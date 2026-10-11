@@ -63,6 +63,11 @@ layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
 
+// Matches m2WindDistanceFade in m2_sway.hpp, used by the shadow pass.
+float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
+    return 1.0 - smoothstep(75.0, 150.0, length(origin - cameraPos));
+}
+
 void main() {
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;
@@ -107,10 +112,11 @@ void main() {
     // top would be two swings of the same plant at two different rates. The
     // player brush below still applies to it: that is motion the authored
     // animation has no way to know about.
-    if (push.isFoliage == 1) {
+    float windFade = m2WindDistanceFade(model[3].xyz, viewPos.xyz);
+    if (push.isFoliage == 1 && windFade > 0.0) {
         float windTime = fogParams.z;
         vec3 worldRef = model[3].xyz;
-        float amp = push.swayAmp * heightFactor;
+        float amp = push.swayAmp * heightFactor * windFade;
 
         // Layer 1: Trunk sway - slow, large amplitude
         float trunkPhase = windTime * 0.8 + dot(worldRef.xy, vec2(0.1, 0.13));

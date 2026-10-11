@@ -31,17 +31,21 @@ inline constexpr uint8_t ALPHA_COUNT_MASK = 0x7F;
 /// Decode one layer's alpha map into `outAlpha`, which is resized to
 /// ALPHA_MAP_SIZE.
 ///
-/// `unsetFill` is what texels the layer's data does not reach are left as.
-/// 255 - fully covered - is what the terrain renderer uses and therefore what
-/// the ground actually looks like, so anything deciding what grows where wants
-/// the same. It stays a parameter for the mesh builder, which fills with 0 and
-/// has always done.
+/// `unsetFill` is the value left in texels a truncated stream does not reach.
+/// This returns the on-disk meaning: sequential opacity for packed maps,
+/// absolute coverage for big alpha. Rendering uses decodeLayerWeight below.
 ///
 /// Returns false when the layer has no alpha map of its own, in which case
 /// `outAlpha` is left filled with `unsetFill`. Layer 0 is always the base and
 /// never has one.
 bool decodeLayerAlpha(const MapChunk& chunk, size_t layerIdx,
                       std::vector<uint8_t>& outAlpha, uint8_t unsetFill = 255);
+
+/// Absolute layer coverage for rendering, vegetation and dominant texture queries.
+/// Big alpha is already weighted; legacy packed alpha is converted from
+/// sequential opacity by removing the coverage of all upper layers.
+bool decodeLayerWeight(const MapChunk& chunk, size_t layerIdx,
+                       std::vector<uint8_t>& outWeight, uint8_t unsetFill = 255);
 
 /// The texel a point in a chunk falls on, as an index into a decoded map.
 ///

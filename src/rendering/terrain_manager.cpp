@@ -124,7 +124,7 @@ int computeTerrainWorkerCount() {
     return 4;  // Fallback
 }
 
-using pipeline::decodeLayerAlpha;
+using pipeline::decodeLayerWeight;
 
 std::string toLowerCopy(std::string v) {
     std::transform(v.begin(), v.end(), v.begin(),
@@ -1929,7 +1929,7 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
             size_t numLayers = std::min(chunk.layers.size(), static_cast<size_t>(4));
             for (size_t i = 1; i < numLayers; ++i) {
                 int a = 0;
-                if (decodeLayerAlpha(chunk, i, alphaScratchTex) &&
+                if (decodeLayerWeight(chunk, i, alphaScratchTex) &&
                     alphaIndex >= 0 &&
                     alphaIndex < static_cast<int>(alphaScratchTex.size())) {
                     a = alphaScratchTex[alphaIndex];
@@ -1938,7 +1938,7 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
             }
             return glm::clamp(255 - accum, 0, 255);
         }
-        if (decodeLayerAlpha(chunk, layerIdx, alphaScratchTex) &&
+        if (decodeLayerWeight(chunk, layerIdx, alphaScratchTex) &&
             alphaIndex >= 0 &&
             alphaIndex < static_cast<int>(alphaScratchTex.size())) {
             return alphaScratchTex[alphaIndex];
@@ -2001,7 +2001,7 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
                 attempts = std::min<uint32_t>(attempts, kMaxAttemptsPerLayer);
                 attemptsTotal += attempts;
 
-                bool hasAlpha = decodeLayerAlpha(chunk, layerIdx, alphaScratch);
+                bool hasAlpha = decodeLayerWeight(chunk, layerIdx, alphaScratch);
                 uint32_t seed = static_cast<uint32_t>(
                     ((pending->coord.x & 0xFF) << 24) ^
                     ((pending->coord.y & 0xFF) << 16) ^
@@ -2408,7 +2408,7 @@ std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float
     int accum = 0;
     for (size_t layerIdx = 1; layerIdx < numLayers; ++layerIdx) {
         int alpha = 0;
-        if (decodeLayerAlpha(*chunk, layerIdx, alphaScratch) &&
+        if (decodeLayerWeight(*chunk, layerIdx, alphaScratch) &&
             alphaIndex < static_cast<int>(alphaScratch.size())) {
             alpha = alphaScratch[alphaIndex];
         }

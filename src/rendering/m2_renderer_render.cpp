@@ -2452,7 +2452,6 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // canopy's outline in solid black instead of its cutout.
         const glm::ivec4 passFlags{foliagePass ? 1 : 0, foliagePass ? 1 : 0,
                                    foliagePass ? 1 : 0, 0};
-        const glm::vec4 wind{globalTime, 0.0f, 0.0f, 0.0f};
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
@@ -2520,7 +2519,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                         .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
                         .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
                         .flags = passFlags,
-                        .wind = wind};
+                        .wind = glm::vec4(globalTime,
+                            m2WindDistanceFade(glm::length(origin - cachedCamPos_)), 0.0f, 0.0f)};
                     vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                        0, sizeof(ShadowPush), &push);
                     vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);

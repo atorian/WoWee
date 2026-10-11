@@ -386,16 +386,23 @@ void ADTLoader::parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerr
         }
     }
 
-    // Alpha maps (MCAL) - variable size from header.
-    // sizeAlpha is only known to be >= 1 here, so a four-byte chunk whose
-    // contents happen to spell MCAL would take skip to 8 and wrap
-    // sizeAlpha - skip to ~1.8e19. Drop the sub-chunk rather than hand a
-    // parser a length longer than the address space.
-    if (ofsAlpha > 0 && sizeAlpha > 0 && ofsAlpha + sizeAlpha <= data.size()) {
-        uint32_t possibleMagic = readUInt32(data, ofsAlpha);
-        uint32_t skip = (possibleMagic == MCAL) ? 8 : 0;
-        if (sizeAlpha > skip) {
-            parseMCAL(data.subspan(ofsAlpha + skip, sizeAlpha - skip), chunk);
+    // MCNK offsets are relative to its outer header. In this payload span
+    // a standard offset already lands after the MCAL header. Also accept
+    // payload-relative header offsets used by synthetic/editor data.
+    if (ofsAlpha > 0 && sizeAlpha > 0) {
+        size_t alphaStart = ofsAlpha;
+        size_t alphaSize = sizeAlpha;
+        if (ofsAlpha >= 8 && readUInt32(data, ofsAlpha - 8) == MCAL) {
+            // Prefer the canonical header even if pixel bytes spell MCAL.
+            // Real WotLK subheaders can carry stale sizes (e.g. 512), while
+            // MCNK sizeAlpha describes the full stream including its header.
+            alphaSize = sizeAlpha >= 8 ? sizeAlpha - 8 : 0;
+        } else if (readUInt32(data, ofsAlpha) == MCAL) {
+            alphaStart += 8;
+            alphaSize = sizeAlpha >= 8 ? sizeAlpha - 8 : 0;
+        }
+        if (alphaSize > 0 && alphaStart <= data.size() && alphaSize <= data.size() - alphaStart) {
+            parseMCAL(data.subspan(alphaStart, alphaSize), chunk);
         }
     }
 

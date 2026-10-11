@@ -117,28 +117,11 @@ ChunkMesh TerrainMeshGenerator::generateChunkMesh(const MapChunk& chunk, int chu
         layerInfo.textureId = layer.textureId;
         layerInfo.flags = layer.flags;
 
-        // The layer's alpha map, through the one decoder.
-        //
-        // This was a third copy of it - the header beside decodeLayerAlpha
-        // says it exists because two had already grown, and this is the one
-        // that was left. It is also the copy that reaches the screen: the
-        // renderer builds its blend textures from these. So the fix that fills
-        // a four-bit map's unpainted last row and column landed in the decoder
-        // the grass and the queries use, and the ground went on drawing a
-        // strip of something else along two sides of every chunk.
-        //
-        // Zero for what a layer's data does not reach, which is what this
-        // builder has always used: an absent alpha means the layer covers
-        // nothing, and the base layer beneath it shows through.
-        //
-        // And nothing at all when there is no map to decode. The renderer
-        // reads an empty one as "this layer covers everything under it" and
-        // hands it the opaque texture, so a map that failed to decode must
-        // leave the vector alone rather than fill it with zeroes - which would
-        // be the opposite instruction.
+        // Upload absolute coverage for both big-alpha and legacy maps.
+        // Vegetation and dominant-texture queries use the same decoder.
         if (layer.useAlpha()) {
             std::vector<uint8_t> decoded;
-            if (decodeLayerAlpha(chunk, layerIdx, decoded, 0)) {
+            if (decodeLayerWeight(chunk, layerIdx, decoded, 0)) {
                 layerInfo.alphaData = std::move(decoded);
             }
         }

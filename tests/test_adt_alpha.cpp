@@ -98,3 +98,75 @@ TEST_CASE("a layer with no map of its own is left as the caller asked",
     REQUIRE(alpha.size() == ALPHA_MAP_SIZE);
     CHECK(at(alpha, 10, 10) == 255);
 }
+
+TEST_CASE("MCAL RLE counts are exact, including copy, fill and zero runs", "[adt][alpha]") {
+    MapChunk chunk;
+    chunk.layers.resize(2);
+    chunk.layers[1].flags = 0x300;
+    // 64 painted rows: no-op copy/fill, 3 literals and 61 repeated texels.
+    // A +1 decoder shifts every row and consumes subsequent command bytes.
+    for (size_t y = 0; y < 64; ++y) {
+        chunk.alphaMap.insert(chunk.alphaMap.end(), {0, 0x80, 3, 10, 20, 30, 0xBD, 40});
+    }
+    std::vector<uint8_t> alpha;
+    REQUIRE(decodeLayerAlpha(chunk, 1, alpha, 0));
+    for (size_t y = 0; y < 64; ++y) {
+        CHECK(at(alpha, 0, y) == 10);
+        CHECK(at(alpha, 1, y) == 20);
+        CHECK(at(alpha, 2, y) == 30);
+        CHECK(at(alpha, 3, y) == 40);
+        CHECK(at(alpha, 63, y) == 40);
+    }
+}
+
+TEST_CASE("a truncated RLE layer never reads the next layer", "[adt][alpha]") {
+    MapChunk chunk;
+    chunk.layers.resize(3);
+    chunk.layers[1].flags = chunk.layers[2].flags = 0x300;
+    chunk.layers[2].offsetMCAL = 2;
+    SECTION("literal run") { chunk.alphaMap = {3, 11, 0xFF, 99}; }
+    SECTION("fill run") { chunk.alphaMap = {0xFF, 11, 0xFF, 99}; }
+    std::vector<uint8_t> alpha;
+    REQUIRE(decodeLayerAlpha(chunk, 1, alpha, 7));
+    CHECK(alpha[0] == 11);
+    CHECK(alpha[127] == 7);
+    CHECK(alpha[4095] == 7);
+}
+
+TEST_CASE("MCNK do-not-fix-alpha preserves the last packed row and column", "[adt][alpha]") {
+    auto chunk = packedChunk([](size_t x, size_t y) { return x == 63 || y == 63 ? 3 : 15; });
+    chunk.flags = 0x8000;
+    std::vector<uint8_t> alpha;
+    REQUIRE(decodeLayerAlpha(chunk, 1, alpha, 0));
+    CHECK(at(alpha, 63, 4) == 51);
+    CHECK(at(alpha, 4, 63) == 51);
+}
+
+TEST_CASE("big alpha coverage survives layer reordering", "[adt][alpha][blend]") {
+    MapChunk chunk;
+    chunk.layers.resize(3);
+    chunk.layers[1].flags = chunk.layers[2].flags = 0x100;
+    chunk.layers[2].offsetMCAL = ALPHA_MAP_SIZE;
+    chunk.alphaMap.assign(ALPHA_MAP_SIZE, 102); // 40% first overlay
+    chunk.alphaMap.insert(chunk.alphaMap.end(), ALPHA_MAP_SIZE, 153); // 60% second
+    std::vector<uint8_t> first, second;
+    REQUIRE(wowee::pipeline::decodeLayerWeight(chunk, 1, first));
+    REQUIRE(wowee::pipeline::decodeLayerWeight(chunk, 2, second));
+    CHECK(first[0] == 102);
+    CHECK(second[0] == 153);
+    CHECK(first[0] + second[0] == 255); // No base layer leaks into the blend.
+}
+
+TEST_CASE("packed sequential opacity converts to absolute coverage", "[adt][alpha][blend]") {
+    auto chunk = packedChunk([](size_t, size_t) { return 15; });
+    chunk.layers.resize(3);
+    chunk.layers[2].flags = 0x100;
+    chunk.layers[2].offsetMCAL = ALPHA_MAP_PACKED;
+    chunk.alphaMap.insert(chunk.alphaMap.end(), ALPHA_MAP_PACKED, 0x88);
+    std::vector<uint8_t> first, second;
+    REQUIRE(wowee::pipeline::decodeLayerWeight(chunk, 1, first));
+    REQUIRE(wowee::pipeline::decodeLayerWeight(chunk, 2, second));
+    CHECK(first[0] == 119);
+    CHECK(second[0] == 136);
+    CHECK(first[0] + second[0] == 255);
+}

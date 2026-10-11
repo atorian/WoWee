@@ -160,3 +160,31 @@ TEST_CASE("ADT loader rejects a file of random bytes", "[adt][robustness]") {
     }
     REQUIRE_NOTHROW(ADTLoader::load(data));
 }
+
+TEST_CASE("standard MCNK alpha payload stops at its declared subchunk size", "[adt][alpha]") {
+    auto payload = mcnkHeader();
+    // File-relative MCNK offset: 128-byte payload header + outer header.
+    writeU32At(payload, 36, 136);
+    writeU32At(payload, 40, 12); // MCAL header (8) + four payload bytes
+    appendChunk(payload, kMCAL, {1, 2, 3, 4});
+    // Some original WotLK files have stale MCAL subheader sizes.
+    writeU32At(payload, 132, 512);
+    // An adjacent subchunk must not be appended to the map.
+    appendChunk(payload, 0x4D435345, {5, 6, 7, 8});
+    std::vector<uint8_t> data;
+    appendChunk(data, kMCNK, payload);
+    const auto terrain = ADTLoader::load(data);
+    REQUIRE(terrain.chunks[0].alphaMap == std::vector<uint8_t>{1, 2, 3, 4});
+}
+
+TEST_CASE("canonical MCAL pixels may themselves spell the subchunk magic", "[adt][alpha]") {
+    auto payload = mcnkHeader();
+    writeU32At(payload, 36, 136);
+    writeU32At(payload, 40, 12);
+    const std::vector<uint8_t> pixels{0x4C, 0x41, 0x43, 0x4D};
+    appendChunk(payload, kMCAL, pixels);
+    std::vector<uint8_t> data;
+    appendChunk(data, kMCNK, payload);
+    const auto terrain = ADTLoader::load(data);
+    REQUIRE(terrain.chunks[0].alphaMap == pixels);
+}

@@ -30,6 +30,13 @@ struct M2Sway {
     float plantHeight = 0.0f;
 };
 
+/// Smoothly stop shader wind at the same distance as skeletal LOD 3.
+/// Matches m2.vert.glsl; the shadow pass uses the main camera, not the light.
+inline float m2WindDistanceFade(float distance) {
+    const float t = std::clamp((distance - 75.0f) / 75.0f, 0.0f, 1.0f);
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
 /// The sway a model gets from what it is and how big it is.
 ///
 /// `boundMinZ`/`boundMaxZ` are the model's own bounds. Height is measured from

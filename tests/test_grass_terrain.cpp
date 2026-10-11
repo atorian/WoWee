@@ -413,14 +413,14 @@ TEST_CASE("an overlay whose alpha runs out still covers the ground",
 
     // A compressed overlay whose stream stops after a handful of texels.
     const auto offset = static_cast<uint32_t>(chunk.alphaMap.size());
-    chunk.alphaMap.push_back(0x80 | 3);   // fill, 4 texels
+    chunk.alphaMap.push_back(0x80 | 3);   // fill, 3 texels
     chunk.alphaMap.push_back(255);
     TextureLayer overlay = makeLayer(kRoadEffect, 0x100 | 0x200, offset);
     chunk.layers.push_back(overlay);
 
     wowee::pipeline::ChunkGrassContext context;
     context.build(chunk, densityFor);
-    // Well past the four texels the stream actually wrote.
+    // Well past the three texels the stream actually wrote.
     REQUIRE(evaluateGrass(context, chunk, 4.0f, 4.0f).suitability == Catch::Approx(0.0f));
 }
 
@@ -437,7 +437,7 @@ TEST_CASE("a road over dirt grows nothing, though the dirt would",
     MapChunk chunk = makeFlatChunk();
     chunk.layers.push_back(makeLayer(kGrassEffect));           // [0] base grass
 
-    std::vector<uint8_t> solid(wowee::pipeline::ALPHA_MAP_SIZE, 255);
+    std::vector<uint8_t> solid(wowee::pipeline::ALPHA_MAP_PACKED, 0xFF);
     const uint32_t dirtOffset = appendAlpha(chunk, solid);
     chunk.layers.push_back(makeLayer(kGrassEffect, 0x100, dirtOffset));   // [1] dirt, grows
 

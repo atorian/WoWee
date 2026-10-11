@@ -1196,18 +1196,25 @@ void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline:
     }
     src.indices.assign(chunk.indices.begin(), chunk.indices.end());
 
-    // One colour for the chunk: the base layer's, with each layer over it in
-    // proportion to how much of the chunk its alpha map covers.
-    glm::vec3 albedo = gpuChunk.baseTexture ? gpuChunk.baseTexture->averageColor() : glm::vec3(0.5f);
+    // Estimate RT albedo with the same absolute coverage as the main pass.
+    const glm::vec3 base = gpuChunk.baseTexture ? gpuChunk.baseTexture->averageColor() : glm::vec3(0.5f);
+    glm::vec3 overlays(0.0f);
+    float coverage = 0.0f;
     for (int i = 0; i < 3 && i + 1 < static_cast<int>(chunk.layers.size()); ++i) {
         const VkTexture* tex = gpuChunk.layerTextures[i];
         const auto& alpha = chunk.layers[i + 1].alphaData;
-        if (!tex || alpha.empty()) continue;
-        uint64_t sum = 0;
-        for (uint8_t a : alpha) sum += a;
-        const float cover = static_cast<float>(sum) / (255.0f * static_cast<float>(alpha.size()));
-        albedo = glm::mix(albedo, tex->averageColor(), cover);
+        if (!tex) continue;
+        float cover = 1.0f; // The renderer binds opaque alpha for an absent map.
+        if (!alpha.empty()) {
+            uint64_t sum = 0;
+            for (uint8_t a : alpha) sum += a;
+            cover = static_cast<float>(sum) / (255.0f * static_cast<float>(alpha.size()));
+        }
+        overlays += tex->averageColor() * cover;
+        coverage += cover;
     }
+    const glm::vec3 albedo = base * std::max(1.0f - coverage, 0.0f) +
+                             overlays / std::max(coverage, 1.0f);
     src.surfaces.push_back(packRtSurface(albedo, 1.0f));
 
     gpuChunk.rtMesh = rtScene_->addMesh(std::move(src));

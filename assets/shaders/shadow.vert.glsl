@@ -14,7 +14,7 @@ layout(push_constant) uniform Push {
     mat4 lightSpaceModel;   // light-space * model, multiplied on the CPU
     vec4 sway;              // xy world origin (phase), z reference height, w amplitude
     ivec4 flags;            // x useTexture, y alphaTest, z foliageSway
-    vec4 wind;              // x windTime
+    vec4 wind;              // x windTime, y distance fade
 } push;
 
 layout(location = 0) in vec3 aPos;
@@ -33,7 +33,8 @@ void main() {
         vec2 worldRef = push.sway.xy;
         float heightFactor = clamp(pos.z / max(push.sway.z, 0.01), 0.0, 1.0);
         heightFactor *= heightFactor;   // quadratic - the base stays planted
-        float amp = push.sway.w * heightFactor;
+        float windFade = push.wind.y;
+        float amp = push.sway.w * heightFactor * windFade;
 
         // Layer 1: Trunk sway - slow, large amplitude
         float trunkPhase = push.wind.x * 0.8 + dot(worldRef, vec2(0.1, 0.13));

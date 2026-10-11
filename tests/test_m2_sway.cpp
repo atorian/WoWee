@@ -81,3 +81,13 @@ TEST_CASE("the sway modes are unchanged by that", "[m2][sway]") {
         CHECK(sway.plantHeight == Catch::Approx(0.8f));
     }
 }
+
+TEST_CASE("distant foliage wind smoothly stops at skeletal LOD 3", "[m2][sway]") {
+    using wowee::rendering::m2WindDistanceFade;
+    CHECK(m2WindDistanceFade(0.0f) == 1.0f);
+    CHECK(m2WindDistanceFade(75.0f) == 1.0f);
+    CHECK(m2WindDistanceFade(112.5f) == Catch::Approx(0.5f));
+    CHECK(m2WindDistanceFade(150.0f) == 0.0f);
+    CHECK(m2WindDistanceFade(1000.0f) == 0.0f);
+    CHECK(m2WindDistanceFade(149.99f) < 0.00001f);
+}
