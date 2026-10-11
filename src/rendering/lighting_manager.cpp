@@ -511,6 +511,14 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // overflow stop while the rest keep their value, and the hue slides toward
     // whatever saturated. Scaling both together keeps the hue and only ever
     // darkens.
+    // Replace a small share of outdoor sunlight with fill: the sun-facing
+    // peak is unchanged, while terrain and character shadow sides stay legible.
+    // Never change caves, underwater colour, or the authored night atmosphere.
+    if (!isIndoors_ && !isUnderwater) {
+        redistributeOutdoorDaylight(newParams.ambientColor,
+                                    newParams.diffuseColor,
+                                    visualTimeOfDayHours_);
+    }
     applyLightHeadroom(newParams.ambientColor, newParams.diffuseColor);
 
     // What the sky is being told, whenever it changes.
