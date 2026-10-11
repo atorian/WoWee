@@ -2111,6 +2111,7 @@ wowee_add_test(test_swim_wall SOURCES test_swim_wall.cpp)
 # indices by one, so 12024 of 15300 colour bands read as empty.
 add_executable(test_light_bands
     test_light_bands.cpp
+    test_distance_fog.cpp
     ${TEST_COMMON_SOURCES})
 target_include_directories(test_light_bands PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_bands SYSTEM PRIVATE
@@ -2159,6 +2160,17 @@ target_include_directories(test_light_volume_order SYSTEM PRIVATE
 target_link_libraries(test_light_volume_order PRIVATE catch2_main)
 add_test(NAME light_volume_order COMMAND test_light_volume_order)
 register_test_target(test_light_volume_order)
+
+# Sky clock/opacity and real Dalaran UV mask regression.
+add_executable(test_m2_sky_material test_m2_sky_material.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_m2_sky_material PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_sky_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_m2_sky_material PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_m2_sky_material PRIVATE catch2_main)
+wowee_test_link_glm(test_m2_sky_material)
+add_test(NAME m2_sky_material COMMAND test_m2_sky_material)
+register_test_target(test_m2_sky_material)
 
 # ── test_m2_blend_mode ───────────────────────────────────────
 # Whether an M2 batch is alpha tested. Additive batches were forced onto
@@ -2599,3 +2611,14 @@ endif()
 add_dependencies(test_server_extension wowee_extension_host server_extension_fixture)
 add_test(NAME server_extension COMMAND test_server_extension)
 register_test_target(test_server_extension)
+
+# Signed M2 UV mapping and the actual Dalaran sculpture's reflection layers.
+add_executable(test_m2_material test_m2_material.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_m2_material PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_material SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_m2_material PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_m2_material PRIVATE catch2_main)
+wowee_test_link_glm(test_m2_material)
+add_test(NAME m2_material COMMAND test_m2_material)
+register_test_target(test_m2_material)

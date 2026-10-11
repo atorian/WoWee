@@ -39,6 +39,7 @@
 #include "rendering/grass_renderer.hpp"
 #include "rendering/hiz_system.hpp"
 #include "rendering/volumetric_fog.hpp"
+#include "rendering/sky_background.hpp"
 #include "rendering/sun_shafts.hpp"
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
@@ -261,7 +262,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[5]{};
+    VkDescriptorSetLayoutBinding bindings[6]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -299,9 +300,22 @@ bool Renderer::createPerFrameResources() {
         bindings[b].pImmutableSamplers = &rtSampler;
     }
 
+    // Real sky color for the far atmospheric background. Linear filtering
+    // smooths the small sky image; immutable so previews need only a view.
+    VkSamplerCreateInfo skySamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    skySamplerInfo.magFilter = skySamplerInfo.minFilter = VK_FILTER_LINEAR;
+    skySamplerInfo.addressModeU = skySamplerInfo.addressModeV = skySamplerInfo.addressModeW =
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    const VkSampler skySampler = vkCtx->getOrCreateSampler(skySamplerInfo);
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[5].pImmutableSamplers = &skySampler;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 5;
+    layoutInfo.bindingCount = 6;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -312,13 +326,13 @@ bool Renderer::createPerFrameResources() {
     // --- Create descriptor pool for UBO + image sampler (normal frames + reflection) ---
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = MAX_FRAMES * 2; // normal frames + reflection frames
+    poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 2 * 4;  // shadow, fog, two RT results, per set
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 5;  // shadow, fog, two RT results and sky
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = MAX_FRAMES * 2; // normal frames + reflection frames
+    poolInfo.maxSets = MAX_FRAMES * 3; // world, capture and reflection sets
     poolInfo.poolSizeCount = 2;
     poolInfo.pPoolSizes = poolSizes;
 
@@ -383,7 +397,7 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
         rtImgInfo[0].imageLayout = rtImgInfo[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[5]{};
+        VkWriteDescriptorSet writes[6]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -411,8 +425,20 @@ bool Renderer::createPerFrameResources() {
             writes[3 + b].pImageInfo = &rtImgInfo[b];
         }
 
-        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        writes[5] = writes[4];
+        writes[5].dstBinding = 5;
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        // Sky capture gets a separate set whose binding 5 stays neutral:
+        // the M2 shader also declares the surface sampler, and must never
+        // bind the image being written by this pass as a sampled image.
+        setAlloc.pSetLayouts = &perFrameSetLayout;
+        if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
+            return false;
+        for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
     }
+
+    skyBackground_ = std::make_unique<SkyBackground>();
 
     // --- Create reflection per-frame UBO and descriptor set ---
     {
@@ -472,7 +498,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[5]{};
+            VkWriteDescriptorSet writes[6]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -500,7 +526,9 @@ bool Renderer::createPerFrameResources() {
                 writes[b].pImageInfo = &rtImgInfo;
             }
 
-            vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
+            writes[5] = writes[4];
+            writes[5].dstBinding = 5;
+            vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
         }
     }
 
@@ -532,6 +560,7 @@ void Renderer::destroyPerFrameResources() {
         volumetricFog_->shutdown();
         volumetricFog_.reset();
     }
+    if (skyBackground_) { skyBackground_->shutdown(); skyBackground_.reset(); }
     destroy(device, sceneDescriptorPool);
     destroy(device, perFrameSetLayout);
     // After every renderer has let go of its geometry, which is why this is
@@ -564,6 +593,10 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.viewPos = glm::vec4(camera->getPosition(), 1.0f);
     currentFrameData.fogParams.z = globalTime;
 
+    currentFrameData.fogSkyTop.w = 0.0f;
+    currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
+    currentFrameData.fogSkyBand1.w = viewDistance_; // common horizontal geometry range
+
     // Lighting from LightingManager
     if (lightingManager) {
         const auto& lp = lightingManager->getLightingParams();
@@ -573,6 +606,12 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
+        const float skyBlend = lightingManager->isIndoors() ? 0.0f
+            : glm::clamp(lightingManager->getFogSkyBlend(), 0.0f, 1.0f);
+        currentFrameData.fogSkyTop = glm::vec4(lp.skyTopColor, skyBlend);
+        currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
+        currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
+        currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         if (waterRenderer && camera) {
@@ -586,6 +625,7 @@ void Renderer::updatePerFrameUBO() {
                 glm::vec3 underwaterFog(0.03f, 0.09f, 0.18f);
                 glm::vec3 blendedFog = glm::mix(lp.fogColor, underwaterFog, blend);
                 currentFrameData.fogColor = glm::vec4(blendedFog, 1.0f);
+                currentFrameData.fogSkyTop.w = 0.0f;
                 currentFrameData.fogParams.x = glm::mix(lp.fogStart, 20.0f, blend);
                 currentFrameData.fogParams.y = glm::mix(lp.fogEnd, 200.0f, blend);
             }
@@ -598,7 +638,8 @@ void Renderer::updatePerFrameUBO() {
     // z carries one texel of the shadow map. The shaders used to hold that as
     // a constant for 4096, and the map is 512 to 4096 by the quality level.
     currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowBias,
-                                              1.0f / static_cast<float>(SHADOW_MAP_SIZE), 0.0f);
+                                              1.0f / static_cast<float>(SHADOW_MAP_SIZE),
+                                              2.0f * shadowDistance_ / static_cast<float>(SHADOW_MAP_SIZE));
 
     // Whether this frame builds the fog volume. Decided here, beside the
     // switch in the block the shaders read, and the frame graph dispatches by
@@ -1318,6 +1359,34 @@ void Renderer::beginFrame() {
     // Update per-frame UBO with current camera/lighting state
     updatePerFrameUBO();
 
+    // Prepare and update sets before any pre-pass binds them (volumetric fog
+    // uses the world set too). Updating an already recorded set invalidates it.
+    const uint32_t skySlot = vkCtx->getCurrentFrame();
+    if (skyBackground_ && skyBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent())) {
+        const uint32_t slot = skySlot;
+        // The sky uses the same light, shadows and fog volume, but a separate set
+        // whose sky sampler stays neutral: never sample the attachment being drawn.
+        VkCopyDescriptorSet copies[5]{};
+        for (uint32_t binding = 0; binding < 5; ++binding) {
+            copies[binding].sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
+            copies[binding].srcSet = perFrameDescSets[slot];
+            copies[binding].srcBinding = binding;
+            copies[binding].dstSet = skyPerFrameDescSets[slot];
+            copies[binding].dstBinding = binding;
+            copies[binding].descriptorCount = 1;
+        }
+        VkDescriptorImageInfo image{};
+        image.imageView = skyBackground_->view(slot);
+        image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = perFrameDescSets[slot];
+        write.dstBinding = 5;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &image;
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 5, copies);
+    }
+
     // ── Early compute: M2 frustum culling ──
     // beginFrame() has already waited for this frame slot's previous fence, so
     // its mapped visibility output is complete and safe for the CPU to reuse.
@@ -1347,6 +1416,36 @@ void Renderer::beginFrame() {
     buildFrameGraph(nullptr);
     if (renderGraph_) {
         renderGraph_->execute(currentCmd);
+    }
+
+    // The real atmosphere is ready after the fog pre-pass. Capture it before
+    // the main pass so its full-resolution MSAA attachments are cleared once.
+    const bool skyProbe = std::getenv("WOWEE_SKY_BACKGROUND_PROBE") != nullptr;
+    const bool inWorld = core::Application::getInstance().getState() == core::AppState::IN_GAME;
+    const bool skipSkyCapture = std::getenv("WOWEE_SKIP_SKY") ||
+        std::getenv("WOWEE_SKIP_ALL_RENDER") ||
+        (passAblation_ && passAblation_->skip(AblationPass::Sky));
+    if (skySystem && camera && (inWorld || skyProbe) && !skipSkyCapture) {
+        if (skyProbe && updateSkyboxLayers()) {
+            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
+            skyboxModelRenderer_->update(0.016f, camera->getPosition(), camera->getViewProjectionMatrix());
+        }
+        const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
+        float coverage = 0.0f;
+        if (lightingManager) {
+            for (const auto& layer : lightingManager->getSkyboxLayers()) coverage += layer.weight;
+        }
+        const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
+        renderSkyBackground(skyProbe ? nullptr : core::Application::getInstance().getGameHandler(),
+                            timeOfDay, authored, authored && coverage >= 0.5f);
+        if (skyProbe) {
+            static bool logged = false;
+            if (!logged) {
+                LOG_INFO("Sky background GPU probe: captured current sky, authored=", authored,
+                         ", MSAA=", int(vkCtx->getMsaaSamples()));
+                logged = true;
+            }
+        }
     }
 
     // --- Begin render pass ---
@@ -1405,6 +1504,7 @@ void Renderer::beginFrame() {
         scissor.extent = renderExtent;
         vkCmdSetScissor(currentCmd, 0, 1, &scissor);
     }
+
 }
 
 void Renderer::endFrame() {
@@ -2115,6 +2215,9 @@ void Renderer::update(float deltaTime) {
         skySystem->update(deltaTime);
     }
     if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
+        skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
+            ? lightingManager->getVisualTimeOfDayHours()
+            : (skybox ? skybox->getTimeOfDay() : 12.0f));
         skyboxModelRenderer_->update(deltaTime, camera->getPosition(),
             camera->getProjectionMatrix() * camera->getViewMatrix());
     }
@@ -2854,6 +2957,30 @@ void Renderer::updateGrassPopulation() {
              complete ? "" : " - hit the blade cap");
 }
 
+void Renderer::renderSkyBackground(game::GameHandler* gameHandler, float timeOfDay,
+                                   bool drawSkyModels, bool useOriginalSkybox) {
+    const uint32_t slot = vkCtx->getCurrentFrame();
+    if (!skyBackground_ || !skyBackground_->view(slot)) return;
+
+    currentFrameData.fogSkyMiddle.w = 1.0f;
+    std::memcpy(perFrameUBOMapped[slot], &currentFrameData, sizeof(currentFrameData));
+
+    // Render only the background, including authored sky layers and the air.
+    skyBackground_->begin(currentCmd, slot);
+    auto params = skyParamsFromLighting(
+        timeOfDay, gameHandler ? gameHandler->getGameTime() : -1.0f,
+        gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+        lightingManager ? &lightingManager->getLightingParams() : nullptr,
+        useOriginalSkybox);
+    params.sunOcclusion = 1.0f; // Lens flare is an optical overlay, not background haze.
+    skySystem->render(currentCmd, skyPerFrameDescSets[slot], *camera, params);
+    if (drawSkyModels) {
+        skyboxModelRenderer_->prepareRender(slot, *camera);
+        skyboxModelRenderer_->render(currentCmd, skyPerFrameDescSets[slot], *camera);
+    }
+    skyBackground_->end(currentCmd, slot);
+}
+
 void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     ZoneScopedN("Renderer::renderWorld");
     (void)world;
@@ -2919,6 +3046,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         for (const auto& layer : lightingManager->getSkyboxLayers()) skyModelCoverage += layer.weight;
     }
     const bool useOriginalSkybox = drawSkyModels && skyModelCoverage >= 0.5f;
+
 
     // ── Multithreaded secondary command buffer recording ──
     // Terrain, WMO, and M2 record on worker threads while main thread handles
@@ -4349,6 +4477,7 @@ void Renderer::renderReflectionPass() {
     // The fog volume is the camera's; its sets here bind the neutral one.
     reflData.volumetricParams = glm::vec4(0.0f);
     reflData.rtParams = glm::vec4(0.0f);
+    reflData.fogSkyMiddle.w = 0.0f; // the main camera sky image is not a reflected view
     std::memcpy(reflPerFrameUBOMapped, &reflData, sizeof(GPUPerFrameData));
 
     // Begin reflection render pass (clears to black; scene rendered if pipeline-compatible)
@@ -4581,7 +4710,8 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     if (!rtLighting_ || !rtLighting_->active() || !camera) return;
     rtRecordedThisFrame_ = true;
     RtLighting::FrameInputs in{};
-    in.viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
+    in.view = camera->getViewMatrix();
+    in.projection = camera->getProjectionMatrix();
     in.cameraPos = camera->getPosition();
     in.sunDir = -glm::vec3(currentFrameData.lightDir);
     in.sunColor = glm::vec3(currentFrameData.lightColor);

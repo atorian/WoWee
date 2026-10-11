@@ -941,7 +941,6 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     }
 
     glm::vec3 camPos = camera.getPosition();
-    const float maxTerrainDistSq = maxViewDistance_ * maxViewDistance_;
 
     renderedChunks = 0;
     culledChunks = 0;
@@ -964,7 +963,10 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         float dx = chunk.boundingSphereCenter.x - camPos.x;
         float dy = chunk.boundingSphereCenter.y - camPos.y;
         float distSq = dx * dx + dy * dy;
-        if (distSq > maxTerrainDistSq) {
+        // Keep any chunk intersecting the common range. The fragment shader
+        // clips at the exact limit; testing only the center removes foothills early.
+        const float chunkLimit = maxViewDistance_ + chunk.boundingSphereRadius;
+        if (distSq > chunkLimit * chunkLimit) {
             culledChunks++;
             continue;
         }

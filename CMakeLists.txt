@@ -892,6 +892,7 @@ set(WOWEE_SOURCES
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
+    src/rendering/sky_background.cpp
     src/rendering/vk_texture.cpp
     src/rendering/vk_buffer.cpp
     src/rendering/vk_pipeline.cpp
@@ -1783,6 +1784,17 @@ if(WOWEE_BUILD_RT_PROBE)
     target_include_directories(rt_probe SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/extern
         ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src)
+    if(GLSLC)
+        set(RT_LOOKUP_SPV ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders/rt_lookup_probe.comp.spv)
+        add_custom_command(OUTPUT ${RT_LOOKUP_SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders
+            COMMAND ${GLSLC} -fshader-stage=compute -O
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_lookup_probe.comp.glsl -o ${RT_LOOKUP_SPV}
+            DEPENDS tools/rt_lookup_probe.comp.glsl assets/shaders/rt_lighting.glsli
+            VERBATIM)
+        add_custom_target(rt_lookup_probe_shader DEPENDS ${RT_LOOKUP_SPV})
+        add_dependencies(rt_probe rt_lookup_probe_shader)
+    endif()
     add_dependencies(rt_probe wowee_version wowee_shaders)
     if(TARGET opcodes-generate)
         add_dependencies(rt_probe opcodes-generate)
@@ -2536,6 +2548,7 @@ add_executable(wowee_editor
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
+    src/rendering/sky_background.cpp
     src/rendering/vk_texture.cpp
     src/rendering/vk_buffer.cpp
     src/rendering/vk_pipeline.cpp

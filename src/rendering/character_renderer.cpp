@@ -16,6 +16,7 @@
  */
 #include <atomic>
 #include "rendering/character_renderer.hpp"
+#include "rendering/m2_blend_mode.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
@@ -249,7 +250,7 @@ struct CharMaterialUBO {
     float heightMapVariance;
     float normalMapStrength;
     int32_t hairMaterial;
-    float _pad[1];
+    int32_t ignoreTextureAlpha;
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -2950,12 +2951,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // inferring a cutout from "the texture has alpha" discards the whole
                 // building and leaves the sky showing through it. Only an alpha-key
                 // material (blendMode 1) cuts out here.
-                const bool blendNeedsCutout = instance.isSceneModel
-                    ? (blendMode == 1)
-                    : ((blendMode == 1) ||
-                       (blendMode == 0 && alphaCutout) ||
-                       (blendMode >= 2 && !alphaCutout) ||
-                       hairMaterial);
+                const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
+                    blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
                 // Enchant glows emit their own light; scene lighting must not tint them.
                 const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
                                    instance.isEffectModel;
@@ -3062,6 +3059,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 CharMaterialUBO matData{};
                 matData.opacity = instance.opacity * batchColorAlpha;
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
+                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
+                                              !instance.isEffectModel) ? 1 : 0;
                 matData.colorKeyBlack = colorKeyBlack ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
                 matData.emissiveBoost = emissiveBoost;
@@ -3178,6 +3177,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             CharMaterialUBO matData{};
             matData.opacity = instance.opacity;
             matData.alphaTest = 0;
+            matData.ignoreTextureAlpha = 1;
             matData.colorKeyBlack = 0;
             matData.unlit = 0;
             matData.emissiveBoost = 1.0f;

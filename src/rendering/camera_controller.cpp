@@ -2085,7 +2085,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // here - asked at the player rather than at the camera. Indoors the
         // camera is forever being pushed off a wall and let back out, and that
         // is what turns a corridor into a bout of motion sickness.
-        if (cachedInsideWMO) {
+        if (cachedInsideInteriorWMO) {
             if (!indoorZoomHeld_) {
                 indoorZoomHeld_ = true;
                 outdoorTargetDistance_ = userTargetDistance;
@@ -2240,8 +2240,12 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // slow breathe in and out at close range, which from the chair reads as
         // the view bobbing - reported as exactly that. A scripted view is not a
         // player deciding how far back to stand.
-        const float bite = barberView_ ? 0.0f
-                                       : userTargetDistance - smoothedCollisionDist_;
+        // Keep the outdoor wheel target intact. Smoothing toward a new zoom
+        // also lags the target without any obstruction, so it must not be
+        // mistaken for a collision and fed back into the requested distance.
+        const bool blocked = rawLimit < currentDistance - 0.1f;
+        const float bite = (!barberView_ && cachedInsideInteriorWMO && blocked)
+            ? userTargetDistance - smoothedCollisionDist_ : 0.0f;
         if (bite > 0.1f) {
             collisionClearSeconds_ = 0.0f;
             // Toward what the sweep is asking for and no further, over about a
@@ -3728,8 +3732,7 @@ void CameraController::processMouseWheel(float delta) {
     // A multiple of the original client's limit rather than a choice between
     // two numbers, so the game's own Max Camera Distance slider means something
     // at every position instead of only at its ends.
-    float maxDist = MAX_DISTANCE_NORMAL * maxDistanceFactor_;
-    if (cachedInsideWMO) maxDist = std::min(maxDist, MAX_DISTANCE_INTERIOR);
+    float maxDist = zoomDistanceLimit(maxDistanceFactor_, cachedInsideInteriorWMO);
     userTargetDistance = glm::clamp(userTargetDistance, MIN_DISTANCE, maxDist);
 }
 

@@ -240,6 +240,7 @@ struct M2Model {
     // Texture transforms (UV animation)
     std::vector<M2TextureTransform> textureTransforms;
     std::vector<uint16_t> textureTransformLookup;
+    std::vector<int16_t> textureCoordLookup;
 
     // Texture weights (per-batch opacity, from M2Track<fixed16>)
     // Each entry is the "at-rest" opacity value (0=transparent, 1=opaque).

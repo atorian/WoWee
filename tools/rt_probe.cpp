@@ -13,6 +13,7 @@
 //     cmake -S . -B build -DWOWEE_BUILD_RT_PROBE=ON
 //     cmake --build build --target rt_probe
 //     cd build/bin && ./rt_probe            (exit status 0 = pass)
+//     ./rt_probe --translated               (continent-coordinate precision)
 //
 // WOWEE_RT_FORCE_SOFTWARE=1 selects the compute tracer on hardware that has
 // ray queries, so both backends can be checked on one machine.
@@ -29,16 +30,19 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
+#include "rt_lookup_probe.hpp"
+
 using namespace wowee::rendering;
 
 namespace {
 
-constexpr uint32_t kSize = 256;       // scene depth, square
+constexpr uint32_t kSize = 1024;       // scene depth, square
 constexpr float kWallDistance = 20.0f;
 
 RtScene::MeshSource box(const glm::vec3& lo, const glm::vec3& hi) {
@@ -57,7 +61,10 @@ RtScene::MeshSource box(const glm::vec3& lo, const glm::vec3& hi) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // World translation must not change reconstructed rays or lighting.
+    const glm::vec3 camera = argc > 1 && std::strcmp(argv[1], "--translated") == 0
+        ? glm::vec3(5800.0f, 600.0f, 650.0f) : glm::vec3(0.0f);
     wowee::core::Logger::getInstance().setLogLevel(wowee::core::LogLevel::INFO);
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -86,18 +93,27 @@ int main() {
         std::printf("backend: %s\n",
                     scene.backend() == RtScene::Backend::Hardware ? "hardware" : "compute");
 
+        const glm::mat4 rotation = glm::rotate(glm::mat4(1.0f), glm::radians(37.0f), glm::vec3(0, 0, 1)) *
+                                   glm::rotate(glm::mat4(1.0f), glm::radians(23.0f), glm::vec3(0, 1, 0));
+        const glm::mat4 sceneTransform = glm::translate(glm::mat4(1.0f), camera) * rotation;
+
         // A 2x4x4 box five yards in front of the wall. The camera looks down
         // +X with Z up, as the client's does.
         const RtScene::MeshId mesh = scene.addMesh(box({14, -2, -2}, {16, 2, 2}));
-        scene.addInstance(mesh, glm::mat4(1.0f));
+        scene.addInstance(mesh, sceneTransform);
         // A second instance of it, moved, to exercise the top level.
-        scene.addInstance(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0, 40, 0)));
+        scene.addInstance(mesh, sceneTransform * glm::translate(glm::mat4(1.0f), glm::vec3(0, 40, 0)));
+        // Include the receiving wall: bad reconstructed origins can hit it.
+        const auto wall = scene.addMesh(box({kWallDistance, -100, -100},
+                                             {kWallDistance + 0.1f, 100, 100}));
+        scene.addInstance(wall, sceneTransform);
 
         glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.5f, 2000.0f);
         proj[1][1] *= -1.0f;
-        const glm::mat4 view = glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0), glm::vec3(0, 0, 1));
+        const glm::mat4 view = glm::lookAt(camera, camera + glm::vec3(rotation * glm::vec4(1, 0, 0, 0)),
+                                             glm::vec3(rotation * glm::vec4(0, 0, 1, 0)));
         const glm::mat4 viewProj = proj * view;
-        const glm::vec4 wallClip = viewProj * glm::vec4(kWallDistance, 0, 0, 1);
+        const glm::vec4 wallClip = viewProj * sceneTransform * glm::vec4(kWallDistance, 0, 0, 1);
         const float wallDepth = wallClip.z / wallClip.w;
 
         const VkExtent2D sceneExtent{kSize, kSize};
@@ -111,9 +127,11 @@ int main() {
         lighting.prepare(sceneExtent);
 
         RtLighting::FrameInputs in{};
-        in.viewProj = viewProj;
-        in.cameraPos = glm::vec3(0);
-        in.sunDir = glm::normalize(glm::vec3(-1.0f, 0.0f, 0.25f));  // toward the sun
+        in.view = view;
+        in.projection = proj;
+        in.cameraPos = camera;
+        std::printf("camera: %.0f %.0f %.0f\n", camera.x, camera.y, camera.z);
+        in.sunDir = glm::normalize(glm::vec3(rotation * glm::vec4(-1.0f, 0.0f, 0.25f, 0.0f)));  // toward the sun
         in.sunColor = glm::vec3(1.0f);
         in.skyColor = glm::vec3(0.3f, 0.35f, 0.4f);
         in.sunUp = true;
@@ -170,7 +188,7 @@ int main() {
             return glm::unpackHalf1x16(base[(size_t(y) * te.width + x) * 4 + c]);
         };
         auto sample = [&](const glm::vec3& world, float& sun, float& dist) {
-            const glm::vec4 c = viewProj * glm::vec4(world, 1.0f);
+            const glm::vec4 c = viewProj * sceneTransform * glm::vec4(world, 1.0f);
             const glm::vec2 uv = glm::vec2(c) / c.w * 0.5f + 0.5f;
             const auto x = static_cast<uint32_t>(uv.x * te.width);
             const auto y = static_cast<uint32_t>(uv.y * te.height);
@@ -178,7 +196,7 @@ int main() {
             dist = texel(lightTexels, x, y, 3);
         };
 
-        int failures = 0;
+        int failures = checkRtLookup(ctx);
         auto expect = [&](const char* what, bool ok) {
             std::printf("  %-52s %s\n", what, ok ? "ok" : "FAIL");
             if (!ok) ++failures;
@@ -200,7 +218,8 @@ int main() {
         expect("wall point beside the shadow is lit", sun > 0.75f);
 
         bool finite = true;
-        uint32_t shadowed = 0;
+        uint32_t shadowed = 0, acne = 0;
+        float minSun = 1.0f, minAo = 1.0f;
         for (uint32_t y = 0; y < te.height; ++y) {
             for (uint32_t x = 0; x < te.width; ++x) {
                 for (int c = 0; c < 4; ++c) {
@@ -208,9 +227,23 @@ int main() {
                              std::isfinite(texel(giTexels, x, y, c));
                 }
                 if (texel(lightTexels, x, y, 0) < 0.5f) ++shadowed;
+                // Far from the box shadow and image border, this flat wall
+                // has neither blockers toward the sun nor AO occluders.
+                const float wallY = -(float(x * 2) + 0.5f - kSize * 0.5f) *
+                                    (2.0f * kWallDistance / (kSize * proj[0][0]));
+                if (x > 8 && x + 8 < te.width && y > 8 && y + 8 < te.height &&
+                    std::abs(wallY) > 5.0f && std::abs(wallY) < 10.0f) {
+                    const float visibility = texel(lightTexels, x, y, 0);
+                    const float ao = texel(lightTexels, x, y, 1);
+                    minSun = std::min(minSun, visibility);
+                    minAo = std::min(minAo, ao);
+                    if (visibility < 0.95f || ao < 0.95f) ++acne;
+                }
             }
         }
         std::printf("trace %ux%u, %u shadowed texels\n", te.width, te.height, shadowed);
+        std::printf("unoccluded wall: %u acne texels, min sun=%.4f AO=%.4f\n", acne, minSun, minAo);
+        expect("unoccluded receiving wall has no self-shadow speckles", acne == 0);
         expect("every value is finite", finite);
         expect("the shadow is a patch, not the frame", shadowed > 20 && shadowed < te.width * te.height / 3);
 

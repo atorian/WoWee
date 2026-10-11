@@ -670,6 +670,7 @@ size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
     for (const auto& [modelId, model] : models) {
         for (const auto& batch : model.batches) {
             if (batch.texture) inUse.insert(batch.texture);
+            if (batch.skyMaskTexture) inUse.insert(batch.skyMaskTexture);
         }
         for (const VkTexture* tex : model.particleTextures) {
             if (tex) inUse.insert(tex);
@@ -1524,13 +1525,15 @@ void M2Renderer::recreatePipelines() {
     destroy(device, alphaTestPipeline_);
     destroy(device, alphaPipeline_);
     destroy(device, additivePipeline_);
+    destroy(device, modulatePipeline_);
+    destroy(device, modulate2xPipeline_);
     destroy(device, particlePipeline_);
     destroy(device, particleAdditivePipeline_);
     destroy(device, smokePipeline_);
     destroy(device, ribbonPipeline_);
     destroy(device, ribbonAdditivePipeline_);
 
-    // The same ten pipelines initialize() builds, built by the same
+    // The same main-pass pipelines initialize() builds, built by the same
     // function. The layouts are untouched above, so it makes none.
     buildMainPassPipelines(perFrameLayout_);
 

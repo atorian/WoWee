@@ -1,6 +1,7 @@
 #include "rendering/shadow_params.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
+#include "rendering/m2_sky_material.hpp"
 #include "rendering/m2_sway.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
@@ -1780,7 +1781,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Handle texture animation: if this batch has per-instance uvOffset,
                     // write a separate SSBO range with the correct offsets.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || model.isLavaModel;
+                                           || model.isLavaModel || skyMode_;
                     uint32_t drawOffset = groupSSBOOffset;
                     if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
                         drawOffset = instanceDataCount_;
@@ -1820,6 +1821,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.model = inst.modelMatrix;
                             e.uvOffset = uvOffset;
                             e.fadeAlpha = p.fadeAlpha;
+                            if (skyMode_) {
+                                const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
+                                e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
+                                    model.skyTextureWeightTracks, batch.weightTrackIndex,
+                                    skyAnimationTimeMs(skyTimeOfDayHours_, duration), inst.globalSequenceTime,
+                                    model.globalSequenceDurations);
+                            }
                             e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                             e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
@@ -1896,9 +1904,12 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             case 0: desiredPipeline = opaquePipeline_; break;
                             case 1: desiredPipeline = alphaTestPipeline_; break;
                             case 2: desiredPipeline = alphaPipeline_; break;
+                            case 5: desiredPipeline = modulatePipeline_; break;
+                            case 6: desiredPipeline = modulate2xPipeline_; break;
                             default: desiredPipeline = additivePipeline_; break;
                         }
                     }
+                    if (skyMode_ && effectiveBlendMode <= 1) desiredPipeline = alphaPipeline_;
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                         currentPipeline = desiredPipeline;
@@ -2016,7 +2027,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         const bool particleDominantEffect = model.isSpellEffect &&
             !model.particleEmitters.empty() && model.batches.size() <= 2;
 
-        for (const auto& batch : model.batches) {
+        for (const size_t batchIndex : model.materialDrawOrder) {
+            const auto& batch = model.batches[batchIndex];
             if (batch.indexCount == 0) continue;
             if (!model.isGroundDetail && batch.submeshLevel != targetLOD) continue;
             if (batch.batchOpacity < 0.01f) continue;
@@ -2105,6 +2117,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
             e.fadeAlpha = instanceFadeAlpha;
+            if (skyMode_) {
+                const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
+                e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
+                    model.skyTextureWeightTracks, batch.weightTrackIndex,
+                    skyAnimationTimeMs(skyTimeOfDayHours_, duration), instance.globalSequenceTime,
+                    model.globalSequenceDurations);
+            }
             e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
@@ -2124,6 +2143,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             VkPipeline desiredPipeline;
             switch (effectiveBlendMode) {
                 case 2: desiredPipeline = alphaPipeline_; break;
+                case 5: desiredPipeline = modulatePipeline_; break;
+                case 6: desiredPipeline = modulate2xPipeline_; break;
                 default: desiredPipeline = additivePipeline_; break;
             }
             // An opaque layer of a faded instance: blended by its fade.
@@ -2143,6 +2164,20 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
                 mat->fireCard = batch.forgeFireCard ? 1 : 0;
                 mat->interiorDarken = 0.0f;
+                if (skyMode_ && batch.skyMaskTexture) {
+                    glm::vec3 translation(0.0f);
+                    const size_t next = static_cast<size_t>(batch.textureAnimIndex) + 1;
+                    if (!skyNoTexAnim && batch.textureAnimIndex != UINT16_MAX &&
+                        next < model.textureTransformLookup.size()) {
+                        const uint16_t transform = model.textureTransformLookup[next];
+                        if (transform < model.textureTransforms.size())
+                            translation = m2_track::sampleVec3(model.textureTransforms[transform].translation,
+                                instance.currentSequenceIndex, instance.animTime, instance.globalSequenceTime,
+                                model.globalSequenceDurations, glm::vec3(0.0f));
+                    }
+                    mat->skyMaskOffsetX = translation.x;
+                    mat->skyMaskOffsetY = translation.y;
+                }
                 if (batch.colorKeyBlack)
                     mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
 

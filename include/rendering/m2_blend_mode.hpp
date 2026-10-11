@@ -34,9 +34,12 @@ enum M2BlendMode : uint8_t {
     M2_BLEND_MODULATE2X = 6,
 };
 
-/// True when the mode adds to the framebuffer rather than covering it.
-///
-/// These never need an alpha channel: black is the transparent colour.
+/// RGB multiplication has no alpha silhouette or black colour key.
+inline bool m2BlendIsModulate(uint8_t blendMode) {
+    return blendMode == M2_BLEND_MODULATE || blendMode == M2_BLEND_MODULATE2X;
+}
+
+/// Additive modes need no alpha channel: black is the transparent colour.
 inline bool m2BlendIsAdditive(uint8_t blendMode) {
     return blendMode == M2_BLEND_ADD || blendMode == M2_BLEND_ADD_ALPHA;
 }
@@ -68,7 +71,7 @@ inline bool m2BlendIsAdditive(uint8_t blendMode) {
 /// when it is in punch-through mode and a texel actually selects index 3.
 inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
     if (blendMode == M2_BLEND_ALPHA_KEY) return hasAlpha;
-    if (m2BlendIsAdditive(blendMode)) return false;
+    if (m2BlendIsAdditive(blendMode) || m2BlendIsModulate(blendMode)) return false;
     return blendMode >= M2_BLEND_ALPHA && !hasAlpha;
 }
 
@@ -82,7 +85,16 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
 /// into a hard-edged disc. Orgrimmar's bonfires used a threshold of 0.7 on
 /// exactly such a card.
 inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed) {
-    return textureIsKeyed && !m2BlendIsAdditive(blendMode);
+    return textureIsKeyed && !m2BlendIsAdditive(blendMode) && !m2BlendIsModulate(blendMode);
+}
+
+/// Characters and mounts honor opaque material alpha, even on DXT5 atlases.
+inline bool characterBatchNeedsAlphaTest(uint16_t mode, bool hasAlpha,
+                                        bool hair, bool scene) {
+    if (scene) return mode == M2_BLEND_ALPHA_KEY;
+    if (hair || mode == M2_BLEND_ALPHA_KEY) return true;
+    const bool additive = mode == 3 || mode == 4 || mode == 6 || mode == 7;
+    return mode >= 2 && !hasAlpha && !additive;
 }
 
 }  // namespace wowee::rendering

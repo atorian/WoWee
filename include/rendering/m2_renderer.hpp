@@ -52,6 +52,10 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
+        VkTexture* skyMaskTexture = nullptr; // second stage of an additive sky layer
+        uint16_t colorTrackIndex = UINT16_MAX;
+        uint16_t weightTrackIndex = UINT16_MAX;
+        uint8_t skyMaskTexCoordSet = 0;
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
         ::VkBuffer materialUBO = VK_NULL_HANDLE;
         VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
@@ -65,9 +69,10 @@ struct M2ModelGPU {
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
+        int8_t priorityPlane = 0; // authored transparent layer priority
         uint16_t materialFlags = 0; // M2 material flags (0x01=Unlit, 0x04=TwoSided, 0x10=NoDepthWrite)
         uint16_t submeshLevel = 0; // LOD level: 0=base, 1=LOD1, 2=LOD2, 3=LOD3
-        uint8_t textureUnit = 0;  // UV set index (0=texCoords[0], 1=texCoords[1])
+        int8_t textureUnit = 0;  // -1=environment mapping, 0=UV0, 1=UV1
         uint8_t texFlags = 0;     // M2Texture.flags (bit0=WrapS, bit1=WrapT)
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
@@ -111,6 +116,7 @@ struct M2ModelGPU {
     uint32_t indexCount = 0;
     uint32_t vertexCount = 0;
     std::vector<BatchGPU> batches;
+    std::vector<size_t> materialDrawOrder;
 
     glm::vec3 boundMin;
     glm::vec3 boundMax;
@@ -223,6 +229,8 @@ struct M2ModelGPU {
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;
     std::vector<uint16_t> textureTransformLookup;
+    std::vector<pipeline::M2AnimationTrack> skyColorAlphaTracks;
+    std::vector<pipeline::M2AnimationTrack> skyTextureWeightTracks;
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
@@ -419,6 +427,10 @@ struct M2MaterialUBO {
     /// A flame card. Fades out over the top of its own model, so the card's
     /// upper edge is not where the fire stops.
     int32_t fireCard;
+    int32_t hasSkyMask;
+    int32_t skyMaskTexCoordSet;
+    float skyMaskOffsetX;
+    float skyMaskOffsetY;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
@@ -443,6 +455,7 @@ public:
                     pipeline::AssetManager* assets);
     /** Configure this renderer for camera-centered sky M2s before initialize(). */
     void setSkyMode(bool enabled) { skyMode_ = enabled; }
+    void setSkyTimeOfDay(float hours) { skyTimeOfDayHours_ = hours; }
     void shutdown();
 
     [[nodiscard]] bool hasModel(uint32_t modelId) const;
@@ -633,7 +646,7 @@ public:
 
     void recreatePipelines();
 
-    /// Build the nine main-pass pipelines. Called by initialize() and again by
+    /// Build the main-pass pipelines. Called by initialize() and again by
     /// recreatePipelines() after a device loss, which is the reason it exists:
     /// the two used to be separate copies of the same 190 lines.
     bool buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout);
@@ -767,7 +780,9 @@ private:
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 3+
+    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend modes 3/4
+    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
+    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -1152,6 +1167,7 @@ private:
     static constexpr size_t MAX_M2_PARTICLES = 4000;
     std::mt19937 particleRng_{123};
     bool skyMode_ = false;
+    float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
     // What the sky-model clock diagnostic last reported, so it prints on a
     // restart or once a second rather than every frame. See M2Renderer::update.

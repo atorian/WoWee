@@ -32,6 +32,23 @@ struct LightingParams {
 
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
+
+    // Value initialization uses the fallback member defaults above. A weighted
+    // sum must start at zero, otherwise every zone gains a second light/sky.
+    static LightingParams blendAccumulator() {
+        return {
+            .ambientColor = glm::vec3(0.0f),
+            .diffuseColor = glm::vec3(0.0f),
+            .directionalDir = glm::vec3(0.0f),
+            .fogColor = glm::vec3(0.0f),
+            .fogStart = 0.0f, .fogEnd = 0.0f, .fogDensity = 0.0f,
+            .skyTopColor = glm::vec3(0.0f),
+            .skyMiddleColor = glm::vec3(0.0f),
+            .skyBand1Color = glm::vec3(0.0f),
+            .skyBand2Color = glm::vec3(0.0f),
+            .cloudDensity = 0.0f, .horizonGlow = 0.0f
+        };
+    }
 };
 
 /** Apply any authored ambience that must remain stable regardless of world time. */
@@ -202,6 +219,7 @@ public:
      * Set whether player is indoors (disables outdoor lighting)
      */
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
+    [[nodiscard]] bool isIndoors() const { return isIndoors_; }
     /// How far the distance fog is pulled toward the sky's horizon colour.
     /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
     /// LightingManager::update.

@@ -12,7 +12,7 @@ layout(set = 0, binding = 1) uniform sampler2DMS uSceneDepth;
 #else
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 #endif
-layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uGbuf;
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uGbuf;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -25,8 +25,8 @@ float loadDepth(ivec2 p) {
 #endif
 }
 
-vec3 worldAt(ivec2 p, float depth) {
-    return rtWorldFromDepth((vec2(p) + 0.5) * pass.sceneExtent.zw, depth);
+vec3 relativeAt(ivec2 p, float depth) {
+    return rtRelativeFromDepth((vec2(p) + 0.5) * pass.sceneExtent.zw, depth);
 }
 
 void main() {
@@ -49,18 +49,18 @@ void main() {
         return;
     }
     ivec2 sp = base + ivec2(sub & 1, sub >> 1);
-    vec3 p = worldAt(sp, d);
+    vec3 p = relativeAt(sp, d);
 
     // Pick, on each axis, the neighbour on the same surface - the one whose
     // depth continues the slope best - so edges do not bend the normal.
     float dl = loadDepth(sp + ivec2(-1, 0)), dr = loadDepth(sp + ivec2(1, 0));
     float dd = loadDepth(sp + ivec2(0, -1)), du = loadDepth(sp + ivec2(0, 1));
-    vec3 dx = abs(dr - d) < abs(d - dl) ? worldAt(sp + ivec2(1, 0), dr) - p
-                                        : p - worldAt(sp + ivec2(-1, 0), dl);
-    vec3 dy = abs(du - d) < abs(d - dd) ? worldAt(sp + ivec2(0, 1), du) - p
-                                        : p - worldAt(sp + ivec2(0, -1), dd);
+    vec3 dx = abs(dr - d) < abs(d - dl) ? relativeAt(sp + ivec2(1, 0), dr) - p
+                                        : p - relativeAt(sp + ivec2(-1, 0), dl);
+    vec3 dy = abs(du - d) < abs(d - dd) ? relativeAt(sp + ivec2(0, 1), du) - p
+                                        : p - relativeAt(sp + ivec2(0, -1), dd);
     vec3 n = normalize(cross(dx, dy));
-    vec3 toCam = pass.cameraPos.xyz - p;
+    vec3 toCam = -p;
     if (dot(n, toCam) < 0.0) n = -n;
 
     imageStore(uGbuf, px, vec4(rtOctEncode(n), length(toCam), float(sub)));

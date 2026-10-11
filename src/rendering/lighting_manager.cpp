@@ -393,7 +393,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogEnd = 300.0f;
     } else if (!activeVolumes_.empty()) {
         // Outdoor with DBC lighting - blend multiple volumes
-        newParams = {}; // Zero-initialize
+        newParams = LightingParams::blendAccumulator();
         glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
 
         // The first MAX_BLEND_VOLUMES only: the list is the whole
@@ -463,25 +463,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         applyZoneAmbienceOverride(zoneId, newParams);
     }
 
-    // Fog toward the colour of the sky it is seen against.
-    //
-    // The fog colour comes from LightParams alone, so it has no relation to
-    // what is behind it. In a zone whose sky is dark - Hellfire's purple, the
-    // Plaguelands, anywhere at night - terrain faded to a pale grey that the
-    // sky never reaches, and the horizon read as a bright band laid over a
-    // dark background rather than distance.
-    //
-    // The horizon colour is skyMiddleColor: that is the band the far terrain
-    // actually sits in front of, and mixing toward it makes distant ground
-    // approach what is behind it from any angle. The DBC's own colour is kept
-    // as the other end, because it carries the zone's authored tint and a fog
-    // that is purely sky has no colour of its own at all.
-    //
-    // The amount is a setting rather than a constant, because how much haze a
-    // zone should have is taste and the right value is not the same at noon in
-    // Elwynn as at night in Hellfire. Zero is the old behaviour exactly.
-    newParams.fogColor = glm::mix(newParams.fogColor, newParams.skyMiddleColor,
-                                  glm::clamp(fogSkyBlend_, 0.0f, 1.0f));
+    // Keep the authored fog colour. The surface shaders blend it toward the
+    // actual sky band along each camera ray; one CPU-side mid-sky tint made
+    // buildings below the horizon stand out as pale silhouettes.
 
     // How much fog, as a multiplier on the distances the zone asks for.
     //

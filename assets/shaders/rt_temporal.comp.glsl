@@ -42,7 +42,7 @@ void main() {
     float len = 0.0;
     vec4 hist = vec4(0.0);
     vec4 histGi = vec4(0.0);
-    vec4 clip = pass.prevViewProj * vec4(p, 1.0);
+    vec4 clip = pass.prevViewProj * vec4(p - pass.prevCameraPos.xyz, 1.0);
     if (pass.misc.y > 0.5 && clip.w > 0.0) {
         vec2 puv = clip.xy / clip.w * 0.5 + 0.5;
         if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0)))) {

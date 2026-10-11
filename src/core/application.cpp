@@ -482,6 +482,15 @@ bool Application::initialize() {
             LOG_WARNING("Lighting manager initialization failed; using fallback lighting");
         }
 
+        // Offline GPU regression: load the real Dalaran sky without connecting
+        // to a realm or changing the user's login/configuration files.
+        if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && renderer && assetManager) {
+            if (!renderer->initializeRenderers(assetManager.get(), "Northrend")) return false;
+            renderer->getCamera()->setPosition(glm::vec3(5818.0f, 405.0f, 650.0f));
+            renderer->getLightingManager()->update(glm::vec3(5818.0f, 405.0f, 650.0f),
+                                                   571, 4395, 43200.0f);
+        }
+
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
             renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_);

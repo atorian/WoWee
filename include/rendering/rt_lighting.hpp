@@ -72,7 +72,8 @@ public:
     [[nodiscard]] VkExtent2D traceExtent() const { return traceExtent_; }
 
     struct FrameInputs {
-        glm::mat4 viewProj;
+        glm::mat4 view;
+        glm::mat4 projection;
         glm::vec3 cameraPos;
         glm::vec3 sunDir;      // toward the sun
         glm::vec3 sunColor;
@@ -87,7 +88,7 @@ public:
                 const FrameInputs& in);
 
     /// What the surface shaders need to find last frame's result, for the
-    /// per-frame block: the view-projection it was traced with, the camera
+    /// per-frame block: the camera-relative view-projection it was traced with, the camera
     /// position, and params (x = mode, 0 when there is no usable result).
     struct ConsumerData {
         glm::mat4 viewProj{1.0f};

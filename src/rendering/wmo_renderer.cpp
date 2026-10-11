@@ -1767,10 +1767,19 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 continue;
             }
 
-            // The distance test used to run whether distanceCulling was set or
-            // not - the flag only chose between two distances - so turning that
-            // flag off never stopped anything past viewDistance_ disappearing.
-            // Now nothing is dropped at all unless culling is asked for.
+            if (gi < instance.worldGroupBounds.size()) {
+                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+                const glm::vec2 nearest = glm::clamp(glm::vec2(camPos),
+                                                    glm::vec2(gMin), glm::vec2(gMax));
+                const glm::vec2 delta = nearest - glm::vec2(camPos);
+                if (glm::dot(delta, delta) > viewDistance_ * viewDistance_) {
+                    result.distanceCulled++;
+                    continue;
+                }
+            }
+
+            // Optional tighter 3D distance culling, independent of the shared
+            // horizontal world limit above. Keep nearby interiors unaffected.
             if (cullingEnabled_ && gi < instance.worldGroupBounds.size()) {
                 const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
 

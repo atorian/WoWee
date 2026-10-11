@@ -62,6 +62,7 @@ layout(location = 4) out float ModelHeight;
 layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
+layout(location = 8) out vec4 AuthoredUVs;
 
 // Matches m2WindDistanceFade in m2_sway.hpp, used by the shadow pass.
 float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
@@ -284,7 +285,18 @@ void main() {
     FragPos = worldPos.xyz;
     Normal = mat3(model) * norm.xyz;
 
-    TexCoord = (push.texCoordSet == 1 ? aTexCoord2 : aTexCoord) + uvOff;
+    vec2 uv = push.texCoordSet == 1 ? aTexCoord2 : aTexCoord;
+    if (push.texCoordSet == -1) {
+        // Authored reflection maps use eye-space sphere coordinates. Ordinary
+        // atlas UVs expose the entire map as bright stripes on polished meshes.
+        vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
+        vec3 eyeNormal = normalize(mat3(view) * Normal);
+        vec3 reflection = reflect(-normalize(eyePosition), eyeNormal);
+        reflection.z += 1.0;
+        uv = reflection.xy / max(length(reflection), 1e-6) * 0.5 + 0.5;
+    }
+    TexCoord = uv + uvOff;
+    AuthoredUVs = vec4(aTexCoord, aTexCoord2);
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own

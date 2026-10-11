@@ -68,11 +68,9 @@ TEST_CASE("opaque is never tested", "[m2]") {
     CHECK_FALSE(m2BlendIsAdditive(2));
 }
 
-TEST_CASE("the modulate modes keep the old fallback", "[m2]") {
-    // They cover what is behind rather than adding to it, so a missing alpha
-    // is the same problem it is for blending.
-    CHECK(m2BatchNeedsAlphaTest(5, false));
-    CHECK(m2BatchNeedsAlphaTest(6, false));
+TEST_CASE("modulate layers multiply RGB independently of atlas alpha", "[m2]") {
+    CHECK_FALSE(m2BatchNeedsAlphaTest(5, false));
+    CHECK_FALSE(m2BatchNeedsAlphaTest(6, false));
     CHECK_FALSE(m2BatchNeedsAlphaTest(5, true));
     CHECK_FALSE(m2BatchNeedsAlphaTest(6, true));
 }
@@ -88,17 +86,30 @@ TEST_CASE("an additive card is not colour keyed", "[m2]") {
     CHECK_FALSE(m2BatchWantsColorKey(3, true));
 }
 
-TEST_CASE("everything else that asked for the key still gets it", "[m2]") {
+TEST_CASE("opaque and alpha cards keep their key; modulation does not", "[m2]") {
     // The key is how a black-backed card survives being drawn opaquely, which
     // is still what happens for every non-additive mode.
     CHECK(m2BatchWantsColorKey(0, true));
     CHECK(m2BatchWantsColorKey(1, true));
     CHECK(m2BatchWantsColorKey(2, true));
-    CHECK(m2BatchWantsColorKey(5, true));
+    CHECK_FALSE(m2BatchWantsColorKey(5, true));
+    CHECK_FALSE(m2BatchWantsColorKey(6, true));
 
     // And a texture nothing marked is never keyed, whatever it blends as.
     for (uint8_t mode = 0; mode <= 6; ++mode) {
         INFO("blend mode " << int(mode));
         CHECK_FALSE(m2BatchWantsColorKey(mode, false));
+    }
+}
+
+TEST_CASE("opaque mount skin does not inherit atlas transparency", "[m2][mount]") {
+    using wowee::rendering::characterBatchNeedsAlphaTest;
+    CHECK_FALSE(characterBatchNeedsAlphaTest(0, true, false, false));
+    CHECK_FALSE(characterBatchNeedsAlphaTest(0, true, false, true));
+    CHECK(characterBatchNeedsAlphaTest(1, true, false, false));
+    CHECK(characterBatchNeedsAlphaTest(0, true, true, false));
+    CHECK_FALSE(characterBatchNeedsAlphaTest(2, true, false, false));
+    for (uint16_t mode : {3, 4, 6, 7}) {
+        CHECK_FALSE(characterBatchNeedsAlphaTest(mode, false, false, false));
     }
 }

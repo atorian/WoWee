@@ -257,13 +257,16 @@ bool RtLighting::createImages(VkExtent2D e) {
     // Transfer source so a tool can read a result back (tools/rt_probe.cpp).
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    auto make = [&](Target& t) {
-        t.img = createImage(dev, alloc, e.width, e.height, kFormat, usage);
+    auto make = [&](Target& t, VkFormat format = kFormat) {
+        t.img = createImage(dev, alloc, e.width, e.height, format, usage);
         return t.img.image != VK_NULL_HANDLE;
     };
     bool ok = make(raw_) && make(rawGi_) && make(tmp_) && make(tmpGi_);
     for (auto& s : slots_) {
-        ok = ok && make(s.gbuf) && make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi);
+        // Half-float distance rounds mountain positions into metre-scale bands.
+        // Keep ray origins/history geometry precise; radiance can stay float16.
+        ok = ok && make(s.gbuf, VK_FORMAT_R32G32B32A32_SFLOAT) &&
+             make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi);
         s.wroteImages = false;
     }
     traceExtent_ = e;
@@ -458,8 +461,12 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     const bool havePrev = havePrev_ && resultFrame_ != 0 && resultFrame_ + 1 == frameCounter_;
 
     RtPassData d{};
-    d.invViewProj = glm::inverse(in.viewProj);
-    d.prevViewProj = havePrev ? prevViewProj_ : in.viewProj;
+    // Inverting projection * world-view in float loses the nearby pixel
+    // differences at continent coordinates. Remove translation before the
+    // multiply; all reconstruction and normal differences stay camera-relative.
+    const glm::mat4 relativeViewProj = in.projection * glm::mat4(glm::mat3(in.view));
+    d.invViewProj = glm::inverse(relativeViewProj);
+    d.prevViewProj = havePrev ? prevViewProj_ : relativeViewProj;
     d.cameraPos = glm::vec4(in.cameraPos, static_cast<float>(frameCounter_ & 0xFFFFFF));
     d.prevCameraPos = glm::vec4(havePrev ? prevCameraPos_ : in.cameraPos, 0.0f);
     d.sunDir = glm::vec4(glm::normalize(in.sunDir), kSunTanRadius);
@@ -520,11 +527,11 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
-    prevViewProj_ = in.viewProj;
+    prevViewProj_ = relativeViewProj;
     prevCameraPos_ = in.cameraPos;
     havePrev_ = true;
     resultFrame_ = frameCounter_;
-    resultViewProj_ = in.viewProj;
+    resultViewProj_ = relativeViewProj;
     resultCameraPos_ = in.cameraPos;
     resultMode_ = mode_;
 }

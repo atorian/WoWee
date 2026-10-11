@@ -42,6 +42,12 @@ public:
         maxDistanceFactor_ = std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
     }
     [[nodiscard]] float maxDistanceFactor() const { return maxDistanceFactor_; }
+    /// Outdoor WMO groups (city platforms, courtyards) keep the outdoor limit.
+    static float zoomDistanceLimit(float factor, bool interior) {
+        const float outdoor = MAX_DISTANCE_NORMAL *
+            std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
+        return interior ? std::min(outdoor, MAX_DISTANCE_INTERIOR) : outdoor;
+    }
     [[nodiscard]] bool isExtendedZoom() const { return extendedZoom_; }
     void setEnabled(bool enabled) { this->enabled = enabled; }
     void setTerrainManager(TerrainManager* tm) { terrainManager = tm; }

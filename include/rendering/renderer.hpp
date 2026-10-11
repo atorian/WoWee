@@ -41,6 +41,7 @@ class TerrainManager;
 class PerformanceHUD;
 class WaterRenderer;
 class Skybox;
+class SkyBackground;
 class Celestial;
 class StarField;
 class Clouds;
@@ -475,6 +476,10 @@ private:
     VmaAllocation perFrameUBOAllocs[MAX_FRAMES] = {};
     void* perFrameUBOMapped[MAX_FRAMES] = {};
     GPUPerFrameData currentFrameData{};
+    std::unique_ptr<SkyBackground> skyBackground_;
+    VkDescriptorSet skyPerFrameDescSets[MAX_FRAMES]{};
+    void renderSkyBackground(game::GameHandler* gameHandler, float timeOfDay,
+                             bool drawSkyModels, bool useOriginalSkybox);
     float globalTime = 0.0f;
 
     // Per-frame reflection UBO (mirrors camera for planar reflections)

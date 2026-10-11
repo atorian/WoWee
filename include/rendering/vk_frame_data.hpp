@@ -43,6 +43,12 @@ struct GPUPerFrameData {
     glm::mat4 rtViewProj;
     glm::vec4 rtCameraPos;
     glm::vec4 rtParams;
+    // Appended so existing shader prefixes keep their offsets. The distant
+    // haze samples the real sky, with the procedural gradient as a fallback.
+    glm::vec4 fogSkyTop{0.0f}; // rgb = zenith, w = sky tint amount
+    glm::vec4 fogSkyMiddle{0.0f}; // w = actual sky capture valid
+    glm::vec4 fogSkyBand1{0.0f}; // w = common horizontal geometry limit
+    glm::vec4 fogSkyBand2{0.0f};
 };
 
 // Push constants for the model matrix (most common case)

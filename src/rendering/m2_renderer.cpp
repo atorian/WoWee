@@ -1,6 +1,7 @@
 #include <atomic>
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/m2_material.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "core/env_flag.hpp"
@@ -352,6 +353,10 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    modulatePipeline_ = buildM2Pipeline(m2ModulateBlendState(false), false,
+                                        VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    modulate2xPipeline_ = buildM2Pipeline(m2ModulateBlendState(true), false,
+                                        VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
 
     // --- Build particle pipelines ---
     if (particleVert.isValid() && particleFrag.isValid()) {
@@ -515,7 +520,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Material set layout (set 1): binding 0 = sampler2D, binding 2 = M2Material UBO
     // (M2Params moved to push constants alongside model matrix)
     {
-        VkDescriptorSetLayoutBinding bindings[2] = {};
+        VkDescriptorSetLayoutBinding bindings[3] = {};
         bindings[0].binding = 0;
         bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[0].descriptorCount = 1;
@@ -526,7 +531,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 2;
+        bindings[2] = bindings[0];
+        bindings[2].binding = 3; // second sky texture (mask)
+        ci.bindingCount = 3;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
     }
@@ -576,7 +583,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // --- Descriptor pools ---
     {
         VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS + 256},
+            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 2 * MAX_MATERIAL_SETS + 256},
             {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS + 256},
         };
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -1138,6 +1145,8 @@ void M2Renderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(modulatePipeline_);
+    destroyPipeline(modulate2xPipeline_);
     destroyPipeline(particlePipeline_);
     destroyPipeline(particleAdditivePipeline_);
     destroyPipeline(smokePipeline_);
@@ -2030,6 +2039,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Copy texture transform data for UV animation
     gpuModel.textureTransforms = model.textureTransforms;
     gpuModel.textureTransformLookup = model.textureTransformLookup;
+    if (skyMode_) {
+        gpuModel.skyColorAlphaTracks = model.colorAlphaTracks;
+        gpuModel.skyTextureWeightTracks = model.textureWeightTracks;
+    }
     gpuModel.hasTextureAnimation = false;
 
     // Build per-batch GPU entries
@@ -2058,6 +2071,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             M2ModelGPU::BatchGPU bgpu;
             bgpu.indexStart = batch.indexStart;
             bgpu.indexCount = batch.indexCount;
+            bgpu.colorTrackIndex = batch.colorIndex;
+            bgpu.priorityPlane = batch.priorityPlane;
+            if (batch.transparencyIndex < model.textureWeightLookup.size())
+                bgpu.weightTrackIndex = model.textureWeightLookup[batch.transparencyIndex];
 
             // Store texture animation index from batch
             bgpu.textureAnimIndex = batch.textureAnimIndex;
@@ -2217,10 +2234,20 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     }
                 }
             }
-            // textureCoordIndex is an index into a texture coord combo table, not directly
-            // a UV set selector. Most batches have index=0 (UV set 0). We always use UV set 0
-            // since we don't have the full combo table - dual-UV effects are rare edge cases.
-            bgpu.textureUnit = 0;
+            bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
+            // These layers multiply the light texture by a second RGB/alpha
+            // mask. Ignoring it turns subtle aurora strands into bright cards.
+            if (skyMode_ && batch.textureCount == 2 && batch.shader == 0 && bgpu.blendMode == 4) {
+                const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
+                if (second < model.textureLookup.size()) {
+                    const uint16_t mask = model.textureLookup[second];
+                    if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
+                        bgpu.skyMaskTexture = allTextures[mask];
+                }
+                const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
+                if (coord < model.textureCoordLookup.size())
+                    bgpu.skyMaskTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
+            }
 
             // Start at full opacity; hide only if texture failed to load.
             bgpu.batchOpacity = (texFailed && !groundDetailModel) ? 0.0f : 1.0f;
@@ -2256,11 +2283,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
                     bgpu.tint = model.colorRGB[batch.colorIndex];
                 }
-                if (batch.colorIndex < model.colorAlphas.size()) {
+                if (!skyMode_ && batch.colorIndex < model.colorAlphas.size()) {
                     float ca = model.colorAlphas[batch.colorIndex];
                     if (ca > 0.001f) animAlpha *= ca;
                 }
-                if (batch.transparencyIndex < model.textureWeights.size()) {
+                if (!skyMode_ && batch.transparencyIndex < model.textureWeights.size()) {
                     float tw = model.textureWeights[batch.transparencyIndex];
                     if (tw > 0.001f) animAlpha *= tw;
                 }
@@ -2445,6 +2472,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         gpuModel.batches.push_back(bgpu);
     }
 
+    gpuModel.materialDrawOrder = m2MaterialDrawOrder(gpuModel.batches);
+
     // Detect particle emitter volume models: box mesh (24 verts, 36 indices)
     // with disproportionately large bounds. These are invisible bounding volumes
     // that only exist to spawn particles - their mesh should never be rendered.
@@ -2489,6 +2518,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.unlit = (bgpu.materialFlags & 0x01) ? 1 : 0;
             mat.blendMode = bgpu.blendMode;
             mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
+            mat.hasSkyMask = bgpu.skyMaskTexture && bgpu.skyMaskTexture->isValid() ? 1 : 0;
+            mat.skyMaskTexCoordSet = bgpu.skyMaskTexCoordSet;
             mat.fadeAlpha = 1.0f;
             mat.interiorDarken = 0.0f;
             mat.specularIntensity = 0.5f;
@@ -2542,7 +2573,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             matBufInfo.offset = 0;
             matBufInfo.range = sizeof(M2MaterialUBO);
 
-            VkWriteDescriptorSet writes[2] = {};
+            VkWriteDescriptorSet writes[3] = {};
             // binding 0: texture
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = bgpu.materialSet;
@@ -2558,7 +2589,13 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].pBufferInfo = &matBufInfo;
 
-            vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
+            VkTexture* maskTex = bgpu.skyMaskTexture && bgpu.skyMaskTexture->isValid()
+                ? bgpu.skyMaskTexture : batchTex;
+            VkDescriptorImageInfo maskInfo = maskTex->descriptorInfo();
+            writes[2] = writes[0];
+            writes[2].dstBinding = 3;
+            writes[2].pImageInfo = &maskInfo;
+            vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
         }
     }
 

@@ -17,9 +17,19 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;  // rgb = zenith, w = sky tint amount (0 disables it)
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
 };
 
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
+layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
+
+#include "sky_atmosphere.glsli"
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -240,16 +250,38 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // everything between the camera and that, sunlit shafts and torch glow
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
-    color = mix(fogColor.rgb, color, fogFactor);
-    if (volumetricParams.x > 0.5) {
-        vec4 air = fogVolumeAt(worldPos);
-        color = color * air.a + air.rgb;
+    float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
+    vec3 haze = fogColor.rgb;
+    vec4 air = vec4(0.0, 0.0, 0.0, 1.0);
+    if (volumetricParams.x > 0.5) air = fogVolumeAt(worldPos);
+    color = color * air.a + air.rgb;
+    haze = haze * air.a + air.rgb;
+    vec3 ray = (worldPos - viewPos.xyz) / max(dist, 0.001);
+    vec3 sky;
+    if (fogSkyMiddle.w > 0.5) {
+        vec4 clip = projection * view * vec4(worldPos, 1.0);
+        vec2 uv = clip.xy / max(clip.w, 0.001) * 0.5 + 0.5;
+        // This is already the real sky behind all the air. Do not fog it twice.
+        sky = textureLod(uSceneSky, uv, 0.0).rgb;
+    } else {
+        sky = atmosphereSkyColor(ray, normalize(-lightDir.xyz), fogSkyTop.rgb,
+                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+        sky = sky * air.a + air.rgb;
+    }
+    if (fogFactor < 1.0 && fogSkyTop.w > 0.0)
+        haze = distanceFogTint(haze, sky, dist, fogParams.x, fogParams.y, fogSkyTop.w);
+    color = mix(haze, color, fogFactor);
+    // Geometry fades into the actual background before the common hard limit.
+    // This also hides the edge of the detailed terrain without bright silhouettes.
+    if (fogSkyMiddle.w > 0.5) {
+        float visible = worldGeometryVisibility(length(worldPos.xy - viewPos.xy), fogSkyBand1.w);
+        color = mix(sky, color, visible);
     }
     return color;
 }
-
 void main() {
+    if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
+
     float time = fogParams.z;
     float basicType = push.liquidBasicType;
 

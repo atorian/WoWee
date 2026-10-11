@@ -1345,6 +1345,11 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         core::Logger::getInstance().debug("  Texture transforms: ", model.textureTransforms.size());
     }
 
+    // Skin batches index a combo table; this is not a direct UV selector.
+    if (header.nTexUnits > 0 && header.ofsTexUnits > 0) {
+        model.textureCoordLookup = readArray<int16_t>(m2Data, header.ofsTexUnits, header.nTexUnits);
+    }
+
     // Read transparency lookup (indexed by batch.transparencyIndex).
     if (header.nTransLookup > 0 && header.ofsTransLookup > 0) {
         model.textureWeightLookup = readArray<uint16_t>(m2Data, header.ofsTransLookup, header.nTransLookup);
