@@ -98,3 +98,57 @@ TEST_CASE("it only ever darkens", "[light]") {
         CHECK(ambient.r <= a0.r + 1e-6f);
     }
 }
+
+
+TEST_CASE("daylight fill raises the shadow side without increasing peak light", "[light]") {
+    glm::vec3 ambient(0.12f, 0.20f, 0.25f);
+    glm::vec3 diffuse(0.80f, 0.68f, 0.52f);
+    const glm::vec3 originalAmbient = ambient;
+    const glm::vec3 originalDiffuse = diffuse;
+    const glm::vec3 originalPeak = ambient + diffuse;
+
+    wowee::rendering::redistributeOutdoorDaylight(ambient, diffuse, 12.0f);
+
+    CHECK(ambient.r > originalAmbient.r);
+    CHECK(ambient.g > originalAmbient.g);
+    CHECK(ambient.b > originalAmbient.b);
+    CHECK(diffuse.r < originalDiffuse.r);
+    CHECK(diffuse.g < originalDiffuse.g);
+    CHECK(diffuse.b < originalDiffuse.b);
+    const glm::vec3 resultPeak = ambient + diffuse;
+    for (int i = 0; i < 3; ++i) {
+        CHECK(resultPeak[i] == Catch::Approx(originalPeak[i]).epsilon(1e-5));
+    }
+
+    // The existing headroom policy still caps channel peaks after the shift.
+    wowee::rendering::applyLightHeadroom(ambient, diffuse);
+    const glm::vec3 capped = ambient + diffuse;
+    CHECK(std::max({capped.r, capped.g, capped.b}) <= 1.00001f);
+}
+
+TEST_CASE("daylight fill respects night, sunrise and sunset", "[light]") {
+    glm::vec3 baseAmbient(0.1f, 0.2f, 0.3f);
+    glm::vec3 baseDiffuse(0.8f, 0.7f, 0.6f);
+
+    for (float hour : {0.0f, 3.0f, 6.0f, 20.0f, 23.9f}) {
+        glm::vec3 ambient = baseAmbient, diffuse = baseDiffuse;
+        wowee::rendering::redistributeOutdoorDaylight(ambient, diffuse, hour);
+        CHECK(ambient == baseAmbient);
+        CHECK(diffuse == baseDiffuse);
+    }
+
+    CHECK(wowee::rendering::outdoorDaylightWeight(7.5f) > 0.0f);
+    CHECK(wowee::rendering::outdoorDaylightWeight(7.5f) < 1.0f);
+    CHECK(wowee::rendering::outdoorDaylightWeight(12.0f) == 1.0f);
+    CHECK(wowee::rendering::outdoorDaylightWeight(18.5f) > 0.0f);
+    CHECK(wowee::rendering::outdoorDaylightWeight(18.5f) < 1.0f);
+}
+
+TEST_CASE("dim outdoor light does not get artificially brightened", "[light]") {
+    glm::vec3 ambient(0.10f, 0.08f, 0.13f);
+    glm::vec3 diffuse(0.08f, 0.18f, 0.15f);
+    const glm::vec3 originalAmbient = ambient, originalDiffuse = diffuse;
+    wowee::rendering::redistributeOutdoorDaylight(ambient, diffuse, 12.0f);
+    CHECK(ambient == originalAmbient);
+    CHECK(diffuse == originalDiffuse);
+}
