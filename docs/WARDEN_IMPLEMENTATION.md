@@ -73,6 +73,14 @@ entries of seed, reply and the next RC4 key pair). `WardenHandler::loadWardenCRF
 reads one on `MODULE_USE`, and a `HASH_REQUEST` whose seed matches an entry is
 answered from it.
 
+The standard Windows module `79c0768d657977d697e10bad956cced1` also has a built-in
+challenge in `include/game/warden_known_modules.hpp`. Its download must match the
+announced MD5 and known module key. For the exact known seed, the client sends
+`HASH_RESULT` using the old RC4 stream, then installs the module's client and
+server keys. Built-in check opcodes allow subsequent checks without a `.cr` file.
+Matching external `.cr` entries still take precedence. The verified standard
+module does not need emulation; unknown modules retain the existing load path.
+
 ---
 
 ## Crypto Layer
@@ -115,8 +123,8 @@ Sub-opcodes inside the decrypted payload (`include/game/warden_constants.hpp`):
 
 ## Check Responses
 
-Check type opcodes differ per module; they are read from the `.cr` file header and
-XORed with the request's last byte. `WardenHandler::handleWardenData` answers each one:
+Check type opcodes differ per module; they come from the built-in standard module
+profile or the `.cr` file header and are XORed with the request's last byte. `WardenHandler::handleWardenData` answers each one:
 
 | Check type | Reply |
 |------------|-------|

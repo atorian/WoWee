@@ -678,6 +678,8 @@ set(WOWEE_SOURCES
     src/game/warden_module.cpp
     src/game/warden_emulator.cpp
     src/game/warden_memory.cpp
+    src/game/server_protocol.cpp
+    src/game/server_extension.cpp
     src/game/transport_manager.cpp
     src/game/transport_path_repository.cpp
     src/game/transport_clock_sync.cpp
@@ -2752,3 +2754,15 @@ add_custom_target(copy_bundled_addons ALL
     COMMENT "Copying bundled addons")
 add_dependencies(copy_bundled_addons wowee)
 
+
+# Realm adapters run in a separate host; configure tools/server_extension_host
+# separately with an x86 toolchain when the server supplies a 32-bit DLL.
+add_executable(wowee_extension_host tools/server_extension_host/main.cpp)
+target_include_directories(wowee_extension_host PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(wowee_extension_host PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(wowee wowee_extension_host)
+install(TARGETS wowee_extension_host RUNTIME DESTINATION bin)
+
+if(WIN32)
+    target_link_libraries(wowee_extension_host PRIVATE shell32)
+endif()

@@ -28,6 +28,10 @@ UIScreenCallbackHandler::UIScreenCallbackHandler(
 }
 
 void UIScreenCallbackHandler::setupCallbacks() {
+    gameHandler_.setOnFailure([this](const std::string& reason) {
+        uiManager_.getAuthScreen().setStatus(reason, true, true);
+        setState_(AppState::AUTHENTICATION);
+    });
     authHandler_.setOnSuccess([this](const std::vector<uint8_t>& sessionKey) {
         authenticatedSessionKey_ = sessionKey;
         LOG_INFO("Cached auth session key for world handoff (", authenticatedSessionKey_.size(), " bytes)");
@@ -107,11 +111,13 @@ void UIScreenCallbackHandler::setupCallbacks() {
             clientBuild = realmBuild;
             LOG_INFO("Using realm-reported build: ", clientBuild);
         }
-        if (gameHandler_.connect(host, port, sessionKey, accountName, clientBuild, realmId)) {
+        if (gameHandler_.connect(host, port, sessionKey, accountName, clientBuild, realmId,
+                authHandler_.getServerHost(), authHandler_.getServerPort())) {
             LOG_INFO("Connected to world server, transitioning to character selection");
             setState_(AppState::CHARACTER_SELECTION);
         } else {
             LOG_ERROR("Failed to connect to world server");
+            setState_(AppState::AUTHENTICATION);
         }
     });
 

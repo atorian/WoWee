@@ -597,6 +597,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     lastPlayerFields_.clear();
     onlineEquipDirty_ = false;
     playerMoneyCopper_ = 0;
+    protocolMoneyCopper_.reset();
     playerArmorRating_ = 0;
     std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
     std::fill(std::begin(playerStats_), std::end(playerStats_), -1);

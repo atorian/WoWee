@@ -2,9 +2,11 @@
 
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
+#include "game/server_extension.hpp"
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -31,6 +33,10 @@ public:
 
     /** Reset all warden state (called on connect / disconnect). */
     void reset();
+    bool beginSession(const std::string& host, uint16_t port, uint32_t build);
+    std::string extensionError() const;
+    bool takeCharacterListRetryRequest();
+    bool handleProtocolPacket(network::Packet& packet);
 
     /** Initialize warden module manager (called once from GameHandler ctor). */
 
@@ -52,6 +58,8 @@ public:
 private:
     void handleWardenData(network::Packet& packet);
     bool loadWardenCRFile(const std::string& moduleHashHex);
+    bool loadClientImage();
+    bool readIntegrityMemory(const std::string& module, uint32_t address, uint8_t length, uint8_t* output);
 
     GameHandler& owner_;
 
@@ -64,6 +72,12 @@ private:
     bool wardenCharEnumBlockedLogged_ = false;
     std::unique_ptr<WardenCrypto> wardenCrypto_;
     std::unique_ptr<WardenMemory> wardenMemory_;
+    ServerExtension serverExtension_;
+    std::future<bool> extensionPreparation_;
+    bool extensionPreparationPending_ = false;
+    std::string extensionPreparationError_;
+    std::deque<network::Packet> extensionWaitingPackets_;
+    size_t extensionWaitingBytes_ = 0;
 
     // Warden module download state
     enum class WardenState {
@@ -77,6 +91,7 @@ private:
     std::vector<uint8_t> wardenModuleKey_;     // 16 bytes RC4
     uint32_t wardenModuleSize_ = 0;
     std::vector<uint8_t> wardenModuleData_;    // Downloaded module chunks
+    bool wardenKnownModuleVerified_ = false; // Download MD5 matches a supported built-in module
     std::shared_ptr<WardenModule> wardenLoadedModule_; // Loaded Warden module
 
     // Pre-computed challenge/response entries from .cr file

@@ -20,6 +20,12 @@
 #include <catch_amalgamated.hpp>
 
 #include <cstdint>
+#include <imgui.h>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -127,4 +133,31 @@ TEST_CASE("a collection is read through to its first face") {
     be32(ttc, base + 20, base + 12 + 2 * 16);
     be32(ttc, base + 36, base + 12 + 2 * 16 + 36);
     CHECK(scaleOf(ttc) == Catch::Approx(1.215f).epsilon(0.0001));
+}
+
+TEST_CASE("merged interface fonts display Cyrillic while preserving primary Latin glyphs") {
+    const char* dir=std::getenv("WOWEE_TEST_FONT_DIR");
+    if (!dir) { SKIP("Set WOWEE_TEST_FONT_DIR to the installed client font directory"); }
+    const std::filesystem::path root(dir);
+    std::ifstream input(root / "arialn.ttf", std::ios::binary);
+    REQUIRE(input.good());
+    std::vector<uint8_t> fallback((std::istreambuf_iterator<char>(input)),{});
+    auto context=std::unique_ptr<ImGuiContext,decltype(&ImGui::DestroyContext)>(
+        ImGui::CreateContext(),ImGui::DestroyContext);
+    auto& io=ImGui::GetIO();
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+    ImFont* primary=io.Fonts->AddFontFromFileTTF((root / "frizqt__.ttf").string().c_str(),18.0f);
+    REQUIRE(primary);
+    const auto* latin=primary->GetFontBaked(18.0f)->FindGlyphNoFallback('A');
+    REQUIRE(latin); const float latinAdvance=latin->AdvanceX;
+    CHECK_FALSE(primary->GetFontBaked(18.0f)->FindGlyphNoFallback(0x0410));
+    REQUIRE(wowee::ui::mergeInterfaceFallback(*io.Fonts,primary,fallback.data(),fallback.size(),18.0f));
+    // The helper owns its copy; delayed glyph loading must not use these bytes.
+    fallback.clear();fallback.shrink_to_fit();
+    for (unsigned cp : {0x0410,0x042F,0x0430,0x044F,0x0401,0x0451}) {
+        const auto* glyph=primary->GetFontBaked(18.0f)->FindGlyphNoFallback(cp);
+        REQUIRE(glyph); CHECK(glyph->Codepoint==cp); CHECK(glyph->AdvanceX>0);
+    }
+    CHECK(primary->GetFontBaked(18.0f)->FindGlyphNoFallback('A')->AdvanceX==Catch::Approx(latinAdvance));
+    CHECK(primary->CalcTextSizeA(18.0f,1000.0f,0.0f,"Алексей Ёж").x>0.0f);
 }

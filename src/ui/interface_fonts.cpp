@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +50,26 @@ uint32_t beAt(const uint8_t* d, size_t n, size_t at, int bytes) {
 }
 
 } // namespace
+
+bool mergeInterfaceFallback(ImFontAtlas& atlas, ImFont* destination,
+                            const void* data, size_t byteCount, float size) {
+    if (!destination || !data || byteCount < 12 ||
+        byteCount > static_cast<size_t>(std::numeric_limits<int>::max()) || size <= 0.0f)
+        return false;
+    void* owned = IM_ALLOC(byteCount);
+    std::memcpy(owned, data, byteCount);
+    ImFontConfig cfg;
+    cfg.MergeMode = true;
+    cfg.DstFont = destination;
+    cfg.FontDataOwnedByAtlas = true;
+    cfg.RasterizerMultiply = 1.35f;
+    cfg.ExtraSizeScale = fontEmSizeScale(data, byteCount);
+    // Legacy renderers preload this range. Dynamic atlases load any missing
+    // Unicode glyph from this source; earlier primary sources take precedence.
+    static const ImWchar ranges[] = {0x0400,0x052F,0x2DE0,0x2DFF,0xA640,0xA69F,0};
+    cfg.GlyphRanges = ranges;
+    return atlas.AddFontFromMemoryTTF(owned, static_cast<int>(byteCount), size, &cfg) != nullptr;
+}
 
 void registerInterfaceFace(const std::string& pathOrName, ImFont* font) {
     if (!font) return;

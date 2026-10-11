@@ -63,6 +63,8 @@ bool AuthHandler::connect(const std::string& host, uint16_t port) {
         return false;
     }
 
+    serverHost_ = hostTrimmed;
+    serverPort_ = port;
     setState(AuthState::CONNECTED);
     LOG_INFO("Connected to auth server");
     return true;

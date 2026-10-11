@@ -123,7 +123,9 @@ bool GameHandler::connect(const std::string& host,
                           const std::vector<uint8_t>& sessionKey,
                           const std::string& accountName,
                           uint32_t build,
-                          uint32_t realmId) {
+                          uint32_t realmId,
+                          const std::string& extensionServerHost,
+                          uint16_t extensionServerPort) {
 
     if (sessionKey.size() != 40) {
         LOG_ERROR("Invalid session key size: ", sessionKey.size(), " (expected 40)");
@@ -138,6 +140,15 @@ bool GameHandler::connect(const std::string& host,
     LOG_INFO("Port: ", port);
     LOG_INFO("Account: ", accountName);
     LOG_INFO("Build: ", build);
+
+    // Session-scoped compatibility: drain old work and unload its adapter
+    // before another server can see either its library or its PE memory.
+    if (wardenHandler_ && !wardenHandler_->beginSession(
+            extensionServerHost.empty() ? host : extensionServerHost,
+            extensionServerHost.empty() ? port : extensionServerPort, build)) {
+        fail(wardenHandler_->extensionError());
+        return false;
+    }
 
     // Store authentication data
     this->sessionKey = sessionKey;
@@ -185,6 +196,8 @@ void GameHandler::disconnect() {
         socket.reset();
     }
     activeCharacterGuid_ = 0;
+    knownTitleBits_.clear();
+    protocolMoneyCopper_.reset();
     guildNameCache_.clear();
     pendingGuildNameQueries_.clear();
     friendGuids_.clear();
@@ -716,7 +729,34 @@ void GameHandler::update(float deltaTime) {
     // Sends a Warden response built off the main thread. Nothing else does:
     // without this the server's check goes unanswered and it drops the
     // connection a few seconds later.
-    if (wardenHandler_) wardenHandler_->update(deltaTime);
+    if (wardenHandler_) {
+        wardenHandler_->update(deltaTime);
+        const auto why = wardenHandler_->extensionError();
+        if (!why.empty()) {
+            if (socket) socket->disconnect();
+            fail(why);
+            return;
+        }
+    }
+
+    // Consume the adapter hint even if enumeration has already succeeded, so
+    // it cannot trigger a stale retry after character creation/deletion.
+    const bool retryAfterServerChecks = wardenHandler_ && wardenHandler_->takeCharacterListRetryRequest();
+    // Some realms discard the first enumeration during setup. Retry once at a
+    // verified protocol boundary; keep the timer as a fallback for other realms.
+    if (state == WorldState::CHAR_LIST_REQUESTED && socket->isConnected() &&
+        !characterListRetried_) {
+        characterListWait_ += std::max(0.0f, deltaTime);
+        if (retryAfterServerChecks || characterListWait_ >= 30.0f) {
+            characterListRetried_ = true;
+            if (retryAfterServerChecks)
+                LOG_INFO("Server initialization checks ended after ", characterListWait_,
+                         "s - retrying CMSG_CHAR_ENUM once");
+            else
+                LOG_INFO("No character list after 30s - retrying CMSG_CHAR_ENUM once");
+            socket->send(CharEnumPacket::build());
+        }
+    }
 
     // Fallback for CMSG_CHAR_DELETE with no server response: if the server
     // doesn't send SMSG_CHAR_DELETE within 3 seconds, re-request the character
@@ -1043,6 +1083,8 @@ void GameHandler::setState(WorldState newState) {
     if (state != newState) {
         LOG_DEBUG("World state: ", static_cast<int>(state), " -> ", static_cast<int>(newState));
         state = newState;
+        characterListWait_ = 0.0f;
+        characterListRetried_ = false;
     }
 }
 

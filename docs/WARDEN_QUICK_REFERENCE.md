@@ -15,6 +15,13 @@ Warden modules are native x86 Windows DLLs that the server encrypts and delivers
 4. Executes entry point via Unicorn Engine x86 emulator
 5. Client responds with check results via `CMSG_WARDEN_DATA` (0x2E7), built by `WardenHandler` from a `WoW.exe` image and pre-computed `.cr` files
 
+The standard Windows module (`79c0768d657977d697e10bad956cced1`), used by
+AzerothCore, TrinityCore and MaNGOS, has a built-in challenge response and check
+opcodes. Its downloaded MD5, module key and challenge seed must all match before
+the client sends the known reply and switches RC4 keys. It needs neither a `.cr`
+file nor module emulation. External `.cr` entries take precedence for matching seeds.
+Unknown modules still follow the loading and `.cr` paths described below.
+
 A signature mismatch does not stop the load. A realm that signs its own module can name its
 key as `wardenRsaModulus` in the expansion profile.
 
@@ -43,8 +50,9 @@ the module again:
 
 The same directory is where `<MD5>.cr` challenge/response files are read from.
 
-Memory and code checks read a `WoW.exe` image, found in `$WOWEE_INTEGRITY_DIR`, a few
-home-directory locations, or `Data/misc` / `Data/expansions/<id>/misc`.
+Memory and code checks read a `WoW.exe` image, found in `$WOWEE_INTEGRITY_DIR`,
+the selected expansion's `misc` directory, home-directory locations, or `Data/misc`.
+The selected expansion takes precedence over legacy caches from other expansions.
 
 ---
 

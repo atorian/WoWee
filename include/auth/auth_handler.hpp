@@ -65,6 +65,8 @@ public:
     [[nodiscard]] AuthState getState() const { return state; }
     [[nodiscard]] const std::vector<uint8_t>& getSessionKey() const { return sessionKey; }
     [[nodiscard]] const std::string& getUsername() const { return username; }
+    [[nodiscard]] const std::string& getServerHost() const { return serverHost_; }
+    [[nodiscard]] uint16_t getServerPort() const { return serverPort_; }
 
     /** True when the last failure is consistent with an auth-protocol mismatch
      *  (rather than bad credentials), so the caller may retry on another
@@ -99,6 +101,8 @@ private:
     std::unique_ptr<SRP> srp;
 
     AuthState state = AuthState::DISCONNECTED;
+    std::string serverHost_;
+    uint16_t serverPort_ = 3724;
     std::string username;
     std::string password;
     ClientInfo clientInfo;

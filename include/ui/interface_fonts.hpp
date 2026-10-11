@@ -12,12 +12,18 @@
 #include <string>
 
 struct ImFont;
+struct ImFontAtlas;
 
 namespace wowee::ui {
 
 /// Records a face under a path or filename. Later registrations of the same
 /// face replace the earlier one.
 void registerInterfaceFace(const std::string& pathOrName, ImFont* font);
+
+/// Adds missing glyphs from another face, preserving glyphs in the primary face.
+/// The atlas owns a copy of the supplied bytes, including for dynamic glyph loading.
+bool mergeInterfaceFallback(ImFontAtlas& atlas, ImFont* destination,
+                            const void* data, size_t byteCount, float size);
 
 /// The face for a path a font object named, or null if it was never loaded -
 /// in which case the caller should draw with whatever it was already using.

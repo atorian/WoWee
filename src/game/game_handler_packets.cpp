@@ -132,6 +132,25 @@ void GameHandler::fireRuneUpdate(uint32_t index) {
 // session handshake, XP and exploration, corpses and combat state, guilds and
 // loot and vendors, teleports and taxis and battlegrounds, world states, action
 // buttons, levelling.
+void GameHandler::applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits) {
+    if (operation < 1 || operation > 3) return;
+    auto titles = operation == 3 ? std::unordered_set<uint32_t>{} : knownTitleBits_;
+    for (auto bit : bits) {
+        if (operation == 2) titles.erase(bit);
+        else titles.insert(bit);
+    }
+    knownTitleBits_.swap(titles);
+    fireAddonEvent("KNOWN_TITLES_UPDATE", {});
+    LOG_INFO("Server known titles updated: operation=", unsigned(operation), " count=", bits.size());
+}
+
+void GameHandler::applyServerMoney(uint64_t copper) {
+    if (protocolMoneyCopper_ && *protocolMoneyCopper_ == copper) return;
+    protocolMoneyCopper_ = copper;
+    fireAddonEvent("PLAYER_MONEY", {});
+    LOG_INFO("Server extended money balance updated");
+}
+
 void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // Auth / session / pre-world handshake
@@ -3434,6 +3453,8 @@ void GameHandler::handlePacket(network::Packet& packet) {
     uint16_t opcode = packet.getOpcode();
 
     try {
+
+    if (wardenHandler_ && wardenHandler_->handleProtocolPacket(packet)) return;
 
     const bool allowVanillaAliases = isPreWotlk();
 

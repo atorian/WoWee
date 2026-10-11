@@ -650,6 +650,31 @@ target_link_libraries(test_bit_packet PRIVATE catch2_main)
 add_test(NAME bit_packet COMMAND test_bit_packet)
 register_test_target(test_bit_packet)
 
+# Standard Warden challenge and RC4 transition (no downloaded module needed).
+add_executable(test_warden_challenge
+    test_warden_challenge.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/game/warden_crypto.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+)
+target_include_directories(test_warden_challenge PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_warden_challenge SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_warden_challenge PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME warden_challenge COMMAND test_warden_challenge)
+register_test_target(test_warden_challenge)
+
+# Warden PE lookup must use the expansion selected by the asset manager.
+add_executable(test_warden_memory
+    test_warden_memory.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/game/warden_memory.cpp
+)
+target_include_directories(test_warden_memory PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_warden_memory SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_warden_memory PRIVATE catch2_main OpenSSL::Crypto)
+add_test(NAME warden_memory COMMAND test_warden_memory)
+register_test_target(test_warden_memory)
+
 # ── test_srp ─────────────────────────────────────────────────
 add_executable(test_srp
     test_srp.cpp
@@ -2554,3 +2579,23 @@ endif()
 # the re-parsing it saved (950.8 s of CPU against 945.2 s without). The main
 # target benefits because it is one target over 413 objects; the tests are the
 # opposite shape. Do not re-add it without measuring.
+
+# Real child-process adapter lifecycle, crash/timeout handling and server isolation.
+add_library(server_extension_fixture SHARED server_extension_fixture.cpp)
+target_include_directories(server_extension_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_executable(test_server_extension test_server_extension.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/server_protocol.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/server_extension.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp)
+target_include_directories(test_server_extension PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_server_extension SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_server_extension PRIVATE
+    EXTENSION_HOST_PATH="$<TARGET_FILE:wowee_extension_host>"
+    EXTENSION_FIXTURE_PATH="$<TARGET_FILE:server_extension_fixture>")
+target_link_libraries(test_server_extension PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+if(WIN32)
+    target_link_libraries(test_server_extension PRIVATE ws2_32)
+endif()
+add_dependencies(test_server_extension wowee_extension_host server_extension_fixture)
+add_test(NAME server_extension COMMAND test_server_extension)
+register_test_target(test_server_extension)

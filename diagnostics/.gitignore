@@ -1,0 +1,3 @@
+*.bin
+native-scripts/
+__pycache__/

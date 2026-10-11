@@ -284,6 +284,20 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
                                               size, &cfg);
     };
 
+    // Western FRIZQT/MORPHEUS lack Cyrillic. ARIALN is already part of the
+    // extracted client fonts and supplies missing glyphs without changing Latin.
+    std::vector<uint8_t> fallbackData;
+    const fs::path fallbackFile = resolve("arialn.ttf");
+    if (!fallbackFile.empty()) {
+        std::ifstream in(fallbackFile, std::ios::binary);
+        fallbackData.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    } else if (assets) {
+        fallbackData = assets->readFileOptional("Fonts\\ARIALN.TTF");
+    }
+    const auto addFallback = [&](ImFont* font, float size) {
+        return mergeInterfaceFallback(*io.Fonts, font, fallbackData.data(), fallbackData.size(), size);
+    };
+
     const fs::path frizqt = resolve("frizqt__.ttf");
     // Kept for any other ImGui context that wants the same face - a second
     // window has an atlas of its own and would otherwise search for it again.
@@ -313,6 +327,9 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
         io.Fonts->AddFontDefault();
     }
 
+    if (io.Fonts->Fonts.Size > 0 && addFallback(io.Fonts->Fonts[0], kClientSize))
+        LOG_INFO("Client font fallback loaded from ARIALN");
+
     // The faces FrameXML's font objects name: body text in FRIZQT, headings in
     // MORPHEUS, damage in SKURRI, condensed numbers in ARIALN.
     const char* faces[] = {
@@ -337,6 +354,7 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
             f = addFromArchive(upper.c_str(), kAtlasSize);
         }
         if (f) {
+            if (std::strcmp(name, "arialn.ttf") != 0) addFallback(f, kAtlasSize);
             registerInterfaceFace(name, f);
             ++loaded;
         }

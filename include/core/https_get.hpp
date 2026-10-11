@@ -12,6 +12,7 @@
 /// Call it off the render thread. It blocks on connect, handshake and read.
 
 #include <string>
+#include <cstddef>
 
 namespace wowee::core {
 
@@ -31,6 +32,7 @@ struct HttpsResponse {
 /// without one. `timeoutSeconds` covers each socket operation rather than the
 /// whole exchange, which is enough to stop a launch hanging on a dead host.
 HttpsResponse httpsGet(const std::string& host, const std::string& path,
-                       const std::string& userAgent, int timeoutSeconds = 8);
+                       const std::string& userAgent, int timeoutSeconds = 8,
+                       std::size_t maxBodyBytes = 4u * 1024u * 1024u);
 
 }  // namespace wowee::core

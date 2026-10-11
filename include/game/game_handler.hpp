@@ -193,7 +193,9 @@ public:
                  const std::vector<uint8_t>& sessionKey,
                  const std::string& accountName,
                  uint32_t build = 12340,
-                 uint32_t realmId = 0);
+                 uint32_t realmId = 0,
+                 const std::string& extensionServerHost = {},
+                 uint16_t extensionServerPort = 3724);
 
     /**
      * Disconnect from world server
@@ -468,7 +470,8 @@ public:
     void addLocalChatMessage(const MessageChatData& msg);
 
     // Money (copper)
-    uint64_t getMoneyCopper() const { return playerMoneyCopper_; }
+    uint64_t getMoneyCopper() const { return protocolMoneyCopper_.value_or(playerMoneyCopper_); }
+    void applyServerMoney(uint64_t copper);
 
     // PvP currency (TBC/WotLK only)
     uint32_t getHonorPoints() const { return playerHonorPoints_; }
@@ -2625,6 +2628,7 @@ public:
 
     // Title system - earned title bits and the currently displayed title
     const std::unordered_set<uint32_t>& getKnownTitleBits() const { return knownTitleBits_; }
+    void applyKnownTitleUpdate(uint8_t operation, const std::vector<uint16_t>& bits);
     int32_t getChosenTitleBit() const { return chosenTitleBit_; }
     /// Returns the formatted title string for a given bit (replaces %s with player name), or empty.
     std::string getFormattedTitle(uint32_t bit) const;
@@ -4237,6 +4241,8 @@ private:
 
     // State
     WorldState state = WorldState::DISCONNECTED;
+    float characterListWait_ = 0.0f;
+    bool characterListRetried_ = false;
 
     // Authentication data
     std::vector<uint8_t> sessionKey;    // 40-byte session key from auth server
@@ -4625,6 +4631,7 @@ private:
     uint64_t lastInteractedGoGuid_ = 0;
     std::unordered_map<uint64_t, float> recentLootMoneyAnnounceCooldowns_;
     uint64_t playerMoneyCopper_ = 0;
+    std::optional<uint64_t> protocolMoneyCopper_; // A realm's authoritative extended balance.
     uint32_t playerHonorPoints_ = 0;
     uint32_t playerArenaPoints_ = 0;
     int32_t playerArmorRating_ = 0;

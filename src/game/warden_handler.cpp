@@ -12,6 +12,8 @@
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include "game/warden_constants.hpp"
+#include "game/warden_known_modules.hpp"
+#include "core/config_paths.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -173,6 +175,7 @@ void WardenHandler::reset() {
     wardenModuleSize_ = 0;
     wardenModuleData_.clear();
     wardenLoadedModule_.reset();
+    wardenKnownModuleVerified_ = false;
     // A response still being built answers the session that just ended; sent
     // on the next one it would go out under that session's keys.
     if (wardenResponsePending_) {
@@ -180,6 +183,99 @@ void WardenHandler::reset() {
         wardenPendingEncrypted_ = {};
         wardenResponsePending_ = false;
     }
+    std::fill(std::begin(wardenCheckOpcodes_), std::end(wardenCheckOpcodes_), 0);
+    wardenCREntries_.clear();
+    if (extensionPreparationPending_) {
+        extensionPreparation_.wait();
+        extensionPreparation_ = {};
+        extensionPreparationPending_ = false;
+    }
+    extensionPreparationError_.clear();
+    extensionWaitingPackets_.clear();
+    extensionWaitingBytes_ = 0;
+    wardenMemory_.reset();
+    serverExtension_.reset();
+}
+
+bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_t build) {
+    reset();
+    const auto* overrideRoot = std::getenv("WOWEE_SERVER_EXTENSIONS_DIR");
+    const auto root = overrideRoot && *overrideRoot ? std::filesystem::path(overrideRoot)
+                                                   : std::filesystem::path("Data/server_extensions");
+#ifdef _WIN32
+    const auto executable = std::filesystem::path(core::getExecutableDir()) / "wowee_extension_host.exe";
+#else
+    const auto executable = std::filesystem::path(core::getExecutableDir()) / "wowee_extension_host";
+#endif
+    // Fetches and native initialization can block; keep them off the render
+    // thread and queue Warden packets until preparation finishes.
+    try {
+        extensionPreparation_ = std::async(std::launch::async,
+            [this, root, host, port, build, executable] {
+                return serverExtension_.begin(root, host, port, build, executable,
+                    {[this](const KnownTitleUpdate& update) {
+                        owner_.applyKnownTitleUpdate(update.operation, update.bits);
+                    }, [this](uint64_t copper) {
+                        owner_.applyServerMoney(copper);
+                    }});
+            });
+        extensionPreparationPending_ = true;
+        return true;
+    } catch (const std::exception& e) {
+        extensionPreparationError_ = e.what();
+        return false;
+    }
+}
+
+std::string WardenHandler::extensionError() const {
+    // The async worker can still be updating its runtime error. Join/get it
+    // in update() before reading the message or releasing the runtime.
+    if (!extensionPreparationError_.empty()) return extensionPreparationError_;
+    return wardenResponsePending_ || extensionPreparationPending_ ? std::string() : serverExtension_.error();
+}
+
+bool WardenHandler::takeCharacterListRetryRequest() {
+    // The main thread must send every preceding async integrity response first.
+    if (extensionPreparationPending_ || wardenResponsePending_) return false;
+    return serverExtension_.takeCharacterListRetryRequest();
+}
+
+bool WardenHandler::handleProtocolPacket(network::Packet& packet) {
+    if (extensionPreparationPending_) {
+        // Currently EZWoW's sole verified custom channel. Never queue stock/auth
+        // traffic here; other protocols add their own claimed opcode set.
+        if (packet.getOpcode() != 0x41D) return false;
+        if (extensionWaitingPackets_.size() >= 128 || extensionWaitingBytes_ + packet.getSize() > 512 * 1024) {
+            extensionPreparationError_ = "Too much data while preparing the server protocol";
+            return true;
+        }
+        extensionWaitingBytes_ += packet.getSize();
+        extensionWaitingPackets_.push_back(packet);
+        return true;
+    }
+    return serverExtension_.packet(packet.getOpcode(), packet.getData(),
+        [this](uint16_t opcode, const std::vector<uint8_t>& bytes) {
+            if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
+                network::Packet outgoing(opcode, bytes);
+                owner_.getSocket()->send(outgoing);
+            }
+        }) != ProtocolResult::Unhandled;
+}
+
+bool WardenHandler::loadClientImage() {
+    if (!serverExtension_.clientPath().empty())
+        return wardenMemory_->loadFromFile(serverExtension_.clientPath());
+    return wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"),
+        owner_.services().assetManager ? owner_.services().assetManager->getDataPath() : std::string());
+}
+
+bool WardenHandler::readIntegrityMemory(const std::string& module, uint32_t address, uint8_t length, uint8_t* output) {
+    const auto result = serverExtension_.readMemory(module, address, length, output);
+    if (result == ServerExtension::ReadResult::Handled) return true;
+    if (result == ServerExtension::ReadResult::Error) return false;
+    // A named DLL's RVA must not accidentally resolve into WoW.exe.
+    if (!module.empty() && asciiLower(module) != "wow.exe") return false;
+    return wardenMemory_ && wardenMemory_->isLoaded() && wardenMemory_->readMemory(address, length, output);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +283,28 @@ void WardenHandler::reset() {
 // ---------------------------------------------------------------------------
 
 void WardenHandler::update(float deltaTime) {
+    if (extensionPreparationPending_) {
+        if (extensionPreparation_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+        bool ready = false;
+        try { ready = extensionPreparation_.get(); }
+        catch (const std::exception& e) { extensionPreparationError_ = e.what(); }
+        extensionPreparationPending_ = false;
+        if (!ready) { extensionWaitingPackets_.clear(); extensionWaitingBytes_ = 0; return; }
+        if (serverExtension_.active()) LOG_INFO("Server extension host initialized");
+        auto waiting = std::move(extensionWaitingPackets_);
+        extensionWaitingPackets_.clear(); extensionWaitingBytes_ = 0;
+        for (auto& packet : waiting) {
+            if (packet.getOpcode() == wireOpcode(Opcode::SMSG_WARDEN_DATA)) handleWardenData(packet);
+            else handleProtocolPacket(packet);
+        }
+    }
     // Drain pending async Warden response (built on background thread to avoid 5s stalls)
     if (wardenResponsePending_) {
         auto status = wardenPendingEncrypted_.wait_for(std::chrono::milliseconds(0));
         if (status == std::future_status::ready) {
             auto plaintext = wardenPendingEncrypted_.get();
             wardenResponsePending_ = false;
-            if (!plaintext.empty() && wardenCrypto_) {
+            if (!plaintext.empty() && wardenCrypto_ && serverExtension_.error().empty()) {
                 std::vector<uint8_t> encrypted = wardenCrypto_->encrypt(plaintext);
                 network::Packet response(wireOpcode(Opcode::CMSG_WARDEN_DATA));
                 for (uint8_t byte : encrypted) {
@@ -239,7 +350,11 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
 
     std::ifstream crFile(crPath, std::ios::binary);
     if (!crFile) {
-        LOG_WARNING("Warden: No .cr file found at ", crPath);
+        if (knownWardenModule(wardenModuleHash_, wardenModuleKey_)) {
+            LOG_INFO("Warden: No external .cr file; using built-in standard challenge");
+        } else {
+            LOG_WARNING("Warden: No .cr file found at ", crPath);
+        }
         return false;
     }
 
@@ -297,6 +412,15 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
 // ---------------------------------------------------------------------------
 
 void WardenHandler::handleWardenData(network::Packet& packet) {
+    if (extensionPreparationPending_) {
+        if (extensionWaitingPackets_.size() >= 128 || extensionWaitingBytes_ + packet.getSize() > 512 * 1024) {
+            extensionPreparationError_ = "Too much Warden data while preparing the server extension";
+            return;
+        }
+        extensionWaitingBytes_ += packet.getSize();
+        extensionWaitingPackets_.push_back(packet);
+        return;
+    }
     const auto& data = packet.getData();
     if (!wardenGateSeen_) {
         wardenGateSeen_ = true;
@@ -323,6 +447,9 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
     // Decrypt the payload
     std::vector<uint8_t> decrypted = wardenCrypto_->decrypt(data);
+
+    serverExtension_.observeWarden(decrypted);
+    if (!serverExtension_.error().empty()) return;
 
     // Avoid expensive hex formatting when DEBUG logs are disabled.
     if (core::Logger::getInstance().shouldLog(core::LogLevel::DEBUG)) {
@@ -375,6 +502,8 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                               | (static_cast<uint32_t>(decrypted[35]) << 16)
                               | (static_cast<uint32_t>(decrypted[36]) << 24);
             wardenModuleData_.clear();
+            wardenKnownModuleVerified_ = false;
+            wardenLoadedModule_.reset();
 
             {
                 std::string hashHex;
@@ -446,35 +575,49 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     }
                 }
 
-                // Load the module (decrypt, decompress, parse, relocate, init)
-                wardenLoadedModule_ = std::make_shared<WardenModule>();
-                // Check the signature against the key this realm actually
-                // signs with, when its profile names one.
-                if (auto* reg = core::Application::getInstance().getExpansionRegistry()) {
-                    if (const auto* profile = reg->getActive();
-                        profile && !profile->wardenRsaModulus.empty()) {
-                        wardenLoadedModule_->setRsaModulus(profile->wardenRsaModulus);
+                // The standard module has a known challenge exchange. Validate the
+                // downloaded bytes before using it; no x86 execution is needed.
+                const auto* known = knownWardenModule(wardenModuleHash_, wardenModuleKey_);
+                wardenKnownModuleVerified_ = known &&
+                    auth::Crypto::md5(wardenModuleData_) == wardenModuleHash_;
+                if (wardenKnownModuleVerified_) {
+                    // Preserve opcode overrides from an explicitly supplied .cr file.
+                    if (wardenCREntries_.empty()) {
+                        std::copy(known->checkOpcodes.begin(), known->checkOpcodes.end(),
+                                  wardenCheckOpcodes_);
                     }
-                }
-                // Inject crypto and socket so module callbacks (sendPacket, generateRC4)
-                // can reach the network layer during initializeModule().
-                wardenLoadedModule_->setCallbackDependencies(
-                    wardenCrypto_.get(),
-                    [this](const uint8_t* data, size_t len) {
-                        if (!wardenCrypto_ || !owner_.getSocket()) return;
-                        std::vector<uint8_t> plaintext(data, data + len);
-                        auto encrypted = wardenCrypto_->encrypt(plaintext);
-                        network::Packet pkt(wireOpcode(Opcode::CMSG_WARDEN_DATA));
-                        for (uint8_t b : encrypted) pkt.writeUInt8(b);
-                        owner_.getSocket()->send(pkt);
-                        LOG_DEBUG("Warden: Module sendPacket callback sent ", len, " bytes");
-                    });
-                if (wardenLoadedModule_->load(wardenModuleData_, wardenModuleHash_, wardenModuleKey_)) { // codeql[cpp/weak-cryptographic-algorithm]
-                    LOG_INFO("Warden: Module loaded successfully (image size=",
-                             wardenLoadedModule_->getModuleSize(), " bytes)");
+                    LOG_INFO("Warden: Verified standard Windows module; built-in challenge available");
                 } else {
-                    LOG_ERROR("Warden: Module loading FAILED");
-                    wardenLoadedModule_.reset();
+                    // Load the module (decrypt, decompress, parse, relocate, init)
+                    wardenLoadedModule_ = std::make_shared<WardenModule>();
+                    // Check the signature against the key this realm actually
+                    // signs with, when its profile names one.
+                    if (auto* reg = core::Application::getInstance().getExpansionRegistry()) {
+                        if (const auto* profile = reg->getActive();
+                            profile && !profile->wardenRsaModulus.empty()) {
+                            wardenLoadedModule_->setRsaModulus(profile->wardenRsaModulus);
+                        }
+                    }
+                    // Inject crypto and socket so module callbacks (sendPacket, generateRC4)
+                    // can reach the network layer during initializeModule().
+                    wardenLoadedModule_->setCallbackDependencies(
+                        wardenCrypto_.get(),
+                        [this](const uint8_t* data, size_t len) {
+                            if (!wardenCrypto_ || !owner_.getSocket()) return;
+                            std::vector<uint8_t> plaintext(data, data + len);
+                            auto encrypted = wardenCrypto_->encrypt(plaintext);
+                            network::Packet pkt(wireOpcode(Opcode::CMSG_WARDEN_DATA));
+                            for (uint8_t b : encrypted) pkt.writeUInt8(b);
+                            owner_.getSocket()->send(pkt);
+                            LOG_DEBUG("Warden: Module sendPacket callback sent ", len, " bytes");
+                        });
+                    if (wardenLoadedModule_->load(wardenModuleData_, wardenModuleHash_, wardenModuleKey_)) { // codeql[cpp/weak-cryptographic-algorithm]
+                        LOG_INFO("Warden: Module loaded successfully (image size=",
+                                 wardenLoadedModule_->getModuleSize(), " bytes)");
+                    } else {
+                        LOG_ERROR("Warden: Module loading FAILED");
+                        wardenLoadedModule_.reset();
+                    }
                 }
 
                 // Send MODULE_OK
@@ -538,6 +681,22 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     break;
                 }                     LOG_DEBUG("Warden: Seed not found in ", wardenCREntries_.size(), " CR entries");
                
+            }
+
+            // A stock server expects this exact module/seed reply and then
+            // switches both RC4 streams. Send HASH_RESULT with the old keys first.
+            // Silence here can leave strict realms waiting forever at char enum.
+            if (const auto* known = knownWardenChallenge(wardenModuleHash_, wardenModuleKey_, seed);
+                wardenKnownModuleVerified_ && known) {
+                std::vector<uint8_t> resp = { WARDEN_CMSG_HASH_RESULT };
+                resp.insert(resp.end(), known->reply.begin(), known->reply.end());
+                sendWardenResponse(resp);
+                wardenCrypto_->replaceKeys(
+                    std::vector<uint8_t>(known->clientKey.begin(), known->clientKey.end()),
+                    std::vector<uint8_t>(known->serverKey.begin(), known->serverKey.end()));
+                wardenState_ = WardenState::WAIT_CHECKS;
+                LOG_INFO("Warden: Answered standard HASH_REQUEST and switched RC4 keys");
+                break;
             }
 
             // --- No CR match: decide strategy based on server strictness ---
@@ -647,7 +806,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     // Ensure wardenMemory_ is loaded on main thread before launching async task
                     if (!wardenMemory_) {
                         wardenMemory_ = std::make_unique<WardenMemory>();
-                        if (!wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"))) {
+                        if (!loadClientImage()) {
                             LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
                         }
                     }
@@ -741,8 +900,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                         wardenMemory_->writeLE32(0xCF0BC8, now - 2000);
                                     }
                                     std::vector<uint8_t> memBuf(readLen, 0);
-                                    bool memOk = wardenMemory_ && wardenMemory_->isLoaded() &&
-                                                 wardenMemory_->readMemory(offset, readLen, memBuf.data());
+                                    bool memOk = readIntegrityMemory(moduleName, offset, readLen, memBuf.data());
                                     if (memOk) {
                                         const char* region = "?";
                                         if (offset >= KUSER_SHARED_DATA_BASE && offset < KUSER_SHARED_DATA_END) region = "KUSER";
@@ -1082,7 +1240,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                         // Lazy-load WoW.exe PE image on first MEM_CHECK
                         if (!wardenMemory_) {
                             wardenMemory_ = std::make_unique<WardenMemory>();
-                            if (!wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"))) {
+                            if (!loadClientImage()) {
                                 LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
                             }
                         }
@@ -1097,7 +1255,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                         // Read bytes from PE image (includes patched runtime globals)
                         std::vector<uint8_t> memBuf(readLen, 0);
-                        if (wardenMemory_->isLoaded() && wardenMemory_->readMemory(offset, readLen, memBuf.data())) {
+                        if (readIntegrityMemory(moduleName, offset, readLen, memBuf.data())) {
                             LOG_DEBUG("Warden:   MEM_CHECK served from PE image");
                             resultData.push_back(0x00);
                             resultData.insert(resultData.end(), memBuf.begin(), memBuf.end());
@@ -1388,6 +1546,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
             resp.push_back((checksum >> 16) & 0xFF);
             resp.push_back((checksum >> 24) & 0xFF);
             resp.insert(resp.end(), resultData.begin(), resultData.end());
+            if (!serverExtension_.error().empty()) break;
             sendWardenResponse(resp);
             LOG_DEBUG("Warden: Sent CHEAT_CHECKS_RESULT (", resp.size(), " bytes, ",
                      checkCount, " checks, checksum=0x",

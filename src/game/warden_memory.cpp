@@ -617,11 +617,31 @@ uint32_t WardenMemory::expectedImageSizeForBuild(uint16_t build, bool isTurtle) 
     }
 }
 
-std::string WardenMemory::findWowExe(uint16_t build) const {
-    std::vector<std::string> candidateDirs;
-    if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR")) {
-        if (env && *env) candidateDirs.emplace_back(env);
+std::string WardenMemory::findWowExe(uint16_t build, const std::string& dataPath) const {
+    const char* candidateExes[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe", "wow.exe" };
+    const auto findInDirectory = [&](const std::filesystem::path& dir) -> std::string {
+        for (const char* exe : candidateExes) {
+            const auto path = dir / exe;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(path, ec)) return path.string();
+        }
+        return {};
+    };
+    // An explicit override and the selected expansion must beat legacy caches,
+    // even when another expansion's executable is larger on disk.
+    if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR"); env && *env) {
+        if (auto path = findInDirectory(env); !path.empty()) return path;
     }
+    if (!dataPath.empty()) {
+        if (auto path = findInDirectory(std::filesystem::path(dataPath) / "misc");
+            !path.empty()) return path;
+        if (isTurtle_) {
+            if (auto path = findInDirectory(std::filesystem::path(dataPath) / "overlay/misc");
+                !path.empty()) return path;
+        }
+    }
+
+    std::vector<std::string> candidateDirs;
     if (const char* home = std::getenv("HOME")) {
         if (home && *home) {
             candidateDirs.push_back(std::string(home) + "/Downloads");
@@ -633,13 +653,13 @@ std::string WardenMemory::findWowExe(uint16_t build) const {
     // extraction made by the asset builder is in the per-user folder, and
     // looking beside the client alone never found its executable.
     for (const std::string& root : core::extractionRoots()) {
-        candidateDirs.push_back(root + "/expansions/turtle/misc");
-        candidateDirs.push_back(root + "/expansions/classic/misc");
+        if (dataPath.empty()) {
+            candidateDirs.push_back(root + "/expansions/turtle/misc");
+            candidateDirs.push_back(root + "/expansions/classic/misc");
+            candidateDirs.push_back(root + "/expansions/turtle/overlay/misc");
+        }
         candidateDirs.push_back(root + "/misc");
-        candidateDirs.push_back(root + "/expansions/turtle/overlay/misc");
     }
-
-    const char* candidateExes[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe", "wow.exe" };
 
     // Collect all candidate paths
     std::vector<std::string> allPaths;
@@ -694,9 +714,9 @@ std::string WardenMemory::findWowExe(uint16_t build) const {
     return bestPath.empty() && !allPaths.empty() ? allPaths[0] : bestPath;
 }
 
-bool WardenMemory::load(uint16_t build, bool isTurtle) {
+bool WardenMemory::load(uint16_t build, bool isTurtle, const std::string& dataPath) {
     isTurtle_ = isTurtle;
-    std::string path = findWowExe(build);
+    std::string path = findWowExe(build, dataPath);
     if (path.empty()) {
         LOG_WARNING("WardenMemory: WoW.exe not found in any candidate directory");
         return false;

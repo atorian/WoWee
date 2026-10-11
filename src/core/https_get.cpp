@@ -115,7 +115,7 @@ std::string dechunk(const std::string& body) {
 }  // namespace
 
 HttpsResponse httpsGet(const std::string& host, const std::string& path,
-                       const std::string& userAgent, int timeoutSeconds) {
+                       const std::string& userAgent, int timeoutSeconds, std::size_t maxBodyBytes) {
     HttpsResponse result;
 
     socket_t sock = connectTcp(host, "443", timeoutSeconds, &result.error);
@@ -175,7 +175,7 @@ HttpsResponse httpsGet(const std::string& host, const std::string& path,
     std::string raw;
     // A release document is a few kilobytes. The cap is there so a hostile or
     // broken endpoint cannot make this read until it runs out of memory.
-    constexpr std::size_t kMaxBytes = 4u * 1024u * 1024u;
+    const std::size_t kMaxBytes = std::min<std::size_t>(maxBodyBytes, 64u * 1024u * 1024u) + 65536;
     char buffer[8192];
     while (raw.size() < kMaxBytes) {
         const int got = SSL_read(ssl, buffer, sizeof(buffer));
@@ -183,6 +183,10 @@ HttpsResponse httpsGet(const std::string& host, const std::string& path,
         raw.append(buffer, static_cast<std::size_t>(got));
     }
 
+    if (raw.size() >= kMaxBytes) {
+        result.error = "reply exceeds size limit";
+        return result;
+    }
     const std::size_t split = headerEnd(raw);
     if (split == std::string::npos) {
         result.error = "no headers in the reply";
@@ -206,6 +210,10 @@ HttpsResponse httpsGet(const std::string& host, const std::string& path,
         body = dechunk(body);
     }
 
+    if (body.size() > maxBodyBytes) {
+        result.error = "reply body exceeds size limit";
+        return result;
+    }
     result.ok = true;
     result.body = std::move(body);
     return result;
