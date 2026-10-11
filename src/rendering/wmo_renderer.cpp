@@ -1214,6 +1214,8 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
+    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
+    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
 
     // Decompose transform to position/rotation/scale
     inst.position = glm::vec3(transform[3]);
@@ -1245,7 +1247,11 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
         }
     }
 
-    rebuildSpatialIndex();
+    // A moving hull changes only its own grid membership. Rebuilding every
+    // building here made each active ship pay for the entire streamed world
+    // once per frame, even while the player was standing still in Dalaran.
+    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                 inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
 }
 
 void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform) {

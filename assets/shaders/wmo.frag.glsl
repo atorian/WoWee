@@ -246,11 +246,11 @@ void main() {
 
     vec3 result;
 
-    // Sample shadow map for all groups.  Interior groups receive attenuated
-    // shadow (30%) so they get subtle light/shadow variation without the full
-    // outdoor darkening that makes them look wrong.
+    // Interior MOCV already contains the building's baked light and shade.
+    // Its roof blocks the outdoor sun; multiplying the baked term by that
+    // shadow darkened the entire room a second time.
     float shadow = 1.0;
-    if (shadowParams.x > 0.5) {
+    if (isInterior == 0 && shadowParams.x > 0.5) {
         vec3 ldir = normalize(-lightDir.xyz);
         float normalOffset = shadowTexel() * 2.0 * (1.0 - abs(dot(norm, ldir)));
         vec3 biasedPos = FragPos + norm * normalOffset;
@@ -330,20 +330,15 @@ void main() {
         // Lava is self-luminous - bright emissive, no shadows
         result = texColor.rgb * 1.5;
     } else if (isInterior != 0) {
-        // WMO interior: vertex colors (MOCV) are pre-baked lighting from the artist.
-        // The MOHD ambient color floors the vertex colors so dark spots don't go
-        // completely black.  Full shadow strength is applied but clamped so
-        // interiors never go darker than a minimum brightness.
-        // The floor is the map's own MOHD ambient, which is what the artists
-        // set as the darkest an interior gets. It used to be raised to 0.35
-        // regardless, which lifted every dark corner in every building to
-        // the same grey. A small safety floor stays for the few roots that
-        // carry no ambient at all.
+        // WotLK MapObj shaders modulate the texture by 2 * vertex color.
+        // MOHD is the building's base ambient; MOCV adds authored warm/cool
+        // pools to it. Using max() flattened those colors into the ambient,
+        // notably erasing Dalaran's blue portal and warm torch lighting.
         vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        wmoAmbient = max(wmoAmbient, vec3(0.15));
-        vec3 mocv = max(VertColor.rgb, wmoAmbient);
-        float clampedShadow = max(shadow, 0.45);
-        result = texColor.rgb * mocv * clampedShadow;
+        vec3 interiorLight = hasVertexColors != 0
+            ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
+            : vec3(1.0);  // Neutral modulation when no baked colors exist.
+        result = texColor.rgb * interiorLight;
     } else if (unlit != 0) {
         // Outdoor unlit surface - still receives directional shadows
         result = texColor.rgb * shadow;
