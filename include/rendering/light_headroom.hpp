@@ -40,4 +40,37 @@ inline void applyLightHeadroom(glm::vec3& ambient, glm::vec3& diffuse) {
     diffuse *= scale;
 }
 
+ 
+/// Transfer a small part of direct daylight into ambient fill without creating
+/// energy or changing the colour of a sun-facing surface. In particular, the
+/// negative-facing side of terrain/characters should not become nearly black
+/// just because the authored DBC sun is strong.
+/// 
+/// Only soften broad daylight. The visual clock (rather than the server clock)
+/// preserves fixed-night zones such as Duskwood and leaves night/torch contrast
+/// alone. This is done before applyLightHeadroom so peak-channel clipping is
+/// still prevented by its existing policy.
+inline float outdoorDaylightWeight(float visualHour) {
+    const auto smooth = [](float x, float from, float to) {
+        const float t = std::clamp((x - from) / (to - from), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    return smooth(visualHour, 6.0f, 9.0f) *
+           (1.0f - smooth(visualHour, 17.0f, 20.0f));
+}
+
+inline void redistributeOutdoorDaylight(glm::vec3& ambient, glm::vec3& diffuse,
+                                        float visualHour) {
+    const float daylight = outdoorDaylightWeight(visualHour);
+    if (daylight <= 0.0f) return;
+
+    const float directPeak = std::max({diffuse.r, diffuse.g, diffuse.b});
+    // Little/no direct light (dark or cloudy areas) already has soft shading.
+    const float sunStrength = std::clamp((directPeak - 0.20f) / 0.50f, 0.0f, 1.0f);
+    const float transfer = 0.20f * daylight * sunStrength;
+    const glm::vec3 fill = diffuse * transfer;
+    ambient += fill;
+    diffuse -= fill;
+}
+
 }  // namespace wowee::rendering
