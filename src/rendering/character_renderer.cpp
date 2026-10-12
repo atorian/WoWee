@@ -2728,11 +2728,17 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         }
         VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
         // The texture's own sampler is the one the cache made for whichever
-        // model loaded the image first, always REPEAT. Wrap per batch instead.
-        const VkSampler wrapSampler = vkCtx_->getOrCreateSampler(
-            m2TextureSamplerInfo(wrapFlags, diffuse->getMipLevels(), 0.0f));
-        if (wrapSampler != VK_NULL_HANDLE) diffuseInfo.sampler = wrapSampler;
-        const VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
+        // model loaded the image first, always REPEAT. Wrap per batch instead,
+        // and the normal map the same way: it is read at the same UV, and a
+        // normal wrapping where the colour clamps lights the edge from the
+        // opposite side of the texture.
+        auto wrapSampler = [&](const VkTexture& tex) {
+            return vkCtx_->getOrCreateSampler(
+                m2TextureSamplerInfo(wrapFlags, tex.getMipLevels(), 0.0f));
+        };
+        if (const VkSampler s = wrapSampler(*diffuse); s != VK_NULL_HANDLE) diffuseInfo.sampler = s;
+        VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
+        if (const VkSampler s = wrapSampler(*normal); s != VK_NULL_HANDLE) normalInfo.sampler = s;
         const MaterialDescriptorKey key{.diffuse = diffuseInfo.imageView, .normal = normalInfo.imageView,
                                         .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler};
         auto& cache = materialDescriptorCache_[frameSlot];
