@@ -45,18 +45,7 @@ layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uCellsOut;
 layout(set = 1, binding = 3) uniform sampler3D uHistory;
 
-// How far along the view slice coordinate s lies: 0 at the near edge, the
-// slice count at the far one, spaced so each slice is a fixed fraction deeper
-// than the one before.
-float sliceDepth(float s) {
-    return volumetricParams.y * exp(s / (volumetricParams.w * volumetricParams.z));
-}
-
-vec3 rayAt(vec2 uv) {
-    vec3 top = mix(vol.rayCorner[0].xyz, vol.rayCorner[1].xyz, uv.x);
-    vec3 bottom = mix(vol.rayCorner[2].xyz, vol.rayCorner[3].xyz, uv.x);
-    return mix(top, bottom, uv.y);
-}
+#include "volumetric_fog_cells.glsli"
 
 float hash13(vec3 p) {
     p = fract(p * 0.1031);
@@ -125,9 +114,8 @@ void main() {
     if (any(greaterThanEqual(cell, vol.dims.xyz))) return;
 
     vec3 at = vec3(cell) + vol.jitter.xyz;
-    vec2 uv = at.xy / vec2(vol.dims.xy);
     float depth = sliceDepth(at.z);
-    vec3 p = vol.rayOrigin.xyz + rayAt(uv) * depth;
+    vec3 p = cellPoint(at);
 
     float density = airDensity(p, depth);
 
@@ -170,15 +158,13 @@ void main() {
 
     vec4 result = vec4(light * density, density);
 
-    // The same air last frame, found by projecting this point into last
+    // The same air last frame, found by projecting this cell into last
     // frame's view. Anything that falls outside it is new to the view and
     // keeps this frame's sample alone.
     if (vol.jitter.w > 0.0) {
-        vec4 prevClip = vol.prevViewProj * vec4(p, 1.0);
+        vec4 prevClip = cellHistoryClip(cell);
         if (prevClip.w > 1e-3) {
-            vec3 prev = vec3(prevClip.xy / prevClip.w * 0.5 + 0.5,
-                             log(max(prevClip.w, volumetricParams.y) / volumetricParams.y) *
-                                 volumetricParams.z);
+            vec3 prev = volumeCoord(prevClip);
             if (all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)))) {
                 result = mix(result, textureLod(uHistory, prev, 0.0), vol.jitter.w);
             }

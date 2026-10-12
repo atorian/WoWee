@@ -45,17 +45,6 @@ glm::uvec3 sizeForQuality(VolumetricFog::Quality q) {
     return {0, 0, 0};
 }
 
-float halton(uint32_t index, uint32_t base) {
-    float f = 1.0f;
-    float r = 0.0f;
-    while (index > 0) {
-        f /= static_cast<float>(base);
-        r += f * static_cast<float>(index % base);
-        index /= base;
-    }
-    return r;
-}
-
 }  // namespace
 
 VolumetricFog::~VolumetricFog() {
@@ -425,8 +414,10 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     // A slow breeze, a yard a second, so the mist drifts rather than sits.
     const float t = in.time;
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
-    const uint32_t seq = (frameCounter_ % 16) + 1;
-    p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
+    framesStill_ = history && fogViewHeldStill(rays, prevRays_, in.cameraPos, prevCameraPos_)
+                       ? framesStill_ + 1
+                       : 0;
+    p.jitter = glm::vec4(fogCellJitter(frameCounter_), history ? fogHistoryWeight(framesStill_) : 0.0f);
     p.dims = glm::ivec4(size_, 0);
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
@@ -476,6 +467,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     cmdPipelineBarrier2(cmd, dep);
 
     prevViewProj_ = in.projection * in.view;
+    prevRays_ = rays;
     prevCameraPos_ = in.cameraPos;
     historyValid_ = true;
     lastRecordedFrame_ = static_cast<int>(frame);
