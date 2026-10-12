@@ -851,7 +851,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                         doodadReady.model = std::move(m2Model);
                         doodadReady.worldPosition = worldPos;
                         doodadReady.modelMatrix = worldMatrix;
-                        if (interiorDoodads[doodadIdx]) doodadReady.interiorAmbient = wmoModel.ambientColor;
+                        if (interiorDoodads[doodadIdx]) {
+                            doodadReady.interiorLight =
+                                doodadInteriorLight(wmoModel.ambientColor, glm::vec3(doodad.color));
+                        }
                         pending->wmoDoodads.push_back(std::move(doodadReady));
                     }
                     }
@@ -1248,7 +1251,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     // blocking, but structural doodads such as Exodarplatform01
                     // carry the only authored floor for their walkable ramps.
                     m2Renderer->setSkipWallCollision(wmoDoodadInstId, true);
-                    m2Renderer->setInteriorLight(wmoDoodadInstId, doodad.interiorAmbient);
+                    m2Renderer->setInteriorLight(wmoDoodadInstId, doodad.interiorLight);
                     ft.m2InstanceIds.push_back(wmoDoodadInstId);
                 }
                 ft.wmoDoodadIndex++;

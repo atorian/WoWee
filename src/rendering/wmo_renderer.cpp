@@ -849,7 +849,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             matData.alphaTest = mb.alphaTest ? 1 : 0;
             matData.unlit = mb.unlit ? 1 : 0;
             matData.isInterior = isInterior ? 1 : 0;
-            matData.hasVertexColors = (groupRes.groupFlags & 0x4) != 0 ? 1 : 0;
+            matData.hasVertexColors = (groupRes.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
             matData.specularIntensity = 0.5f;
             matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
             matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
@@ -2151,6 +2151,12 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
     resources.collisionVertices.reserve(group.vertices.size());
     for (const auto& v : group.vertices) {
         resources.collisionVertices.push_back(v.position);
+    }
+    if ((groupFlags & pipeline::kWMOGroupIndoor) && (groupFlags & pipeline::kWMOGroupHasVertexColors)) {
+        resources.collisionVertexColors.reserve(group.vertices.size());
+        for (const auto& v : group.vertices) {
+            resources.collisionVertexColors.push_back(glm::vec3(v.color));
+        }
     }
     if (!group.triFlags.empty()) {
         // Store all triangles but tag each with MOPY flags for collision filtering
@@ -4067,8 +4073,8 @@ uint32_t WMORenderer::gatherLavaLights(const glm::vec3& cameraPos,
 /// The pre-check is not redundant with the transform below it. Inverting the
 /// model matrix and multiplying is the expensive part, and a building whose
 /// own bounds contain the point usually has no *group* that does.
-bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
-                                    bool interiorOnly, uint32_t* outModelId) const {
+std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
+        float glX, float glY, float glZ, bool interiorOnly) const {
     const glm::vec3 queryMin(glX - 0.5f, glY - 0.5f, glZ - 0.5f);
     const glm::vec3 queryMax(glX + 0.5f, glY + 0.5f, glZ + 0.5f);
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
@@ -4098,12 +4104,19 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
             glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
         for (const auto& group : model.groups) {
             if (groupContainsPoint(group, localPos, interiorOnly)) {
-                if (outModelId) *outModelId = instance.modelId;
-                return true;
+                return GroupHolding{.model = &model, .instance = &instance, .group = &group,
+                                    .localPos = localPos};
             }
         }
     }
-    return false;
+    return std::nullopt;
+}
+
+bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
+                                    bool interiorOnly, uint32_t* outModelId) const {
+    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly);
+    if (holding && outModelId) *outModelId = holding->instance->modelId;
+    return holding.has_value();
 }
 
 bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outModelId) const {
@@ -4115,12 +4128,39 @@ bool WMORenderer::isInsideInteriorWMO(float glX, float glY, float glZ) const {
     return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, nullptr);
 }
 
-std::optional<glm::vec3> WMORenderer::interiorAmbientAt(float glX, float glY, float glZ) const {
+/// The vertex colour of the nearest surface straight below a model-space
+/// point in a group, when the group keeps vertex colours and has a surface
+/// there.
+template <typename Group>
+static std::optional<glm::vec3> floorColorBelow(const Group& group, const glm::vec3& localPos,
+                                                const glm::vec3& localDown) {
+    const auto& colors = group.collisionVertexColors;
+    if (colors.empty()) return std::nullopt;
+    if (!trianglesAlongRay(group, localPos, localDown, tl_triScratch)) return std::nullopt;
+
+    const auto& verts = group.collisionVertices;
+    const auto& indices = group.collisionIndices;
+    float nearest = std::numeric_limits<float>::max();
+    std::optional<glm::vec3> color;
+    for (uint32_t triStart : tl_triScratch) {
+        const uint16_t i0 = indices[triStart], i1 = indices[triStart + 1], i2 = indices[triStart + 2];
+        const float t = rayTriangleIntersect(localPos, localDown, verts[i0], verts[i1], verts[i2]);
+        if (t <= 0.0f || t >= nearest) continue;
+        nearest = t;
+        color = colorAtPoint(localPos + localDown * t, verts[i0], verts[i1], verts[i2],
+                             colors[i0], colors[i1], colors[i2]);
+    }
+    return color;
+}
+
+std::optional<InteriorLight> WMORenderer::interiorLightAt(float glX, float glY, float glZ) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
-    uint32_t modelId = 0;
-    if (!isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, &modelId)) return std::nullopt;
-    // isInsideWMOGroups only answers from a loaded model.
-    return loadedModels.at(modelId).wmoAmbientColor;
+    const auto holding = findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true);
+    if (!holding) return std::nullopt;
+    const glm::vec3 localDown =
+        glm::normalize(glm::vec3(holding->instance->invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    return unitInteriorLight(holding->model->wmoAmbientColor,
+                             floorColorBelow(*holding->group, holding->localPos, localDown));
 }
 
 float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {

@@ -13,6 +13,9 @@ namespace pipeline {
 /// inside from the porch and the roof, which are groups of the same model.
 inline constexpr uint32_t kWMOGroupIndoor = 0x2000;
 
+/// MOGP flag 0x4: the group has vertex colours (MOCV).
+inline constexpr uint32_t kWMOGroupHasVertexColors = 0x4;
+
 /**
  * WMO (World Model Object) Format
  *

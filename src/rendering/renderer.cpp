@@ -2115,7 +2115,7 @@ void Renderer::update(float deltaTime) {
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
         characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorAmbientAt(p.x, p.y, p.z);
+            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
         });
     }
 
