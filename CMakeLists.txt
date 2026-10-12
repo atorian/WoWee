@@ -1565,6 +1565,20 @@ option(WOWEE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 # the sanitizers in an ASAN build, and outside the LTO link in Release.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
+# See the GNU branch of wowee_apply_client_flags. Each name is checked, since
+# an older GCC that lacks one rejects -Wno-error= for it.
+set(WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS "")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    include(CheckCXXCompilerFlag)
+    foreach(_w array-bounds stringop-overflow stringop-overread restrict
+               free-nonheap-object maybe-uninitialized)
+        string(MAKE_C_IDENTIFIER "WOWEE_GCC_HAS_W_${_w}" _have)
+        check_cxx_compiler_flag(-W${_w} ${_have})
+        if(${_have})
+            list(APPEND WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS -Wno-error=${_w})
+        endif()
+    endforeach()
+endif()
 function(wowee_apply_client_flags target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
@@ -1592,6 +1606,13 @@ function(wowee_apply_client_flags target)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
             target_compile_options(${target} PRIVATE -Wno-odr)
             target_link_options(${target} PRIVATE -Wno-odr)
+            # Warnings, not errors, for GCC's checks that run after inlining.
+            # They fire inside libstdc++ on ordinary code: GCC 13 on
+            # std::string(1, c) + ".wav", GCC 16 on vector<uint8_t>::resize.
+            # An LTO build never runs them at compile time, which is why the
+            # Release builds never saw them; a build without LTO (the dev
+            # preset, pull-request CI) stopped on them.
+            target_compile_options(${target} PRIVATE ${WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS})
         endif()
     endif()
 
