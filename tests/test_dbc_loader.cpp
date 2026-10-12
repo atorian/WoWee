@@ -3,6 +3,9 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include <cstring>
+#include <atomic>
+#include <barrier>
+#include <thread>
 
 using wowee::pipeline::DBCFile;
 
@@ -482,4 +485,46 @@ TEST_CASE("Spell.dbc's timing columns come from the file's shape", "[dbc][spell]
         CHECK(f.recoveryTime == 0);
         CHECK(f.categoryRecoveryTime == 0);
     }
+}
+
+TEST_CASE("DBC ID lookup supports concurrent first readers and reload", "[dbc][threading]") {
+    constexpr uint32_t count = 8192;
+    std::vector<std::vector<uint32_t>> records;
+    for (uint32_t row = 0; row < count; ++row) records.push_back({row * 3 + 1});
+    const auto bytes = buildSyntheticDBC(count, 1, records, std::string(1, '\0'));
+    DBCFile dbc;
+    for (int round = 0; round < 8; ++round) {
+        REQUIRE(dbc.load(bytes));
+        std::barrier start(8);
+        std::atomic<uint32_t> failures{0};
+        std::vector<std::thread> readers;
+        for (uint32_t worker = 0; worker < 8; ++worker) {
+            readers.emplace_back([&, worker] {
+                start.arrive_and_wait();
+                for (uint32_t n = 0; n < count; ++n) {
+                    const uint32_t row = (n * 17 + worker * 31) % count;
+                    if (dbc.findRecordById(row * 3 + 1) != static_cast<int32_t>(row)) ++failures;
+                    if (dbc.findRecordById(row * 3 + 2) != -1) ++failures;
+                }
+            });
+        }
+        for (auto& reader : readers) reader.join();
+        REQUIRE(failures.load() == 0);
+    }
+    REQUIRE(dbc.load(buildSyntheticDBC(2, 1, {{42}, {7}}, std::string(1, '\0'))));
+    REQUIRE(dbc.findRecordById(42) == 0);
+    REQUIRE(dbc.findRecordById(7) == 1);
+    REQUIRE(dbc.findRecordById(1) == -1);
+}
+
+TEST_CASE("DBC ID indexes are rebuilt by CSV and JSON reloads", "[dbc]") {
+    DBCFile dbc;
+    const std::string csv = "# fields=1 strings=\n42\n7\n";
+    REQUIRE(dbc.load(std::vector<uint8_t>(csv.begin(), csv.end())));
+    REQUIRE(dbc.findRecordById(42) == 0);
+    REQUIRE(dbc.findRecordById(7) == 1);
+    REQUIRE(dbc.load(buildJsonDBC(R"({"fieldCount":1,"records":[[11],[99]]})")));
+    REQUIRE(dbc.findRecordById(11) == 0);
+    REQUIRE(dbc.findRecordById(99) == 1);
+    REQUIRE(dbc.findRecordById(42) == -1);
 }

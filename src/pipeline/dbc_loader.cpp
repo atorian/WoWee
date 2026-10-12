@@ -120,8 +120,7 @@ bool DBCFile::load(const std::vector<uint8_t>& dbcData) {
     }
 
     loaded = true;
-    idCacheBuilt = false;
-    idToIndexCache.clear();
+    buildIdCache();
 
     return true;
 }
@@ -198,13 +197,11 @@ std::string_view DBCFile::getStringViewByOffset(uint32_t offset) const {
 }
 
 int32_t DBCFile::findRecordById(uint32_t id) const {
-    if (!loaded) {
+    // AssetManager shares completed tables with I/O and render workers. Build
+    // the index during load, before publishing the table, so these readers
+    // never clear/rehash the same unordered_map concurrently.
+    if (!loaded || !idCacheBuilt) {
         return -1;
-    }
-
-    // Build ID cache if not already built
-    if (!idCacheBuilt) {
-        buildIdCache();
     }
 
     auto it = idToIndexCache.find(id);
@@ -217,6 +214,7 @@ int32_t DBCFile::findRecordById(uint32_t id) const {
 
 void DBCFile::buildIdCache() const {
     idToIndexCache.clear();
+    idToIndexCache.reserve(recordCount);
 
     for (uint32_t i = 0; i < recordCount; i++) {
         uint32_t id = getUInt32(i, 0);  // Assume first field is ID
@@ -388,8 +386,7 @@ bool DBCFile::loadCSV(const std::vector<uint8_t>& csvData) {
     }
 
     loaded = true;
-    idCacheBuilt = false;
-    idToIndexCache.clear();
+    buildIdCache();
 
     LOG_DEBUG("Loaded CSV DBC: ", recordCount, " records, ",
               fieldCount, " fields, ", stringCols.size(), " string cols, ",
@@ -484,8 +481,7 @@ bool DBCFile::loadJSON(const std::vector<uint8_t>& jsonData) {
 
         stringBlockSize = static_cast<uint32_t>(stringBlock.size());
         loaded = true;
-        idCacheBuilt = false;
-        idToIndexCache.clear();
+        buildIdCache();
 
         LOG_INFO("Loaded JSON DBC: ", recordCount, " records, ",
                  fieldCount, " fields, ", stringBlockSize, " string bytes");
