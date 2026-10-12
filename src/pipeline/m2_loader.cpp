@@ -1512,7 +1512,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             em.position.y = readValue<float>(m2Data, base + 0x0C);
             em.position.z = readValue<float>(m2Data, base + 0x10);
             em.bone       = readValue<uint16_t>(m2Data, base + 0x14);
-            em.texture    = readValue<uint16_t>(m2Data, base + 0x16);
+            em.texture    = m2EmitterBaseTexture(em.flags, readValue<uint16_t>(m2Data, base + 0x16));
             em.blendingType = readValue<uint8_t>(m2Data, base + 0x28);
             em.emitterType  = readValue<uint8_t>(m2Data, base + 0x29);
             em.textureTileRotation = readValue<int16_t>(m2Data, base + 0x2E);

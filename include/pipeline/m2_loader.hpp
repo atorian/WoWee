@@ -153,13 +153,24 @@ struct M2FBlock {
     std::vector<glm::vec3> vec3Values;  // For color RGB
 };
 
+/// Emitter flag 0x10000000 (WotLK): the emitter blends up to three textures,
+/// and its texture field packs their indices five bits each.
+constexpr uint32_t kM2EmitterMultiTexture = 0x10000000;
+
+/// The texture an emitter draws with. For a multi-texture emitter that is the
+/// first of the packed three; read whole, the packed value is out of range
+/// and the particle was drawn white. Blending in the other two is not done.
+inline uint16_t m2EmitterBaseTexture(uint32_t flags, uint16_t texture) {
+    return (flags & kM2EmitterMultiTexture) ? static_cast<uint16_t>(texture & 0x1F) : texture;
+}
+
 // Particle emitter definition parsed from M2
 struct M2ParticleEmitter {
     int32_t particleId;
     uint32_t flags;
     glm::vec3 position;
     uint16_t bone;
-    uint16_t texture;
+    uint16_t texture;       // index into the model's textures; see m2EmitterBaseTexture
     uint8_t blendingType;   // 0=opaque,1=alphakey,2=alpha,4=add
     uint8_t emitterType;    // 1=plane,2=sphere,3=spline
     int16_t textureTileRotation = 0;

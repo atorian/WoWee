@@ -131,3 +131,11 @@ TEST_CASE("a texture animation with no keys leaves the UVs alone", "[m2][texanim
     const auto t = m2SampleUVTransform(M2TextureTransform{}, 0, 0.0f, 0.0f, {});
     CHECK(m2UVTransformIsIdentity(t));
 }
+
+TEST_CASE("a multi-texture emitter draws with the first of its packed textures", "[m2][particles]") {
+    // Three five-bit indices: 3, then 1, then 2.
+    const uint16_t packed = static_cast<uint16_t>((2u << 10) | (1u << 5) | 3u);
+    CHECK(m2EmitterBaseTexture(kM2EmitterMultiTexture, packed) == 3);
+    // Without the flag the field is a plain index, whatever its bits.
+    CHECK(m2EmitterBaseTexture(0, packed) == packed);
+}
