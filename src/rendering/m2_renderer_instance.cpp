@@ -309,27 +309,21 @@ void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject)
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
-    for (auto& inst : instances) {
-        if (inst.id == instanceId) {
-            inst.skipCollision = skip;
-            return;
-        }
-    }
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    instances[idxIt->second].skipCollision = skip;
 }
 
 void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
-    for (auto& inst : instances) {
-        if (inst.id == instanceId) {
-            inst.skipWallCollision = skip;
-            return;
-        }
-    }
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    instances[idxIt->second].skipWallCollision = skip;
 }
 
 void M2Renderer::setInteriorLight(uint32_t instanceId, std::optional<glm::vec3> wmoAmbient) {
-    auto it = instanceIndexById.find(instanceId);
-    if (it == instanceIndexById.end()) return;
-    instances[it->second].interiorLight =
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    instances[idxIt->second].interiorLight =
         wmoAmbient ? glm::vec4(*wmoAmbient, 1.0f) : glm::vec4(0.0f);
 }
 
