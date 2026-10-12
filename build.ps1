@@ -62,7 +62,18 @@ Set-Location "build"
 
 # Configure with CMake
 Write-Host "Configuring with CMake..."
-& cmake .. -DCMAKE_BUILD_TYPE=Release
+# Ninja when it is installed and a compiler is already on PATH (a Developer
+# PowerShell, or an MSYS2 toolchain), for a fresh directory only: CMake refuses
+# to switch generators on a directory configured with another. Otherwise the
+# Visual Studio generator, which CMakeLists.txt gives /MP.
+$generatorArgs = @()
+$haveCompiler = (Get-Command cl -ErrorAction SilentlyContinue) -or
+                (Get-Command gcc -ErrorAction SilentlyContinue) -or
+                (Get-Command clang -ErrorAction SilentlyContinue)
+if (-not (Test-Path "CMakeCache.txt") -and (Get-Command ninja -ErrorAction SilentlyContinue) -and $haveCompiler) {
+    $generatorArgs = @("-G", "Ninja")
+}
+& cmake .. @generatorArgs -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Build with all cores
