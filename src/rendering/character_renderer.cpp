@@ -65,9 +65,9 @@ namespace {
 // character.frag the interior light.
 struct CharacterPushConstants {
     glm::mat4 model;
-    glm::vec4 interiorLight;
+    InteriorLightGPU interiorLight;
 };
-static_assert(sizeof(CharacterPushConstants) == 80, "matches Push in character.vert/frag");
+static_assert(sizeof(CharacterPushConstants) == 96, "matches Push in character.vert/frag");
 
 // How far an instance moves before the WMO is asked again where it stands.
 constexpr float kInteriorLightRequeryDistance = 0.5f;
@@ -3739,7 +3739,7 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
 }
 
 void CharacterRenderer::updateInteriorLight(
-        const std::function<std::optional<glm::vec3>(const glm::vec3&)>& interiorAmbientAt) {
+        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt) {
     for (auto& [id, instance] : instances) {
         // A weapon's position stays where it was created; it is carried by
         // the matrix its parent's bone gives it.
@@ -3751,9 +3751,8 @@ void CharacterRenderer::updateInteriorLight(
             continue;
         }
         instance.interiorLightOrigin = origin;
-        const auto ambient =
-            interiorAmbientAt(origin + glm::vec3(0.0f, 0.0f, kInteriorLightProbeHeight));
-        instance.interiorLight = ambient ? glm::vec4(*ambient, 1.0f) : glm::vec4(0.0f);
+        instance.interiorLight = packInteriorLight(
+            interiorLightAt(origin + glm::vec3(0.0f, 0.0f, kInteriorLightProbeHeight)));
     }
 }
 

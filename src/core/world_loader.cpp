@@ -497,7 +497,9 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
                                 if (doodadInstId) {
                                     m2Renderer->setSkipWallCollision(doodadInstId, true);
                                     if (interiorDoodads[doodadIdx]) {
-                                        m2Renderer->setInteriorLight(doodadInstId, wmoModel.ambientColor);
+                                        m2Renderer->setInteriorLight(doodadInstId,
+                                            rendering::doodadInteriorLight(wmoModel.ambientColor,
+                                                                           glm::vec3(doodad.color)));
                                     }
                                 }
                                 loadedDoodads++;

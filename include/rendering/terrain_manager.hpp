@@ -6,6 +6,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "rendering/interior_light.hpp"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -110,8 +111,8 @@ struct PendingTile {
         pipeline::M2Model model;
         glm::vec3 worldPosition;   // For frustum culling
         glm::mat4 modelMatrix;     // Pre-computed world transform
-        // The WMO's MOHD ambient when an interior group holds the doodad
-        std::optional<glm::vec3> interiorAmbient;
+        // The doodad's light when an interior group holds it
+        std::optional<InteriorLight> interiorLight;
     };
     std::vector<WMODoodadReady> wmoDoodads;
 
