@@ -89,7 +89,10 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
     // 11: uint32 LightParamsID (death), and unused ones after it
     //
     // 8 and 9 were read as rain and under water, so rain drew the under-water
-    // light and diving drew the storm. The layout names for them changed with
+    // light and diving drew the storm. The order is the wowdev DB/Light page's
+    // (ParamsClear, ParamsClearWat, ParamsStorm, ParamsStormWat, ParamsDeath;
+    // storm covers rain, snow and sandstorm), and WebWowViewerCpp reads slot 1
+    // as the under-water fog. The layout names for them changed with
     // the fix, so a dbc_layouts.json copied before it reports the missing
     // fields instead of carrying the old columns on.
 
