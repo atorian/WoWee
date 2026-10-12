@@ -98,6 +98,12 @@ struct M2ModelGPU {
         bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
+        /// The texture this batch is hidden waiting for, when its first load
+        /// failed. Empty once it has it. A hidden batch is never bound, so its
+        /// descriptor and material can be rewritten when a retry succeeds.
+        std::string pendingTextureKey;
+        uint32_t pendingTextureFlags = 0;
+        float loadedOpacity = 1.0f; ///< what batchOpacity becomes once the texture arrives
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
 
@@ -676,6 +682,16 @@ public:
     /// The texture as one batch samples it: its image, with a sampler built
     /// from that batch's own wrap flags.
     VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
+    /// Take what the loaded texture says about itself onto the batch.
+    void applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
+                                const std::string& textureKeyLower) const;
+    /// Point a batch's descriptor set at its texture.
+    void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
+    /// Ask again for textures that failed to load, and show the batches that
+    /// were hidden waiting for them. A failed MPQ read is often transient.
+    void retryPendingBatchTextures();
+    struct PendingBatchTexture { uint32_t modelId; size_t batchIndex; };
+    std::vector<PendingBatchTexture> pendingBatchTextures_;
 
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
