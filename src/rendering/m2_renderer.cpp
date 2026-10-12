@@ -351,6 +351,8 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
                                       /*alphaToCoverage=*/true);
     alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    noAlphaAddPipeline_ = buildM2Pipeline(m2NoAlphaAddBlendState(), false,
+                                          VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     modulatePipeline_ = buildM2Pipeline(m2ModulateBlendState(false), false,
@@ -689,7 +691,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 112, "M2InstanceGPU must be 112 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 176, "M2InstanceGPU must be 176 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
@@ -1144,6 +1146,7 @@ void M2Renderer::shutdown() {
     destroyPipeline(cutoutPipeline_);
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
+    destroyPipeline(noAlphaAddPipeline_);
     destroyPipeline(additivePipeline_);
     destroyPipeline(modulatePipeline_);
     destroyPipeline(modulate2xPipeline_);
@@ -1400,10 +1403,47 @@ bool isForgeFireTexture(const std::string& texKeyLower,
 
 } // namespace
 
+void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
+                                    M2ModelGPU::BatchGPU& batch) const {
+    M2BatchMaterialInputs in;
+    in.blendMode = static_cast<uint8_t>(batch.blendMode);
+    in.hasAlpha = batch.hasAlpha;
+    in.alphaIsSilhouette = batch.alphaIsSilhouette;
+    in.colorKeyBlack = batch.colorKeyBlack;
+    in.flameCard = batch.forgeFireCard;
+    in.spellEffect = model.isSpellEffect;
+    in.groundDetail = model.isGroundDetail;
+    in.foliageLike = model.isFoliageLike;
+    batch.drawState = m2BatchDrawState(in);
+    if (!batch.materialUBOMapped) return;
+
+    M2MaterialUBO mat{};
+    mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
+    mat.alphaTest = batch.drawState.alphaTest;
+    mat.colorKeyBlack =
+        m2BatchWantsColorKey(in.blendMode, batch.colorKeyBlack) ? 1 : 0;
+    mat.colorKeyThreshold = batch.drawState.colorKeyThreshold;
+    mat.tintR = batch.tint.r;
+    mat.tintG = batch.tint.g;
+    mat.tintB = batch.tint.b;
+    mat.unlit = (batch.materialFlags & 0x01) && !batch.drawState.litOverride ? 1 : 0;
+    mat.blendMode = batch.blendMode;
+    mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
+    mat.fireCard = batch.forgeFireCard ? 1 : 0;
+    mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
+    mat.secondTexCoordSet = batch.secondTexCoordSet;
+    mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
+        batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
+    mat.specularIntensity = 0.5f;
+    mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
+    std::memcpy(batch.materialUBOMapped, &mat, sizeof(mat));
+}
+
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
     auto it = models.find(modelId);
     if (it != models.end()) {
         it->second.isSpellEffect = true;
+        for (auto& batch : it->second.batches) writeBatchMaterial(it->second, batch);
         // Spell effects MUST have bone animation for ribbons/particles to work.
         // The classifier may have set disableAnimation=true based on name tokens
         // (e.g. "chest" in HolySmite_Low_Chest.m2) - override that for spell effects.
@@ -2506,27 +2546,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &bgpu.materialUBO, &bgpu.materialUBOAlloc, &matAllocInfo);
 
-            // Write initial material data (static per-batch; the draw loop updates the rest)
-            M2MaterialUBO mat{};
-            mat.hasTexture = (bgpu.texture != nullptr && bgpu.texture != whiteTexture_.get()) ? 1 : 0;
-            mat.alphaTest = m2BatchNeedsAlphaTest(bgpu.blendMode, bgpu.hasAlpha) ? 1 : 0;
-            mat.colorKeyBlack =
-                m2BatchWantsColorKey(bgpu.blendMode, bgpu.colorKeyBlack) ? 1 : 0;
-            mat.tintR = bgpu.tint.r;
-            mat.tintG = bgpu.tint.g;
-            mat.tintB = bgpu.tint.b;
-            mat.colorKeyThreshold = 0.08f;
-            mat.unlit = (bgpu.materialFlags & 0x01) ? 1 : 0;
-            mat.blendMode = bgpu.blendMode;
-            mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
-            mat.hasSecondTexture = bgpu.secondTexture && bgpu.secondTexture->isValid() ? 1 : 0;
-            mat.secondTexCoordSet = bgpu.secondTexCoordSet;
-            mat.cullBackFaces = !skyMode_ && !gpuModel.isSpellEffect &&
-                bgpu.blendMode >= 2 && (bgpu.materialFlags & 0x04) == 0 ? 1 : 0;
-            mat.specularIntensity = 0.5f;
-            mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
-            memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
+            writeBatchMaterial(gpuModel, bgpu);
+            const auto& mat = *static_cast<const M2MaterialUBO*>(bgpu.materialUBOMapped);
 
             // What the sky model's layers are actually being given, once each.
             //

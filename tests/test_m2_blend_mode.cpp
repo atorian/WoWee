@@ -113,3 +113,78 @@ TEST_CASE("opaque mount skin does not inherit atlas transparency", "[m2][mount]"
         CHECK_FALSE(characterBatchNeedsAlphaTest(mode, false, false, false));
     }
 }
+
+using wowee::rendering::M2BatchMaterialInputs;
+using wowee::rendering::M2BlendPipeline;
+using wowee::rendering::m2BatchDrawState;
+using wowee::rendering::m2BlendPipeline;
+using wowee::rendering::m2DrawBlendMode;
+
+TEST_CASE("a spell effect's Mod layer darkens rather than glows", "[m2]") {
+    // Mod is dst * src and only darkens. Spell effects had it remapped to
+    // additive along with their opaque layers, so smoke and void effects lit
+    // up instead.
+    CHECK(m2BlendPipeline(m2DrawBlendMode(5, true)) == M2BlendPipeline::Modulate);
+    CHECK(m2BlendPipeline(m2DrawBlendMode(6, true)) == M2BlendPipeline::Modulate2x);
+}
+
+TEST_CASE("a spell effect's opaque and keyed layers are still added", "[m2]") {
+    // They are painted on black; drawn opaque the black would show.
+    CHECK(m2BlendPipeline(m2DrawBlendMode(0, true)) == M2BlendPipeline::AlphaAdd);
+    CHECK(m2BlendPipeline(m2DrawBlendMode(1, true)) == M2BlendPipeline::AlphaAdd);
+    // Outside an effect they draw as authored.
+    CHECK(m2BlendPipeline(m2DrawBlendMode(0, false)) == M2BlendPipeline::Opaque);
+}
+
+TEST_CASE("NoAlphaAdd does not share Add's alpha-scaled pipeline", "[m2]") {
+    // Mode 3 adds the whole texel whatever its alpha says; a mode 3 texture
+    // with an empty alpha channel vanished on the SRC_ALPHA pipeline.
+    CHECK(m2BlendPipeline(3) == M2BlendPipeline::NoAlphaAdd);
+    CHECK(m2BlendPipeline(4) == M2BlendPipeline::AlphaAdd);
+    // Including inside a spell effect.
+    CHECK(m2BlendPipeline(m2DrawBlendMode(3, true)) == M2BlendPipeline::NoAlphaAdd);
+}
+
+TEST_CASE("a flame card's black-backed layer is added, not cut out", "[m2]") {
+    M2BatchMaterialInputs in;
+    in.blendMode = 0;
+    in.colorKeyBlack = true;
+    in.flameCard = true;
+    const auto s = m2BatchDrawState(in);
+    CHECK_FALSE(s.forceCutout);
+    CHECK(m2BlendPipeline(s.drawBlendMode) == M2BlendPipeline::AlphaAdd);
+}
+
+TEST_CASE("an opaque foliage batch is cut out only where its alpha is a silhouette", "[m2]") {
+    // Silverpine's trunk: opaque, sampling an atlas panel with a stale hole.
+    M2BatchMaterialInputs trunk;
+    trunk.blendMode = 0;
+    trunk.hasAlpha = true;
+    trunk.foliageLike = true;
+    CHECK_FALSE(m2BatchDrawState(trunk).forceCutout);
+
+    M2BatchMaterialInputs leaves = trunk;
+    leaves.alphaIsSilhouette = true;
+    const auto s = m2BatchDrawState(leaves);
+    CHECK(s.forceCutout);
+    CHECK(s.alphaTest == 2);
+}
+
+TEST_CASE("ground clutter is cut out and lit", "[m2]") {
+    M2BatchMaterialInputs in;
+    in.blendMode = 0;
+    in.groundDetail = true;
+    const auto s = m2BatchDrawState(in);
+    CHECK(s.forceCutout);
+    CHECK(s.alphaTest == 3);
+    CHECK(s.litOverride);
+}
+
+TEST_CASE("a keyed Mod card keys hard, the same card in an effect does not", "[m2]") {
+    M2BatchMaterialInputs in;
+    in.blendMode = 5;
+    in.colorKeyBlack = true;
+    CHECK(m2BatchDrawState(in).colorKeyThreshold == 0.7f);
+    in.spellEffect = true;
+    CHECK(m2BatchDrawState(in).colorKeyThreshold == 0.08f);
+}

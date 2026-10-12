@@ -1470,7 +1470,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
 
             bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
-            const bool foliageLikeModel = model.isFoliageLike;
             const bool particleDominantEffect = model.isSpellEffect &&
                 !model.particleEmitters.empty() && model.batches.size() <= 2;
 
@@ -1527,7 +1526,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &vbOffset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            // Write base instance data to SSBO (uvOffset=0 - overridden for tex-anim batches)
+            // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
             size_t writtenInstances = 0;
             for (const auto& p : pending) {
@@ -1535,7 +1534,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 auto& inst = instances[p.instanceIdx];
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
-                e.uvOffset = glm::vec2(0.0f);
+                e.uv = M2UVTransform{};
+                e.uv2 = M2UVTransform{};
+                e.tintScale = 1.0f;
                 e.fadeAlpha = p.fadeAlpha;
                 e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
@@ -1780,40 +1781,33 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Particle-dominant effects: emission geometry - skip opaque
                     if (particleDominantEffect && batch.blendMode <= 1) continue;
 
-                    // Handle texture animation: if this batch has per-instance uvOffset,
-                    // write a separate SSBO range with the correct offsets.
+                    // Handle texture animation: if this batch has a per-instance UV
+                    // transform, write a separate SSBO range with the right ones.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
                                            || model.isLavaModel || skyMode_ || batch.batchOpacity != 1.0f;
                     uint32_t drawOffset = groupSSBOOffset;
                     if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
                         drawOffset = instanceDataCount_;
                         // Hoist per-batch lookups: the transform pointer is fixed for
-                        // every instance in this group; only the sampled translation
+                        // every instance in this group; only the sampled transform
                         // varies (per-instance animTime).
                         const pipeline::M2TextureTransform* tt = nullptr;
                         if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation) {
-                            uint16_t lookupIdx = batch.textureAnimIndex;
-                            if (lookupIdx < model.textureTransformLookup.size()) {
-                                uint16_t transformIdx = model.textureTransformLookup[lookupIdx];
-                                if (transformIdx < model.textureTransforms.size()) {
-                                    tt = &model.textureTransforms[transformIdx];
-                                }
-                            }
+                            tt = m2TextureTransformAt(model.textureTransformLookup,
+                                                      model.textureTransforms, batch.textureAnimIndex);
                         }
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             const auto& p = pending[j];
                             auto& inst = instances[p.instanceIdx];
-                            glm::vec2 uvOffset(0.0f);
+                            M2UVTransform uv;
                             if (tt) {
-                                glm::vec3 trans = m2_track::sampleVec3(
-                                    tt->translation, inst.currentSequenceIndex,
-                                    inst.animTime, inst.globalSequenceTime,
-                                    model.globalSequenceDurations, glm::vec3(0.0f));
-                                uvOffset = glm::vec2(trans.x, trans.y);
+                                uv = m2SampleUVTransform(*tt, inst.currentSequenceIndex,
+                                                         inst.animTime, inst.globalSequenceTime,
+                                                         model.globalSequenceDurations);
                             }
-                            if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
-                                uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
-                                                     -lavaAnimSeconds * 0.08f);
+                            if (model.isLavaModel && m2UVTransformIsIdentity(uv)) {
+                                uv = m2UVTranslation(glm::vec2(lavaAnimSeconds * 0.03f,
+                                                               -lavaAnimSeconds * 0.08f));
                             }
                             // Rebuild the entry from CPU-side data rather than copying it
                             // out of the base entry. instSSBO lives in write-combined
@@ -1821,7 +1815,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             // uncached and costs microseconds per instance.
                             auto& e = instSSBO[instanceDataCount_];
                             e.model = inst.modelMatrix;
-                            e.uvOffset = uvOffset;
+                            e.uv = uv;
+                            e.uv2 = M2UVTransform{};
+                            e.tintScale = 1.0f;
                             e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
@@ -1840,96 +1836,17 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         }
                     }
 
-                    // Pipeline selection (per-model/batch, not per-instance)
-                    // A batch the artist marked opaque is not asking for
-                    // any of this. Blend mode 0 means the alpha channel goes
-                    // unread, and M2 textures are routinely atlases whose
-                    // alpha belongs to another layer or another model - so
-                    // keying on it eats surfaces that were painted solid.
-                    //
-                    // Silverpine's trees are the case that found it. Their
-                    // trunk is one opaque batch sampling the right-hand panel
-                    // of SilverPineTree01TrunkSkin, and that panel carries a
-                    // stale alpha hole across its middle - 24% of the texels
-                    // the trunk's own triangles cover, with unbroken bark
-                    // painted underneath. Forced to the cutout pipeline, where
-                    // alpha becomes coverage, the trunk lost its midsection
-                    // and left the canopy floating over the stump. 133 foliage
-                    // models were holed the same way - Tirisfal's canopytree07,
-                    // the Plaguelands and Stonetalon pines, Eversong and
-                    // Silvermoon, Nagrand, Crystalsong, Ruby Sanctum, the
-                    // Storm Peaks, and every Zangarmarsh mushroom cap.
-                    //
-                    // Where the alpha really is the silhouette - a card drawn
-                    // on a black backing, or DXT1 punch-through, which stores
-                    // no colour under a transparent texel at all - the cutout
-                    // still stands, over the 15 models that need it: Swamp of
-                    // Sorrows' canopies, the quilboar thorn cards, Loch Modan's
-                    // leaves and the lamps whose glass is keyed out. Measured
-                    // from the texture by alphaIsSilhouette, not guessed from
-                    // its name.
-                    const bool opaqueByMaterial = batch.blendMode == M2_BLEND_OPAQUE;
-                    const bool foliageCutout = foliageLikeModel && !model.isSpellEffect &&
-                                               batch.blendMode <= 3 &&
-                                               (!opaqueByMaterial || batch.alphaIsSilhouette);
-                    // The fire burning in the hearth is an effect overlay on a
-                    // black background, the same shape as a spell visual; drawn
-                    // opaque it fills the forge opening with a black rectangle
-                    // instead of flame. That is true of the flame cards only -
-                    // treating the whole model this way turned the masonry and
-                    // ironwork additive, which is to say translucent.
-                    const bool fireEffectModel = batch.forgeFireCard;
-                    // A batch the artist marked additive is already doing
-                    // what the cutout and the colour key are approximations
-                    // of: black adds nothing, so it disappears on its own.
-                    // Forcing it opaque and then keying the black out leaves
-                    // the bright middle of a glow card as a solid disc, which
-                    // is what Orgrimmar's bonfires were.
-                    const bool forceCutout =
-                        !model.isSpellEffect && !fireEffectModel &&
-                        !m2BlendIsAdditive(batch.blendMode) &&
-                        (model.isGroundDetail || foliageCutout ||
-                         m2BatchNeedsAlphaTest(batch.blendMode, batch.hasAlpha) ||
-                         batch.colorKeyBlack);
-
-                    uint8_t effectiveBlendMode = batch.blendMode;
-                    if (model.isSpellEffect || fireEffectModel) {
-                        if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
-                        else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
-                    }
-                    if (forceCutout) effectiveBlendMode = 1;
-
-                    VkPipeline desiredPipeline;
-                    if (forceCutout) {
-                        desiredPipeline = cutoutPipeline_;
-                    } else {
-                        switch (effectiveBlendMode) {
-                            case 0: desiredPipeline = opaquePipeline_; break;
-                            case 1: desiredPipeline = alphaTestPipeline_; break;
-                            case 2: desiredPipeline = alphaPipeline_; break;
-                            case 5: desiredPipeline = modulatePipeline_; break;
-                            case 6: desiredPipeline = modulate2xPipeline_; break;
-                            default: desiredPipeline = additivePipeline_; break;
-                        }
-                    }
-                    if (skyMode_ && effectiveBlendMode <= 1) desiredPipeline = alphaPipeline_;
+                    // Pipeline selection (per-model/batch, not per-instance).
+                    // What the batch is drawn as was decided when the model
+                    // loaded - see m2BatchDrawState.
+                    const M2BatchDrawState& drawState = batch.drawState;
+                    VkPipeline desiredPipeline = drawState.forceCutout
+                        ? cutoutPipeline_
+                        : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
+                    if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = alphaPipeline_;
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                         currentPipeline = desiredPipeline;
-                    }
-
-                    // Update material UBO
-                    if (batch.materialUBOMapped) {
-                        auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
-                        if (batch.colorKeyBlack)
-                            mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
-                        if (forceCutout) {
-                            mat->alphaTest = model.isGroundDetail ? 3 : (foliageCutout ? 2 : 1);
-                            if (model.isGroundDetail) mat->unlit = 0;
-                        }
-                        mat->volumetricBeam =
-                            (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
-                        mat->fireCard = batch.forgeFireCard ? 1 : 0;
                     }
 
                     // Bind material descriptor set (set 1)
@@ -2078,7 +1995,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
             if (particleDominantEffect) continue; // emission-only mesh
 
-            // Compute UV offset for this instance + batch
+            // Compute the UV transforms for this instance + batch
             //
             // WOWEE_SKY_M2_NO_TEXANIM=1 freezes the sky's scrolling. Nine of
             // its eighteen additive layers carry a texture animation, and
@@ -2088,25 +2005,52 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             // are drawn on.
             static const bool skyNoTexAnim =
                 std::getenv("WOWEE_SKY_M2_NO_TEXANIM") != nullptr;
-            glm::vec2 uvOffset(0.0f);
-            if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
-                !(skyMode_ && skyNoTexAnim)) {
-                uint16_t lookupIdx = batch.textureAnimIndex;
-                if (lookupIdx < model.textureTransformLookup.size()) {
-                    uint16_t transformIdx = model.textureTransformLookup[lookupIdx];
-                    if (transformIdx < model.textureTransforms.size()) {
-                        const auto& tt = model.textureTransforms[transformIdx];
-                        glm::vec3 trans = m2_track::sampleVec3(
-                            tt.translation, instance.currentSequenceIndex,
-                            instance.animTime, instance.globalSequenceTime,
-                            model.globalSequenceDurations, glm::vec3(0.0f));
-                        uvOffset = glm::vec2(trans.x, trans.y);
-                    }
+            const bool texAnimRuns = batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
+                                     !(skyMode_ && skyNoTexAnim);
+            M2UVTransform uv;
+            if (texAnimRuns) {
+                if (const auto* tt = m2TextureTransformAt(model.textureTransformLookup,
+                                                          model.textureTransforms,
+                                                          batch.textureAnimIndex)) {
+                    uv = m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                                             instance.animTime, instance.globalSequenceTime,
+                                             model.globalSequenceDurations);
                 }
             }
-            if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
-                uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
-                                     -lavaAnimSeconds * 0.08f);
+            if (model.isLavaModel && m2UVTransformIsIdentity(uv)) {
+                uv = m2UVTranslation(glm::vec2(lavaAnimSeconds * 0.03f,
+                                               -lavaAnimSeconds * 0.08f));
+            }
+            // A masked layer's second stage animates by the combo entry after
+            // its first.
+            M2UVTransform uv2;
+            if (batch.secondTexture && texAnimRuns) {
+                if (const auto* tt = m2TextureTransformAt(model.textureTransformLookup,
+                                                          model.textureTransforms,
+                                                          static_cast<size_t>(batch.textureAnimIndex) + 1)) {
+                    uv2 = m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                                              instance.animTime, instance.globalSequenceTime,
+                                              model.globalSequenceDurations);
+                }
+            }
+
+            // A fire's own glow breathes. The same clock and parameters as
+            // the lamp sprites and the local light they cast, so a brazier
+            // and the pool of light under it rise and fall together
+            // instead of beating against each other.
+            //
+            // Never for a sky. lampFlicker is keyed on the instance
+            // position and says a seed that drifts re-rolls its phase every
+            // frame and strobes; a sky dome's position IS the camera's,
+            // rewritten every frame, so it is the one instance that can
+            // never be a valid seed. The classifier no longer calls
+            // HellfireSkyBox a brazier, and this makes sure the next model
+            // that gets miscalled one cannot strobe the sky either.
+            float tintScale = 1.0f;
+            if (!skyMode_ && m2BlendIsAdditive(static_cast<uint8_t>(batch.blendMode)) &&
+                (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
+                tintScale = lampFlicker(instance.position, lampFlickerClockSeconds(),
+                                        0.82f, 0.12f, 0.06f);
             }
 
             // Write single instance entry to SSBO
@@ -2114,7 +2058,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             uint32_t drawOffset = instanceDataCount_;
             auto& e = instSSBO[instanceDataCount_];
             e.model = instance.modelMatrix;
-            e.uvOffset = uvOffset;
+            e.uv = uv;
+            e.uv2 = uv2;
+            e.tintScale = tintScale;
             e.fadeAlpha = instanceFadeAlpha * batch.batchOpacity;
             if (skyMode_) {
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
@@ -2132,75 +2078,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             instanceDataCount_++;
 
             // Pipeline selection
-            uint8_t effectiveBlendMode = batch.blendMode;
-            if (model.isSpellEffect || batch.forgeFireCard) {
-                // Matches the opaque pass: a forge's flame cards are additive,
-                // the forge itself is not.
-                if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
-                else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
-            }
-
-            VkPipeline desiredPipeline;
-            switch (effectiveBlendMode) {
-                case 2: desiredPipeline = alphaPipeline_; break;
-                case 5: desiredPipeline = modulatePipeline_; break;
-                case 6: desiredPipeline = modulate2xPipeline_; break;
-                default: desiredPipeline = additivePipeline_; break;
-            }
+            const uint8_t drawBlendMode = batch.drawState.drawBlendMode;
+            VkPipeline desiredPipeline = blendPipeline(m2BlendPipeline(drawBlendMode));
             // An opaque layer of a faded instance: blended by its fade.
-            if (instanceFaded && effectiveBlendMode <= 1) desiredPipeline = alphaPipeline_;
+            if (instanceFaded && drawBlendMode <= 1) desiredPipeline = alphaPipeline_;
             if (desiredPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                 currentPipeline = desiredPipeline;
-            }
-
-            if (batch.materialUBOMapped) {
-                auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
-                // Here as well as in the opaque pass. A searchlight beam is
-                // additive, so this is the pass that actually draws it - and
-                // setting the flag only in the other one meant the softening
-                // never ran on the one model it was written for.
-                mat->volumetricBeam =
-                    (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
-                mat->fireCard = batch.forgeFireCard ? 1 : 0;
-                if (batch.secondTexture) {
-                    glm::vec3 translation(0.0f);
-                    const size_t next = static_cast<size_t>(batch.textureAnimIndex) + 1;
-                    if (!(skyMode_ && skyNoTexAnim) && batch.textureAnimIndex != UINT16_MAX &&
-                        next < model.textureTransformLookup.size()) {
-                        const uint16_t transform = model.textureTransformLookup[next];
-                        if (transform < model.textureTransforms.size())
-                            translation = m2_track::sampleVec3(model.textureTransforms[transform].translation,
-                                instance.currentSequenceIndex, instance.animTime, instance.globalSequenceTime,
-                                model.globalSequenceDurations, glm::vec3(0.0f));
-                    }
-                    mat->secondOffsetX = translation.x;
-                    mat->secondOffsetY = translation.y;
-                }
-                if (batch.colorKeyBlack)
-                    mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
-
-                // A fire's own glow breathes. The same clock and parameters as
-                // the lamp sprites and the local light they cast, so a brazier
-                // and the pool of light under it rise and fall together
-                // instead of beating against each other.
-                //
-                // Never for a sky. lampFlicker is keyed on the instance
-                // position and says a seed that drifts re-rolls its phase every
-                // frame and strobes; a sky dome's position IS the camera's,
-                // rewritten every frame, so it is the one instance that can
-                // never be a valid seed. The classifier no longer calls
-                // HellfireSkyBox a brazier, and this makes sure the next model
-                // that gets miscalled one cannot strobe the sky either.
-                if (!skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
-                    (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
-                    const float flicker = lampFlicker(
-                        instance.position, lampFlickerClockSeconds(),
-                        0.82f, 0.12f, 0.06f);
-                    mat->tintR = batch.tint.r * flicker;
-                    mat->tintG = batch.tint.g * flicker;
-                    mat->tintB = batch.tint.b * flicker;
-                }
             }
 
             if (!batch.materialSet) continue;

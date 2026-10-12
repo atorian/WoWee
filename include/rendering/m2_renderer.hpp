@@ -8,6 +8,8 @@
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_uv_transform.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -69,6 +71,7 @@ struct M2ModelGPU {
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
+        M2BatchDrawState drawState; // decided by writeBatchMaterial
         int8_t priorityPlane = 0; // authored transparent layer priority
         uint16_t materialFlags = 0; // M2 material flags (0x01=Unlit, 0x04=TwoSided, 0x10=NoDepthWrite)
         uint16_t submeshLevel = 0; // LOD level: 0=base, 1=LOD1, 2=LOD2, 3=LOD3
@@ -431,8 +434,6 @@ struct M2MaterialUBO {
     int32_t fireCard;
     int32_t hasSecondTexture;
     int32_t secondTexCoordSet;
-    float secondOffsetX;
-    float secondOffsetY;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
@@ -655,6 +656,22 @@ public:
     /// recreatePipelines() after a device loss, which is the reason it exists:
     /// the two used to be separate copies of the same 190 lines.
     bool buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout);
+    VkPipeline blendPipeline(M2BlendPipeline kind) const {
+        switch (kind) {
+            case M2BlendPipeline::Opaque: return opaquePipeline_;
+            case M2BlendPipeline::AlphaTest: return alphaTestPipeline_;
+            case M2BlendPipeline::Alpha: return alphaPipeline_;
+            case M2BlendPipeline::NoAlphaAdd: return noAlphaAddPipeline_;
+            case M2BlendPipeline::Modulate: return modulatePipeline_;
+            case M2BlendPipeline::Modulate2x: return modulate2xPipeline_;
+            case M2BlendPipeline::AlphaAdd: break;
+        }
+        return additivePipeline_;
+    }
+    /// Decide how a batch is drawn and write its material buffer. Runs when the
+    /// model loads, and again if it is marked a spell effect afterwards; the
+    /// draw loops write nothing into it.
+    void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch) const;
 
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
@@ -783,7 +800,8 @@ private:
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend modes 3/4
+    VkPipeline noAlphaAddPipeline_ = VK_NULL_HANDLE;    // blend mode 3
+    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 4 and up past 6
     VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
     VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
@@ -848,23 +866,30 @@ private:
 
     // GPU instance data SSBO - per-instance transforms, fade, bones for instanced draws.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
+    // Everything that differs between instances of one batch lives here, not
+    // in the batch's material buffer: that one buffer is shared by every
+    // instance and read when the GPU executes, so what was written into it
+    // during recording reached all of them as whatever the last write said.
     struct M2InstanceGPU {
         glm::mat4 model;           // 64 bytes @ offset 0
-        glm::vec2 uvOffset;        //  8 bytes @ offset 64
-        float fadeAlpha;           //  4 bytes @ offset 72
-        int32_t useBones;          //  4 bytes @ offset 76
-        int32_t boneBase;          //  4 bytes @ offset 80
-        int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
-        float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
-        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water)
-        glm::vec4 interiorLight{0.0f}; // 16 bytes @ offset 96 - M2Instance::interiorLight
+        M2UVTransform uv;          // 32 bytes @ offset 64 - texture animation, stage 0
+        M2UVTransform uv2;         // 32 bytes @ offset 96 - texture animation, mask stage
+        float fadeAlpha;           //  4 bytes @ offset 128
+        int32_t useBones;          //  4 bytes @ offset 132
+        int32_t boneBase;          //  4 bytes @ offset 136
+        int32_t boneCount;         //  4 bytes @ offset 140 - clamps skinning reads
+        float highlight = 0.0f;    //  4 bytes @ offset 144 - pressed-on lift
+        int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
+        float tintScale = 1.0f;    //  4 bytes @ offset 152 - a fire's flicker, per instance
+        float pad0 = 0.0f;         //  4 bytes @ offset 156
+        glm::vec4 interiorLight{0.0f}; // 16 bytes @ offset 160 - M2Instance::interiorLight
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 112 bytes a slot, so this costs 7 MB rather than 3.5.
+    // buffers of 176 bytes a slot, so this costs 11 MB.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;

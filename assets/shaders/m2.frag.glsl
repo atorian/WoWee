@@ -50,8 +50,6 @@ layout(set = 1, binding = 2) uniform M2Material {
     int fireCard;
     int hasSecondTexture;
     int secondTexCoordSet;
-    float secondOffsetX;
-    float secondOffsetY;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -66,8 +64,9 @@ layout(location = 4) in float ModelHeight;
 layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
-layout(location = 8) in vec4 AuthoredUVs;
+layout(location = 8) in vec4 MaskUVs;
 layout(location = 9) flat in vec4 vInteriorLight;
+layout(location = 10) flat in float vTintScale;
 
 layout(location = 0) out vec4 outColor;
 
@@ -202,13 +201,13 @@ void main() {
     // Mask RGBA before lighting or alpha handling; the authored UV1 mask
     // bounds the foam even while its UV0 water texture scrolls.
     if (hasSecondTexture != 0) {
-        vec2 maskUV = secondTexCoordSet == 1 ? AuthoredUVs.zw : AuthoredUVs.xy;
-        texColor *= texture(uSecondTexture, maskUV + vec2(secondOffsetX, secondOffsetY));
+        vec2 maskUV = secondTexCoordSet == 1 ? MaskUVs.zw : MaskUVs.xy;
+        texColor *= texture(uSecondTexture, maskUV);
     }
     // The batch's authored colour. A glow card is painted white and coloured
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
     // every fire in the world burns white.
-    texColor.rgb *= vec3(tintR, tintG, tintB);
+    texColor.rgb *= vec3(tintR, tintG, tintB) * vTintScale;
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be
@@ -241,6 +240,8 @@ void main() {
             vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
             skyColor = (blendMode >= 3) ? skyColor * air.a : skyColor * air.a + air.rgb;
         }
+        // NoAlphaAdd is drawn ONE, ONE, so it can only fade through its colour.
+        if (blendMode == 3) skyColor *= vFadeAlpha;
         outColor = vec4(skyColor, skyAlpha * vFadeAlpha);
         return;
     }
@@ -568,6 +569,11 @@ void main() {
         // means dimming it.
         if (blendMode >= 3) result *= tipFade;
     }
+
+    // NoAlphaAdd is drawn ONE, ONE: neither the texture's alpha nor the alpha
+    // written here scales it, so the distance and instance fade go into the
+    // colour.
+    if (blendMode == 3) result *= vFadeAlpha;
 
     outColor = vec4(result, outAlpha);
 }

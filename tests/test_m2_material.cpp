@@ -28,6 +28,15 @@ TEST_CASE("modulation uses destination RGB and keeps its alpha", "[m2][material]
     }
 }
 
+TEST_CASE("NoAlphaAdd adds the whole texel", "[m2][material]") {
+    // Blend mode 3: neither factor may be the source alpha.
+    const auto state = m2NoAlphaAddBlendState();
+    CHECK(state.blendEnable == VK_TRUE);
+    CHECK(state.srcColorBlendFactor == VK_BLEND_FACTOR_ONE);
+    CHECK(state.dstColorBlendFactor == VK_BLEND_FACTOR_ONE);
+    CHECK(state.colorBlendOp == VK_BLEND_OP_ADD);
+}
+
 TEST_CASE("Dalaran sculpture has four reflection layers using Mod2x", "[m2][material][asset]") {
     const std::string path = "Data/expansions/wotlk/world/expansion02/doodads/dalaran/dalaran_sculpture";
     const auto data = wowee::test::readFile(path + ".m2");

@@ -68,4 +68,20 @@ inline VkPipelineColorBlendAttachmentState m2ModulateBlendState(bool twice) {
     return state;
 }
 
+// NoAlphaAdd: the texture's alpha does not attenuate what is added, so a fade
+// has to come through the colour (see m2.frag.glsl).
+inline VkPipelineColorBlendAttachmentState m2NoAlphaAddBlendState() {
+    VkPipelineColorBlendAttachmentState state{};
+    state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    state.blendEnable = VK_TRUE;
+    state.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.colorBlendOp = VK_BLEND_OP_ADD;
+    state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    state.alphaBlendOp = VK_BLEND_OP_ADD;
+    return state;
+}
+
 } // namespace wowee::rendering
