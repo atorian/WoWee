@@ -28,6 +28,42 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(WOWEE_BUILD_TESTS "Build tests" ON)
 option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build configs; pairs well with Debug)" OFF)
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
+option(WOWEE_ENABLE_LTO "Link-time optimisation for the client in Release builds" ON)
+
+# ccache, when it is installed. A fresh worktree or a CI runner otherwise
+# compiles all of the client from nothing.
+#
+# The client compiles every file against a precompiled header, and ccache
+# refuses to cache those unless told the PCH's defines and timestamps may be
+# ignored - without the sloppiness below almost nothing would hit. Clang also
+# stamps the PCH with its build time, which -fno-pch-timestamp turns off
+# (see WOWEE_COMPILER_CACHE where the PCH is declared).
+#
+# Not on MSVC: Debug there uses /ZI, which ccache cannot cache.
+option(WOWEE_USE_CCACHE "Use ccache as the compiler launcher when found" ON)
+set(WOWEE_COMPILER_CACHE "")
+if(WOWEE_USE_CCACHE AND NOT MSVC AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(WOWEE_CCACHE_PROGRAM ccache)
+    if(WOWEE_CCACHE_PROGRAM)
+        set(WOWEE_COMPILER_CACHE ${WOWEE_CCACHE_PROGRAM})
+        set(_wowee_ccache_launcher
+            ${CMAKE_COMMAND} -E env
+            CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
+            ${WOWEE_CCACHE_PROGRAM})
+        set(CMAKE_C_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
+        set(CMAKE_CXX_COMPILER_LAUNCHER ${_wowee_ccache_launcher})
+        message(STATUS "Compiler cache: ${WOWEE_CCACHE_PROGRAM}")
+    else()
+        message(STATUS "Compiler cache: ccache not found")
+    endif()
+endif()
+
+# The Visual Studio generator compiles one project's files one at a time
+# unless /MP is given, and the client is a single project of over 400 files.
+# Ninja schedules files itself and needs nothing here.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Visual Studio")
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/MP>)
+endif()
 # AMD's FidelityFX SDK backends, off by default.
 #
 # They give neither a performance nor a quality gain here today, and FSR3 frame
@@ -494,11 +530,11 @@ function(compile_shaders TARGET_NAME)
     set(SPV_DIR ${SHADER_DIR})
     file(MAKE_DIRECTORY ${SPV_DIR})
 
-    file(GLOB GLSL_SOURCES "${SHADER_DIR}/*.glsl")
+    file(GLOB GLSL_SOURCES CONFIGURE_DEPENDS "${SHADER_DIR}/*.glsl")
     # Shared code lives in .glsli, which the glob above does not pick up. A
     # shader that includes any of it is rebuilt when one changes; the rest are
     # left alone, since their .spv are tracked and a rebuild rewrites them.
-    file(GLOB GLSL_INCLUDES "${SHADER_DIR}/*.glsli")
+    file(GLOB GLSL_INCLUDES CONFIGURE_DEPENDS "${SHADER_DIR}/*.glsli")
     set(SPV_OUTPUTS)
 
     foreach(GLSL_FILE ${GLSL_SOURCES})
@@ -1367,6 +1403,11 @@ target_precompile_headers(wowee PRIVATE
     <glm/glm.hpp>
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
+# A clang PCH carries its build time, and ccache would treat every rebuilt PCH
+# as a different input. See WOWEE_USE_CCACHE.
+if(WOWEE_COMPILER_CACHE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(wowee PRIVATE -Xclang -fno-pch-timestamp)
+endif()
 # Vendored headers as SYSTEM to suppress third-party warnings
 target_include_directories(wowee SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
@@ -1522,11 +1563,10 @@ else()
     )
 endif()
 
-# ── Unit tests (Catch2) ──────────────────────────────────────
-if(WOWEE_BUILD_TESTS)
 # Defined here rather than beside the tools that use it: tests/ is added
 # below and a CMake function has to exist before the directory that calls
-# it is processed.
+# it is processed. Outside the tests block, because the tools further down
+# call it too, and a configure with WOWEE_BUILD_TESTS=OFF failed on it.
 # Everything a StormLib consumer has to link besides StormLib itself.
 #
 # A static libstorm leaves its own dependencies to whoever links it: bzip2
@@ -1561,6 +1601,8 @@ function(wowee_link_stormlib target)
     endif()
 endfunction()
 
+# ── Unit tests (Catch2) ──────────────────────────────────────
+if(WOWEE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
@@ -1585,7 +1627,7 @@ endif()
 # Release build optimizations
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
-if(_ipo_supported)
+if(_ipo_supported AND WOWEE_ENABLE_LTO)
     set_property(TARGET wowee PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 if(NOT MSVC)

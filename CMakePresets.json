@@ -1,0 +1,62 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "WOWEE_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Development (RelWithDebInfo, no LTO)",
+      "description": "For the edit-build-test loop: optimised, with debug info, and no link-time optimisation on every relink.",
+      "binaryDir": "${sourceDir}/build-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "WOWEE_ENABLE_LTO": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "displayName": "Debug + AddressSanitizer/UBSan",
+      "description": "The directory test.sh --asan expects.",
+      "binaryDir": "${sourceDir}/build_asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "WOWEE_ENABLE_ASAN": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release (LTO)",
+      "description": "What build.sh produces and test.sh runs by default.",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WOWEE_ENABLE_LTO": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "asan", "inherits": "base", "configurePreset": "asan" },
+    { "name": "release", "inherits": "base", "configurePreset": "release" }
+  ]
+}
