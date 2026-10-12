@@ -21,6 +21,9 @@ jobs:
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +55,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           cmake \
+          ninja-build \
+          ccache \
           build-essential \
           pkg-config \
           libglm-dev \
@@ -93,8 +98,19 @@ jobs:
         sudo cmake --install /tmp/SDL3/build
         sudo ldconfig
 
+    # ccache across runs. A run saves under its own commit and restores the
+    # newest earlier one, so each job starts from the last build it made.
+    - name: Restore compiler cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-linux-${{ matrix.arch }}-${{ github.sha }}
+        restore-keys: ccache-linux-${{ matrix.arch }}-
+
     - name: Configure
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWOWEE_BUILD_TESTS=ON
+      run: >-
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWOWEE_BUILD_TESTS=ON
+        -DWOWEE_ENABLE_LTO=${{ github.event_name == 'pull_request' && 'OFF' || 'ON' }}
 
     - name: Assert AMD FSR2 target
       run: |
@@ -129,7 +145,11 @@ jobs:
       run: cmake --build build --target wowee_editor --parallel ${{ matrix.build_jobs }}
 
     - name: Run tests
-      run: cd build && ctest --output-on-failure
+      run: cd build && ctest --output-on-failure --parallel "$(nproc)"
+
+    - name: Compiler cache statistics
+      if: always()
+      run: ccache --show-stats || true
 
     - name: Package (DEB)
       run: cd build && cpack -G DEB
@@ -144,6 +164,9 @@ jobs:
   build-macos:
     name: Build (macOS ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     strategy:
       fail-fast: false
       matrix:
@@ -167,16 +190,24 @@ jobs:
 
     - name: Install dependencies
       run: |
-        brew install cmake pkg-config sdl3 glm openssl@3 zlib ffmpeg unicorn \
+        brew install cmake ninja ccache pkg-config sdl3 glm openssl@3 zlib ffmpeg unicorn \
           stormlib vulkan-loader vulkan-headers molten-vk shaderc
+
+    - name: Restore compiler cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-macos-${{ matrix.arch }}-${{ github.sha }}
+        restore-keys: ccache-macos-${{ matrix.arch }}-
 
     - name: Configure
       run: |
         BREW=$(brew --prefix)
         PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
         export PKG_CONFIG_PATH
-        cmake -S . -B build \
+        cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
+          -DWOWEE_ENABLE_LTO=${{ github.event_name == 'pull_request' && 'OFF' || 'ON' }} \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
           -DCMAKE_PREFIX_PATH="$BREW" \
           -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
@@ -206,7 +237,11 @@ jobs:
       run: cmake --build build --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Run tests
-      run: cd build && ctest --output-on-failure
+      run: cd build && ctest --output-on-failure --parallel "$(sysctl -n hw.logicalcpu)"
+
+    - name: Compiler cache statistics
+      if: always()
+      run: ccache --show-stats || true
 
     - name: Configure Developer ID signing
       env:
@@ -455,6 +490,9 @@ jobs:
   build-windows-arm:
     name: Build (windows-arm64)
     runs-on: windows-11-arm
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -481,6 +519,7 @@ jobs:
           mingw-w64-clang-aarch64-cmake
           mingw-w64-clang-aarch64-clang
           mingw-w64-clang-aarch64-ninja
+          mingw-w64-clang-aarch64-ccache
           mingw-w64-clang-aarch64-pkgconf
           mingw-w64-clang-aarch64-sdl3
           mingw-w64-clang-aarch64-glm
@@ -519,9 +558,18 @@ jobs:
         cmake --build /tmp/StormLib/build --parallel $(nproc)
         cmake --install /tmp/StormLib/build
 
+    - name: Restore compiler cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-windows-arm64-${{ github.sha }}
+        restore-keys: ccache-windows-arm64-
+
     - name: Configure
       shell: msys2 {0}
-      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      run: >-
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        -DWOWEE_ENABLE_LTO=${{ github.event_name == 'pull_request' && 'OFF' || 'ON' }}
 
     - name: Assert AMD FSR2 target
       shell: msys2 {0}
@@ -547,6 +595,11 @@ jobs:
     - name: Build
       shell: msys2 {0}
       run: cmake --build build --parallel $(nproc)
+
+    - name: Compiler cache statistics
+      if: always()
+      shell: msys2 {0}
+      run: ccache --show-stats || true
 
     - name: Bundle DLLs
       shell: msys2 {0}
@@ -580,6 +633,9 @@ jobs:
   build-windows:
     name: Build (windows-x86-64)
     runs-on: windows-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -607,6 +663,7 @@ jobs:
           mingw-w64-ucrt-x86_64-cmake
           mingw-w64-ucrt-x86_64-gcc
           mingw-w64-ucrt-x86_64-ninja
+          mingw-w64-ucrt-x86_64-ccache
           mingw-w64-ucrt-x86_64-pkgconf
           mingw-w64-ucrt-x86_64-sdl3
           mingw-w64-ucrt-x86_64-glm
@@ -642,9 +699,18 @@ jobs:
         cmake --build /tmp/StormLib/build --parallel $(nproc)
         cmake --install /tmp/StormLib/build
 
+    - name: Restore compiler cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-windows-x86-64-${{ github.sha }}
+        restore-keys: ccache-windows-x86-64-
+
     - name: Configure
       shell: msys2 {0}
-      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      run: >-
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        -DWOWEE_ENABLE_LTO=${{ github.event_name == 'pull_request' && 'OFF' || 'ON' }}
 
     - name: Assert AMD FSR2 target
       shell: msys2 {0}
@@ -670,6 +736,11 @@ jobs:
     - name: Build
       shell: msys2 {0}
       run: cmake --build build --parallel $(nproc)
+
+    - name: Compiler cache statistics
+      if: always()
+      shell: msys2 {0}
+      run: ccache --show-stats || true
 
     - name: Bundle DLLs
       shell: msys2 {0}

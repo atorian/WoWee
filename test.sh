@@ -88,7 +88,9 @@ if [[ $RUN_TEST -eq 1 ]]; then
     echo "──────────────────────────────────────────────"
     echo " Running unit tests [$TEST_LABEL]"
     echo "──────────────────────────────────────────────"
-    if ! (cd "$BUILD_TEST_DIR" && ctest --output-on-failure); then
+    # In parallel: 9 s serially, 4 s on 11 cores.
+    NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+    if ! (cd "$BUILD_TEST_DIR" && ctest --output-on-failure --parallel "$NPROC"); then
         OVERALL_FAILED=1
         echo ""
         echo "One or more unit tests FAILED."

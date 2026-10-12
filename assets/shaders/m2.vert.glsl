@@ -64,6 +64,8 @@ layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec4 AuthoredUVs;
 
+#include "sphere_map.glsli"
+
 // Matches m2WindDistanceFade in m2_sway.hpp, used by the shadow pass.
 float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
     return 1.0 - smoothstep(75.0, 150.0, length(origin - cameraPos));
@@ -291,9 +293,7 @@ void main() {
         // atlas UVs expose the entire map as bright stripes on polished meshes.
         vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
         vec3 eyeNormal = normalize(mat3(view) * Normal);
-        vec3 reflection = reflect(-normalize(eyePosition), eyeNormal);
-        reflection.z += 1.0;
-        uv = reflection.xy / max(length(reflection), 1e-6) * 0.5 + 0.5;
+        uv = sphereMapUV(eyePosition, eyeNormal);
     }
     TexCoord = uv + uvOff;
     AuthoredUVs = vec4(aTexCoord, aTexCoord2);

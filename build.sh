@@ -51,7 +51,13 @@ cd build
 
 # Configure with cmake
 echo "Configuring with CMake..."
-cmake .. -DCMAKE_BUILD_TYPE=Release
+# Ninja when it is installed, for a fresh directory only: CMake refuses to
+# switch generators on a directory already configured with another.
+GENERATOR_ARGS=()
+if [ ! -f CMakeCache.txt ] && command -v ninja >/dev/null 2>&1; then
+    GENERATOR_ARGS=(-G Ninja)
+fi
+cmake .. "${GENERATOR_ARGS[@]}" -DCMAKE_BUILD_TYPE=Release
 
 # Build with all cores
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)

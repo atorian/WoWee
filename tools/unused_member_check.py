@@ -210,10 +210,12 @@ def main():
                 continue
             decl_line = m.group(0)
             # clang's -Wunused-private-field is about non-static data members.
-            # A static or constexpr constant is not one, and `operator` is the
-            # tail of a deleted assignment operator rather than a member name.
+            # A static or constexpr constant is not one, nor is a friend
+            # declaration such as `friend struct WorldSocketTestAccess;`, and
+            # `operator` is the tail of a deleted assignment operator rather
+            # than a member name.
             if name == "operator" or re.search(
-                    r"\b(?:static|constexpr|enum|using|typedef)\b", decl_line):
+                    r"\b(?:static|constexpr|enum|using|typedef|friend)\b", decl_line):
                 continue
             if not is_write_only(name, header, decl_line, scope):
                 continue
