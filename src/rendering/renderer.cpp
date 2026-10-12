@@ -261,9 +261,71 @@ bool Renderer::createPerFrameResources() {
         }
     }
 
+    // A small local depth map for geometry contact shadows. Its footprint
+    // stays fixed when the player increases distant sun-shadow coverage.
+    VkSamplerCreateInfo contactSamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    contactSamplerInfo.magFilter = contactSamplerInfo.minFilter = VK_FILTER_NEAREST;
+    contactSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    contactSamplerInfo.addressModeU = contactSamplerInfo.addressModeV =
+        contactSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    contactSamplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    contactShadowSampler_ = vkCtx->getOrCreateSampler(contactSamplerInfo);
+    if (!contactShadowSampler_) return false;
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
+        contactShadowImages_[i] = createImage(device, vkCtx->getAllocator(),
+            CONTACT_MAP_SIZE, CONTACT_MAP_SIZE, VK_FORMAT_D32_SFLOAT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!contactShadowImages_[i].image) return false;
+        VkFramebufferCreateInfo contactFB{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        contactFB.renderPass = shadowRenderPass;
+        contactFB.attachmentCount = 1;
+        contactFB.pAttachments = &contactShadowImages_[i].imageView;
+        contactFB.width = contactFB.height = CONTACT_MAP_SIZE;
+        contactFB.layers = 1;
+        if (vkCreateFramebuffer(device, &contactFB, nullptr, &contactShadowFramebuffer_[i]) != VK_SUCCESS)
+            return false;
+    }
+    // Bindings must be valid before the first world/preview draw as well.
+    vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
+        for (auto& image : contactShadowImages_) {
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            VkImageMemoryBarrier2 initial{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            initial.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            initial.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            initial.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            initial.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            initial.srcQueueFamilyIndex = initial.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            initial.image = image.image;
+            initial.subresourceRange = range;
+            VkDependencyInfo initialDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            initialDep.imageMemoryBarrierCount = 1;
+            initialDep.pImageMemoryBarriers = &initial;
+            cmdPipelineBarrier2(cmd, initialDep);
+            const VkClearDepthStencilValue clear{1.0f, 0};
+            vkCmdClearDepthStencilImage(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       &clear, 1, &range);
+            VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            b.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = image.image;
+            b.subresourceRange = range;
+            VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &b;
+            cmdPipelineBarrier2(cmd, dep);
+        }
+    });
+    for (auto& layout : contactShadowLayout_) layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[8]{};
+    VkDescriptorSetLayoutBinding bindings[9]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -320,7 +382,10 @@ bool Renderer::createPerFrameResources() {
         bindings[b] = bindings[3];
         bindings[b].binding = b;
     }
-    layoutInfo.bindingCount = 8;
+    bindings[8] = bindings[3];
+    bindings[8].binding = 8;
+    bindings[8].pImmutableSamplers = &contactShadowSampler_;
+    layoutInfo.bindingCount = 9;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -333,7 +398,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 7;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 8;  // shadow, fog, lighting, sky, reflection and geometry
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -404,7 +469,7 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
         for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[8]{};
+        VkWriteDescriptorSet writes[9]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -439,7 +504,13 @@ bool Renderer::createPerFrameResources() {
             writes[b].dstBinding = b;
             writes[b].pImageInfo = &rtImgInfo[b - 4];
         }
-        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
+        VkDescriptorImageInfo contactInfo{};
+        contactInfo.imageView = contactShadowImages_[i].imageView;
+        contactInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        writes[8] = writes[1];
+        writes[8].dstBinding = 8;
+        writes[8].pImageInfo = &contactInfo;
+        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
         // Sky capture gets a separate set whose binding 5 stays neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
@@ -447,7 +518,7 @@ bool Renderer::createPerFrameResources() {
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
         for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
@@ -510,7 +581,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[8]{};
+            VkWriteDescriptorSet writes[9]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -544,7 +615,13 @@ bool Renderer::createPerFrameResources() {
                 writes[b] = writes[4];
                 writes[b].dstBinding = b;
             }
-            vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
+            VkDescriptorImageInfo contactInfo{};
+            contactInfo.imageView = contactShadowImages_[i].imageView;
+            contactInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[8] = writes[1];
+            writes[8].dstBinding = 8;
+            writes[8].pImageInfo = &contactInfo;
+            vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
         }
     }
 
@@ -596,7 +673,13 @@ void Renderer::destroyPerFrameResources() {
         if (shadowDepthView[i]) { vkDestroyImageView(device, shadowDepthView[i], nullptr); shadowDepthView[i] = VK_NULL_HANDLE; }
         if (shadowDepthImage[i]) { vmaDestroyImage(vkCtx->getAllocator(), shadowDepthImage[i], shadowDepthAlloc[i]); shadowDepthImage[i] = VK_NULL_HANDLE; shadowDepthAlloc[i] = VK_NULL_HANDLE; }
         shadowDepthLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (contactShadowFramebuffer_[i]) {
+            vkDestroyFramebuffer(device, contactShadowFramebuffer_[i], nullptr);
+            contactShadowFramebuffer_[i] = VK_NULL_HANDLE;
+        }
+        destroyImage(device, vkCtx->getAllocator(), contactShadowImages_[i]);
     }
+    contactShadowSampler_ = VK_NULL_HANDLE;
     if (shadowRenderPass) { vkDestroyRenderPass(device, shadowRenderPass, nullptr); shadowRenderPass = VK_NULL_HANDLE; }
     shadowSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
 }
@@ -647,6 +730,27 @@ void Renderer::updatePerFrameUBO() {
     }
 
     currentFrameData.lightSpaceMatrix = lightSpaceMatrix;
+    currentFrameData.contactSpaceMatrix = glm::mat4(0.0f);
+    currentFrameData.contactParams = glm::vec4(0.0f);
+    if (shadowCenterInitialized && contactShadowImages_[0].image) {
+        // Resolve nearby caster detail along the same rays as the solar map.
+        // This map removes direct light; shade retains only faint grounding.
+        glm::vec3 rays = glm::vec3(currentFrameData.lightDir);
+        const float lengthSq = glm::dot(rays, rays);
+        rays = lengthSq > 1e-6f ? rays * glm::inversesqrt(lengthSq)
+                               : glm::normalize(glm::vec3(-0.3f, -0.7f, -0.6f));
+        if (rays.z > 0.0f) rays = -rays;
+        if (rays.z > -0.15f) rays = glm::normalize(glm::vec3(rays.x, rays.y, -0.15f));
+        const glm::vec3 up = std::abs(rays.z) > 0.99f
+            ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(0.0f, 0.0f, 1.0f);
+        glm::mat4 projection = glm::ortho(-16.0f, 16.0f, -16.0f, 16.0f, 0.1f, 128.0f);
+        projection[1][1] *= -1.0f;
+        currentFrameData.contactSpaceMatrix = projection * glm::lookAt(
+            characterPosition - rays * 64.0f, characterPosition, up);
+        static const bool contactEnabled = std::getenv("WOWEE_DISABLE_CONTACT_SHADOWS") == nullptr;
+        currentFrameData.contactParams = glm::vec4(contactEnabled ? 1.0f : 0.0f,
+                                                  1.0f / CONTACT_MAP_SIZE, 127.9f, 0.06f);
+    }
     // Scale shadow bias proportionally to ortho extent to avoid acne at close range / gaps at far range
     float shadowBias = glm::clamp(0.8f * (shadowDistance_ / 300.0f), 0.0f, 1.0f);
     // z carries one texel of the shadow map. The shaders used to hold that as
@@ -4577,6 +4681,11 @@ void Renderer::renderReflectionPass() {
 }
 
 void Renderer::renderShadowPass() {
+    renderShadowMap(false);
+    renderShadowMap(true);
+}
+
+void Renderer::renderShadowMap(bool contact) {
     ZoneScopedN("Renderer::renderShadowPass");
     static const bool skipShadows = (std::getenv("WOWEE_SKIP_SHADOWS") != nullptr);
     if (skipShadows) return;
@@ -4588,32 +4697,39 @@ void Renderer::renderShadowPass() {
     // into it. Returning here instead left the image untransitioned while it
     // stayed bound for sampling, which is the shape of fault that takes the
     // device down rather than drawing something wrong.
-    const bool drawCasters = shadowsEnabled;
+    const bool drawCasters = shadowsEnabled && (!contact || currentFrameData.contactParams.x > 0.5f);
 
     // Shadows render every frame - throttling causes visible flicker on player/NPCs
 
-    // lightSpaceMatrix was already computed at frame start (before updatePerFrameUBO).
+    const glm::mat4& passMatrix = contact ? currentFrameData.contactSpaceMatrix : lightSpaceMatrix;
+    const uint32_t mapSize = contact ? CONTACT_MAP_SIZE : SHADOW_MAP_SIZE;
+    // passMatrix was already computed at frame start (before updatePerFrameUBO).
     // Zero matrix means character position isn't set yet - skip shadow pass entirely.
-    if (lightSpaceMatrix == glm::mat4(0.0f)) return;
+    if (passMatrix == glm::mat4(0.0f)) return;
     uint32_t frame = vkCtx->getCurrentFrame();
+    const VkImage passImage = contact ? contactShadowImages_[frame].image : shadowDepthImage[frame];
+    const VkImageView passView = contact ? contactShadowImages_[frame].imageView : shadowDepthView[frame];
+    const VkFramebuffer passFramebuffer = contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
+    auto& passLayout = contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
+    const glm::vec3 passCenter = contact ? characterPosition : shadowCenter;
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
     b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     b1.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    b1.oldLayout = shadowDepthLayout_[frame];
+    b1.oldLayout = passLayout;
     b1.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.srcAccessMask = (shadowDepthLayout_[frame] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    b1.srcAccessMask = (passLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         ? VK_ACCESS_SHADER_READ_BIT
         : 0;
     b1.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    b1.image = shadowDepthImage[frame];
+    b1.image = passImage;
     b1.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     // The fog's compute pass reads the map as well as the fragment shaders.
-    VkPipelineStageFlags srcStage = (shadowDepthLayout_[frame] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    VkPipelineStageFlags srcStage = (passLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         ? (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
         : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     b1.srcStageMask = srcStage;
@@ -4646,7 +4762,7 @@ void Renderer::renderShadowPass() {
     if (dynamicRendering) {
         VkRenderingAttachmentInfo depthAttach{};
         depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depthAttach.imageView = shadowDepthView[frame];
+        depthAttach.imageView = passView;
         depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -4654,7 +4770,7 @@ void Renderer::renderShadowPass() {
 
         VkRenderingInfo renderInfo{};
         renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        renderInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
+        renderInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = mapSize, .height = mapSize}};
         renderInfo.layerCount = 1;
         renderInfo.pDepthAttachment = &depthAttach;
         vkCmdBeginRendering(currentCmd, &renderInfo);
@@ -4662,8 +4778,8 @@ void Renderer::renderShadowPass() {
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rpInfo.renderPass = shadowRenderPass;
-        rpInfo.framebuffer = shadowFramebuffer[frame];
-        rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
+        rpInfo.framebuffer = passFramebuffer;
+        rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = mapSize, .height = mapSize}};
         VkClearValue clear{};
         clear.depthStencil = {.depth = 1.0f, .stencil = 0};
         rpInfo.clearValueCount = 1;
@@ -4671,27 +4787,27 @@ void Renderer::renderShadowPass() {
         vkCmdBeginRenderPass(currentCmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     }
 
-    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(SHADOW_MAP_SIZE), .height = static_cast<float>(SHADOW_MAP_SIZE), .minDepth = 0.0f, .maxDepth = 1.0f};
+    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(mapSize), .height = static_cast<float>(mapSize), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(currentCmd, 0, 1, &vp);
-    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = SHADOW_MAP_SIZE, .height = SHADOW_MAP_SIZE}};
+    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = mapSize, .height = mapSize}};
     vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
     // Phase 7/8: render shadow casters
-    const float shadowCullRadius = shadowDistance_ * 1.35f;
+    const float shadowCullRadius = contact ? 24.0f : shadowDistance_ * 1.35f;
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
-    if (terrainRenderer) {
-        terrainRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+    if (terrainRenderer && !contact) {
+        terrainRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
-    if (wmoRenderer) {
-        wmoRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+    if (wmoRenderer && !contact) {
+        wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
     if (m2Renderer) {
-        m2Renderer->renderShadow(currentCmd, lightSpaceMatrix, globalTime, shadowCenter, shadowCullRadius);
+        m2Renderer->renderShadow(currentCmd, passMatrix, globalTime, passCenter, shadowCullRadius, !contact);
     }
     if (characterRenderer) {
-        characterRenderer->renderShadow(currentCmd, lightSpaceMatrix, shadowCenter, shadowCullRadius);
+        characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !contact);
     }
     }  // drawCasters
 
@@ -4704,7 +4820,7 @@ void Renderer::renderShadowPass() {
     // Barrier 2: DEPTH_STENCIL_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
     VkImageMemoryBarrier2 b2{};
     b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    b2.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    b2.srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     // Compute too: the volumetric fog samples it right after this pass.
     b2.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     b2.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -4713,15 +4829,15 @@ void Renderer::renderShadowPass() {
     b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b2.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b2.image = shadowDepthImage[frame];
+    b2.image = passImage;
     b2.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     VkDependencyInfo b2Dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     b2Dep.dependencyFlags = 0;
     b2Dep.imageMemoryBarrierCount = 1;
     b2Dep.pImageMemoryBarriers = &b2;
     cmdPipelineBarrier2(currentCmd, b2Dep);
-    shadowDepthLayout_[frame] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (vkCtx) vkCtx->gpuMark(currentCmd, "shadows");
+    passLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (vkCtx) vkCtx->gpuMark(currentCmd, contact ? "contact shadows" : "shadows");
 }
 
 VkImageView Renderer::getNeutralRtLightingView() const {

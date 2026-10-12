@@ -64,4 +64,15 @@
 
 - 2026-10-12 — Offline world fixtures must set GameHandler currentMapId as well as character/map terrain. Loading Kalimdor alone left currentMapId=0 and sampled Azeroth light volume 42 over Orgrimmar geometry. Assert actual map and light-volume IDs in the fixture log; a matching zone name and real models do not prove the correct lighting profile.
 
+
+- 2026-10-12 — The user confirmed atorian/WoWee as this project’s push destination. Use the personal fork as origin and preserve Kelsidavis/WoWee as upstream; verify destination, existing authentication and write permissions before pushing instead of assuming a cloned upstream URL is writable.
+
 - 2026-10-12 — The user reported no cast shadows after a fill-light adjustment. Separate shaded normals from projected caster shadows: verify a visible caster and receiving floor. Orgrimmar canyon/market groups carry Interior plus ExteriorLit (0x40) or ShowExteriorSky (0x100); using Interior alone bypassed sunlight/shadows. Respect independent lighting flags, preserve baked MOCV in sky-visible groups, and keep closed rooms exempt from outdoor roof shadows.
+
+- 2026-10-12 — A successful pull/build and CPU lighting tests did not establish visible cast shadows: the user still saw none in Dalaran, Stormwind and the draenei starting area. Verify a full-height character and a lit receiving floor in the running build; a shadow-pass log or included draw call is insufficient. Inspect actual map contents, receiver bias in world units and the final shadow contribution before claiming a fix.
+
+- 2026-10-12 — RT prepare published new image views before the first forward draw, but their UNDEFINED-to-GENERAL transition ran later in record. Validate mode 1 from cold activation and initialize/clear targets before publishing sampled descriptors. Keep a confirmed startup-layout fix separate from a claim that persistent shadow visibility is solved.
+
+- 2026-10-12 — Missing shadows need matched caster/receiver checks, but visible stock-client silhouettes do not authorize strong shadows in ambient light. The user corrected the fixed-direction, 50% ambient shadow: shaded ground should get only faint soft grounding; clear silhouettes belong to sunlight (especially Sholazar and Stormwind). Resolve nearby solar geometry at high resolution, align it with the main sun, combine visibility without double darkening, and verify sunlit and already-shaded frames separately. A valid map/floor alone is insufficient: visually exclude underwater points and camp canopies before calling a fixture sunlit.
+
+- 2026-10-12 — Adding a login endpoint does not establish realm compatibility. Warmane/Lordaeron reached world authentication but WoWee treated WAIT_QUEUE as failure and could not initialize its custom Warden module. Keep queue responses pending until AUTH_OK, verify the actual module exchange, and claim working login only after a real character list.

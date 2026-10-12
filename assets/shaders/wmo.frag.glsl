@@ -24,9 +24,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
 };
 
 #include "rt_lighting.glsli"
+#include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 #include "wmo_lighting.glsli"
 
@@ -299,6 +302,9 @@ void main() {
     }
     RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
+    vec2 localShadow = localShadowAt(FragPos);
+    if (isInterior == 0 || receivesExteriorShadows != 0)
+        shadow = min(shadow, localShadow.x);
 
     if (emissive == 1) {
         // Authored luminous glass must remain bright in direct sun and shadow.
@@ -402,6 +408,9 @@ void main() {
         // added at full those would double in brightness.
         if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
     }
+
+    if (isWindow == 0 && isLava == 0 && emissive == 0)
+        result *= localShadow.y;
 
     if (isWindow == 0 && isLava == 0)
         result += localLightContribution(FragPos, norm, texColor.rgb);

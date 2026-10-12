@@ -364,7 +364,7 @@ void CharacterPreview::createFBO() {
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 7;
+        sizes[1].descriptorCount = MAX_FRAMES * 8;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
@@ -433,7 +433,7 @@ void CharacterPreview::createFBO() {
         rtImg.imageView = appRenderer->getNeutralRtLightingView();
         rtImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[8]{};
+        VkWriteDescriptorSet writes[9]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = previewPerFrameSet_[i];
         writes[0].dstBinding = 0;
@@ -452,7 +452,7 @@ void CharacterPreview::createFBO() {
         writes[2].descriptorCount = 1;
         writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[2].pImageInfo = &fogImg;
-        for (uint32_t b = 3; b <= 7; ++b) {
+        for (uint32_t b = 3; b <= 8; ++b) {
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = previewPerFrameSet_[i];
             writes[b].dstBinding = b;
@@ -461,7 +461,7 @@ void CharacterPreview::createFBO() {
             writes[b].pImageInfo = &rtImg;
         }
 
-        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture

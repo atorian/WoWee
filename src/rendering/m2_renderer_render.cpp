@@ -2313,19 +2313,19 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
-                              const glm::vec3& /*shadowCenter*/, float shadowRadius) {
+                              const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
 
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
     VkDescriptorPool curShadowTexPool = shadowTexPool_[frameIdx];
-    if (curShadowTexPool) {
+    if (resetDescriptors && curShadowTexPool) {
         vkResetDescriptorPool(vkCtx_->getDevice(), curShadowTexPool, 0);
     }
     // Cache: texture imageView -> allocated descriptor set (avoids duplicates within frame)
     // Reuse persistent map - pool reset already invalidated the sets.
-    shadowTexSetCache_.clear();
+    if (resetDescriptors) shadowTexSetCache_.clear();
     auto& texSetCache = shadowTexSetCache_;
 
     auto getTexDescSet = [&](VkTexture* tex) -> VkDescriptorSet {
@@ -2381,33 +2381,57 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // and a batch's texture was bound once per instance rather than once per
     // batch. With tens of thousands of instances resident that is the cost of
     // this pass, and none of it is drawing.
-    shadowCasters_[0].clear();
-    shadowCasters_[1].clear();
-    for (uint32_t i = 0; i < instances.size(); ++i) {
-        const auto& instance = instances[i];
-        if (!instance.cachedIsValid || instance.cachedIsSmoke ||
-            instance.cachedIsInvisibleTrap) continue;
-        if (!instance.cachedModel) continue;
-        const M2ModelGPU& model = *instance.cachedModel;
-
-        // Cull casters against the light-space ortho footprint, not a
-        // world-space sphere around the player. The shadow frustum extends
-        // ~2000 units toward the sun, so a distant tree can legitimately
-        // cast across the whole view while sitting far outside any player
-        // sphere - sphere culling made such shadows pop on/off at the cull
-        // boundary as the player moved (large-area flicker at low sun).
+    // Cull casters against the light-space ortho footprint, not a
+    // world-space sphere around the player. The shadow frustum extends
+    // ~2000 units toward the sun, so a distant tree can legitimately
+    // cast across the whole view while sitting far outside any player
+    // sphere - sphere culling made such shadows pop on/off at the cull
+    // boundary as the player moved (large-area flicker at low sun).
+    auto insideFootprint = [&](const M2Instance& instance, const M2ModelGPU& model) {
         const glm::vec4 clip = lightSpaceMatrix * glm::vec4(instance.position, 1.0f);
         // Orthographic projection: w == 1, NDC directly comparable.
         // Inflate by the model's bounding sphere converted to NDC
         // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
         const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
-        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) continue;
-        if (clip.z < -margin || clip.z > 1.0f + margin) continue;
+        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
+        return clip.z >= -margin && clip.z <= 1.0f + margin;
+    };
 
-        shadowCasters_[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
-    }
-    for (auto& bucket : shadowCasters_) {
-        std::sort(bucket.begin(), bucket.end());
+    // The contact map is a small box around the player inside the sun's own
+    // footprint, along the same rays, so its casters are a subset of the ones
+    // the sun's pass culled a moment ago. Walking every instance in the world
+    // a second time for it cost as much as the sun's whole cull - the walk is
+    // a cache miss per instance, and there are tens of thousands of them.
+    // Filtering in place keeps each bucket sorted by model.
+    const bool fromSolarCasters = !resetDescriptors && solarCastersFresh_;
+    solarCastersFresh_ = false;
+    if (fromSolarCasters) {
+        for (auto& bucket : shadowCasters_) {
+            std::erase_if(bucket, [&](const std::pair<uint32_t, uint32_t>& caster) {
+                // Only ever this frame's list, but an index that no longer
+                // names the instance it was culled as is dropped, not drawn.
+                if (caster.second >= instances.size()) return true;
+                const auto& instance = instances[caster.second];
+                if (instance.modelId != caster.first || !instance.cachedModel) return true;
+                return !insideFootprint(instance, *instance.cachedModel);
+            });
+        }
+    } else {
+        shadowCasters_[0].clear();
+        shadowCasters_[1].clear();
+        for (uint32_t i = 0; i < instances.size(); ++i) {
+            const auto& instance = instances[i];
+            if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+                instance.cachedIsInvisibleTrap) continue;
+            if (!instance.cachedModel) continue;
+            const M2ModelGPU& model = *instance.cachedModel;
+            if (!insideFootprint(instance, model)) continue;
+            shadowCasters_[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
+        }
+        for (auto& bucket : shadowCasters_) {
+            std::sort(bucket.begin(), bucket.end());
+        }
+        solarCastersFresh_ = resetDescriptors;
     }
 
     // Helper lambda to draw instances with a given foliageSway setting
@@ -2509,6 +2533,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     drawPass(false);
     // Pass 2: foliage (wind displacement enabled, per-batch alpha-tested textures)
     drawPass(true);
+
+    // Contact coverage differs from the solar footprint; do not report that as flicker.
+    if (!resetDescriptors) return;
 
     // A shadow that flickers is a caster that was drawn last frame and is not
     // drawn this one. The cull is in light space and the light turns with the

@@ -289,6 +289,13 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
         return;
     }
 
+    // Queue notices can be followed by another AUTH_RESPONSE (including in the
+    // same receive batch). Keep AUTH_SENT until the server actually admits us.
+    if (response.result == AuthResult::WAIT_QUEUE) {
+        LOG_INFO("World authentication queued; waiting for server admission");
+        return;
+    }
+
     if (!response.isSuccess()) {
         char code[8];
         std::snprintf(code, sizeof(code), "0x%02X", static_cast<unsigned>(response.result));

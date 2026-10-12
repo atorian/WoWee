@@ -24,9 +24,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
 };
 
 #include "rt_lighting.glsli"
+#include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uBaseTexture;
@@ -243,7 +246,9 @@ void main() {
     shadow = rtShadow(rt, shadow);
     ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
 
-    vec3 result = ambient + shadow * diffuse;
+    vec2 localShadow = localShadowAt(FragPos);
+    shadow = min(shadow, localShadow.x);
+    vec3 result = ambient * localShadow.y + shadow * diffuse;
     result += localLightContribution(FragPos, norm, finalColor.rgb);
 
     result = applyFog(result, FragPos, fragDist);

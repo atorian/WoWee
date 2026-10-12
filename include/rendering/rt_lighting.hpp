@@ -130,7 +130,6 @@ private:
     Slot slots_[MAX_FRAMES_IN_FLIGHT];
     Target raw_, rawGi_, tmp_, tmpGi_;
     AllocatedImage neutral_{};
-    bool imagesNeedInit_ = false;
 
     VkSampler linearSampler_ = VK_NULL_HANDLE;
     VkSampler pointSampler_ = VK_NULL_HANDLE;

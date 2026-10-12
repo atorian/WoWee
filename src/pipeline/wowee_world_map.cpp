@@ -171,8 +171,8 @@ WoweeWorldMap WoweeWorldMapLoader::makeArena(const std::string& mapName) {
     m.name = mapName;
     m.worldType = WoweeWorldMap::Arena;
     m.gridSize = 1;
-    m.tileBitmap.assign(bitmapBytesFor(1), 0);
-    m.setTile(0, 0, true);
+    // The arena contains exactly one tile; initialise its presence bit directly.
+    m.tileBitmap.assign(bitmapBytesFor(1), 0x01);
     return m;
 }
 

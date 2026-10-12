@@ -553,7 +553,8 @@ public:
      * Render depth-only pass for shadow casting
      */
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      bool resetDescriptors = true);
 
     /**
      * Render M2 particle emitters (point sprites)
@@ -1183,6 +1184,9 @@ private:
     ///
     /// Kept as members so a frame's worth of casters costs no allocation.
     std::vector<std::pair<uint32_t, uint32_t>> shadowCasters_[2];
+    /// Set by the sun's pass once it has culled into shadowCasters_, and
+    /// consumed by the contact pass that follows it in the same frame.
+    bool solarCastersFresh_ = false;
 
     // Ribbon draw-call list (reused each frame)
     struct RibbonDrawCall {

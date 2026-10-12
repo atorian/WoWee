@@ -52,9 +52,9 @@ constexpr SettingDesc kSchema[] = {
      // No longer conditional on a shadows toggle: there is not one, and the
      // stored value it used to read may still say 0 from before it went, which
      // would grey this out for good.
-     "How far away things still cast shadows, in yards. The shadow map\n"
-     "covers this whole range, so a shorter distance also gives sharper\n"
-     "shadows close to you.", "", 300},
+     "How far sunlight shadows reach, in yards. A shorter distance\n"
+     "makes these shadows sharper. Nearby character and object shadows\n"
+     "keep their detail at any distance setting.", "", 300},
     {"viewdistance", "View distance", SettingKind::Float, 400, 2400, 50, "Graphics", "View",
      "How far into the distance the world is drawn, in yards. The single\n"
      "largest cost in the picture: terrain, buildings and creatures are all\n"

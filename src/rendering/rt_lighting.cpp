@@ -257,7 +257,7 @@ bool RtLighting::createImages(VkExtent2D e) {
     VmaAllocator alloc = ctx_->getAllocator();
     // Transfer source so a tool can read a result back (tools/rt_probe.cpp).
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     auto make = [&](Target& t, VkFormat format = kFormat) {
         t.img = createImage(dev, alloc, e.width, e.height, format, usage);
         return t.img.image != VK_NULL_HANDLE;
@@ -270,9 +270,46 @@ bool RtLighting::createImages(VkExtent2D e) {
              make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi) && make(s.reflection);
         s.wroteImages = false;
     }
+    if (!ok) return false;
+    // prepare() publishes these views to the forward pass, which runs before
+    // record(). Transition and clear them now: deferring this to record() left
+    // the first opaque draws with descriptors pointing at UNDEFINED images.
+    ctx_->immediateSubmit([&](VkCommandBuffer cmd) {
+        auto init = [&](const Target& t) {
+            transitionImageLayout(cmd, t.img.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkClearColorValue neutral{};
+            neutral.float32[0] = neutral.float32[1] = 1.0f;
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                &neutral, 1, &range);
+            VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = t.img.image;
+            barrier.subresourceRange = range;
+            VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &barrier;
+            cmdPipelineBarrier2(cmd, dep);
+        };
+        for (const Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) init(*t);
+        for (const auto& slot : slots_) {
+            for (const Target* t : {&slot.gbuf, &slot.hist, &slot.histGi, &slot.out,
+                                    &slot.outGi, &slot.reflection}) init(*t);
+        }
+    });
     traceExtent_ = e;
-    imagesNeedInit_ = true;
-    return ok;
+    return true;
 }
 
 void RtLighting::destroyImages() {
@@ -443,33 +480,6 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     scene_->update(cmd);
     // Separates building the scene from tracing it in the GPU timings.
     ctx_->gpuMark(cmd, RtScene::kGpuMarkLabel);
-
-    if (imagesNeedInit_) {
-        imagesNeedInit_ = false;
-        std::vector<VkImageMemoryBarrier2> barriers;
-        auto add = [&](const Target& t) {
-            VkImageMemoryBarrier2 b{};
-            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            b.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-            b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = t.img.image;
-            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            barriers.push_back(b);
-        };
-        for (const Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) add(*t);
-        for (auto& sl : slots_) {
-            for (const Target* t : {&sl.gbuf, &sl.hist, &sl.histGi, &sl.out, &sl.outGi, &sl.reflection}) add(*t);
-        }
-        VkDependencyInfo dep{};
-        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
-        dep.pImageMemoryBarriers = barriers.data();
-        cmdPipelineBarrier2(cmd, dep);
-    }
 
     // Last frame's slot holds history only if last frame traced into it.
     const bool havePrev = havePrev_ && resultFrame_ != 0 && resultFrame_ + 1 == frameCounter_;

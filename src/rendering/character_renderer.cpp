@@ -3456,7 +3456,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                                     const glm::vec3& shadowCenter, float shadowRadius) {
+                                     const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
     if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
@@ -3467,10 +3467,10 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
 
     // This frame slot's fence was waited on in beginFrame, so last time's sets
     // are finished with and the pool can be handed back whole.
-    if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
+    if (resetDescriptors && frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
         vkResetDescriptorPool(device, shadowTexPool_[frameIndex], 0);
     }
-    shadowTexSetCache_.clear();
+    if (resetDescriptors) shadowTexSetCache_.clear();
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
 

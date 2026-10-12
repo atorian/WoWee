@@ -320,6 +320,7 @@ void WMORenderer::shutdown() {
     // - and nothing to call it on either, which is what this used to try.
     if (!vkCtx_) {
         loadedModels.clear();
+        loadingModels_.clear();
         instances.clear();
         spatialGrid.clear();
         instanceIndexById.clear();
@@ -339,6 +340,13 @@ void WMORenderer::shutdown() {
             destroyGroupGPU(group);
         }
     }
+
+    // Incremental loads also own uploaded groups, even before publication.
+    // Closing during city streaming must release those buffers as well.
+    for (auto& [id, model] : loadingModels_) {
+        for (auto& group : model.groups) destroyGroupGPU(group);
+    }
+    loadingModels_.clear();
 
     // Free cached textures
     for (auto& [path, entry] : textureCache) {

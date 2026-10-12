@@ -3967,7 +3967,43 @@ void Application::update(float deltaTime) {
             character.x = orgrimmar ? 1676.0f : -2917.58f;
             character.y = orgrimmar ? -4315.0f : -257.98f;
             character.z = orgrimmar ? 61.0f : 52.9968f;
+            if (const char* scene = std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
+                const std::string name(scene);
+                if (name == "brill") {
+                    character.mapId = 0; character.zoneId = 85;
+                    character.x = 2274.0f; character.y = 323.0f; character.z = 35.0f;
+                    character.race = game::Race::UNDEAD;
+                } else if (name == "stormwind") {
+                    character.mapId = 0; character.zoneId = 1519;
+                    character.x = -8833.0f; character.y = 628.0f; character.z = 94.0f;
+                    character.race = game::Race::HUMAN;
+                } else if (name == "sholazar") {
+                    character.mapId = 571; character.zoneId = 3711;
+                    character.x = 5570.28f; character.y = 5761.68f; character.z = -75.221f;
+                    character.race = game::Race::HUMAN;
+                } else if (name == "dalaran") {
+                    character.mapId = 571; character.zoneId = 4395;
+                    character.x = 5815.0f; character.y = 629.0f; character.z = 647.0f;
+                    character.race = game::Race::DWARF;
+                }
+                // Diagnostic offsets allow lit and shaded receiving surfaces
+                // to be compared without moving the normal gameplay character.
+                for (const auto& [key, value] : {
+                         std::pair{"WOWEE_SHADOW_PROBE_OFFSET_X", &character.x},
+                         std::pair{"WOWEE_SHADOW_PROBE_OFFSET_Y", &character.y}}) {
+                    if (const char* offset = std::getenv(key)) {
+                        const float delta = std::atof(offset);
+                        if (std::isfinite(delta) && std::abs(delta) <= 1024.0f) *value += delta;
+                    }
+                }
+                gameHandler->currentMapIdRef() = character.mapId;
+            }
             if (orgrimmar) renderer->getLightingManager()->setTimeOfDay(8.73333f / 24.0f);
+            if (const char* hour = std::getenv("WOWEE_SHADOW_PROBE_HOUR")) {
+                const float h = std::atof(hour);
+                if (std::isfinite(h) && h >= 0.0f && h < 24.0f)
+                    renderer->getLightingManager()->setTimeOfDay(h / 24.0f);
+            }
             gameHandler->charactersRef().push_back(character);
             gameHandler->setActiveCharacterGuid(character.guid);
             gameHandler->setPlayerGuid(character.guid);
@@ -3977,7 +4013,7 @@ void Application::update(float deltaTime) {
             // exercises world assets and appearance queues without those packets.
             addonsLoaded_ = true;
             LOG_INFO("Mulgore probe: starting world entry");
-            worldLoader_->loadOnlineWorldTerrain(1, character.x, character.y, character.z);
+            worldLoader_->loadOnlineWorldTerrain(character.mapId, character.x, character.y, character.z);
             LOG_INFO("Mulgore probe: world entry completed");
         }
     }
@@ -4222,6 +4258,22 @@ void Application::update(float deltaTime) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
             renderer->update(deltaTime);
+            if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
+                glm::vec3 feet = renderer->getCharacterPosition();
+                static std::optional<float> floor;
+                if (!floor) {
+                    floor = renderer->getWMORenderer()->getFloorHeight(
+                        feet.x, feet.y, feet.z + 3.0f, nullptr, feet.z - 3.0f);
+                    if (!floor) floor = renderer->getTerrainManager()->getHeightAt(feet.x, feet.y);
+                    if (floor) LOG_INFO("Shadow scene: map=", gameHandler->getCurrentMapId(),
+                                       " floor=", *floor, " x=", feet.x, " y=", feet.y);
+                }
+                if (floor) feet.z = *floor + 0.03f;
+                renderer->getCharacterPosition() = feet;
+                renderer->getCharacterRenderer()->setInstancePosition(renderer->getCharacterInstanceId(), feet);
+                renderer->getCamera()->setPosition(feet + glm::vec3(-4.0f, 0.0f, 6.0f));
+                renderer->getCamera()->setRotation(0.0f, -55.0f);
+            }
             if (std::getenv("WOWEE_ORGRIMMAR_PROBE")) {
                 renderer->getCamera()->setPosition(glm::vec3(1658.0f, -4315.0f, 68.0f));
                 renderer->getCamera()->setRotation(55.0f, -3.0f);
@@ -5139,7 +5191,8 @@ void Application::render() {
             // The stall is real and worth fixing, but it has to be fixed where
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
-            if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE"))
+            if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
+                !std::getenv("WOWEE_SHADOW_PROBE_SCENE"))
                 uiManager->render(state, authHandler.get(), gameHandler.get());
         });
 

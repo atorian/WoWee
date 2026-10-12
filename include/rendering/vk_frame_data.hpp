@@ -49,6 +49,9 @@ struct GPUPerFrameData {
     glm::vec4 fogSkyMiddle{0.0f}; // w = actual sky capture valid
     glm::vec4 fogSkyBand1{0.0f}; // w = common horizontal geometry limit
     glm::vec4 fogSkyBand2{0.0f};
+    // Local geometry occlusion remains visible in ambient light.
+    glm::mat4 contactSpaceMatrix{0.0f};
+    glm::vec4 contactParams{0.0f}; // enabled, texel UV size, depth span, soft ambient strength
 };
 
 // Push constants for the model matrix (most common case)

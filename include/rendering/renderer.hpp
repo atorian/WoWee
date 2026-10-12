@@ -369,6 +369,11 @@ private:
     VmaAllocation shadowDepthAlloc[2] = {};
     VkImageView shadowDepthView[2] = {};
     VkSampler shadowSampler = VK_NULL_HANDLE;
+    static constexpr uint32_t CONTACT_MAP_SIZE = 1024;
+    AllocatedImage contactShadowImages_[2]{};
+    VkFramebuffer contactShadowFramebuffer_[2]{};
+    VkImageLayout contactShadowLayout_[2]{};
+    VkSampler contactShadowSampler_ = VK_NULL_HANDLE;
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
     VkFramebuffer shadowFramebuffer[2] = {};
     VkImageLayout shadowDepthLayout_[2] = {};
@@ -434,6 +439,7 @@ private:
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
+    void renderShadowMap(bool contact);
     glm::mat4 computeLightSpaceMatrix();
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
