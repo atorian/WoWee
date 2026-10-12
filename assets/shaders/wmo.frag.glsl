@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "sky_atmosphere.glsli"
+#include "wmo_lighting.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -50,7 +51,7 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     float wmoAmbientB;
     int emissive;
     int hasVertexColors;
-    int padding1;
+    int receivesExteriorShadows;
     int padding2;
 };
 
@@ -278,7 +279,7 @@ void main() {
     // Its roof blocks the outdoor sun; multiplying the baked term by that
     // shadow darkened the entire room a second time.
     float shadow = 1.0;
-    if (isInterior == 0 && shadowParams.x > 0.5) {
+    if ((isInterior == 0 || receivesExteriorShadows != 0) && shadowParams.x > 0.5) {
         vec3 ldir = normalize(-lightDir.xyz);
         // Texture relief changes lighting, not the caster geometry. Offsetting
         // along its perturbed normal can push the lookup into the surface.
@@ -370,6 +371,10 @@ void main() {
             ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
             : vec3(1.0);  // Neutral modulation when no baked colors exist.
         result = texColor.rgb * interiorLight;
+        if (receivesExteriorShadows != 0) {
+            result = wmoBakedExteriorShadow(result, rtAmbient(rt, ambientColor.rgb),
+                lightColor.rgb, dot(norm, normalize(-lightDir.xyz)), shadow);
+        }
     } else if (unlit != 0) {
         // Outdoor unlit surface - still receives directional shadows
         result = texColor.rgb * shadow;

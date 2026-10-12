@@ -8,6 +8,8 @@
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_material_class.hpp"
+#include "rendering/wmo_lighting.hpp"
+#include <cstdlib>
 #include "rendering/normal_map.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
@@ -673,10 +675,12 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             bool alphaTest;
             bool unlit;
             bool isWindow;
+            bool exteriorLighting;
             uint8_t emissiveLevel;
             bool operator==(const BatchKey& o) const {
                 return texPtr == o.texPtr && alphaTest == o.alphaTest &&
                        unlit == o.unlit && isWindow == o.isWindow &&
+                       exteriorLighting == o.exteriorLighting &&
                        emissiveLevel == o.emissiveLevel;
             }
         };
@@ -686,7 +690,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                        (std::hash<bool>()(k.alphaTest) << 1) ^
                        (std::hash<bool>()(k.unlit) << 2) ^
                        (std::hash<bool>()(k.isWindow) << 3) ^
-                       (std::hash<uint8_t>()(k.emissiveLevel) << 4);
+                       (std::hash<uint8_t>()(k.emissiveLevel) << 4) ^
+                       (std::hash<bool>()(k.exteriorLighting) << 5);
             }
         };
         std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
@@ -795,7 +800,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             }
 
             BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isWindow = isWindow, .emissiveLevel = emissiveLevel };
+                          .isWindow = isWindow,
+                          .exteriorLighting = wmoUsesExteriorLighting(groupRes.groupFlags, matFlags),
+                          .emissiveLevel = emissiveLevel };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
@@ -830,7 +837,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // Allocate descriptor sets and UBOs for each merged batch
         groupRes.mergedBatches.reserve(batchMap.size());
         bool anyTextured = false;
-        bool isInterior = (groupRes.groupFlags & 0x2000) != 0;
+        const bool portalInterior = (groupRes.groupFlags & 0x2000) != 0;
+        const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
+                                   std::getenv("WOWEE_ORGRIMMAR_SHADOW_BASELINE");
         for (auto& [key, mb] : batchMap) {
             if (mb.hasTexture) anyTextured = true;
 
@@ -847,7 +856,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             matData.hasTexture = mb.hasTexture ? 1 : 0;
             matData.alphaTest = mb.alphaTest ? 1 : 0;
             matData.unlit = mb.unlit ? 1 : 0;
-            matData.isInterior = isInterior ? 1 : 0;
+            matData.isInterior = (portalInterior && (baselineProbe || !key.exteriorLighting)) ? 1 : 0;
+            matData.receivesExteriorShadows = !baselineProbe &&
+                wmoReceivesExteriorShadows(groupRes.groupFlags, key.exteriorLighting) ? 1 : 0;
             matData.hasVertexColors = (groupRes.groupFlags & 0x4) != 0 ? 1 : 0;
             matData.specularIntensity = 0.5f;
             matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;

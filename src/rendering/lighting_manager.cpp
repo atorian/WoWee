@@ -3,6 +3,7 @@
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/light_headroom.hpp"
+#include "rendering/daylight_fill.hpp"
 #include "rendering/light_volume_order.hpp"
 #include <glm/gtc/constants.hpp>
 #include "pipeline/asset_manager.hpp"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <cstdlib>
 
 namespace wowee {
 namespace rendering {
@@ -495,6 +497,13 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // overflow stop while the rest keep their value, and the hue slides toward
     // whatever saturated. Scaling both together keeps the hue and only ever
     // darkens.
+    // The offline comparison runs both treatments with identical world data.
+    const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
+                               std::getenv("WOWEE_ORGRIMMAR_PROBE_BASELINE");
+    if (!isIndoors_ && !baselineProbe) {
+        applyDaylightFill(newParams.ambientColor, newParams.diffuseColor,
+                         newParams.directionalDir);
+    }
     applyLightHeadroom(newParams.ambientColor, newParams.diffuseColor);
 
     // What the sky is being told, whenever it changes.

@@ -3955,8 +3955,13 @@ void Application::update(float deltaTime) {
             character.gender = game::Gender::FEMALE;
             character.level = 1;
             character.mapId = 1;
-            character.zoneId = 215;
-            character.x = -2917.58f; character.y = -257.98f; character.z = 52.9968f;
+            gameHandler->currentMapIdRef() = character.mapId;
+            const bool orgrimmar = std::getenv("WOWEE_ORGRIMMAR_PROBE") != nullptr;
+            character.zoneId = orgrimmar ? 1637 : 215;
+            character.x = orgrimmar ? 1676.0f : -2917.58f;
+            character.y = orgrimmar ? -4315.0f : -257.98f;
+            character.z = orgrimmar ? 61.0f : 52.9968f;
+            if (orgrimmar) renderer->getLightingManager()->setTimeOfDay(8.73333f / 24.0f);
             gameHandler->charactersRef().push_back(character);
             gameHandler->setActiveCharacterGuid(character.guid);
             gameHandler->setPlayerGuid(character.guid);
@@ -3966,7 +3971,7 @@ void Application::update(float deltaTime) {
             // exercises world assets and appearance queues without those packets.
             addonsLoaded_ = true;
             LOG_INFO("Mulgore probe: starting world entry");
-            worldLoader_->loadOnlineWorldTerrain(1, -2917.58f, -257.98f, 52.9968f);
+            worldLoader_->loadOnlineWorldTerrain(1, character.x, character.y, character.z);
             LOG_INFO("Mulgore probe: world entry completed");
         }
     }
@@ -4208,6 +4213,22 @@ void Application::update(float deltaTime) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
             renderer->update(deltaTime);
+            if (std::getenv("WOWEE_ORGRIMMAR_PROBE")) {
+                renderer->getCamera()->setPosition(glm::vec3(1658.0f, -4315.0f, 68.0f));
+                renderer->getCamera()->setRotation(55.0f, -3.0f);
+                if (std::getenv("WOWEE_ORGRIMMAR_SHADOW_PROBE")) {
+                    static const float floorZ = renderer->getWMORenderer()->getFloorHeight(
+                        1676.0f, -4315.0f, 75.0f, nullptr, 61.0f).value_or(61.0f);
+                    const glm::vec3 feet(1676.0f, -4315.0f, floorZ + 0.03f);
+                    renderer->getCharacterPosition() = feet;
+                    renderer->getCharacterRenderer()->setInstancePosition(
+                        renderer->getCharacterInstanceId(), feet);
+                    renderer->getCamera()->setPosition(feet + glm::vec3(-12.0f, 0.0f, 5.0f));
+                    renderer->getCamera()->setRotation(0.0f, -12.0f);
+                    static bool logged = false;
+                    if (!logged) { LOG_INFO("Orgrimmar shadow probe: caster on WMO floor z=", floorZ); logged = true; }
+                }
+            }
         } catch (const std::bad_alloc& e) {
             LOG_ERROR("OOM during Application::update stage 'renderer->update': ", e.what());
             throw;
@@ -5109,7 +5130,7 @@ void Application::render() {
             // The stall is real and worth fixing, but it has to be fixed where
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
-            if (!std::getenv("WOWEE_FOUNTAIN_PROBE"))
+            if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE"))
                 uiManager->render(state, authHandler.get(), gameHandler.get());
         });
 

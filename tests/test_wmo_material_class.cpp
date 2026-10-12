@@ -115,3 +115,38 @@ TEST_CASE("the name test reads the whole path, in any case",
     CHECK_FALSE(wmoTextureNamedGlass("WIND_BANNER.BLP"));
     CHECK_FALSE(wmoTextureNamedGlass(""));
 }
+
+#include "rendering/wmo_lighting.hpp"
+#include <glm/glm.hpp>
+namespace {
+using vec3 = glm::vec3;
+using glm::max;
+using glm::clamp;
+#include "../assets/shaders/wmo_lighting.glsli"
+}
+
+TEST_CASE("Orgrimmar streets can use exterior lighting inside portal groups", "[wmo-light]") {
+    using namespace wowee::rendering;
+    // Real MOGP flags: bazzaar/AssassinCanyon, BigCanyon, throne rooms.
+    CHECK(wmoUsesExteriorLighting(0x2841, 0));
+    CHECK_FALSE(wmoUsesBakedInteriorLighting(0x2841, 0));
+    CHECK(wmoReceivesExteriorShadows(0x2841, true));
+    CHECK(wmoUsesBakedInteriorLighting(0x2905, 0));
+    CHECK(wmoReceivesExteriorShadows(0x2905, false));
+    CHECK(wmoUsesBakedInteriorLighting(0x2805, 0));
+    CHECK_FALSE(wmoReceivesExteriorShadows(0x2805, false));
+    CHECK(wmoUsesExteriorLighting(0x809, 0));
+    CHECK_FALSE(wmoUsesBakedInteriorLighting(0x2805, 0x8));
+}
+
+TEST_CASE("sky-visible baked floor receives caster shade without losing its colors", "[wmo-light]") {
+    const vec3 baked(0.6f, 0.3f, 0.15f), ambient(0.4f), sun(0.6f);
+    CHECK(wmoBakedExteriorShadow(baked, ambient, sun, 1.0f, 1.0f) == baked);
+    const vec3 shadowed = wmoBakedExteriorShadow(baked, ambient, sun, 1.0f, 0.0f);
+    CHECK(shadowed.r == Catch::Approx(0.24f));
+    CHECK(shadowed.g == Catch::Approx(0.12f));
+    CHECK(shadowed.b == Catch::Approx(0.06f));
+    CHECK(shadowed.r / shadowed.g == Catch::Approx(baked.r / baked.g));
+    CHECK(wmoBakedExteriorShadow(baked, ambient, sun, -1.0f, 0.0f) == baked);
+    CHECK(wmoBakedExteriorShadow(baked, vec3(0.0f), vec3(0.0f), 1.0f, 0.0f) == baked);
+}

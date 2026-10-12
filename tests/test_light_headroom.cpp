@@ -16,6 +16,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/light_headroom.hpp"
+#include "rendering/daylight_fill.hpp"
 
 using wowee::rendering::applyLightHeadroom;
 using wowee::rendering::lightHeadroomScale;
@@ -97,4 +98,37 @@ TEST_CASE("it only ever darkens", "[light]") {
         INFO("v = " << v);
         CHECK(ambient.r <= a0.r + 1e-6f);
     }
+}
+
+TEST_CASE("Orgrimmar morning keeps lit color and reveals shaded detail", "[light]") {
+    // LightParams 247/212 interpolated at 08:44, from the extracted DBC.
+    glm::vec3 ambient = glm::vec3(119.86f, 108.82f, 122.94f) / 255.0f;
+    glm::vec3 diffuse = glm::vec3(255.0f, 201.82f, 106.08f) / 255.0f;
+    glm::vec3 oldAmbient = ambient, oldDiffuse = diffuse;
+    applyLightHeadroom(oldAmbient, oldDiffuse);
+    wowee::rendering::applyDaylightFill(ambient, diffuse,
+                                       glm::normalize(glm::vec3(0.45f, -0.86f, -0.39f)));
+    applyLightHeadroom(ambient, diffuse);
+    const glm::vec3 lit = ambient + diffuse;
+    const glm::vec3 oldLit = oldAmbient + oldDiffuse;
+    for (int c = 0; c < 3; ++c) {
+        CHECK(lit[c] == Catch::Approx(oldLit[c]).margin(1e-6));
+        CHECK(lit[c] <= 1.000001f);
+        CHECK(ambient[c] > oldAmbient[c]);
+    }
+    // The shade/sun ratio improves, without raising the sun-facing maximum.
+    CHECK(ambient.r / lit.r > 0.44f);
+}
+
+TEST_CASE("daylight fill preserves night and fades continuously at sunrise", "[light]") {
+    for (float z : {0.4f, 0.0f}) {
+        glm::vec3 ambient(0.1f, 0.2f, 0.3f), diffuse(0.4f, 0.3f, 0.2f);
+        const auto a = ambient, d = diffuse;
+        wowee::rendering::applyDaylightFill(ambient, diffuse, glm::vec3(0.0f, -1.0f, z));
+        CHECK(ambient == a);
+        CHECK(diffuse == d);
+    }
+    glm::vec3 a(0.1f), d(0.6f);
+    wowee::rendering::applyDaylightFill(a, d, glm::vec3(0.0f, -1.0f, -0.001f));
+    CHECK(a.r == Catch::Approx(0.1f).margin(0.0001f));
 }
