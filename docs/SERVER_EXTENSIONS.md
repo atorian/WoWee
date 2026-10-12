@@ -93,6 +93,23 @@ diagnostic 30-second timeout. Two live sessions returned seven characters in
 17.4 and 14.7 seconds, compared with the previous 30.2 seconds; the user also
 confirmed readable Cyrillic names, successful world entry and character control.
 
+On 2026-10-12, comparison with the native patch-completion callback and
+CharacterSelect_OnShow identified an earlier ordinary character-list query.
+The adapter now queues that query after its first valid manifest, on the main
+thread after pending integrity replies, while retaining the final-boundary
+retry. In one live session five characters arrived in 6.657 seconds, just
+0.187 seconds after this early query, while DBC checks continued. This avoids
+waiting for all checks before showing characters; manifest receipt still does
+not claim patch mounting or instant first login.
+
+The next update reuses the exact known Warden module from the local cache only
+after validating its announced size, MD5 and current module key. Missing or
+corrupt caches retain the normal download. An additional ordinary query at the
+verified bootstrap-installation boundary can overlap earlier initialization too.
+Two fresh live sessions on 2026-10-12 returned seven characters in 1.219 and
+1.140 seconds with module-cache reuse; the second also reached IN_WORLD.
+Manifest/final retries and the full Warden challenge/check sequence remain.
+
 ## Local profile
 
 The default root is `Data/server_extensions`, relative to the resource directory.

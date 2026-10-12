@@ -28,6 +28,7 @@ public:
     ProtocolResult packet(uint16_t opcode, const std::vector<uint8_t>& body, const ProtocolSend& send);
     void observeWarden(const std::vector<uint8_t>& plaintext);
     bool takeCharacterListRetryRequest();
+    bool takeEarlyCharacterListRetryRequest();
     bool active() const;
     const std::string& error() const;
     const std::string& clientPath() const;

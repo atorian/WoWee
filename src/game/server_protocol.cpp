@@ -25,6 +25,7 @@ class EzWowProtocol final : public ServerProtocolAdapter {
     bool translated_ = false;
     bool patchesRequested_ = false;
     bool manifestReceived_ = false;
+    bool earlyEnumerationPending_ = false;
     bool enumerationRetryRequested_ = false;
     bool enumerationRetryPending_ = false;
     std::vector<EzWowPatch> patchManifest_;
@@ -77,9 +78,14 @@ public:
                     bootstrap_.fill(0); received_.fill(false); patchManifest_.clear();
                     receiving_ = true; installed_ = translated_ = patchesRequested_ = false;
                     manifestReceived_ = enumerationRetryRequested_ = enumerationRetryPending_ = false;
+                    earlyEnumerationPending_ = false;
                 } else if (callback == 0x46AE20) {
                     if (receiving_) {
                         receiving_ = false; installed_ = translated_;
+                        // The delivered callback is installed. Try the ordinary
+                        // character query now; manifest/final retries remain if
+                        // the server still gates enumeration at this stage.
+                        if (installed_) earlyEnumerationPending_ = true;
                     } else if (installed_ && patchesRequested_ && manifestReceived_ &&
                                finalFileCallback && !enumerationRetryRequested_) {
                         // Queue only a retry of the ordinary query; no extension
@@ -124,6 +130,10 @@ public:
                 // This callback sends no immediate reply in the reference DLL.
                 auto patches = parseEzWowPatches(body);
                 patchManifest_ = std::move(patches);
+                // Native processFinishDone switches to charselect, whose OnShow
+                // calls GetCharacterListUpdate. Allow that ordinary query to
+                // overlap the remaining checks, retaining the final retry.
+                if (!manifestReceived_) earlyEnumerationPending_ = true;
                 manifestReceived_ = true;
                 return ProtocolResult::Handled;
             }
@@ -188,6 +198,11 @@ public:
         }
         error_ = "EZWoW: runtime bootstrap at 0xDD1000 was not fully received and installed for this session.";
         return ProtocolResult::Error;
+    }
+    bool takeEarlyCharacterListRetryRequest() override {
+        const bool pending = earlyEnumerationPending_ && error_.empty();
+        earlyEnumerationPending_ = false;
+        return pending;
     }
     bool takeCharacterListRetryRequest() override {
         const bool pending = enumerationRetryPending_ && error_.empty();

@@ -742,6 +742,14 @@ void GameHandler::update(float deltaTime) {
     // Consume the adapter hint even if enumeration has already succeeded, so
     // it cannot trigger a stale retry after character creation/deletion.
     const bool retryAfterServerChecks = wardenHandler_ && wardenHandler_->takeCharacterListRetryRequest();
+    const bool retryAtProtocolCheckpoint = wardenHandler_ && wardenHandler_->takeEarlyCharacterListRetryRequest();
+    if (retryAtProtocolCheckpoint && !retryAfterServerChecks && state == WorldState::CHAR_LIST_REQUESTED &&
+        socket->isConnected() && !characterListRetried_) {
+        LOG_INFO("Server protocol checkpoint after ", characterListWait_,
+                 "s - querying characters while initialization checks continue");
+        socket->send(CharEnumPacket::build());
+        // An early query may be discarded. Preserve the final-boundary/timeout retry.
+    }
     // Some realms discard the first enumeration during setup. Retry once at a
     // verified protocol boundary; keep the timer as a fallback for other realms.
     if (state == WorldState::CHAR_LIST_REQUESTED && socket->isConnected() &&

@@ -333,6 +333,50 @@ TEST_CASE("EZWoW enumeration retry follows only the final verified initializatio
     }
 }
 
+TEST_CASE("EZWoW character query can overlap checks without consuming the final retry", "[protocol]") {
+    using wowee::game::ProtocolResult;
+    auto protocol = wowee::game::makeServerProtocol("ezwow", {"login.ezwow.org",3724,12340});
+    const auto send = [](uint16_t, const std::vector<uint8_t>&) {};
+    const std::vector<uint8_t> loader(std::begin(ezLoaderFixture),std::end(ezLoaderFixture));
+    const std::vector<uint8_t> manifest(std::begin(ezPatchFixture),std::end(ezPatchFixture));
+    CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    protocol->warden(initializeTiming(0x14E720));
+    for (size_t i=27;i-- >0;) REQUIRE(protocol->packet(0x2E9,bootstrapWrite(i),send)==ProtocolResult::Handled);
+    protocol->warden(initializeTiming(0x46AE20));
+    CHECK(protocol->takeEarlyCharacterListRetryRequest());
+    CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    REQUIRE(protocol->packet(0x41D,loader,send)==ProtocolResult::Handled);
+    CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    SECTION("valid manifest queues one query, duplicates do not") {
+        REQUIRE(protocol->packet(0x41D,manifest,send)==ProtocolResult::Handled);
+        CHECK(protocol->takeEarlyCharacterListRetryRequest());
+        CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+        CHECK_FALSE(protocol->takeCharacterListRetryRequest());
+        REQUIRE(protocol->packet(0x41D,manifest,send)==ProtocolResult::Handled);
+        CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+        const std::vector<uint8_t> finalInit{0x03,0x14,0x00,0x64,0xe5,0x02,0xea,0x01,0x00,0x02,0x00,0x10,0x92,0x41,0x00,0xc0,0x18,0x02,0x00,0x30,0x25,0x02,0x00,0x10,0x29,0x02,0x00,0x03,0x08,0x00,0x76,0x9a,0xdd,0xfa,0x04,0x00,0x00,0x10,0x92,0x41,0x00,0x01,0x03,0x08,0x00,0xb4,0xe9,0xd7,0xba,0x01,0x01,0x00,0x20,0xae,0x46,0x00,0x01};
+        protocol->warden(finalInit);
+        CHECK(protocol->takeCharacterListRetryRequest());
+        CHECK_FALSE(protocol->takeCharacterListRetryRequest());
+    }
+    SECTION("invalid manifest cannot queue a query") {
+        auto invalid = manifest; invalid.pop_back();
+        CHECK(protocol->packet(0x41D,invalid,send)==ProtocolResult::Error);
+        CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    }
+    SECTION("bootstrap restart discards a pending query") {
+        REQUIRE(protocol->packet(0x41D,manifest,send)==ProtocolResult::Handled);
+        protocol->warden(initializeTiming(0x14E720));
+        CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    }
+    SECTION("a later protocol error suppresses a pending query") {
+        REQUIRE(protocol->packet(0x41D,manifest,send)==ProtocolResult::Handled);
+        auto invalid = manifest; invalid.pop_back();
+        CHECK(protocol->packet(0x41D,invalid,send)==ProtocolResult::Error);
+        CHECK_FALSE(protocol->takeEarlyCharacterListRetryRequest());
+    }
+}
+
 TEST_CASE("Server extension defers Warden enumeration hints and clears them on endpoint change", "[extension]") {
     using wowee::game::ProtocolResult;
     Fixture f;

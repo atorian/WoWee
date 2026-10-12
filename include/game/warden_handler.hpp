@@ -36,6 +36,7 @@ public:
     bool beginSession(const std::string& host, uint16_t port, uint32_t build);
     std::string extensionError() const;
     bool takeCharacterListRetryRequest();
+    bool takeEarlyCharacterListRetryRequest();
     bool handleProtocolPacket(network::Packet& packet);
 
     /** Initialize warden module manager (called once from GameHandler ctor). */

@@ -37,6 +37,8 @@ public:
     virtual void warden(std::span<const uint8_t>) {}
     // Deferred hint, consumed on the main thread after pending Warden replies.
     virtual bool takeCharacterListRetryRequest() { return false; }
+    // An earlier ordinary query can overlap server checks; it never claims readiness.
+    virtual bool takeEarlyCharacterListRetryRequest() { return false; }
     virtual ProtocolResult memory(const std::string&, uint32_t, uint8_t, uint8_t*) {
         return ProtocolResult::Unhandled;
     }

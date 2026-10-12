@@ -424,6 +424,10 @@ ProtocolResult ServerExtension::packet(uint16_t opcode, const std::vector<uint8_
         return result;
     } catch (const std::exception& e) { impl_->error = e.what(); return ProtocolResult::Error; }
 }
+bool ServerExtension::takeEarlyCharacterListRetryRequest() {
+    std::lock_guard<std::mutex> lock(impl_->requestMutex);
+    return impl_->protocol && impl_->error.empty() && impl_->protocol->takeEarlyCharacterListRetryRequest();
+}
 bool ServerExtension::takeCharacterListRetryRequest() {
     std::lock_guard<std::mutex> lock(impl_->requestMutex);
     return impl_->protocol && impl_->error.empty() && impl_->protocol->takeCharacterListRetryRequest();

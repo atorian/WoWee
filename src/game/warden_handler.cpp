@@ -13,6 +13,7 @@
 #include "core/logger.hpp"
 #include "game/warden_constants.hpp"
 #include "game/warden_known_modules.hpp"
+#include "game/warden_module_cache.hpp"
 #include "core/config_paths.hpp"
 #include <algorithm>
 #include <cctype>
@@ -232,6 +233,11 @@ std::string WardenHandler::extensionError() const {
     // in update() before reading the message or releasing the runtime.
     if (!extensionPreparationError_.empty()) return extensionPreparationError_;
     return wardenResponsePending_ || extensionPreparationPending_ ? std::string() : serverExtension_.error();
+}
+
+bool WardenHandler::takeEarlyCharacterListRetryRequest() {
+    if (extensionPreparationPending_ || wardenResponsePending_) return false;
+    return serverExtension_.takeEarlyCharacterListRetryRequest();
 }
 
 bool WardenHandler::takeCharacterListRetryRequest() {
@@ -512,6 +518,35 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                 // Try to load pre-computed challenge/response entries
                 loadWardenCRFile(hashHex);
+            }
+
+            // Reuse only a known module with the current key and freshly
+            // verified cached bytes. Unknown/missing/corrupt entries download
+            // normally; this never changes the HASH_REQUEST/rekey exchange.
+            if (const auto* known = knownWardenModule(wardenModuleHash_, wardenModuleKey_)) {
+                std::filesystem::path cacheDir;
+#ifdef _WIN32
+                if (const auto* base = std::getenv("APPDATA")) cacheDir = std::filesystem::path(base) / "wowee/warden_cache";
+                else cacheDir = "warden_cache";
+#else
+                if (const auto* base = std::getenv("HOME")) cacheDir = std::filesystem::path(base) / ".local/share/wowee/warden_cache";
+                else cacheDir = "warden_cache";
+#endif
+                std::string hashHex;
+                constexpr char digits[] = "0123456789abcdef";
+                for (auto byte : wardenModuleHash_) { hashHex += digits[byte >> 4]; hashHex += digits[byte & 15]; }
+                wardenModuleData_ = readVerifiedWardenModuleCache(cacheDir / (hashHex + ".wdn"),
+                                                                 wardenModuleHash_, wardenModuleSize_);
+                if (!wardenModuleData_.empty()) {
+                    wardenKnownModuleVerified_ = true;
+                    if (wardenCREntries_.empty())
+                        std::copy(known->checkOpcodes.begin(), known->checkOpcodes.end(), wardenCheckOpcodes_);
+                    wardenState_ = WardenState::WAIT_HASH_REQUEST;
+                    sendWardenResponse({WARDEN_CMSG_MODULE_OK});
+                    LOG_INFO("Warden: Reused verified cached module (", wardenModuleData_.size(),
+                             " bytes); skipped download round trip");
+                    break;
+                }
             }
 
             // Respond with MODULE_MISSING to request the module data

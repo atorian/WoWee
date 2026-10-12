@@ -54,3 +54,47 @@ TEST_CASE("Standard Warden handshake sends hash before rekeying both streams", "
     // The next check reply uses the NEW client key, without carrying old RC4 state.
     CHECK(crypto.encrypt({0x02,0x05,0x00,0x11,0x22,0x33,0x44,0x01,0x78,0x56,0x34,0x12}) == std::vector<uint8_t> {0xCA,0xBC,0x21,0x60,0xD9,0xCC,0xB8,0x1D,0x9F,0xA5,0xDA,0xDA});
 }
+
+
+TEST_CASE("Cached Warden handshake advances RC4 only for MODULE_OK before hash", "[warden]") {
+    WardenCrypto crypto;
+    std::vector<uint8_t> session(40);
+    std::iota(session.begin(), session.end(), 0);
+    REQUIRE(crypto.initFromSessionKey(session));
+    (void)crypto.encrypt({WARDEN_CMSG_MODULE_OK});
+    const auto& module = kStandardWardenChallenge;
+    std::vector<uint8_t> reply{WARDEN_CMSG_HASH_RESULT};
+    reply.insert(reply.end(), module.reply.begin(), module.reply.end());
+    // Independent SHA1Randx/RC4 vector with no MODULE_MISSING byte.
+    CHECK(crypto.encrypt(reply) == std::vector<uint8_t>{0x85,0xB1,0x59,0x2E,0x04,0x41,0xF1,0x31,0x05,0x7E,0x4B,0x34,0x2A,0x1D,0x3F,0xAD,0x8B,0x70,0x07,0xD6,0xDA});
+    crypto.replaceKeys(std::vector<uint8_t>(module.clientKey.begin(), module.clientKey.end()),
+                       std::vector<uint8_t>(module.serverKey.begin(), module.serverKey.end()));
+    CHECK(crypto.encrypt({0x02,0x05,0x00,0x11,0x22,0x33,0x44,0x01,0x78,0x56,0x34,0x12}) ==
+          std::vector<uint8_t>{0xCA,0xBC,0x21,0x60,0xD9,0xCC,0xB8,0x1D,0x9F,0xA5,0xDA,0xDA});
+}
+
+
+#include "game/warden_module_cache.hpp"
+#include <fstream>
+
+TEST_CASE("Warden cache validates contents and bounds before reuse", "[warden]") {
+    namespace fs = std::filesystem;
+    const std::vector<uint8_t> bytes{1, 2, 3, 4, 5};
+    const auto hash = wowee::auth::Crypto::md5(bytes);
+    const auto directory = fs::temp_directory_path() / ("wowee_warden_cache_" + std::to_string(reinterpret_cast<uintptr_t>(&bytes)));
+    fs::create_directories(directory);
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{directory};
+    const auto file = directory / "module.wdn";
+    CHECK(readVerifiedWardenModuleCache(file, hash, bytes.size()).empty());
+    { std::ofstream out(file, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+    CHECK(readVerifiedWardenModuleCache(file, hash, bytes.size()) == bytes);
+    CHECK(readVerifiedWardenModuleCache(file, hash, bytes.size() - 1).empty());
+    CHECK(readVerifiedWardenModuleCache(file, hash, bytes.size() + 1).empty());
+    CHECK(readVerifiedWardenModuleCache(file, hash, 0).empty());
+    CHECK(readVerifiedWardenModuleCache(file, hash, 1024 * 1024 + 1).empty());
+    CHECK(readVerifiedWardenModuleCache(file, {}, bytes.size()).empty());
+    auto changedHash = hash; changedHash[0] ^= 1;
+    CHECK(readVerifiedWardenModuleCache(file, changedHash, bytes.size()).empty());
+    { std::ofstream out(file, std::ios::binary); out.write("wrong", 5); }
+    CHECK(readVerifiedWardenModuleCache(file, hash, bytes.size()).empty());
+}
