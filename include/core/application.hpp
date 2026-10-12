@@ -355,9 +355,9 @@ private:
     // Declared after authHandler so it is destroyed first: its transport
     // calls into the auth handler.
     std::unique_ptr<RealmPatchSync> realmPatchSync_;
-    std::string realmPatchStatus_;
+    std::string connectionStatus_;  // what the character screen was last told
     void startRealmPatchSync(const std::vector<game::EzWowPatch>& patches);
-    void updateRealmPatches();
+    void updateConnectionAndPatches(float deltaTime);
 
     // Beat by the main loop each iteration; the watchdog treats a long silence as a
     // hang. Long but healthy work that renders its own frames (world load) must beat

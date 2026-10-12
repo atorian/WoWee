@@ -4152,8 +4152,8 @@ void Application::update(float deltaTime) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
-    updateCheckpoint = "realm patches";
-    updateRealmPatches();
+    updateCheckpoint = "connection and realm patches";
+    updateConnectionAndPatches(deltaTime);
 
     // Update based on current state
     updateCheckpoint = "state switch";
@@ -5978,50 +5978,61 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
             [auth] { return auth->isConnected(); },
         });
     }
-    realmPatchStatus_.clear();
     realmPatchSync_->start(patches, authHandler->getClientInfo().locale);
 }
 
-void Application::updateRealmPatches() {
-    if (!realmPatchSync_) return;
+void Application::updateConnectionAndPatches(float deltaTime) {
+    const bool connecting = uiScreenCallbacks_ && uiScreenCallbacks_->connecting();
+    const bool syncing = realmPatchSync_ && realmPatchSync_->busy();
     // The login and realm screens pump the auth connection themselves; past
-    // them it carries the patch transfer and nothing else reads it.
-    if (realmPatchSync_->busy() && authHandler &&
+    // them it carries the realm-list requests of a retry and the patch
+    // transfer, and nothing else reads it.
+    if ((connecting || syncing) && authHandler &&
         state != AppState::AUTHENTICATION && state != AppState::REALM_SELECTION) {
         authHandler->update(0.0f);
     }
-    realmPatchSync_->update();
+    if (uiScreenCallbacks_) uiScreenCallbacks_->update(deltaTime);
+    if (realmPatchSync_) realmPatchSync_->update();
 
-    const auto p = realmPatchSync_->progress();
-    std::string text;
+    // One status for the character screen: what the connection is doing,
+    // then the patch download under it.
+    std::string text = uiScreenCallbacks_ ? uiScreenCallbacks_->connectionStatus() : std::string();
     bool isError = false;
-    auto mb = [](uint64_t bytes) { return std::to_string((bytes + (1u << 19)) >> 20); };
-    switch (p.state) {
-        case RealmPatchSync::State::Checking:
-            text = "Checking realm patches...";
-            break;
-        case RealmPatchSync::State::Downloading:
-        case RealmPatchSync::State::Verifying:
-            text = "Downloading realm patches " + std::to_string(p.fileIndex) + "/" +
-                   std::to_string(p.fileCount) + ": " + p.current + " - " + mb(p.doneBytes) +
-                   " / " + mb(p.totalBytes) + " MB";
-            if (p.state == RealmPatchSync::State::Verifying) text += " (verifying)";
-            break;
-        case RealmPatchSync::State::Done:
-            if (p.fileCount) text = "Realm patches downloaded (" + std::to_string(p.fileCount) + " archive(s))";
-            break;
-        case RealmPatchSync::State::Failed:
-            text = "Realm patch download failed: " + p.error;
-            isError = true;
-            break;
-        case RealmPatchSync::State::Idle:
-            break;
+    if (realmPatchSync_) {
+        const auto p = realmPatchSync_->progress();
+        auto mb = [](uint64_t bytes) { return std::to_string((bytes + (1u << 19)) >> 20); };
+        std::string patch;
+        switch (p.state) {
+            case RealmPatchSync::State::Checking:
+                patch = "Checking realm patches...";
+                break;
+            case RealmPatchSync::State::Downloading:
+            case RealmPatchSync::State::Verifying: {
+                const int percent = p.totalBytes ? static_cast<int>(p.doneBytes * 100 / p.totalBytes) : 0;
+                patch = "Downloading realm patches: " + std::to_string(percent) + "% (" +
+                        mb(p.doneBytes) + " / " + mb(p.totalBytes) + " MB), archive " +
+                        std::to_string(p.fileIndex) + " of " + std::to_string(p.fileCount) + ": " +
+                        p.current;
+                if (p.state == RealmPatchSync::State::Verifying) patch += " (verifying)";
+                break;
+            }
+            case RealmPatchSync::State::Done:
+                if (p.fileCount) patch = "Realm patches downloaded (" + std::to_string(p.fileCount) + " archive(s))";
+                break;
+            case RealmPatchSync::State::Failed:
+                patch = "Realm patch download stopped: " + p.error;
+                isError = true;
+                break;
+            case RealmPatchSync::State::Idle:
+                break;
+        }
+        if (!patch.empty()) text += (text.empty() ? "" : "\n") + patch;
     }
-    if (text != realmPatchStatus_ && uiManager) {
-        realmPatchStatus_ = text;
+    if (text != connectionStatus_ && uiManager) {
+        connectionStatus_ = text;
         if (!text.empty()) uiManager->getCharacterScreen().setStatus(text, isError);
+        else uiManager->getCharacterScreen().setStatus("", false);
     }
 }
-
 } // namespace core
 } // namespace wowee

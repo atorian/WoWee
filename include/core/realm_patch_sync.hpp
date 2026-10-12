@@ -18,6 +18,7 @@
 
 #include "game/server_protocol.hpp"
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -125,6 +126,9 @@ private:
     std::FILE* file_ = nullptr;
     uint64_t received_ = 0;                 // bytes of the current archive held
     uint64_t completedBytes_ = 0;           // archives finished this run
+    // A transfer that goes quiet is asked for again from where it stopped.
+    std::chrono::steady_clock::time_point lastData_{};
+    int stallRetries_ = 0;
     uint64_t totalBytes_ = 0;
 };
 

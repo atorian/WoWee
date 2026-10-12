@@ -13,6 +13,9 @@ namespace fs = std::filesystem;
 namespace {
 
 // The locales ezLib recognises in a patch name, as its own pattern lists them.
+constexpr auto kStallTimeout = std::chrono::seconds(30);
+constexpr int kMaxStallRetries = 3;
+
 constexpr const char* kLocales[] = {"enUS", "enGB", "koKR", "frFR", "deDE",
                                     "zhCN", "zhTW", "esES", "esMX", "ruRU"};
 
@@ -203,8 +206,25 @@ void RealmPatchSync::update() {
     }
 
     if (state_ == State::Downloading) {
-        if (transport_.connected && !transport_.connected())
+        if (transport_.connected && !transport_.connected()) {
             fail("The login server closed the connection during the download; it resumes next login");
+            return;
+        }
+        if (std::chrono::steady_clock::now() - lastData_ > kStallTimeout) {
+            const auto& entry = plan_[queue_[queuePos_]];
+            if (stallRetries_ >= kMaxStallRetries) {
+                fail("The login server stopped sending " + entry.localName + "; it resumes next login");
+                return;
+            }
+            ++stallRetries_;
+            if (std::fflush(file_) != 0 || !transport_.request || !transport_.request(entry.patch.name, received_)) {
+                fail("Could not ask for the rest of " + entry.localName + "; it resumes next login");
+                return;
+            }
+            lastData_ = std::chrono::steady_clock::now();
+            LOG_WARNING("Realm patches: no data for ", kStallTimeout.count(), " s; asked for ",
+                        entry.patch.name, " again from ", received_, " (retry ", stallRetries_, ")");
+        }
         return;
     }
 
@@ -271,6 +291,8 @@ void RealmPatchSync::beginNext() {
         return;
     }
     state_ = State::Downloading;
+    lastData_ = std::chrono::steady_clock::now();
+    stallRetries_ = 0;
     LOG_INFO("Realm patch download: ", entry.patch.name, " (", entry.patch.size, " bytes, from ", held, ")");
 }
 
@@ -295,6 +317,8 @@ void RealmPatchSync::onData(const uint8_t* data, size_t size) {
         return;
     }
     received_ += size;
+    lastData_ = std::chrono::steady_clock::now();
+    if (size) stallRetries_ = 0;
     if (received_ < entry.patch.size) return;
 
     closeFile();

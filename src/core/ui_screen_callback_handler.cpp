@@ -8,6 +8,8 @@
 #include "game/world_packets.hpp"
 #include "pipeline/asset_manager.hpp"
 #include <cstdlib>
+#include <cstdio>
+#include <algorithm>
 #include <utility>
 
 namespace wowee { namespace core {
@@ -30,21 +32,14 @@ UIScreenCallbackHandler::UIScreenCallbackHandler(
 
 void UIScreenCallbackHandler::setupCallbacks() {
     gameHandler_.setOnFailure([this](const std::string& reason) {
-        // The original client answers REALM_LIST_REALM_NOT_FOUND by asking the
-        // login server for the realm list again and reconnecting, and Isengard
-        // admits that second attempt. Do the same, a bounded number of times.
-        if (reason.find("REALM_LIST_REALM_NOT_FOUND") != std::string::npos &&
-            realmNotFoundRetries_ < 2 && !lastRealmName_.empty() && authHandler_.isConnected()) {
-            ++realmNotFoundRetries_;
-            LOG_WARNING("World server did not recognise realm '", lastRealmName_,
-                        "'; refreshing the realm list and reconnecting (attempt ",
-                        realmNotFoundRetries_, ")");
-            gameHandler_.disconnect();
-            retryRealmName_ = lastRealmName_;
-            authHandler_.requestRealmList();
-            setState_(AppState::REALM_SELECTION);
+        // While connecting, a transient failure is retried rather than shown:
+        // Isengard answers a first attempt with REALM_LIST_REALM_NOT_FOUND, or
+        // with nothing at all, and admits the next one.
+        if (attempt_.active && isRetryable(reason)) {
+            scheduleRetry(reason);
             return;
         }
+        cancelAttempt();
         uiManager_.getAuthScreen().setStatus(reason, true, true);
         setState_(AppState::AUTHENTICATION);
     });
@@ -68,18 +63,24 @@ void UIScreenCallbackHandler::setupCallbacks() {
             connectToRealm_(realm.name, realm.address);
             return;
         }
-        LOG_WARNING("Realm '", name, "' is no longer in the realm list");
+        LOG_WARNING("Realm '", name, "' is no longer in the realm list; using its last address");
+        if (attempt_.active) connectToRealm_(name, attempt_.address);
     });
 
     // Realm selection callback
     uiManager_.getRealmScreen().setOnRealmSelected([this](const std::string& realmName, const std::string& realmAddress) {
-        realmNotFoundRetries_ = 0;
+        attempt_ = {};
+        attempt_.number = 1;
         connectToRealm_(realmName, realmAddress);
     });
 
     connectToRealm_ = [this](const std::string& realmName, const std::string& realmAddress) {
         LOG_INFO("Realm selected: ", realmName, " (", realmAddress, ")");
-        lastRealmName_ = realmName;
+        attempt_.active = true;
+        attempt_.realm = realmName;
+        attempt_.address = realmAddress;
+        attempt_.lastState = -1;
+        attempt_.phaseTime = 0.0f;
 
         // Parse realm address (format: "hostname:port")
         std::string host = realmAddress;
@@ -151,12 +152,17 @@ void UIScreenCallbackHandler::setupCallbacks() {
             setState_(AppState::CHARACTER_SELECTION);
         } else {
             LOG_ERROR("Failed to connect to world server");
+            if (attempt_.active) {
+                scheduleRetry("could not reach the world server at " + realmAddress);
+                return;
+            }
             setState_(AppState::AUTHENTICATION);
         }
     };
 
     // Realm screen back button - return to login
     uiManager_.getRealmScreen().setOnBack([this]() {
+        cancelAttempt();
         authHandler_.disconnect();
         uiManager_.getRealmScreen().reset();
         setState_(AppState::AUTHENTICATION);
@@ -219,6 +225,7 @@ void UIScreenCallbackHandler::setupCallbacks() {
     // "Back" button on character screen
     uiManager_.getCharacterScreen().setOnBack([this]() {
         // Disconnect from world server and reset UI state for fresh realm selection
+        cancelAttempt();
         gameHandler_.disconnect();
         uiManager_.getRealmScreen().resetForBack();
         uiManager_.getCharacterScreen().reset();
@@ -237,6 +244,143 @@ void UIScreenCallbackHandler::setupCallbacks() {
             gameHandler_.requestCharacterList();
         }
     });
+}
+
+bool UIScreenCallbackHandler::isRetryable(const std::string& reason) {
+    // Answers about the account or the client: another attempt gets the same
+    // one, and some of them count failed logins.
+    static const char* const kFinal[] = {
+        "BANNED", "SUSPENDED", "UNKNOWN_ACCOUNT", "INCORRECT_PASSWORD", "VERSION_MISMATCH",
+        "PARENTAL_CONTROL", "LOCKED_ENFORCED", "BILLING", "NO_TIME", "EZWoW",
+    };
+    for (const char* word : kFinal) {
+        if (reason.find(word) != std::string::npos) return false;
+    }
+    return true;
+}
+
+void UIScreenCallbackHandler::cancelAttempt() {
+    attempt_ = {};
+    retryRealmName_.clear();
+    connectionStatus_.clear();
+}
+
+void UIScreenCallbackHandler::scheduleRetry(const std::string& why) {
+    if (!attempt_.active || attempt_.retryPending) return;
+    gameHandler_.disconnect();
+    attempt_.lastError = why;
+    if (attempt_.number >= kMaxAttempts) {
+        const std::string message = "Could not connect to " + attempt_.realm + " after " +
+                                    std::to_string(kMaxAttempts) + " attempts: " + why;
+        LOG_ERROR(message);
+        cancelAttempt();
+        uiManager_.getAuthScreen().setStatus(message, true, true);
+        setState_(AppState::AUTHENTICATION);
+        return;
+    }
+    // A little longer each time, so a server that is restarting gets room.
+    attempt_.retryPending = true;
+    attempt_.retryIn = static_cast<float>(attempt_.number);
+    LOG_WARNING("Connecting to ", attempt_.realm, " failed (", why, "); attempt ",
+                attempt_.number + 1, " of ", kMaxAttempts, " in ", attempt_.retryIn, " s");
+}
+
+void UIScreenCallbackHandler::startRetry() {
+    attempt_.retryPending = false;
+    ++attempt_.number;
+    attempt_.lastState = -1;
+    attempt_.phaseTime = 0.0f;
+    // Ask for the realm list again first, as the original client does: the
+    // realm's address can change between attempts.
+    if (authHandler_.isConnected()) {
+        retryRealmName_ = attempt_.realm;
+        authHandler_.requestRealmList();
+        return;
+    }
+    connectToRealm_(attempt_.realm, attempt_.address);
+}
+
+void UIScreenCallbackHandler::update(float deltaTime) {
+    if (!attempt_.active) return;
+    const std::string of = attempt_.number > 1
+        ? " (attempt " + std::to_string(attempt_.number) + " of " + std::to_string(kMaxAttempts) + ")"
+        : std::string();
+
+    if (attempt_.retryPending) {
+        attempt_.retryIn -= deltaTime;
+        char wait[32];
+        std::snprintf(wait, sizeof(wait), "%d", static_cast<int>(std::max(0.0f, attempt_.retryIn) + 0.99f));
+        connectionStatus_ = "Could not connect to " + attempt_.realm + ": " + attempt_.lastError +
+                            ". Trying again in " + wait + " s (attempt " +
+                            std::to_string(attempt_.number + 1) + " of " +
+                            std::to_string(kMaxAttempts) + ")...";
+        if (attempt_.retryIn <= 0.0f) startRetry();
+        return;
+    }
+    if (!retryRealmName_.empty()) {
+        // Waiting for the refreshed realm list.
+        attempt_.phaseTime += deltaTime;
+        connectionStatus_ = "Asking the login server where " + attempt_.realm + " is" + of + "...";
+        if (attempt_.phaseTime > 6.0f) {
+            // No list came back; use the address already known.
+            retryRealmName_.clear();
+            connectToRealm_(attempt_.realm, attempt_.address);
+        }
+        return;
+    }
+
+    using game::WorldState;
+    const WorldState state = gameHandler_.getState();
+    if (static_cast<int>(state) != attempt_.lastState) {
+        attempt_.lastState = static_cast<int>(state);
+        attempt_.phaseTime = 0.0f;
+    } else {
+        attempt_.phaseTime += deltaTime;
+    }
+    const int seconds = static_cast<int>(attempt_.phaseTime);
+
+    switch (state) {
+        case WorldState::CHAR_LIST_RECEIVED:
+        case WorldState::ENTERING_WORLD:
+        case WorldState::IN_WORLD:
+            if (attempt_.number > 1) {
+                LOG_INFO("Connected to ", attempt_.realm, " on attempt ", attempt_.number);
+            }
+            attempt_ = {};
+            connectionStatus_.clear();
+            return;
+        case WorldState::CONNECTING:
+        case WorldState::CONNECTED:
+            connectionStatus_ = "Connecting to " + attempt_.realm + of + "...";
+            // The server greets a connection within a fraction of a second;
+            // one it has not greeted in this long it never will.
+            if (attempt_.phaseTime > 6.0f) scheduleRetry("the world server did not answer");
+            return;
+        case WorldState::CHALLENGE_RECEIVED:
+            connectionStatus_ = "Signing in to " + attempt_.realm + of + "...";
+            if (attempt_.phaseTime > 6.0f) scheduleRetry("the world server did not answer");
+            return;
+        case WorldState::AUTH_SENT:
+            // No deadline: the server may be holding this account in its queue.
+            connectionStatus_ = attempt_.phaseTime < 5.0f
+                ? "Signing in to " + attempt_.realm + of + "..."
+                : "Waiting for " + attempt_.realm + " to let this account in (" +
+                      std::to_string(seconds) + " s)" + of + "...";
+            return;
+        case WorldState::AUTHENTICATED:
+        case WorldState::READY:
+        case WorldState::CHAR_LIST_REQUESTED:
+            connectionStatus_ = attempt_.phaseTime < 3.0f
+                ? std::string("Signed in. Loading characters...")
+                : "Signed in. The server is checking the client before listing characters (" +
+                      std::to_string(seconds) + " s)...";
+            if (attempt_.phaseTime > 60.0f) scheduleRetry("no character list after a minute");
+            return;
+        case WorldState::DISCONNECTED:
+        case WorldState::FAILED:
+            scheduleRetry("the world server closed the connection");
+            return;
+    }
 }
 
 }} // namespace wowee::core
