@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <array>
 #include <cstdint>
 
 namespace wowee {
@@ -181,6 +182,10 @@ private:
     // Reprojection state.
     glm::mat4 prevViewProj_{1.0f};
     glm::vec3 prevCameraPos_{0.0f};
+    /// Last frame's corner rays, to tell whether the view has moved since.
+    std::array<glm::vec3, 4> prevRays_{};
+    /// Frames in a row the view has held still, for the history weight.
+    uint32_t framesStill_ = 0;
     bool historyValid_ = false;
     uint32_t frameCounter_ = 0;
     int lastRecordedFrame_ = -1;

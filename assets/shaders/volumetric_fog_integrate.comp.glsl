@@ -43,15 +43,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
 layout(set = 1, binding = 4) uniform sampler3D uCells;
 layout(set = 1, binding = 5, rgba16f) uniform writeonly image3D uIntegratedOut;
 
-float sliceDepth(float s) {
-    return volumetricParams.y * exp(s / (volumetricParams.w * volumetricParams.z));
-}
-
-vec3 rayAt(vec2 uv) {
-    vec3 top = mix(vol.rayCorner[0].xyz, vol.rayCorner[1].xyz, uv.x);
-    vec3 bottom = mix(vol.rayCorner[2].xyz, vol.rayCorner[3].xyz, uv.x);
-    return mix(top, bottom, uv.y);
-}
+#include "volumetric_fog_cells.glsli"
 
 void main() {
     ivec2 column = ivec2(gl_GlobalInvocationID.xy);

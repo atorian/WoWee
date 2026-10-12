@@ -1,0 +1,43 @@
+// Where the fog volume's cells sit in the world, and where a point lands in
+// the volume. Shared by the inject and integrate passes, and compiled as C++
+// by test_volumetric_fog_math. The including code declares volumetricParams
+// (x = on, y = near, z = 1 / ln(far / near), w = slices) and the
+// VolumeParams block as `vol`.
+
+// How far along the view slice coordinate s lies: 0 at the near edge, the
+// slice count at the far one, spaced so each slice is a fixed fraction deeper
+// than the one before.
+float sliceDepth(float s) {
+    return volumetricParams.y * exp(s / (volumetricParams.w * volumetricParams.z));
+}
+
+// The ray one yard deep along the view through screen position uv.
+vec3 rayAt(vec2 uv) {
+    vec3 top = mix(vec3(vol.rayCorner[0]), vec3(vol.rayCorner[1]), uv.x);
+    vec3 bottom = mix(vec3(vol.rayCorner[2]), vec3(vol.rayCorner[3]), uv.x);
+    return mix(top, bottom, uv.y);
+}
+
+// The world point at volume position `at`, counted in cells: columns and rows
+// across the screen, slices along the view.
+vec3 cellPoint(vec3 at) {
+    vec2 uv = vec2(at.x, at.y) / vec2(vol.dims.x, vol.dims.y);
+    return vec3(vol.rayOrigin) + rayAt(uv) * sliceDepth(at.z);
+}
+
+// Where a point lands in the volume of the view-projection that gave `clip`,
+// as texture coordinates: the screen position across, the slice along.
+vec3 volumeCoord(vec4 clip) {
+    vec2 uv = vec2(clip.x, clip.y) / clip.w * 0.5f + 0.5f;
+    float slice = log(max(clip.w, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
+    return vec3(uv, slice);
+}
+
+// A cell's centre as last frame's view saw it. The centre, because that is
+// where last frame's value for the cell is stored: looking up this frame's
+// jittered sample point instead read the history up to a cell off, and
+// filtered between neighbours, so every frame blurred the volume a little
+// more and moved it by a jitter that changes every frame.
+vec4 cellHistoryClip(ivec3 cell) {
+    return vol.prevViewProj * vec4(cellPoint(vec3(cell) + 0.5f), 1.0f);
+}
