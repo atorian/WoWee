@@ -32,6 +32,7 @@
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
+#include "rendering/rt_build_budget.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_range_allocator.hpp"
 #include "rendering/vk_context.hpp"
@@ -41,6 +42,10 @@ namespace wowee::rendering {
 
 class RtScene {
 public:
+    /// GPU timing mark recorded right after update(): its interval is the
+    /// scene update alone, which sizes the next frame's build share.
+    static constexpr const char* kGpuMarkLabel = "rt_scene";
+
     using MeshId = uint32_t;
     using InstanceId = uint32_t;
     static constexpr uint32_t kInvalid = ~0u;
@@ -165,6 +170,7 @@ private:
     bool createDescriptors();
     void ensurePoolCapacity(VkCommandBuffer cmd, GpuPool& pool, uint32_t needed);
     uint32_t poolAllocate(VkCommandBuffer cmd, GpuPool& pool, uint32_t count);
+    void observeLastBuild();
     void uploadPending(VkCommandBuffer cmd);
     void buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& meshes);
     void uploadFrame(VkCommandBuffer cmd, FrameResources& fr);
@@ -191,6 +197,14 @@ private:
     std::vector<Mesh> meshes_;
     std::vector<MeshId> freeMeshes_;
     std::vector<MeshId> pendingMeshes_;
+    // What each frame slot built, for the budget to set against its GPU time.
+    struct FrameBuild {
+        uint64_t triangles = 0;
+        uint32_t meshes = 0;
+        uint32_t largest = 0;
+    };
+    FrameBuild frameBuilds_[MAX_FRAMES_IN_FLIGHT];
+    RtBuildBudget buildBudget_;
     std::vector<Instance> instances_;
     std::vector<InstanceId> freeInstances_;
     uint32_t liveMeshes_ = 0;

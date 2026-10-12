@@ -441,6 +441,8 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     if (!s.wroteImages || s.boundDepth != depthImage_) writeSlotSets(slotIndex);
 
     scene_->update(cmd);
+    // Separates building the scene from tracing it in the GPU timings.
+    ctx_->gpuMark(cmd, RtScene::kGpuMarkLabel);
 
     if (imagesNeedInit_) {
         imagesNeedInit_ = false;

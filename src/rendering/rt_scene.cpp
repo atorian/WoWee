@@ -2,6 +2,7 @@
 
 #include "core/logger.hpp"
 
+#include <chrono>
 #include <algorithm>
 #include <cstring>
 
@@ -22,6 +23,11 @@ constexpr uint32_t kInitialNodes = 1u << 17;
 // million triangles a second on one core, so this keeps a frame's share to a
 // few milliseconds while the world streams in after the switch is turned on.
 constexpr uint64_t kBuildBudgetTriangles = 150000;
+// CPU time the per-frame share may take converting sources, whatever its
+// triangle budget (the software backend also builds a BVH here).
+constexpr int kBuildCpuBudgetMs = 4;
+// A scene update slower than this on the GPU is logged with what it built.
+constexpr double kSlowBuildMs = 8.0;
 
 uint32_t grownCapacity(uint32_t current, uint32_t needed) {
     uint32_t c = std::max(current, 1024u);
@@ -239,6 +245,13 @@ void RtScene::buildMesh(Mesh& m) {
         tri.v2 = glm::vec4(src.positions[src.indices[t * 3 + 2]], 0.0f);
         if (unpackRtSurface(surface).a < 1.0f) m.hasTranslucent = true;
     }
+    // Only the software tracer walks these nodes; the hardware backend builds
+    // its BLAS on the GPU. Building them anyway cost the main thread a
+    // binned-SAH pass over every triangle that streamed in.
+    if (backend_ != Backend::Software) {
+        m.nodeCount = 0;
+        return;
+    }
     RtBvh bvh = buildRtTriangleBvh(m.tris);
     m.nodeCount = static_cast<uint32_t>(bvh.nodes.size());
     m.nodes = std::move(bvh.nodes);
@@ -423,11 +436,21 @@ void RtScene::uploadPending(VkCommandBuffer cmd) {
         ensurePoolCapacity(cmd, nodePool_, kInitialNodes);
     }
 
-    // Build this frame's share from the sources.
+    // Build this frame's share from the sources: as many triangles as the
+    // measured cost lets the frame afford (RtBuildBudget), the fixed share
+    // where the GPU cannot time itself, and never more CPU time than a few
+    // milliseconds. The first mesh is always taken, however large, so the
+    // queue moves even on a frame with no room.
+    const uint64_t budget = ctx_->gpuTimingSupported() ? buildBudget_.budget() : kBuildBudgetTriangles;
+    const auto cpuStart = std::chrono::steady_clock::now();
     std::vector<MeshId> batch;
     uint64_t built = 0;
     size_t consumed = 0;
-    for (; consumed < pendingMeshes_.size() && built < kBuildBudgetTriangles; ++consumed) {
+    for (; consumed < pendingMeshes_.size() && built < budget; ++consumed) {
+        if (!batch.empty() &&
+            std::chrono::steady_clock::now() - cpuStart > std::chrono::milliseconds(kBuildCpuBudgetMs)) {
+            break;
+        }
         const MeshId id = pendingMeshes_[consumed];
         Mesh& m = meshes_[id];
         if (!m.live || !m.queued) continue;
@@ -435,6 +458,10 @@ void RtScene::uploadPending(VkCommandBuffer cmd) {
         buildMesh(m);
         built += m.triCount;
         batch.push_back(id);
+        FrameBuild& fb = frameBuilds_[ctx_->getCurrentFrame()];
+        fb.triangles += m.triCount;
+        ++fb.meshes;
+        fb.largest = std::max(fb.largest, m.triCount);
     }
     pendingMeshes_.erase(pendingMeshes_.begin(), pendingMeshes_.begin() + consumed);
     if (batch.empty()) return;
@@ -819,8 +846,33 @@ void RtScene::writeDescriptors(FrameResources& fr) {
                            0, nullptr);
 }
 
+void RtScene::observeLastBuild() {
+    // The timings VkContext holds are this frame slot's previous frame, read
+    // once its fence was waited on; so are frameBuilds_[slot].
+    const uint32_t slot = ctx_->getCurrentFrame();
+    FrameBuild& fb = frameBuilds_[slot];
+    if (ctx_->gpuTimingSupported()) {
+        double buildMs = -1.0, frameMs = 0.0;
+        for (const auto& [label, ms] : ctx_->gpuTimings()) {
+            frameMs += ms;
+            if (label && std::strcmp(label, kGpuMarkLabel) == 0) buildMs = ms;
+        }
+        if (buildMs >= 0.0) {
+            buildBudget_.observe({fb.triangles, buildMs, frameMs});
+            if (buildMs > kSlowBuildMs) {
+                LOG_WARNING("RtScene: scene update took ", buildMs, " ms of a ", frameMs,
+                            " ms GPU frame building ", fb.triangles, " triangles in ", fb.meshes,
+                            " meshes (largest ", fb.largest, "); next share ", buildBudget_.budget(),
+                            " triangles, ", pendingMeshes_.size(), " meshes queued");
+            }
+        }
+    }
+    fb = {};
+}
+
 void RtScene::update(VkCommandBuffer cmd) {
     if (!ctx_ || !active_) return;
+    observeLastBuild();
     uploadPending(cmd);
 
     if (meshTableDirty_) {

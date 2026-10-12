@@ -2726,3 +2726,12 @@ target_include_directories(test_warden_hmac SYSTEM PRIVATE
 target_link_libraries(test_warden_hmac PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
 add_test(NAME warden_hmac COMMAND test_warden_hmac)
 register_test_target(test_warden_hmac)
+
+# ── test_rt_build_budget ─────────────────────────────────────
+# How much ray-tracing geometry a frame builds, from measured GPU cost.
+add_executable(test_rt_build_budget test_rt_build_budget.cpp)
+target_include_directories(test_rt_build_budget PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+target_include_directories(test_rt_build_budget SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_rt_build_budget PRIVATE catch2_main)
+add_test(NAME rt_build_budget COMMAND test_rt_build_budget)
+register_test_target(test_rt_build_budget)
