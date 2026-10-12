@@ -17,6 +17,7 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_material.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
@@ -265,6 +266,7 @@ struct CharMaterialUBO {
     float normalMapStrength;
     int32_t hairMaterial;
     int32_t ignoreTextureAlpha;
+    float modulateNeutral;
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -284,9 +286,9 @@ CharacterRenderer::~CharacterRenderer() {
     shutdown();
 }
 
-/// Builds the five main-pass pipelines from an already-loaded shader pair.
+/// Builds the main-pass pipelines from an already-loaded shader pair.
 ///
-/// initialize() and recreatePipelines() both need exactly these five, blend
+/// initialize() and recreatePipelines() both need exactly these, blend
 /// state apart, and each described the vertex layout and the builder for
 /// itself. The layout is the part worth having once: the bone weights and
 /// indices are packed bytes, so a description that drifts from the struct
@@ -338,6 +340,8 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    modulatePipeline_ = buildCharPipeline(m2ModulateBlendState(false), false);
+    modulate2xPipeline_ = buildCharPipeline(m2ModulateBlendState(true), false);
     translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
 }
@@ -567,6 +571,8 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(modulatePipeline_);
+    destroyPipeline(modulate2xPipeline_);
     destroyPipeline(translucentPipeline_);
 
     destroy(device, pipelineLayout_);
@@ -2743,6 +2749,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
 
+    auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
+        switch (p) {
+            case CharacterBlendPipeline::Opaque: return opaquePipeline_;
+            case CharacterBlendPipeline::AlphaTest: return alphaTestPipeline_;
+            case CharacterBlendPipeline::Alpha: return alphaPipeline_;
+            case CharacterBlendPipeline::Translucent: return translucentPipeline_;
+            case CharacterBlendPipeline::Additive: return additivePipeline_;
+            case CharacterBlendPipeline::Modulate: return modulatePipeline_;
+            case CharacterBlendPipeline::Modulate2x: return modulate2xPipeline_;
+        }
+        return alphaPipeline_;
+    };
+
     // Start with opaque pipeline
     VkPipeline currentPipeline = opaquePipeline_;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
@@ -3040,73 +3059,18 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // material (blendMode 1) cuts out here.
                 const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
                     blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
-                // Enchant glows emit their own light; scene lighting must not tint them.
-                const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
-                                   instance.isEffectModel;
-
-                // Hair textures are authored as alpha-cut cards. If they use the
-                // translucent pipeline they form a soft shell around the head.
-                // M2Blend: 0 Opaque, 1 AlphaKey, 2 Alpha, 3 NoAlphaAdd, 4 Add,
-                // 5 Mod, 6 Mod2x, 7 BlendAdd. (6/Mod2x is kept on additive as it
-                // has been; the doodad path in M2Renderer already sends
-                // everything above 2 there.)
-                const bool additiveBlend = (blendMode == 3 || blendMode == 4 ||
-                                            blendMode == 6 || blendMode == 7);
-
-                VkPipeline desiredPipeline;
-                if (instance.isEffectModel) {
-                    // Enchant visuals are glow cards drawn on black. Their materials
-                    // declare Mod/alpha blending, which would composite that black
-                    // background as an opaque quad - force additive so only the light adds.
-                    desiredPipeline = additivePipeline_;
-                } else if (additiveBlend) {
-                    // Decided before the fade branch below, not after it. An
-                    // additive card fades by adding less light - matData.opacity
-                    // already scales what it contributes - so a partial alpha is
-                    // not a reason to divert it to the translucent pipeline, and
-                    // diverting it composites the card's black backing as black.
-                    //
-                    // The Darnassus wisps are the case: their glow alpha is an
-                    // animated pulse, so the diversion tripped on almost every
-                    // frame the pulse was not at full, and the cards showed as
-                    // black roughly half the time.
-                    desiredPipeline = additivePipeline_;
-                } else if (instance.opacity * batchColorAlpha < 0.999f) {
-                    // Whole-instance fade (ghost form, spawn fade-in): the opaque and
-                    // alpha-test pipelines have blending disabled, so the shader's
-                    // texColor.a * opacity output is discarded and only hair (via
-                    // alpha-to-coverage) ever looked translucent. Route every batch
-                    // through the blend pipeline; the per-batch alphaTest UBO flag
-                    // still handles cutout materials in the shader.
-                    //
-                    // Except that a batch which must not write depth still must
-                    // not, fading or otherwise. translucentPipeline_ writes
-                    // depth so a fading character's own solid parts keep sorting
-                    // against each other; alphaPipeline_ is the same blend with
-                    // the depth write off. Sending a translucent card down the
-                    // writing one puts an invisible occluder in front of
-                    // whatever it covers, which is how the glue screens' cloud
-                    // and haze cards were punching a rectangle out of the
-                    // character standing behind them - the card's own materials
-                    // ask for no depth write (0x10) and the scenes animate their
-                    // alpha, so almost every frame took this branch.
-                    const bool noDepthWrite = (blendMode >= 2) || ((materialFlags & 0x10) != 0);
-                    desiredPipeline = noDepthWrite ? alphaPipeline_ : translucentPipeline_;
-                } else if (hairMaterial) {
-                    desiredPipeline = alphaTestPipeline_;
-                } else {
-                    // additiveBlend (3/4/6/7) is handled above; only the
-                    // non-additive modes reach here. 4/Add is the one that used
-                    // to fall through to the alpha pipeline, which composited a
-                    // glow card's black backing as an actual black quad - every
-                    // material on Wisp.m2 declares it.
-                    switch (blendMode) {
-                        case 0: desiredPipeline = opaquePipeline_; break;
-                        case 1: desiredPipeline = alphaTestPipeline_; break;
-                        case 2: desiredPipeline = alphaPipeline_; break;
-                        default: desiredPipeline = alphaPipeline_; break;
-                    }
-                }
+                const bool unlit = characterBatchUnlit(blendMode, materialFlags,
+                                                       instance.isEffectModel);
+                const CharacterBlendPipeline blendPipeline = characterBlendPipeline({
+                    .blendMode = blendMode,
+                    .materialFlags = materialFlags,
+                    .effectModel = instance.isEffectModel,
+                    .hairMaterial = hairMaterial,
+                    .opacity = instance.opacity * batchColorAlpha,
+                });
+                const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
+                                      blendPipeline == CharacterBlendPipeline::Modulate2x;
+                VkPipeline desiredPipeline = pipelineFor(blendPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
@@ -3148,8 +3112,12 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
                                               !instance.isEffectModel) ? 1 : 0;
-                matData.colorKeyBlack = colorKeyBlack ? 1 : 0;
+                // A Mod layer's black darkens; keying it out would drop exactly that.
+                matData.colorKeyBlack = (colorKeyBlack && !modulate) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
+                matData.modulateNeutral =
+                    blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
+                    : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;
@@ -4469,6 +4437,8 @@ void CharacterRenderer::recreatePipelines() {
     destroy(device, alphaTestPipeline_);
     destroy(device, alphaPipeline_);
     destroy(device, additivePipeline_);
+    destroy(device, modulatePipeline_);
+    destroy(device, modulate2xPipeline_);
     destroy(device, translucentPipeline_);
 
     // --- Load shaders ---
@@ -4492,11 +4462,13 @@ void CharacterRenderer::recreatePipelines() {
     charFrag.destroy();
 
     if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
-        !translucentPipeline_) {
+        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_) {
         LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
                   " alphaTest=", (void*)alphaTestPipeline_,
                   " alpha=", (void*)alphaPipeline_,
                   " additive=", (void*)additivePipeline_,
+                  " modulate=", (void*)modulatePipeline_,
+                  " modulate2x=", (void*)modulate2xPipeline_,
                   " renderPass=", (void*)mainPass, " samples=", static_cast<int>(samples));
     } else {
         LOG_INFO("CharacterRenderer: pipelines recreated successfully (samples=",

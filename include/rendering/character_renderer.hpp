@@ -403,6 +403,8 @@ private:
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;
+    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
+    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
     // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
     // write kept on, so the faded model still self-occludes instead of showing
     // backfaces and under-armor skin through the body.
