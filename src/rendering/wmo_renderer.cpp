@@ -7,6 +7,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
+#include "rendering/wmo_batch_merge.hpp"
 #include "rendering/wmo_material_class.hpp"
 #include "rendering/wmo_group_containment.hpp"
 #include "rendering/normal_map.hpp"
@@ -668,47 +669,23 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             srcGroup = &model.groups[mergeGroupIndex];
         }
         ++mergeGroupIndex;
-        // Use pointer value as key for batching
-        struct BatchKey {
-            uintptr_t texPtr;
-            bool alphaTest;
-            bool unlit;
-            bool isWindow;
-            uint8_t emissiveLevel;
-            // Batches whose textures failed all point at the white one; each
-            // failed texture keeps a batch of its own so it can be given its
-            // texture alone when a retry succeeds.
-            uint32_t pendingTexture;
-            bool operator==(const BatchKey& o) const {
-                return texPtr == o.texPtr && alphaTest == o.alphaTest &&
-                       unlit == o.unlit && isWindow == o.isWindow &&
-                       emissiveLevel == o.emissiveLevel && pendingTexture == o.pendingTexture;
-            }
-        };
-        struct BatchKeyHash {
-            size_t operator()(const BatchKey& k) const {
-                return std::hash<uintptr_t>()(k.texPtr) ^
-                       (std::hash<bool>()(k.alphaTest) << 1) ^
-                       (std::hash<bool>()(k.unlit) << 2) ^
-                       (std::hash<bool>()(k.isWindow) << 3) ^
-                       (std::hash<uint8_t>()(k.emissiveLevel) << 4) ^
-                       (std::hash<uint32_t>()(k.pendingTexture) << 5);
-            }
-        };
-        std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
+        // What each batch draws with. Batches merge only when all of it
+        // matches; see rendering/wmo_batch_merge.hpp.
+        std::vector<WmoBatchState> batchStates;
+        std::vector<VkTexture*> batchTextures;
+        batchStates.reserve(groupRes.batches.size());
+        batchTextures.reserve(groupRes.batches.size());
 
         for (const auto& batch : groupRes.batches) {
             VkTexture* tex = whiteTexture_.get();
-            bool hasTexture = false;
             uint32_t pendingTexture = UINT32_MAX;
 
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t texIndex = modelData.materialTextureIndices[batch.materialId];
                 if (texIndex < modelData.textures.size()) {
                     tex = modelData.textures[texIndex];
-                    hasTexture = (tex != nullptr && tex != whiteTexture_.get());
                     if (!tex) tex = whiteTexture_.get();
-                    if (!hasTexture && texIndex < modelData.textureNames.size() &&
+                    if (tex == whiteTexture_.get() && texIndex < modelData.textureNames.size() &&
                         !modelData.textureNames[texIndex].empty()) {
                         pendingTexture = texIndex;
                     }
@@ -723,11 +700,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                             modelData.materialTextureIndices.size(), " - white fallback");
             }
 
-            bool alphaTest = false;
             uint32_t blendMode = 0;
             if (batch.materialId < modelData.materialBlendModes.size()) {
                 blendMode = modelData.materialBlendModes[batch.materialId];
-                alphaTest = (blendMode == 1);
             }
 
             bool unlit = false;
@@ -805,36 +780,50 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
-            BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isWindow = isWindow, .emissiveLevel = emissiveLevel,
-                          .pendingTexture = pendingTexture };
-            auto& mb = batchMap[key];
-            if (mb.draws.empty()) {
-                mb.texture = tex;
-                mb.pendingTextureIndex = pendingTexture;
-                mb.hasTexture = hasTexture;
-                mb.alphaTest = alphaTest;
-                mb.unlit = unlit;
-                mb.isTransparent = (blendMode >= 2);
-                mb.isWindow = isWindow;
-                mb.isLava = isLava;
-                mb.emissiveLevel = emissiveLevel;
-                mb.clothTop = clothTop;
-                mb.clothDrop = clothDrop;
-                mb.clothCentreX = clothCx;
-                mb.clothCentreY = clothCy;
-                if (hasTexture) attachNormalHeightMap(mb);
+            batchStates.push_back({ .texture = tex, .blendMode = blendMode, .unlit = unlit,
+                                    .isWindow = isWindow, .isLava = isLava,
+                                    .emissiveLevel = emissiveLevel,
+                                    .clothTop = clothTop, .clothDrop = clothDrop,
+                                    .clothCentreX = clothCx, .clothCentreY = clothCy,
+                                    .pendingTexture = pendingTexture });
+            batchTextures.push_back(tex);
+        }
+
+        std::vector<GroupResources::MergedBatch> merged;
+        for (const auto& members : groupWmoBatches(batchStates)) {
+            const WmoBatchState& state = batchStates[members.front()];
+            VkTexture* tex = batchTextures[members.front()];
+            GroupResources::MergedBatch mb;
+            mb.texture = tex;
+            mb.pendingTextureIndex = state.pendingTexture;
+            mb.hasTexture = tex != whiteTexture_.get();
+            mb.alphaTest = state.blendMode == 1;
+            mb.unlit = state.unlit;
+            mb.isTransparent = state.blendMode >= 2;
+            mb.isWindow = state.isWindow;
+            mb.isLava = state.isLava;
+            mb.emissiveLevel = state.emissiveLevel;
+            mb.clothTop = state.clothTop;
+            mb.clothDrop = state.clothDrop;
+            mb.clothCentreX = state.clothCentreX;
+            mb.clothCentreY = state.clothCentreY;
+            if (mb.hasTexture) {
+                attachNormalHeightMap(mb);
             }
-            GroupResources::MergedBatch::DrawRange dr;
-            dr.firstIndex = batch.startIndex;
-            dr.indexCount = batch.indexCount;
-            mb.draws.push_back(dr);
+            for (size_t i : members) {
+                const auto& batch = groupRes.batches[i];
+                GroupResources::MergedBatch::DrawRange dr;
+                dr.firstIndex = batch.startIndex;
+                dr.indexCount = batch.indexCount;
+                mb.draws.push_back(dr);
+            }
+            merged.push_back(std::move(mb));
         }
 
         // Allocate descriptor sets and UBOs for each merged batch
-        groupRes.mergedBatches.reserve(batchMap.size());
+        groupRes.mergedBatches.reserve(merged.size());
         bool anyTextured = false;
-        for (auto& [key, mb] : batchMap) {
+        for (auto& mb : merged) {
             if (mb.hasTexture) anyTextured = true;
             createMergedBatchMaterial(modelData, groupRes, mb);
 
@@ -2073,6 +2062,12 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
     for (const auto& v : group.vertices) {
         resources.collisionVertices.push_back(v.position);
     }
+    if ((groupFlags & pipeline::kWMOGroupIndoor) && (groupFlags & pipeline::kWMOGroupHasVertexColors)) {
+        resources.collisionVertexColors.reserve(group.vertices.size());
+        for (const auto& v : group.vertices) {
+            resources.collisionVertexColors.push_back(glm::vec3(v.color));
+        }
+    }
     if (!group.triFlags.empty()) {
         // Store all triangles but tag each with MOPY flags for collision filtering
         resources.collisionIndices = group.indices;
@@ -2237,7 +2232,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.alphaTest = mb.alphaTest ? 1 : 0;
     matData.unlit = mb.unlit ? 1 : 0;
     matData.isInterior = isInterior ? 1 : 0;
-    matData.hasVertexColors = (group.groupFlags & 0x4) != 0 ? 1 : 0;
+    matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
     matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
     matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
@@ -4218,8 +4213,8 @@ uint32_t WMORenderer::gatherLavaLights(const glm::vec3& cameraPos,
 /// The pre-check is not redundant with the transform below it. Inverting the
 /// model matrix and multiplying is the expensive part, and a building whose
 /// own bounds contain the point usually has no *group* that does.
-bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
-                                    bool interiorOnly, uint32_t* outModelId) const {
+std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
+        float glX, float glY, float glZ, bool interiorOnly) const {
     const glm::vec3 queryMin(glX - 0.5f, glY - 0.5f, glZ - 0.5f);
     const glm::vec3 queryMax(glX + 0.5f, glY + 0.5f, glZ + 0.5f);
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
@@ -4249,12 +4244,19 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
             glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
         for (const auto& group : model.groups) {
             if (groupContainsPoint(group, localPos, interiorOnly)) {
-                if (outModelId) *outModelId = instance.modelId;
-                return true;
+                return GroupHolding{.model = &model, .instance = &instance, .group = &group,
+                                    .localPos = localPos};
             }
         }
     }
-    return false;
+    return std::nullopt;
+}
+
+bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
+                                    bool interiorOnly, uint32_t* outModelId) const {
+    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly);
+    if (holding && outModelId) *outModelId = holding->instance->modelId;
+    return holding.has_value();
 }
 
 bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outModelId) const {
@@ -4266,12 +4268,39 @@ bool WMORenderer::isInsideInteriorWMO(float glX, float glY, float glZ) const {
     return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, nullptr);
 }
 
-std::optional<glm::vec3> WMORenderer::interiorAmbientAt(float glX, float glY, float glZ) const {
+/// The vertex colour of the nearest surface straight below a model-space
+/// point in a group, when the group keeps vertex colours and has a surface
+/// there.
+template <typename Group>
+static std::optional<glm::vec3> floorColorBelow(const Group& group, const glm::vec3& localPos,
+                                                const glm::vec3& localDown) {
+    const auto& colors = group.collisionVertexColors;
+    if (colors.empty()) return std::nullopt;
+    if (!trianglesAlongRay(group, localPos, localDown, tl_triScratch)) return std::nullopt;
+
+    const auto& verts = group.collisionVertices;
+    const auto& indices = group.collisionIndices;
+    float nearest = std::numeric_limits<float>::max();
+    std::optional<glm::vec3> color;
+    for (uint32_t triStart : tl_triScratch) {
+        const uint16_t i0 = indices[triStart], i1 = indices[triStart + 1], i2 = indices[triStart + 2];
+        const float t = rayTriangleIntersect(localPos, localDown, verts[i0], verts[i1], verts[i2]);
+        if (t <= 0.0f || t >= nearest) continue;
+        nearest = t;
+        color = colorAtPoint(localPos + localDown * t, verts[i0], verts[i1], verts[i2],
+                             colors[i0], colors[i1], colors[i2]);
+    }
+    return color;
+}
+
+std::optional<InteriorLight> WMORenderer::interiorLightAt(float glX, float glY, float glZ) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
-    uint32_t modelId = 0;
-    if (!isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, &modelId)) return std::nullopt;
-    // isInsideWMOGroups only answers from a loaded model.
-    return loadedModels.at(modelId).wmoAmbientColor;
+    const auto holding = findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true);
+    if (!holding) return std::nullopt;
+    const glm::vec3 localDown =
+        glm::normalize(glm::vec3(holding->instance->invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    return unitInteriorLight(holding->model->wmoAmbientColor,
+                             floorColorBelow(*holding->group, holding->localPos, localDown));
 }
 
 float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {

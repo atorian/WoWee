@@ -2173,6 +2173,12 @@ wowee_add_test(test_light_headroom
 wowee_add_test(test_light_params_eval
     SOURCES test_light_params_eval.cpp)
 
+# ── test_camera_water_depth ──────────────────────────────────
+# Whether the water over the camera is the water it is in. The 400-unit
+# query found a lake over a dry cave and lit the cave as under water.
+wowee_add_test(test_camera_water_depth
+    SOURCES test_camera_water_depth.cpp)
+
 # ── test_interior_light ──────────────────────────────────────
 # The light of a model inside a WMO interior group. Doodads and characters
 # inside a WMO took the sun and the zone's LightParams instead of the
@@ -2432,6 +2438,14 @@ wowee_add_test(test_sun_direction
 # their own MODF records hold.
 wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_wmo_batch_merge ─────────────────────────────────────
+# Which WMO group batches draw as one. A merged batch is drawn with its first
+# batch's material, so opaque and blended materials on one texture, or two
+# banners with their own pivots, must stay apart.
+wowee_add_test(test_wmo_batch_merge
+    SOURCES test_wmo_batch_merge.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_wmo_group_path ──────────────────────────────────────

@@ -11,6 +11,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
+#include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/performance_hud.hpp"
 #include "rendering/water_renderer.hpp"
@@ -2113,7 +2114,7 @@ void Renderer::update(float deltaTime) {
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
         characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorAmbientAt(p.x, p.y, p.z);
+            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
         });
     }
 
@@ -3598,7 +3599,12 @@ std::optional<float> Renderer::cameraWaterDepth() const {
     const auto waterH = waterRenderer->getNearestWaterHeightAt(
         camPos.x, camPos.y, camPos.z, kUnderwaterReach);
     if (!waterH) return std::nullopt;
-    return *waterH - camPos.z;
+    // That reach also finds a lake over a dry cave; the ground tells the two
+    // apart. See camera_water_depth.hpp.
+    const auto groundH = terrainManager ? terrainManager->getHeightAt(camPos.x, camPos.y)
+                                        : std::nullopt;
+    const bool hole = terrainManager && terrainManager->isHoleAt(camPos.x, camPos.y);
+    return rendering::cameraWaterDepth(camPos.z, waterH, groundH, hole);
 }
 
 void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {

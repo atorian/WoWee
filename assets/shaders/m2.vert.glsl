@@ -51,7 +51,8 @@ struct InstanceData {
     float tintScale;
     float pad0;
     // See interior_light.glsli.
-    vec4 interiorLight;
+    vec4 interiorAmbient;
+    vec4 interiorDirect;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -73,8 +74,9 @@ layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec4 MaskUVs;
-layout(location = 9) flat out vec4 vInteriorLight;
-layout(location = 10) flat out float vTintScale;
+layout(location = 9) flat out vec4 vInteriorAmbient;
+layout(location = 10) flat out vec4 vInteriorDirect;
+layout(location = 11) flat out float vTintScale;
 
 #include "sphere_map.glsli"
 
@@ -326,7 +328,8 @@ void main() {
     vFadeAlpha = fade;
     vSkyMode = push.isFoliage < 0 ? 1 : 0;
     vHighlight = instanceData[instIdx].highlight;
-    vInteriorLight = instanceData[instIdx].interiorLight;
+    vInteriorAmbient = instanceData[instIdx].interiorAmbient;
+    vInteriorDirect = instanceData[instIdx].interiorDirect;
 
     gl_Position = projection * view * worldPos;
     // A sky model sits on the far plane whatever its radius, so the depth

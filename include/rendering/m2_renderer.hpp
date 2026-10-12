@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/collision_geometry.hpp"
+#include "rendering/interior_light.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 
@@ -343,9 +344,8 @@ struct M2Instance {
     bool cachedIsValid = false;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
     bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
-    /// rgb: the MOHD ambient of the WMO interior group the instance stands in;
-    /// w: 1 inside one, 0 outdoors. See interior_light.glsli.
-    glm::vec4 interiorLight{0.0f};
+    /// The light of the WMO interior group the instance stands in, if any.
+    InteriorLightGPU interiorLight;
     float cachedBoundRadius = 0.0f;
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
@@ -622,9 +622,9 @@ public:
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
     void setSkipCollision(uint32_t instanceId, bool skip);
     void setSkipWallCollision(uint32_t instanceId, bool skip);
-    /// Light the instance as standing inside a WMO interior group with the
-    /// MOHD ambient `wmoAmbient`, or as outdoors when it has no value.
-    void setInteriorLight(uint32_t instanceId, std::optional<glm::vec3> wmoAmbient);
+    /// Light the instance as standing inside a WMO interior group, or as
+    /// outdoors when `light` has no value.
+    void setInteriorLight(uint32_t instanceId, const std::optional<InteriorLight>& light);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */
@@ -902,14 +902,14 @@ private:
         int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
         float tintScale = 1.0f;    //  4 bytes @ offset 152 - a fire's flicker, per instance
         float pad0 = 0.0f;         //  4 bytes @ offset 156
-        glm::vec4 interiorLight{0.0f}; // 16 bytes @ offset 160 - M2Instance::interiorLight
+        InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 176 bytes a slot, so this costs 11 MB.
+    // buffers of 192 bytes a slot, so this costs 12 MB.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;

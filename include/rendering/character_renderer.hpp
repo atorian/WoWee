@@ -2,6 +2,7 @@
 
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/interior_light.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -108,10 +109,10 @@ public:
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
     /// Look up again, for each instance that has moved since it was last
-    /// looked up, the MOHD ambient of the WMO interior group it stands in.
-    /// `interiorAmbientAt` answers for a world position; no value is outdoors.
+    /// looked up, the light of the WMO interior group it stands in.
+    /// `interiorLightAt` answers for a world position; no value is outdoors.
     void updateInteriorLight(
-        const std::function<std::optional<glm::vec3>(const glm::vec3&)>& interiorAmbientAt);
+        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
@@ -318,9 +319,8 @@ private:
         bool hasOverrideModelMatrix = false;
         glm::mat4 overrideModelMatrix{1.0f};
 
-        /// rgb: the MOHD ambient of the WMO interior group the instance stands
-        /// in; w: 1 inside one, 0 outdoors. See interior_light.glsli.
-        glm::vec4 interiorLight{0.0f};
+        /// The light of the WMO interior group the instance stands in, if any.
+        InteriorLightGPU interiorLight;
         /// Where interiorLight was looked up, once it has been.
         std::optional<glm::vec3> interiorLightOrigin;
 
