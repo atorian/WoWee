@@ -1,5 +1,6 @@
 #include "core/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
+#include "rendering/interior_light.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/light_headroom.hpp"
@@ -381,17 +382,12 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                   [](const SkyboxLayer& a, const SkyboxLayer& b) { return a.weight > b.weight; });
     }
 
-    // Sample and blend lighting
+    // Sample and blend lighting. Indoors too: the sky and fog seen through a
+    // doorway are the outdoor ones, and applyInteriorLight below replaces only
+    // the light on the frame's surfaces.
     LightingParams newParams;
 
-    if (isIndoors_) {
-        // Indoor lighting: static ambient-heavy
-        newParams.ambientColor = glm::vec3(0.6f, 0.6f, 0.65f);
-        newParams.diffuseColor = glm::vec3(0.3f, 0.3f, 0.35f);
-        newParams.fogColor = glm::vec3(0.3f, 0.3f, 0.4f);
-        newParams.fogStart = 50.0f;
-        newParams.fogEnd = 300.0f;
-    } else if (!activeVolumes_.empty()) {
+    if (!activeVolumes_.empty()) {
         // Outdoor with DBC lighting - blend multiple volumes
         newParams = LightingParams::blendAccumulator();
         glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
@@ -459,7 +455,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    if (!isIndoors_) {
+    if (isIndoors_) {
+        applyInteriorLight(newParams, indoorAmbient_);
+    } else {
         applyZoneAmbienceOverride(zoneId, newParams);
     }
 

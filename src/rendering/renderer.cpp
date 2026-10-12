@@ -2113,6 +2113,13 @@ void Renderer::update(float deltaTime) {
 
     // Update lighting system
     if (lightingManager) {
+        // Lit by the building only inside one of its interior groups. Being
+        // inside any group is not enough: Stormwind's streets are exterior
+        // groups of the city's WMO, and so are porches, bridges and archways.
+        lightingManager->setIndoors(insideWmo
+            ? wmoRenderer->interiorAmbientAt(camPos.x, camPos.y, camPos.z)
+            : std::nullopt);
+
         const auto* gh = core::Application::getInstance().getGameHandler();
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
         float gameTime    = gh ? gh->getGameTime() : -1.0f;

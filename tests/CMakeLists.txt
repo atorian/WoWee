@@ -2143,6 +2143,15 @@ wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_interior_light ──────────────────────────────────────
+# The light inside a WMO interior group. LightingManager's indoor mode was
+# never switched on, so doodads and characters inside a WMO took the sun
+# and the zone's LightParams instead of the building's MOHD ambient.
+wowee_add_test(test_interior_light
+    SOURCES test_interior_light.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_m2_view_distance ────────────────────────────────────
 # How far one M2 instance draws. Three separate widenings - a size factor,
 # an animation factor and the game object floor - each pushed past the view

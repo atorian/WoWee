@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <glm/glm.hpp>
 
@@ -215,10 +216,14 @@ public:
      */
     [[nodiscard]] const LightingParams& getLightingParams() const { return currentParams_; }
 
-    /**
-     * Set whether player is indoors (disables outdoor lighting)
-     */
-    void setIndoors(bool indoors) { isIndoors_ = indoors; }
+    /// Whether the camera is inside a WMO interior group, given as that WMO's
+    /// MOHD ambient colour; no value is outdoors. Indoors the sky models fade
+    /// out, the zone ambience is not applied and the frame is lit by the
+    /// building rather than the sun - see applyInteriorLight.
+    void setIndoors(std::optional<glm::vec3> wmoAmbient) {
+        isIndoors_ = wmoAmbient.has_value();
+        indoorAmbient_ = wmoAmbient.value_or(glm::vec3(0.0f));
+    }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
     /// How far the distance fog is pulled toward the sky's horizon colour.
     /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
@@ -335,6 +340,7 @@ private:
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
+    glm::vec3 indoorAmbient_{0.0f};
     float fogSkyBlend_ = 0.7f;
     float fogStrength_ = 0.4f;
 

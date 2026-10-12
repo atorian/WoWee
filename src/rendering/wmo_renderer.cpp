@@ -8,6 +8,7 @@
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_material_class.hpp"
+#include "rendering/wmo_group_containment.hpp"
 #include "rendering/normal_map.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
@@ -3991,11 +3992,6 @@ void WMORenderer::updateActiveGroup(float glX, float glY, float glZ) {
 /// Five queries ask this before they look at an instance at all, and each had
 /// its own copy. The focus is what keeps a raycast from walking every building
 /// in the zone when the caller only cares about what is near the player.
-/// MOGP flag 0x2000: the group is indoors. It is what separates a
-/// building's inside from the porch and the roof, which are groups of the
-/// same model, and so what decides whether the sky is still drawn.
-constexpr uint32_t kWMOGroupIndoor = 0x2000;
-
 bool WMORenderer::outsideCollisionFocus(const WMOInstance& instance) const {
     return collisionFocus.excludes(instance.worldBoundsMin,
                                    instance.worldBoundsMax);
@@ -4101,10 +4097,7 @@ bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
         const glm::vec3 localPos =
             glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
         for (const auto& group : model.groups) {
-            if (interiorOnly && !(group.groupFlags & kWMOGroupIndoor)) continue;
-            if (localPos.x >= group.boundingBoxMin.x && localPos.x <= group.boundingBoxMax.x &&
-                localPos.y >= group.boundingBoxMin.y && localPos.y <= group.boundingBoxMax.y &&
-                localPos.z >= group.boundingBoxMin.z && localPos.z <= group.boundingBoxMax.z) {
+            if (groupContainsPoint(group, localPos, interiorOnly)) {
                 if (outModelId) *outModelId = instance.modelId;
                 return true;
             }
@@ -4120,6 +4113,14 @@ bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outMode
 
 bool WMORenderer::isInsideInteriorWMO(float glX, float glY, float glZ) const {
     return isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, nullptr);
+}
+
+std::optional<glm::vec3> WMORenderer::interiorAmbientAt(float glX, float glY, float glZ) const {
+    QueryTimer timer(&queryTimeMs, &queryCallCount);
+    uint32_t modelId = 0;
+    if (!isInsideWMOGroups(glX, glY, glZ, /*interiorOnly=*/true, &modelId)) return std::nullopt;
+    // isInsideWMOGroups only answers from a loaded model.
+    return loadedModels.at(modelId).wmoAmbientColor;
 }
 
 float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {
