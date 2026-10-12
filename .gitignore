@@ -6,6 +6,11 @@ build-android/
 build-android-deps/
 build-debug/
 build-sanitize/
+build-dev/
+# Personal presets beside the shared CMakePresets.json.
+CMakeUserPresets.json
+# ccache directory CI keeps in the workspace.
+.ccache/
 bin/
 lib/
 

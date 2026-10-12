@@ -56,6 +56,12 @@ def load_aliases(path: Path, canonical: set[str]) -> dict[str, str]:
 
 
 def write_file(path: Path, content: str) -> None:
+    # Only when the content changed. The build runs this on every build, and
+    # a rewrite with the same bytes still moves the mtime, which recompiled
+    # every file that includes the opcode headers - 308 of them - on a build
+    # with nothing to do.
+    if path.exists() and path.read_text() == content:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 
