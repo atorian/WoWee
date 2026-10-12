@@ -252,8 +252,9 @@ private:
     /// carried different ones.
     void renderUnderwaterOverlay(VkCommandBuffer cmd);
     /// How far the camera is under terrain water: positive under the surface,
-    /// down to -2 just above it, nothing with no water there. WMO liquid is
-    /// left out, as the underwater overlay leaves it out.
+    /// down to -2 just above it, nothing with no water there or with the
+    /// camera in a cave below the ground under it. WMO liquid is left out, as
+    /// the underwater overlay leaves it out.
     [[nodiscard]] std::optional<float> cameraWaterDepth() const;
     void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
     void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
