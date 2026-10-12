@@ -333,6 +333,9 @@ struct M2Instance {
     bool cachedIsValid = false;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
     bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
+    /// rgb: the MOHD ambient of the WMO interior group the instance stands in;
+    /// w: 1 inside one, 0 outdoors. See interior_light.glsli.
+    glm::vec4 interiorLight{0.0f};
     float cachedBoundRadius = 0.0f;
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
@@ -411,7 +414,6 @@ struct M2MaterialUBO {
     int32_t unlit;
     int32_t blendMode;
     int32_t cullBackFaces; // authored single-sided transparent material
-    float interiorDarken;
     float specularIntensity;
     float emissiveBoost;
     // The batch's authored colour, from the M2's colour track, with any
@@ -612,6 +614,9 @@ public:
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
     void setSkipCollision(uint32_t instanceId, bool skip);
     void setSkipWallCollision(uint32_t instanceId, bool skip);
+    /// Light the instance as standing inside a WMO interior group with the
+    /// MOHD ambient `wmoAmbient`, or as outdoors when it has no value.
+    void setInteriorLight(uint32_t instanceId, std::optional<glm::vec3> wmoAmbient);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */
@@ -691,7 +696,6 @@ public:
     [[nodiscard]] float particleDensity() const { return particleDensity_; }
 
     void setSuppressBakedStars(bool suppress) { suppressBakedStars_ = suppress; }
-    void setInsideInterior(bool inside) { insideInterior = inside; }
 
     /// Drop the ground clutter from this pass, for the ablation's clutter
     /// phase. Clutter is drawn by the thousand and shares this renderer with
@@ -757,7 +761,6 @@ public:
 
 private:
     bool initialized_ = false;
-    bool insideInterior = false;
     pipeline::AssetManager* assetManager = nullptr;
 
     // Vulkan context
@@ -854,13 +857,14 @@ private:
         int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
         int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water)
+        glm::vec4 interiorLight{0.0f}; // 16 bytes @ offset 96 - M2Instance::interiorLight
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 96 bytes a slot, so this costs 6 MB rather than 3.
+    // buffers of 112 bytes a slot, so this costs 7 MB rather than 3.5.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;

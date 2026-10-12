@@ -55,7 +55,7 @@ struct LightingParams {
 void applyZoneAmbienceOverride(uint32_t zoneId, LightingParams& params);
 
 /** Resolve the sky clock shown for a zone without changing the world clock. */
-float resolveZoneVisualTimeHours(uint32_t zoneId, bool isIndoors, float worldTimeHours);
+float resolveZoneVisualTimeHours(uint32_t zoneId, float worldTimeHours);
 
 /**
  * Light set keyframe for time-of-day interpolation
@@ -215,9 +215,10 @@ public:
      */
     [[nodiscard]] const LightingParams& getLightingParams() const { return currentParams_; }
 
-    /**
-     * Set whether player is indoors (disables outdoor lighting)
-     */
+    /// Whether the camera is inside a WMO interior group. Indoors the sky
+    /// models fade out. The frame's light stays the outdoor one: it lights
+    /// what is seen through a door, and each model inside an interior group
+    /// takes its own light instead - see interior_light.glsli.
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
     /// How far the distance fog is pulled toward the sky's horizon colour.

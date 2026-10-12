@@ -61,6 +61,20 @@ namespace wowee {
 namespace rendering {
 
 namespace {
+// The main pass's push constants: character.vert reads the model matrix and
+// character.frag the interior light.
+struct CharacterPushConstants {
+    glm::mat4 model;
+    glm::vec4 interiorLight;
+};
+static_assert(sizeof(CharacterPushConstants) == 80, "matches Push in character.vert/frag");
+
+// How far an instance moves before the WMO is asked again where it stands.
+constexpr float kInteriorLightRequeryDistance = 0.5f;
+// The WMO is asked a yard above an instance's feet, as the camera controller
+// asks for the player: a group's floor and the bottom of its box coincide.
+constexpr float kInteriorLightProbeHeight = 1.0f;
+
 size_t approxTextureBytesWithMips(int w, int h) {
     if (w <= 0 || h <= 0) return 0;
     size_t base = static_cast<size_t>(w) * static_cast<size_t>(h) * 4ull;
@@ -439,13 +453,13 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 
     // --- Pipeline layout ---
     // set 0 = perFrame, set 1 = material, set 2 = bones
-    // Push constant: mat4 model = 64 bytes
+    // Push constants: CharacterPushConstants
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_};
         VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pushRange.offset = 0;
-        pushRange.size = 64; // mat4
+        pushRange.size = sizeof(CharacterPushConstants);
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 3;
@@ -2770,12 +2784,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (instance.opacity <= 0.0f) continue;
 
         // Set model matrix (use override for weapon instances)
-        glm::mat4 modelMat = instance.hasOverrideModelMatrix
-            ? instance.overrideModelMatrix
-            : getModelMatrix(instance);
-
-        // Push model matrix
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &modelMat);
+        const CharacterPushConstants push{
+            .model = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                     : getModelMatrix(instance),
+            .interiorLight = instance.interiorLight,
+        };
+        vkCmdPushConstants(cmd, pipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
 
         // Upload bone matrices to SSBO
         int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
@@ -3720,6 +3736,25 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
     model = glm::scale(model, glm::vec3(instance.scale));
 
     return model;
+}
+
+void CharacterRenderer::updateInteriorLight(
+        const std::function<std::optional<glm::vec3>(const glm::vec3&)>& interiorAmbientAt) {
+    for (auto& [id, instance] : instances) {
+        // A weapon's position stays where it was created; it is carried by
+        // the matrix its parent's bone gives it.
+        const glm::vec3 origin = instance.hasOverrideModelMatrix
+            ? glm::vec3(instance.overrideModelMatrix[3])
+            : instance.position;
+        if (instance.interiorLightOrigin &&
+            glm::distance(*instance.interiorLightOrigin, origin) < kInteriorLightRequeryDistance) {
+            continue;
+        }
+        instance.interiorLightOrigin = origin;
+        const auto ambient =
+            interiorAmbientAt(origin + glm::vec3(0.0f, 0.0f, kInteriorLightProbeHeight));
+        instance.interiorLight = ambient ? glm::vec4(*ambient, 1.0f) : glm::vec4(0.0f);
+    }
 }
 
 void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
