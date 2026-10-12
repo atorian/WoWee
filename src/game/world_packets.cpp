@@ -347,7 +347,9 @@ bool AuthResponseParser::parse(network::Packet& packet, AuthResponseData& respon
     uint8_t resultCode = packet.readUInt8();
     response.result = static_cast<AuthResult>(resultCode);
 
-    LOG_INFO("Parsed SMSG_AUTH_RESPONSE: ", getAuthResultString(response.result));
+    LOG_INFO("Parsed SMSG_AUTH_RESPONSE: ", getAuthResultString(response.result),
+             " (code 0x", std::hex, static_cast<int>(resultCode), std::dec,
+             ", ", packet.getSize(), " bytes)");
 
     return true;
 }
@@ -400,6 +402,16 @@ const char* getAuthResultString(AuthResult result) {
             return "PARENTAL_CONTROL - Parental controls active";
         case AuthResult::LOCKED_ENFORCED:
             return "LOCKED_ENFORCED - Account is locked";
+        case AuthResult::REALM_LIST_IN_PROGRESS:
+            return "REALM_LIST_IN_PROGRESS - Realm list in progress";
+        case AuthResult::REALM_LIST_SUCCESS:
+            return "REALM_LIST_SUCCESS - Realm list success";
+        case AuthResult::REALM_LIST_FAILED:
+            return "REALM_LIST_FAILED - Realm list failed";
+        case AuthResult::REALM_LIST_INVALID:
+            return "REALM_LIST_INVALID - Realm list invalid";
+        case AuthResult::REALM_LIST_REALM_NOT_FOUND:
+            return "REALM_LIST_REALM_NOT_FOUND - The world server does not host this realm";
         default:
             return "UNKNOWN - Unknown result code";
     }

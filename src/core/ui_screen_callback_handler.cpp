@@ -8,6 +8,7 @@
 #include "game/world_packets.hpp"
 #include "pipeline/asset_manager.hpp"
 #include <cstdlib>
+#include <utility>
 
 namespace wowee { namespace core {
 
@@ -29,6 +30,21 @@ UIScreenCallbackHandler::UIScreenCallbackHandler(
 
 void UIScreenCallbackHandler::setupCallbacks() {
     gameHandler_.setOnFailure([this](const std::string& reason) {
+        // The original client answers REALM_LIST_REALM_NOT_FOUND by asking the
+        // login server for the realm list again and reconnecting, and Isengard
+        // admits that second attempt. Do the same, a bounded number of times.
+        if (reason.find("REALM_LIST_REALM_NOT_FOUND") != std::string::npos &&
+            realmNotFoundRetries_ < 2 && !lastRealmName_.empty() && authHandler_.isConnected()) {
+            ++realmNotFoundRetries_;
+            LOG_WARNING("World server did not recognise realm '", lastRealmName_,
+                        "'; refreshing the realm list and reconnecting (attempt ",
+                        realmNotFoundRetries_, ")");
+            gameHandler_.disconnect();
+            retryRealmName_ = lastRealmName_;
+            authHandler_.requestRealmList();
+            setState_(AppState::REALM_SELECTION);
+            return;
+        }
         uiManager_.getAuthScreen().setStatus(reason, true, true);
         setState_(AppState::AUTHENTICATION);
     });
@@ -43,9 +59,27 @@ void UIScreenCallbackHandler::setupCallbacks() {
         setState_(AppState::REALM_SELECTION);
     });
 
+    authHandler_.setOnRealmList([this](const std::vector<auth::Realm>& realms) {
+        if (retryRealmName_.empty()) return;
+        const std::string name = std::exchange(retryRealmName_, std::string());
+        for (const auto& realm : realms) {
+            if (realm.name != name) continue;
+            LOG_INFO("Realm list refreshed: '", name, "' is at ", realm.address);
+            connectToRealm_(realm.name, realm.address);
+            return;
+        }
+        LOG_WARNING("Realm '", name, "' is no longer in the realm list");
+    });
+
     // Realm selection callback
     uiManager_.getRealmScreen().setOnRealmSelected([this](const std::string& realmName, const std::string& realmAddress) {
+        realmNotFoundRetries_ = 0;
+        connectToRealm_(realmName, realmAddress);
+    });
+
+    connectToRealm_ = [this](const std::string& realmName, const std::string& realmAddress) {
         LOG_INFO("Realm selected: ", realmName, " (", realmAddress, ")");
+        lastRealmName_ = realmName;
 
         // Parse realm address (format: "hostname:port")
         std::string host = realmAddress;
@@ -119,7 +153,7 @@ void UIScreenCallbackHandler::setupCallbacks() {
             LOG_ERROR("Failed to connect to world server");
             setState_(AppState::AUTHENTICATION);
         }
-    });
+    };
 
     // Realm screen back button - return to login
     uiManager_.getRealmScreen().setOnBack([this]() {

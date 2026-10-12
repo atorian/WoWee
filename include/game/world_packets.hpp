@@ -115,7 +115,13 @@ enum class AuthResult : uint8_t {
     DB_BUSY = 0x1F,                 // DB busy
     SUSPENDED = 0x20,               // Suspended
     PARENTAL_CONTROL = 0x21,        // Parental control
-    LOCKED_ENFORCED = 0x22          // Account locked
+    LOCKED_ENFORCED = 0x22,         // Account locked
+    // Realm-list results, also sent in place of an auth result
+    REALM_LIST_IN_PROGRESS = 0x23,
+    REALM_LIST_SUCCESS = 0x24,
+    REALM_LIST_FAILED = 0x25,
+    REALM_LIST_INVALID = 0x26,
+    REALM_LIST_REALM_NOT_FOUND = 0x27  // this world server does not host the realm id sent
 };
 
 /**

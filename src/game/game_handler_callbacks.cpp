@@ -290,8 +290,10 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
     }
 
     if (!response.isSuccess()) {
+        char code[8];
+        std::snprintf(code, sizeof(code), "0x%02X", static_cast<unsigned>(response.result));
         std::string reason = std::string("Authentication failed: ") +
-                           getAuthResultString(response.result);
+                           getAuthResultString(response.result) + " (code " + code + ")";
         fail(reason);
         return;
     }

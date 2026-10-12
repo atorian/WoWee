@@ -41,6 +41,13 @@ private:
     SetStateFn setState_;
 
     std::string pendingCreatedCharacterName_;  // Auto-select after character creation
+
+    // Connects to a realm's world server; shared by the realm screen and the
+    // realm-not-found retry.
+    std::function<void(const std::string& name, const std::string& address)> connectToRealm_;
+    std::string lastRealmName_;   // the realm last connected to
+    std::string retryRealmName_;  // waiting for a refreshed realm list
+    int realmNotFoundRetries_ = 0;
     std::vector<uint8_t> authenticatedSessionKey_;
 };
 
