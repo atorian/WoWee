@@ -266,7 +266,13 @@ struct ServerExtension::Impl {
         pthread_sigmask(SIG_BLOCK, &mask, &old);
         const auto written = write(input, request.data(), request.size());
         if (written < 0 && errno == EPIPE && !sigismember(&old, SIGPIPE)) {
-            timespec instant{}; sigtimedwait(&mask, nullptr, &instant);
+            // sigtimedwait with a zero timeout would do, but macOS has none.
+            // A failed write raises SIGPIPE on this thread, so it is pending
+            // by now and sigwait returns at once.
+            sigset_t pending; sigemptyset(&pending);
+            if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE)) {
+                int signal = 0; sigwait(&mask, &signal);
+            }
         }
         pthread_sigmask(SIG_SETMASK, &old, nullptr);
         if (written != static_cast<ssize_t>(request.size())) throw std::runtime_error("Extension host stopped accepting requests");
