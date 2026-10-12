@@ -38,9 +38,11 @@ has a row in the schema, and the schema's own checks cover those.
 """
 
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from source_index import SourceIndex  # noqa: E402  (a sibling, not a package)
 
 ROOT = Path(__file__).resolve().parent.parent
 LOADER = ROOT / "src/ui/game_screen_minimap.cpp"
@@ -70,15 +72,13 @@ def main():
             continue
         fields.setdefault(key, member)
 
+    # Absolute, because this is not always run from the root: under
+    # sweep_guard the working directory is the build tree, where "src" does
+    # not exist - so every field found nothing and looked unread.
+    index = SourceIndex([ROOT / "src", ROOT / "include"], suffixes={".cpp", ".hpp"})
     unread = []
     for key, member in sorted(fields.items()):
-        found = subprocess.run(
-            # Absolute, because this is not always run from the root: under
-            # sweep_guard the working directory is the build tree, where "src"
-            # does not exist - so every field found nothing and looked unread.
-            ["grep", "-rn", "--include=*.cpp", "--include=*.hpp", "-w", member,
-             str(ROOT / "src"), str(ROOT / "include")],
-            capture_output=True, text=True).stdout.splitlines()
+        found = [line for _, _, line in index.lines_with_word(member)]
         # Three kinds of mention are not a use of the value.
         #
         # Its own declaration, which every field in a header has - without this
@@ -93,7 +93,7 @@ def main():
         # position is read out of the file and handed to setDPSMeterPos on the
         # next line, and excluding that whole file called it unread.
         declaration = re.compile(
-            r':\s*\d+:\s*(?:static\s+)?(?:const\s+)?'
+            r'^\s*(?:static\s+)?(?:const\s+)?'
             r'(?:float|int|bool|double|unsigned|std::\w+|ImVec2)\s+' + member + r'\s*[=;{]')
         readFromFile = re.compile(re.escape(member) + r'\s*=\s*(?:std::(?:sto[fid]|max|clamp)|\(|val\b)')
         writtenToFile = re.compile(r'out\s*<<')

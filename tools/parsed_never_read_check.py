@@ -141,7 +141,10 @@ def structs_and_accessors():
 
 
 def mentions(skip=None):
-    """(parser counts, everywhere-else counts) - the header is neither."""
+    """(parser, everywhere else): how many files in each mention a word.
+
+    Only whether a count is zero is ever asked. The header is neither.
+    """
     parser, other = collections.Counter(), collections.Counter()
     sources = list((ROOT / "src").rglob("*.cpp")) + list((ROOT / "include").rglob("*.hpp"))
     for p in sources:
@@ -150,8 +153,7 @@ def mentions(skip=None):
         # A name that appears only in a comment is not a read.
         s = re.sub(r"//[^\n]*|/\*.*?\*/", "", p.read_text(errors="ignore"), flags=re.S)
         tgt = parser if PARSER.search(str(p)) else other
-        for w in set(re.findall(r"\b\w+\b", s)):
-            tgt[w] += s.count(w)
+        tgt.update(set(re.findall(r"\b\w+\b", s)))
     return parser, other
 
 

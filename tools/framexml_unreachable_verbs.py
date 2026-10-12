@@ -48,8 +48,11 @@ nowhere else disappears with that panel, and nothing in the takeover machinery
 is watching for it.
 """
 import re
-import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from source_index import SourceIndex  # noqa: E402  (a sibling, not a package)
 
 # Resolved from this file, not written out: an absolute path to one
 # machine makes the sweep answer nothing anywhere else, silently.
@@ -81,21 +84,15 @@ for m in re.finditer(r"\b([a-z][A-Za-z0-9_]*)\s*\(", hdr):
         methods.add(name)
 
 
+SOURCES = SourceIndex([ROOT / "src/ui", ROOT / "src/addons"])
+
+
 def count(name: str, where: str) -> int:
     """Callers of name under a directory, excluding its own declaration."""
-    try:
-        out = subprocess.run(
-            ["grep", "-rn", f"{name}(", str(ROOT / where)],
-            capture_output=True, text=True).stdout
-    except Exception:
-        return 0
-    n = 0
-    for line in out.splitlines():
-        # A definition is not a call.
-        if re.search(rf"::\s*{re.escape(name)}\s*\(", line):
-            continue
-        n += 1
-    return n
+    definition = re.compile(rf"::\s*{re.escape(name)}\s*\(")
+    # A definition is not a call.
+    return sum(1 for _, _, line in SOURCES.lines_containing(f"{name}(", under=ROOT / where)
+               if not definition.search(line))
 
 
 # src/ui/chat/commands is reachable again, and not through a binding.
@@ -126,8 +123,6 @@ print(f"{bridged} reachable only as slash commands, which the SlashCmdList "
       f"bridge carries\n")
 print(f"{len(rows)} verbs this client's own windows can reach and FrameXML cannot:\n")
 for name, ui in sorted(rows, key=lambda r: -r[1]):
-    out = subprocess.run(
-        ["grep", "-rln", f"{name}(", str(ROOT / "src/ui")],
-        capture_output=True, text=True).stdout.split()
-    files = ", ".join(Path(f).name for f in out[:3])
+    out = sorted({path for path, _, _ in SOURCES.lines_containing(f"{name}(", under=ROOT / "src/ui")})
+    files = ", ".join(f.name for f in out[:3])
     print(f"  {name:<38} {ui:>3} call(s)  {files}")

@@ -15,13 +15,17 @@ count passes and is meant to be followed by lowering the ceiling here - a
 ratchet, not a snapshot. Where the honest answer is none, the ceiling is zero
 and lowering it is not possible.
 
-These run in about a minute together, which is why they are the ones wired
-into the build; the slower reports - element readiness, the unbound global
-scan, the ungated-draw walk - stay manual. The line here used to say six of
-them in under three seconds, and had said so for long enough that the count was
-out by a factor of five: a comment about how much a thing costs stops being
-true the moment someone adds to it, and this one is worth keeping honest
-because it is the argument for what belongs here.
+These are cheap enough to run on every ctest, which is why they are the ones
+wired into the build; the slower reports - element readiness, the unbound
+global scan, the ungated-draw walk - stay manual. Measured on 2026-10-12 on a
+checkout without the extracted interface, the server source or framexml_run,
+which skip about half of them: 21 seconds, down from 276 once seven sweeps
+stopped running a grep or a regex per name and read the tree once instead
+(tools/source_index.py). The line here has been wrong twice before - "six of
+them in under three seconds", then "about a minute" - because a comment about
+how much a thing costs stops being true the moment someone adds to it, and
+this one is worth keeping honest because it is the argument for what belongs
+here.
 """
 import argparse
 import pathlib
@@ -578,7 +582,7 @@ CHECKS = [
     # deleting the bridge is what makes it fail. Verified that way.
     # Verbs this client's own windows can reach and FrameXML cannot. The
     # question that found the slash-command registry, so it is worth running
-    # rather than remembering - 2.7s. Thirty-three, down from sixty-six as the
+    # rather than remembering - 0.5s. Thirty-three, down from sixty-six as the
     # windows that reached them were handed over, and all triaged in the tool:
     # callback wiring, the glue screen, the 3D world, five with a bound
     # FrameXML equivalent, and window state FrameXML replaces whole. Thirty-
