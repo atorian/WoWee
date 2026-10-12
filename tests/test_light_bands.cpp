@@ -125,6 +125,26 @@ TEST_CASE("every expansion declares the band fields where they are",
     }
 }
 
+TEST_CASE("every expansion reads Light.dbc's weather columns in file order",
+          "[light]") {
+    // The columns after the clear light are clear under water, storm, storm
+    // under water. Field 8 was read as rain and 9 as under water, so rain drew
+    // the under-water light and diving drew the storm.
+    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+        const std::string json =
+            wowee::test::slurp(std::string("Data/expansions/") + expansion +
+                  "/dbc_layouts.json");
+        INFO(expansion);
+        const size_t at = json.find("\"Light\": {");
+        REQUIRE(at != std::string::npos);
+        const std::string body = json.substr(at, json.find('}', at) - at);
+        CHECK(body.find("\"LightParamsID\": 7") != std::string::npos);
+        CHECK(body.find("\"LightParamsIDClearUnderwater\": 8") != std::string::npos);
+        CHECK(body.find("\"LightParamsIDStorm\": 9") != std::string::npos);
+        CHECK(body.find("\"LightParamsIDStormUnderwater\": 10") != std::string::npos);
+    }
+}
+
 TEST_CASE("fog distances are in the same unit as the light positions",
           "[light]") {
     // LightFloatBand channel 0 is the fog's far distance, stored in
