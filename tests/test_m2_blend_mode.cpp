@@ -109,9 +109,62 @@ TEST_CASE("opaque mount skin does not inherit atlas transparency", "[m2][mount]"
     CHECK(characterBatchNeedsAlphaTest(1, true, false, false));
     CHECK(characterBatchNeedsAlphaTest(0, true, true, false));
     CHECK_FALSE(characterBatchNeedsAlphaTest(2, true, false, false));
-    for (uint16_t mode : {3, 4, 6, 7}) {
+    for (uint16_t mode : {3, 4, 5, 6, 7}) {
+        INFO("blend mode " << mode);
         CHECK_FALSE(characterBatchNeedsAlphaTest(mode, false, false, false));
     }
+}
+
+using wowee::rendering::CharacterBatchBlendInputs;
+using wowee::rendering::CharacterBlendPipeline;
+using wowee::rendering::characterBatchUnlit;
+using wowee::rendering::characterBlendPipeline;
+
+TEST_CASE("a character's Mod and Mod2x layers multiply what is behind them",
+          "[m2][character]") {
+    // Mod2x was drawn additive and Mod with the alpha blend.
+    CHECK(characterBlendPipeline({.blendMode = 5}) == CharacterBlendPipeline::Modulate);
+    CHECK(characterBlendPipeline({.blendMode = 6}) == CharacterBlendPipeline::Modulate2x);
+}
+
+TEST_CASE("a fading character keeps its additive and Mod layers on their own blend",
+          "[m2][character]") {
+    // The fade is applied in the shader. On the alpha blend an additive card's
+    // black backing and a Mod layer's whole texture would be painted on.
+    CHECK(characterBlendPipeline({.blendMode = 4, .opacity = 0.5f}) ==
+          CharacterBlendPipeline::Additive);
+    CHECK(characterBlendPipeline({.blendMode = 5, .opacity = 0.5f}) ==
+          CharacterBlendPipeline::Modulate);
+    CHECK(characterBlendPipeline({.blendMode = 6, .opacity = 0.5f}) ==
+          CharacterBlendPipeline::Modulate2x);
+}
+
+TEST_CASE("a fading character's solid parts keep writing depth, its cards do not",
+          "[m2][character]") {
+    CHECK(characterBlendPipeline({.blendMode = 0, .opacity = 0.5f}) ==
+          CharacterBlendPipeline::Translucent);
+    // The glue screens' haze cards: opaque material, no-depth-write flag.
+    CHECK(characterBlendPipeline({.blendMode = 0, .materialFlags = 0x10, .opacity = 0.5f}) ==
+          CharacterBlendPipeline::Alpha);
+}
+
+TEST_CASE("an enchant's layers are added whatever blend their materials declare",
+          "[m2][character]") {
+    for (uint16_t mode : {0, 2, 5, 6}) {
+        INFO("blend mode " << mode);
+        CHECK(characterBlendPipeline({.blendMode = mode, .effectModel = true}) ==
+              CharacterBlendPipeline::Additive);
+    }
+}
+
+TEST_CASE("a character's Mod layers are lit unless their material says unlit",
+          "[m2][character]") {
+    CHECK_FALSE(characterBatchUnlit(5, 0, false));
+    CHECK_FALSE(characterBatchUnlit(6, 0, false));
+    CHECK(characterBatchUnlit(5, 0x01, false));
+    // Additive layers emit their own light.
+    CHECK(characterBatchUnlit(4, 0, false));
+    CHECK_FALSE(characterBatchUnlit(0, 0, false));
 }
 
 using wowee::rendering::M2BatchMaterialInputs;

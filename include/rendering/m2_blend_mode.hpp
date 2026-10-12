@@ -215,8 +215,94 @@ inline bool characterBatchNeedsAlphaTest(uint16_t mode, bool hasAlpha,
                                         bool hair, bool scene) {
     if (scene) return mode == M2_BLEND_ALPHA_KEY;
     if (hair || mode == M2_BLEND_ALPHA_KEY) return true;
-    const bool additive = mode == 3 || mode == 4 || mode == 6 || mode == 7;
-    return mode >= 2 && !hasAlpha && !additive;
+    const bool noSilhouette = mode == M2_BLEND_ADD || mode == M2_BLEND_ADD_ALPHA ||
+                              mode == M2_BLEND_MODULATE || mode == M2_BLEND_MODULATE2X ||
+                              mode == 7;
+    return mode >= 2 && !hasAlpha && !noSilhouette;
+}
+
+/// The pipelines a character, creature or attachment batch can be drawn on.
+enum class CharacterBlendPipeline : uint8_t {
+    Opaque,
+    AlphaTest,
+    Alpha,         ///< blended, no depth write
+    Translucent,   ///< blended, depth written: a fading character's solid parts
+    Additive,      ///< SRC_ALPHA, ONE
+    Modulate,
+    Modulate2x,
+};
+
+struct CharacterBatchBlendInputs {
+    uint16_t blendMode = M2_BLEND_OPAQUE;
+    uint16_t materialFlags = 0;
+    bool effectModel = false;   ///< an enchant visual
+    bool hairMaterial = false;
+    float opacity = 1.0f;       ///< instance fade times the batch's animated alpha
+};
+
+/// The pipeline a character batch draws on.
+///
+/// Mod (5) and Mod2x (6) multiply what is behind them. Mod2x was drawn
+/// additive, which brightens where it should darken below 0.5 and lighten
+/// above it, and Mod fell through to the alpha blend, which painted the
+/// texture over the surface instead of tinting it.
+inline CharacterBlendPipeline characterBlendPipeline(const CharacterBatchBlendInputs& in) {
+    // Enchant visuals are glow cards drawn on black. Their materials declare
+    // Mod/alpha blending, which would composite that black background as an
+    // opaque quad - force additive so only the light adds.
+    if (in.effectModel) return CharacterBlendPipeline::Additive;
+
+    // Decided before the fade below. An additive card fades by adding less
+    // light, and a modulated one by multiplying by something nearer its
+    // identity, both in the shader - so a partial alpha is no reason to divert
+    // either to the translucent pipeline, which composites the card's black
+    // backing as black. The Darnassus wisps are the case: their glow alpha is
+    // an animated pulse, and they showed as black about half the time. Add
+    // (4) is a mode that used to reach the alpha blend, which composited a
+    // glow card's black backing as a black quad: every material on Wisp.m2
+    // declares it.
+    switch (in.blendMode) {
+        case M2_BLEND_ADD:
+        case M2_BLEND_ADD_ALPHA:
+        case 7:
+            return CharacterBlendPipeline::Additive;
+        case M2_BLEND_MODULATE: return CharacterBlendPipeline::Modulate;
+        case M2_BLEND_MODULATE2X: return CharacterBlendPipeline::Modulate2x;
+        default: break;
+    }
+
+    if (in.opacity < 0.999f) {
+        // Whole-instance fade (ghost form, spawn fade-in): the opaque and
+        // alpha-test pipelines have blending disabled, so the fade only shows
+        // through a blend pipeline. A batch that must not write depth still
+        // must not while fading: the glue screens' cloud and haze cards ask
+        // for no depth write (0x10), animate their alpha, and punched a
+        // rectangle out of the character behind them through the writing one.
+        const bool noDepthWrite = in.blendMode >= M2_BLEND_ALPHA ||
+                                  (in.materialFlags & 0x10) != 0;
+        return noDepthWrite ? CharacterBlendPipeline::Alpha
+                            : CharacterBlendPipeline::Translucent;
+    }
+
+    // Hair textures are authored as alpha-cut cards. On the translucent
+    // pipeline they form a soft shell around the head.
+    if (in.hairMaterial) return CharacterBlendPipeline::AlphaTest;
+
+    switch (in.blendMode) {
+        case M2_BLEND_OPAQUE: return CharacterBlendPipeline::Opaque;
+        case M2_BLEND_ALPHA_KEY: return CharacterBlendPipeline::AlphaTest;
+        default: return CharacterBlendPipeline::Alpha;
+    }
+}
+
+/// Whether a character batch ignores scene lighting. Additive layers emit
+/// their own light and enchant glows must not be tinted by the scene. Mod and
+/// Mod2x follow their material's unlit flag, as they do on doodads; they were
+/// forced unlit along with every other mode above 2.
+inline bool characterBatchUnlit(uint16_t blendMode, uint16_t materialFlags, bool effectModel) {
+    if (effectModel || (materialFlags & 0x01) != 0) return true;
+    return blendMode >= M2_BLEND_ADD && blendMode != M2_BLEND_MODULATE &&
+           blendMode != M2_BLEND_MODULATE2X;
 }
 
 }  // namespace wowee::rendering
