@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <vector>
 #include <cstdint>
 #include <string>
@@ -49,6 +50,11 @@ public:
                            uint8_t patternLen, bool imageOnly,
                            uint32_t hintOffset = 0, bool hintOnly = false) const;
 
+    /** Abandon any code-pattern search in progress, and every later one.
+     *  The session it answers has ended; a search returns "not found" and
+     *  caches nothing. */
+    void requestCancel() const { cancel_.store(true, std::memory_order_relaxed); }
+
     /** Write a little-endian uint32 at the given virtual address in the PE image. */
     void writeLE32(uint32_t va, uint32_t value);
 
@@ -75,6 +81,7 @@ private:
     // Cache for searchCodePattern results to avoid repeated 5-second brute-force searches.
     // Key: hex string of seed(4)+hash(20)+patLen(1)+imageOnly(1) = 26 bytes.
     mutable std::unordered_map<std::string, bool> codePatternCache_;
+    mutable std::atomic<bool> cancel_{false};
 };
 
 } // namespace game

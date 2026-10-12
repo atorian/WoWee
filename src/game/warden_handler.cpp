@@ -178,8 +178,11 @@ void WardenHandler::reset() {
     wardenLoadedModule_.reset();
     wardenKnownModuleVerified_ = false;
     // A response still being built answers the session that just ended; sent
-    // on the next one it would go out under that session's keys.
+    // on the next one it would go out under that session's keys. Stop its
+    // code-pattern searches first: waiting them out held the main thread for
+    // most of a minute after a disconnect.
     if (wardenResponsePending_) {
+        if (wardenMemory_) wardenMemory_->requestCancel();
         wardenPendingEncrypted_.wait();
         wardenPendingEncrypted_ = {};
         wardenResponsePending_ = false;

@@ -2710,3 +2710,19 @@ target_link_libraries(test_realm_patch_sync PRIVATE catch2_main OpenSSL::SSL Ope
 wowee_test_link_glm(test_realm_patch_sync)
 add_test(NAME realm_patch_sync COMMAND test_realm_patch_sync)
 register_test_target(test_realm_patch_sync)
+
+# ── test_warden_hmac ─────────────────────────────────────────
+# The keyed-once HMAC-SHA1 used by the code-pattern search, against OpenSSL.
+add_executable(test_warden_hmac
+    test_warden_hmac.cpp
+)
+target_include_directories(test_warden_hmac PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}
+)
+target_include_directories(test_warden_hmac SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+)
+target_link_libraries(test_warden_hmac PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME warden_hmac COMMAND test_warden_hmac)
+register_test_target(test_warden_hmac)

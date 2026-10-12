@@ -2,7 +2,11 @@
 #include "game/warden_memory.hpp"
 #include "core/env.hpp"
 #include "core/logger.hpp"
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <fstream>
 #include <optional>
 #include <vector>
@@ -79,4 +83,43 @@ TEST_CASE("An explicit Warden integrity directory wins over the active extractio
     uint8_t result = 0;
     REQUIRE(memory.readMemory(0x4002A7, 1, &result));
     CHECK(result == 0x33);
+}
+
+// Hidden: `test_warden_memory [.bench]`, against a real WoW.exe (set
+// WOWEE_BENCH_WOW_EXE, default Data/expansions/wotlk/misc/WoW.exe). A full
+// code-pattern search must finish well inside the server's response window.
+TEST_CASE("code-pattern search over a real WoW.exe", "[.bench]") {
+    const char* env = std::getenv("WOWEE_BENCH_WOW_EXE");
+    const std::string exe = env && *env ? env : "Data/expansions/wotlk/misc/WoW.exe";
+    if (!fs::exists(exe)) SKIP("no WoW.exe at " << exe);
+    wowee::game::WardenMemory memory;
+    REQUIRE(memory.loadFromFile(exe));
+
+    std::ifstream in(exe, std::ios::binary);
+    std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Thirteen bytes from deep in the file's code, as a check would name them.
+    const size_t at = file.size() * 3 / 5;
+    std::vector<uint8_t> pattern(file.begin() + at, file.begin() + at + 13);
+    uint8_t seed[4] = {0x11, 0x22, 0x33, 0x44};
+    uint8_t hash[20];
+    unsigned size = 0;
+    HMAC(EVP_sha1(), seed, 4, pattern.data(), pattern.size(), hash, &size);
+
+    auto t0 = std::chrono::steady_clock::now();
+    const bool found = memory.searchCodePattern(seed, hash, 13, false);
+    auto t1 = std::chrono::steady_clock::now();
+    uint8_t absent[20] = {0xde, 0xad};
+    const bool none = memory.searchCodePattern(seed, absent, 13, false);
+    auto t2 = std::chrono::steady_clock::now();
+    WARN("found=" << found << " in " << std::chrono::duration<double>(t1 - t0).count()
+         << " s; absent=" << none << " in " << std::chrono::duration<double>(t2 - t1).count() << " s");
+    CHECK(found);
+    CHECK_FALSE(none);
+
+    // A cancelled memory answers at once and caches nothing.
+    memory.requestCancel();
+    uint8_t other[20] = {0xbe, 0xef};
+    auto t3 = std::chrono::steady_clock::now();
+    CHECK_FALSE(memory.searchCodePattern(seed, other, 13, false));
+    CHECK(std::chrono::steady_clock::now() - t3 < std::chrono::milliseconds(50));
 }
