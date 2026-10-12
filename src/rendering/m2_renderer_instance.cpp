@@ -1509,16 +1509,10 @@ void M2Renderer::recreatePipelines() {
     destroy(device, opaquePipeline_);
     destroy(device, cutoutPipeline_);
     destroy(device, alphaTestPipeline_);
-    destroy(device, alphaPipeline_);
-    destroy(device, noAlphaAddPipeline_);
-    destroy(device, additivePipeline_);
-    destroy(device, modulatePipeline_);
-    destroy(device, modulate2xPipeline_);
-    destroy(device, particlePipeline_);
-    destroy(device, particleAdditivePipeline_);
-    destroy(device, smokePipeline_);
-    destroy(device, ribbonPipeline_);
-    destroy(device, ribbonAdditivePipeline_);
+    destroyBlendedPipelines(scenePipes_);
+    // Rebuilt by the renderer once it has decided the water's pass again: the
+    // one these were built for may not survive the change that got us here.
+    setAfterWaterPass(VK_NULL_HANDLE, VK_SAMPLE_COUNT_1_BIT);
 
     // The same main-pass pipelines initialize() builds, built by the same
     // function. The layouts are untouched above, so it makes none.

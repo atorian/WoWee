@@ -1013,6 +1013,48 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     cmdPipelineBarrier2(cmd, dep);
 }
 
+namespace {
+
+// Push constants now carry per-batch data only; per-instance data is in instance SSBO.
+struct M2PushConstants {
+    int32_t texCoordSet;        // UV set index (0 or 1)
+    int32_t isFoliage;          // -1 = sky, 0 = none, 1 = wind foliage, 2 = ground clutter
+    int32_t instanceDataOffset; // Base index into instance SSBO for this draw group
+    float swayRefHeight;        // Model-space height the wind normalises against
+    float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
+    float plantHeight;          // The model's own height, for the player brush
+};
+
+// Where in its draw distance a doodad starts to fade out.
+constexpr float kFadeStartFraction = 0.75f;
+
+// Fill the sway half of the push constants for one model.
+//
+// Two modes, and the split is about who owns the idle motion. Ground clutter
+// plays a sequence of its own, so mode 2 asks the shader for the player
+// brush and no wind - two swings of one plant at two rates reads as a
+// glitch. Everything else the wind picks up has its animation disabled by
+// the classifier and gets mode 1, wind and brush both.
+//
+// The wind itself was written for trees: it normalised height against 20
+// yards and displaced by an absolute number of model units, so a one-yard
+// tuft travelled a fraction of a millimetre. Every model normalises against
+// its own height now, with an amplitude interpolated between the two ends
+// rather than switched at a threshold - a bush a foot taller than its
+// neighbour should not sway ten times less. Both ends reproduce the numbers
+// that were there: a 20-yard tree still throws 0.35 model units at the tip.
+void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
+    const M2Sway sway = m2SwayFor(sky, mdl.isHangingCloth, mdl.shadowWindFoliage,
+                                  mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
+                                  mdl.isStandingCloth);
+    pc.isFoliage = sway.mode;
+    pc.swayRefHeight = sway.refHeight;
+    pc.swayAmp = sway.amp;
+    pc.plantHeight = sway.plantHeight;
+}
+
+}  // namespace
+
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
     if (instances.empty() || !opaquePipeline_) {
         return;
@@ -1051,8 +1093,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     glowSprites_.clear();
 
     lastDrawCallCount = 0;
-    const float lavaAnimSeconds = std::chrono::duration<float>(
+    lavaAnimSeconds_ = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - kLavaAnimStart).count();
+    const float lavaAnimSeconds = lavaAnimSeconds_;
 
     // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
@@ -1124,7 +1167,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
     }
 
-    const float fadeStartFraction = 0.75f;
+    const float fadeStartFraction = kFadeStartFraction;
     const glm::vec3 camPos = camera.getPosition();
 
     // Where this pass's three milliseconds go.
@@ -1325,48 +1368,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     " visible of ", p.instances, " instances");
     };
 
-    uint32_t currentModelId = UINT32_MAX;
-    const M2ModelGPU* currentModel = nullptr;
-    bool currentModelValid = false;
-
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
-
-    // Push constants now carry per-batch data only; per-instance data is in instance SSBO.
-    struct M2PushConstants {
-        int32_t texCoordSet;        // UV set index (0 or 1)
-        int32_t isFoliage;          // -1 = sky, 0 = none, 1 = wind foliage, 2 = ground clutter
-        int32_t instanceDataOffset; // Base index into instance SSBO for this draw group
-        float swayRefHeight;        // Model-space height the wind normalises against
-        float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
-        float plantHeight;          // The model's own height, for the player brush
-    };
-
-    // Fill the sway half of the push constants for one model.
-    //
-    // Two modes, and the split is about who owns the idle motion. Ground clutter
-    // plays a sequence of its own, so mode 2 asks the shader for the player
-    // brush and no wind - two swings of one plant at two rates reads as a
-    // glitch. Everything else the wind picks up has its animation disabled by
-    // the classifier and gets mode 1, wind and brush both.
-    //
-    // The wind itself was written for trees: it normalised height against 20
-    // yards and displaced by an absolute number of model units, so a one-yard
-    // tuft travelled a fraction of a millimetre. Every model normalises against
-    // its own height now, with an amplitude interpolated between the two ends
-    // rather than switched at a threshold - a bush a foot taller than its
-    // neighbour should not sway ten times less. Both ends reproduce the numbers
-    // that were there: a 20-yard tree still throws 0.35 model units at the tip.
-    auto fillSway = [](M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
-        const M2Sway sway = m2SwayFor(sky, mdl.isHangingCloth, mdl.shadowWindFoliage,
-                                      mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
-                                      mdl.isStandingCloth);
-        pc.isFoliage = sway.mode;
-        pc.swayRefHeight = sway.refHeight;
-        pc.swayAmp = sway.amp;
-        pc.plantHeight = sway.plantHeight;
-    };
 
     auto appendInstancePortalGlow = [&](const M2Instance& instance, float distSq) {
         if (distSq >= 400.0f * 400.0f) return;
@@ -1843,7 +1847,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     VkPipeline desiredPipeline = drawState.forceCutout
                         ? cutoutPipeline_
                         : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
-                    if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = alphaPipeline_;
+                    if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
                     if (desiredPipeline != currentPipeline) {
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                         currentPipeline = desiredPipeline;
@@ -1875,6 +1879,45 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         }
     }
 
+    // With the water out of the scene pass, the blended half waits for it:
+    // drawn now, the water would be laid over it.
+    blendedPendingAfterWater_ = drawsBlendedAfterWater();
+    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet);
+
+    // How many of the sky's layers were actually drawn this frame.
+    //
+    // The instance-level report says DRAWN every frame, which is a different
+    // question: it counts instances that survived culling, not batches that
+    // reached a draw call. Every per-batch gate between the two is meant to be
+    // constant here - the material flags are static, the LOD is chosen by a
+    // distance that does not change for a dome centred on the camera, and the
+    // batch opacity is baked at load - so this number should never move. If it
+    // moves while the camera turns, the flicker is layers appearing and
+    // disappearing and one of those gates is not as constant as it reads.
+    if (skyMode_ && (skyDiagDrawsOpaque_ != skyDiagLastOpaque_ ||
+                     skyDiagDrawsTransparent_ != skyDiagLastTransparent_)) {
+        LOG_INFO("skyM2 draws: opaque=", skyDiagDrawsOpaque_,
+                 " transparent=", skyDiagDrawsTransparent_,
+                 " (was ", skyDiagLastOpaque_, "/", skyDiagLastTransparent_, ")");
+        skyDiagLastOpaque_ = skyDiagDrawsOpaque_;
+        skyDiagLastTransparent_ = skyDiagDrawsTransparent_;
+    }
+
+    if (m2Profile) {
+        const auto m2T3 = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        sayPhases({.cull = ms(m2T0, m2T1),
+                   .sort = ms(m2T1, m2T2),
+                   .record = ms(m2T2, m2T3),
+                   .visible = sortedVisible_.size(),
+                   .instances = instances.size()});
+    }
+}
+
+void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (!perFrameSet || instanceMapped_[vkCtx_->getCurrentFrame()] == nullptr) return;
     // =====================================================================
     // Pass 2: Transparent/additive batches - back-to-front per instance
     // =====================================================================
@@ -1884,11 +1927,32 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     std::sort(transparentVisible_.begin(), transparentVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
 
-    currentModelId = UINT32_MAX;
-    currentModel = nullptr;
-    currentModelValid = false;
-    currentPipeline = opaquePipeline_;
-    currentMaterialSet = VK_NULL_HANDLE;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
+    const float lavaAnimSeconds = lavaAnimSeconds_;
+    const float fadeStartFraction = kFadeStartFraction;
+
+    // The sets the opaque pass bound, again: this may be a different command
+    // buffer from the one it recorded into.
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    if (megaBoneSet_[frameIndex]) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 2, 1, &megaBoneSet_[frameIndex], 0, nullptr);
+    } else if (dummyBoneSet_) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 2, 1, &dummyBoneSet_, 0, nullptr);
+    }
+    if (instanceSet_[frameIndex]) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
+    }
+
+    uint32_t currentModelId = UINT32_MAX;
+    const M2ModelGPU* currentModel = nullptr;
+    bool currentModelValid = false;
+    VkPipeline currentPipeline = VK_NULL_HANDLE;
+    VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
 
     for (const auto& entry : transparentVisible_) {
         if (entry.index >= instances.size()) continue;
@@ -2081,7 +2145,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             const uint8_t drawBlendMode = batch.drawState.drawBlendMode;
             VkPipeline desiredPipeline = blendPipeline(m2BlendPipeline(drawBlendMode));
             // An opaque layer of a faded instance: blended by its fade.
-            if (instanceFaded && drawBlendMode <= 1) desiredPipeline = alphaPipeline_;
+            if (instanceFaded && drawBlendMode <= 1) desiredPipeline = blended().alpha;
             if (desiredPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                 currentPipeline = desiredPipeline;
@@ -2107,8 +2171,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     }
 
     // Render glow sprites as billboarded additive point lights
-    if (!glowSprites_.empty() && particleAdditivePipeline_ && glowVB_ && glowTexDescSet_) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleAdditivePipeline_);
+    if (!glowSprites_.empty() && blended().particleAdditive && glowVB_ && glowTexDescSet_) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blended().particleAdditive);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 particlePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2139,37 +2203,19 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_, &offset);
         vkCmdDraw(cmd, static_cast<uint32_t>(uploadCount), 1, 0, 0);
     }
+}
 
-    // How many of the sky's layers were actually drawn this frame.
-    //
-    // The instance-level report says DRAWN every frame, which is a different
-    // question: it counts instances that survived culling, not batches that
-    // reached a draw call. Every per-batch gate between the two is meant to be
-    // constant here - the material flags are static, the LOD is chosen by a
-    // distance that does not change for a dome centred on the camera, and the
-    // batch opacity is baked at load - so this number should never move. If it
-    // moves while the camera turns, the flicker is layers appearing and
-    // disappearing and one of those gates is not as constant as it reads.
-    if (skyMode_ && (skyDiagDrawsOpaque_ != skyDiagLastOpaque_ ||
-                     skyDiagDrawsTransparent_ != skyDiagLastTransparent_)) {
-        LOG_INFO("skyM2 draws: opaque=", skyDiagDrawsOpaque_,
-                 " transparent=", skyDiagDrawsTransparent_,
-                 " (was ", skyDiagLastOpaque_, "/", skyDiagLastTransparent_, ")");
-        skyDiagLastOpaque_ = skyDiagDrawsOpaque_;
-        skyDiagLastTransparent_ = skyDiagDrawsTransparent_;
-    }
-
-    if (m2Profile) {
-        const auto m2T3 = std::chrono::steady_clock::now();
-        const auto ms = [](auto a, auto b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-        sayPhases({.cull = ms(m2T0, m2T1),
-                   .sort = ms(m2T1, m2T2),
-                   .record = ms(m2T2, m2T3),
-                   .visible = sortedVisible_.size(),
-                   .instances = instances.size()});
-    }
+void M2Renderer::renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    // Only what render() culled and sorted this frame; a frame it skipped
+    // would otherwise replay the last one's lists.
+    if (!blendedPendingAfterWater_ || !drawsBlendedAfterWater()) return;
+    blendedPendingAfterWater_ = false;
+    drawingAfterWater_ = true;
+    recordTransparentPass(cmd, perFrameSet);
+    renderSmokeParticles(cmd, perFrameSet);
+    renderM2Particles(cmd, perFrameSet);
+    renderM2Ribbons(cmd, perFrameSet);
+    drawingAfterWater_ = false;
 }
 
 bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
