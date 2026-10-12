@@ -121,11 +121,14 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     };
     std::vector<Candidate> candidates;
 
-    for (const auto& instance : instances) {
+    // Only the instances whose model can light anything. Asking every
+    // instance in the world, every frame, was a cache miss apiece for a
+    // handful of lamps.
+    for (const size_t index : lightInstanceIndices_) {
+        if (index >= instances.size()) continue;
+        const auto& instance = instances[index];
         const M2ModelGPU* model = instance.cachedModel;
-        if (!model || (!model->isLanternLike && !model->isTorch &&
-                       !model->isBrazierOrFire && !model->isForge &&
-                       !model->isLavaModel)) continue;
+        if (!model || !model->canThrowLocalLight()) continue;
 
         if (model->isLavaModel) {
             const glm::vec3 worldPos = instance.cachedCullCenter;

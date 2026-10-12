@@ -179,6 +179,19 @@ private:
     std::string dataPath;
     std::string expansionDataPath_;  // e.g. "Data/expansions/wotlk"
     std::string overridePath_;       // e.g. "Data/override"
+    bool overrideDirExists_ = false; // probed once per data path
+
+    /// Whether a file is on disk, asked of the disk once per path.
+    ///
+    /// Every resolve used to stat the override folder twice - present or not
+    /// - and a path the manifest lacks a third time, and each texture load
+    /// probed for its sidecars on top. The assets do not change while the game
+    /// runs, but the questions repeat endlessly: every NPC and object spawned
+    /// asks after the same few hundred paths, on the main thread, from the
+    /// file system. clearCache forgets the answers.
+    [[nodiscard]] bool looseFileExists(const std::string& filesystemPath) const;
+    mutable std::shared_mutex existsMutex_;
+    mutable std::unordered_map<std::string, bool> existsCache_;
 
     // Base manifest (loaded from dataPath/manifest.json)
     AssetManifest manifest_;

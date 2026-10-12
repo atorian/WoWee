@@ -77,7 +77,8 @@ bool AssetManager::initialize(const std::string& dataPath_) {
         return false;
     }
 
-    if (std::filesystem::is_directory(overridePath_)) {
+    overrideDirExists_ = std::filesystem::is_directory(overridePath_);
+    if (overrideDirExists_) {
         LOG_INFO("Override directory found: ", overridePath_);
     }
 
@@ -104,6 +105,7 @@ bool AssetManager::switchDataPath(const std::string& newDataPath) {
     baseFallbackDataPath_.clear();
     dataPath = newDataPath;
     overridePath_ = dataPath + "/override";
+    overrideDirExists_ = std::filesystem::is_directory(overridePath_);
     initialized = true;
     LOG_INFO("Switched asset manager to: ", dataPath, " (",
              manifest_.getEntryCount(), " files indexed)");
@@ -164,11 +166,11 @@ void AssetManager::shutdown() {
 
 std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
     // Check override directory first (for HD upgrades, custom textures)
-    if (!overridePath_.empty()) {
+    if (overrideDirExists_) {
         const auto* entry = manifest_.lookup(normalizedPath);
         if (entry && !entry->filesystemPath.empty()) {
             std::string overrideFsPath = overridePath_ + "/" + entry->filesystemPath;
-            if (LooseFileReader::fileExists(overrideFsPath)) {
+            if (looseFileExists(overrideFsPath)) {
                 return overrideFsPath;
             }
         }
@@ -181,7 +183,7 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
         std::string overrideByPath = normalizedPath;
         std::replace(overrideByPath.begin(), overrideByPath.end(), '\\', '/');
         overrideByPath = overridePath_ + "/" + overrideByPath;
-        if (LooseFileReader::fileExists(overrideByPath)) {
+        if (looseFileExists(overrideByPath)) {
             return overrideByPath;
         }
     }
@@ -207,10 +209,24 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
     std::string looseCandidate = normalizedPath;
     std::replace(looseCandidate.begin(), looseCandidate.end(), '\\', '/');
     looseCandidate = dataPath + "/" + looseCandidate;
-    if (LooseFileReader::fileExists(looseCandidate)) {
+    if (looseFileExists(looseCandidate)) {
         return looseCandidate;
     }
     return {};
+}
+
+bool AssetManager::looseFileExists(const std::string& filesystemPath) const {
+    {
+        std::shared_lock<std::shared_mutex> lock(existsMutex_);
+        auto it = existsCache_.find(filesystemPath);
+        if (it != existsCache_.end()) return it->second;
+    }
+    // Probed outside the lock: two threads asking at once both stat the same
+    // file and agree, which is cheaper than serializing every probe.
+    const bool exists = LooseFileReader::fileExists(filesystemPath);
+    std::lock_guard<std::shared_mutex> lock(existsMutex_);
+    existsCache_.emplace(filesystemPath, exists);
+    return exists;
 }
 
 bool AssetManager::setBaseFallbackPath(const std::string& basePath,
@@ -354,7 +370,7 @@ std::string AssetManager::resolveSidecarPath(const std::string& normalizedPath,
     std::string fsPath = resolveFile(normalizedPath);
     if (!fsPath.empty() && fsPath.size() >= 4) {
         std::string candidate = fsPath.substr(0, fsPath.size() - 4) + extension;
-        if (LooseFileReader::fileExists(candidate)) return candidate;
+        if (looseFileExists(candidate)) return candidate;
     }
 
     // Fallback: probe well-known custom-zone texture roots so that sidecar-only
@@ -367,7 +383,7 @@ std::string AssetManager::resolveSidecarPath(const std::string& normalizedPath,
     const std::string tail = norm.substr(0, norm.size() - 4) + extension;
     for (const char* root : {"custom_zones/textures/", "output/textures/"}) {
         std::string p = std::string(root) + tail;
-        if (LooseFileReader::fileExists(p)) return p;
+        if (looseFileExists(p)) return p;
     }
     return {};
 }
@@ -769,6 +785,10 @@ void AssetManager::clearDBCCache() {
 }
 
 void AssetManager::clearCache() {
+    {
+        std::lock_guard<std::shared_mutex> existsLock(existsMutex_);
+        existsCache_.clear();
+    }
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     dbcCache.clear();
     fileCache.clear();

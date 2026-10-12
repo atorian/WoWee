@@ -520,6 +520,8 @@ static std::string cvarStorePath() {
     return core::getConfigRoot() + "/cvars.cfg";
 }
 
+static bool g_storedCVarsLoaded = false;
+
 /// Read the stored CVars back. Called once, before the interface loads,
 /// because a panel reads its checkbox out of the CVar as it is built and
 /// anything arriving later leaves the box disagreeing with the setting.
@@ -529,7 +531,13 @@ static std::string cvarStorePath() {
 /// box is ticked, the box writes equipmentManager, and the paperdoll reads that
 /// on VARIABLES_LOADED - so it came back off on every login, and so did every
 /// other option the player had set.
+///
+/// Read once per run, by whichever comes first: the interface being set up or
+/// the first game-side storedCVarValue. After that the store is the file - every
+/// write goes to both - so nothing ever needs to read it again.
 static void loadStoredCVars() {
+    if (g_storedCVarsLoaded) return;
+    g_storedCVarsLoaded = true;
     std::ifstream in(cvarStorePath());
     if (!in.is_open()) return;
     std::string line;
@@ -1723,23 +1731,15 @@ static void applyCVarSideEffects(lua_State* L, const std::string& key,
 /// above checks its service and would quietly do nothing that early - which is
 /// indistinguishable from the fault this exists to fix.
 std::string storedCVarValue(const std::string& key, const std::string& fallback) {
-    // The store first, for a call made after the interface is up; the file
-    // otherwise, which is the case this exists for. Reading the file twice
-    // costs nothing and keeps the two answers the same.
+    // The file is read into the store once, here or when the interface is
+    // set up. Reading it on every call that missed the store - and probing the
+    // config folder to find it - put the file system in the frame: the
+    // nameplates ask several of these per unit per frame, and in a town that
+    // was a tenth of the frame.
+    loadStoredCVars();
     std::string wanted = key;
     toLowerInPlace(wanted);
     if (auto it = cvarStore().find(wanted); it != cvarStore().end()) return it->second;
-
-    std::ifstream in(cvarStorePath());
-    if (!in.is_open()) return fallback;
-    std::string line;
-    while (std::getline(in, line)) {
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos || eq == 0) continue;
-        std::string k = line.substr(0, eq);
-        toLowerInPlace(k);
-        if (k == wanted) return line.substr(eq + 1);
-    }
     return fallback;
 }
 

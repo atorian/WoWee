@@ -208,6 +208,9 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     } else if (!mdlRef.particleEmitters.empty()) {
         particleOnlyInstanceIndices_.push_back(idx);
     }
+    if (mdlRef.canThrowLocalLight()) {
+        lightInstanceIndices_.push_back(idx);
+    }
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
@@ -311,6 +314,9 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         animatedInstanceIndices_.push_back(idx);
     } else if (!mdl2.particleEmitters.empty()) {
         particleOnlyInstanceIndices_.push_back(idx);
+    }
+    if (mdl2.canThrowLocalLight()) {
+        lightInstanceIndices_.push_back(idx);
     }
     instanceIndexById[instance.id] = idx;
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);

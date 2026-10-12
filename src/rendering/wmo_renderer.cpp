@@ -1227,9 +1227,10 @@ void WMORenderer::removeInstance(uint32_t instanceId) {
                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
     if (it != instances.end()) {
         if (m2Renderer_) {
-            for (const auto& doodad : it->doodads) {
-                m2Renderer_->removeInstance(doodad.m2InstanceId);
-            }
+            std::vector<uint32_t> doodadIds;
+            doodadIds.reserve(it->doodads.size());
+            for (const auto& doodad : it->doodads) doodadIds.push_back(doodad.m2InstanceId);
+            m2Renderer_->removeInstances(doodadIds);
         }
         instances.erase(it);
         rebuildSpatialIndex();
@@ -1244,14 +1245,19 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
     std::unordered_set<uint32_t> toRemove(instanceIds.begin(), instanceIds.end());
     if (m2Renderer_) {
+        // In one batch: each single removal rescans every M2 instance in the
+        // world to rebuild its index lists, and a town's WMOs carry hundreds
+        // of doodads between them.
+        std::vector<uint32_t> doodadIds;
         for (const auto& inst : instances) {
             if (toRemove.find(inst.id) == toRemove.end()) {
                 continue;
             }
             for (const auto& doodad : inst.doodads) {
-                m2Renderer_->removeInstance(doodad.m2InstanceId);
+                doodadIds.push_back(doodad.m2InstanceId);
             }
         }
+        m2Renderer_->removeInstances(doodadIds);
     }
 
     const size_t oldSize = instances.size();
@@ -1270,11 +1276,11 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
 void WMORenderer::clearInstances() {
     if (m2Renderer_) {
+        std::vector<uint32_t> doodadIds;
         for (const auto& inst : instances) {
-            for (const auto& doodad : inst.doodads) {
-                m2Renderer_->removeInstance(doodad.m2InstanceId);
-            }
+            for (const auto& doodad : inst.doodads) doodadIds.push_back(doodad.m2InstanceId);
         }
+        m2Renderer_->removeInstances(doodadIds);
     }
     instances.clear();
     spatialGrid.clear();

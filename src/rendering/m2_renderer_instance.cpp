@@ -283,6 +283,10 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         instances.pop_back();
     }
 
+    rebuildInstanceIndexLists();
+}
+
+void M2Renderer::rebuildInstanceIndexLists() {
     // Rebuild the lightweight auxiliary index vectors (smoke, portal, etc.)
     // These are small vectors of indices that are rebuilt cheaply.
     smokeInstanceIndices_.clear();
@@ -290,6 +294,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     for (size_t i = 0; i < instances.size(); i++) {
         auto& ri = instances[i];
         if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
@@ -299,6 +304,8 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
             animatedInstanceIndices_.push_back(i);
         else if (ri.cachedHasParticleEmitters)
             particleOnlyInstanceIndices_.push_back(i);
+        if (ri.cachedModel && ri.cachedModel->canThrowLocalLight())
+            lightInstanceIndices_.push_back(i);
     }
 }
 
@@ -331,22 +338,68 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         return;
     }
 
-    std::unordered_set<uint32_t> toRemove(instanceIds.begin(), instanceIds.end());
-    const size_t oldSize = instances.size();
-    for (auto& inst : instances) {
-        if (toRemove.count(inst.id)) {
-            destroyInstanceBones(inst, /*defer=*/true);
-        }
-    }
-    instances.erase(std::remove_if(instances.begin(), instances.end(),
-                   [&toRemove](const M2Instance& inst) {
-                       return toRemove.find(inst.id) != toRemove.end();
-                   }),
-                   instances.end());
+    // A tile's doodads leave together, and this used to compact the array and
+    // then rebuild the whole spatial index - every grid cell, the id map and
+    // the dedup map, for every instance still in the world. That was the
+    // 70-130 ms hitch each tile unload cost while moving. Only what the
+    // leaving instances own is touched now: their cells, their dedup keys and
+    // the slots they vacate. The grid files ids, not indices, so a survivor
+    // moved into a vacated slot keeps its cells as they are.
+    std::unordered_set<uint32_t> toRemove;
+    toRemove.reserve(instanceIds.size());
+    std::unordered_set<GridCell, GridCellHash> touchedCells;
+    std::vector<size_t> holes;
+    holes.reserve(instanceIds.size());
+    for (uint32_t id : instanceIds) {
+        auto idxIt = instanceIndexById.find(id);
+        if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) continue;
+        if (!toRemove.insert(id).second) continue;
+        auto& inst = instances[idxIt->second];
+        holes.push_back(idxIt->second);
 
-    if (instances.size() != oldSize) {
-        rebuildSpatialIndex();
+        const GridCell minCell = toSpatialCell(inst.worldBoundsMin);
+        const GridCell maxCell = toSpatialCell(inst.worldBoundsMax);
+        for (int z = minCell.z; z <= maxCell.z; z++)
+            for (int y = minCell.y; y <= maxCell.y; y++)
+                for (int x = minCell.x; x <= maxCell.x; x++)
+                    touchedCells.insert(GridCell{.x = x, .y = y, .z = z});
+
+        if (!inst.cachedIsGroundDetail) {
+            DedupKey dk{.modelId = inst.modelId,
+                        .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
+                        .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
+                        .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
+            // Only drop the entry if it still names this instance.
+            auto dedupIt = instanceDedupMap_.find(dk);
+            if (dedupIt != instanceDedupMap_.end() && dedupIt->second == id) {
+                instanceDedupMap_.erase(dedupIt);
+            }
+        }
+        destroyInstanceBones(inst, /*defer=*/true);
+        instanceIndexById.erase(idxIt);
     }
+    if (holes.empty()) return;
+
+    for (const GridCell& cell : touchedCells) {
+        auto it = spatialGrid.find(cell);
+        if (it == spatialGrid.end()) continue;
+        std::erase_if(it->second, [&](uint32_t id) { return toRemove.count(id) != 0; });
+        if (it->second.empty()) spatialGrid.erase(it);
+    }
+
+    // Fill the holes from the back, highest first, so a slot being filled is
+    // never one still waiting to be emptied: everything past the highest
+    // remaining hole is a survivor.
+    std::sort(holes.begin(), holes.end(), std::greater<>());
+    for (size_t hole : holes) {
+        const size_t last = instances.size() - 1;
+        if (hole != last) {
+            instances[hole] = std::move(instances[last]);
+            instanceIndexById[instances[hole].id] = hole;
+        }
+        instances.pop_back();
+    }
+    rebuildInstanceIndexLists();
 }
 
 void M2Renderer::clear() {
@@ -442,6 +495,7 @@ void M2Renderer::clear() {
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
@@ -474,6 +528,7 @@ void M2Renderer::clearInstances() {
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
     smokeParticles.clear();
     smokeEmitAccum = 0.0f;
 }
@@ -498,6 +553,7 @@ void M2Renderer::rebuildSpatialIndex() {
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
+    lightInstanceIndices_.clear();
 
     for (size_t i = 0; i < instances.size(); i++) {
         auto& inst = instances[i];
@@ -529,6 +585,9 @@ void M2Renderer::rebuildSpatialIndex() {
             animatedInstanceIndices_.push_back(i);
         } else if (inst.cachedHasParticleEmitters) {
             particleOnlyInstanceIndices_.push_back(i);
+        }
+        if (inst.cachedModel && inst.cachedModel->canThrowLocalLight()) {
+            lightInstanceIndices_.push_back(i);
         }
 
         insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);

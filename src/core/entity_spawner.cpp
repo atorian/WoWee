@@ -398,6 +398,9 @@ void EntitySpawner::clearAllQueues() {
     asyncEquipmentLoads_.clear();
     asyncNpcCompositeLoads_.clear();
     asyncGameObjectLoads_.clear();
+    asyncGameObjectM2Displays_.clear();
+    asyncGameObjectGuids_.clear();
+    abandonedGameObjectGuids_.clear();
 }
 
 void EntitySpawner::despawnAllCreatures() {

@@ -665,14 +665,27 @@ private:
         float x, y, z, orientation;
         float scale = 1.0f;
         std::shared_ptr<pipeline::WMOModel> wmoModel;
+        /// An M2 game object read, parsed and skinned on a worker, its
+        /// textures decoded beside it. The main thread only uploads it.
+        std::shared_ptr<pipeline::M2Model> m2Model;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
         bool valid = false;
         bool isWmo = false;
         std::string modelPath;
+        /// Why the worker gave up, for the warning, when valid is false.
+        std::string error;
     };
     struct AsyncGameObjectLoad {
         std::future<PreparedGameObjectWMO> future;
     };
+    /// Display ids whose M2 is being read on a worker. A second object of
+    /// the same display waits for that load rather than starting its own.
+    std::unordered_set<uint32_t> asyncGameObjectM2Displays_;
+    /// Objects with a load in flight, and those of them the server removed
+    /// before it finished: their model is still kept, but no instance made.
+    std::unordered_set<uint64_t> asyncGameObjectGuids_;
+    std::unordered_set<uint64_t> abandonedGameObjectGuids_;
+    void finishM2GameObjectLoad(PreparedGameObjectWMO& result);
 
     // A parsed WMO whose GPU upload is being spread across frames. Uploading a
     // transport in one go cost ~40ms - its textures are large, and that upload

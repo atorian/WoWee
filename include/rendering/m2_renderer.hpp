@@ -245,6 +245,10 @@ struct M2ModelGPU {
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
+    /// The kinds M2Renderer::gatherLocalLights can find a light in.
+    [[nodiscard]] bool canThrowLocalLight() const {
+        return isLanternLike || isTorch || isBrazierOrFire || isForge || isLavaModel;
+    }
 };
 
 /**
@@ -1131,6 +1135,9 @@ private:
     CollisionFocus collisionFocus;
 
     void rebuildSpatialIndex();
+    /// The smoke, portal, animated, particle and light index lists, from the
+    /// instances as they now stand - after a removal has moved some of them.
+    void rebuildInstanceIndexLists();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
     SpatialGrid spatialGrid;
@@ -1246,6 +1253,7 @@ private:
     std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
     std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
     std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
+    std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
 
     // Smoke particle system
     std::vector<SmokeParticle> smokeParticles;

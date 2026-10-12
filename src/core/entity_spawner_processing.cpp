@@ -395,129 +395,142 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             uint32_t modelId = nextCreatureModelId_++;
             auto* am = assetManager_;
 
-            // Collect display skin texture paths for background pre-decode
-            std::vector<std::string> displaySkinPaths;
-            {
-                auto itDD = displayDataMap_.find(s.displayId);
-                if (itDD != displayDataMap_.end()) {
-                    std::string modelDir;
-                    size_t lastSlash = m2Path.find_last_of("\\/");
-                    if (lastSlash != std::string::npos) modelDir = m2Path.substr(0, lastSlash + 1);
-
-                    auto resolveForAsync = [&](const std::string& skinField) {
-                        if (skinField.empty()) return;
-                        std::string raw = skinField;
-                        std::replace(raw.begin(), raw.end(), '/', '\\');
-                        while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) raw.erase(raw.begin());
-                        while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.pop_back();
-                        if (raw.empty()) return;
-                        bool hasExt = raw.size() >= 4 && raw.substr(raw.size()-4) == ".blp";
-                        bool hasDir = raw.find('\\') != std::string::npos;
-                        std::vector<std::string> candidates;
-                        if (hasDir) {
-                            candidates.push_back(raw);
-                            if (!hasExt) candidates.push_back(raw + ".blp");
-                        } else {
-                            candidates.push_back(modelDir + raw);
-                            if (!hasExt) candidates.push_back(modelDir + raw + ".blp");
-                            candidates.push_back(raw);
-                            if (!hasExt) candidates.push_back(raw + ".blp");
-                        }
-                        for (const auto& c : candidates) {
-                            if (am->fileExists(c)) { displaySkinPaths.push_back(c); return; }
-                        }
-                    };
-                    resolveForAsync(itDD->second.skin1);
-                    resolveForAsync(itDD->second.skin2);
-                    resolveForAsync(itDD->second.skin3);
-
-                    // Pre-decode humanoid NPC textures (bake, skin, face, underwear, hair, equipment)
-                    if (itDD->second.extraDisplayId != 0) {
-                        auto itHE = humanoidExtraMap_.find(itDD->second.extraDisplayId);
-                        if (itHE != humanoidExtraMap_.end()) {
-                            const auto& he = itHE->second;
-                            // Baked texture
-                            if (!he.bakeName.empty()) {
-                                displaySkinPaths.push_back("Textures\\BakedNpcTextures\\" + he.bakeName);
-                            }
-                            // CharSections, through the one reader in
-                            // pipeline/char_sections.hpp. This was a fifth
-                            // hand-written copy of that scan, and a prefetch
-                            // that names different paths than the spawn will
-                            // ask for is a prefetch that does nothing - it
-                            // never collected the skin row's second texture,
-                            // so the head detail sheet was always decoded on
-                            // the main thread at spawn time.
-                            auto csDbc = am->loadDBC("CharSections.dbc");
-                            if (csDbc) {
-                                const auto* csL = pipeline::getActiveDBCLayout()
-                                    ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                                const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
-                                pipeline::CharacterAppearance who;
-                                who.raceId = he.raceId;
-                                who.sexId = he.sexId;
-                                who.skinId = he.skinId;
-                                who.faceId = he.faceId;
-                                who.hairStyleId = he.hairStyleId;
-                                who.hairColorId = he.hairColorId;
-                                // With the same existence check the spawn uses:
-                                // the underwear rows name art that was never
-                                // shipped - every Broken male torso among it -
-                                // and without the check this prefetched a file
-                                // the spawn never asks for, and warned that it
-                                // was missing.
-                                const auto sections = pipeline::resolveCharacterSections(
-                                    csDbc.get(), csF, who,
-                                    [](const std::string& path, void* ctx) {
-                                        return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
-                                    },
-                                    am);
-                                for (const std::string* path : {&sections.bodySkin, &sections.skinExtra,
-                                                                &sections.faceLower, &sections.faceUpper,
-                                                                &sections.hair}) {
-                                    if (!path->empty()) displaySkinPaths.push_back(*path);
-                                }
-                                for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
-                            }
-                            // Equipment region textures
-                            auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
-                            if (idiDbc) {
-                                const auto* idiL = pipeline::getActiveDBCLayout()
-                                    ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                                // Through the shared resolver, which reconciles
-                                // the layout against the file's own field count.
-                                // Written out here instead, this path read the
-                                // eight names one column to the left of where
-                                // the 25-field file keeps them - the chest
-                                // texture on the legs, the sleeves on the
-                                // hands, and nothing on the upper arm - while
-                                // the other reader of the same eight columns
-                                // went through the resolver and was right.
-                                uint32_t trf[8];
-                                pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, trf);
-                                const bool isFem = (he.sexId == 1);
-                                for (uint32_t did : he.equipDisplayId) {
-                                    if (did == 0) continue;
-                                    int32_t recIdx = idiDbc->findRecordById(did);
-                                    if (recIdx < 0) continue;
-                                    for (int region = 0; region < 8; region++) {
-                                        std::string texName = idiDbc->getString(static_cast<uint32_t>(recIdx), trf[region]);
-                                        if (texName.empty()) continue;
-                                        std::string path = pipeline::resolveItemRegionTexture(
-                                            *am, region, texName, isFem);
-                                        if (!path.empty()) displaySkinPaths.push_back(path);
-                                    }
-                                }
-                            }
-                        }
+            // The display's rows are copied for the worker, which works out
+            // every texture path from them - the skins, the bake, CharSections
+            // and the equipment regions. Each of those asks whether a file
+            // exists, and asked here they were the file-system probes left on
+            // the main thread for every new NPC a town shows.
+            std::optional<CreatureDisplayData> displayCopy;
+            std::optional<HumanoidDisplayExtra> extraCopy;
+            if (auto itDD = displayDataMap_.find(s.displayId); itDD != displayDataMap_.end()) {
+                displayCopy = itDD->second;
+                if (itDD->second.extraDisplayId != 0) {
+                    if (auto itHE = humanoidExtraMap_.find(itDD->second.extraDisplayId);
+                        itHE != humanoidExtraMap_.end()) {
+                        extraCopy = itHE->second;
                     }
                 }
             }
 
             AsyncCreatureLoad load;
             load.future = ThreadPool::ioWorkers().submit(
-                [am, m2Path, modelId, s, skinPaths = std::move(displaySkinPaths)]() -> PreparedCreatureModel {
+                [am, m2Path, modelId, s, displayCopy, extraCopy]() -> PreparedCreatureModel {
                     PreparedCreatureModel result;
+                    // Collect display skin texture paths for pre-decode below.
+                    std::vector<std::string> skinPaths;
+                    if (displayCopy) {
+                        std::vector<std::string>& displaySkinPaths = skinPaths;
+                        std::string modelDir;
+                        size_t lastSlash = m2Path.find_last_of("\\/");
+                        if (lastSlash != std::string::npos) modelDir = m2Path.substr(0, lastSlash + 1);
+
+                        auto resolveForAsync = [&](const std::string& skinField) {
+                            if (skinField.empty()) return;
+                            std::string raw = skinField;
+                            std::replace(raw.begin(), raw.end(), '/', '\\');
+                            while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) raw.erase(raw.begin());
+                            while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.pop_back();
+                            if (raw.empty()) return;
+                            bool hasExt = raw.size() >= 4 && raw.substr(raw.size()-4) == ".blp";
+                            bool hasDir = raw.find('\\') != std::string::npos;
+                            std::vector<std::string> candidates;
+                            if (hasDir) {
+                                candidates.push_back(raw);
+                                if (!hasExt) candidates.push_back(raw + ".blp");
+                            } else {
+                                candidates.push_back(modelDir + raw);
+                                if (!hasExt) candidates.push_back(modelDir + raw + ".blp");
+                                candidates.push_back(raw);
+                                if (!hasExt) candidates.push_back(raw + ".blp");
+                            }
+                            for (const auto& c : candidates) {
+                                if (am->fileExists(c)) { displaySkinPaths.push_back(c); return; }
+                            }
+                        };
+                        resolveForAsync(displayCopy->skin1);
+                        resolveForAsync(displayCopy->skin2);
+                        resolveForAsync(displayCopy->skin3);
+
+                        // Pre-decode humanoid NPC textures (bake, skin, face, underwear, hair, equipment)
+                        if (displayCopy->extraDisplayId != 0) {
+                            if (extraCopy) {
+                                const auto& he = *extraCopy;
+                                // Baked texture
+                                if (!he.bakeName.empty()) {
+                                    displaySkinPaths.push_back("Textures\\BakedNpcTextures\\" + he.bakeName);
+                                }
+                                // CharSections, through the one reader in
+                                // pipeline/char_sections.hpp. This was a fifth
+                                // hand-written copy of that scan, and a prefetch
+                                // that names different paths than the spawn will
+                                // ask for is a prefetch that does nothing - it
+                                // never collected the skin row's second texture,
+                                // so the head detail sheet was always decoded on
+                                // the main thread at spawn time.
+                                auto csDbc = am->loadDBC("CharSections.dbc");
+                                if (csDbc) {
+                                    const auto* csL = pipeline::getActiveDBCLayout()
+                                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
+                                    const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
+                                    pipeline::CharacterAppearance who;
+                                    who.raceId = he.raceId;
+                                    who.sexId = he.sexId;
+                                    who.skinId = he.skinId;
+                                    who.faceId = he.faceId;
+                                    who.hairStyleId = he.hairStyleId;
+                                    who.hairColorId = he.hairColorId;
+                                    // With the same existence check the spawn uses:
+                                    // the underwear rows name art that was never
+                                    // shipped - every Broken male torso among it -
+                                    // and without the check this prefetched a file
+                                    // the spawn never asks for, and warned that it
+                                    // was missing.
+                                    const auto sections = pipeline::resolveCharacterSections(
+                                        csDbc.get(), csF, who,
+                                        [](const std::string& path, void* ctx) {
+                                            return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
+                                        },
+                                        am);
+                                    for (const std::string* path : {&sections.bodySkin, &sections.skinExtra,
+                                                                    &sections.faceLower, &sections.faceUpper,
+                                                                    &sections.hair}) {
+                                        if (!path->empty()) displaySkinPaths.push_back(*path);
+                                    }
+                                    for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
+                                }
+                                // Equipment region textures
+                                auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
+                                if (idiDbc) {
+                                    const auto* idiL = pipeline::getActiveDBCLayout()
+                                        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                                    // Through the shared resolver, which reconciles
+                                    // the layout against the file's own field count.
+                                    // Written out here instead, this path read the
+                                    // eight names one column to the left of where
+                                    // the 25-field file keeps them - the chest
+                                    // texture on the legs, the sleeves on the
+                                    // hands, and nothing on the upper arm - while
+                                    // the other reader of the same eight columns
+                                    // went through the resolver and was right.
+                                    uint32_t trf[8];
+                                    pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, trf);
+                                    const bool isFem = (he.sexId == 1);
+                                    for (uint32_t did : he.equipDisplayId) {
+                                        if (did == 0) continue;
+                                        int32_t recIdx = idiDbc->findRecordById(did);
+                                        if (recIdx < 0) continue;
+                                        for (int region = 0; region < 8; region++) {
+                                            std::string texName = idiDbc->getString(static_cast<uint32_t>(recIdx), trf[region]);
+                                            if (texName.empty()) continue;
+                                            std::string path = pipeline::resolveItemRegionTexture(
+                                                *am, region, texName, isFem);
+                                            if (!path.empty()) displaySkinPaths.push_back(path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     result.guid = s.guid;
                     result.displayId = s.displayId;
                     result.modelId = modelId;
@@ -955,10 +968,30 @@ void EntitySpawner::processAsyncGameObjectResults() {
         auto result = it->future.get();
         it = asyncGameObjectLoads_.erase(it);
 
-        if (!result.valid || !result.isWmo || !result.wmoModel) {
-            // Fallback: spawn via sync path (likely an M2 or failed WMO)
+        asyncGameObjectGuids_.erase(result.guid);
+        const bool abandoned = abandonedGameObjectGuids_.erase(result.guid) > 0;
+
+        if (!result.isWmo) {
+            asyncGameObjectM2Displays_.erase(result.displayId);
+            finishM2GameObjectLoad(result);
+            if (abandoned || gameObjectDisplayIdFailedCache_.count(result.displayId)) continue;
+            // The model is resident now, so this only makes the instance.
             spawnOnlineGameObject(result.guid, result.entry, result.displayId,
-                                 result.x, result.y, result.z, result.orientation, result.scale);
+                                  result.x, result.y, result.z, result.orientation, result.scale);
+            continue;
+        }
+        if (abandoned) continue;
+
+        if (!result.valid || !result.wmoModel) {
+            // Said once, and never read again. This used to hand the object to
+            // the synchronous path, which read the same file a second time on
+            // the main thread and, failing again, guessed at an .m2 of the
+            // same name - a broken or missing file is not mended by reading it
+            // twice. Every later object of this display is dropped unread.
+            LOG_WARNING("Game object model did not load: displayId=", result.displayId,
+                        " entry=", result.entry, " ", result.modelPath, " - ",
+                        result.error.empty() ? std::string("unreadable") : result.error);
+            gameObjectDisplayIdFailedCache_.insert(result.displayId);
             continue;
         }
 
@@ -983,6 +1016,41 @@ void EntitySpawner::processAsyncGameObjectResults() {
 
     finishWmoSpawn(result, modelId);
     }
+}
+
+// Uploads an M2 game object a worker has already read, parsed and decoded, and
+// records it against its display so every later object of that display only
+// makes an instance. A model that failed is recorded as failed, as the
+// synchronous path does, so it is not read again for every object using it.
+void EntitySpawner::finishM2GameObjectLoad(PreparedGameObjectWMO& result) {
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2Renderer) return;
+
+    // Another object of this display may have put it up meanwhile.
+    if (auto cached = gameObjectDisplayIdModelCache_.find(result.displayId);
+        cached != gameObjectDisplayIdModelCache_.end() && m2Renderer->hasModel(cached->second)) {
+        return;
+    }
+    if (!result.valid || !result.m2Model) {
+        LOG_WARNING("Game object model did not load: displayId=", result.displayId,
+                    " entry=", result.entry, " ", result.modelPath, " - ",
+                    result.error.empty() ? std::string("unreadable") : result.error);
+        gameObjectDisplayIdFailedCache_.insert(result.displayId);
+        return;
+    }
+
+    const uint32_t modelId = nextGameObjectModelId_++;
+    m2Renderer->setPredecodedBLPCache(&result.predecodedTextures);
+    const bool loaded = m2Renderer->loadModel(*result.m2Model, modelId);
+    m2Renderer->setPredecodedBLPCache(nullptr);
+    if (!loaded) {
+        LOG_WARNING("Failed to load gameobject model: ", result.modelPath);
+        gameObjectDisplayIdFailedCache_.insert(result.displayId);
+        return;
+    }
+    // Resident across the away-and-back cycle, as the synchronous path keeps it.
+    m2Renderer->setModelPinned(modelId, true);
+    gameObjectDisplayIdModelCache_[result.displayId] = modelId;
 }
 
 // Creates the render instance and the transport/doodad follow-ups once a model
@@ -1072,19 +1140,38 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                  gameObjectDisplayIdFailedCache_.size(), " failed");
     }
 
-    // Process spawns: cached WMOs and M2s go sync (cheap), uncached WMOs go async
+    // Process spawns: anything already resident spawns here, which is cheap;
+    // anything that still has to be read from disk goes to a worker first.
+    // Objects of a model that is loading wait in place for it, and so does
+    // anything queued later for the same object, so its updates stay in order.
     auto startTime = std::chrono::steady_clock::now();
     static constexpr float kBudgetMs = 2.0f;
-    static constexpr int kMaxAsyncLoads = 2;
+    static constexpr int kMaxAsyncLoads = 4;
 
-    while (!pendingGameObjectSpawns_.empty()) {
+    if (!gameObjectLookupsBuilt_) buildGameObjectDisplayLookups();
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    std::unordered_set<uint64_t> waitingGuids;
+
+    for (size_t i = 0; i < pendingGameObjectSpawns_.size();) {
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - startTime).count();
         if (elapsedMs >= kBudgetMs) break;
 
-        auto& s = pendingGameObjectSpawns_.front();
+        const PendingGameObjectSpawn s = pendingGameObjectSpawns_[i];
+        if (waitingGuids.count(s.guid)) { ++i; continue; }
+        // A model already found broken is not read again, for any object.
+        if (gameObjectDisplayIdFailedCache_.count(s.displayId)) {
+            pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin() +
+                                           static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        auto waitForLoad = [&]() { waitingGuids.insert(s.guid); ++i; };
+        auto done = [&]() {
+            pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin() +
+                                           static_cast<std::ptrdiff_t>(i));
+        };
+        const bool slotFree = static_cast<int>(asyncGameObjectLoads_.size()) < kMaxAsyncLoads;
 
-        // Check if this is an uncached WMO that needs async loading
         std::string modelPath;
         if (gameObjectLookupsBuilt_) {
             // Check transport overrides first
@@ -1101,29 +1188,34 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         bool isWmo = lowerPath.size() >= 4 && lowerPath.substr(lowerPath.size() - 4) == ".wmo";
         bool isCached = isWmo && gameObjectDisplayIdWmoCache_.count(s.displayId);
 
-        if (isWmo && !isCached && !modelPath.empty() &&
-            static_cast<int>(asyncGameObjectLoads_.size()) < kMaxAsyncLoads) {
-            // Launch async WMO load - file I/O + parse on background thread
+        // An uncached WMO: file I/O, parse and texture decode on a worker.
+        // Without a free slot it waits: the synchronous path decoded its
+        // textures on the main thread, measured at 35-51ms for a transport.
+        if (isWmo && !isCached && !modelPath.empty()) {
+            if (!slotFree) { waitForLoad(); continue; }
             auto* am = assetManager_;
-            PendingGameObjectSpawn capture = s;
+            PendingGameObjectSpawn captureSpawn = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
             load.future = ThreadPool::ioWorkers().submit(
-                [am, capture, capturePath]() -> PreparedGameObjectWMO {
+                [am, captureSpawn, capturePath]() -> PreparedGameObjectWMO {
                     PreparedGameObjectWMO result;
-                    result.guid = capture.guid;
-                    result.entry = capture.entry;
-                    result.displayId = capture.displayId;
-                    result.x = capture.x;
-                    result.y = capture.y;
-                    result.z = capture.z;
-                    result.orientation = capture.orientation;
-                    result.scale = capture.scale;
+                    result.guid = captureSpawn.guid;
+                    result.entry = captureSpawn.entry;
+                    result.displayId = captureSpawn.displayId;
+                    result.x = captureSpawn.x;
+                    result.y = captureSpawn.y;
+                    result.z = captureSpawn.z;
+                    result.orientation = captureSpawn.orientation;
+                    result.scale = captureSpawn.scale;
                     result.modelPath = capturePath;
                     result.isWmo = true;
 
                     auto wmoData = am->readFile(capturePath);
-                    if (wmoData.empty()) return result;
+                    if (wmoData.empty()) {
+                        result.error = "file missing or empty";
+                        return result;
+                    }
 
                     auto wmo = std::make_shared<pipeline::WMOModel>(
                         pipeline::WMOLoader::load(wmoData));
@@ -1170,24 +1262,99 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     return result;
                 });
             asyncGameObjectLoads_.push_back(std::move(load));
-            pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin());
+            asyncGameObjectGuids_.insert(s.guid);
+            done();
             continue;
         }
 
-        // An uncached WMO that could not get an async slot must wait for one.
-        // Falling through to the synchronous path here meant decoding its
-        // textures on the main thread: measured at 35-51ms for a transport,
-        // against this loop's 2ms budget. The async path pre-decodes them on a
-        // worker, so waiting a frame for a free slot is far cheaper than doing
-        // the work here. Only reachable when several uncached WMOs arrive at
-        // once - a zone with a few ships in view does exactly that.
-        if (isWmo && !isCached && !modelPath.empty()) {
-            break;  // retry next frame, keeping queue order
+        // An M2 not yet resident: the same, for the model, its skin and its
+        // textures. This went through the synchronous path as "cheap", which
+        // it is only once the model is up - before that it read the files on
+        // the main thread, for every new kind of object a town shows.
+        const bool isM2 = !isWmo && !modelPath.empty();
+        bool m2Resident = false;
+        if (isM2 && m2Renderer) {
+            auto cached = gameObjectDisplayIdModelCache_.find(s.displayId);
+            m2Resident = cached != gameObjectDisplayIdModelCache_.end() &&
+                         m2Renderer->hasModel(cached->second);
+        }
+        if (isM2 && m2Renderer && !m2Resident &&
+            !gameObjectDisplayIdFailedCache_.count(s.displayId)) {
+            if (!slotFree || asyncGameObjectM2Displays_.count(s.displayId)) {
+                waitForLoad();
+                continue;
+            }
+            auto* am = assetManager_;
+            PendingGameObjectSpawn captureSpawn = s;
+            std::string capturePath = modelPath;
+            AsyncGameObjectLoad load;
+            load.future = ThreadPool::ioWorkers().submit(
+                [am, captureSpawn, capturePath]() -> PreparedGameObjectWMO {
+                    PreparedGameObjectWMO result;
+                    result.guid = captureSpawn.guid;
+                    result.entry = captureSpawn.entry;
+                    result.displayId = captureSpawn.displayId;
+                    result.x = captureSpawn.x;
+                    result.y = captureSpawn.y;
+                    result.z = captureSpawn.z;
+                    result.orientation = captureSpawn.orientation;
+                    result.scale = captureSpawn.scale;
+                    result.modelPath = capturePath;
+                    result.isWmo = false;
+
+                    auto m2Data = am->readFile(capturePath);
+                    if (m2Data.empty()) {
+                        result.error = "file missing or empty";
+                        return result;
+                    }
+                    auto model = std::make_shared<pipeline::M2Model>(
+                        pipeline::M2Loader::load(m2Data));
+                    // Collision classification needs the asset path. Embedded M2
+                    // names are often generic and caused herb/grass gameobjects
+                    // to be treated as solid props.
+                    model->name = capturePath;
+                    if (model->vertices.empty()) {
+                        result.error = "parsed to no geometry (" +
+                                       std::to_string(m2Data.size()) + " bytes)";
+                        return result;
+                    }
+
+                    const std::string skinPath = pipeline::skinPathForM2(capturePath);
+                    auto skinData = am->readFile(skinPath);
+                    if (!skinData.empty() && model->version >= 264) {
+                        pipeline::M2Loader::loadSkin(skinData, *model);
+                    } else if (skinData.empty() && model->version >= 264) {
+                        LOG_WARNING("GO skin file MISSING for WotLK M2 (no indices/batches): ", skinPath);
+                    }
+
+                    // Keyed as M2Renderer::loadModel asks for them.
+                    for (const auto& tex : model->textures) {
+                        std::string texKey = tex.filename;
+                        const size_t nul = texKey.find('\0');
+                        if (nul != std::string::npos) texKey.resize(nul);
+                        if (texKey.empty()) continue;
+                        std::replace(texKey.begin(), texKey.end(), '/', '\\');
+                        std::transform(texKey.begin(), texKey.end(), texKey.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        if (result.predecodedTextures.count(texKey)) continue;
+                        auto blp = am->loadTexture(texKey, true);
+                        if (blp.isValid()) result.predecodedTextures[texKey] = std::move(blp);
+                    }
+
+                    result.m2Model = std::move(model);
+                    result.valid = true;
+                    return result;
+                });
+            asyncGameObjectLoads_.push_back(std::move(load));
+            asyncGameObjectM2Displays_.insert(s.displayId);
+            asyncGameObjectGuids_.insert(s.guid);
+            done();
+            continue;
         }
 
-        // Cached WMO or M2 - spawn synchronously (cheap)
+        // Resident model, or nothing to load: spawn now.
         spawnOnlineGameObject(s.guid, s.entry, s.displayId, s.x, s.y, s.z, s.orientation, s.scale);
-        pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin());
+        done();
     }
 }
 
@@ -2005,6 +2172,13 @@ void EntitySpawner::onGameObjectInfoReceived(uint32_t entry) {
 }
 
 void EntitySpawner::despawnGameObject(uint64_t guid) {
+    // A spawn still waiting, or still loading on a worker, is cancelled too:
+    // otherwise it lands after the server has removed the object, and the
+    // object stays in the world with nothing left to remove it.
+    std::erase_if(pendingGameObjectSpawns_,
+                  [guid](const PendingGameObjectSpawn& s) { return s.guid == guid; });
+    if (asyncGameObjectGuids_.count(guid)) abandonedGameObjectGuids_.insert(guid);
+
     pendingTransportDoodadBatches_.erase(
         std::remove_if(pendingTransportDoodadBatches_.begin(), pendingTransportDoodadBatches_.end(),
                        [guid](const PendingTransportDoodadBatch& b) { return b.guid == guid; }),
