@@ -2695,7 +2695,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Pre-compute aligned UBO stride for ring buffer sub-allocation
     const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
     const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
-    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, VkTexture* normal) -> VkDescriptorSet {
+    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, uint8_t wrapFlags,
+                                        VkTexture* normal) -> VkDescriptorSet {
         // Valid, not merely non-null. descriptorInfo() hands back whatever the
         // texture holds - VK_NULL_HANDLE for a view and a sampler that were
         // never created - and declares SHADER_READ_ONLY_OPTIMAL either way. A
@@ -2714,7 +2715,12 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // binding a null view loses the device.
             return VK_NULL_HANDLE;
         }
-        const VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
+        VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
+        // The texture's own sampler is the one the cache made for whichever
+        // model loaded the image first, always REPEAT. Wrap per batch instead.
+        const VkSampler wrapSampler = vkCtx_->getOrCreateSampler(
+            m2TextureSamplerInfo(wrapFlags, diffuse->getMipLevels(), 0.0f));
+        if (wrapSampler != VK_NULL_HANDLE) diffuseInfo.sampler = wrapSampler;
         const VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
         const MaterialDescriptorKey key{.diffuse = diffuseInfo.imageView, .normal = normalInfo.imageView,
                                         .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler};
@@ -2935,7 +2941,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (sl < gpuModel.data.textures.size())
                             chosenType = gpuModel.data.textures[sl].type;
                     }
-                    VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch);
+                    VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch).texture;
                     // At debug: this canary was for heads resolving to the
                     // white texture, and they resolve to a texture. Twenty-four
                     // of them a session is noise in a log read for faults.
@@ -2976,7 +2982,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     continue;
                 }
                 // Resolve texture for this batch (prefer hair textures for hair geosets).
-                VkTexture* texPtr = resolveBatchTexture(instance, gpuModel, batch);
+                const BatchTexture resolved = resolveBatchTexture(instance, gpuModel, batch);
+                VkTexture* texPtr = resolved.texture;
+                uint8_t wrapFlags = resolved.wrapFlags;
                 const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 auto groupTexIt = instance.groupTextureOverrides.find(batchGroup);
                 if (groupTexIt != instance.groupTextureOverrides.end() && groupTexIt->second != nullptr) {
@@ -3034,6 +3042,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                     if (ti < gpuModel.data.textures.size() &&
                                         (gpuModel.data.textures[ti].type == 1 || gpuModel.data.textures[ti].type == 11)) {
                                         texPtr = candidate;
+                                        wrapFlags = static_cast<uint8_t>(gpuModel.data.textures[ti].flags & 0x3);
                                         break;
                                     }
                                 }
@@ -3197,7 +3206,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 materialRingOffset_[frameSlot] = matOffset + uboStride;
 
                 VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
-                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, normalMap);
+                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap);
                 if (!materialSet) continue;
 
                 // Bind material descriptor set (set 1)
@@ -3262,7 +3271,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset2, &matData, sizeof(CharMaterialUBO));
             materialRingOffset_[frameSlot] = matOffset2 + uboStride;
 
-            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, flatNormalTexture_.get());
+            const uint8_t wrapFlags = !gpuModel.data.textures.empty()
+                ? static_cast<uint8_t>(gpuModel.data.textures[0].flags & 0x3)
+                : BatchTexture::kRepeatBoth;
+            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, wrapFlags,
+                                                                   flatNormalTexture_.get());
             if (!materialSet) continue;
 
             const uint32_t dynamicOffset = matOffset2;
@@ -3552,7 +3565,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             // binding 0 changes, so the bones stay bound from above.
             VkDescriptorSet texSet = shadowParams_.set;
             if (blendMode == 1) {
-                VkTexture* tex = resolveBatchTexture(inst, gpuModel, batch);
+                VkTexture* tex = resolveBatchTexture(inst, gpuModel, batch).texture;
                 if (tex && tex != whiteTexture_.get()) {
                     texSet = shadowTexDescSet(tex, frameIndex);
                 }
@@ -3622,21 +3635,19 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
     return set;
 }
 
-VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
-                                                 const M2ModelGPU& gm,
-                                                 const pipeline::M2Batch& b) const {
+CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
+        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b) const {
             // A skin batch can reference multiple textures (b.textureCount) starting at b.textureIndex.
             // We currently bind only a single texture, so pick the most appropriate one.
-            if (b.textureIndex == 0xFFFF) return whiteTexture_.get();
-            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return whiteTexture_.get();
+            if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
+            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return {.texture = whiteTexture_.get()};
 
             uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
             comboCount = std::min<uint32_t>(comboCount, 8u);
 
-            struct Candidate { VkTexture* tex; uint32_t type; };
-            Candidate first{.tex = whiteTexture_.get(), .type = 0};
+            BatchTexture first{.texture = whiteTexture_.get()};
             bool hasFirst = false;
-            Candidate firstNonWhite{.tex = whiteTexture_.get(), .type = 0};
+            BatchTexture firstNonWhite{.texture = whiteTexture_.get()};
             bool hasFirstNonWhite = false;
 
             for (uint32_t i = 0; i < comboCount; i++) {
@@ -3647,6 +3658,9 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
 
                 VkTexture* texPtr = gm.textureIds[texSlot];
                 uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
+                const uint8_t wrapFlags = texSlot < gm.data.textures.size()
+                    ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
+                    : BatchTexture::kRepeatBoth;
                 // Apply texture slot overrides.
                 // For type-1 (skin) overrides, only apply to skin-group batches
                 // to prevent the skin composite from bleeding onto cloak/hair.
@@ -3667,7 +3681,7 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
                 }
 
                 if (!hasFirst) {
-                    first = {.tex = texPtr, .type = texType};
+                    first = {.texture = texPtr, .wrapFlags = wrapFlags};
                     hasFirst = true;
                 }
 
@@ -3675,18 +3689,18 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
 
                 // Prefer the hair texture slot (type 6) whenever present in the combo.
                 if (texType == 6) {
-                    return texPtr;
+                    return {.texture = texPtr, .wrapFlags = wrapFlags};
                 }
 
                 if (!hasFirstNonWhite) {
-                    firstNonWhite = {.tex = texPtr, .type = texType};
+                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags};
                     hasFirstNonWhite = true;
                 }
             }
 
-            if (hasFirstNonWhite) return firstNonWhite.tex;
-            if (hasFirst && first.tex != nullptr) return first.tex;
-            return whiteTexture_.get();
+            if (hasFirstNonWhite) return firstNonWhite;
+            if (hasFirst && first.texture != nullptr) return first;
+            return {.texture = whiteTexture_.get()};
 }
 
 glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) const {

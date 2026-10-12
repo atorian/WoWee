@@ -539,11 +539,20 @@ private:
     /// built and torn down here and in three other renderers.
     ShadowParamsSet shadowParams_;
 
+    /// A batch's texture and the M2Texture wrap flags of the slot it came from
+    /// (bit 0 repeats U, bit 1 repeats V). The wrap belongs to the slot, not
+    /// to the image, which another model may tile where this one clamps.
+    struct BatchTexture {
+        static constexpr uint8_t kRepeatBoth = 0x3;
+        VkTexture* texture = nullptr;
+        uint8_t wrapFlags = kRepeatBoth;
+    };
+
     /// Which texture a batch draws with. Shared by the main pass and the shadow
     /// pass, which needs it to cut a silhouette rather than a rectangle.
-    [[nodiscard]] VkTexture* resolveBatchTexture(const CharacterInstance& inst,
-                                   const M2ModelGPU& gm,
-                                   const pipeline::M2Batch& b) const;
+    [[nodiscard]] BatchTexture resolveBatchTexture(const CharacterInstance& inst,
+                                                   const M2ModelGPU& gm,
+                                                   const pipeline::M2Batch& b) const;
 
     /// Per-batch texture sets for alpha-keyed shadow casters, one pool per
     /// frame in flight and reset at the top of each frame's shadow pass. Same
