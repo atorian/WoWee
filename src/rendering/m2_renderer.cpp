@@ -351,6 +351,8 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
                                       /*alphaToCoverage=*/true);
     alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+    noAlphaAddPipeline_ = buildM2Pipeline(m2NoAlphaAddBlendState(), false,
+                                          VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     modulatePipeline_ = buildM2Pipeline(m2ModulateBlendState(false), false,
@@ -689,7 +691,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 128, "M2InstanceGPU must be 128 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 192, "M2InstanceGPU must be 192 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
@@ -1144,6 +1146,7 @@ void M2Renderer::shutdown() {
     destroyPipeline(cutoutPipeline_);
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
+    destroyPipeline(noAlphaAddPipeline_);
     destroyPipeline(additivePipeline_);
     destroyPipeline(modulatePipeline_);
     destroyPipeline(modulate2xPipeline_);
@@ -1400,10 +1403,152 @@ bool isForgeFireTexture(const std::string& texKeyLower,
 
 } // namespace
 
+VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
+                                                 uint8_t texFlags) const {
+    VkDescriptorImageInfo info = texture.descriptorInfo();
+    const VkSampler sampler = vkCtx_->getOrCreateSampler(m2TextureSamplerInfo(
+        texFlags, texture.getMipLevels(), skyMode_ ? m2SkyMipBias() : 0.0f));
+    if (sampler != VK_NULL_HANDLE) info.sampler = sampler;
+    return info;
+}
+
+void M2Renderer::applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
+                                        const std::string& textureKeyLower) const {
+    auto pit = texturePropsByPtr_.find(batch.texture);
+    if (pit == texturePropsByPtr_.end()) return;
+    batch.hasAlpha = pit->second.hasAlpha;
+    batch.alphaIsSilhouette = pit->second.alphaIsSilhouette;
+    batch.colorKeyBlack = pit->second.colorKeyBlack;
+    // Forge fire is drawn on cards with a black backing that has to be keyed
+    // out, and some of them use effect textures carrying none of the
+    // flame/glow tokens the hint looks for - coals, lava lumps,
+    // ARMORREFLECT/ORBREFLECT. Keying the whole model instead made the masonry
+    // and ironwork translucent, since a forge is mostly those.
+    // And a bonfire's, which is the same thing at a different scale: OrcBonFire
+    // draws its flame on cards textured with LavaLump2 and FlameLickSmall over
+    // a black backing, with the material marked opaque. Drawn as the material
+    // asks, the black backing is a solid rectangle around the flame - which is
+    // the hard-edged slab standing over Grom'gol. The wood and ash batches
+    // carry neither an ember nor a flame token, so they stay solid.
+    if ((model.isForge || model.isBrazierOrFire) &&
+        isForgeFireTexture(textureKeyLower, classifyBatchTexture(textureKeyLower))) {
+        batch.colorKeyBlack = true;
+        batch.forgeFireCard = true;
+    }
+}
+
+void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
+    if (!batch.materialSet) return;
+    VkTexture* batchTex = (batch.texture && batch.texture->isValid())
+        ? batch.texture : whiteTexture_.get();
+    VkDescriptorImageInfo imgInfo = batchImageInfo(*batchTex, batch.texFlags);
+
+    VkDescriptorBufferInfo matBufInfo{};
+    matBufInfo.buffer = batch.materialUBO;
+    matBufInfo.offset = 0;
+    matBufInfo.range = sizeof(M2MaterialUBO);
+
+    VkWriteDescriptorSet writes[3] = {};
+    // binding 0: texture
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = batch.materialSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].pImageInfo = &imgInfo;
+    // binding 2: M2Material UBO
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = batch.materialSet;
+    writes[1].dstBinding = 2;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[1].pBufferInfo = &matBufInfo;
+
+    const bool hasMask = batch.secondTexture && batch.secondTexture->isValid();
+    VkDescriptorImageInfo maskInfo = hasMask
+        ? batchImageInfo(*batch.secondTexture, batch.secondTexFlags) : imgInfo;
+    writes[2] = writes[0];
+    writes[2].dstBinding = 3;
+    writes[2].pImageInfo = &maskInfo;
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+}
+
+void M2Renderer::retryPendingBatchTextures() {
+    // loadTexture itself decides when a failed key is worth reading again;
+    // asking before then is a map lookup and returns the white fallback.
+    for (size_t i = 0; i < pendingBatchTextures_.size();) {
+        const PendingBatchTexture pending = pendingBatchTextures_[i];
+        auto it = models.find(pending.modelId);
+        M2ModelGPU::BatchGPU* batch =
+            (it != models.end() && pending.batchIndex < it->second.batches.size())
+                ? &it->second.batches[pending.batchIndex] : nullptr;
+        if (!batch || batch->pendingTextureKey.empty()) {
+            pendingBatchTextures_[i] = pendingBatchTextures_.back();
+            pendingBatchTextures_.pop_back();
+            continue;
+        }
+        VkTexture* tex = loadTexture(batch->pendingTextureKey, batch->pendingTextureFlags);
+        if (tex == nullptr || tex == whiteTexture_.get()) {
+            ++i;
+            continue;
+        }
+        // The batch has been hidden since it loaded, so nothing in flight
+        // refers to its descriptor set or material buffer.
+        const M2ModelGPU& model = it->second;
+        batch->texture = tex;
+        applyBatchTextureProps(model, *batch, batch->pendingTextureKey);
+        writeBatchMaterial(model, *batch);
+        writeBatchDescriptors(*batch);
+        batch->batchOpacity = batch->loadedOpacity;
+        LOG_INFO("M2 batch shown after retry: '", model.name, "' batch ", pending.batchIndex,
+                 " got '", batch->pendingTextureKey, "'");
+        batch->pendingTextureKey.clear();
+        pendingBatchTextures_[i] = pendingBatchTextures_.back();
+        pendingBatchTextures_.pop_back();
+    }
+}
+
+void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
+                                    M2ModelGPU::BatchGPU& batch) const {
+    M2BatchMaterialInputs in;
+    in.blendMode = static_cast<uint8_t>(batch.blendMode);
+    in.hasAlpha = batch.hasAlpha;
+    in.alphaIsSilhouette = batch.alphaIsSilhouette;
+    in.colorKeyBlack = batch.colorKeyBlack;
+    in.flameCard = batch.forgeFireCard;
+    in.spellEffect = model.isSpellEffect;
+    in.groundDetail = model.isGroundDetail;
+    in.foliageLike = model.isFoliageLike;
+    batch.drawState = m2BatchDrawState(in);
+    if (!batch.materialUBOMapped) return;
+
+    M2MaterialUBO mat{};
+    mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
+    mat.alphaTest = batch.drawState.alphaTest;
+    mat.colorKeyBlack =
+        m2BatchWantsColorKey(in.blendMode, batch.colorKeyBlack) ? 1 : 0;
+    mat.colorKeyThreshold = batch.drawState.colorKeyThreshold;
+    mat.tintR = batch.tint.r;
+    mat.tintG = batch.tint.g;
+    mat.tintB = batch.tint.b;
+    mat.unlit = (batch.materialFlags & 0x01) && !batch.drawState.litOverride ? 1 : 0;
+    mat.blendMode = batch.blendMode;
+    mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
+    mat.fireCard = batch.forgeFireCard ? 1 : 0;
+    mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
+    mat.secondTexCoordSet = batch.secondTexCoordSet;
+    mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
+        batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
+    mat.specularIntensity = 0.5f;
+    mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
+    std::memcpy(batch.materialUBOMapped, &mat, sizeof(mat));
+}
+
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
     auto it = models.find(modelId);
     if (it != models.end()) {
         it->second.isSpellEffect = true;
+        for (auto& batch : it->second.batches) writeBatchMaterial(it->second, batch);
         // Spell effects MUST have bone animation for ribbons/particles to work.
         // The classifier may have set disableAnimation=true based on name tokens
         // (e.g. "chest" in HolySmite_Low_Chest.m2) - override that for spell effects.
@@ -2208,31 +2353,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                                     (bgpu.lanternGlowHint && flameCard);
             bgpu.glowTint = tcls.glowTint;
             if (tex != nullptr && tex != whiteTexture_.get()) {
-                auto pit = texturePropsByPtr_.find(tex);
-                if (pit != texturePropsByPtr_.end()) {
-                    bgpu.hasAlpha = pit->second.hasAlpha;
-                    bgpu.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-                    bgpu.colorKeyBlack = pit->second.colorKeyBlack;
-                    // Forge fire is drawn on cards with a black backing that has
-                    // to be keyed out, and some of them use effect textures
-                    // carrying none of the flame/glow tokens the hint looks for
-                    // - coals, lava lumps, ARMORREFLECT/ORBREFLECT. Keying the
-                    // whole model instead made the masonry and ironwork
-                    // translucent, since a forge is mostly those.
-                    // And a bonfire's, which is the same thing at a different
-                    // scale: OrcBonFire draws its flame on cards textured with
-                    // LavaLump2 and FlameLickSmall over a black backing, with
-                    // the material marked opaque. Drawn as the material asks,
-                    // the black backing is a solid rectangle around the flame -
-                    // which is the hard-edged slab standing over Grom'gol. The
-                    // wood and ash batches carry neither an ember nor a flame
-                    // token, so they stay solid.
-                    if ((gpuModel.isForge || gpuModel.isBrazierOrFire) &&
-                        isForgeFireTexture(batchTexKeyLower, tcls)) {
-                        bgpu.colorKeyBlack = true;
-                        bgpu.forgeFireCard = true;
-                    }
-                }
+                applyBatchTextureProps(gpuModel, bgpu, batchTexKeyLower);
             }
             bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
             // These layers multiply the first texture by a second RGB/alpha
@@ -2243,14 +2364,26 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     const uint16_t mask = model.textureLookup[second];
                     if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
                         bgpu.secondTexture = allTextures[mask];
+                    if (mask < model.textures.size())
+                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[mask].flags & 0x3);
                 }
                 const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
                 if (coord < model.textureCoordLookup.size())
                     bgpu.secondTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
             }
 
-            // Start at full opacity; hide only if texture failed to load.
-            bgpu.batchOpacity = (texFailed && !groundDetailModel) ? 0.0f : 1.0f;
+            // Hide the batch if its texture failed to load, and remember what it
+            // was waiting for: retryPendingBatchTextures shows it if a later
+            // attempt succeeds, rather than leaving a hole until the model is
+            // unloaded.
+            const bool hiddenForTexture = texFailed && !groundDetailModel;
+            if (hiddenForTexture && batch.textureIndex < model.textureLookup.size()) {
+                const uint16_t texIdx = model.textureLookup[batch.textureIndex];
+                if (texIdx < model.textures.size()) {
+                    bgpu.pendingTextureKey = batchTexKeyLower;
+                    bgpu.pendingTextureFlags = model.textures[texIdx].flags;
+                }
+            }
 
             // And say so, because invisible is indistinguishable from absent.
             //
@@ -2261,7 +2394,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             // invisible three steps later on the strength of that flag said
             // nothing at all, so the search went to the texture files - which
             // were all present and correct - instead of to the batch.
-            if (texFailed && !groundDetailModel) {
+            if (hiddenForTexture) {
                 static core::LogBudget hiddenBatchBudget(
                     16, "M2 batches hidden because their texture did not load");
                 if (hiddenBatchBudget.take()) {
@@ -2275,7 +2408,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             // These provide per-batch opacity for ghosts, ethereal effects, fading doodads, etc.
             // Skip zero values: some animated tracks start at 0 and animate up, and baking
             // that first keyframe would make the entire batch permanently invisible.
-            if (bgpu.batchOpacity > 0.0f) {
+            {
                 float animAlpha = 1.0f;
                 if (batch.colorIndex < model.colorRGB.size()) {
                     // The batch's authored colour. A glow card is painted
@@ -2292,7 +2425,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                         model.textureWeightLookup, batch.transparencyIndex);
                     if (weight > 0.001f) animAlpha *= weight;
                 }
-                bgpu.batchOpacity *= animAlpha;
+                bgpu.loadedOpacity = animAlpha;
+                bgpu.batchOpacity = hiddenForTexture ? 0.0f : animAlpha;
             }
 
             // Compute batch center and radius for glow sprite positioning
@@ -2506,27 +2640,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &bgpu.materialUBO, &bgpu.materialUBOAlloc, &matAllocInfo);
 
-            // Write initial material data (static per-batch; the draw loop updates the rest)
-            M2MaterialUBO mat{};
-            mat.hasTexture = (bgpu.texture != nullptr && bgpu.texture != whiteTexture_.get()) ? 1 : 0;
-            mat.alphaTest = m2BatchNeedsAlphaTest(bgpu.blendMode, bgpu.hasAlpha) ? 1 : 0;
-            mat.colorKeyBlack =
-                m2BatchWantsColorKey(bgpu.blendMode, bgpu.colorKeyBlack) ? 1 : 0;
-            mat.tintR = bgpu.tint.r;
-            mat.tintG = bgpu.tint.g;
-            mat.tintB = bgpu.tint.b;
-            mat.colorKeyThreshold = 0.08f;
-            mat.unlit = (bgpu.materialFlags & 0x01) ? 1 : 0;
-            mat.blendMode = bgpu.blendMode;
-            mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
-            mat.hasSecondTexture = bgpu.secondTexture && bgpu.secondTexture->isValid() ? 1 : 0;
-            mat.secondTexCoordSet = bgpu.secondTexCoordSet;
-            mat.cullBackFaces = !skyMode_ && !gpuModel.isSpellEffect &&
-                bgpu.blendMode >= 2 && (bgpu.materialFlags & 0x04) == 0 ? 1 : 0;
-            mat.specularIntensity = 0.5f;
-            mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
-            memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
+            writeBatchMaterial(gpuModel, bgpu);
+            const auto& mat = *static_cast<const M2MaterialUBO*>(bgpu.materialUBOMapped);
 
             // What the sky model's layers are actually being given, once each.
             //
@@ -2566,44 +2682,18 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         VkTexture* batchTex = (bgpu.texture && bgpu.texture->isValid())
             ? bgpu.texture : whiteTexture_.get();
         if (!batchTex || !batchTex->isValid()) bgpu.materialSet = VK_NULL_HANDLE;
-        if (bgpu.materialSet) {
-            VkDescriptorImageInfo imgInfo = batchTex->descriptorInfo();
-
-            VkDescriptorBufferInfo matBufInfo{};
-            matBufInfo.buffer = bgpu.materialUBO;
-            matBufInfo.offset = 0;
-            matBufInfo.range = sizeof(M2MaterialUBO);
-
-            VkWriteDescriptorSet writes[3] = {};
-            // binding 0: texture
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = bgpu.materialSet;
-            writes[0].dstBinding = 0;
-            writes[0].descriptorCount = 1;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[0].pImageInfo = &imgInfo;
-            // binding 2: M2Material UBO
-            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[1].dstSet = bgpu.materialSet;
-            writes[1].dstBinding = 2;
-            writes[1].descriptorCount = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[1].pBufferInfo = &matBufInfo;
-
-            VkTexture* maskTex = bgpu.secondTexture && bgpu.secondTexture->isValid()
-                ? bgpu.secondTexture : batchTex;
-            VkDescriptorImageInfo maskInfo = maskTex->descriptorInfo();
-            writes[2] = writes[0];
-            writes[2].dstBinding = 3;
-            writes[2].pImageInfo = &maskInfo;
-            vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
-        }
+        writeBatchDescriptors(bgpu);
     }
 
     // Pre-compute available LOD levels to avoid per-instance batch iteration
     gpuModel.availableLODs = 0;
     for (const auto& b : gpuModel.batches) {
         if (b.submeshLevel < 8) gpuModel.availableLODs |= (1u << b.submeshLevel);
+    }
+
+    for (size_t bi = 0; bi < gpuModel.batches.size(); ++bi) {
+        if (!gpuModel.batches[bi].pendingTextureKey.empty())
+            pendingBatchTextures_.push_back({modelId, bi});
     }
 
     registerRtModel(gpuModel, model);
@@ -2613,6 +2703,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId].vertexCount, " vertices, ",
               models[modelId].indexCount / 3, " triangles, ", models[modelId].batches.size(), " batches)");
 
+    retryPendingBatchTextures();
 
     return true;
 }

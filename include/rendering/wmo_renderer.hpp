@@ -516,6 +516,9 @@ private:
         // Pre-merged batches for efficient rendering (computed at load time)
         struct MergedBatch {
             VkTexture* texture = nullptr;   // from cache, NOT owned
+            /// The model texture this batch wanted and did not get, drawn white
+            /// until retryPendingTextures loads it. UINT32_MAX when it has it.
+            uint32_t pendingTextureIndex = UINT32_MAX;
             VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
             VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
@@ -662,6 +665,10 @@ private:
         std::vector<PortalRef> portalRefs;
         // For each group: which portal refs belong to it (start index, count)
         std::vector<std::pair<uint16_t, uint16_t>> groupPortalRefs;
+
+        /// Merged batches drawn white because their texture failed to load,
+        /// as (group, merged batch) indices.
+        std::vector<std::pair<uint32_t, uint32_t>> pendingTextureBatches;
 
         // Set once the textures and materials below have been populated, so a
         // resumed load skips straight to the groups it has left.
@@ -812,6 +819,18 @@ private:
      * Allocate a material descriptor set from the pool
      */
     VkDescriptorSet allocateMaterialSet();
+    /// Create a merged batch's material buffer and descriptor set.
+    void createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
+                                   GroupResources::MergedBatch& mb);
+    /// The normal/height map the cache made alongside a texture, if any.
+    void attachNormalHeightMap(GroupResources::MergedBatch& mb) const;
+    /// Ask again for textures that failed to load and give the batches drawn
+    /// white for want of them their texture. A failed MPQ read is often
+    /// transient.
+    void retryPendingTextures();
+    std::vector<uint32_t> modelsWithPendingTextures_;
+    /// Free least recently used textures no loaded or loading model refers to.
+    size_t evictUnreferencedTextures(size_t bytesNeeded);
 
     /**
      * Destroy GPU resources for a single group.

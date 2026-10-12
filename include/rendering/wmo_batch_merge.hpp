@@ -40,6 +40,11 @@ struct WmoBatchState {
     float clothDrop = 0.0f;
     float clothCentreX = 0.0f;
     float clothCentreY = 0.0f;
+    /// The model texture this batch wanted, when its load failed. Every such
+    /// batch binds the white fallback, so this keeps each failed texture in a
+    /// merged batch of its own, which a retry can then give its texture alone.
+    /// UINT32_MAX when the texture loaded.
+    uint32_t pendingTexture = UINT32_MAX;
 
     bool operator==(const WmoBatchState&) const = default;
 };

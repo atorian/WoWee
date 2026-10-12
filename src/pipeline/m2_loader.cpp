@@ -488,7 +488,11 @@ std::string readString(const std::vector<uint8_t>& data, uint32_t offset, uint32
     return std::string(reinterpret_cast<const char*>(&data[offset]), actualLen);
 }
 
-enum class TrackType { VEC3, QUAT_COMPRESSED, FLOAT, FIXED16, BYTE_BOOL };
+// Bone rotations are compressed int16[4] quaternions from TBC on. A texture
+// animation's rotation never is: it is a C4Quaternion, float[4], in every
+// version - read as compressed it took half of each key's bytes as the whole
+// key and came out as noise.
+enum class TrackType { VEC3, QUAT_COMPRESSED, QUAT_FLOAT, FLOAT, FIXED16, BYTE_BOOL };
 
 // M2 sequence flag: when set, keyframe data is embedded in the M2 file.
 // When clear, data lives in an external .anim file and the M2 offsets are
@@ -545,6 +549,7 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
         else if (type == TrackType::FIXED16) keyElementSize = sizeof(int16_t);
         else if (type == TrackType::BYTE_BOOL) keyElementSize = sizeof(uint8_t);
         else if (type == TrackType::VEC3) keyElementSize = sizeof(float) * 3;
+        else if (type == TrackType::QUAT_FLOAT) keyElementSize = sizeof(float) * 4;
         else keyElementSize = sizeof(int16_t) * 4;
         if (keyOffset + keyCount * keyElementSize > data.size()) {
             track.sequences[i].timestamps.clear();
@@ -579,6 +584,17 @@ void parseAnimTrack(const std::vector<uint8_t>& data,
             track.sequences[i].vec3Values.reserve(values.size());
             for (const auto& v : values) {
                 track.sequences[i].vec3Values.emplace_back(v.x, v.y, v.z);
+            }
+        } else if (type == TrackType::QUAT_FLOAT) {
+            struct C4Quaternion { float x, y, z, w; };
+            auto values = readArray<C4Quaternion>(data, keyOffset, keyCount);
+            track.sequences[i].quatValues.reserve(values.size());
+            for (const auto& fq : values) {
+                // Disk order: XYZW, glm::quat constructor: (w, x, y, z)
+                glm::quat q(fq.w, fq.x, fq.y, fq.z);
+                const float len = glm::length(q);
+                track.sequences[i].quatValues.push_back(
+                    len > 0.001f ? q / len : glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
             }
         } else {
             // Rotation: compressed quaternion int16[4] per key
@@ -1332,12 +1348,12 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             if (header.version >= 264) {
                 M2TextureTransformDisk dt = readValue<M2TextureTransformDisk>(m2Data, ofs);
                 parseAnimTrack(m2Data, dt.translation, tt.translation, TrackType::VEC3, seqFlags);
-                parseAnimTrack(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_COMPRESSED, seqFlags);
+                parseAnimTrack(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_FLOAT, seqFlags);
                 parseAnimTrack(m2Data, dt.scaling, tt.scale, TrackType::VEC3, seqFlags);
             } else {
                 M2TextureTransformDiskVanilla dt = readValue<M2TextureTransformDiskVanilla>(m2Data, ofs);
                 parseAnimTrackVanilla(m2Data, dt.translation, tt.translation, TrackType::VEC3);
-                parseAnimTrackVanilla(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_COMPRESSED, /*compressedQuat=*/isTBC);
+                parseAnimTrackVanilla(m2Data, dt.rotation, tt.rotation, TrackType::QUAT_FLOAT);
                 parseAnimTrackVanilla(m2Data, dt.scaling, tt.scale, TrackType::VEC3);
             }
             model.textureTransforms.push_back(std::move(tt));
@@ -1496,7 +1512,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             em.position.y = readValue<float>(m2Data, base + 0x0C);
             em.position.z = readValue<float>(m2Data, base + 0x10);
             em.bone       = readValue<uint16_t>(m2Data, base + 0x14);
-            em.texture    = readValue<uint16_t>(m2Data, base + 0x16);
+            em.texture    = m2EmitterBaseTexture(em.flags, readValue<uint16_t>(m2Data, base + 0x16));
             em.blendingType = readValue<uint8_t>(m2Data, base + 0x28);
             em.emitterType  = readValue<uint8_t>(m2Data, base + 0x29);
             em.textureTileRotation = readValue<int16_t>(m2Data, base + 0x2E);
