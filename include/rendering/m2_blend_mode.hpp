@@ -193,7 +193,7 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
                      m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ||
                      in.colorKeyBlack);
 
-    s.drawBlendMode = s.forceCutout ? M2_BLEND_ALPHA_KEY
+    s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY)
                                     : m2DrawBlendMode(in.blendMode, effectOverlay);
     if (s.forceCutout) {
         s.alphaTest = in.groundDetail ? 3 : (foliageCutout ? 2 : 1);

@@ -275,6 +275,9 @@ private:
     /// Whether the minimap follows water out of the scene pass, for the same
     /// reason the spray does - see syncSwimEffectsTargetPass.
     bool minimapDrawsWithWater_ = false;
+    /// The water's pass when it has left the scene pass, for the blended doodads
+    /// to be drawn over it; null while the water is drawn in the scene pass.
+    VkRenderPass blendedAfterWaterPass_ = VK_NULL_HANDLE;
 
     void runDeferredWorldInitStep(float deltaTime);
 

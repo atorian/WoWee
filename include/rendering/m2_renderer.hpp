@@ -496,7 +496,24 @@ public:
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    /// The opaque pass, and the blended one too unless it is drawn after the
+    /// water (see renderAfterWater).
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+
+    /// Draw blended things - transparent batches, glow sprites, particles,
+    /// smoke and ribbons - in the water's pass, after the water, instead of in
+    /// the scene pass under it. `pass` is that pass, or null while the water is
+    /// drawn in the scene pass. Rebuilds pipelines: call between frames, with
+    /// nothing in flight using the old ones.
+    void setAfterWaterPass(VkRenderPass pass, VkSampleCountFlagBits samples);
+    [[nodiscard]] VkRenderPass afterWaterPass() const { return afterWaterPass_; }
+    /// Whether render() leaves the blended things for renderAfterWater.
+    [[nodiscard]] bool drawsBlendedAfterWater() const {
+        return afterWaterPass_ != VK_NULL_HANDLE && afterWaterPipes_.alpha != VK_NULL_HANDLE;
+    }
+    /// Record them, into the water's pass after the water. Needs render() to
+    /// have run this frame.
+    void renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /** Gather the nearest authored glow cards as inexpensive scene point lights. */
     uint32_t gatherLocalLights(const glm::vec3& cameraPos,
@@ -667,13 +684,13 @@ public:
         switch (kind) {
             case M2BlendPipeline::Opaque: return opaquePipeline_;
             case M2BlendPipeline::AlphaTest: return alphaTestPipeline_;
-            case M2BlendPipeline::Alpha: return alphaPipeline_;
-            case M2BlendPipeline::NoAlphaAdd: return noAlphaAddPipeline_;
-            case M2BlendPipeline::Modulate: return modulatePipeline_;
-            case M2BlendPipeline::Modulate2x: return modulate2xPipeline_;
+            case M2BlendPipeline::Alpha: return blended().alpha;
+            case M2BlendPipeline::NoAlphaAdd: return blended().noAlphaAdd;
+            case M2BlendPipeline::Modulate: return blended().modulate;
+            case M2BlendPipeline::Modulate2x: return blended().modulate2x;
             case M2BlendPipeline::AlphaAdd: break;
         }
-        return additivePipeline_;
+        return blended().additive;
     }
     /// Decide how a batch is drawn and write its material buffer. Runs when the
     /// model loads, and again if it is marked a spell effect afterwards; the
@@ -819,11 +836,42 @@ private:
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
-    VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
-    VkPipeline noAlphaAddPipeline_ = VK_NULL_HANDLE;    // blend mode 3
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 4 and up past 6
-    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
-    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
+    /// Everything drawn blended: the transparent batches, particles, smoke and
+    /// ribbons. They exist twice. One set is for the scene pass. The other is
+    /// for the pass the water is drawn in, when the water leaves the scene
+    /// pass: blended things drawn before the water had the water's sheet
+    /// laid over them, so a waterfall's foam showed at full strength only
+    /// where it hung past the pool.
+    struct BlendedPipelines {
+        VkPipeline alpha = VK_NULL_HANDLE;            // blend mode 2
+        VkPipeline noAlphaAdd = VK_NULL_HANDLE;       // blend mode 3
+        VkPipeline additive = VK_NULL_HANDLE;         // blend mode 4 and up past 6
+        VkPipeline modulate = VK_NULL_HANDLE;         // blend mode 5
+        VkPipeline modulate2x = VK_NULL_HANDLE;       // blend mode 6
+        VkPipeline particle = VK_NULL_HANDLE;         // M2 emitter particles
+        VkPipeline particleAdditive = VK_NULL_HANDLE; // additive particles, glow sprites
+        VkPipeline smoke = VK_NULL_HANDLE;            // chimney smoke
+        VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
+        VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
+    };
+    BlendedPipelines scenePipes_;
+    BlendedPipelines afterWaterPipes_;
+    VkRenderPass afterWaterPass_ = VK_NULL_HANDLE;
+    /// Set while renderAfterWater records, so the blended draws pick the
+    /// pipelines built for the water's pass.
+    bool drawingAfterWater_ = false;
+    /// render() left its blended half for renderAfterWater this frame.
+    bool blendedPendingAfterWater_ = false;
+    const BlendedPipelines& blended() const {
+        return drawingAfterWater_ ? afterWaterPipes_ : scenePipes_;
+    }
+    bool buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits samples,
+                               bool derive, BlendedPipelines& out);
+    void destroyBlendedPipelines(BlendedPipelines& pipes);
+    /// Pass 2: the transparent batches and the glow sprites, after the opaque
+    /// pass has culled, sorted and gathered them.
+    void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    float lavaAnimSeconds_ = 0.0f;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -837,15 +885,10 @@ private:
     VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
 
     // Particle pipelines
-    VkPipeline particlePipeline_ = VK_NULL_HANDLE;       // M2 emitter particles
-    VkPipeline particleAdditivePipeline_ = VK_NULL_HANDLE; // Additive particle blend
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline smokePipeline_ = VK_NULL_HANDLE;           // Smoke particles
     VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
 
     // Ribbon pipelines (additive + alpha-blend)
-    VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;          // Alpha-blend ribbons
-    VkPipeline ribbonAdditivePipeline_ = VK_NULL_HANDLE;  // Additive ribbons
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
     /// The per-frame set layout initialize() was given. recreatePipelines()
     /// runs long after that call and needs the same one.
