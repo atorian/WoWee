@@ -145,7 +145,7 @@ jobs:
       run: cmake --build build --target wowee_editor --parallel ${{ matrix.build_jobs }}
 
     - name: Run tests
-      run: cd build && ctest --output-on-failure
+      run: cd build && ctest --output-on-failure --parallel "$(nproc)"
 
     - name: Compiler cache statistics
       if: always()
@@ -237,7 +237,7 @@ jobs:
       run: cmake --build build --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Run tests
-      run: cd build && ctest --output-on-failure
+      run: cd build && ctest --output-on-failure --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Compiler cache statistics
       if: always()
