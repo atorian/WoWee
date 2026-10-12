@@ -3912,6 +3912,34 @@ void Application::update(float deltaTime) {
     ZoneScopedN("Application::update");
     const char* updateCheckpoint = "enter";
     try {
+    // Reproduce world entry with real Kalimdor assets without a realm session.
+    if (std::getenv("WOWEE_MULGORE_PROBE") && worldLoader_) {
+        static bool loaded = false;
+        if (!loaded) {
+            loaded = true;
+            game::Character character{};
+            character.guid = 0x1235000000000000ULL;
+            character.name = "MulgoreProbe";
+            character.race = game::Race::TAUREN;
+            character.characterClass = game::Class::WARRIOR;
+            character.gender = game::Gender::FEMALE;
+            character.level = 1;
+            character.mapId = 1;
+            character.zoneId = 215;
+            character.x = -2917.58f; character.y = -257.98f; character.z = 52.9968f;
+            gameHandler->charactersRef().push_back(character);
+            gameHandler->setActiveCharacterGuid(character.guid);
+            gameHandler->setPlayerGuid(character.guid);
+            auto& movement = gameHandler->movementInfoRef();
+            movement.x = character.x; movement.y = character.y; movement.z = character.z;
+            // Addon login events require live UNIT update fields. This fixture
+            // exercises world assets and appearance queues without those packets.
+            addonsLoaded_ = true;
+            LOG_INFO("Mulgore probe: starting world entry");
+            worldLoader_->loadOnlineWorldTerrain(1, -2917.58f, -257.98f, 52.9968f);
+            LOG_INFO("Mulgore probe: world entry completed");
+        }
+    }
     // Offline regression fixture: exercises the real appearance/equipment
     // queues and GPU uploads without authenticating or changing realm state.
     if (std::getenv("WOWEE_ENTITY_STREAM_PROBE") && entitySpawner_ &&
@@ -3925,7 +3953,7 @@ void Application::update(float deltaTime) {
         static constexpr uint64_t firstGuid = 0x1234000000000000ULL;
         static constexpr int playerCount = 24;
         if (!seeded) {
-            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) {
+            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && !std::getenv("WOWEE_MULGORE_PROBE")) {
                 LOG_ERROR("Entity stream probe requires initialized offline renderers");
                 window->setShouldClose(true);
                 return;
@@ -3984,14 +4012,17 @@ void Application::update(float deltaTime) {
             for (int i = 0; i < playerCount; ++i) {
                 const uint32_t appearance = static_cast<uint32_t>(i % 8) |
                     (static_cast<uint32_t>(i % 4) << 16);
+                const bool mulgore = std::getenv("WOWEE_MULGORE_PROBE") != nullptr;
                 entitySpawner_->queuePlayerSpawn(firstGuid + i,
-                    expanded ? races[(i / 2) % 10] : 1, i % 2,
-                    appearance, 0, 405.0f + i / 6,
-                    5818.0f + i % 6,
-                    650.0f, 0.0f);
+                    mulgore ? 6 : (expanded ? races[(i / 2) % 10] : 1), i % 2,
+                    appearance, 0, (mulgore ? -257.98f : 405.0f) + i / 6,
+                    (mulgore ? -2917.58f : 5818.0f) + i % 6,
+                    mulgore ? 52.9968f : 650.0f, 0.0f);
                 entitySpawner_->queuePlayerEquipment(firstGuid + i, equipment, types);
             }
-            renderer->getCamera()->setPosition(glm::vec3(5805.0f, 406.0f, 652.0f));
+            renderer->getCamera()->setPosition(std::getenv("WOWEE_MULGORE_PROBE")
+                ? glm::vec3(-2930.58f, -256.98f, 55.0f)
+                : glm::vec3(5805.0f, 406.0f, 652.0f));
             renderer->getCamera()->setRotation(0.0f, 0.0f);
             seeded = true;
             LOG_INFO("Entity stream probe: queued ", playerCount,
@@ -4123,7 +4154,7 @@ void Application::update(float deltaTime) {
         case AppState::IN_GAME:
             // Checked before the frame rather than after it: everything below
             // reads a world that is no longer being updated.
-            if (gameHandler &&
+            if (gameHandler && !std::getenv("WOWEE_MULGORE_PROBE") &&
                 gameHandler->getState() == game::WorldState::DISCONNECTED) {
                 handleWorldDisconnect();
                 break;

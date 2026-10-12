@@ -2557,7 +2557,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                         .flags = passFlags,
                         .wind = glm::vec4(globalTime,
                             m2WindDistanceFade(glm::length(origin - cachedCamPos_)), 0.0f, 0.0f)};
-                    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                    vkCmdPushConstants(cmd, shadowPipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                        0, sizeof(ShadowPush), &push);
                     vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
                 }
