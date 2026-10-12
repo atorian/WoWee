@@ -532,7 +532,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         bindings[2] = bindings[0];
-        bindings[2].binding = 3; // second sky texture (mask)
+        bindings[2].binding = 3; // second texture stage (RGBA mask)
         ci.bindingCount = 3;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
@@ -2235,18 +2235,18 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
             bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
-            // These layers multiply the light texture by a second RGB/alpha
-            // mask. Ignoring it turns subtle aurora strands into bright cards.
-            if (skyMode_ && batch.textureCount == 2 && batch.shader == 0 && bgpu.blendMode == 4) {
+            // These layers multiply the first texture by a second RGB/alpha
+            // mask. Both aurora strands and fountain foam need this stage.
+            if (m2UsesSecondTextureMask(batch.shader, batch.textureCount, bgpu.blendMode)) {
                 const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
                 if (second < model.textureLookup.size()) {
                     const uint16_t mask = model.textureLookup[second];
                     if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
-                        bgpu.skyMaskTexture = allTextures[mask];
+                        bgpu.secondTexture = allTextures[mask];
                 }
                 const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
                 if (coord < model.textureCoordLookup.size())
-                    bgpu.skyMaskTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
+                    bgpu.secondTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
             }
 
             // Start at full opacity; hide only if texture failed to load.
@@ -2287,9 +2287,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     float ca = model.colorAlphas[batch.colorIndex];
                     if (ca > 0.001f) animAlpha *= ca;
                 }
-                if (!skyMode_ && batch.transparencyIndex < model.textureWeights.size()) {
-                    float tw = model.textureWeights[batch.transparencyIndex];
-                    if (tw > 0.001f) animAlpha *= tw;
+                if (!skyMode_) {
+                    const float weight = m2TextureWeightOpacity(model.textureWeights,
+                        model.textureWeightLookup, batch.transparencyIndex);
+                    if (weight > 0.001f) animAlpha *= weight;
                 }
                 bgpu.batchOpacity *= animAlpha;
             }
@@ -2518,9 +2519,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.unlit = (bgpu.materialFlags & 0x01) ? 1 : 0;
             mat.blendMode = bgpu.blendMode;
             mat.volumetricBeam = bgpu.volumetricBeam ? 1 : 0;
-            mat.hasSkyMask = bgpu.skyMaskTexture && bgpu.skyMaskTexture->isValid() ? 1 : 0;
-            mat.skyMaskTexCoordSet = bgpu.skyMaskTexCoordSet;
-            mat.fadeAlpha = 1.0f;
+            mat.hasSecondTexture = bgpu.secondTexture && bgpu.secondTexture->isValid() ? 1 : 0;
+            mat.secondTexCoordSet = bgpu.secondTexCoordSet;
+            mat.cullBackFaces = !skyMode_ && !gpuModel.isSpellEffect &&
+                bgpu.blendMode >= 2 && (bgpu.materialFlags & 0x04) == 0 ? 1 : 0;
             mat.interiorDarken = 0.0f;
             mat.specularIntensity = 0.5f;
             mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
@@ -2589,8 +2591,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].pBufferInfo = &matBufInfo;
 
-            VkTexture* maskTex = bgpu.skyMaskTexture && bgpu.skyMaskTexture->isValid()
-                ? bgpu.skyMaskTexture : batchTex;
+            VkTexture* maskTex = bgpu.secondTexture && bgpu.secondTexture->isValid()
+                ? bgpu.secondTexture : batchTex;
             VkDescriptorImageInfo maskInfo = maskTex->descriptorInfo();
             writes[2] = writes[0];
             writes[2].dstBinding = 3;

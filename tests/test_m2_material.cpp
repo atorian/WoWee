@@ -71,3 +71,63 @@ TEST_CASE("authored priorities sort stably without reordering the batches", "[m2
     CHECK(batches[1].priorityPlane == 2);
     CHECK(m2MaterialDrawOrder(std::vector<Batch>{}).empty());
 }
+
+TEST_CASE("transparency combos resolve reordered and invisible tracks", "[m2][material]") {
+    const std::vector<float> weights{0.0f, 0.25f, 0.75f};
+    const std::vector<uint16_t> lookup{2, 0, 1, UINT16_MAX};
+    CHECK(m2TextureWeightOpacity(weights, lookup, 0) == 0.75f);
+    CHECK(m2TextureWeightOpacity(weights, lookup, 1) == 0.0f);
+    CHECK(m2TextureWeightOpacity(weights, lookup, 2) == 0.25f);
+    CHECK(m2TextureWeightOpacity(weights, lookup, 3) == 1.0f);
+    CHECK(m2TextureWeightOpacity(weights, lookup, UINT16_MAX) == 1.0f);
+    CHECK(m2TextureWeightOpacity({}, lookup, 0) == 1.0f);
+}
+
+TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m2][material][asset]") {
+    for (const auto name : {"dalaran_fountain_01", "dalaran_fountain_02"}) {
+        const std::string path = std::string("Data/expansions/wotlk/world/expansion02/doodads/dalaran/") + name;
+        const auto data = wowee::test::readFile(path + ".m2");
+        if (data.empty()) { SUCCEED("optional WotLK asset is not extracted"); continue; }
+        auto model = wowee::pipeline::M2Loader::load(data);
+        REQUIRE(wowee::pipeline::M2Loader::loadSkin(wowee::test::readFile(path + "00.skin"), model));
+        size_t masks = 0;
+        for (const auto& batch : model.batches) {
+            REQUIRE(batch.materialIndex < model.materials.size());
+            const auto mode = model.materials[batch.materialIndex].blendMode;
+            if (!m2UsesSecondTextureMask(batch.shader, batch.textureCount, mode)) continue;
+            ++masks;
+            REQUIRE(batch.textureIndex + 1u < model.textureLookup.size());
+            const auto first = model.textureLookup[batch.textureIndex];
+            const auto second = model.textureLookup[batch.textureIndex + 1u];
+            REQUIRE(first < model.textures.size());
+            REQUIRE(second < model.textures.size());
+            CHECK(model.textures[first].filename.find("WATERFOAMLOOP2") != std::string::npos);
+            CHECK(model.textures[second].filename.find("T_VFX_BORDER3") != std::string::npos);
+            CHECK(m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit) == 0);
+            CHECK(m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u) == 1);
+            REQUIRE(batch.textureAnimIndex + 1u < model.textureTransformLookup.size());
+            CHECK(model.textureTransformLookup[batch.textureAnimIndex] != UINT16_MAX);
+            CHECK(model.textureTransformLookup[batch.textureAnimIndex + 1u] == UINT16_MAX);
+        }
+        CHECK(masks == 1);
+        // Statue reflection stages have a different combiner; multiplying their
+        // RGBA as though they were foam masks would damage the opaque bronze.
+        for (const auto& batch : model.batches) {
+            if (batch.shader == 1)
+                CHECK_FALSE(m2UsesSecondTextureMask(batch.shader, batch.textureCount,
+                    model.materials[batch.materialIndex].blendMode));
+        }
+        if (model.batches.size() == 25) {
+            const auto& crystal = model.materials[model.batches[8].materialIndex];
+            CHECK(crystal.blendMode == M2_BLEND_ADD_ALPHA);
+            CHECK((crystal.flags & 0x04) == 0); // only the front contributes light
+            CHECK((model.materials[model.batches[4].materialIndex].flags & 0x04) != 0);
+            for (const auto pair : {std::pair<size_t, float>{1, 16384.0f / 32767.0f},
+                                   {2, 10813.0f / 32767.0f}, {16, 6553.0f / 32767.0f}}) {
+                const auto& batch = model.batches[pair.first];
+                CHECK(m2TextureWeightOpacity(model.textureWeights, model.textureWeightLookup,
+                    batch.transparencyIndex) == Catch::Approx(pair.second));
+            }
+        }
+    }
+}

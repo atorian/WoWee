@@ -30,7 +30,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "sky_atmosphere.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
-layout(set = 1, binding = 3) uniform sampler2D uSkyMask;
+layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 
 layout(set = 1, binding = 2) uniform M2Material {
     int hasTexture;
@@ -39,7 +39,7 @@ layout(set = 1, binding = 2) uniform M2Material {
     float colorKeyThreshold;
     int unlit;
     int blendMode;
-    float fadeAlpha;
+    int cullBackFaces;
     float interiorDarken;
     float specularIntensity;
     float emissiveBoost;
@@ -48,10 +48,10 @@ layout(set = 1, binding = 2) uniform M2Material {
     float tintB;
     int volumetricBeam;
     int fireCard;
-    int hasSkyMask;
-    int skyMaskTexCoordSet;
-    float skyMaskOffsetX;
-    float skyMaskOffsetY;
+    int hasSecondTexture;
+    int secondTexCoordSet;
+    float secondOffsetX;
+    float secondOffsetY;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -196,7 +196,14 @@ vec4 fogVolumeSky(vec2 uv) {
 }
 
 void main() {
+    if (cullBackFaces != 0 && !gl_FrontFacing) discard;
     vec4 texColor = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
+    // Mask RGBA before lighting or alpha handling; the authored UV1 mask
+    // bounds the foam even while its UV0 water texture scrolls.
+    if (hasSecondTexture != 0) {
+        vec2 maskUV = secondTexCoordSet == 1 ? AuthoredUVs.zw : AuthoredUVs.xy;
+        texColor *= texture(uSecondTexture, maskUV + vec2(secondOffsetX, secondOffsetY));
+    }
     // The batch's authored colour. A glow card is painted white and coloured
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
     // every fire in the world burns white.
@@ -220,10 +227,6 @@ void main() {
     // and stood still when it did not, on its blended layers alone. The rescale
     // is for foliage cutouts, where a hard edge is the point.
     if (vSkyMode != 0) {
-        if (hasSkyMask != 0) {
-            vec2 maskUV = skyMaskTexCoordSet == 1 ? AuthoredUVs.zw : AuthoredUVs.xy;
-            texColor *= texture(uSkyMask, maskUV + vec2(skyMaskOffsetX, skyMaskOffsetY));
-        }
         // An opaque layer's alpha channel says nothing - it was never
         // blended - so only the fade is its alpha. That matters while the
         // sky crossfades between zones, when every layer is drawn blended.

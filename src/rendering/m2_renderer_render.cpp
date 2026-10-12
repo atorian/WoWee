@@ -1,4 +1,5 @@
 #include "rendering/shadow_params.hpp"
+#include "rendering/m2_material.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_sky_material.hpp"
@@ -1781,7 +1782,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Handle texture animation: if this batch has per-instance uvOffset,
                     // write a separate SSBO range with the correct offsets.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || model.isLavaModel || skyMode_;
+                                           || model.isLavaModel || skyMode_ || batch.batchOpacity != 1.0f;
                     uint32_t drawOffset = groupSSBOOffset;
                     if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
                         drawOffset = instanceDataCount_;
@@ -1820,7 +1821,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             auto& e = instSSBO[instanceDataCount_];
                             e.model = inst.modelMatrix;
                             e.uvOffset = uvOffset;
-                            e.fadeAlpha = p.fadeAlpha;
+                            e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
                                 e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
@@ -2116,7 +2117,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             auto& e = instSSBO[instanceDataCount_];
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
-            e.fadeAlpha = instanceFadeAlpha;
+            e.fadeAlpha = instanceFadeAlpha * batch.batchOpacity;
             if (skyMode_) {
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
                 e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
@@ -2164,10 +2165,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
                 mat->fireCard = batch.forgeFireCard ? 1 : 0;
                 mat->interiorDarken = 0.0f;
-                if (skyMode_ && batch.skyMaskTexture) {
+                if (batch.secondTexture) {
                     glm::vec3 translation(0.0f);
                     const size_t next = static_cast<size_t>(batch.textureAnimIndex) + 1;
-                    if (!skyNoTexAnim && batch.textureAnimIndex != UINT16_MAX &&
+                    if (!(skyMode_ && skyNoTexAnim) && batch.textureAnimIndex != UINT16_MAX &&
                         next < model.textureTransformLookup.size()) {
                         const uint16_t transform = model.textureTransformLookup[next];
                         if (transform < model.textureTransforms.size())
@@ -2175,8 +2176,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 instance.currentSequenceIndex, instance.animTime, instance.globalSequenceTime,
                                 model.globalSequenceDurations, glm::vec3(0.0f));
                     }
-                    mat->skyMaskOffsetX = translation.x;
-                    mat->skyMaskOffsetY = translation.y;
+                    mat->secondOffsetX = translation.x;
+                    mat->secondOffsetY = translation.y;
                 }
                 if (batch.colorKeyBlack)
                     mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;

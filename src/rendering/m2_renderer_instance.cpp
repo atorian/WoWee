@@ -670,7 +670,7 @@ size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
     for (const auto& [modelId, model] : models) {
         for (const auto& batch : model.batches) {
             if (batch.texture) inUse.insert(batch.texture);
-            if (batch.skyMaskTexture) inUse.insert(batch.skyMaskTexture);
+            if (batch.secondTexture) inUse.insert(batch.secondTexture);
         }
         for (const VkTexture* tex : model.particleTextures) {
             if (tex) inUse.insert(tex);

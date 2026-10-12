@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <cstdint>
 #include <vector>
@@ -13,6 +14,23 @@ inline int8_t m2TextureCoordSet(const std::vector<int16_t>& lookup, uint16_t com
     if (combo >= lookup.size()) return 0;
     const int16_t mapping = lookup[combo];
     return mapping == -1 || mapping == 1 ? static_cast<int8_t>(mapping) : 0;
+}
+
+// Shader 0 with two stages and alpha-add blending combines RGBA from
+// both stages. This is shared by sky auroras and the foam on fountains.
+inline bool m2UsesSecondTextureMask(uint16_t shader, uint16_t textureCount,
+                                    uint16_t blendMode) {
+    return shader == 0 && textureCount == 2 && blendMode == 4;
+}
+
+// Skin batches address a combo table, not the transparency array directly.
+// Zero is an authored invisible layer and must not become the default one.
+inline float m2TextureWeightOpacity(const std::vector<float>& weights,
+                                   const std::vector<uint16_t>& lookup,
+                                   uint16_t combo) {
+    if (combo >= lookup.size() || lookup[combo] >= weights.size()) return 1.0f;
+    const float value = weights[lookup[combo]];
+    return std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 1.0f;
 }
 
 // Preserve source order within an authored priority plane so each base,

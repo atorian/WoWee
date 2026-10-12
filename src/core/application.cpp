@@ -493,6 +493,32 @@ bool Application::initialize() {
                                                    571, 4395, 43200.0f);
         }
 
+        // Offline fountain fixture uses the real M2 loader, textures and world pass.
+        if (std::getenv("WOWEE_FOUNTAIN_PROBE") && renderer && assetManager) {
+            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) return false;
+            const std::string path = "World/Expansion02/Doodads/Dalaran/Dalaran_Fountain_01.m2";
+            auto model = pipeline::M2Loader::load(assetManager->readFile(path));
+            model.name = path;
+            if (!pipeline::M2Loader::loadSkin(assetManager->readFile(pipeline::skinPathForM2(path)), model)) return false;
+            // Replay the previous renderer's missing weight/mask stages for
+            // a deterministic comparison; this changes only the offline fixture.
+            if (std::getenv("WOWEE_FOUNTAIN_PROBE_LEGACY")) {
+                model.textureWeights.assign(model.textureWeights.size(), 1.0f);
+                for (auto& material : model.materials) material.flags |= 0x04;
+                for (auto& batch : model.batches)
+                    if (batch.shader == 0 && batch.textureCount == 2) batch.textureCount = 1;
+            }
+            if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0101)) return false;
+            const auto fountain = renderer->getM2Renderer()->createInstance(
+                0xFFFF0101, glm::vec3(5818.0f, 405.0f, 650.0f));
+            renderer->getM2Renderer()->restartInstanceAnimation(fountain);
+            renderer->getCamera()->setPosition(glm::vec3(5780.0f, 405.0f, 663.0f));
+            renderer->getCamera()->setRotation(0.0f, 3.0f);
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
+                renderer->getCamera()->getViewProjectionMatrix());
+            LOG_INFO("Fountain GPU probe: real Dalaran_Fountain_01 uploaded, batches=", model.batches.size());
+        }
+
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
             renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_);
@@ -4213,7 +4239,7 @@ void Application::render() {
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
     // The offline stream fixture draws its uploads through the real world path.
-    if (state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE")) {
+    if (state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") || std::getenv("WOWEE_FOUNTAIN_PROBE")) {
         runRenderStage("renderWorld", [&] {
             renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
         });
@@ -5022,7 +5048,8 @@ void Application::render() {
             // The stall is real and worth fixing, but it has to be fixed where
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
-            uiManager->render(state, authHandler.get(), gameHandler.get());
+            if (!std::getenv("WOWEE_FOUNTAIN_PROBE"))
+                uiManager->render(state, authHandler.get(), gameHandler.get());
         });
 
         // The interface, over the world and everything the world drew on top

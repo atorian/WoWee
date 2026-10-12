@@ -52,10 +52,10 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
-        VkTexture* skyMaskTexture = nullptr; // second stage of an additive sky layer
+        VkTexture* secondTexture = nullptr; // second stage of an RGBA-masked layer
         uint16_t colorTrackIndex = UINT16_MAX;
         uint16_t weightTrackIndex = UINT16_MAX;
-        uint8_t skyMaskTexCoordSet = 0;
+        uint8_t secondTexCoordSet = 0;
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
         ::VkBuffer materialUBO = VK_NULL_HANDLE;
         VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
@@ -410,7 +410,7 @@ struct M2MaterialUBO {
     float colorKeyThreshold;
     int32_t unlit;
     int32_t blendMode;
-    float fadeAlpha;
+    int32_t cullBackFaces; // authored single-sided transparent material
     float interiorDarken;
     float specularIntensity;
     float emissiveBoost;
@@ -427,10 +427,10 @@ struct M2MaterialUBO {
     /// A flame card. Fades out over the top of its own model, so the card's
     /// upper edge is not where the fire stops.
     int32_t fireCard;
-    int32_t hasSkyMask;
-    int32_t skyMaskTexCoordSet;
-    float skyMaskOffsetX;
-    float skyMaskOffsetY;
+    int32_t hasSecondTexture;
+    int32_t secondTexCoordSet;
+    float secondOffsetX;
+    float secondOffsetY;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
