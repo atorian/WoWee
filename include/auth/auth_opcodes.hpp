@@ -13,6 +13,15 @@ enum class AuthOpcode : uint8_t {
     RECONNECT_PROOF = 0x03,
     AUTHENTICATOR = 0x04,  // TrinityCore-style Google Authenticator token
     REALM_LIST = 0x10,
+    // Patch transfer. The server streams a file the client agreed to fetch.
+    XFER_INITIATE = 0x30,  // S->C: u8 nameLen, name, u64 size, md5[16]
+    XFER_DATA = 0x31,      // S->C: u16 length, bytes
+    XFER_ACCEPT = 0x32,    // C->S: start from the beginning
+    XFER_RESUME = 0x33,    // C->S: u64 offset already held
+    XFER_CANCEL = 0x34,    // C->S
+    // EZWoW's ezLib names the file before each accept/resume: u8 length, name.
+    // The stock protocol has no such packet; the server announced the file.
+    XFER_FILE_NAME = 0xFF,
 };
 
 // LOGON_CHALLENGE response status codes

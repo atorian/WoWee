@@ -34,7 +34,7 @@ namespace wowee {
 namespace rendering { class Renderer; }
 namespace ui { class UIManager; class MapWindow; }
 namespace auth { class AuthHandler; }
-namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; }
+namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class DBCLayout; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; }
@@ -49,6 +49,7 @@ class AnimationCallbackHandler;
 class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
+class RealmPatchSync;
 
 enum class AppState {
     AUTHENTICATION,
@@ -349,6 +350,14 @@ private:
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;
     std::unique_ptr<UIScreenCallbackHandler> uiScreenCallbacks_;
+
+    // Realm-announced patch archives, fetched over the login connection.
+    // Declared after authHandler so it is destroyed first: its transport
+    // calls into the auth handler.
+    std::unique_ptr<RealmPatchSync> realmPatchSync_;
+    std::string realmPatchStatus_;
+    void startRealmPatchSync(const std::vector<game::EzWowPatch>& patches);
+    void updateRealmPatches();
 
     // Beat by the main loop each iteration; the watchdog treats a long silence as a
     // hang. Long but healthy work that renders its own frames (world load) must beat

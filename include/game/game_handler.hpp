@@ -58,6 +58,8 @@ namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
 
+struct EzWowPatch;
+
 struct PlayerSkill {
     uint32_t skillId = 0;
     uint16_t value = 0;        // base + permanent item bonuses
@@ -233,6 +235,13 @@ public:
     using CharDeleteCallback = std::function<void(bool success, const std::string& message)>;
     void setCharDeleteCallback(CharDeleteCallback cb) { charDeleteCallback_ = std::move(cb); }
     uint8_t getLastCharDeleteResult() const { return lastCharDeleteResult_; }
+
+    // A realm extension announced the patch archives this client should hold.
+    using ServerPatchManifestCallback = std::function<void(const std::vector<EzWowPatch>&)>;
+    void setServerPatchManifestCallback(ServerPatchManifestCallback cb) { serverPatchManifestCallback_ = std::move(cb); }
+    void notifyServerPatchManifest(const std::vector<EzWowPatch>& patches) {
+        if (serverPatchManifestCallback_) serverPatchManifestCallback_(patches);
+    }
 
     using CharLoginFailCallback = std::function<void(const std::string& reason)>;
     void setCharLoginFailCallback(CharLoginFailCallback cb) { charLoginFailCallback_ = std::move(cb); }
@@ -4910,6 +4919,7 @@ private:
     WorldConnectFailureCallback onFailure;
     CharCreateCallback charCreateCallback_;
     CharDeleteCallback charDeleteCallback_;
+    ServerPatchManifestCallback serverPatchManifestCallback_;
     CharLoginFailCallback charLoginFailCallback_;
     uint8_t lastCharDeleteResult_ = 0xFF;
     bool pendingCharDeleteResponse_ = false;

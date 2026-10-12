@@ -14,10 +14,13 @@ struct KnownTitleUpdate {
     uint8_t operation; // 1 add, 2 remove, 3 replace
     std::vector<uint16_t> bits;
 };
+struct EzWowPatch;
 struct ProtocolEvents {
     // Invoked synchronously by world-packet dispatch, never by preparation or Warden workers.
     std::function<void(const KnownTitleUpdate&)> knownTitles{};
     std::function<void(uint64_t)> money{};
+    // The archives the realm expects this client to hold, in announced order.
+    std::function<void(const std::vector<EzWowPatch>&)> patchManifest{};
 };
 struct ProtocolSession {
     std::string host;

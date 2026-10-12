@@ -34,6 +34,7 @@ enum class AuthState {
 using AuthSuccessCallback = std::function<void(const std::vector<uint8_t>& sessionKey)>;
 using AuthFailureCallback = std::function<void(const std::string& reason)>;
 using RealmListCallback = std::function<void(const std::vector<Realm>& realms)>;
+using XferDataCallback = std::function<void(const uint8_t* data, size_t size)>;
 
 class AuthHandler {
 public:
@@ -72,6 +73,14 @@ public:
      *  (rather than bad credentials), so the caller may retry on another
      *  protocol version. See protocolFailureSuspected_. */
     [[nodiscard]] bool lastFailureWasProtocol() const { return protocolFailureSuspected_; }
+
+    /** Ask the server to stream one patch file over this authenticated
+     *  connection, EZWoW-style: the file is named first, then accepted (offset
+     *  0) or resumed. The bytes arrive through setOnXferData. False when the
+     *  connection is gone or was never authenticated. */
+    [[nodiscard]] bool requestPatchTransfer(const std::string& name, uint64_t offset);
+    void cancelPatchTransfer();
+    void setOnXferData(XferDataCallback callback) { onXferData = std::move(callback); }
 
     // Callbacks
     void setOnSuccess(AuthSuccessCallback callback) { onSuccess = std::move(callback); }
@@ -119,6 +128,7 @@ private:
     AuthSuccessCallback onSuccess;
     AuthFailureCallback onFailure;
     RealmListCallback onRealmList;
+    XferDataCallback onXferData;
 
     // Receive buffer
     std::vector<uint8_t> receiveBuffer;

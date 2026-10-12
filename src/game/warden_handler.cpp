@@ -218,6 +218,8 @@ bool WardenHandler::beginSession(const std::string& host, uint16_t port, uint32_
                         owner_.applyKnownTitleUpdate(update.operation, update.bits);
                     }, [this](uint64_t copper) {
                         owner_.applyServerMoney(copper);
+                    }, [this](const std::vector<EzWowPatch>& patches) {
+                        owner_.notifyServerPatchManifest(patches);
                     }});
             });
         extensionPreparationPending_ = true;

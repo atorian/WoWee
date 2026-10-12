@@ -667,6 +667,8 @@ set(WOWEE_SOURCES
     src/core/frame_pacer.cpp
     src/core/https_get.cpp
     src/core/update_check.cpp
+    src/core/realm_patches.cpp
+    src/core/realm_patch_sync.cpp
 
     # Math
     src/math/spline.cpp

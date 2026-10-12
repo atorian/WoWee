@@ -110,6 +110,25 @@ Two fresh live sessions on 2026-10-12 returned seven characters in 1.219 and
 1.140 seconds with module-cache reuse; the second also reached IN_WORLD.
 Manifest/final retries and the full Warden challenge/check sequence remain.
 
+### EZWoW patch downloads
+
+Read from the original `ezLib` 1.7.2 (`Patches.cpp`) on 2026-10-12. Command 1
+lists `name, size, flags, md5, fastMd5`; `md5` is the whole file's MD5. Names are
+`<order>[_lazy]_<name>[_<locale>].MPQ`; archives for another locale are skipped
+and the file is kept without its prefix. `downloadMpq` does not use HTTP: it
+calls the native XFER-initiate setup (`0x465550`) and hooks the native XFER
+reply (`0x8cde60`, called at `0x8ca4e5`) so that, on the **login** connection,
+`[0xFF][u8 length][server name]` precedes the stock `XFER_ACCEPT` (0x32) or
+`XFER_RESUME` (0x33, u64 offset). The file then arrives as stock `XFER_DATA`
+(0x31, u16 length, bytes).
+
+`RealmPatchSync` (`src/core/realm_patch_sync.cpp`) does the same over the auth
+connection, which stays open after realm selection. Archives go to
+`<user data>/realm_patches/<realmPatchDirName(login host, port)>/`, download to
+`.partial`, resume from it, and move into place only after the MD5 matches.
+Checked MD5s are cached by size and modification time in `checksums.json`.
+Mounting the archives and applying `dbc_diff.MPQ` are not done yet.
+
 ## Local profile
 
 The default root is `Data/server_extensions`, relative to the resource directory.

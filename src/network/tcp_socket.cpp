@@ -158,13 +158,18 @@ void TCPSocket::update() {
 }
 
 void TCPSocket::tryParsePackets() {
-    // For auth packets, we need at least 1 byte (opcode)
-    while (!receiveBuffer.empty()) {
-        uint8_t opcode = receiveBuffer[0];
+    // Walk the buffer by offset and drop the parsed prefix once at the end. A
+    // patch transfer delivers megabytes per update as thousands of packets;
+    // erasing each one from the front made that quadratic.
+    size_t consumed = 0;
+    while (consumed < receiveBuffer.size()) {
+        const uint8_t* data = receiveBuffer.data() + consumed;
+        const size_t available = receiveBuffer.size() - consumed;
+        uint8_t opcode = data[0];
 
         // Determine expected packet size based on opcode
         // This is specific to authentication protocol
-        size_t expectedSize = getExpectedPacketSize(opcode);
+        size_t expectedSize = getExpectedPacketSize(data, available);
 
         if (expectedSize == 0) {
             // Unknown opcode or need more data to determine size
@@ -172,9 +177,9 @@ void TCPSocket::tryParsePackets() {
             break;
         }
 
-        if (receiveBuffer.size() < expectedSize) {
+        if (available < expectedSize) {
             // Not enough data yet
-            LOG_DEBUG("Waiting for more data: have ", receiveBuffer.size(),
+            LOG_DEBUG("Waiting for more data: have ", available,
                      " bytes, need ", expectedSize);
             break;
         }
@@ -183,44 +188,42 @@ void TCPSocket::tryParsePackets() {
         LOG_DEBUG("Parsing packet: opcode=0x", std::hex, static_cast<int>(opcode), std::dec,
                  " size=", expectedSize, " bytes");
 
-        // Create packet from buffer data
-        std::vector<uint8_t> packetData(receiveBuffer.begin(),
-                                        receiveBuffer.begin() + expectedSize);
-
-        Packet packet(opcode, packetData);
-
-        // Remove parsed data from buffer
-        receiveBuffer.erase(receiveBuffer.begin(), receiveBuffer.begin() + expectedSize);
+        Packet packet(opcode, std::vector<uint8_t>(data, data + expectedSize));
+        consumed += expectedSize;
 
         // Call callback if set
         if (packetCallback) {
             packetCallback(packet);
         }
+        // The callback may have disconnected, which empties the buffer.
+        if (!connected) return;
     }
+    receiveBuffer.erase(receiveBuffer.begin(), receiveBuffer.begin() + consumed);
 }
 
-size_t TCPSocket::getExpectedPacketSize(uint8_t opcode) {
+size_t TCPSocket::getExpectedPacketSize(const uint8_t* data, size_t size) {
     // Authentication packet sizes (WoW 3.3.5a)
     // Note: These are minimum sizes. Some packets are variable length.
 
+    const uint8_t opcode = data[0];
     switch (opcode) {
         case 0x00:  // LOGON_CHALLENGE response
             // Need to read status byte to determine success/failure
-            if (receiveBuffer.size() >= 3) {
-                uint8_t status = receiveBuffer[2];
+            if (size >= 3) {
+                uint8_t status = data[2];
                 if (status == 0x00) {
                     // Success: opcode(1) + unk(1) + status(1) + B(32) + gLen(1) + g(gLen) +
                     //          nLen(1) + N(nLen) + salt(32) + crcHash(16) + securityFlags(1)
                     //          + optional security flag data
-                    if (receiveBuffer.size() >= 36) {  // enough to read g_len
-                        uint8_t gLen = receiveBuffer[35];
+                    if (size >= 36) {  // enough to read g_len
+                        uint8_t gLen = data[35];
                         size_t minSize = 36 + gLen + 1;  // up to N_len
-                        if (receiveBuffer.size() >= minSize) {
-                            uint8_t nLen = receiveBuffer[36 + gLen];
+                        if (size >= minSize) {
+                            uint8_t nLen = data[36 + gLen];
                             size_t baseSize = 36 + gLen + 1 + nLen + 32 + 16 + 1;
                             // Need to read securityFlags to account for extra data
-                            if (receiveBuffer.size() >= baseSize) {
-                                uint8_t secFlags = receiveBuffer[baseSize - 1];
+                            if (size >= baseSize) {
+                                uint8_t secFlags = data[baseSize - 1];
                                 size_t extra = 0;
                                 if (secFlags & 0x01) extra += 20;  // PIN: seed(4) + salt(16)
                                 if (secFlags & 0x02) extra += 12;  // Matrix: w(1)+h(1)+digits(1)+challenges(1)+seed(8)
@@ -242,24 +245,35 @@ size_t TCPSocket::getExpectedPacketSize(uint8_t opcode) {
             //   Build 6299-8088: cmd(1)+error(1)+M2(20)+surveyId(4)+loginFlags(2) = 28
             //   Build < 6299: cmd(1)+error(1)+M2(20)+surveyId(4) = 26
             // Failure: varies by server - minimum 2 bytes (opcode + status), some send 4
-            if (receiveBuffer.size() >= 2) {
-                uint8_t status = receiveBuffer[1];
+            if (size >= 2) {
+                uint8_t status = data[1];
                 if (status == 0x00) {
-                    if (receiveBuffer.size() >= 32) return 32;
-                    if (receiveBuffer.size() >= 28) return 28;
-                    if (receiveBuffer.size() >= 26) return 26;
+                    if (size >= 32) return 32;
+                    if (size >= 28) return 28;
+                    if (size >= 26) return 26;
                     return 0;
                 }                     // Consume up to 4 bytes if available, minimum 2
-                    return (receiveBuffer.size() >= 4) ? 4 : 2;
+                    return (size >= 4) ? 4 : 2;
                
             }
             return 0;  // Need more data
 
+        case 0x30:  // XFER_INITIATE: opcode(1) + nameLen(1) + name + size(8) + md5(16)
+            if (size >= 2) return 2 + data[1] + 8 + 16;
+            return 0;
+
+        case 0x31:  // XFER_DATA: opcode(1) + length(2) + bytes(length)
+            if (size >= 3) {
+                const uint16_t length = data[1] | (data[2] << 8);
+                return 3 + length;
+            }
+            return 0;
+
         case 0x10:  // REALM_LIST response
             // Variable length - format: opcode(1) + size(2) + payload(size)
             // Need to read size field (little-endian uint16 at offset 1-2)
-            if (receiveBuffer.size() >= 3) {
-                uint16_t size = receiveBuffer[1] | (receiveBuffer[2] << 8);
+            if (size >= 3) {
+                uint16_t size = data[1] | (data[2] << 8);
                 // Total packet size is: opcode(1) + size field(2) + payload(size)
                 return 1 + 2 + size;
             }

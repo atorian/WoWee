@@ -20,7 +20,8 @@ public:
 
 private:
     void tryParsePackets();
-    size_t getExpectedPacketSize(uint8_t opcode);
+    // Bytes the auth packet starting at data occupies, or 0 when more must arrive.
+    size_t getExpectedPacketSize(const uint8_t* data, size_t size);
 
     socket_t sockfd = INVALID_SOCK;
     bool connected = false;

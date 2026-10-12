@@ -85,7 +85,7 @@ In progress / known gaps:
 - Visual edge cases: some M2/WMO rendering gaps (some particle effects)
 - Water refraction: always on and no longer a setting; srcAccessMask barrier fix (2026-03-18) resolved prior VK_ERROR_DEVICE_LOST on AMD/Mali GPUs
 - Shadows: held on, with no settings control. Turning them off loses the device, and the fault is not found yet
-- Realm patch directories: per-realm directory naming and patch-manifest validation exist (`src/core/realm_patches.cpp`), but nothing downloads or calls them yet
+- Realm patch directories: EZWoW-announced archives download over the login connection into the per-realm directory (`src/core/realm_patch_sync.cpp`), but they are not mounted yet
 - Fixed 2026-05-15: classic/turtle update-field tables had multiple wrong indices (`UNIT_FIELD_BYTES_1`=133 colliding with `UNIT_FIELD_MOUNTDISPLAYID`=133; STAT0..4 at 138..142; RESISTANCES at 154; missing NATIVEDISPLAYID). Corrected against vmangos `UpdateFields_1_12_1.h`: BYTES_1=138, STAT0..4=150..154, RESISTANCES=155, added NATIVEDISPLAYID=132.
 
 ## Where To Look

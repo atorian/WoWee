@@ -14,6 +14,10 @@
 #include "core/transport_callback_handler.hpp"
 #include "core/world_entry_callback_handler.hpp"
 #include "core/ui_screen_callback_handler.hpp"
+#include "core/realm_patch_sync.hpp"
+#include "core/realm_patches.hpp"
+#include "core/data_paths.hpp"
+#include "game/server_protocol.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation_controller.hpp"
@@ -2148,6 +2152,8 @@ void Application::shutdown() {
     LOG_DEBUG("Resetting gameHandler...");
     gameHandler.reset();
     gameServices_ = {};
+    // Its transport calls into the auth handler; release it first.
+    realmPatchSync_.reset();
     LOG_DEBUG("Resetting authHandler...");
     authHandler.reset();
     LOG_DEBUG("Resetting assetManager...");
@@ -4146,6 +4152,9 @@ void Application::update(float deltaTime) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
+    updateCheckpoint = "realm patches";
+    updateRealmPatches();
+
     // Update based on current state
     updateCheckpoint = "state switch";
     switch (state) {
@@ -5336,6 +5345,14 @@ void Application::setupUICallbacks() {
         [this](AppState s) { setState(s); });
     uiScreenCallbacks_->setupCallbacks();
 
+    // ── Realm patch archives (EZWoW: list over world, files over login) ──
+    gameHandler->setServerPatchManifestCallback([this](const std::vector<game::EzWowPatch>& patches) {
+        startRealmPatchSync(patches);
+    });
+    authHandler->setOnXferData([this](const uint8_t* data, size_t size) {
+        if (realmPatchSync_) realmPatchSync_->onData(data, size);
+    });
+
     // ── World entry, unstuck, hearthstone, bind point ──
     worldEntryCallbacks_ = std::make_unique<WorldEntryCallbackHandler>(
         *renderer, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
@@ -5940,6 +5957,70 @@ void Application::setupTestTransport() {
     LOG_INFO("To disembark:");
     LOG_INFO("  /transport leave");
     LOG_INFO("========================================");
+}
+
+
+void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patches) {
+    if (!authHandler) return;
+    // Per login endpoint, named from the address the player connected to and
+    // never from anything the server sent.
+    const auto directory = userDataRoot() / "realm_patches" /
+        realmPatchDirName(authHandler->getServerHost(), authHandler->getServerPort());
+    if (realmPatchSync_ && realmPatchSync_->busy()) {
+        LOG_INFO("Realm patch list received again while syncing; continuing the current run");
+        return;
+    }
+    if (!realmPatchSync_ || realmPatchSync_->directory() != directory) {
+        auth::AuthHandler* auth = authHandler.get();
+        realmPatchSync_ = std::make_unique<RealmPatchSync>(directory, RealmPatchSync::Transport{
+            [auth](const std::string& name, uint64_t offset) { return auth->requestPatchTransfer(name, offset); },
+            [auth] { auth->cancelPatchTransfer(); },
+            [auth] { return auth->isConnected(); },
+        });
+    }
+    realmPatchStatus_.clear();
+    realmPatchSync_->start(patches, authHandler->getClientInfo().locale);
+}
+
+void Application::updateRealmPatches() {
+    if (!realmPatchSync_) return;
+    // The login and realm screens pump the auth connection themselves; past
+    // them it carries the patch transfer and nothing else reads it.
+    if (realmPatchSync_->busy() && authHandler &&
+        state != AppState::AUTHENTICATION && state != AppState::REALM_SELECTION) {
+        authHandler->update(0.0f);
+    }
+    realmPatchSync_->update();
+
+    const auto p = realmPatchSync_->progress();
+    std::string text;
+    bool isError = false;
+    auto mb = [](uint64_t bytes) { return std::to_string((bytes + (1u << 19)) >> 20); };
+    switch (p.state) {
+        case RealmPatchSync::State::Checking:
+            text = "Checking realm patches...";
+            break;
+        case RealmPatchSync::State::Downloading:
+        case RealmPatchSync::State::Verifying:
+            text = "Downloading realm patches " + std::to_string(p.fileIndex) + "/" +
+                   std::to_string(p.fileCount) + ": " + p.current + " - " + mb(p.doneBytes) +
+                   " / " + mb(p.totalBytes) + " MB";
+            if (p.state == RealmPatchSync::State::Verifying) text += " (verifying)";
+            break;
+        case RealmPatchSync::State::Done:
+            if (p.fileCount) text = "Realm patches downloaded (" + std::to_string(p.fileCount) + " archive(s))";
+            break;
+        case RealmPatchSync::State::Failed:
+            text = "Realm patch download failed: " + p.error;
+            isError = true;
+            break;
+        case RealmPatchSync::State::Idle:
+            break;
+    }
+    if (text != realmPatchStatus_ && uiManager) {
+        realmPatchStatus_ = text;
+        if (!text.empty()) uiManager->getCharacterScreen().setStatus(text, isError);
+    }
 }
 
 } // namespace core

@@ -130,6 +130,7 @@ public:
                 // This callback sends no immediate reply in the reference DLL.
                 auto patches = parseEzWowPatches(body);
                 patchManifest_ = std::move(patches);
+                if (events_.patchManifest) events_.patchManifest(patchManifest_);
                 // Native processFinishDone switches to charselect, whose OnShow
                 // calls GetCharacterListUpdate. Allow that ordinary query to
                 // overlap the remaining checks, retaining the final retry.

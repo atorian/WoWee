@@ -2688,3 +2688,25 @@ target_link_libraries(test_m2_material PRIVATE catch2_main)
 wowee_test_link_glm(test_m2_material)
 add_test(NAME m2_material COMMAND test_m2_material)
 register_test_target(test_m2_material)
+
+# ── test_realm_patch_sync ────────────────────────────────────
+# Keeping a realm's patch directory in step with its announced list, against
+# a faked transfer: resume, damage, overrun and a dropped connection.
+add_executable(test_realm_patch_sync
+    test_realm_patch_sync.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/realm_patch_sync.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/realm_patches.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_realm_patch_sync PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}
+)
+target_include_directories(test_realm_patch_sync SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/extern/nlohmann
+)
+target_link_libraries(test_realm_patch_sync PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+wowee_test_link_glm(test_realm_patch_sync)
+add_test(NAME realm_patch_sync COMMAND test_realm_patch_sync)
+register_test_target(test_realm_patch_sync)

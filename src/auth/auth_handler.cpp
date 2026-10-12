@@ -506,6 +506,35 @@ void AuthHandler::handleRealmListResponse(network::Packet& packet) {
     }
 }
 
+bool AuthHandler::requestPatchTransfer(const std::string& name, uint64_t offset) {
+    if (!isConnected() ||
+        (state != AuthState::AUTHENTICATED && state != AuthState::REALM_LIST_REQUESTED &&
+         state != AuthState::REALM_LIST_RECEIVED)) {
+        return false;
+    }
+    if (name.empty() || name.size() > 255) return false;
+
+    // ezLib sends both packets from one hook in front of the native accept.
+    network::Packet named(static_cast<uint16_t>(AuthOpcode::XFER_FILE_NAME));
+    named.writeUInt8(static_cast<uint8_t>(name.size()));
+    named.writeBytes(reinterpret_cast<const uint8_t*>(name.data()), name.size());
+    socket->send(named);
+
+    if (offset == 0) {
+        socket->send(network::Packet(static_cast<uint16_t>(AuthOpcode::XFER_ACCEPT)));
+    } else {
+        network::Packet resume(static_cast<uint16_t>(AuthOpcode::XFER_RESUME));
+        resume.writeUInt64(offset);
+        socket->send(resume);
+    }
+    LOG_INFO("Requested patch transfer: ", name, " from offset ", offset);
+    return true;
+}
+
+void AuthHandler::cancelPatchTransfer() {
+    if (isConnected()) socket->send(network::Packet(static_cast<uint16_t>(AuthOpcode::XFER_CANCEL)));
+}
+
 void AuthHandler::handlePacket(network::Packet& packet) {
     if (packet.getSize() < 1) {
         LOG_DEBUG("Received empty auth packet (ignored)");
@@ -517,6 +546,13 @@ void AuthHandler::handlePacket(network::Packet& packet) {
     // Note: packet now has read position advanced past opcode
 
     AuthOpcode opcode = static_cast<AuthOpcode>(opcodeValue);
+
+    // A transfer is thousands of these; a hex dump each would flood the log.
+    if (opcode == AuthOpcode::XFER_DATA) {
+        const auto& raw = packet.getData();
+        if (onXferData && raw.size() >= 3) onXferData(raw.data() + 3, raw.size() - 3);
+        return;
+    }
 
     // Hex dump first bytes for diagnostics
     {
@@ -575,6 +611,12 @@ void AuthHandler::handlePacket(network::Packet& packet) {
             } else {
                 LOG_WARNING("Unexpected REALM_LIST response in state: ", static_cast<int>(state));
             }
+            break;
+
+        case AuthOpcode::XFER_INITIATE:
+            // EZWoW's client names the file itself; a stock server announcing
+            // one is a version update this client cannot apply.
+            LOG_WARNING("Server offered a client patch transfer; not supported");
             break;
 
         default:
