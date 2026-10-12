@@ -19,6 +19,8 @@
 #include <condition_variable>
 #include <mutex>
 #include <atomic>
+#include <functional>
+#include <optional>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -105,6 +107,11 @@ public:
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
+    /// Look up again, for each instance that has moved since it was last
+    /// looked up, the MOHD ambient of the WMO interior group it stands in.
+    /// `interiorAmbientAt` answers for a world position; no value is outdoors.
+    void updateInteriorLight(
+        const std::function<std::optional<glm::vec3>(const glm::vec3&)>& interiorAmbientAt);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
@@ -310,6 +317,12 @@ private:
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
         glm::mat4 overrideModelMatrix{1.0f};
+
+        /// rgb: the MOHD ambient of the WMO interior group the instance stands
+        /// in; w: 1 inside one, 0 outdoors. See interior_light.glsli.
+        glm::vec4 interiorLight{0.0f};
+        /// Where interiorLight was looked up, once it has been.
+        std::optional<glm::vec3> interiorLightOrigin;
 
         // Enchant visual attached to a weapon. Such a model is nothing but the
         // additive FX batches that attached weapons otherwise drop, and it still

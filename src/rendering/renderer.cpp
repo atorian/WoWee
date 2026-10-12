@@ -2111,8 +2111,22 @@ void Renderer::update(float deltaTime) {
     }
     playerIndoors_ = insideWmo;
 
+    // Characters, creatures and their weapons take the light of the interior
+    // group they stand in. WMO doodads are told theirs when they are placed.
+    if (characterRenderer && wmoRenderer) {
+        characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
+            return wmoRenderer->interiorAmbientAt(p.x, p.y, p.z);
+        });
+    }
+
     // Update lighting system
     if (lightingManager) {
+        // Indoors only inside one of a WMO's interior groups. Being inside any
+        // group is not enough: Stormwind's streets are exterior groups of the
+        // city's WMO, and so are porches, bridges and archways.
+        lightingManager->setIndoors(insideWmo &&
+            wmoRenderer->isInsideInteriorWMO(camPos.x, camPos.y, camPos.z));
+
         const auto* gh = core::Application::getInstance().getGameHandler();
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
         float gameTime    = gh ? gh->getGameTime() : -1.0f;
@@ -3069,11 +3083,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // to handle thread-unsafe GPU allocations (descriptor pools, bone SSBOs).
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
-        if (m2Renderer && cameraController) {
-            // Use isInsideInteriorWMO (flag 0x2000) - not isInsideWMO which includes
-            // outdoor WMO groups like archways/bridges that should receive shadows.
-            m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
-        }
         auto prepStart = std::chrono::steady_clock::now();
         if (wmoRenderer) wmoRenderer->prepareRender();
         auto prepWmoEnd = std::chrono::steady_clock::now();
@@ -3419,10 +3428,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
 
         if (m2Renderer && camera && !skipM2) {
-            if (cameraController) {
-                // Use isInsideInteriorWMO (flag 0x2000) for correct indoor detection
-                m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
-            }
             m2Renderer->prepareRender(frameIdx, *camera);
             auto m2Start = std::chrono::steady_clock::now();
             m2Renderer->render(currentCmd, perFrameSet, *camera);

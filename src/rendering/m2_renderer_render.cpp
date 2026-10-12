@@ -1542,6 +1542,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
                 e.flags = inst.afloat > 0 ? 1 : 0;
+                e.interiorLight = inst.interiorLight;
                 instanceDataCount_++;
                 ++writtenInstances;
             }
@@ -1834,6 +1835,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
                             e.flags = inst.afloat > 0 ? 1 : 0;
+                            e.interiorLight = inst.interiorLight;
                             instanceDataCount_++;
                         }
                     }
@@ -1919,10 +1921,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Update material UBO
                     if (batch.materialUBOMapped) {
                         auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
-                        // interiorDarken is a camera-based flag - it darkens ALL M2s (incl.
-                        // outdoor trees) when the camera is inside a WMO.  Disable it; indoor
-                        // M2s already look correct from the darker ambient/lighting.
-                        mat->interiorDarken = 0.0f;
                         if (batch.colorKeyBlack)
                             mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
                         if (forceCutout) {
@@ -2130,6 +2128,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
             e.flags = instance.afloat > 0 ? 1 : 0;
+            e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
 
             // Pipeline selection
@@ -2164,7 +2163,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 mat->volumetricBeam =
                     (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
                 mat->fireCard = batch.forgeFireCard ? 1 : 0;
-                mat->interiorDarken = 0.0f;
                 if (batch.secondTexture) {
                     glm::vec3 translation(0.0f);
                     const size_t next = static_cast<size_t>(batch.textureAnimIndex) + 1;
