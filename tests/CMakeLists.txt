@@ -2150,6 +2150,13 @@ wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_light_params_eval ───────────────────────────────────
+# Which LightParams row a volume names for the weather, what a row with
+# missing bands gives, and how volumes blend when one names a missing row.
+# A missing fog band put the fog's end at 0.03 yards.
+wowee_add_test(test_light_params_eval
+    SOURCES test_light_params_eval.cpp)
+
 # ── test_interior_light ──────────────────────────────────────
 # The light of a model inside a WMO interior group. Doodads and characters
 # inside a WMO took the sun and the zone's LightParams instead of the

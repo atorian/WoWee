@@ -3,6 +3,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <cstdint>
 #include <vector>
@@ -250,6 +251,10 @@ private:
     /// from both the parallel and the fallback recording paths, which had
     /// carried different ones.
     void renderUnderwaterOverlay(VkCommandBuffer cmd);
+    /// How far the camera is under terrain water: positive under the surface,
+    /// down to -2 just above it, nothing with no water there. WMO liquid is
+    /// left out, as the underwater overlay leaves it out.
+    [[nodiscard]] std::optional<float> cameraWaterDepth() const;
     void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
     void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
 

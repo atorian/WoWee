@@ -3,6 +3,7 @@
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/light_headroom.hpp"
+#include "rendering/light_params_eval.hpp"
 #include "rendering/light_volume_order.hpp"
 #include <glm/gtc/constants.hpp>
 #include "pipeline/asset_manager.hpp"
@@ -10,6 +11,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <ctime>
 
@@ -17,9 +19,7 @@ namespace wowee {
 namespace rendering {
 
 
-// WoW's Light.dbc stores time-of-day as half-minutes (0..2879).
-// 24 hours × 60 minutes × 2 = 2880 half-minute ticks per day cycle.
-constexpr uint16_t kHalfMinutesPerDay = 2880;
+constexpr uint16_t kHalfMinutesPerDay = LIGHT_HALF_MINUTES_PER_DAY;
 
 // Maximum volumes to blend (top 2-4)
 constexpr size_t MAX_BLEND_VOLUMES = 2;
@@ -82,10 +82,16 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
     // 2-4: float X, Z, Y (note: z and y swapped!)
     // 5: float FalloffStart (inner radius)
     // 6: float FalloffEnd (outer radius)
-    // 7: uint32 LightParamsID (clear weather)
-    // 8: uint32 LightParamsID (overcast/rain)
-    // 9: uint32 LightParamsID (underwater)
-    // ... more params for death, phases, etc.
+    // 7: uint32 LightParamsID (clear)
+    // 8: uint32 LightParamsID (clear, under water)
+    // 9: uint32 LightParamsID (storm)
+    // 10: uint32 LightParamsID (storm, under water)
+    // 11: uint32 LightParamsID (death), and unused ones after it
+    //
+    // 8 and 9 were read as rain and under water, so rain drew the under-water
+    // light and diving drew the storm. The layout names for them changed with
+    // the fix, so a dbc_layouts.json copied before it reports the missing
+    // fields instead of carrying the old columns on.
 
     const auto* activeLayout = pipeline::getActiveDBCLayout();
     const auto* lL = activeLayout ? activeLayout->getLayout("Light") : nullptr;
@@ -112,12 +118,11 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
 
         // LightParams IDs for different conditions
         volume.lightParamsId = dbc->getUInt32(i, lL ? (*lL)["LightParamsID"] : 7);
-        if (dbc->getFieldCount() > 8) {
-            volume.lightParamsIdRain = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDRain"] : 8);
-        }
-        if (dbc->getFieldCount() > 9) {
-            volume.lightParamsIdUnderwater = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDUnderwater"] : 9);
-        }
+        volume.lightParamsIdUnderwater =
+            dbc->getUInt32(i, lL ? (*lL)["LightParamsIDClearUnderwater"] : 8);
+        volume.lightParamsIdStorm = dbc->getUInt32(i, lL ? (*lL)["LightParamsIDStorm"] : 9);
+        volume.lightParamsIdStormUnderwater =
+            dbc->getUInt32(i, lL ? (*lL)["LightParamsIDStormUnderwater"] : 10);
 
         // Add to map-specific list
         lightVolumesByMap_[volume.mapId].push_back(volume);
@@ -347,7 +352,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
             for (size_t i = 0; i < blendCount; ++i) {
                 const auto& wv = activeVolumes_[i];
-                const uint32_t paramsId = selectLightParamsId(wv.volume, isRaining, isUnderwater);
+                const uint32_t paramsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
                 auto profileIt = lightParamsProfiles_.find(paramsId);
                 if (profileIt == lightParamsProfiles_.end() ||
                     profileIt->second.lightSkyboxId == 0) continue;
@@ -385,53 +390,40 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // their own light in the shaders.
     LightingParams newParams;
 
-    if (!activeVolumes_.empty()) {
-        // Outdoor with DBC lighting - blend multiple volumes
-        newParams = LightingParams::blendAccumulator();
-        glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
-
+    std::optional<LightingParams> blended;
+    {
         // The first MAX_BLEND_VOLUMES only: the list is the whole
         // neighbourhood now, and those are the ones whose weights were
         // normalized to sum to one.
+        std::array<WeightedLightingParams, MAX_BLEND_VOLUMES> parts;
+        size_t partCount = 0;
         const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
         for (size_t i = 0; i < blendCount; ++i) {
             const auto& wv = activeVolumes_[i];
-            uint32_t lightParamsId = selectLightParamsId(wv.volume, isRaining, isUnderwater);
+            const uint32_t lightParamsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
             auto it = lightParamsProfiles_.find(lightParamsId);
+            if (it == lightParamsProfiles_.end()) continue;
+            parts[partCount++] = {
+                .params = sampleLightParams(it->second, timeHalfMinutes, fallbackParams_),
+                .weight = wv.weight};
 
-            if (it != lightParamsProfiles_.end()) {
-                LightingParams params = sampleLightParams(&it->second, timeHalfMinutes);
-
-                // Blend this volume's contribution
-                newParams.ambientColor += params.ambientColor * wv.weight;
-                newParams.diffuseColor += params.diffuseColor * wv.weight;
-                newParams.fogColor += params.fogColor * wv.weight;
-                newParams.skyTopColor += params.skyTopColor * wv.weight;
-                newParams.skyMiddleColor += params.skyMiddleColor * wv.weight;
-                newParams.skyBand1Color += params.skyBand1Color * wv.weight;
-                newParams.skyBand2Color += params.skyBand2Color * wv.weight;
-
-                newParams.fogStart += params.fogStart * wv.weight;
-                newParams.fogEnd += params.fogEnd * wv.weight;
-                newParams.fogDensity += params.fogDensity * wv.weight;
-                newParams.cloudDensity += params.cloudDensity * wv.weight;
-                newParams.horizonGlow += params.horizonGlow * wv.weight;
-
-                // Blend direction weighted (normalize at end)
-                blendedDir += params.directionalDir * wv.weight;
+            // Debug logging for fog params (first few samples only)
+            static int debugCount = 0;
+            if (debugCount < 3) {
+                const LightingParams& p = parts[partCount - 1].params;
+                LOG_INFO("Fog params: start=", p.fogStart, " end=", p.fogEnd,
+                         " color=(", p.fogColor.r, ",", p.fogColor.g, ",", p.fogColor.b, ")");
+                debugCount++;
             }
         }
+        blended = blendLightingParams(std::span(parts.data(), partCount));
+    }
 
-        // Normalize blended direction
-        float blendedDirLenSq = glm::dot(blendedDir, blendedDir);
-        if (blendedDirLenSq > 1e-6f) {
-            newParams.directionalDir = blendedDir * glm::inversesqrt(blendedDirLenSq);
-        } else {
-            // Fallback if all directions cancelled out
-            newParams.directionalDir = glm::vec3(0.3f, -0.7f, 0.6f);
-        }
+    if (blended) {
+        newParams = *blended;
     } else {
-        // No light volume, use fallback with time-based animation
+        // No light volume, or none naming a LightParams row: the fallback,
+        // with time-based animation
         newParams = fallbackParams_;
 
         // Animate sun direction
@@ -648,137 +640,6 @@ std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(c
     }
 
     return weighted;
-}
-
-uint32_t LightingManager::selectLightParamsId(const LightVolume* volume, bool isRaining, bool isUnderwater) const {
-    if (!volume) return 0;
-
-    // Select appropriate LightParams based on conditions
-    if (isUnderwater && volume->lightParamsIdUnderwater != 0) {
-        return volume->lightParamsIdUnderwater;
-    }
-    if (isRaining && volume->lightParamsIdRain != 0) {
-        return volume->lightParamsIdRain;
-    }
-    return volume->lightParamsId;
-}
-
-LightingParams LightingManager::sampleLightParams(const LightParamsProfile* profile, uint16_t timeHalfMinutes) const {
-    if (!profile) return fallbackParams_;
-
-    LightingParams params;
-
-    // Sample color bands
-    params.ambientColor = sampleColorBand(profile->colorBands[LightParamsProfile::AMBIENT_COLOR], timeHalfMinutes);
-    params.diffuseColor = sampleColorBand(profile->colorBands[LightParamsProfile::DIFFUSE_COLOR], timeHalfMinutes);
-    params.fogColor = sampleColorBand(profile->colorBands[LightParamsProfile::FOG_COLOR], timeHalfMinutes);
-    params.skyTopColor = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_TOP_COLOR], timeHalfMinutes);
-    params.skyMiddleColor = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_MIDDLE_COLOR], timeHalfMinutes);
-    params.skyBand1Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND1_COLOR], timeHalfMinutes);
-    params.skyBand2Color = sampleColorBand(profile->colorBands[LightParamsProfile::SKY_BAND2_COLOR], timeHalfMinutes);
-
-    // Sample float bands. The fog distance is stored in the same
-    // thirty-sixths of a yard as the light positions, and was being used raw:
-    // Tirisfal's 12000 became 12000 yards, so the fog ended six times further
-    // out than the far clip and nothing was ever hazed. It is 333 yards.
-    params.fogEnd = sampleFloatBand(profile->floatBands[LightParamsProfile::FOG_END],
-                                    timeHalfMinutes) / LIGHT_COORD_UNITS_PER_YARD;
-    // The start is a fraction of the end rather than a distance, so it needs
-    // no conversion of its own.
-    const float fogStartScalar = sampleFloatBand(
-        profile->floatBands[LightParamsProfile::FOG_START_SCALAR], timeHalfMinutes);
-    params.fogStart = params.fogEnd * fogStartScalar;
-    params.fogDensity = sampleFloatBand(profile->floatBands[LightParamsProfile::FOG_DENSITY], timeHalfMinutes);
-    params.cloudDensity = sampleFloatBand(profile->floatBands[LightParamsProfile::CLOUD_DENSITY], timeHalfMinutes);
-
-    // Debug logging for fog params (first few samples only)
-    static int debugCount = 0;
-    if (debugCount < 3) {
-        LOG_INFO("Fog params: start=", params.fogStart, " end=", params.fogEnd,
-                 " color=(", params.fogColor.r, ",", params.fogColor.g, ",", params.fogColor.b, ")");
-        debugCount++;
-    }
-
-    // Compute sun direction from time
-    float angle = (timeHalfMinutes / static_cast<float>(kHalfMinutesPerDay)) * glm::two_pi<float>();
-    params.directionalDir = glm::normalize(glm::vec3(
-        std::sin(angle) * 0.6f,
-        -0.6f + std::cos(angle) * 0.4f,
-        std::cos(angle) * 0.6f
-    ));
-
-    return params;
-}
-
-glm::vec3 LightingManager::sampleColorBand(const ColorBand& band, uint16_t timeHalfMinutes) const {
-    if (band.numKeyframes == 0) {
-        return glm::vec3(0.5f);  // Fallback gray
-    }
-
-    if (band.numKeyframes == 1) {
-        return band.colors[0];  // Single keyframe
-    }
-
-    // Safer initialization: default to wrapping last→first
-    uint8_t idx1 = band.numKeyframes - 1;
-    uint8_t idx2 = 0;
-
-    // Find surrounding keyframes
-    for (uint8_t i = 0; i < band.numKeyframes; ++i) {
-        if (timeHalfMinutes < band.times[i]) {
-            idx2 = i;
-            idx1 = (i > 0) ? (i - 1) : (band.numKeyframes - 1);  // Wrap to last
-            break;
-        }
-    }
-
-    // Calculate interpolation factor
-    uint16_t t1 = band.times[idx1];
-    uint16_t t2 = band.times[idx2];
-
-    // Handle midnight wrap
-    uint16_t timeSpan = (t2 > t1) ? (t2 - t1) : (kHalfMinutesPerDay - t1 + t2);
-    uint16_t elapsed = (timeHalfMinutes >= t1) ? (timeHalfMinutes - t1) : (kHalfMinutesPerDay - t1 + timeHalfMinutes);
-
-    float t = (timeSpan > 0) ? (static_cast<float>(elapsed) / static_cast<float>(timeSpan)) : 0.0f;
-    t = glm::clamp(t, 0.0f, 1.0f);
-
-    // Linear interpolation
-    return glm::mix(band.colors[idx1], band.colors[idx2], t);
-}
-
-float LightingManager::sampleFloatBand(const FloatBand& band, uint16_t timeHalfMinutes) const {
-    if (band.numKeyframes == 0) {
-        return 1.0f;  // Fallback
-    }
-
-    if (band.numKeyframes == 1) {
-        return band.values[0];
-    }
-
-    // Safer initialization: default to wrapping last→first
-    uint8_t idx1 = band.numKeyframes - 1;
-    uint8_t idx2 = 0;
-
-    // Find surrounding keyframes
-    for (uint8_t i = 0; i < band.numKeyframes; ++i) {
-        if (timeHalfMinutes < band.times[i]) {
-            idx2 = i;
-            idx1 = (i > 0) ? (i - 1) : (band.numKeyframes - 1);
-            break;
-        }
-    }
-
-    uint16_t t1 = band.times[idx1];
-    uint16_t t2 = band.times[idx2];
-
-    uint16_t timeSpan = (t2 > t1) ? (t2 - t1) : (kHalfMinutesPerDay - t1 + t2);
-    uint16_t elapsed = (timeHalfMinutes >= t1) ? (timeHalfMinutes - t1) : (kHalfMinutesPerDay - t1 + timeHalfMinutes);
-
-    float t = (timeSpan > 0) ? (static_cast<float>(elapsed) / static_cast<float>(timeSpan)) : 0.0f;
-    t = glm::clamp(t, 0.0f, 1.0f);
-
-    return glm::mix(band.values[idx1], band.values[idx2], t);
 }
 
 glm::vec3 LightingManager::dbcColorToVec3(uint32_t dbcColor) const {

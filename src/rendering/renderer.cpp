@@ -629,13 +629,11 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
-        if (waterRenderer && camera) {
-            glm::vec3 camPos = camera->getPosition();
-            auto waterH = waterRenderer->getNearestWaterHeightAt(camPos.x, camPos.y, camPos.z);
+        {
             constexpr float MIN_SUBMERSION = 2.0f;
-            if (waterH && camPos.z < (*waterH - MIN_SUBMERSION)
-                       && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
-                float depth = *waterH - camPos.z - MIN_SUBMERSION;
+            const auto eyeDepth = cameraWaterDepth();
+            if (eyeDepth && *eyeDepth > MIN_SUBMERSION) {
+                float depth = *eyeDepth - MIN_SUBMERSION;
                 float blend = glm::clamp(1.0f - std::exp(-depth * 0.08f), 0.0f, 0.7f);
                 glm::vec3 underwaterFog(0.03f, 0.09f, 0.18f);
                 glm::vec3 blendedFog = glm::mix(lp.fogColor, underwaterFog, blend);
@@ -2131,7 +2129,10 @@ void Renderer::update(float deltaTime) {
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
         float gameTime    = gh ? gh->getGameTime() : -1.0f;
         bool isRaining    = gh ? gh->isRaining() : false;
-        bool isUnderwater = cameraController ? cameraController->isSwimming() : false;
+        // The camera's eye under the surface, not the player swimming: on the
+        // surface the camera is above the water and sees the dry light.
+        const auto eyeDepth = cameraWaterDepth();
+        const bool isUnderwater = eyeDepth && *eyeDepth > 0.0f;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
@@ -3585,6 +3586,19 @@ void Renderer::syncSwimEffectsTargetPass() {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
     }
+}
+
+std::optional<float> Renderer::cameraWaterDepth() const {
+    if (!waterRenderer || !camera) return std::nullopt;
+    const glm::vec3 camPos = camera->getPosition();
+    if (waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) return std::nullopt;
+    // Far enough for deep ocean; see renderUnderwaterOverlay for what the
+    // default 15 units did.
+    constexpr float kUnderwaterReach = 400.0f;
+    const auto waterH = waterRenderer->getNearestWaterHeightAt(
+        camPos.x, camPos.y, camPos.z, kUnderwaterReach);
+    if (!waterH) return std::nullopt;
+    return *waterH - camPos.z;
 }
 
 void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
