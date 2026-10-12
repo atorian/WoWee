@@ -2639,8 +2639,8 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     src.positions.reserve(model.vertices.size());
     for (const auto& v : model.vertices) src.positions.push_back(v.position);
     for (const auto& batch : gpuModel.batches) {
-        if (batch.submeshLevel != 0 || batch.blendMode >= 2 || batch.batchOpacity < 0.01f ||
-            batch.starLayer || batch.glowCardLike) {
+        if (batch.submeshLevel != 0 || !m2BatchCastsShadow(batch.blendMode,
+            batch.batchOpacity, batch.glowCardLike, batch.starLayer)) {
             continue;
         }
         glm::vec3 albedo = batch.tint;

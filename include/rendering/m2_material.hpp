@@ -46,6 +46,13 @@ inline std::vector<size_t> m2MaterialDrawOrder(const std::vector<Batch>& batches
     return order;
 }
 
+// Only opaque/cutout geometry casts a directional shadow. Blended reflection
+// overlays and luminous cones do not become opaque blockers in the depth pass.
+inline bool m2BatchCastsShadow(uint16_t blendMode, float opacity,
+                               bool glowCard, bool starLayer) {
+    return blendMode <= 1 && opacity >= 0.01f && !glowCard && !starLayer;
+}
+
 // Modulation ignores texture alpha and preserves destination alpha.
 inline VkPipelineColorBlendAttachmentState m2ModulateBlendState(bool twice) {
     VkPipelineColorBlendAttachmentState state{};

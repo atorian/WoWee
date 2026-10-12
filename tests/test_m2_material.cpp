@@ -131,3 +131,26 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
         }
     }
 }
+
+TEST_CASE("Dalaran lamp light volumes do not cast opaque shadows", "[m2][material][asset][shadow]") {
+    for (const auto name : {"dalaran_lamppost01", "dalaran_lampwall01"}) {
+        const std::string path = std::string("Data/expansions/wotlk/world/expansion02/doodads/dalaran/") + name;
+        const auto data = wowee::test::readFile(path + ".m2");
+        if (data.empty()) { SUCCEED("optional WotLK lamp is not extracted"); continue; }
+        auto model = wowee::pipeline::M2Loader::load(data);
+        REQUIRE(wowee::pipeline::M2Loader::loadSkin(wowee::test::readFile(path + "00.skin"), model));
+        size_t solid = 0, blended = 0;
+        for (const auto& batch : model.batches) {
+            REQUIRE(batch.materialIndex < model.materials.size());
+            const auto blend = model.materials[batch.materialIndex].blendMode;
+            const bool casts = m2BatchCastsShadow(blend, 1.0f, false, false);
+            if (blend >= 2) { ++blended; CHECK_FALSE(casts); }
+            else { ++solid; CHECK(casts); }
+        }
+        CHECK(solid == (std::string(name) == "dalaran_lamppost01" ? 3 : 2));
+        CHECK(blended == (std::string(name) == "dalaran_lamppost01" ? 4 : 2));
+    }
+    CHECK_FALSE(m2BatchCastsShadow(0, 0.0f, false, false));
+    CHECK_FALSE(m2BatchCastsShadow(0, 1.0f, true, false));
+    CHECK_FALSE(m2BatchCastsShadow(0, 1.0f, false, true));
+}

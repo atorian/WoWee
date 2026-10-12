@@ -296,7 +296,7 @@ void main() {
         }
         shadow = mix(1.0, shadow, shadowParams.y);
     }
-    RtLight rt = rtLightAt(FragPos);
+    RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
 
     if (emissive == 1) {
@@ -418,8 +418,11 @@ void main() {
         float baseBrightness = mix(0.3, 0.9, sunGlint);
         vec3 glass = result * baseBrightness;
 
-        vec3 reflectTint = mix(ambientColor.rgb * 1.2, vec3(0.6, 0.75, 1.0), 0.6);
-        glass = mix(glass, reflectTint, fresnel * 0.8);
+        vec3 reflectTint = atmosphereSkyColor(reflectDir, ldir, fogSkyTop.rgb,
+            fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+        vec4 reflectedScene = rtReflectionAt(FragPos, vertexNormal);
+        reflectTint = mix(reflectTint, reflectedScene.rgb, reflectedScene.a);
+        glass = mix(glass, reflectTint, 0.2 + fresnel * 0.65);
 
         vec3 halfDir = normalize(ldir + viewDir);
         float spec = pow(max(dot(norm, halfDir), 0.0), 256.0);
@@ -433,7 +436,10 @@ void main() {
             // Instance/dungeon glass: mostly transparent to see through
             alpha = mix(0.12, 0.35, fresnel);
         } else {
-            alpha = mix(0.4, 0.95, NdotV);
+            // Exterior panes are backed by the building, not an aperture onto
+            // the terrain underneath a floating city. Reflection never comes
+            // from alpha-blending the background through this surface.
+            alpha = 1.0;
         }
     }
 

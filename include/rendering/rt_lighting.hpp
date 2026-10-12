@@ -15,7 +15,8 @@ namespace rendering {
 class RtScene;
 
 /**
- * Ray traced sun shadows, ambient occlusion and one-bounce diffuse light for
+ * Ray traced sun shadows, ambient occlusion, one-bounce diffuse light and local
+ * glass reflections for
  * the forward renderer.
  *
  * There is no G-buffer to trace from, so the pass runs after the opaque
@@ -59,11 +60,14 @@ public:
     /// views changed and the per-frame sets must be written again.
     bool prepare(VkExtent2D sceneExtent);
 
-    /// The immutable sampler for per-frame bindings 3 and 4.
+    /// The immutable sampler for per-frame lighting, reflection and geometry bindings.
     [[nodiscard]] VkSampler sampler() const { return linearSampler_; }
     /// What per-frame set `slot` binds at 3 (sun, AO, distance) and 4 (bounce).
     [[nodiscard]] VkImageView lightViewForSlot(uint32_t slot) const;
     [[nodiscard]] VkImageView giViewForSlot(uint32_t slot) const;
+    [[nodiscard]] VkImageView reflectionViewForSlot(uint32_t slot) const;
+    [[nodiscard]] VkImageView geometryViewForSlot(uint32_t slot) const;
+    [[nodiscard]] VkImage reflectionImageWrittenBy(uint32_t slot) const { return slots_[slot].reflection.img.image; }
     [[nodiscard]] VkImageView neutralView() const { return neutral_.imageView; }
     /// The images slot `slot` writes, in GENERAL layout, at the trace size.
     /// For tools that read the result back (tools/rt_probe.cpp).
@@ -102,7 +106,7 @@ private:
         AllocatedImage img{};
     };
     struct Slot {
-        Target gbuf, hist, histGi, out, outGi;
+        Target gbuf, hist, histGi, out, outGi, reflection;
         AllocatedBuffer ubo{};
         VkDescriptorSet sets[3] = {};  // one per filter pass; set 0 also runs the rest
         VkImage boundDepth = VK_NULL_HANDLE;

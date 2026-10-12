@@ -383,7 +383,7 @@ void main() {
         // Sky-bounce ambient for foliage: upward-facing leaves catch more
         // ambient than the canopy underside, giving the crown depth instead
         // of a uniformly-lit blob.
-        RtLight rt = rtLightAt(FragPos);
+        RtLight rt = rtLightAt(FragPos, vertexNormal);
         shadow = rtShadow(rt, shadow);
         vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
         if (isFoliage) {

@@ -494,7 +494,7 @@ bool Application::initialize() {
         }
 
         // Offline fountain fixture uses the real M2 loader, textures and world pass.
-        if (std::getenv("WOWEE_FOUNTAIN_PROBE") && renderer && assetManager) {
+        if (std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_GLASS_LAMP_PROBE") && renderer && assetManager) {
             if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) return false;
             const std::string path = "World/Expansion02/Doodads/Dalaran/Dalaran_Fountain_01.m2";
             auto model = pipeline::M2Loader::load(assetManager->readFile(path));
@@ -517,6 +517,36 @@ bool Application::initialize() {
             renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
                 renderer->getCamera()->getViewProjectionMatrix());
             LOG_INFO("Fountain GPU probe: real Dalaran_Fountain_01 uploaded, batches=", model.batches.size());
+        }
+
+        // Offline comparison of actual Dalaran windows and lamppost materials.
+        // Uses the fountain fixture's world/UI guards and an isolated config.
+        if (std::getenv("WOWEE_GLASS_LAMP_PROBE") && renderer && assetManager) {
+            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE") ||
+                !std::getenv("WOWEE_FOUNTAIN_PROBE")) return false;
+            const std::string cityPath = "World/WMO/Northrend/Dalaran/ND_Dalaran.wmo";
+            auto city = pipeline::WMOLoader::load(assetManager->readFile(cityPath));
+            for (uint32_t group = 0; group < city.nGroups; ++group) {
+                const auto candidates = pipeline::wmoGroupCandidates(cityPath, group);
+                if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), city, group))
+                    return false;
+            }
+            if (!renderer->getWMORenderer()->loadModel(city, 0xFFFF0201)) return false;
+            renderer->getWMORenderer()->createInstance(0xFFFF0201, glm::vec3(5818.0f, 405.0f, 650.0f));
+            const std::string lampPath = "World/Expansion02/Doodads/Dalaran/Dalaran_Lamppost01.m2";
+            auto lamp = pipeline::M2Loader::load(assetManager->readFile(lampPath));
+            lamp.name = lampPath;
+            if (!pipeline::M2Loader::loadSkin(assetManager->readFile(pipeline::skinPathForM2(lampPath)), lamp))
+                return false;
+            if (!renderer->getM2Renderer()->loadModel(lamp, 0xFFFF0202)) return false;
+            renderer->getM2Renderer()->createInstance(0xFFFF0202, glm::vec3(5779.0f, 292.0f, 655.0f));
+            renderer->getCharacterPosition() = glm::vec3(5775.0f, 291.0f, 650.0f);
+            renderer->getCamera()->setPosition(glm::vec3(5775.0f, 288.0f, 660.0f));
+            renderer->getCamera()->setRotation(90.0f, 0.0f);
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
+                renderer->getCamera()->getViewProjectionMatrix());
+            LOG_INFO("Glass/lamp GPU probe: real Dalaran city groups=", city.nGroups,
+                     " lamp batches=", lamp.batches.size());
         }
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall

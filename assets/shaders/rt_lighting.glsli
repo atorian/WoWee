@@ -15,6 +15,16 @@
 layout(set = 0, binding = 3) uniform sampler2D uRtLight;  // r sun, g AO, a distance
 layout(set = 0, binding = 4) uniform sampler2D uRtGi;     // rgb incoming light
 
+layout(set = 0, binding = 6) uniform sampler2D uRtReflection;
+layout(set = 0, binding = 7) uniform sampler2D uRtGeometry;
+
+vec3 rtReceiverNormal(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) *
+        vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+
 struct RtLight {
     float weight;
     float sun;
@@ -25,7 +35,7 @@ struct RtLight {
 // Test each tap before interpolating: a half-resolution texel at a silhouette
 // can belong to the foreground or the surface behind it. Predict the distance
 // on the receiver's local plane, so sloping ground can use neighbouring taps.
-RtLight rtGatherLight(vec2 f, float expected, vec2 distanceGradient, int radius) {
+RtLight rtGatherLight(vec2 f, float expected, vec2 distanceGradient, int radius, vec3 receiverNormal) {
     RtLight r = RtLight(0.0, 1.0, 1.0, vec3(0.0));
     ivec2 size = textureSize(uRtLight, 0);
     ivec2 center = ivec2(floor(f + 0.5));
@@ -49,6 +59,14 @@ RtLight rtGatherLight(vec2 f, float expected, vec2 distanceGradient, int radius)
                                           : 0.01 * predicted + 0.02;
             float e = (l.a - predicted) / tolerance;
             float match = l.a > 0.0 ? exp(-e * e) : 0.0;
+            // Thin nearby surfaces can share distance while facing different
+            // ways (the lamp lid, stem and light cone). Depth alone transferred
+            // their shadow/AO onto each other when the camera moved.
+            if (dot(receiverNormal, receiverNormal) > 0.5) {
+                vec4 geometry = texelFetch(uRtGeometry, q, 0);
+                match *= geometry.z > 0.0
+                    ? smoothstep(0.65, 0.85, dot(rtReceiverNormal(geometry.xy), receiverNormal)) : 0.0;
+            }
             float w = match * exp(-dot(o, o) / float(radius * radius));
             if (w <= 1e-4) continue;
             best = max(best, match);
@@ -65,24 +83,50 @@ RtLight rtGatherLight(vec2 f, float expected, vec2 distanceGradient, int radius)
     return r;
 }
 
-RtLight rtLightAtProjected(vec2 f, float expected, vec2 distanceGradient) {
+RtLight rtLightAtProjected(vec2 f, float expected, vec2 distanceGradient,
+                           vec3 receiverNormal) {
     RtLight r = RtLight(0.0, 1.0, 1.0, vec3(0.0));
     if (rtParams.x < 0.5) return r;
-    r = rtGatherLight(f, expected, distanceGradient, 1);
+    r = rtGatherLight(f, expected, distanceGradient, 1, receiverNormal);
     // The trace belongs to the previous frame. An animated edge or the strip
     // it just uncovered may have no receiver in the local 3x3 taps. Recover
     // nearby lighting from the same surface before reverting to flat ambient,
     // which otherwise draws a bright moving rim. Stop at the first good ring;
     // stable pixels keep the cheap local lookup and shadow edges stay local.
     for (int radius = 2; radius <= 16 && r.weight < 0.999; radius *= 2) {
-        RtLight nearby = rtGatherLight(f, expected, distanceGradient, radius);
+        RtLight nearby = rtGatherLight(f, expected, distanceGradient, radius, receiverNormal);
         if (nearby.weight > r.weight) r = nearby;
     }
     return r;
 }
 
+// Sharp reflected radiance uses only local taps on the same plane. The
+// diffuse recovery rings would smear neighbouring walls into a pane.
+vec4 rtReflectionAtProjected(vec2 f, float expected, vec3 normal) {
+    if (rtParams.x < 0.5) return vec4(0.0);
+    ivec2 size = textureSize(uRtReflection, 0);
+    ivec2 base = ivec2(floor(f));
+    vec2 fraction = fract(f);
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1), q = base + o;
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
+        vec4 geometry = texelFetch(uRtGeometry, q, 0);
+        vec4 reflection = texelFetch(uRtReflection, q, 0);
+        float alignment = dot(rtReceiverNormal(geometry.xy), normal);
+        if (reflection.a <= 0.0 || geometry.z <= 0.0 || alignment < 0.9 ||
+            abs(geometry.z - expected) > 0.01 * expected + 0.05) continue;
+        float w = (o.x == 1 ? fraction.x : 1.0 - fraction.x) *
+                  (o.y == 1 ? fraction.y : 1.0 - fraction.y);
+        sum += reflection.rgb * w;
+        wsum += w;
+    }
+    return wsum > 0.05 ? vec4(sum / wsum, min(wsum, 1.0)) : vec4(0.0);
+}
+
 #ifndef RT_LOOKUP_PROBE
-RtLight rtLightAt(vec3 worldPos) {
+RtLight rtLightAt(vec3 worldPos, vec3 receiverNormal) {
     // Uniform across the draw, so this early return keeps derivatives valid.
     if (rtParams.x < 0.5) return RtLight(0.0, 1.0, 1.0, vec3(0.0));
     vec3 relativePos = worldPos - rtCameraPos.xyz;
@@ -103,7 +147,20 @@ RtLight rtLightAt(vec3 worldPos) {
         any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
         return RtLight(0.0, 1.0, 1.0, vec3(0.0));
     }
-    return rtLightAtProjected(f, expected, gradient);
+    if (dot(receiverNormal, -relativePos) < 0.0) receiverNormal = -receiverNormal;
+    return rtLightAtProjected(f, expected, gradient, receiverNormal);
+}
+
+vec4 rtReflectionAt(vec3 worldPos, vec3 normal) {
+    if (rtParams.x < 0.5) return vec4(0.0);
+    vec3 relativePos = worldPos - rtCameraPos.xyz;
+    vec4 clip = rtViewProj * vec4(relativePos, 1.0);
+    vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+    if (clip.w <= 0.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
+        return vec4(0.0);
+    if (dot(normal, -relativePos) < 0.0) normal = -normal;
+    vec2 f = uv * vec2(textureSize(uRtReflection, 0)) - 0.5;
+    return rtReflectionAtProjected(f, length(relativePos), normal);
 }
 #endif
 

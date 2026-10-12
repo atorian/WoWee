@@ -44,7 +44,8 @@ enum Binding : uint32_t {
     kFilterInGi = 14,
     kFilterOut = 15,
     kFilterOutGi = 16,
-    kBindingCount = 17,
+    kReflectionStore = 17,
+    kBindingCount = 18,
 };
 
 constexpr VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -180,7 +181,7 @@ bool RtLighting::createPipelines() {
     }
     b[kUbo].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     for (uint32_t i : {kGbufStore, kRawStore, kRawGiStore, kHistStore, kHistGiStore, kFilterOut,
-                       kFilterOutGi}) {
+                       kFilterOutGi, kReflectionStore}) {
         b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     }
     VkDescriptorSetLayoutCreateInfo li{};
@@ -193,7 +194,7 @@ bool RtLighting::createPipelines() {
     VkDescriptorPoolSize sizes[3] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSets},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSets * 10},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSets * 7},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSets * 8},
     };
     VkDescriptorPoolCreateInfo pi{};
     pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -266,7 +267,7 @@ bool RtLighting::createImages(VkExtent2D e) {
         // Half-float distance rounds mountain positions into metre-scale bands.
         // Keep ray origins/history geometry precise; radiance can stay float16.
         ok = ok && make(s.gbuf, VK_FORMAT_R32G32B32A32_SFLOAT) &&
-             make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi);
+             make(s.hist) && make(s.histGi) && make(s.out) && make(s.outGi) && make(s.reflection);
         s.wroteImages = false;
     }
     traceExtent_ = e;
@@ -279,7 +280,7 @@ void RtLighting::destroyImages() {
     VmaAllocator alloc = ctx_->getAllocator();
     for (Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) destroyImage(dev, alloc, t->img);
     for (auto& s : slots_) {
-        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi}) destroyImage(dev, alloc, t->img);
+        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi, &s.reflection}) destroyImage(dev, alloc, t->img);
         s.wroteImages = false;
         s.boundDepth = VK_NULL_HANDLE;
     }
@@ -324,6 +325,16 @@ bool RtLighting::prepare(VkExtent2D sceneExtent) {
 VkImageView RtLighting::lightViewForSlot(uint32_t slot) const {
     const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
     return other.out.img.imageView ? other.out.img.imageView : neutral_.imageView;
+}
+
+VkImageView RtLighting::reflectionViewForSlot(uint32_t slot) const {
+    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
+    return other.reflection.img.imageView ? other.reflection.img.imageView : neutral_.imageView;
+}
+
+VkImageView RtLighting::geometryViewForSlot(uint32_t slot) const {
+    const Slot& other = slots_[(slot + 1) % MAX_FRAMES_IN_FLIGHT];
+    return other.gbuf.img.imageView ? other.gbuf.img.imageView : neutral_.imageView;
 }
 
 VkImageView RtLighting::giViewForSlot(uint32_t slot) const {
@@ -379,6 +390,7 @@ void RtLighting::writeSlotSets(uint32_t slotIndex) {
         img[kGbufCur] = sampled(s.gbuf);
         img[kRawStore] = storage(raw_);
         img[kRawGiStore] = storage(rawGi_);
+        img[kReflectionStore] = storage(s.reflection);
         img[kGbufPrev] = sampled(prev.gbuf);
         img[kRaw] = sampled(raw_);
         img[kRawGi] = sampled(rawGi_);
@@ -448,7 +460,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
         };
         for (const Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) add(*t);
         for (auto& sl : slots_) {
-            for (const Target* t : {&sl.gbuf, &sl.hist, &sl.histGi, &sl.out, &sl.outGi}) add(*t);
+            for (const Target* t : {&sl.gbuf, &sl.hist, &sl.histGi, &sl.out, &sl.outGi, &sl.reflection}) add(*t);
         }
         VkDependencyInfo dep{};
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;

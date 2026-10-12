@@ -2515,7 +2515,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             for (const auto& batch : model.batches) {
-                if (batch.submeshLevel > 0) continue;
+                if (batch.submeshLevel > 0 || !m2BatchCastsShadow(batch.blendMode,
+                    batch.batchOpacity, batch.glowCardLike, batch.starLayer)) continue;
+                const bool alphaCutout = batch.blendMode == 1;
                 // A leaf card with no texture is a shadow with no caster.
                 //
                 // The else below binds the white set, whose alpha test passes
@@ -2524,7 +2526,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 // same batch for want of a material set. The result is a black
                 // rectangle on the ground under a tree that looks fine, coming
                 // and going as the texture cache lets the sheet back in.
-                if (foliagePass && !batch.texture) {
+                if (alphaCutout && !batch.texture) {
                     if (!warnedShadowNoTexture_) {
                         warnedShadowNoTexture_ = true;
                         LOG_WARNING("Shadow pass: a foliage batch of ", model.name,
@@ -2536,11 +2538,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 // Once per batch, where it used to be once per batch per
                 // instance: the texture is the batch's, and every instance of
                 // this model shares it.
-                if (foliagePass && batch.hasAlpha && batch.texture) {
+                if (alphaCutout && batch.texture) {
                     VkDescriptorSet texSet = getTexDescSet(batch.texture);
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
-                } else if (foliagePass) {
+                } else {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
                 }
@@ -2554,7 +2556,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                     ShadowPush push{
                         .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
                         .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
-                        .flags = passFlags,
+                        .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0,
+                                            passFlags.z, 0),
                         .wind = glm::vec4(globalTime,
                             m2WindDistanceFade(glm::length(origin - cachedCamPos_)), 0.0f, 0.0f)};
                     vkCmdPushConstants(cmd, shadowPipelineLayout_,

@@ -93,6 +93,9 @@ int main(int argc, char** argv) {
         std::printf("backend: %s\n",
                     scene.backend() == RtScene::Backend::Hardware ? "hardware" : "compute");
 
+        auto reflectedBuilding = box({-8, -22, -100}, {-6, -12, 100});
+        reflectedBuilding.surfaces[0] = packRtSurface(glm::vec3(0.8f, 0.1f, 0.05f), 1.0f);
+
         const glm::mat4 rotation = glm::rotate(glm::mat4(1.0f), glm::radians(37.0f), glm::vec3(0, 0, 1)) *
                                    glm::rotate(glm::mat4(1.0f), glm::radians(23.0f), glm::vec3(0, 1, 0));
         const glm::mat4 sceneTransform = glm::translate(glm::mat4(1.0f), camera) * rotation;
@@ -107,6 +110,7 @@ int main(int argc, char** argv) {
         const auto wall = scene.addMesh(box({kWallDistance, -100, -100},
                                              {kWallDistance + 0.1f, 100, 100}));
         scene.addInstance(wall, sceneTransform);
+        scene.addInstance(scene.addMesh(std::move(reflectedBuilding)), sceneTransform);
 
         glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.5f, 2000.0f);
         proj[1][1] *= -1.0f;
@@ -171,6 +175,8 @@ int main(int argc, char** argv) {
         AllocatedBuffer gi = createBuffer(ctx.getAllocator(), bytes,
                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                           VMA_MEMORY_USAGE_CPU_ONLY);
+        AllocatedBuffer reflection = createBuffer(ctx.getAllocator(), bytes,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
         ctx.immediateSubmit([&](VkCommandBuffer cmd) {
             VkBufferImageCopy region{};
             region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -179,6 +185,8 @@ int main(int argc, char** argv) {
                                    VK_IMAGE_LAYOUT_GENERAL, light.buffer, 1, &region);
             vkCmdCopyImageToBuffer(cmd, lighting.giImageWrittenBy(ctx.getCurrentFrame()),
                                    VK_IMAGE_LAYOUT_GENERAL, gi.buffer, 1, &region);
+            vkCmdCopyImageToBuffer(cmd, lighting.reflectionImageWrittenBy(ctx.getCurrentFrame()),
+                                   VK_IMAGE_LAYOUT_GENERAL, reflection.buffer, 1, &region);
         });
         vkDeviceWaitIdle(ctx.getDevice());
 
@@ -196,11 +204,21 @@ int main(int argc, char** argv) {
             dist = texel(lightTexels, x, y, 3);
         };
 
+        const auto* reflectionTexels = static_cast<const uint16_t*>(reflection.info.pMappedData);
         int failures = checkRtLookup(ctx);
         auto expect = [&](const char* what, bool ok) {
             std::printf("  %-52s %s\n", what, ok ? "ok" : "FAIL");
             if (!ok) ++failures;
         };
+
+        const auto rx = te.width * 3 / 4, ry = te.height / 2;
+        const glm::vec3 reflected(texel(reflectionTexels, rx, ry, 0),
+                                  texel(reflectionTexels, rx, ry, 1),
+                                  texel(reflectionTexels, rx, ry, 2));
+        std::printf("offscreen building reflection: %.3f %.3f %.3f\n", reflected.r, reflected.g, reflected.b);
+        expect("mirror reflects the red building behind the camera",
+               reflected.r > 0.2f && reflected.r > reflected.g * 4.0f &&
+               reflected.g > reflected.b && texel(reflectionTexels, rx, ry, 3) > 0.0f);
 
         // Rays toward the sun rise a quarter yard per yard: from the wall, the
         // box's front face (x = 16) is four yards back, so a wall point is
@@ -249,7 +267,9 @@ int main(int argc, char** argv) {
 
         destroyBuffer(ctx.getAllocator(), light);
         destroyBuffer(ctx.getAllocator(), gi);
+        destroyBuffer(ctx.getAllocator(), reflection);
         destroyImage(ctx.getDevice(), ctx.getAllocator(), depth);
+        ctx.flushDeferredCleanup();
         lighting.shutdown();
         scene.shutdown();
         ctx.shutdown();

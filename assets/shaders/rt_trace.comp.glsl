@@ -20,6 +20,8 @@ layout(set = 0, binding = 3) uniform sampler2D uGbufCur;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uRaw;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D uRawGi;
 
+layout(set = 0, binding = 17, rgba16f) uniform writeonly image2D uReflection;
+
 layout(local_size_x = 8, local_size_y = 8) in;
 
 void main() {
@@ -31,6 +33,7 @@ void main() {
     if (dist <= 0.0) {
         imageStore(uRaw, px, vec4(1.0, 1.0, 0.0, 0.0));
         imageStore(uRawGi, px, vec4(pass.skyColor.rgb, 0.0));
+        imageStore(uReflection, px, vec4(0.0));
         return;
     }
     vec3 n = rtGbufNormal(g);
@@ -75,6 +78,29 @@ void main() {
         }
     }
 
+    // Reflection is view-dependent: do not accumulate it in diffuse history or
+    // blur it across the window frame. Only nearby non-horizontal receivers need
+    // this ray; distant geometry and the ground retain the cheap lighting pass.
+    vec4 reflection = vec4(0.0);
+    if (dist < 120.0 && abs(n.z) < 0.9) {
+        vec3 incident = normalize(p - pass.cameraPos.xyz);
+        vec3 rd = reflect(incident, n);
+        uint reflectionRng = rtSeed(uvec2(px), 0u);
+        vec3 radiance = pass.skyColor.rgb;
+        float t;
+        vec3 hn;
+        vec4 hs;
+        if (rtClosest(origin, rd, 120.0, reflectionRng, t, hn, hs)) {
+            vec3 hp = origin + rd * t;
+            radiance *= hs.rgb;
+            float ndl = max(dot(hn, L), 0.0);
+            if (pass.sunColor.w > 0.5 && ndl > 0.0 &&
+                !rtOccluded(hp + hn * rtSurfaceOffset(t), L, pass.params.w, reflectionRng))
+                radiance += hs.rgb * pass.sunColor.rgb * ndl;
+        }
+        reflection = vec4(radiance, dist);
+    }
+    imageStore(uReflection, px, reflection);
     imageStore(uRaw, px, vec4(sun, ao, 0.0, 0.0));
     imageStore(uRawGi, px, vec4(gi, 0.0));
 }

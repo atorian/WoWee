@@ -262,7 +262,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[6]{};
+    VkDescriptorSetLayoutBinding bindings[8]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -315,7 +315,11 @@ bool Renderer::createPerFrameResources() {
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 6;
+    for (uint32_t b = 6; b <= 7; ++b) {
+        bindings[b] = bindings[3];
+        bindings[b].binding = b;
+    }
+    layoutInfo.bindingCount = 8;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -328,7 +332,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 5;  // shadow, fog, two RT results and sky
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 7;  // shadow, fog, lighting, sky, reflection and geometry
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -392,12 +396,14 @@ bool Renderer::createPerFrameResources() {
 
         // Neutral until the ray traced lighting is on; writeRtLightingBindings
         // swaps in the other slot's results then.
-        VkDescriptorImageInfo rtImgInfo[2]{};
+        VkDescriptorImageInfo rtImgInfo[4]{};
         rtImgInfo[0].imageView = rtLighting_->lightViewForSlot(i);
         rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
-        rtImgInfo[0].imageLayout = rtImgInfo[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        rtImgInfo[2].imageView = rtLighting_->reflectionViewForSlot(i);
+        rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
+        for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[6]{};
+        VkWriteDescriptorSet writes[8]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -427,7 +433,12 @@ bool Renderer::createPerFrameResources() {
 
         writes[5] = writes[4];
         writes[5].dstBinding = 5;
-        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        for (uint32_t b = 6; b <= 7; ++b) {
+            writes[b] = writes[4];
+            writes[b].dstBinding = b;
+            writes[b].pImageInfo = &rtImgInfo[b - 4];
+        }
+        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
         // Sky capture gets a separate set whose binding 5 stays neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
@@ -435,7 +446,7 @@ bool Renderer::createPerFrameResources() {
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
         for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
@@ -498,7 +509,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[6]{};
+            VkWriteDescriptorSet writes[8]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -528,7 +539,11 @@ bool Renderer::createPerFrameResources() {
 
             writes[5] = writes[4];
             writes[5].dstBinding = 5;
-            vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+            for (uint32_t b = 6; b <= 7; ++b) {
+                writes[b] = writes[4];
+                writes[b].dstBinding = b;
+            }
+            vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
         }
     }
 
@@ -4682,20 +4697,22 @@ void Renderer::writeRtLightingBindings() {
     // RtLighting::prepare has waited for the device whenever it reports a
     // change, so neither slot's set is in use.
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-        VkDescriptorImageInfo info[2]{};
+        VkDescriptorImageInfo info[4]{};
         info[0].imageView = rtLighting_->lightViewForSlot(i);
         info[1].imageView = rtLighting_->giViewForSlot(i);
-        info[0].imageLayout = info[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        VkWriteDescriptorSet writes[2]{};
-        for (uint32_t b = 0; b < 2; ++b) {
+        info[2].imageView = rtLighting_->reflectionViewForSlot(i);
+        info[3].imageView = rtLighting_->geometryViewForSlot(i);
+        for (auto& image : info) image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet writes[4]{};
+        for (uint32_t b = 0; b < 4; ++b) {
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = perFrameDescSets[i];
-            writes[b].dstBinding = 3 + b;
+            writes[b].dstBinding = b < 2 ? 3 + b : 4 + b;
             writes[b].descriptorCount = 1;
             writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[b].pImageInfo = &info[b];
         }
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 4, writes, 0, nullptr);
     }
 }
 

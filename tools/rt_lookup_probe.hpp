@@ -10,7 +10,7 @@
 inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     using namespace wowee::rendering;
     constexpr uint32_t size = 64;
-    struct Sample { glm::vec4 point, settings; };
+    struct Sample { glm::vec4 point, settings, normal{0.0f}; };
     struct Result { glm::vec4 ambientWeight, sunAo; };
     const std::array samples{
         Sample{{39, 30, 10, 0}, {0, 0, 3, 0}},   // shifted animated edge
@@ -22,6 +22,9 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
         Sample{{39, 30, 10, 0}, {0, 0, 2, 0}},   // AO-only mode
         Sample{{39, 30, 10, 0}, {0, 0, 1, 0}},   // sun-only mode
         Sample{{-10, 30, 10, 0}, {0, 0, 3, 0}},  // off-screen taps stay outside
+        Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {1, 0, 0, 0}}, // same distance, wrong plane
+        Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}}, // matching lamp lid
+        Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, -1, 0}}, // opposite side
     };
     const VkDevice dev = ctx.getDevice();
     const auto alloc = ctx.getAllocator();
@@ -60,6 +63,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
         VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayoutCreateInfo slci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -82,7 +86,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     if (pipelineStatus != VK_SUCCESS) return 1;
     const std::array poolSizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3},
     };
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -103,8 +107,10 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     const std::array imageInfos{
         VkDescriptorImageInfo{sampler, light.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         VkDescriptorImageInfo{sampler, gi.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        // gi.xy are near zero, which decodes to a +Z geometric normal.
+        VkDescriptorImageInfo{sampler, gi.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
     };
-    std::array<VkWriteDescriptorSet, 4> writes{};
+    std::array<VkWriteDescriptorSet, 5> writes{};
     for (size_t i = 0; i < writes.size(); ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
@@ -161,13 +167,14 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     const auto* results = static_cast<const Result*>(output.info.pMappedData);
     const std::array names{"moving character edge", "revealed sloping background", "wide revealed strip",
                            "stable sloping background", "unrelated depth rejected", "RT off",
-                           "AO-only mode", "sun-only mode", "outside image"};
+                           "AO-only mode", "sun-only mode", "outside image",
+                           "wrong plane rejected", "matching lamp lid", "opposite side rejected"};
     int failures = 0;
     for (size_t i = 0; i < samples.size(); ++i) {
-        const bool fallback = i == 4 || i == 5 || i == 8;
+        const bool fallback = i == 4 || i == 5 || i == 8 || i == 9 || i == 11;
         glm::vec3 expectedAmbient = fallback || i == 7 ? glm::vec3(.3f, .35f, .4f)
             : i == 6 ? glm::vec3(.3f, .35f, .4f) * .4f
-            : i == 0 ? glm::vec3(.02f, .03f, .04f) : glm::vec3(.08f, .1f, .12f);
+            : (i == 0 || i == 10) ? glm::vec3(.02f, .03f, .04f) : glm::vec3(.08f, .1f, .12f);
         const bool ok = glm::length(glm::vec3(results[i].ambientWeight) - expectedAmbient) < .002f &&
             std::abs(results[i].ambientWeight.w - (fallback ? 0.0f : 1.0f)) < .002f &&
             (fallback || std::abs(results[i].sunAo.x - (i == 0 || i >= 6 ? .25f : .75f)) < .002f);

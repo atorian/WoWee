@@ -239,7 +239,7 @@ void main() {
         }
     }
 
-    RtLight rt = rtLightAt(FragPos);
+    RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
     ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
 

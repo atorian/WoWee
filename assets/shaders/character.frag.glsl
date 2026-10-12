@@ -415,7 +415,7 @@ void main() {
             }
             shadow = mix(1.0, shadow, shadowParams.y);
         }
-        RtLight rt = rtLightAt(FragPos);
+        RtLight rt = rtLightAt(FragPos, vertexNormal);
         shadow = rtShadow(rt, shadow);
 
         result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
