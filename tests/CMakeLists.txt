@@ -2419,6 +2419,14 @@ wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_wmo_batch_merge ─────────────────────────────────────
+# Which WMO group batches draw as one. A merged batch is drawn with its first
+# batch's material, so opaque and blended materials on one texture, or two
+# banners with their own pivots, must stay apart.
+wowee_add_test(test_wmo_batch_merge
+    SOURCES test_wmo_batch_merge.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_wmo_group_path ──────────────────────────────────────
 # The names a WMO's group file might carry. Five loaders tried different
 # numbers of them, so a building spelled ".WMO" loaded its interior on some

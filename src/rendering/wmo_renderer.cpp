@@ -7,6 +7,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
+#include "rendering/wmo_batch_merge.hpp"
 #include "rendering/wmo_material_class.hpp"
 #include "rendering/wmo_group_containment.hpp"
 #include "rendering/normal_map.hpp"
@@ -668,39 +669,20 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             srcGroup = &model.groups[mergeGroupIndex];
         }
         ++mergeGroupIndex;
-        // Use pointer value as key for batching
-        struct BatchKey {
-            uintptr_t texPtr;
-            bool alphaTest;
-            bool unlit;
-            bool isWindow;
-            uint8_t emissiveLevel;
-            bool operator==(const BatchKey& o) const {
-                return texPtr == o.texPtr && alphaTest == o.alphaTest &&
-                       unlit == o.unlit && isWindow == o.isWindow &&
-                       emissiveLevel == o.emissiveLevel;
-            }
-        };
-        struct BatchKeyHash {
-            size_t operator()(const BatchKey& k) const {
-                return std::hash<uintptr_t>()(k.texPtr) ^
-                       (std::hash<bool>()(k.alphaTest) << 1) ^
-                       (std::hash<bool>()(k.unlit) << 2) ^
-                       (std::hash<bool>()(k.isWindow) << 3) ^
-                       (std::hash<uint8_t>()(k.emissiveLevel) << 4);
-            }
-        };
-        std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
+        // What each batch draws with. Batches merge only when all of it
+        // matches; see rendering/wmo_batch_merge.hpp.
+        std::vector<WmoBatchState> batchStates;
+        std::vector<VkTexture*> batchTextures;
+        batchStates.reserve(groupRes.batches.size());
+        batchTextures.reserve(groupRes.batches.size());
 
         for (const auto& batch : groupRes.batches) {
             VkTexture* tex = whiteTexture_.get();
-            bool hasTexture = false;
 
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t texIndex = modelData.materialTextureIndices[batch.materialId];
                 if (texIndex < modelData.textures.size()) {
                     tex = modelData.textures[texIndex];
-                    hasTexture = (tex != nullptr && tex != whiteTexture_.get());
                     if (!tex) tex = whiteTexture_.get();
                 } else {
                     LOG_WARNING("WMO ", id, " batch materialId=", batch.materialId,
@@ -713,11 +695,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                             modelData.materialTextureIndices.size(), " - white fallback");
             }
 
-            bool alphaTest = false;
             uint32_t blendMode = 0;
             if (batch.materialId < modelData.materialBlendModes.size()) {
                 blendMode = modelData.materialBlendModes[batch.materialId];
-                alphaTest = (blendMode == 1);
             }
 
             bool unlit = false;
@@ -795,44 +775,56 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
-            BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isWindow = isWindow, .emissiveLevel = emissiveLevel };
-            auto& mb = batchMap[key];
-            if (mb.draws.empty()) {
-                mb.texture = tex;
-                mb.hasTexture = hasTexture;
-                mb.alphaTest = alphaTest;
-                mb.unlit = unlit;
-                mb.isTransparent = (blendMode >= 2);
-                mb.isWindow = isWindow;
-                mb.isLava = isLava;
-                mb.emissiveLevel = emissiveLevel;
-                mb.clothTop = clothTop;
-                mb.clothDrop = clothDrop;
-                mb.clothCentreX = clothCx;
-                mb.clothCentreY = clothCy;
-                // Look up normal/height map from texture cache
-                if (hasTexture && tex != whiteTexture_.get()) {
-                    for (const auto& [cacheKey, cacheEntry] : textureCache) {
-                        if (cacheEntry.texture.get() == tex) {
-                            mb.normalHeightMap = cacheEntry.normalHeightMap.get();
-                            mb.heightMapVariance = cacheEntry.heightMapVariance;
-                            break;
-                        }
+            batchStates.push_back({ .texture = tex, .blendMode = blendMode, .unlit = unlit,
+                                    .isWindow = isWindow, .isLava = isLava,
+                                    .emissiveLevel = emissiveLevel,
+                                    .clothTop = clothTop, .clothDrop = clothDrop,
+                                    .clothCentreX = clothCx, .clothCentreY = clothCy });
+            batchTextures.push_back(tex);
+        }
+
+        std::vector<GroupResources::MergedBatch> merged;
+        for (const auto& members : groupWmoBatches(batchStates)) {
+            const WmoBatchState& state = batchStates[members.front()];
+            VkTexture* tex = batchTextures[members.front()];
+            GroupResources::MergedBatch mb;
+            mb.texture = tex;
+            mb.hasTexture = tex != whiteTexture_.get();
+            mb.alphaTest = state.blendMode == 1;
+            mb.unlit = state.unlit;
+            mb.isTransparent = state.blendMode >= 2;
+            mb.isWindow = state.isWindow;
+            mb.isLava = state.isLava;
+            mb.emissiveLevel = state.emissiveLevel;
+            mb.clothTop = state.clothTop;
+            mb.clothDrop = state.clothDrop;
+            mb.clothCentreX = state.clothCentreX;
+            mb.clothCentreY = state.clothCentreY;
+            // Look up normal/height map from texture cache
+            if (mb.hasTexture) {
+                for (const auto& [cacheKey, cacheEntry] : textureCache) {
+                    if (cacheEntry.texture.get() == tex) {
+                        mb.normalHeightMap = cacheEntry.normalHeightMap.get();
+                        mb.heightMapVariance = cacheEntry.heightMapVariance;
+                        break;
                     }
                 }
             }
-            GroupResources::MergedBatch::DrawRange dr;
-            dr.firstIndex = batch.startIndex;
-            dr.indexCount = batch.indexCount;
-            mb.draws.push_back(dr);
+            for (size_t i : members) {
+                const auto& batch = groupRes.batches[i];
+                GroupResources::MergedBatch::DrawRange dr;
+                dr.firstIndex = batch.startIndex;
+                dr.indexCount = batch.indexCount;
+                mb.draws.push_back(dr);
+            }
+            merged.push_back(std::move(mb));
         }
 
         // Allocate descriptor sets and UBOs for each merged batch
-        groupRes.mergedBatches.reserve(batchMap.size());
+        groupRes.mergedBatches.reserve(merged.size());
         bool anyTextured = false;
         bool isInterior = (groupRes.groupFlags & 0x2000) != 0;
-        for (auto& [key, mb] : batchMap) {
+        for (auto& mb : merged) {
             if (mb.hasTexture) anyTextured = true;
 
             // Create material UBO
