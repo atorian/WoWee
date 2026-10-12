@@ -1318,11 +1318,9 @@ else()
     add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
 endif()
 
-# Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF
+# Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF. Set up on
+# wowee_base, which the client and every tool linking the libraries share.
 if(WOWEE_ENABLE_TRACY)
-    target_sources(wowee PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
-    target_compile_definitions(wowee PRIVATE TRACY_ENABLE)
-    target_include_directories(wowee SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public)
     message(STATUS "Tracy profiler: ENABLED")
 endif()
 
@@ -1527,10 +1525,14 @@ elseif(glm_FOUND)
     target_include_directories(wowee_base PUBLIC ${GLM_INCLUDE_DIRS})
 endif()
 # The profiler macros expand differently with Tracy on, so every library that
-# uses them has to agree with the client. TracyClient.cpp stays in the client.
+# uses them has to agree with the client, and the runtime goes with the
+# definition: a tool linking instrumented pipeline objects needs TracyClient
+# as much as the client does.
 if(WOWEE_ENABLE_TRACY)
+    target_sources(wowee_base PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
     target_compile_definitions(wowee_base PUBLIC TRACY_ENABLE)
     target_include_directories(wowee_base SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
+    target_link_libraries(wowee_base PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
@@ -1654,7 +1656,10 @@ function(wowee_apply_client_flags target)
             )
         else()
             target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+            # PUBLIC so that every executable linking an instrumented static
+            # library (the tools link wowee_pipeline) links the sanitizer
+            # runtimes too, rather than failing on __asan_* symbols.
+            target_link_options(${target} PUBLIC -fsanitize=address,undefined)
         endif()
     endif()
 
