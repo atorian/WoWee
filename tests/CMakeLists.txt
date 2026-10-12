@@ -626,6 +626,18 @@ wowee_add_test(test_monster_move_facing
             ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
             ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp)
 
+# Real receive parser: extended headers, fragmented RC4 streams and legacy framing.
+wowee_add_test(test_world_socket
+    SOURCES test_world_socket.cpp
+            ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/network/world_socket.cpp
+            ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+            ${CMAKE_SOURCE_DIR}/src/auth/rc4.cpp
+            ${CMAKE_SOURCE_DIR}/src/auth/vanilla_crypt.cpp
+            ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/opcode_table.cpp)
+target_link_libraries(test_world_socket PRIVATE OpenSSL::Crypto Threads::Threads)
+
 # ── test_packet ──────────────────────────────────────────────
 add_executable(test_packet
     test_packet.cpp

@@ -247,7 +247,7 @@ void WorldSocket::closeSocketNoJoin() {
     connected = false;
 }
 
-void WorldSocket::recordRecentPacket(bool outbound, uint16_t opcode, uint16_t payloadLen) {
+void WorldSocket::recordRecentPacket(bool outbound, uint16_t opcode, uint32_t payloadLen) {
     const auto now = std::chrono::steady_clock::now();
     recentPacketHistory_.push_back(RecentPacketTrace{now, outbound, opcode, payloadLen});
     while (!recentPacketHistory_.empty() &&
@@ -584,7 +584,7 @@ void WorldSocket::pumpNetworkIO() {
         return;
     }
 
-    if (receivedAny) {
+    if (receivedAny || bufferedBytes() >= 4) {
         const bool debugLog = core::Logger::getInstance().shouldLog(core::LogLevel::DEBUG);
         if (debugLog) {
             LOG_DEBUG("World socket read ", bytesReadThisTick, " bytes in ", readOps,
@@ -618,7 +618,7 @@ void WorldSocket::pumpNetworkIO() {
 }
 
 void WorldSocket::tryParsePackets() {
-    // World server packets have 4-byte incoming header: size(2) + opcode(2)
+    // WotLK large packets use size(3) + opcode(2); legacy headers stay four bytes.
     int parsedThisTick = 0;
     size_t parseOffset = receiveReadOffset_;
     size_t localHeaderBytesDecrypted = headerBytesDecrypted;
@@ -654,37 +654,39 @@ void WorldSocket::tryParsePackets() {
             localHeaderBytesDecrypted = 4;
         }
 
-        // Parse header (now decrypted in-place).
-        // Size: 2 bytes big-endian. For world packets, this includes opcode bytes.
-        uint16_t size = (receiveBuffer[parseOffset + 0] << 8) | receiveBuffer[parseOffset + 1];
-        // Opcode: 2 bytes little-endian.
-        uint16_t opcode = receiveBuffer[parseOffset + 2] | (receiveBuffer[parseOffset + 3] << 8);
-        if (size < 2) {
-            LOG_ERROR("World packet framing desync: invalid size=", size,
-                      " rawHdr=", std::hex,
-                      static_cast<int>(rawHeader[0]), " ",
-                      static_cast<int>(rawHeader[1]), " ",
-                      static_cast<int>(rawHeader[2]), " ",
-                      static_cast<int>(rawHeader[3]), std::dec,
-                      " enc=", encryptionEnabled, ". Disconnecting to recover stream.");
-            closeSocketNoJoin();
-            return;
+        // The high bit of the first decrypted WotLK byte selects a five-byte
+        // header. Do not consume the fifth cipher byte until it has arrived,
+        // and retain the decrypted count while awaiting the header or body.
+        const bool extended = !useVanillaCrypt && (receiveBuffer[parseOffset] & 0x80);
+        const size_t headerSize = extended ? 5 : 4;
+        if ((receiveBuffer.size() - parseOffset) < headerSize) break;
+        if (encryptionEnabled && localHeaderBytesDecrypted < headerSize) {
+            decryptCipher.process(receiveBuffer.data() + parseOffset + localHeaderBytesDecrypted,
+                                  headerSize - localHeaderBytesDecrypted);
+            localHeaderBytesDecrypted = headerSize;
         }
-        constexpr uint16_t kMaxWorldPacketSize = 0x8000;  // 32KB - allows large guild rosters, auction lists
-        if (size > kMaxWorldPacketSize) {
-            LOG_ERROR("World packet framing desync: oversized packet size=", size,
-                      " rawHdr=", std::hex,
-                      static_cast<int>(rawHeader[0]), " ",
-                      static_cast<int>(rawHeader[1]), " ",
-                      static_cast<int>(rawHeader[2]), " ",
-                      static_cast<int>(rawHeader[3]), std::dec,
-                      " enc=", encryptionEnabled, ". Disconnecting to recover stream.");
+
+        uint32_t size = (static_cast<uint32_t>(receiveBuffer[parseOffset]) << 8)
+                      | receiveBuffer[parseOffset + 1];
+        if (extended) {
+            size = (static_cast<uint32_t>(receiveBuffer[parseOffset] & 0x7f) << 16)
+                 | (static_cast<uint32_t>(receiveBuffer[parseOffset + 1]) << 8)
+                 | receiveBuffer[parseOffset + 2];
+        }
+        const size_t opcodeOffset = parseOffset + headerSize - 2;
+        const uint16_t opcode = receiveBuffer[opcodeOffset]
+                              | (receiveBuffer[opcodeOffset + 1] << 8);
+        // Bound the whole frame to the receive-buffer limit before allocating.
+        if (size < 2 || size > kMaxReceiveBufferBytes - headerSize + 2) {
+            LOG_ERROR("World packet framing desync: invalid size=", size,
+                      " headerBytes=", headerSize, " enc=", encryptionEnabled,
+                      ". Disconnecting to recover stream.");
             closeSocketNoJoin();
             return;
         }
 
-        const uint16_t payloadLen = size - 2;
-        const size_t totalSize = 4 + payloadLen;
+        const uint32_t payloadLen = size - 2;
+        const size_t totalSize = headerSize + payloadLen;
 
         if (headerTracePacketsLeft > 0) {
             LOG_INFO("WS HDR TRACE raw=",
@@ -733,7 +735,7 @@ void WorldSocket::tryParsePackets() {
         try {
             std::vector<uint8_t> packetData(payloadLen);
             if (payloadLen > 0) {
-                std::memcpy(packetData.data(), receiveBuffer.data() + parseOffset + 4, payloadLen);
+                std::memcpy(packetData.data(), receiveBuffer.data() + parseOffset + headerSize, payloadLen);
             }
             // Queue packet; callbacks run after buffer state is finalized.
             parsedPackets->emplace_back(opcode, std::move(packetData));

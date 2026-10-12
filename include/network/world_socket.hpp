@@ -28,7 +28,7 @@ namespace network {
  *
  * Key Differences from Auth Server:
  * - Outgoing: 6-byte header (2 bytes size + 4 bytes opcode, big-endian)
- * - Incoming: 4-byte header (2 bytes size + 2 bytes opcode)
+ * - Incoming: 4/5-byte header (2/3 bytes size + 2 bytes opcode; 5 for large WotLK packets)
  * - Headers are encrypted after CMSG_AUTH_SESSION
  * - Packet bodies remain unencrypted
  * - Size field includes opcode bytes (payloadLen = size - 2)
@@ -82,6 +82,7 @@ public:
     [[nodiscard]] bool isEncryptionEnabled() const { return encryptionEnabled; }
 
 private:
+    friend struct WorldSocketTestAccess;
     /**
      * Try to parse complete packets from receive buffer
      */
@@ -92,7 +93,7 @@ private:
     void startAsyncPump();
     void stopAsyncPump();
     void closeSocketNoJoin();
-    void recordRecentPacket(bool outbound, uint16_t opcode, uint16_t payloadLen);
+    void recordRecentPacket(bool outbound, uint16_t opcode, uint32_t payloadLen);
     void dumpRecentPacketHistoryLocked(const char* reason, size_t bufferedBytes);
 
     socket_t sockfd = INVALID_SOCK;           // THREAD-SAFE: protected by ioMutex_
@@ -132,7 +133,7 @@ private:
     bool useFastRecvAppend_ = false;
     bool useParseScratchQueue_ = false;
 
-    // Track how many header bytes have been decrypted (0-4)
+    // Track how many header bytes have been decrypted (0-5)
     // This prevents re-decrypting the same header when waiting for more data
     size_t headerBytesDecrypted = 0;
 
@@ -146,7 +147,7 @@ private:
         std::chrono::steady_clock::time_point when{};
         bool outbound = false;
         uint16_t opcode = 0;
-        uint16_t payloadLen = 0;
+        uint32_t payloadLen = 0;
     };
     std::deque<RecentPacketTrace> recentPacketHistory_;
 
