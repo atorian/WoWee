@@ -675,10 +675,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             bool unlit;
             bool isWindow;
             uint8_t emissiveLevel;
+            // Batches whose textures failed all point at the white one; each
+            // failed texture keeps a batch of its own so it can be given its
+            // texture alone when a retry succeeds.
+            uint32_t pendingTexture;
             bool operator==(const BatchKey& o) const {
                 return texPtr == o.texPtr && alphaTest == o.alphaTest &&
                        unlit == o.unlit && isWindow == o.isWindow &&
-                       emissiveLevel == o.emissiveLevel;
+                       emissiveLevel == o.emissiveLevel && pendingTexture == o.pendingTexture;
             }
         };
         struct BatchKeyHash {
@@ -687,7 +691,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                        (std::hash<bool>()(k.alphaTest) << 1) ^
                        (std::hash<bool>()(k.unlit) << 2) ^
                        (std::hash<bool>()(k.isWindow) << 3) ^
-                       (std::hash<uint8_t>()(k.emissiveLevel) << 4);
+                       (std::hash<uint8_t>()(k.emissiveLevel) << 4) ^
+                       (std::hash<uint32_t>()(k.pendingTexture) << 5);
             }
         };
         std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
@@ -695,6 +700,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         for (const auto& batch : groupRes.batches) {
             VkTexture* tex = whiteTexture_.get();
             bool hasTexture = false;
+            uint32_t pendingTexture = UINT32_MAX;
 
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t texIndex = modelData.materialTextureIndices[batch.materialId];
@@ -702,6 +708,10 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                     tex = modelData.textures[texIndex];
                     hasTexture = (tex != nullptr && tex != whiteTexture_.get());
                     if (!tex) tex = whiteTexture_.get();
+                    if (!hasTexture && texIndex < modelData.textureNames.size() &&
+                        !modelData.textureNames[texIndex].empty()) {
+                        pendingTexture = texIndex;
+                    }
                 } else {
                     LOG_WARNING("WMO ", id, " batch materialId=", batch.materialId,
                                 " texIndex=", texIndex, " >= textures size ",
@@ -796,10 +806,12 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             }
 
             BatchKey key{ .texPtr = reinterpret_cast<uintptr_t>(tex), .alphaTest = alphaTest, .unlit = unlit,
-                          .isWindow = isWindow, .emissiveLevel = emissiveLevel };
+                          .isWindow = isWindow, .emissiveLevel = emissiveLevel,
+                          .pendingTexture = pendingTexture };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
+                mb.pendingTextureIndex = pendingTexture;
                 mb.hasTexture = hasTexture;
                 mb.alphaTest = alphaTest;
                 mb.unlit = unlit;
@@ -811,16 +823,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 mb.clothDrop = clothDrop;
                 mb.clothCentreX = clothCx;
                 mb.clothCentreY = clothCy;
-                // Look up normal/height map from texture cache
-                if (hasTexture && tex != whiteTexture_.get()) {
-                    for (const auto& [cacheKey, cacheEntry] : textureCache) {
-                        if (cacheEntry.texture.get() == tex) {
-                            mb.normalHeightMap = cacheEntry.normalHeightMap.get();
-                            mb.heightMapVariance = cacheEntry.heightMapVariance;
-                            break;
-                        }
-                    }
-                }
+                if (hasTexture) attachNormalHeightMap(mb);
             }
             GroupResources::MergedBatch::DrawRange dr;
             dr.firstIndex = batch.startIndex;
@@ -831,98 +834,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // Allocate descriptor sets and UBOs for each merged batch
         groupRes.mergedBatches.reserve(batchMap.size());
         bool anyTextured = false;
-        bool isInterior = (groupRes.groupFlags & 0x2000) != 0;
         for (auto& [key, mb] : batchMap) {
             if (mb.hasTexture) anyTextured = true;
-
-            // Create material UBO
-            VmaAllocator allocator = vkCtx_->getAllocator();
-            AllocatedBuffer matBuf = createBuffer(allocator, sizeof(WMOMaterialUBO),
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU);
-            mb.materialUBO = matBuf.buffer;
-            mb.materialUBOAlloc = matBuf.allocation;
-
-            // Write material params
-            WMOMaterialUBO matData{};
-            matData.hasTexture = mb.hasTexture ? 1 : 0;
-            matData.alphaTest = mb.alphaTest ? 1 : 0;
-            matData.unlit = mb.unlit ? 1 : 0;
-            matData.isInterior = isInterior ? 1 : 0;
-            matData.hasVertexColors = (groupRes.groupFlags & 0x4) != 0 ? 1 : 0;
-            matData.specularIntensity = 0.5f;
-            matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
-            matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
-            matData.enablePOM = pomEnabled_ ? 1 : 0;
-            matData.pomScale = 0.012f;
-            matData.pomMaxSamples = pomSamplesFor(pomQuality_);
-            matData.heightMapVariance = mb.heightMapVariance;
-            matData.normalMapStrength = normalMapStrength_;
-            matData.isLava = mb.isLava ? 1 : 0;
-            matData.wmoAmbientR = modelData.wmoAmbientColor.r;
-            matData.wmoAmbientG = modelData.wmoAmbientColor.g;
-            matData.wmoAmbientB = modelData.wmoAmbientColor.b;
-            matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
-            if (matBuf.info.pMappedData) {
-                memcpy(matBuf.info.pMappedData, &matData, sizeof(matData));
-            }
-
-            // Allocate and write descriptor set
-            mb.materialSet = allocateMaterialSet();
-            // Valid, not merely non-null. descriptorInfo() returns the
-            // texture's handles as they are, so one whose upload or view
-            // creation failed writes VK_NULL_HANDLE into a live descriptor and
-            // declares SHADER_READ_ONLY_OPTIMAL over it - undefined behaviour
-            // that reaches an NVIDIA driver as a lost device. See #123.
-            //
-            // The set is dropped rather than written when even the fallback is
-            // unsampleable, and the render pass already skips a batch with no
-            // set: an unlit wall costs a wall, a null view costs the device.
-            const auto pick = [](VkTexture* wanted, VkTexture* fallback) -> VkTexture* {
-                if (wanted && wanted->isValid()) return wanted;
-                return (fallback && fallback->isValid()) ? fallback : nullptr;
-            };
-            VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
-            VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
-            if ((!texToUse || !nhMap) && mb.materialSet) {
-                vkFreeDescriptorSets(vkCtx_->getDevice(), materialDescPool_, 1,
-                                     &mb.materialSet);
-                mb.materialSet = VK_NULL_HANDLE;
-            }
-            if (mb.materialSet) {
-                VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
-
-                VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = mb.materialUBO;
-                bufInfo.offset = 0;
-                bufInfo.range = sizeof(WMOMaterialUBO);
-
-                VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
-
-                VkWriteDescriptorSet writes[3] = {};
-                writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[0].dstSet = mb.materialSet;
-                writes[0].dstBinding = 0;
-                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[0].descriptorCount = 1;
-                writes[0].pImageInfo = &imgInfo;
-
-                writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[1].dstSet = mb.materialSet;
-                writes[1].dstBinding = 1;
-                writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                writes[1].descriptorCount = 1;
-                writes[1].pBufferInfo = &bufInfo;
-
-                writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[2].dstSet = mb.materialSet;
-                writes[2].dstBinding = 2;
-                writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[2].descriptorCount = 1;
-                writes[2].pImageInfo = &nhImgInfo;
-
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
-            }
+            createMergedBatchMaterial(modelData, groupRes, mb);
 
             if (mb.isLava) {
                 for (const auto& draw : mb.draws) {
@@ -949,6 +863,11 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
+            if (mb.pendingTextureIndex != UINT32_MAX) {
+                modelData.pendingTextureBatches.emplace_back(
+                    static_cast<uint32_t>(mergeGroupIndex - 1),
+                    static_cast<uint32_t>(groupRes.mergedBatches.size()));
+            }
             groupRes.mergedBatches.push_back(std::move(mb));
         }
         groupRes.allUntextured = !anyTextured && !groupRes.mergedBatches.empty();
@@ -1060,8 +979,10 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     // modelData no longer owns it afterwards.
     const uint32_t loadedGroupCount = modelData.loadedGroups;
     registerRtModel(id, modelData);
+    if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
     loadedModels[id] = std::move(modelData);
     loadingModels_.erase(id);
+    retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
     return ModelLoadResult::Complete;
 }
@@ -2287,6 +2208,230 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
     }
 }
 
+void WMORenderer::attachNormalHeightMap(GroupResources::MergedBatch& mb) const {
+    if (!mb.texture || mb.texture == whiteTexture_.get()) return;
+    for (const auto& [cacheKey, cacheEntry] : textureCache) {
+        if (cacheEntry.texture.get() == mb.texture) {
+            mb.normalHeightMap = cacheEntry.normalHeightMap.get();
+            mb.heightMapVariance = cacheEntry.heightMapVariance;
+            return;
+        }
+    }
+}
+
+void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
+                                            GroupResources::MergedBatch& mb) {
+    const bool isInterior = (group.groupFlags & 0x2000) != 0;
+
+    // Create material UBO
+    VmaAllocator allocator = vkCtx_->getAllocator();
+    AllocatedBuffer matBuf = createBuffer(allocator, sizeof(WMOMaterialUBO),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    mb.materialUBO = matBuf.buffer;
+    mb.materialUBOAlloc = matBuf.allocation;
+
+    // Write material params
+    WMOMaterialUBO matData{};
+    matData.hasTexture = mb.hasTexture ? 1 : 0;
+    matData.alphaTest = mb.alphaTest ? 1 : 0;
+    matData.unlit = mb.unlit ? 1 : 0;
+    matData.isInterior = isInterior ? 1 : 0;
+    matData.hasVertexColors = (group.groupFlags & 0x4) != 0 ? 1 : 0;
+    matData.specularIntensity = 0.5f;
+    matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
+    matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
+    matData.enablePOM = pomEnabled_ ? 1 : 0;
+    matData.pomScale = 0.012f;
+    matData.pomMaxSamples = pomSamplesFor(pomQuality_);
+    matData.heightMapVariance = mb.heightMapVariance;
+    matData.normalMapStrength = normalMapStrength_;
+    matData.isLava = mb.isLava ? 1 : 0;
+    matData.wmoAmbientR = model.wmoAmbientColor.r;
+    matData.wmoAmbientG = model.wmoAmbientColor.g;
+    matData.wmoAmbientB = model.wmoAmbientColor.b;
+    matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
+    if (matBuf.info.pMappedData) {
+        memcpy(matBuf.info.pMappedData, &matData, sizeof(matData));
+    }
+
+    // Allocate and write descriptor set
+    mb.materialSet = allocateMaterialSet();
+    // Valid, not merely non-null. descriptorInfo() returns the
+    // texture's handles as they are, so one whose upload or view
+    // creation failed writes VK_NULL_HANDLE into a live descriptor and
+    // declares SHADER_READ_ONLY_OPTIMAL over it - undefined behaviour
+    // that reaches an NVIDIA driver as a lost device. See #123.
+    //
+    // The set is dropped rather than written when even the fallback is
+    // unsampleable, and the render pass already skips a batch with no
+    // set: an unlit wall costs a wall, a null view costs the device.
+    const auto pick = [](VkTexture* wanted, VkTexture* fallback) -> VkTexture* {
+        if (wanted && wanted->isValid()) return wanted;
+        return (fallback && fallback->isValid()) ? fallback : nullptr;
+    };
+    VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
+    VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
+    if ((!texToUse || !nhMap) && mb.materialSet) {
+        vkFreeDescriptorSets(vkCtx_->getDevice(), materialDescPool_, 1,
+                             &mb.materialSet);
+        mb.materialSet = VK_NULL_HANDLE;
+    }
+    if (!mb.materialSet) return;
+
+    VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
+
+    VkDescriptorBufferInfo bufInfo{};
+    bufInfo.buffer = mb.materialUBO;
+    bufInfo.offset = 0;
+    bufInfo.range = sizeof(WMOMaterialUBO);
+
+    VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
+
+    VkWriteDescriptorSet writes[3] = {};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = mb.materialSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].descriptorCount = 1;
+    writes[0].pImageInfo = &imgInfo;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = mb.materialSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[1].descriptorCount = 1;
+    writes[1].pBufferInfo = &bufInfo;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = mb.materialSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].descriptorCount = 1;
+    writes[2].pImageInfo = &nhImgInfo;
+
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+}
+
+void WMORenderer::retryPendingTextures() {
+    for (size_t m = 0; m < modelsWithPendingTextures_.size();) {
+        auto it = loadedModels.find(modelsWithPendingTextures_[m]);
+        if (it == loadedModels.end()) {
+            modelsWithPendingTextures_[m] = modelsWithPendingTextures_.back();
+            modelsWithPendingTextures_.pop_back();
+            continue;
+        }
+        ModelData& model = it->second;
+        auto& pending = model.pendingTextureBatches;
+        for (size_t p = 0; p < pending.size();) {
+            const auto [groupIndex, batchIndex] = pending[p];
+            if (groupIndex >= model.groups.size() ||
+                batchIndex >= model.groups[groupIndex].mergedBatches.size()) {
+                pending[p] = pending.back();
+                pending.pop_back();
+                continue;
+            }
+            GroupResources& group = model.groups[groupIndex];
+            auto& mb = group.mergedBatches[batchIndex];
+            const uint32_t texIndex = mb.pendingTextureIndex;
+            if (texIndex >= model.textureNames.size() || texIndex >= model.textures.size()) {
+                pending[p] = pending.back();
+                pending.pop_back();
+                continue;
+            }
+            // loadTexture decides when a failed path is worth reading again;
+            // asking before then is a lookup that hands back white.
+            VkTexture* tex = loadTexture(model.textureNames[texIndex]);
+            if (!tex || tex == whiteTexture_.get()) {
+                ++p;
+                continue;
+            }
+
+            // The old set and buffer may still be read by a frame in flight, so
+            // the batch gets new ones and the old go once every slot has fenced.
+            const VkDescriptorSet oldSet = mb.materialSet;
+            const ::VkBuffer oldUbo = mb.materialUBO;
+            const VmaAllocation oldUboAlloc = mb.materialUBOAlloc;
+            model.textures[texIndex] = tex;
+            mb.texture = tex;
+            mb.hasTexture = true;
+            mb.pendingTextureIndex = UINT32_MAX;
+            attachNormalHeightMap(mb);
+            createMergedBatchMaterial(model, group, mb);
+            group.allUntextured = false;
+            VkDevice device = vkCtx_->getDevice();
+            VmaAllocator allocator = vkCtx_->getAllocator();
+            VkDescriptorPool pool = materialDescPool_;
+            vkCtx_->deferAfterAllFrameFences([device, allocator, pool, oldSet, oldUbo, oldUboAlloc]() {
+                if (oldSet) {
+                    VkDescriptorSet set = oldSet;
+                    vkFreeDescriptorSets(device, pool, 1, &set);
+                }
+                if (oldUbo) vmaDestroyBuffer(allocator, oldUbo, oldUboAlloc);
+            });
+            core::Logger::getInstance().info("WMO ", model.id, " got texture '",
+                                             model.textureNames[texIndex], "' on a retry");
+            pending[p] = pending.back();
+            pending.pop_back();
+        }
+        if (pending.empty()) {
+            modelsWithPendingTextures_[m] = modelsWithPendingTextures_.back();
+            modelsWithPendingTextures_.pop_back();
+        } else {
+            ++m;
+        }
+    }
+}
+
+size_t WMORenderer::evictUnreferencedTextures(size_t bytesNeeded) {
+    if (textureCache.empty() || bytesNeeded == 0) return 0;
+
+    // Free a slab rather than exactly what was asked for: finding what is in
+    // use walks every model, and one sweep should serve many loads.
+    constexpr size_t kEvictionSlab = 64ull * 1024 * 1024;
+    bytesNeeded = std::max(bytesNeeded, kEvictionSlab);
+
+    // What a loaded or half-loaded model points at, which its descriptor sets
+    // and the ray-traced scene's albedo lookups rely on.
+    std::unordered_set<const VkTexture*> inUse;
+    auto collect = [&](const ModelData& model) {
+        for (const VkTexture* tex : model.textures) {
+            if (tex) inUse.insert(tex);
+        }
+        for (const auto& group : model.groups) {
+            for (const auto& mb : group.mergedBatches) {
+                if (mb.texture) inUse.insert(mb.texture);
+            }
+        }
+    };
+    for (const auto& [id, model] : loadedModels) collect(model);
+    for (const auto& [id, model] : loadingModels_) collect(model);
+
+    std::vector<std::pair<uint64_t, std::string>> candidates;
+    candidates.reserve(textureCache.size());
+    for (const auto& [key, entry] : textureCache) {
+        if (!entry.texture || inUse.count(entry.texture.get()) != 0) continue;
+        candidates.emplace_back(entry.lastUse, key);
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    size_t freed = 0;
+    for (const auto& [lastUse, key] : candidates) {
+        if (freed >= bytesNeeded) break;
+        auto it = textureCache.find(key);
+        if (it == textureCache.end()) continue;
+        freed += it->second.approxBytes;
+        textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
+        // A frame in flight may still sample it; it dies once every slot has
+        // fenced. std::function needs a copyable capture.
+        auto doomed = std::make_shared<TextureCacheEntry>(std::move(it->second));
+        vkCtx_->deferAfterAllFrameFences([doomed]() mutable { doomed.reset(); });
+        textureCache.erase(it);
+    }
+    return freed;
+}
+
 VkDescriptorSet WMORenderer::allocateMaterialSet() {
     if (!materialDescPool_ || !materialSetLayout_) return VK_NULL_HANDLE;
 
@@ -2711,6 +2856,12 @@ VkTexture* WMORenderer::loadTexture(const std::string& path) {
     core::Logger::getInstance().debug("WMO texture: ", path, " size=", blp.width, "x", blp.height);
 
     size_t approxBytes = blp.approxUploadBytes();
+    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
+        // Make room before refusing, as the M2 cache does. Without this the
+        // first textures to arrive kept their place for the session and every
+        // building streamed in after the cache filled was drawn white.
+        evictUnreferencedTextures(approxBytes);
+    }
     if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
         for (const auto& c : attemptedCandidates) {
             failedTextureCache_.insert(c);
