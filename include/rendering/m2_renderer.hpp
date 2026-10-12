@@ -9,6 +9,8 @@
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_uv_transform.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -54,6 +56,7 @@ struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
         VkTexture* secondTexture = nullptr; // second stage of an RGBA-masked layer
+        uint8_t secondTexFlags = 0;         // M2Texture.flags of the mask's slot
         uint16_t colorTrackIndex = UINT16_MAX;
         uint16_t weightTrackIndex = UINT16_MAX;
         uint8_t secondTexCoordSet = 0;
@@ -70,6 +73,7 @@ struct M2ModelGPU {
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
+        M2BatchDrawState drawState; // decided by writeBatchMaterial
         int8_t priorityPlane = 0; // authored transparent layer priority
         uint16_t materialFlags = 0; // M2 material flags (0x01=Unlit, 0x04=TwoSided, 0x10=NoDepthWrite)
         uint16_t submeshLevel = 0; // LOD level: 0=base, 1=LOD1, 2=LOD2, 3=LOD3
@@ -95,6 +99,12 @@ struct M2ModelGPU {
         bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
+        /// The texture this batch is hidden waiting for, when its first load
+        /// failed. Empty once it has it. A hidden batch is never bound, so its
+        /// descriptor and material can be rewritten when a retry succeeds.
+        std::string pendingTextureKey;
+        uint32_t pendingTextureFlags = 0;
+        float loadedOpacity = 1.0f; ///< what batchOpacity becomes once the texture arrives
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
 
@@ -431,8 +441,6 @@ struct M2MaterialUBO {
     int32_t fireCard;
     int32_t hasSecondTexture;
     int32_t secondTexCoordSet;
-    float secondOffsetX;
-    float secondOffsetY;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
@@ -488,7 +496,24 @@ public:
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
+    /// The opaque pass, and the blended one too unless it is drawn after the
+    /// water (see renderAfterWater).
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+
+    /// Draw blended things - transparent batches, glow sprites, particles,
+    /// smoke and ribbons - in the water's pass, after the water, instead of in
+    /// the scene pass under it. `pass` is that pass, or null while the water is
+    /// drawn in the scene pass. Rebuilds pipelines: call between frames, with
+    /// nothing in flight using the old ones.
+    void setAfterWaterPass(VkRenderPass pass, VkSampleCountFlagBits samples);
+    [[nodiscard]] VkRenderPass afterWaterPass() const { return afterWaterPass_; }
+    /// Whether render() leaves the blended things for renderAfterWater.
+    [[nodiscard]] bool drawsBlendedAfterWater() const {
+        return afterWaterPass_ != VK_NULL_HANDLE && afterWaterPipes_.alpha != VK_NULL_HANDLE;
+    }
+    /// Record them, into the water's pass after the water. Needs render() to
+    /// have run this frame.
+    void renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /** Gather the nearest authored glow cards as inexpensive scene point lights. */
     uint32_t gatherLocalLights(const glm::vec3& cameraPos,
@@ -655,6 +680,35 @@ public:
     /// recreatePipelines() after a device loss, which is the reason it exists:
     /// the two used to be separate copies of the same 190 lines.
     bool buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout);
+    VkPipeline blendPipeline(M2BlendPipeline kind) const {
+        switch (kind) {
+            case M2BlendPipeline::Opaque: return opaquePipeline_;
+            case M2BlendPipeline::AlphaTest: return alphaTestPipeline_;
+            case M2BlendPipeline::Alpha: return blended().alpha;
+            case M2BlendPipeline::NoAlphaAdd: return blended().noAlphaAdd;
+            case M2BlendPipeline::Modulate: return blended().modulate;
+            case M2BlendPipeline::Modulate2x: return blended().modulate2x;
+            case M2BlendPipeline::AlphaAdd: break;
+        }
+        return blended().additive;
+    }
+    /// Decide how a batch is drawn and write its material buffer. Runs when the
+    /// model loads, and again if it is marked a spell effect afterwards; the
+    /// draw loops write nothing into it.
+    void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch) const;
+    /// The texture as one batch samples it: its image, with a sampler built
+    /// from that batch's own wrap flags.
+    VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
+    /// Take what the loaded texture says about itself onto the batch.
+    void applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
+                                const std::string& textureKeyLower) const;
+    /// Point a batch's descriptor set at its texture.
+    void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
+    /// Ask again for textures that failed to load, and show the batches that
+    /// were hidden waiting for them. A failed MPQ read is often transient.
+    void retryPendingBatchTextures();
+    struct PendingBatchTexture { uint32_t modelId; size_t batchIndex; };
+    std::vector<PendingBatchTexture> pendingBatchTextures_;
 
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
@@ -782,10 +836,42 @@ private:
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
-    VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend modes 3/4
-    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
-    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
+    /// Everything drawn blended: the transparent batches, particles, smoke and
+    /// ribbons. They exist twice. One set is for the scene pass. The other is
+    /// for the pass the water is drawn in, when the water leaves the scene
+    /// pass: blended things drawn before the water had the water's sheet
+    /// laid over them, so a waterfall's foam showed at full strength only
+    /// where it hung past the pool.
+    struct BlendedPipelines {
+        VkPipeline alpha = VK_NULL_HANDLE;            // blend mode 2
+        VkPipeline noAlphaAdd = VK_NULL_HANDLE;       // blend mode 3
+        VkPipeline additive = VK_NULL_HANDLE;         // blend mode 4 and up past 6
+        VkPipeline modulate = VK_NULL_HANDLE;         // blend mode 5
+        VkPipeline modulate2x = VK_NULL_HANDLE;       // blend mode 6
+        VkPipeline particle = VK_NULL_HANDLE;         // M2 emitter particles
+        VkPipeline particleAdditive = VK_NULL_HANDLE; // additive particles, glow sprites
+        VkPipeline smoke = VK_NULL_HANDLE;            // chimney smoke
+        VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
+        VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
+    };
+    BlendedPipelines scenePipes_;
+    BlendedPipelines afterWaterPipes_;
+    VkRenderPass afterWaterPass_ = VK_NULL_HANDLE;
+    /// Set while renderAfterWater records, so the blended draws pick the
+    /// pipelines built for the water's pass.
+    bool drawingAfterWater_ = false;
+    /// render() left its blended half for renderAfterWater this frame.
+    bool blendedPendingAfterWater_ = false;
+    const BlendedPipelines& blended() const {
+        return drawingAfterWater_ ? afterWaterPipes_ : scenePipes_;
+    }
+    bool buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits samples,
+                               bool derive, BlendedPipelines& out);
+    void destroyBlendedPipelines(BlendedPipelines& pipes);
+    /// Pass 2: the transparent batches and the glow sprites, after the opaque
+    /// pass has culled, sorted and gathered them.
+    void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    float lavaAnimSeconds_ = 0.0f;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -799,15 +885,10 @@ private:
     VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
 
     // Particle pipelines
-    VkPipeline particlePipeline_ = VK_NULL_HANDLE;       // M2 emitter particles
-    VkPipeline particleAdditivePipeline_ = VK_NULL_HANDLE; // Additive particle blend
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline smokePipeline_ = VK_NULL_HANDLE;           // Smoke particles
     VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
 
     // Ribbon pipelines (additive + alpha-blend)
-    VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;          // Alpha-blend ribbons
-    VkPipeline ribbonAdditivePipeline_ = VK_NULL_HANDLE;  // Additive ribbons
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
     /// The per-frame set layout initialize() was given. recreatePipelines()
     /// runs long after that call and needs the same one.
@@ -848,23 +929,30 @@ private:
 
     // GPU instance data SSBO - per-instance transforms, fade, bones for instanced draws.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
+    // Everything that differs between instances of one batch lives here, not
+    // in the batch's material buffer: that one buffer is shared by every
+    // instance and read when the GPU executes, so what was written into it
+    // during recording reached all of them as whatever the last write said.
     struct M2InstanceGPU {
         glm::mat4 model;           // 64 bytes @ offset 0
-        glm::vec2 uvOffset;        //  8 bytes @ offset 64
-        float fadeAlpha;           //  4 bytes @ offset 72
-        int32_t useBones;          //  4 bytes @ offset 76
-        int32_t boneBase;          //  4 bytes @ offset 80
-        int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
-        float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
-        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water)
-        InteriorLightGPU interiorLight; // 32 bytes @ offset 96 - M2Instance::interiorLight
+        M2UVTransform uv;          // 32 bytes @ offset 64 - texture animation, stage 0
+        M2UVTransform uv2;         // 32 bytes @ offset 96 - texture animation, mask stage
+        float fadeAlpha;           //  4 bytes @ offset 128
+        int32_t useBones;          //  4 bytes @ offset 132
+        int32_t boneBase;          //  4 bytes @ offset 136
+        int32_t boneCount;         //  4 bytes @ offset 140 - clamps skinning reads
+        float highlight = 0.0f;    //  4 bytes @ offset 144 - pressed-on lift
+        int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
+        float tintScale = 1.0f;    //  4 bytes @ offset 152 - a fire's flicker, per instance
+        float pad0 = 0.0f;         //  4 bytes @ offset 156
+        InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 128 bytes a slot, so this costs 8 MB rather than 4.
+    // buffers of 192 bytes a slot, so this costs 12 MB.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;

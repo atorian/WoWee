@@ -17,6 +17,8 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_material.hpp"
+#include "rendering/m2_uv_transform.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
@@ -265,7 +267,13 @@ struct CharMaterialUBO {
     float normalMapStrength;
     int32_t hairMaterial;
     int32_t ignoreTextureAlpha;
+    float modulateNeutral;
+    int32_t texCoordSet;
+    int32_t pad0;
+    M2UVTransform uvTransform;
 };
+static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
+static_assert(sizeof(CharMaterialUBO) == 112, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -275,7 +283,8 @@ struct CharVertexGPU {
     glm::vec3 normal;        // 12 bytes, offset 20
     glm::vec2 texCoords;     // 8 bytes,  offset 32
     glm::vec4 tangent;       // 16 bytes, offset 40 (xyz=dir, w=handedness)
-};  // 56 bytes total
+    glm::vec2 texCoords2;    // 8 bytes,  offset 56
+};  // 64 bytes total
 
 CharacterRenderer::CharacterRenderer() {
 }
@@ -284,9 +293,9 @@ CharacterRenderer::~CharacterRenderer() {
     shutdown();
 }
 
-/// Builds the five main-pass pipelines from an already-loaded shader pair.
+/// Builds the main-pass pipelines from an already-loaded shader pair.
 ///
-/// initialize() and recreatePipelines() both need exactly these five, blend
+/// initialize() and recreatePipelines() both need exactly these, blend
 /// state apart, and each described the vertex layout and the builder for
 /// itself. The layout is the part worth having once: the bone weights and
 /// indices are packed bytes, so a description that drifts from the struct
@@ -297,7 +306,8 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                                                wowee::rendering::VkShaderModule& charFrag) {
     // --- Vertex input ---
     // CharVertexGPU: vec3 pos(12) + uint8[4] boneWeights(4) + uint8[4] boneIndices(4) +
-    //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) = 56 bytes
+    //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) +
+    //               vec2 texCoords2(8) = 64 bytes
     VkVertexInputBindingDescription charBinding{};
     charBinding.binding = 0;
     charBinding.stride = sizeof(CharVertexGPU);
@@ -310,6 +320,7 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
         {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,  .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, normal))},
         {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords))},
         {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, tangent))},
+        {.location = 6, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords2))},
     };
 
     // --- Build pipelines ---
@@ -338,6 +349,8 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    modulatePipeline_ = buildCharPipeline(m2ModulateBlendState(false), false);
+    modulate2xPipeline_ = buildCharPipeline(m2ModulateBlendState(true), false);
     translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
 }
@@ -375,7 +388,8 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         bindings[1].binding = 1;
         bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // The vertex stage reads the batch's UV set and texture animation.
+        bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[2].binding = 2;
         bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[2].descriptorCount = 1;
@@ -567,6 +581,8 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(modulatePipeline_);
+    destroyPipeline(modulate2xPipeline_);
     destroyPipeline(translucentPipeline_);
 
     destroy(device, pipelineLayout_);
@@ -1978,7 +1994,8 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         std::memcpy(dst.boneWeights, src.boneWeights, 4);
         std::memcpy(dst.boneIndices, src.boneIndices, 4);
         dst.normal = src.normal;
-        dst.texCoords = src.texCoords[0]; // Use first UV set
+        dst.texCoords = src.texCoords[0];
+        dst.texCoords2 = src.texCoords[1];
         dst.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // default
 
         // Diagnostic: check bone indices
@@ -2048,7 +2065,7 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         gpuVerts[i].tangent = glm::vec4(tOrtho, w);
     }
 
-    // Upload vertex buffer (CharVertexGPU, 56 bytes per vertex)
+    // Upload vertex buffer (CharVertexGPU, 64 bytes per vertex)
     auto vb = uploadBuffer(*vkCtx_,
         gpuVerts.data(),
         gpuVerts.size() * sizeof(CharVertexGPU),
@@ -2689,7 +2706,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Pre-compute aligned UBO stride for ring buffer sub-allocation
     const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
     const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
-    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, VkTexture* normal) -> VkDescriptorSet {
+    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, uint8_t wrapFlags,
+                                        VkTexture* normal) -> VkDescriptorSet {
         // Valid, not merely non-null. descriptorInfo() hands back whatever the
         // texture holds - VK_NULL_HANDLE for a view and a sampler that were
         // never created - and declares SHADER_READ_ONLY_OPTIMAL either way. A
@@ -2708,8 +2726,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // binding a null view loses the device.
             return VK_NULL_HANDLE;
         }
-        const VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
-        const VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
+        VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
+        // The texture's own sampler is the one the cache made for whichever
+        // model loaded the image first, always REPEAT. Wrap per batch instead,
+        // and the normal map the same way: it is read at the same UV, and a
+        // normal wrapping where the colour clamps lights the edge from the
+        // opposite side of the texture.
+        auto wrapSampler = [&](const VkTexture& tex) {
+            return vkCtx_->getOrCreateSampler(
+                m2TextureSamplerInfo(wrapFlags, tex.getMipLevels(), 0.0f));
+        };
+        if (const VkSampler s = wrapSampler(*diffuse); s != VK_NULL_HANDLE) diffuseInfo.sampler = s;
+        VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
+        if (const VkSampler s = wrapSampler(*normal); s != VK_NULL_HANDLE) normalInfo.sampler = s;
         const MaterialDescriptorKey key{.diffuse = diffuseInfo.imageView, .normal = normalInfo.imageView,
                                         .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler};
         auto& cache = materialDescriptorCache_[frameSlot];
@@ -2742,6 +2771,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Bind per-frame descriptor set (set 0) -- shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+
+    auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
+        switch (p) {
+            case CharacterBlendPipeline::Opaque: return opaquePipeline_;
+            case CharacterBlendPipeline::AlphaTest: return alphaTestPipeline_;
+            case CharacterBlendPipeline::Alpha: return alphaPipeline_;
+            case CharacterBlendPipeline::Translucent: return translucentPipeline_;
+            case CharacterBlendPipeline::Additive: return additivePipeline_;
+            case CharacterBlendPipeline::Modulate: return modulatePipeline_;
+            case CharacterBlendPipeline::Modulate2x: return modulate2xPipeline_;
+        }
+        return alphaPipeline_;
+    };
 
     // Start with opaque pipeline
     VkPipeline currentPipeline = opaquePipeline_;
@@ -2916,7 +2958,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (sl < gpuModel.data.textures.size())
                             chosenType = gpuModel.data.textures[sl].type;
                     }
-                    VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch);
+                    VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch).texture;
                     // At debug: this canary was for heads resolving to the
                     // white texture, and they resolve to a texture. Twenty-four
                     // of them a session is noise in a log read for faults.
@@ -2957,7 +2999,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     continue;
                 }
                 // Resolve texture for this batch (prefer hair textures for hair geosets).
-                VkTexture* texPtr = resolveBatchTexture(instance, gpuModel, batch);
+                const BatchTexture resolved = resolveBatchTexture(instance, gpuModel, batch);
+                VkTexture* texPtr = resolved.texture;
+                uint8_t wrapFlags = resolved.wrapFlags;
                 const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 auto groupTexIt = instance.groupTextureOverrides.find(batchGroup);
                 if (groupTexIt != instance.groupTextureOverrides.end() && groupTexIt->second != nullptr) {
@@ -3015,6 +3059,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                     if (ti < gpuModel.data.textures.size() &&
                                         (gpuModel.data.textures[ti].type == 1 || gpuModel.data.textures[ti].type == 11)) {
                                         texPtr = candidate;
+                                        wrapFlags = static_cast<uint8_t>(gpuModel.data.textures[ti].flags & 0x3);
                                         break;
                                     }
                                 }
@@ -3040,73 +3085,18 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // material (blendMode 1) cuts out here.
                 const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
                     blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
-                // Enchant glows emit their own light; scene lighting must not tint them.
-                const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
-                                   instance.isEffectModel;
-
-                // Hair textures are authored as alpha-cut cards. If they use the
-                // translucent pipeline they form a soft shell around the head.
-                // M2Blend: 0 Opaque, 1 AlphaKey, 2 Alpha, 3 NoAlphaAdd, 4 Add,
-                // 5 Mod, 6 Mod2x, 7 BlendAdd. (6/Mod2x is kept on additive as it
-                // has been; the doodad path in M2Renderer already sends
-                // everything above 2 there.)
-                const bool additiveBlend = (blendMode == 3 || blendMode == 4 ||
-                                            blendMode == 6 || blendMode == 7);
-
-                VkPipeline desiredPipeline;
-                if (instance.isEffectModel) {
-                    // Enchant visuals are glow cards drawn on black. Their materials
-                    // declare Mod/alpha blending, which would composite that black
-                    // background as an opaque quad - force additive so only the light adds.
-                    desiredPipeline = additivePipeline_;
-                } else if (additiveBlend) {
-                    // Decided before the fade branch below, not after it. An
-                    // additive card fades by adding less light - matData.opacity
-                    // already scales what it contributes - so a partial alpha is
-                    // not a reason to divert it to the translucent pipeline, and
-                    // diverting it composites the card's black backing as black.
-                    //
-                    // The Darnassus wisps are the case: their glow alpha is an
-                    // animated pulse, so the diversion tripped on almost every
-                    // frame the pulse was not at full, and the cards showed as
-                    // black roughly half the time.
-                    desiredPipeline = additivePipeline_;
-                } else if (instance.opacity * batchColorAlpha < 0.999f) {
-                    // Whole-instance fade (ghost form, spawn fade-in): the opaque and
-                    // alpha-test pipelines have blending disabled, so the shader's
-                    // texColor.a * opacity output is discarded and only hair (via
-                    // alpha-to-coverage) ever looked translucent. Route every batch
-                    // through the blend pipeline; the per-batch alphaTest UBO flag
-                    // still handles cutout materials in the shader.
-                    //
-                    // Except that a batch which must not write depth still must
-                    // not, fading or otherwise. translucentPipeline_ writes
-                    // depth so a fading character's own solid parts keep sorting
-                    // against each other; alphaPipeline_ is the same blend with
-                    // the depth write off. Sending a translucent card down the
-                    // writing one puts an invisible occluder in front of
-                    // whatever it covers, which is how the glue screens' cloud
-                    // and haze cards were punching a rectangle out of the
-                    // character standing behind them - the card's own materials
-                    // ask for no depth write (0x10) and the scenes animate their
-                    // alpha, so almost every frame took this branch.
-                    const bool noDepthWrite = (blendMode >= 2) || ((materialFlags & 0x10) != 0);
-                    desiredPipeline = noDepthWrite ? alphaPipeline_ : translucentPipeline_;
-                } else if (hairMaterial) {
-                    desiredPipeline = alphaTestPipeline_;
-                } else {
-                    // additiveBlend (3/4/6/7) is handled above; only the
-                    // non-additive modes reach here. 4/Add is the one that used
-                    // to fall through to the alpha pipeline, which composited a
-                    // glow card's black backing as an actual black quad - every
-                    // material on Wisp.m2 declares it.
-                    switch (blendMode) {
-                        case 0: desiredPipeline = opaquePipeline_; break;
-                        case 1: desiredPipeline = alphaTestPipeline_; break;
-                        case 2: desiredPipeline = alphaPipeline_; break;
-                        default: desiredPipeline = alphaPipeline_; break;
-                    }
-                }
+                const bool unlit = characterBatchUnlit(blendMode, materialFlags,
+                                                       instance.isEffectModel);
+                const CharacterBlendPipeline blendPipeline = characterBlendPipeline({
+                    .blendMode = blendMode,
+                    .materialFlags = materialFlags,
+                    .effectModel = instance.isEffectModel,
+                    .hairMaterial = hairMaterial,
+                    .opacity = instance.opacity * batchColorAlpha,
+                });
+                const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
+                                      blendPipeline == CharacterBlendPipeline::Modulate2x;
+                VkPipeline desiredPipeline = pipelineFor(blendPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
@@ -3148,8 +3138,25 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
                                               !instance.isEffectModel) ? 1 : 0;
-                matData.colorKeyBlack = colorKeyBlack ? 1 : 0;
+                // A Mod layer's black darkens; keying it out would drop exactly that.
+                matData.colorKeyBlack = (colorKeyBlack && !modulate) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
+                matData.modulateNeutral =
+                    blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
+                    : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
+                matData.texCoordSet = m2TextureCoordSet(
+                    gpuModel.data.textureCoordLookup,
+                    static_cast<uint16_t>(batch.textureUnit + resolved.comboOffset));
+                const size_t animLookup = batch.textureAnimIndex == 0xFFFF
+                    ? size_t{0xFFFF}
+                    : size_t{batch.textureAnimIndex} + resolved.comboOffset;
+                if (const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
+                                                          gpuModel.data.textureTransforms,
+                                                          animLookup)) {
+                    matData.uvTransform = m2SampleUVTransform(
+                        *tt, instance.currentSequenceIndex, instance.animationTime,
+                        instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
+                }
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;
@@ -3194,6 +3201,13 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     matData.enablePOM = 0;
                     matData.heightMapVariance = 0.0f;
                 }
+                // The tangent frame follows UV0. A batch sampling UV1 or the
+                // sphere map would have its relief turned the wrong way.
+                if (matData.texCoordSet != 0) {
+                    normalMap = flatNormalTexture_.get();
+                    matData.enableNormalMap = 0;
+                    matData.heightMapVariance = 0.0f;
+                }
                 if (usePreviewSimpleShader) {
                     matData.enableNormalMap = 0;
                     matData.enablePOM = kPreviewSimpleTextureMode;
@@ -3229,7 +3243,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 materialRingOffset_[frameSlot] = matOffset + uboStride;
 
                 VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
-                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, normalMap);
+                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap);
                 if (!materialSet) continue;
 
                 // Bind material descriptor set (set 1)
@@ -3294,7 +3308,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset2, &matData, sizeof(CharMaterialUBO));
             materialRingOffset_[frameSlot] = matOffset2 + uboStride;
 
-            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, flatNormalTexture_.get());
+            const uint8_t wrapFlags = !gpuModel.data.textures.empty()
+                ? static_cast<uint8_t>(gpuModel.data.textures[0].flags & 0x3)
+                : BatchTexture::kRepeatBoth;
+            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, wrapFlags,
+                                                                   flatNormalTexture_.get());
             if (!materialSet) continue;
 
             const uint32_t dynamicOffset = matOffset2;
@@ -3584,7 +3602,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             // binding 0 changes, so the bones stay bound from above.
             VkDescriptorSet texSet = shadowParams_.set;
             if (blendMode == 1) {
-                VkTexture* tex = resolveBatchTexture(inst, gpuModel, batch);
+                VkTexture* tex = resolveBatchTexture(inst, gpuModel, batch).texture;
                 if (tex && tex != whiteTexture_.get()) {
                     texSet = shadowTexDescSet(tex, frameIndex);
                 }
@@ -3654,21 +3672,19 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
     return set;
 }
 
-VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
-                                                 const M2ModelGPU& gm,
-                                                 const pipeline::M2Batch& b) const {
+CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
+        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b) const {
             // A skin batch can reference multiple textures (b.textureCount) starting at b.textureIndex.
             // We currently bind only a single texture, so pick the most appropriate one.
-            if (b.textureIndex == 0xFFFF) return whiteTexture_.get();
-            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return whiteTexture_.get();
+            if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
+            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return {.texture = whiteTexture_.get()};
 
             uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
             comboCount = std::min<uint32_t>(comboCount, 8u);
 
-            struct Candidate { VkTexture* tex; uint32_t type; };
-            Candidate first{.tex = whiteTexture_.get(), .type = 0};
+            BatchTexture first{.texture = whiteTexture_.get()};
             bool hasFirst = false;
-            Candidate firstNonWhite{.tex = whiteTexture_.get(), .type = 0};
+            BatchTexture firstNonWhite{.texture = whiteTexture_.get()};
             bool hasFirstNonWhite = false;
 
             for (uint32_t i = 0; i < comboCount; i++) {
@@ -3679,6 +3695,9 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
 
                 VkTexture* texPtr = gm.textureIds[texSlot];
                 uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
+                const uint8_t wrapFlags = texSlot < gm.data.textures.size()
+                    ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
+                    : BatchTexture::kRepeatBoth;
                 // Apply texture slot overrides.
                 // For type-1 (skin) overrides, only apply to skin-group batches
                 // to prevent the skin composite from bleeding onto cloak/hair.
@@ -3699,7 +3718,8 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
                 }
 
                 if (!hasFirst) {
-                    first = {.tex = texPtr, .type = texType};
+                    first = {.texture = texPtr, .wrapFlags = wrapFlags,
+                             .comboOffset = static_cast<uint16_t>(i)};
                     hasFirst = true;
                 }
 
@@ -3707,18 +3727,20 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
 
                 // Prefer the hair texture slot (type 6) whenever present in the combo.
                 if (texType == 6) {
-                    return texPtr;
+                    return {.texture = texPtr, .wrapFlags = wrapFlags,
+                            .comboOffset = static_cast<uint16_t>(i)};
                 }
 
                 if (!hasFirstNonWhite) {
-                    firstNonWhite = {.tex = texPtr, .type = texType};
+                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags,
+                                     .comboOffset = static_cast<uint16_t>(i)};
                     hasFirstNonWhite = true;
                 }
             }
 
-            if (hasFirstNonWhite) return firstNonWhite.tex;
-            if (hasFirst && first.tex != nullptr) return first.tex;
-            return whiteTexture_.get();
+            if (hasFirstNonWhite) return firstNonWhite;
+            if (hasFirst && first.texture != nullptr) return first;
+            return {.texture = whiteTexture_.get()};
 }
 
 glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) const {
@@ -4469,6 +4491,8 @@ void CharacterRenderer::recreatePipelines() {
     destroy(device, alphaTestPipeline_);
     destroy(device, alphaPipeline_);
     destroy(device, additivePipeline_);
+    destroy(device, modulatePipeline_);
+    destroy(device, modulate2xPipeline_);
     destroy(device, translucentPipeline_);
 
     // --- Load shaders ---
@@ -4492,11 +4516,13 @@ void CharacterRenderer::recreatePipelines() {
     charFrag.destroy();
 
     if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
-        !translucentPipeline_) {
+        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_) {
         LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
                   " alphaTest=", (void*)alphaTestPipeline_,
                   " alpha=", (void*)alphaPipeline_,
                   " additive=", (void*)additivePipeline_,
+                  " modulate=", (void*)modulatePipeline_,
+                  " modulate2x=", (void*)modulate2xPipeline_,
                   " renderPass=", (void*)mainPass, " samples=", static_cast<int>(samples));
     } else {
         LOG_INFO("CharacterRenderer: pipelines recreated successfully (samples=",

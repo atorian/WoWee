@@ -1,0 +1,34 @@
+// The per-batch material of the character pass, set 1 binding 1. Both stages
+// read it: the vertex shader picks and animates the UV, the fragment shader
+// does the rest. Must match CharMaterialUBO in character_renderer.cpp.
+layout(set = 1, binding = 1) uniform CharMaterial {
+    float opacity;
+    int alphaTest;
+    int colorKeyBlack;
+    int unlit;
+    float emissiveBoost;
+    // Keep these as scalar floats to match the C++ UBO packing. A std140 vec3
+    // would insert padding here and shift the following material flags.
+    float emissiveTintR;
+    float emissiveTintG;
+    float emissiveTintB;
+    float specularIntensity;
+    int enableNormalMap;
+    int enablePOM;
+    float pomScale;
+    int pomMaxSamples;
+    float heightMapVariance;
+    float normalMapStrength;
+    int hairMaterial;
+    int ignoreTextureAlpha;
+    // 0 for every layer but Mod (1) and Mod2x (0.5): the colour that
+    // multiplies the scene by nothing, which fog and fades move toward.
+    float modulateNeutral;
+    // The UV the texture samples: 0 or 1 for a vertex set, -1 for the sphere
+    // environment map.
+    int texCoordSet;
+    // The texture animation, as two rows of a 2x3 matrix (w is padding).
+    // See m2_uv_transform.hpp.
+    vec4 uvRow0;
+    vec4 uvRow1;
+};

@@ -824,28 +824,14 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     auto tex = std::make_unique<VkTexture>();
     tex->uploadBLP(*vkCtx_, blp);
 
-    // M2Texture flags: bit 0 = WrapS (1=repeat, 0=clamp), bit 1 = WrapT
+    // The texture's own sampler is only what makes it valid on its own. A
+    // batch samples it through a sampler built from that batch's wrap flags
+    // (batchImageInfo), since another model can use the same image with
+    // different ones.
     VkSamplerAddressMode wrapS = (texFlags & 0x1) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VkSamplerAddressMode wrapT = (texFlags & 0x2) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    // WOWEE_SKY_MIP_BIAS pushes the sky's textures toward smaller mips.
-    //
-    // Every per-frame quantity behind the sky has now been measured and holds
-    // still while it flickers: the lighting, the clock, the culling, the frame
-    // time, and every one of the thirty-four batches' material flags. Nothing
-    // is alpha tested, colour keyed, or drawn as a glow card. What is left is
-    // the texture sample, and the sky is the one model where that is loud:
-    // eighteen of its layers are additive, so each layer's sampling noise adds
-    // to the last rather than replacing it, and the dome is at its most
-    // foreshortened exactly where a turn sweeps fastest.
-    //
-    // A knob rather than a fixed value, because if this is the cause the right
-    // amount is a thing to measure and not to guess.
-    static const float skyMipBias = [] {
-        const char* set = std::getenv("WOWEE_SKY_MIP_BIAS");
-        return set ? std::strtof(set, nullptr) : 0.0f;
-    }();
     tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT,
-                       16.0f, skyMode_ ? skyMipBias : 0.0f);
+                       16.0f, skyMode_ ? m2SkyMipBias() : 0.0f);
 
     VkTexture* texPtr = tex.get();
 
@@ -1523,15 +1509,10 @@ void M2Renderer::recreatePipelines() {
     destroy(device, opaquePipeline_);
     destroy(device, cutoutPipeline_);
     destroy(device, alphaTestPipeline_);
-    destroy(device, alphaPipeline_);
-    destroy(device, additivePipeline_);
-    destroy(device, modulatePipeline_);
-    destroy(device, modulate2xPipeline_);
-    destroy(device, particlePipeline_);
-    destroy(device, particleAdditivePipeline_);
-    destroy(device, smokePipeline_);
-    destroy(device, ribbonPipeline_);
-    destroy(device, ribbonAdditivePipeline_);
+    destroyBlendedPipelines(scenePipes_);
+    // Rebuilt by the renderer once it has decided the water's pass again: the
+    // one these were built for may not survive the change that got us here.
+    setAfterWaterPass(VK_NULL_HANDLE, VK_SAMPLE_COUNT_1_BIT);
 
     // The same main-pass pipelines initialize() builds, built by the same
     // function. The layouts are untouched above, so it makes none.

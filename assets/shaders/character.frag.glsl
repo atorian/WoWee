@@ -38,27 +38,7 @@ layout(push_constant) uniform Push {
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
-layout(set = 1, binding = 1) uniform CharMaterial {
-    float opacity;
-    int alphaTest;
-    int colorKeyBlack;
-    int unlit;
-    float emissiveBoost;
-    // Keep these as scalar floats to match the C++ UBO packing. A std140 vec3
-    // would insert padding here and shift the following material flags.
-    float emissiveTintR;
-    float emissiveTintG;
-    float emissiveTintB;
-    float specularIntensity;
-    int enableNormalMap;
-    int enablePOM;
-    float pomScale;
-    int pomMaxSamples;
-    float heightMapVariance;
-    float normalMapStrength;
-    int hairMaterial;
-    int ignoreTextureAlpha;
-};
+#include "character_material.glsli"
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 
@@ -297,6 +277,8 @@ void main() {
             texColor.a *= ck;
             if (texColor.a < 0.01) discard;
         }
+        if (modulateNeutral > 0.0)
+            texColor.rgb = mix(vec3(modulateNeutral), texColor.rgb, opacity);
         outColor = vec4(texColor.rgb, texColor.a * opacity);
         return;
     }
@@ -434,7 +416,17 @@ void main() {
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
 
     float dist = length(viewPos.xyz - FragPos);
-    result = applyFog(result, FragPos, dist);
+    if (modulateNeutral > 0.0) {
+        // The blend multiplies by the colour and ignores alpha, so fog and the
+        // fade go into the colour, toward the multiplication identity. Mixing
+        // toward the fog colour would tint everything behind the layer.
+        float visibility = distanceFogVisibility(dist, fogParams.x, fogParams.y) * opacity *
+            worldGeometryVisibility(length(FragPos.xy - viewPos.xy), fogSkyBand1.w);
+        if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
+        result = mix(vec3(modulateNeutral), result, clamp(visibility, 0.0, 1.0));
+    } else {
+        result = applyFog(result, FragPos, dist);
+    }
     if (!finiteVec3(result)) {
         result = texColor.rgb;
     }

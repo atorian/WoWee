@@ -719,6 +719,21 @@ wowee_test_link_glm(test_m2_ribbon_tracks)
 add_test(NAME m2_ribbon_tracks COMMAND test_m2_ribbon_tracks)
 register_test_target(test_m2_ribbon_tracks)
 
+# ── test_m2_texture_transform ────────────────────────────────
+# A texture animation's rotation keys as the loader reads them, and the UV
+# transform the doodad shader is handed.
+add_executable(test_m2_texture_transform
+    test_m2_texture_transform.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+)
+target_include_directories(test_m2_texture_transform PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_texture_transform SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_m2_texture_transform PRIVATE catch2_main)
+wowee_test_link_glm(test_m2_texture_transform)
+add_test(NAME m2_texture_transform COMMAND test_m2_texture_transform)
+register_test_target(test_m2_texture_transform)
+
 # ── test_shapeshift_forms ────────────────────────────────────
 # The stance bar's three questions, which used to be three different lists.
 wowee_add_test(test_shapeshift_forms
@@ -2423,6 +2438,14 @@ wowee_add_test(test_sun_direction
 # their own MODF records hold.
 wowee_add_test(test_placement_transform
     SOURCES test_placement_transform.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_wmo_batch_merge ─────────────────────────────────────
+# Which WMO group batches draw as one. A merged batch is drawn with its first
+# batch's material, so opaque and blended materials on one texture, or two
+# banners with their own pivots, must stay apart.
+wowee_add_test(test_wmo_batch_merge
+    SOURCES test_wmo_batch_merge.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_wmo_group_path ──────────────────────────────────────

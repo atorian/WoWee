@@ -28,6 +28,30 @@ TEST_CASE("modulation uses destination RGB and keeps its alpha", "[m2][material]
     }
 }
 
+TEST_CASE("NoAlphaAdd adds the whole texel", "[m2][material]") {
+    // Blend mode 3: neither factor may be the source alpha.
+    const auto state = m2NoAlphaAddBlendState();
+    CHECK(state.blendEnable == VK_TRUE);
+    CHECK(state.srcColorBlendFactor == VK_BLEND_FACTOR_ONE);
+    CHECK(state.dstColorBlendFactor == VK_BLEND_FACTOR_ONE);
+    CHECK(state.colorBlendOp == VK_BLEND_OP_ADD);
+}
+
+TEST_CASE("a batch's sampler wraps as its own texture slot says", "[m2][material]") {
+    // Bit 0 tiles U, bit 1 tiles V, a clear bit clamps.
+    const auto uOnly = m2TextureSamplerInfo(0x1, 8, 0.0f);
+    CHECK(uOnly.addressModeU == VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    CHECK(uOnly.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    const auto vOnly = m2TextureSamplerInfo(0x2, 8, 0.0f);
+    CHECK(vOnly.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    CHECK(vOnly.addressModeV == VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    const auto clamped = m2TextureSamplerInfo(0x0, 8, 0.0f);
+    CHECK(clamped.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    CHECK(clamped.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    // Every mip of the image stays reachable.
+    CHECK(clamped.maxLod == 7.0f);
+}
+
 TEST_CASE("Dalaran sculpture has four reflection layers using Mod2x", "[m2][material][asset]") {
     const std::string path = "Data/expansions/wotlk/world/expansion02/doodads/dalaran/dalaran_sculpture";
     const auto data = wowee::test::readFile(path + ".m2");

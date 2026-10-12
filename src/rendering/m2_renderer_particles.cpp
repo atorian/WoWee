@@ -407,7 +407,7 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
 // Ribbon rendering
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!ribbonPipeline_ || !ribbonAdditivePipeline_ || !ribbonVB_ || !ribbonVBMapped_) return;
+    if (!blended().ribbon || !blended().ribbonAdditive || !ribbonVB_ || !ribbonVBMapped_) return;
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
     static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
     if (kNoRibbons) return;
@@ -449,7 +449,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             if (em.materialIndex < gpu.batches.size()) {
                 additive = (gpu.batches[em.materialIndex].blendMode >= 3);
             }
-            VkPipeline pipe = additive ? ribbonAdditivePipeline_ : ribbonPipeline_;
+            VkPipeline pipe = additive ? blended().ribbonAdditive : blended().ribbon;
 
             // Descriptor set for texture
             VkDescriptorSet texSet = (ri < gpu.ribbonTexSets.size())
@@ -585,7 +585,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 }
 
 void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!particlePipeline_ || !m2ParticleVB_) return;
+    if (!blended().particle || !m2ParticleVB_) return;
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
     // tells a particle artifact apart from a skinned-geometry one.
     static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
@@ -818,7 +818,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
         uint8_t blendType = group.blendType;
         VkPipeline desiredPipeline = (blendType == 3 || blendType == 4)
-            ? particleAdditivePipeline_ : particlePipeline_;
+            ? blended().particleAdditive : blended().particle;
         if (desiredPipeline != currentPipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
             currentPipeline = desiredPipeline;
@@ -868,7 +868,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 }
 
 void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (smokeParticles.empty() || !smokePipeline_ || !smokeVB_) return;
+    if (smokeParticles.empty() || !blended().smoke || !smokeVB_) return;
 
     // Build vertex data: pos(3) + lifeRatio(1) + size(1) + isSpark(1) per particle
     size_t count = std::min(smokeParticles.size(), static_cast<size_t>(MAX_SMOKE_PARTICLES));
@@ -883,7 +883,7 @@ void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFr
         *dst++ = p.isSpark;
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, smokePipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blended().smoke);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             smokePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
 

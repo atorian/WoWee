@@ -3146,11 +3146,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 const auto tBegin = std::chrono::steady_clock::now();
                 m2Renderer->render(cmd, perFrameSet, *camera);
                 const auto tModels = std::chrono::steady_clock::now();
-                m2Renderer->renderSmokeParticles(cmd, perFrameSet);
+                // Blended things go after the water when it has a pass of its
+                // own; see M2Renderer::renderAfterWater.
+                const bool blendedHere = !m2Renderer->drawsBlendedAfterWater();
+                if (blendedHere) m2Renderer->renderSmokeParticles(cmd, perFrameSet);
                 const auto tSmoke = std::chrono::steady_clock::now();
-                m2Renderer->renderM2Particles(cmd, perFrameSet);
+                if (blendedHere) m2Renderer->renderM2Particles(cmd, perFrameSet);
                 const auto tParts = std::chrono::steady_clock::now();
-                m2Renderer->renderM2Ribbons(cmd, perFrameSet);
+                if (blendedHere) m2Renderer->renderM2Ribbons(cmd, perFrameSet);
                 const auto tParticles = std::chrono::steady_clock::now();
                 vkEndCommandBuffer(cmd);
 
@@ -3433,9 +3436,11 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             m2Renderer->prepareRender(frameIdx, *camera);
             auto m2Start = std::chrono::steady_clock::now();
             m2Renderer->render(currentCmd, perFrameSet, *camera);
-            m2Renderer->renderSmokeParticles(currentCmd, perFrameSet);
-            m2Renderer->renderM2Particles(currentCmd, perFrameSet);
-            m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
+            if (!m2Renderer->drawsBlendedAfterWater()) {
+                m2Renderer->renderSmokeParticles(currentCmd, perFrameSet);
+                m2Renderer->renderM2Particles(currentCmd, perFrameSet);
+                m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
+            }
             if (vkCtx) vkCtx->gpuMark(currentCmd, "m2");
             lastM2RenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - m2Start).count();
@@ -3529,6 +3534,12 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         waterRenderer->setRenderExtent(waterExtent);
         waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
 
+        // What is blended goes over the water, not under it. Drawn in the scene
+        // pass it was in the refraction copy and then covered by the sheet, so
+        // a waterfall's foam was faint and shifted over the pool and at full
+        // strength only where it hung past the edge.
+        if (m2Renderer && !skipM2) m2Renderer->renderAfterWater(currentCmd, perFrameSet);
+
         // Spray belongs on top of the surface it is thrown off. Recorded in the
         // scene pass it went under the water instead, which the sheet then hid -
         // barely at the shore where alpha sits near its floor, completely in the
@@ -3575,6 +3586,9 @@ void Renderer::syncSwimEffectsTargetPass() {
     }
 
     if (swimEffects) swimEffects->setTargetPass(pass, samples);
+    // Blended doodads follow the water out of the scene pass for the same
+    // reason. Built by refreshSwimEffectsPass, which waits for the GPU first.
+    blendedAfterWaterPass_ = swimEffectsDrawWithWater_ ? pass : VK_NULL_HANDLE;
     // The minimap for the same reason as the spray, and it is the more visible
     // of the two: it is a fixed disc in the corner of the screen, so any water
     // on screen behind it painted straight over the terrain it draws. The
@@ -4348,10 +4362,12 @@ void Renderer::refreshSwimEffectsPass() {
     syncSwimEffectsTargetPass();
     const bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
     const bool minimapMoved = minimap && minimapDrawsWithWater_ != minimapWasWithWater;
-    if (!sprayMoved && !minimapMoved) return;
+    const bool blendedMoved = m2Renderer && m2Renderer->afterWaterPass() != blendedAfterWaterPass_;
+    if (!sprayMoved && !minimapMoved && !blendedMoved) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
+    if (blendedMoved) m2Renderer->setAfterWaterPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
 }
 
 // ========================= Multithreaded Secondary Command Buffers =========================

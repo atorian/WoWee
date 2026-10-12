@@ -375,16 +375,6 @@ void main() {
     // ============================================================
     // Refraction (screen-space from scene history)
     // ============================================================
-    vec2 refractOffset = norm.xy * (0.02 + 0.03 * fresnel);
-    vec2 refractUV = clamp(screenUV + refractOffset, vec2(0.001), vec2(0.999));
-    // The capture is taken after the scene is drawn and before the water goes
-    // over it, so it holds no water and has had no display post-processing
-    // applied yet. That means a single sharp tap is correct: there is no
-    // feedback loop to smear out, and no baked-in brightness to divide back off.
-    vec3 sceneRefract = texture(SceneColor, refractUV).rgb;
-
-    float sceneDepth = texture(SceneDepth, refractUV).r;
-
     // The camera's own planes, handed in rather than written out again here.
     //
     // This said 0.05 while the camera's near plane is 0.5, so every depth read
@@ -396,8 +386,28 @@ void main() {
     // triangle edges, which is where the hard lines came from.
     float near = push.depthRange.x;
     float far = push.depthRange.y;
-    float sceneLinDepth = linearizeDepth(sceneDepth, near, far);
     float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
+
+    vec2 refractOffset = norm.xy * (0.02 + 0.03 * fresnel);
+    vec2 refractUV = clamp(screenUV + refractOffset, vec2(0.001), vec2(0.999));
+    float sceneDepth = texture(SceneDepth, refractUV).r;
+    float sceneLinDepth = linearizeDepth(sceneDepth, near, far);
+    // Only what is behind the surface can be seen through it. Next to anything
+    // standing in front of the water the offset lands on that thing - a
+    // character on the shore - and its colour was copied into the water around
+    // its silhouette, moving with the waves. Such a sample is thrown away for
+    // the one straight behind this pixel, which the depth test says is behind
+    // the water.
+    if (sceneLinDepth < waterLinDepth) {
+        refractUV = screenUV;
+        sceneDepth = texture(SceneDepth, refractUV).r;
+        sceneLinDepth = linearizeDepth(sceneDepth, near, far);
+    }
+    // The capture is taken after the scene is drawn and before the water goes
+    // over it, so it holds no water and has had no display post-processing
+    // applied yet. That means a single sharp tap is correct: there is no
+    // feedback loop to smear out, and no baked-in brightness to divide back off.
+    vec3 sceneRefract = texture(SceneColor, refractUV).rgb;
     float depthDiff = max(sceneLinDepth - waterLinDepth, 0.0);
 
     // Convert screen-space depth difference to approximate vertical water depth.

@@ -32,7 +32,12 @@ layout(set = 2, binding = 0) readonly buffer BoneSSBO {
 // Per-instance data read via gl_InstanceIndex (GPU instancing)
 struct InstanceData {
     mat4 model;
-    vec2 uvOffset;
+    // Texture animation for the base texture and for the mask stage, as two
+    // rows of a 2x3 matrix each (w is padding). See m2_uv_transform.hpp.
+    vec4 uvRow0;
+    vec4 uvRow1;
+    vec4 uv2Row0;
+    vec4 uv2Row1;
     float fadeAlpha;
     int useBones;
     int boneBase;
@@ -42,6 +47,9 @@ struct InstanceData {
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
     int flags;
+    // A fire's flicker, which differs between instances of one model.
+    float tintScale;
+    float pad0;
     // See interior_light.glsli.
     vec4 interiorAmbient;
     vec4 interiorDirect;
@@ -65,9 +73,10 @@ layout(location = 4) out float ModelHeight;
 layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
-layout(location = 8) out vec4 AuthoredUVs;
+layout(location = 8) out vec4 MaskUVs;
 layout(location = 9) flat out vec4 vInteriorAmbient;
 layout(location = 10) flat out vec4 vInteriorDirect;
+layout(location = 11) flat out float vTintScale;
 
 #include "sphere_map.glsli"
 
@@ -76,11 +85,14 @@ float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
     return 1.0 - smoothstep(75.0, 150.0, length(origin - cameraPos));
 }
 
+vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
+    return vec2(dot(row0.xy, uv) + row0.z, dot(row1.xy, uv) + row1.z);
+}
+
 void main() {
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;
     mat4 model = instanceData[instIdx].model;
-    vec2 uvOff = instanceData[instIdx].uvOffset;
     float fade = instanceData[instIdx].fadeAlpha;
     int uBones = instanceData[instIdx].useBones;
     int bBase  = instanceData[instIdx].boneBase;
@@ -300,8 +312,13 @@ void main() {
         vec3 eyeNormal = normalize(mat3(view) * Normal);
         uv = sphereMapUV(eyePosition, eyeNormal);
     }
-    TexCoord = uv + uvOff;
-    AuthoredUVs = vec4(aTexCoord, aTexCoord2);
+    TexCoord = uvTransform(instanceData[instIdx].uvRow0, instanceData[instIdx].uvRow1, uv);
+    // The mask stage has its own animation. Both UV sets are carried, and the
+    // fragment shader picks the one the material names.
+    vec4 m0 = instanceData[instIdx].uv2Row0;
+    vec4 m1 = instanceData[instIdx].uv2Row1;
+    MaskUVs = vec4(uvTransform(m0, m1, aTexCoord), uvTransform(m0, m1, aTexCoord2));
+    vTintScale = instanceData[instIdx].tintScale;
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own
