@@ -238,7 +238,8 @@ def main() -> int:
             if path.suffix not in (".cpp", ".hpp", ".h"):
                 continue
             for name, code in bodies(path):
-                found.append((str(path.relative_to(ROOT)), name, code))
+                found.append((str(path.relative_to(ROOT)), name, code,
+                              collections.Counter(code)))
     if not found:
         print("Found no function bodies at all, which cannot be right.")
         return 1
@@ -257,12 +258,23 @@ def main() -> int:
         # lines were never compared at all - however alike they were. A
         # ninety-line parser and its ninety-eight-line copy score 0.96 and were
         # invisible; so, for that matter, would the guild roster's 31-line and
-        # 99-line copies have been. Costs seven seconds over the whole tree.
+        # 99-line copies have been. The ceilings below are what keep that
+        # affordable: most pairs in the band are rejected before difflib runs.
         near = []
         for offset in range(-6, 7):
             near += buckets.get(key + offset, [])
-        for file_a, name_a, code_a in group:
-            for file_b, name_b, code_b in near:
+        for file_a, name_a, code_a, lines_a in group:
+            for file_b, name_b, code_b, lines_b in near:
+                # Two ceilings on the ratio before computing it, both what
+                # difflib's own real_quick_ratio and quick_ratio work out: a
+                # pair cannot match more lines than the shorter body has, nor
+                # more than the two share. Most pairs fall under the threshold
+                # here, and the full comparison is what cost half a minute.
+                # The first is checked before anything else because it skips
+                # most pairs outright, and skips both orders of each.
+                total = len(code_a) + len(code_b)
+                if 2 * min(len(code_a), len(code_b)) < THRESHOLD * total:
+                    continue
                 if (file_a, name_a) == (file_b, name_b):
                     continue
                 pair = tuple(sorted([(file_a, name_a), (file_b, name_b)]))
@@ -270,6 +282,10 @@ def main() -> int:
                     continue
                 seen.add(pair)
                 if tuple(sorted((name_a, name_b))) in settled:
+                    continue
+                shared = sum(min(lines_a[line], lines_b[line])
+                             for line in lines_a.keys() & lines_b.keys())
+                if 2 * shared < THRESHOLD * total:
                     continue
                 ratio = difflib.SequenceMatcher(None, code_a, code_b).ratio()
                 if ratio >= THRESHOLD:

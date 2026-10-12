@@ -15,7 +15,7 @@ Clang reports these as -Wunused-private-field, but only on some versions. The
 clang on the Windows CI image reported two that clang 18 on Linux does not, so
 a local build is not a gate for this class and CI catches it one per run.
 
-This asks the same question with grep, so any host answers it.
+This asks the same question of the source text, so any host answers it.
 
 WHAT IT DOES
 
@@ -33,6 +33,9 @@ than crying wolf.
 import pathlib
 import re
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_index import SourceIndex  # noqa: E402  (a sibling, not a package)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCES = [ROOT / "include", ROOT / "src", ROOT / "tools"]
@@ -55,22 +58,9 @@ DECL = re.compile(
 EXPECTED = set()
 
 
-def files():
-    for base in SOURCES:
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*"):
-            if path.suffix in (".cpp", ".hpp", ".h", ".inc", ".mm"):
-                yield path
-
-
 def main():
-    corpus = {}
-    for path in files():
-        try:
-            corpus[path] = path.read_text(errors="ignore")
-        except OSError:
-            pass
+    index = SourceIndex(SOURCES, suffixes={".cpp", ".hpp", ".h", ".inc", ".mm"})
+    corpus = index.text
     if not corpus:
         print("Read no sources. The zero below means the scan broke.")
         return 1
@@ -174,29 +164,22 @@ def main():
     def never_referenced(name, path, decl_line, scope):
         """True when the declaration is the only mention of this member.
 
-        Searched directly rather than through the mention index, because that
-        index is keyed on the trailing-underscore convention and this question
-        has to cover members that do not follow it.
+        Asked of the word index rather than lines_for, because that is keyed
+        on the trailing-underscore convention and this question has to cover
+        members that do not follow it.
         """
-        word = re.compile(r"\b%s\b" % re.escape(name))
-        qualified = re.compile(r"(?:\.|->)\s*%s\b" % re.escape(name))
-        for where in (scope if scope is not None else corpus):
-            text = corpus.get(where)
-            if text is None or not word.search(text):
+        for where, _, raw in index.lines_with_word(name, within=scope):
+            if where == path and raw.strip() == decl_line.strip():
                 continue
-            for raw in text.split("\n"):
-                if not word.search(raw):
-                    continue
-                if where == path and raw.strip() == decl_line.strip():
-                    continue
-                return False
+            return False
         # A public member can be read through an object from anywhere, so a
         # qualified mention outside the scope still counts.
         if scope is not None:
-            for where, text in corpus.items():
+            qualified = re.compile(r"(?:\.|->)\s*%s\b" % re.escape(name))
+            for where in index.files_with_word(name):
                 if where in scope:
                     continue
-                if qualified.search(text):
+                if qualified.search(corpus[where]):
                     return False
         return True
 
