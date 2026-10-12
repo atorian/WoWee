@@ -1,4 +1,5 @@
 #include "core/entity_spawner.hpp"
+#include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "core/appearance_composer.hpp"
 #include "pipeline/char_sections.hpp"
@@ -62,7 +63,7 @@ EntitySpawner::EntitySpawner(rendering::Renderer* renderer,
 {
 }
 
-EntitySpawner::~EntitySpawner() = default;
+EntitySpawner::~EntitySpawner() { clearAllQueues(); }
 // --- Lifecycle ---
 
 void EntitySpawner::initialize() {
@@ -72,6 +73,28 @@ void EntitySpawner::initialize() {
 }
 
 void EntitySpawner::update() {
+    // Submit appearance, equipment and attachment copies together before the
+    // next draw. The default upload queue is the graphics queue, so rendering
+    // observes the recorded barriers without a CPU fence wait per texture.
+    auto* uploadCtx = renderer_ ? renderer_->getVkContext() : nullptr;
+    if (uploadCtx) uploadCtx->beginUploadBatch();
+    struct UploadGuard {
+        rendering::VkContext* ctx;
+        ~UploadGuard() { if (ctx) ctx->endUploadBatch(); }
+    } uploadGuard{uploadCtx};
+    // Drain even abandoned attachment requests so despawning an owner cannot
+    // occupy a worker slot indefinitely. Only completed futures are consumed.
+    for (auto it = asyncAttachmentLoads_.begin(); it != asyncAttachmentLoads_.end();) {
+        if (it->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        auto ready = it->second.get();
+        for (auto& [path, model] : ready.models) attachmentModelData_[path] = std::move(model);
+        for (auto& [path, texture] : ready.predecodedTextures)
+            preparedAttachmentTextures_[path] = std::move(texture);
+        it = asyncAttachmentLoads_.erase(it);
+    }
     processPlayerSpawnQueue();
     processCreatureSpawnQueue();
     processAsyncNpcCompositeResults();
@@ -217,9 +240,10 @@ void EntitySpawner::rebuildLookups() {
 
 bool EntitySpawner::hasWorkPending() const {
     return !pendingCreatureSpawns_.empty() || !asyncCreatureLoads_.empty() ||
-           !asyncNpcCompositeLoads_.empty() || !pendingPlayerSpawns_.empty() ||
+           !asyncNpcCompositeLoads_.empty() || !pendingPlayerSpawns_.empty() || !asyncPlayerLoads_.empty() ||
            !asyncEquipmentLoads_.empty() || !deferredEquipmentQueue_.empty() ||
-           !pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty();
+           !pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty() ||
+           !asyncAttachmentLoads_.empty();
 }
 
 void EntitySpawner::clearMountState() {
@@ -303,7 +327,10 @@ void EntitySpawner::queuePlayerSpawn(uint64_t guid, uint8_t raceId, uint8_t gend
                                       float x, float y, float z, float orientation) {
     if (playerInstances_.count(guid)) return;
     if (pendingPlayerSpawnGuids_.count(guid)) return;
-    pendingPlayerSpawns_.push_back({guid, raceId, genderId, appearanceBytes, facialFeatures, x, y, z, orientation});
+    const uint64_t revision = ++nextPlayerSpawnRevision_;
+    playerSpawnRevisions_[guid] = revision;
+    pendingPlayerSpawns_.push_back({guid, raceId, genderId, appearanceBytes, facialFeatures,
+                                  x, y, z, orientation, revision});
     pendingPlayerSpawnGuids_.insert(guid);
 }
 
@@ -315,12 +342,32 @@ void EntitySpawner::queueGameObjectSpawn(uint64_t guid, uint32_t entry, uint32_t
 void EntitySpawner::queuePlayerEquipment(uint64_t guid,
                                           const std::array<uint32_t, 19>& displayInfoIds,
                                           const std::array<uint8_t, 19>& inventoryTypes) {
+    equipmentRevisions_[guid] = ++nextEquipmentRevision_;
+    for (auto& queued : deferredEquipmentQueue_) {
+        if (queued.first == guid) {
+            queued.second = {displayInfoIds, inventoryTypes};
+            return;
+        }
+    }
     deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
 }
 
 // --- Immediate despawn wrappers ---
 
 void EntitySpawner::clearAllQueues() {
+    // Only teardown/map transitions join workers, before changing their asset
+    // dataset. Ordinary frame updates only poll; pooled futures never wait in
+    // their destructor, so these explicit lifetime fences are required.
+    for (auto& future : asyncPlayerLoads_) if (future.valid()) future.wait();
+    for (auto& load : asyncCreatureLoads_) if (load.future.valid()) load.future.wait();
+    for (auto& load : asyncEquipmentLoads_) if (load.future.valid()) load.future.wait();
+    for (auto& load : asyncNpcCompositeLoads_) if (load.future.valid()) load.future.wait();
+    for (auto& load : asyncGameObjectLoads_) if (load.future.valid()) load.future.wait();
+    for (auto& [key, future] : asyncAttachmentLoads_) if (future.valid()) future.wait();
+    asyncAttachmentLoads_.clear();
+    attachmentModelData_.clear();
+    preparedAttachmentTextures_.clear();
+    playerSpawnRevisions_.clear();
     pendingCreatureSpawns_.clear();
     pendingCreatureSpawnGuids_.clear();
     requestedCreatureDisplayIds_.clear();
@@ -330,6 +377,7 @@ void EntitySpawner::clearAllQueues() {
     pendingPlayerSpawns_.clear();
     pendingPlayerSpawnGuids_.clear();
     pendingOnlinePlayerEquipment_.clear();
+    equipmentRevisions_.clear();
     deferredEquipmentQueue_.clear();
     pendingGameObjectSpawns_.clear();
     // Including the one that is already partway onto the GPU. An incremental
@@ -345,6 +393,8 @@ void EntitySpawner::clearAllQueues() {
     pendingTransportDoodadBatches_.clear();
     asyncCreatureLoads_.clear();
     asyncCreatureDisplayLoads_.clear();
+    asyncPlayerLoads_.clear();
+    preparedPlayerModels_.clear();
     asyncEquipmentLoads_.clear();
     asyncNpcCompositeLoads_.clear();
     asyncGameObjectLoads_.clear();
@@ -446,16 +496,29 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         // Main-hand NPC weapon path: only use actual weapon models.
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
         pipeline::M2Model weaponModel;
-        if (!loadWeaponM2(m2Path, weaponModel)) return false;
-
         std::string texturePath;
         if (!textureName.empty()) {
             texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
             if (!assetManager_->fileExists(texturePath)) texturePath.clear();
         }
 
-        uint32_t weaponModelId = nextWeaponModelId_++;
-        return charRenderer->attachWeapon(instanceId, attachmentId, weaponModel, weaponModelId, texturePath);
+        if (!loadWeaponM2(m2Path, weaponModel, texturePath)) return false;
+        charRenderer->setPredecodedBLPCache(&preparedAttachmentTextures_, true);
+        auto* uploadCtx = renderer_->getVkContext();
+        if (uploadCtx) uploadCtx->beginUploadBatch();
+        struct AttachmentGuard {
+            rendering::CharacterRenderer* renderer;
+            rendering::VkContext* ctx;
+            ~AttachmentGuard() {
+                renderer->setPredecodedBLPCache(nullptr);
+                if (ctx) ctx->endUploadBatch();
+            }
+        } guard{charRenderer, uploadCtx};
+        const std::string attachmentKey = m2Path + '|' + texturePath;
+        auto [cachedId, inserted] = attachmentModelIds_.try_emplace(attachmentKey, 0);
+        if (inserted) cachedId->second = nextWeaponModelId_++;
+        return charRenderer->attachWeapon(instanceId, attachmentId,
+            weaponModel, cachedId->second, texturePath);
     };
 
     auto hasResolvableWeaponModel = [&](uint32_t itemDisplayId) -> bool {
@@ -516,7 +579,8 @@ bool EntitySpawner::retryCreatureVirtualWeapons(uint64_t guid, uint32_t instance
         creatureWeaponsAttached_.insert(guid);
         creatureWeaponAttachAttempts_.erase(guid);
     } else {
-        creatureWeaponAttachAttempts_[guid] = static_cast<uint8_t>(attempts + 1);
+        if (asyncAttachmentLoads_.empty())
+            creatureWeaponAttachAttempts_[guid] = static_cast<uint8_t>(attempts + 1);
     }
     return true;
 }
@@ -1746,7 +1810,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     auto itPreDec = displayIdPredecodedTextures_.find(displayId);
     bool hasPreDec = (itPreDec != displayIdPredecodedTextures_.end());
     if (hasPreDec) {
-        charRenderer->setPredecodedBLPCache(&itPreDec->second);
+        charRenderer->setPredecodedBLPCache(&itPreDec->second, true);
     }
 
     // Creature skin names are relative to the model's own directory, so the
@@ -1821,7 +1885,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             // (in processAsyncNpcCompositeResults).
             auto* am = assetManager_;
             AsyncNpcCompositeLoad load;
-            load.future = std::async(std::launch::async,
+            load.future = ThreadPool::ioWorkers().submit(
                 [am, extraCopy, skinSlots = std::move(skinSlots),
                  hairSlots = std::move(hairSlots), modelId, displayId, isHdCharacterModel]() mutable -> PreparedNpcComposite {
                     PreparedNpcComposite result;
@@ -2011,12 +2075,22 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                         std::transform(key.begin(), key.end(), key.begin(),
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.count(key)) continue;
-                        auto blp = am->loadTexture(key);
+                        auto blp = rendering::CharacterRenderer::prepareTexture(am, key);
                         if (blp.isValid()) {
                             result.predecodedTextures[key] = std::move(blp);
                         }
                     }
 
+                    if (def.hasComposite) {
+                        if (!def.regionLayers.empty()) {
+                            rendering::CharacterRenderer::prepareCompositeWithRegions(am,
+                                def.basePath, def.overlayPaths, def.regionLayers, result.predecodedTextures);
+                        } else if (!def.overlayPaths.empty()) {
+                            std::vector<std::string> layers{def.basePath};
+                            layers.insert(layers.end(), def.overlayPaths.begin(), def.overlayPaths.end());
+                            rendering::CharacterRenderer::prepareCompositeTextures(am, layers, result.predecodedTextures);
+                        }
+                    }
                     return result;
                 });
             asyncNpcCompositeLoads_.push_back(std::move(load));

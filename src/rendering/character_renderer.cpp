@@ -837,11 +837,13 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
     if (predecodedBLPCache_) {
         auto pit = predecodedBLPCache_->find(key);
         if (pit != predecodedBLPCache_->end()) {
-            blpImage = std::move(pit->second);
-            predecodedBLPCache_->erase(pit);
+            blpImage = pit->second;
         }
     }
-    if (!blpImage.isValid()) {
+    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(key)) {
+        LOG_ERROR("Unprepared character texture reached GPU consumer: ", key);
+    }
+    if (!blpImage.isValid() && !preparedTexturesOnly_) {
         blpImage = assetManager->loadTexture(key);
     }
     if (!blpImage.isValid()) {
@@ -854,7 +856,7 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
         return whiteTexture_.get();
     }
 
-    applyMagentaKeyIfNeeded(blpImage, key);
+    if (!preparedTexturesOnly_) applyMagentaKeyIfNeeded(blpImage, key);
 
     size_t approxBytes = approxTextureBytesWithMips(blpImage.width, blpImage.height);
     if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
@@ -1153,38 +1155,43 @@ int impliedScale(const AtlasRegion256& region, int overlayWidth) {
 
 }  // namespace
 
-VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
-    if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_.get();
+namespace {
+std::string compositeLayersKey(const std::vector<std::string>& paths) {
+    std::string key = "__composite__";
+    for (const auto& path : paths) { key += '|'; key += path; }
+    return key;
+}
+std::string compositeRegionsKey(const std::string& base,
+    const std::vector<std::string>& layers,
+    const std::vector<std::pair<int, std::string>>& regions) {
+    std::string key = base;
+    for (const auto& layer : layers) { key += '|'; key += layer; }
+    key += '#';
+    for (const auto& region : regions) {
+        key += std::to_string(region.first) + ':' + region.second + ',';
     }
-
-    // Composite key is deterministic from layer set; if we've already built it,
-    // reuse the existing GPU texture to keep live instance pointers valid.
-    std::string cacheKey = "__composite__";
-    for (const auto& lp : layerPaths) { cacheKey += '|'; cacheKey += lp; }
-    auto cachedComposite = textureCache.find(cacheKey);
-    if (cachedComposite != textureCache.end()) {
-        cachedComposite->second.lastUse = ++textureCacheCounter_;
-        return cachedComposite->second.texture.get();
-    }
-
+    return key;
+}
+pipeline::BLPImage buildCompositeLayersCPU(pipeline::AssetManager* assets,
+    const std::vector<std::string>& layerPaths,
+    std::unordered_map<std::string, pipeline::BLPImage>* predecoded) {
+    if (layerPaths.empty() || !assets || !assets->isInitialized()) return {};
     // Load base layer
     pipeline::BLPImage base;
-    if (predecodedBLPCache_) {
+    if (predecoded) {
         std::string key = layerPaths[0];
         std::replace(key.begin(), key.end(), '/', '\\');
         std::transform(key.begin(), key.end(), key.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            base = std::move(pit->second);
-            predecodedBLPCache_->erase(pit);
+        auto pit = predecoded->find(key);
+        if (pit != predecoded->end()) {
+            base = pit->second;
         }
     }
-    if (!base.isValid()) base = assetManager->loadTexture(layerPaths[0]);
+    if (!base.isValid()) base = assets->loadTexture(layerPaths[0]);
     if (!base.isValid()) {
         core::Logger::getInstance().warning("Composite: failed to load base layer: ", layerPaths[0]);
-        return whiteTexture_.get();
+        return {};
     }
     applyMagentaKeyIfNeeded(base, layerPaths[0]);
 
@@ -1235,18 +1242,17 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     for (size_t layer = 1; layer < layerPaths.size(); layer++) {
         if (layerPaths[layer].empty()) continue;
         pipeline::BLPImage overlay;
-        if (predecodedBLPCache_) {
+        if (predecoded) {
             std::string key = layerPaths[layer];
             std::replace(key.begin(), key.end(), '/', '\\');
             std::transform(key.begin(), key.end(), key.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            auto pit = predecodedBLPCache_->find(key);
-            if (pit != predecodedBLPCache_->end()) {
-                overlay = std::move(pit->second);
-                predecodedBLPCache_->erase(pit);
+            auto pit = predecoded->find(key);
+            if (pit != predecoded->end()) {
+                overlay = pit->second;
             }
         }
-        if (!overlay.isValid()) overlay = assetManager->loadTexture(layerPaths[layer]);
+        if (!overlay.isValid()) overlay = assets->loadTexture(layerPaths[layer]);
         if (!overlay.isValid()) {
             core::Logger::getInstance().warning("Composite: FAILED to load overlay: ",
                                                 layerPaths[layer]);
@@ -1378,83 +1384,16 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     }
 
     bleedAndStripMagentaKey(composite, width, height);
-    const bool hasAlpha = hasNonOpaqueAlpha(composite);
-
-    // Upload composite to GPU via VkTexture
-    auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx_, composite.data(), width, height, VK_FORMAT_R8G8B8A8_UNORM, true);
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    VkTexture* texPtr = tex.get();
-
-    // Store in texture cache with deterministic key.
-    // Keep the first allocation for a key to avoid invalidating raw pointers
-    // held by active render instances.
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = approxTextureBytesWithMips(width, height);
-    e.lastUse = ++textureCacheCounter_;
-    e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = false;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
-    // No derived normal map for a composited body, and this is why: the
-    // derivation reads luminance as height, which holds for stone and bark and
-    // does not hold for skin. Every freckle, every painted shadow under a
-    // collarbone, becomes a ridge - and on a character that reads as stretch
-    // marks. Art authored as a surface gets one; art authored as a person does
-    // not.
-    // Checked before emplacing, not after. emplace builds its node from the
-    // arguments and then destroys that node if the key is already present --
-    // and ~VkTexture frees nothing, so the texture goes in, comes back out
-    // destroyed-but-not-freed, and there is no longer a pointer to free it by.
-    if (auto existing = textureCache.find(cacheKey); existing != textureCache.end()) {
-        e.texture->destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
-        existing->second.lastUse = ++textureCacheCounter_;
-        return existing->second.texture.get();
-    }
-    textureCache.emplace(cacheKey, std::move(e));
-
-    core::Logger::getInstance().info("Composite texture created: ", width, "x", height, " from ", layerPaths.size(), " layers");
-    return texPtr;
+    pipeline::BLPImage result;
+    result.width = width;
+    result.height = height;
+    result.data = std::move(composite);
+    return result;
 }
-
-void CharacterRenderer::clearCompositeCache() {
-    // Just clear the lookup map so next compositeWithRegions() creates fresh textures.
-    // Don't delete GPU textures -- they may still be referenced by models or instances.
-    // Orphaned textures will be cleaned up when their model/instance is destroyed.
-    compositeCache_.clear();
-}
-
-VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
-                                                const std::vector<std::string>& baseLayers,
-                                                const std::vector<std::pair<int, std::string>>& regionLayers) {
-    // Build cache key from all inputs to avoid redundant compositing
-    std::string cacheKey = basePath;
-    for (const auto& bl : baseLayers) { cacheKey += '|'; cacheKey += bl; }
-    cacheKey += '#';
-    for (const auto& rl : regionLayers) {
-        cacheKey += std::to_string(rl.first);
-        cacheKey += ':';
-        cacheKey += rl.second;
-        cacheKey += ',';
-    }
-    auto cacheIt = compositeCache_.find(cacheKey);
-    if (cacheIt != compositeCache_.end() && cacheIt->second != nullptr) {
-        return cacheIt->second;
-    }
-
-    // If the lookup map was cleared, recover from the texture cache without
-    // regenerating/replacing the underlying GPU texture.
-    std::string storageKey = "__compositeRegions__" + cacheKey;
-    auto cachedComposite = textureCache.find(storageKey);
-    if (cachedComposite != textureCache.end()) {
-        cachedComposite->second.lastUse = ++textureCacheCounter_;
-        VkTexture* texPtr = cachedComposite->second.texture.get();
-        compositeCache_[cacheKey] = texPtr;
-        return texPtr;
-    }
-
+pipeline::BLPImage buildCompositeRegionsCPU(pipeline::AssetManager* assets,
+    const std::string& basePath, const std::vector<std::string>& baseLayers,
+    const std::vector<std::pair<int, std::string>>& regionLayers,
+    std::unordered_map<std::string, pipeline::BLPImage>* predecoded) {
     // Region index -> pixel coordinates on the 256x256 base atlas
     // These are scaled up by (width/256, height/256) for larger textures (512x512, 1024x1024)
     static constexpr int regionCoords256[][2] = {
@@ -1475,25 +1414,24 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         layers.push_back(ul);
     }
     // Load base composite into CPU buffer
-    if (!assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_.get();
+    if (!assets || !assets->isInitialized()) {
+        return {};
     }
 
     pipeline::BLPImage base;
-    if (predecodedBLPCache_) {
+    if (predecoded) {
         std::string key = basePath;
         std::replace(key.begin(), key.end(), '/', '\\');
         std::transform(key.begin(), key.end(), key.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            base = std::move(pit->second);
-            predecodedBLPCache_->erase(pit);
+        auto pit = predecoded->find(key);
+        if (pit != predecoded->end()) {
+            base = pit->second;
         }
     }
-    if (!base.isValid()) base = assetManager->loadTexture(basePath);
+    if (!base.isValid()) base = assets->loadTexture(basePath);
     if (!base.isValid()) {
-        return whiteTexture_.get();
+        return {};
     }
     applyMagentaKeyIfNeeded(base, basePath);
 
@@ -1546,18 +1484,17 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     for (const auto& ul : baseLayers) {
         if (ul.empty()) continue;
         pipeline::BLPImage overlay;
-        if (predecodedBLPCache_) {
+        if (predecoded) {
             std::string key = ul;
             std::replace(key.begin(), key.end(), '/', '\\');
             std::transform(key.begin(), key.end(), key.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            auto pit = predecodedBLPCache_->find(key);
-            if (pit != predecodedBLPCache_->end()) {
-                overlay = std::move(pit->second);
-                predecodedBLPCache_->erase(pit);
+            auto pit = predecoded->find(key);
+            if (pit != predecoded->end()) {
+                overlay = pit->second;
             }
         }
-        if (!overlay.isValid()) overlay = assetManager->loadTexture(ul);
+        if (!overlay.isValid()) overlay = assets->loadTexture(ul);
         if (!overlay.isValid()) continue;
         applyMagentaKeyIfNeeded(overlay, ul);
 
@@ -1637,18 +1574,17 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         if (regionIdx < 0 || regionIdx >= 8) continue;
 
         pipeline::BLPImage overlay;
-        if (predecodedBLPCache_) {
+        if (predecoded) {
             std::string key = rl.second;
             std::replace(key.begin(), key.end(), '/', '\\');
             std::transform(key.begin(), key.end(), key.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            auto pit = predecodedBLPCache_->find(key);
-            if (pit != predecodedBLPCache_->end()) {
-                overlay = std::move(pit->second);
-                predecodedBLPCache_->erase(pit);
+            auto pit = predecoded->find(key);
+            if (pit != predecoded->end()) {
+                overlay = pit->second;
             }
         }
-        if (!overlay.isValid()) overlay = assetManager->loadTexture(rl.second);
+        if (!overlay.isValid()) overlay = assets->loadTexture(rl.second);
         if (!overlay.isValid()) {
             core::Logger::getInstance().warning("compositeWithRegions: failed to load ", rl.second);
             continue;
@@ -1689,6 +1625,141 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     }
 
     bleedAndStripMagentaKey(composite, width, height);
+    pipeline::BLPImage result;
+    result.width = width;
+    result.height = height;
+    result.data = std::move(composite);
+    return result;
+}
+} // namespace
+
+pipeline::BLPImage CharacterRenderer::prepareTexture(pipeline::AssetManager* assets, const std::string& path) {
+    auto image = assets->loadTexture(path);
+    if (image.isValid()) applyMagentaKeyIfNeeded(image, path);
+    return image;
+}
+
+void CharacterRenderer::prepareCompositeTextures(pipeline::AssetManager* assets,
+    const std::vector<std::string>& layers,
+    std::unordered_map<std::string, pipeline::BLPImage>& decoded) {
+    const auto key = compositeLayersKey(layers);
+    decoded[key] = buildCompositeLayersCPU(assets, layers, &decoded);
+}
+void CharacterRenderer::prepareCompositeWithRegions(pipeline::AssetManager* assets,
+    const std::string& base, const std::vector<std::string>& layers,
+    const std::vector<std::pair<int, std::string>>& regions,
+    std::unordered_map<std::string, pipeline::BLPImage>& decoded) {
+    const auto key = "__compositeRegions__" + compositeRegionsKey(base, layers, regions);
+    decoded[key] = buildCompositeRegionsCPU(assets, base, layers, regions, &decoded);
+}
+
+VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
+    if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
+        return whiteTexture_.get();
+    }
+
+    // Composite key is deterministic from layer set; if we've already built it,
+    // reuse the existing GPU texture to keep live instance pointers valid.
+    const std::string cacheKey = compositeLayersKey(layerPaths);
+    auto cachedComposite = textureCache.find(cacheKey);
+    if (cachedComposite != textureCache.end()) {
+        cachedComposite->second.lastUse = ++textureCacheCounter_;
+        return cachedComposite->second.texture.get();
+    }
+
+    pipeline::BLPImage image;
+    if (predecodedBLPCache_) {
+        auto ready = predecodedBLPCache_->find(cacheKey);
+        if (ready != predecodedBLPCache_->end()) image = std::move(ready->second);
+    }
+    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(cacheKey)) {
+        LOG_ERROR("Unprepared character composite reached GPU consumer: ", cacheKey);
+    }
+    if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeLayersCPU(assetManager, layerPaths, predecodedBLPCache_);
+    if (!image.isValid()) return whiteTexture_.get();
+    auto& composite = image.data;
+    const int width = image.width, height = image.height;
+    const bool hasAlpha = hasNonOpaqueAlpha(composite);
+
+    // Upload composite to GPU via VkTexture
+    auto tex = std::make_unique<VkTexture>();
+    tex->upload(*vkCtx_, composite.data(), width, height, VK_FORMAT_R8G8B8A8_UNORM, true);
+    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
+
+    VkTexture* texPtr = tex.get();
+
+    // Store in texture cache with deterministic key.
+    // Keep the first allocation for a key to avoid invalidating raw pointers
+    // held by active render instances.
+    TextureCacheEntry e;
+    e.texture = std::move(tex);
+    e.approxBytes = approxTextureBytesWithMips(width, height);
+    e.lastUse = ++textureCacheCounter_;
+    e.hasAlpha = hasAlpha;
+    e.colorKeyBlack = false;
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
+    // No derived normal map for a composited body, and this is why: the
+    // derivation reads luminance as height, which holds for stone and bark and
+    // does not hold for skin. Every freckle, every painted shadow under a
+    // collarbone, becomes a ridge - and on a character that reads as stretch
+    // marks. Art authored as a surface gets one; art authored as a person does
+    // not.
+    // Checked before emplacing, not after. emplace builds its node from the
+    // arguments and then destroys that node if the key is already present --
+    // and ~VkTexture frees nothing, so the texture goes in, comes back out
+    // destroyed-but-not-freed, and there is no longer a pointer to free it by.
+    if (auto existing = textureCache.find(cacheKey); existing != textureCache.end()) {
+        e.texture->destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
+        existing->second.lastUse = ++textureCacheCounter_;
+        return existing->second.texture.get();
+    }
+    textureCache.emplace(cacheKey, std::move(e));
+
+    core::Logger::getInstance().info("Composite texture created: ", width, "x", height, " from ", layerPaths.size(), " layers");
+    return texPtr;
+}
+
+void CharacterRenderer::clearCompositeCache() {
+    // Just clear the lookup map so next compositeWithRegions() creates fresh textures.
+    // Don't delete GPU textures -- they may still be referenced by models or instances.
+    // Orphaned textures will be cleaned up when their model/instance is destroyed.
+    compositeCache_.clear();
+}
+
+VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
+                                                const std::vector<std::string>& baseLayers,
+                                                const std::vector<std::pair<int, std::string>>& regionLayers) {
+    // Build cache key from all inputs to avoid redundant compositing
+    const std::string cacheKey = compositeRegionsKey(basePath, baseLayers, regionLayers);
+    auto cacheIt = compositeCache_.find(cacheKey);
+    if (cacheIt != compositeCache_.end() && cacheIt->second != nullptr) {
+        return cacheIt->second;
+    }
+
+    // If the lookup map was cleared, recover from the texture cache without
+    // regenerating/replacing the underlying GPU texture.
+    std::string storageKey = "__compositeRegions__" + cacheKey;
+    auto cachedComposite = textureCache.find(storageKey);
+    if (cachedComposite != textureCache.end()) {
+        cachedComposite->second.lastUse = ++textureCacheCounter_;
+        VkTexture* texPtr = cachedComposite->second.texture.get();
+        compositeCache_[cacheKey] = texPtr;
+        return texPtr;
+    }
+
+    pipeline::BLPImage image;
+    if (predecodedBLPCache_) {
+        auto ready = predecodedBLPCache_->find(storageKey);
+        if (ready != predecodedBLPCache_->end()) image = std::move(ready->second);
+    }
+    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(storageKey)) {
+        LOG_ERROR("Unprepared character composite reached GPU consumer: ", storageKey);
+    }
+    if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeRegionsCPU(assetManager, basePath, baseLayers, regionLayers, predecodedBLPCache_);
+    if (!image.isValid()) return whiteTexture_.get();
+    auto& composite = image.data;
+    const int width = image.width, height = image.height;
     const bool hasAlpha = hasNonOpaqueAlpha(composite);
 
     // Upload to GPU via VkTexture

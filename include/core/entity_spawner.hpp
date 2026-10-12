@@ -395,7 +395,8 @@ private:
     void buildCreatureDisplayLookups();
 
     // Weapon M2 loading helper
-    bool loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel);
+    bool loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel,
+                      const std::string& texturePath = {});
 
     // GameObject display lookups
     std::unordered_map<uint32_t, std::string> gameObjectDisplayIdToPath_;
@@ -445,6 +446,7 @@ private:
     };
     struct AsyncCreatureLoad {
         std::future<PreparedCreatureModel> future;
+        std::optional<PreparedCreatureModel> ready;
     };
     std::vector<AsyncCreatureLoad> asyncCreatureLoads_;
     std::unordered_set<uint32_t> asyncCreatureDisplayLoads_;
@@ -559,6 +561,10 @@ private:
     void processDeferredEquipmentQueue();
     struct PreparedEquipmentUpdate {
         uint64_t guid;
+        uint64_t revision = 0;
+        uint32_t instanceId = 0;
+        std::vector<std::pair<int, std::string>> regions;
+        std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> models;
         std::array<uint32_t, 19> displayInfoIds;
         std::array<uint8_t, 19> inventoryTypes;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
@@ -568,9 +574,11 @@ private:
     };
     std::vector<AsyncEquipmentLoad> asyncEquipmentLoads_;
     void processAsyncEquipmentResults();
-    std::vector<std::string> resolveEquipmentTexturePaths(uint64_t guid,
-        const std::array<uint32_t, 19>& displayInfoIds,
-        const std::array<uint8_t, 19>& inventoryTypes) const;
+    const PreparedEquipmentUpdate* preparedEquipmentUpdate_ = nullptr;
+    std::unordered_map<uint64_t, uint64_t> equipmentRevisions_;
+    uint64_t nextEquipmentRevision_ = 0;
+    std::unordered_map<std::string, std::future<PreparedEquipmentUpdate>> asyncAttachmentLoads_;
+    std::unordered_map<std::string, pipeline::BLPImage> preparedAttachmentTextures_;
     std::unordered_map<uint32_t, uint32_t> playerModelCache_;
     /// Which runtime texture slot of a player model takes which art. Type 8 is
     /// Skin Extra - the head detail sheet, not the underwear, though on the
@@ -587,9 +595,22 @@ private:
         uint32_t appearanceBytes;
         uint8_t facialFeatures;
         float x, y, z, orientation;
+        uint64_t revision = 0;
     };
     std::deque<PendingPlayerSpawn> pendingPlayerSpawns_;
     std::unordered_set<uint64_t> pendingPlayerSpawnGuids_;
+    std::unordered_map<uint64_t, uint64_t> playerSpawnRevisions_;
+    uint64_t nextPlayerSpawnRevision_ = 0;
+    struct PreparedPlayerSpawn {
+        PendingPlayerSpawn request;
+        std::shared_ptr<pipeline::M2Model> model;
+        std::string bodySkinPath, skinExtraPath, hairTexturePath, faceLowerPath, faceUpperPath;
+        std::vector<std::string> underwearPaths;
+        std::unordered_map<std::string, pipeline::BLPImage> textures;
+    };
+    std::vector<std::future<PreparedPlayerSpawn>> asyncPlayerLoads_;
+    std::unordered_map<uint32_t, std::shared_ptr<pipeline::M2Model>> preparedPlayerModels_;
+    const PreparedPlayerSpawn* preparedPlayerSpawn_ = nullptr;
     void processPlayerSpawnQueue();
 
     // --- GameObject instances ---

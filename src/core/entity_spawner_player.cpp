@@ -113,53 +113,12 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
             modelId = 0;
         }
     }
+    // This consumer never reads or parses a file. Its worker supplied the
+    // immutable model and finished appearance atlas before publishing readiness.
+    if (!preparedPlayerSpawn_ || !preparedPlayerSpawn_->model) return;
     if (modelId == 0) {
-        game::Race race = static_cast<game::Race>(raceId);
-        game::Gender gender = (genderId == 1) ? game::Gender::FEMALE : game::Gender::MALE;
-        std::string m2Path = game::getPlayerModelPath(race, gender);
-        if (m2Path.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: unknown race/gender for guid 0x", std::hex, guid, std::dec,
-                        " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId));
-            return;
-        }
-
-        auto m2Data = assetManager_->readFile(m2Path);
-        if (m2Data.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to read M2: ", m2Path);
-            return;
-        }
-
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.vertices.empty()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to parse M2: ", m2Path);
-            return;
-        }
-
-        // Skin file (only for WotLK M2s - vanilla has embedded skin)
-        std::string skinPath = pipeline::skinPathForM2(m2Path);
-        auto skinData = assetManager_->readFile(skinPath);
-        if (!skinData.empty() && model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, model);
-        }
-
-        // After skin loading, full model must be valid (vertices + indices)
-        if (!model.isValid()) {
-            LOG_WARNING("spawnOnlinePlayer: failed to load skin for M2: ", m2Path);
-            return;
-        }
-
-        // Only the three animations a standing player needs. Loading every
-        // external sequence of a character model stalls the frame.
-        pipeline::loadExternalAnimations(
-            *assetManager_, m2Path, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
-
         modelId = nextPlayerModelId_++;
-        if (!charRenderer->loadModel(model, modelId)) {
-            LOG_WARNING("spawnOnlinePlayer: failed to load model to GPU: ", m2Path);
-            return;
-        }
-
+        if (!charRenderer->loadModel(*preparedPlayerSpawn_->model, modelId)) return;
         playerModelCache_[cacheKey] = modelId;
     }
 
@@ -186,65 +145,15 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 1.0f);
     if (instanceId == 0) return;
 
-    // The character's textures, through the one reader in
-    // pipeline/char_sections.hpp - the same scan the local player, the NPCs and
-    // the portrait use. This path used to carry a fourth copy of it, and the
-    // copy did not read the skin row's second texture, which is the head detail
-    // an HD model draws its ears and eyelashes from. Every other player in the
-    // world had skin-coloured eyelashes for exactly that reason.
-    const std::string defaultSkin = defaultBodySkinPath(raceId, genderId);
-    const std::string pelvisPath = defaultPelvisPath(raceId, genderId);
     const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
     const uint8_t hairStyleId = look.hairStyleId;
-
-    std::string bodySkinPath = defaultSkin;
-    std::string skinExtraPath, hairTexturePath, faceLowerPath, faceUpperPath;
-    std::vector<std::string> underwearPaths;
-
-    if (auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
-        charSectionsDbc && charSectionsDbc->isLoaded()) {
-        const auto* csL = pipeline::getActiveDBCLayout()
-            ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
-
-        pipeline::CharacterAppearance who;
-        who.raceId = raceId;
-        who.sexId = genderId;
-        who.skinId = look.skinId;
-        who.faceId = look.faceId;
-        who.hairStyleId = look.hairStyleId;
-        who.hairColorId = look.hairColorId;
-
-        // The underwear rows name art that was never shipped for some skin
-        // colours - Draenei 10 to 16 among them - and this caller can check.
-        const auto sections = pipeline::resolveCharacterSections(
-            charSectionsDbc.get(), csF, who,
-            [](const std::string& path, void* ctx) {
-                return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
-            },
-            assetManager_);
-
-        if (!sections.bodySkin.empty()) bodySkinPath = sections.bodySkin;
-        skinExtraPath = sections.skinExtra;
-        faceLowerPath = sections.faceLower;
-        faceUpperPath = sections.faceUpper;
-        hairTexturePath = sections.hair;
-        underwearPaths = sections.underwear;
-
-        if (!sections.exactFace) {
-            LOG_WARNING("spawnOnlinePlayer: no DBC face match for face=",
-                        static_cast<int>(look.faceId), " skin=", static_cast<int>(look.skinId),
-                        // Cast, because both are uint8_t and the stream writes
-                        // one as a character: race 9 came out as a tab and sex
-                        // 0 as a NUL, which is unreadable and puts a NUL in the
-                        // log file - grep then takes the whole log for binary
-                        // and prints nothing at all for any pattern in it.
-                        " race=", static_cast<int>(raceId),
-                        " sex=", static_cast<int>(genderId),
-                        sections.haveFace ? " - using the nearest face instead"
-                                          : " - this player will render with no face");
-        }
-    }
+    const auto& bodySkinPath = preparedPlayerSpawn_->bodySkinPath;
+    const auto& skinExtraPath = preparedPlayerSpawn_->skinExtraPath;
+    const auto& hairTexturePath = preparedPlayerSpawn_->hairTexturePath;
+    const auto& faceLowerPath = preparedPlayerSpawn_->faceLowerPath;
+    const auto& faceUpperPath = preparedPlayerSpawn_->faceUpperPath;
+    const auto& underwearPaths = preparedPlayerSpawn_->underwearPaths;
+    const std::string pelvisPath = defaultPelvisPath(raceId, genderId);
 
     // Composite base skin + face + underwear overlays
     rendering::VkTexture* compositeTex = nullptr;
@@ -771,30 +680,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
     // --- Textures (skin atlas compositing) ---
 
-    uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
-
-    std::vector<std::pair<int, std::string>> regionLayers;
-    const bool isFemale = (st.genderId == 1);
-
-    for (int s = 0; s < 19; s++) {
-        uint32_t did = displayInfoIds[s];
-        if (did == 0) continue;
-        int32_t recIdx = displayInfoDbc->findRecordById(did);
-        if (recIdx < 0) continue;
-
-        for (int region = 0; region < 8; region++) {
-            std::string texName = displayInfoDbc->getString(
-                static_cast<uint32_t>(recIdx), texRegionFields[region]);
-            if (texName.empty()) continue;
-
-            std::string fullPath = pipeline::resolveItemRegionTexture(
-                *assetManager_, region, texName, isFemale);
-            if (fullPath.empty()) continue;
-
-            regionLayers.emplace_back(region, fullPath);
-        }
-    }
+    if (!preparedEquipmentUpdate_) return;
+    const auto& regionLayers = preparedEquipmentUpdate_->regions;
 
     const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
     if (slotsIt == playerTextureSlotsByModelId_.end()) return;
@@ -872,6 +759,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 }
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
+    pendingPlayerSpawnGuids_.erase(guid);
+    playerSpawnRevisions_.erase(guid);
+    equipmentRevisions_.erase(guid);
+    pendingOnlinePlayerEquipment_.erase(guid);
+    std::erase_if(pendingPlayerSpawns_, [guid](const auto& request) { return request.guid == guid; });
+    std::erase_if(deferredEquipmentQueue_, [guid](const auto& request) { return request.first == guid; });
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
     pendingRemotePlayerMounts_.erase(guid);
     removeRemotePlayerMount(guid);

@@ -66,6 +66,7 @@
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/item_textures.hpp"
 #include "ui/ui_manager.hpp"
 #include "ui/map_window.hpp"
 #include "ui/touch_controls.hpp"
@@ -95,6 +96,7 @@
 #include <cctype>
 #include <optional>
 #include <sstream>
+#include <numeric>
 #include <set>
 #include <filesystem>
 #include <fstream>
@@ -3884,6 +3886,144 @@ void Application::update(float deltaTime) {
     ZoneScopedN("Application::update");
     const char* updateCheckpoint = "enter";
     try {
+    // Offline regression fixture: exercises the real appearance/equipment
+    // queues and GPU uploads without authenticating or changing realm state.
+    if (std::getenv("WOWEE_ENTITY_STREAM_PROBE") && entitySpawner_ &&
+        renderer && renderer->getCharacterRenderer()) {
+        static bool seeded = false, complete = false;
+        static std::vector<float> times;
+        static std::array<uint32_t, 19> fixtureEquipment{};
+        static std::array<uint8_t, 19> fixtureTypes{};
+        static uint32_t fixtureMount = 0;
+        const bool expanded = std::getenv("WOWEE_ENTITY_STREAM_EXPANDED") != nullptr;
+        static constexpr uint64_t firstGuid = 0x1234000000000000ULL;
+        static constexpr int playerCount = 24;
+        if (!seeded) {
+            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) {
+                LOG_ERROR("Entity stream probe requires initialized offline renderers");
+                window->setShouldClose(true);
+                return;
+            }
+            std::array<uint32_t, 19> equipment{};
+            std::array<uint8_t, 19> types{};
+            if (auto dbc = assetManager->loadDBC("ItemDisplayInfo.dbc")) {
+                const auto* layout = pipeline::getActiveDBCLayout()
+                    ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+                uint32_t fields[8];
+                pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+                for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                    const std::string torso = dbc->getString(row, fields[3]);
+                    if (!torso.empty() && !pipeline::resolveItemRegionTexture(
+                            *assetManager, 3, torso, false).empty()) {
+                        equipment[4] = dbc->getUInt32(row, 0);
+                        types[4] = 5;
+                        break;
+                    }
+                }
+                for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    if (!art.modelFile.empty() && assetManager->fileExists(
+                            "Item\\ObjectComponents\\Weapon\\" + art.modelFile)) {
+                        equipment[15] = dbc->getUInt32(row, 0);
+                        types[15] = 13;
+                        break;
+                    }
+                }
+            }
+            if (equipment[4] == 0 || equipment[15] == 0) {
+                LOG_ERROR("Entity stream probe: missing real equipment fixture");
+                window->setShouldClose(true);
+                return;
+            }
+            fixtureEquipment = equipment;
+            fixtureTypes = types;
+            if (expanded) {
+                if (auto dbc = assetManager->loadDBC("CreatureDisplayInfo.dbc")) {
+                    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+                        const auto id = dbc->getUInt32(row, 0);
+                        const auto path = entitySpawner_->getModelPathForDisplayId(id);
+                        if (path.find("Horse") != std::string::npos && assetManager->fileExists(path)) {
+                            fixtureMount = id;
+                            break;
+                        }
+                    }
+                }
+                if (fixtureMount == 0) {
+                    LOG_ERROR("Expanded entity probe requires a real horse mount");
+                    window->setShouldClose(true);
+                    return;
+                }
+            }
+            constexpr uint8_t races[] = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11};
+            for (int i = 0; i < playerCount; ++i) {
+                const uint32_t appearance = static_cast<uint32_t>(i % 8) |
+                    (static_cast<uint32_t>(i % 4) << 16);
+                entitySpawner_->queuePlayerSpawn(firstGuid + i,
+                    expanded ? races[(i / 2) % 10] : 1, i % 2,
+                    appearance, 0, 405.0f + i / 6,
+                    5818.0f + i % 6,
+                    650.0f, 0.0f);
+                entitySpawner_->queuePlayerEquipment(firstGuid + i, equipment, types);
+            }
+            renderer->getCamera()->setPosition(glm::vec3(5805.0f, 406.0f, 652.0f));
+            renderer->getCamera()->setRotation(0.0f, 0.0f);
+            seeded = true;
+            LOG_INFO("Entity stream probe: queued ", playerCount,
+                     " players, chest=", equipment[4], " weapon=", equipment[15]);
+        }
+        if (!complete) {
+            const auto start = std::chrono::steady_clock::now();
+            entitySpawner_->update();
+            renderer->getCharacterRenderer()->processPendingNormalMaps(4);
+            const bool firstTick = times.empty();
+            times.push_back(std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - start).count());
+            if (expanded && firstTick) {
+                // The first two jobs are in flight. Cancel both, replace one
+                // with a different race, and leave the other GUID absent.
+                entitySpawner_->despawnPlayer(firstGuid);
+                entitySpawner_->despawnPlayer(firstGuid + 1);
+                entitySpawner_->queuePlayerSpawn(firstGuid, 2, 0, 0, 0,
+                    405.0f, 5818.0f, 650.0f, 0.0f);
+                entitySpawner_->queuePlayerEquipment(firstGuid, fixtureEquipment, fixtureTypes);
+                entitySpawner_->queuePlayerSpawn(firstGuid + playerCount, 1, 1, 0, 0,
+                    409.0f, 5820.0f, 650.0f, 0.0f);
+                entitySpawner_->queuePlayerEquipment(firstGuid + playerCount, fixtureEquipment, fixtureTypes);
+                entitySpawner_->setRemotePlayerMountDisplayId(firstGuid, fixtureMount);
+                entitySpawner_->setRemotePlayerMountDisplayId(firstGuid + playerCount, fixtureMount);
+            }
+            renderer->getVkContext()->pollUploadBatches();
+            if (!entitySpawner_->hasWorkPending()) {
+                int spawned = 0;
+                for (int i = 0; i < playerCount; ++i)
+                    spawned += entitySpawner_->isPlayerSpawned(firstGuid + i);
+                if (expanded) {
+                    spawned += entitySpawner_->isPlayerSpawned(firstGuid + playerCount);
+                    const auto* mount0 = entitySpawner_->getRemotePlayerMount(firstGuid);
+                    const auto* mount1 = entitySpawner_->getRemotePlayerMount(firstGuid + playerCount);
+                    const bool cancelled = !entitySpawner_->isPlayerSpawned(firstGuid + 1);
+                    const auto& instances = entitySpawner_->getPlayerInstances();
+                    const auto instance = instances.find(firstGuid);
+                    const auto* data = instance == instances.end() ? nullptr
+                        : renderer->getCharacterRenderer()->getModelData(
+                            renderer->getCharacterRenderer()->getInstanceModelId(instance->second));
+                    const bool replacement = data && data->name.find("Orc") != std::string::npos;
+                    LOG_INFO("Expanded entity probe: mounts=", int(mount0 != nullptr) + int(mount1 != nullptr),
+                             " cancelled=", cancelled, " replaced=", replacement);
+                    if (!mount0 || !mount1 || !cancelled || !replacement)
+                        LOG_ERROR("Expanded entity probe failed mount/cancellation/replacement check");
+                }
+                std::sort(times.begin(), times.end());
+                const float total = std::accumulate(times.begin(), times.end(), 0.0f);
+                LOG_INFO("Entity stream probe: completed players=", spawned,
+                         " ticks=", times.size(), " total_ms=", total,
+                         " p95_ms=", times[(times.size() - 1) * 95 / 100],
+                         " max_ms=", times.back());
+                if (spawned != playerCount) LOG_ERROR("Entity stream probe lost players");
+                complete = true;
+            }
+        }
+    }
     // A reload asked for by the interface. Done here, between frames, because
     // the request comes from inside the Lua state that the reload destroys -
     // performing it at the call site would free the machinery mid-call.
@@ -4072,8 +4212,8 @@ void Application::render() {
     renderingFrame_ = true;
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
-    // Only render 3D world when in-game
-    if (state == AppState::IN_GAME) {
+    // The offline stream fixture draws its uploads through the real world path.
+    if (state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE")) {
         runRenderStage("renderWorld", [&] {
             renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
         });

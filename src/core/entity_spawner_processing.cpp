@@ -1,4 +1,7 @@
 #include "core/entity_spawner.hpp"
+#include "core/thread_pool.hpp"
+#include "core/character_paths.hpp"
+#include "core/helm_visual.hpp"
 
 #include <set>
 #include "rendering/m2_model_classifier.hpp"
@@ -57,13 +60,27 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             break;
         }
 
-        if (!it->future.valid() ||
-            it->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        if (!it->ready) {
+            if (!it->future.valid() ||
+                it->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+                ++it;
+                continue;
+            }
+            it->ready = it->future.get();
+        }
+
+        // Preserve decoded data until an upload slot is available, while still
+        // draining stale requests, failures and cache hits without GPU work.
+        const auto& prepared = *it->ready;
+        const auto request = requestedCreatureDisplayIds_.find(prepared.guid);
+        const bool current = request != requestedCreatureDisplayIds_.end() &&
+                             request->second == prepared.displayId;
+        if (current && prepared.valid && !prepared.permanent_failure && prepared.model &&
+            !displayIdModelCache_.count(prepared.displayId) && modelUploads >= maxUploadsThisTick) {
             ++it;
             continue;
         }
-
-        auto result = it->future.get();
+        auto result = std::move(*it->ready);
         it = asyncCreatureLoads_.erase(it);
         asyncCreatureDisplayLoads_.erase(result.displayId);
 
@@ -117,23 +134,6 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             continue;
         }
 
-        // Only actual GPU uploads count toward the per-tick budget.
-        if (modelUploads >= maxUploadsThisTick) {
-            // Re-queue this result - it needs a GPU upload but we're at budget.
-            // Push a new pending spawn so it's retried next frame.
-            pendingCreatureSpawnGuids_.erase(result.guid);
-            creatureSpawnRetryDeadlines_.erase(result.guid);
-            PendingCreatureSpawn s{};
-            s.guid = result.guid;
-            s.displayId = result.displayId;
-            s.x = result.x; s.y = result.y; s.z = result.z;
-            s.orientation = result.orientation;
-            s.scale = result.scale;
-            pendingCreatureSpawns_.push_back(s);
-            pendingCreatureSpawnGuids_.insert(result.guid);
-            continue;
-        }
-
         // Model parsed on background thread - upload to GPU on main thread.
         auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!charRenderer) {
@@ -148,7 +148,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         // Upload model to GPU (must happen on main thread)
         // Use pre-decoded BLP cache to skip main-thread texture decode
         auto uploadStart = std::chrono::steady_clock::now();
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
+        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
         if (!charRenderer->loadModel(*result.model, result.modelId)) {
             charRenderer->setPredecodedBLPCache(nullptr);
             nonRenderableCreatureDisplayIds_.insert(result.displayId);
@@ -207,7 +207,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
     if (batchCtx) batchCtx->beginUploadBatch();
     struct BatchGuard {
         rendering::VkContext* ctx;
-        ~BatchGuard() { if (ctx) ctx->endUploadBatchSync(); }
+        ~BatchGuard() { if (ctx) ctx->endUploadBatch(); }
     } batchGuard{batchCtx};
 
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
@@ -235,7 +235,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
         const auto& info = result.info;
 
         // Set pre-decoded cache so texture loads skip synchronous BLP decode
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
+        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
 
         // --- Apply skin to type-1 slots ---
         rendering::VkTexture* skinTex = nullptr;
@@ -515,7 +515,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             }
 
             AsyncCreatureLoad load;
-            load.future = std::async(std::launch::async,
+            load.future = ThreadPool::ioWorkers().submit(
                 [am, m2Path, modelId, s, skinPaths = std::move(displaySkinPaths)]() -> PreparedCreatureModel {
                     PreparedCreatureModel result;
                     result.guid = s.guid;
@@ -596,7 +596,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                         std::transform(key.begin(), key.end(), key.begin(),
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.count(key)) continue;
-                        auto blp = am->loadTexture(key);
+                        auto blp = rendering::CharacterRenderer::prepareTexture(am, key);
                         if (blp.isValid()) {
                             result.predecodedTextures[key] = std::move(blp);
                         }
@@ -683,76 +683,131 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 }
 
 void EntitySpawner::processPlayerSpawnQueue() {
-    if (pendingPlayerSpawns_.empty()) return;
     if (!assetManager_ || !assetManager_->isInitialized()) return;
-
-    int processed = 0;
-    while (!pendingPlayerSpawns_.empty() && processed < MAX_SPAWNS_PER_FRAME) {
-        PendingPlayerSpawn s = pendingPlayerSpawns_.front();
-        pendingPlayerSpawns_.erase(pendingPlayerSpawns_.begin());
-        pendingPlayerSpawnGuids_.erase(s.guid);
-
-        // Skip if already spawned (could have been spawned by a previous update this frame)
-        if (playerInstances_.count(s.guid)) {
-            processed++;
+    const auto start = std::chrono::steady_clock::now();
+    constexpr float kPlayerBudgetMs = 2.0f;
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!cr) return;
+    for (auto it = asyncPlayerLoads_.begin(); it != asyncPlayerLoads_.end();) {
+        if (std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - start).count() >= kPlayerBudgetMs) break;
+        if (it->wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ++it;
             continue;
         }
-
-        spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes, s.facialFeatures, s.x, s.y, s.z, s.orientation);
-        // Apply any equipment updates that arrived before the player was spawned.
-        auto pit = pendingOnlinePlayerEquipment_.find(s.guid);
-        if (pit != pendingOnlinePlayerEquipment_.end()) {
-            deferredEquipmentQueue_.emplace_back(s.guid, pit->second);
-            pendingOnlinePlayerEquipment_.erase(pit);
+        auto ready = it->get();
+        it = asyncPlayerLoads_.erase(it);
+        const auto& s = ready.request;
+        const auto expected = playerSpawnRevisions_.find(s.guid);
+        if (expected == playerSpawnRevisions_.end() || expected->second != s.revision ||
+            !pendingPlayerSpawnGuids_.erase(s.guid) || playerInstances_.count(s.guid)) continue;
+        playerSpawnRevisions_.erase(expected);
+        if (!ready.model) continue;
+        preparedPlayerModels_[(uint32_t(s.raceId) << 8) | s.genderId] = ready.model;
+        // Use the latest position after the asynchronous load, not its old snapshot.
+        float x = s.x, y = s.y, z = s.z, orientation = s.orientation;
+        if (gameHandler_) {
+            if (auto entity = gameHandler_->getEntityManager().getEntity(s.guid)) {
+                x = entity->getLatestX(); y = entity->getLatestY(); z = entity->getLatestZ();
+                orientation = entity->getOrientation();
+            }
         }
-        processed++;
-    }
-}
-
-std::vector<std::string> EntitySpawner::resolveEquipmentTexturePaths(uint64_t guid,
-    const std::array<uint32_t, 19>& displayInfoIds,
-    const std::array<uint8_t, 19>& /*inventoryTypes*/) const {
-    std::vector<std::string> paths;
-
-    auto it = onlinePlayerAppearance_.find(guid);
-    if (it == onlinePlayerAppearance_.end()) return paths;
-    const OnlinePlayerAppearanceState& st = it->second;
-
-    // Add base skin + underwear paths
-    if (!st.bodySkinPath.empty()) paths.push_back(st.bodySkinPath);
-    for (const auto& up : st.underwearPaths) {
-        if (!up.empty()) paths.push_back(up);
-    }
-
-    // Resolve equipment region texture paths (same logic as setOnlinePlayerEquipment)
-    auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return paths;
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-
-    uint32_t texRegionFields[8];
-    pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
-    const bool isFemale = (st.genderId == 1);
-
-    for (int s = 0; s < 19; s++) {
-        uint32_t did = displayInfoIds[s];
-        if (did == 0) continue;
-        int32_t recIdx = displayInfoDbc->findRecordById(did);
-        if (recIdx < 0) continue;
-        for (int region = 0; region < 8; region++) {
-            std::string texName = displayInfoDbc->getString(
-                static_cast<uint32_t>(recIdx), texRegionFields[region]);
-            if (texName.empty()) continue;
-            std::string path = pipeline::resolveItemRegionTexture(
-                *assetManager_, region, texName, isFemale);
-            if (!path.empty()) paths.push_back(path);
+        preparedPlayerSpawn_ = &ready;
+        cr->setPredecodedBLPCache(&ready.textures, true);
+        struct AppearanceGuard {
+            EntitySpawner* spawner;
+            rendering::CharacterRenderer* renderer;
+            ~AppearanceGuard() {
+                spawner->preparedPlayerSpawn_ = nullptr;
+                renderer->setPredecodedBLPCache(nullptr);
+            }
+        } guard{this, cr};
+        spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes,
+                          s.facialFeatures, x, y, z, orientation);
+        if (auto equipment = pendingOnlinePlayerEquipment_.find(s.guid);
+            equipment != pendingOnlinePlayerEquipment_.end()) {
+            deferredEquipmentQueue_.emplace_back(s.guid, equipment->second);
+            pendingOnlinePlayerEquipment_.erase(equipment);
         }
     }
-    return paths;
+    // Snapshot inputs only. Workers never touch entity maps, instances or GPU state.
+    while (!pendingPlayerSpawns_.empty() && asyncPlayerLoads_.size() < 2) {
+        const auto request = pendingPlayerSpawns_.front();
+        pendingPlayerSpawns_.pop_front();
+        if (!pendingPlayerSpawnGuids_.count(request.guid)) continue;
+        auto* assets = assetManager_;
+        const uint32_t key = (uint32_t(request.raceId) << 8) | request.genderId;
+        auto cached = preparedPlayerModels_.find(key);
+        auto model = cached != preparedPlayerModels_.end() ? cached->second : nullptr;
+        asyncPlayerLoads_.push_back(ThreadPool::ioWorkers().submit(
+            [assets, request, model = std::move(model)]() mutable {
+                PreparedPlayerSpawn ready;
+                ready.request = request;
+                if (!model) {
+                    const auto path = game::getPlayerModelPath(static_cast<game::Race>(request.raceId),
+                        request.genderId == 1 ? game::Gender::FEMALE : game::Gender::MALE);
+                    auto bytes = assets->readFile(path);
+                    if (bytes.empty()) return ready;
+                    model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(bytes));
+                    const auto skin = assets->readFile(pipeline::skinPathForM2(path));
+                    if (model->version >= 264 && !skin.empty()) pipeline::M2Loader::loadSkin(skin, *model);
+                    if (!model->isValid()) return ready;
+                    if (model->name.empty()) model->name = path;
+                    pipeline::loadExternalAnimations(*assets, path, bytes, *model,
+                        {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
+                }
+                ready.model = model;
+                ready.bodySkinPath = defaultBodySkinPath(request.raceId, request.genderId);
+                if (auto dbc = assets->loadDBC("CharSections.dbc")) {
+                    const auto* layout = pipeline::getActiveDBCLayout()
+                        ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
+                    const auto look = unpackAppearanceBytes(request.appearanceBytes);
+                    pipeline::CharacterAppearance who;
+                    who.raceId = request.raceId; who.sexId = request.genderId;
+                    who.skinId = look.skinId; who.faceId = look.faceId;
+                    who.hairStyleId = look.hairStyleId; who.hairColorId = look.hairColorId;
+                    auto sections = pipeline::resolveCharacterSections(dbc.get(),
+                        pipeline::detectCharSectionsFields(dbc.get(), layout), who,
+                        [](const std::string& path, void* ctx) {
+                            return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
+                        }, assets);
+                    if (!sections.bodySkin.empty()) ready.bodySkinPath = sections.bodySkin;
+                    ready.skinExtraPath = sections.skinExtra;
+                    ready.hairTexturePath = sections.hair;
+                    ready.faceLowerPath = sections.faceLower;
+                    ready.faceUpperPath = sections.faceUpper;
+                    ready.underwearPaths = std::move(sections.underwear);
+                }
+                std::vector<std::string> layers{ready.bodySkinPath};
+                if (!ready.faceLowerPath.empty()) layers.push_back(ready.faceLowerPath);
+                if (!ready.faceUpperPath.empty()) layers.push_back(ready.faceUpperPath);
+                layers.insert(layers.end(), ready.underwearPaths.begin(), ready.underwearPaths.end());
+                auto paths = layers;
+                paths.push_back(ready.hairTexturePath);
+                paths.push_back(ready.skinExtraPath);
+                paths.push_back(defaultPelvisPath(request.raceId, request.genderId));
+                for (const auto& texture : model->textures)
+                    if (texture.type == 0) paths.push_back(texture.filename);
+                for (auto path : paths) {
+                    if (path.empty()) continue;
+                    std::replace(path.begin(), path.end(), '/', '\\');
+                    std::transform(path.begin(), path.end(), path.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (!ready.textures.count(path)) ready.textures[path] = rendering::CharacterRenderer::prepareTexture(assets, path);
+                }
+                if (layers.size() > 1)
+                    rendering::CharacterRenderer::prepareCompositeTextures(assets, layers, ready.textures);
+                return ready;
+            }));
+    }
 }
 
 void EntitySpawner::processAsyncEquipmentResults() {
+    const auto start = std::chrono::steady_clock::now();
+    constexpr float kEquipmentBudgetMs = 2.0f;
     for (auto it = asyncEquipmentLoads_.begin(); it != asyncEquipmentLoads_.end(); ) {
+        if (std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - start).count() >= kEquipmentBudgetMs) break;
         if (!it->future.valid() ||
             it->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             ++it;
@@ -764,61 +819,128 @@ void EntitySpawner::processAsyncEquipmentResults() {
         auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!charRenderer) continue;
 
-        // Set pre-decoded cache so compositeWithRegions skips synchronous BLP decode
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
+        auto appearance = onlinePlayerAppearance_.find(result.guid);
+        auto revision = equipmentRevisions_.find(result.guid);
+        if (appearance == onlinePlayerAppearance_.end() ||
+            appearance->second.instanceId != result.instanceId ||
+            revision == equipmentRevisions_.end() || revision->second != result.revision) continue;
+        preparedEquipmentUpdate_ = &result;
+        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
+        struct EquipmentGuard {
+            EntitySpawner* spawner;
+            rendering::CharacterRenderer* renderer;
+            ~EquipmentGuard() {
+                spawner->preparedEquipmentUpdate_ = nullptr;
+                renderer->setPredecodedBLPCache(nullptr);
+            }
+        } guard{this, charRenderer};
         setOnlinePlayerEquipment(result.guid, result.displayInfoIds, result.inventoryTypes);
-        charRenderer->setPredecodedBLPCache(nullptr);
     }
 }
 
 void EntitySpawner::processDeferredEquipmentQueue() {
-    // First, finalize any completed async pre-decodes
     processAsyncEquipmentResults();
-
-    if (deferredEquipmentQueue_.empty()) return;
-    // Limit in-flight async equipment loads
-    if (asyncEquipmentLoads_.size() >= 2) return;
-
-    auto [guid, equipData] = deferredEquipmentQueue_.front();
-    deferredEquipmentQueue_.erase(deferredEquipmentQueue_.begin());
-
-    // Resolve all texture paths that compositeWithRegions will need
-    auto texturePaths = resolveEquipmentTexturePaths(guid, equipData.first, equipData.second);
-
-    if (texturePaths.empty()) {
-        // No textures to pre-decode - just apply directly (fast path)
-        LOG_WARNING("Equipment fast path for guid=0x", std::hex, guid, std::dec,
-                    " (no textures to pre-decode)");
-        setOnlinePlayerEquipment(guid, equipData.first, equipData.second);
+    if (deferredEquipmentQueue_.empty() || asyncEquipmentLoads_.size() >= 2) return;
+    auto [guid, equipment] = deferredEquipmentQueue_.front();
+    deferredEquipmentQueue_.pop_front();
+    const auto appearance = onlinePlayerAppearance_.find(guid);
+    if (appearance == onlinePlayerAppearance_.end()) {
+        pendingOnlinePlayerEquipment_[guid] = equipment;
         return;
     }
-    LOG_DEBUG("Equipment async pre-decode for guid=0x", std::hex, guid, std::dec,
-                " textures=", texturePaths.size());
-
-    // Launch background BLP pre-decode
-    auto* am = assetManager_;
-    auto displayInfoIds = equipData.first;
-    auto inventoryTypes = equipData.second;
+    const auto snapshot = appearance->second;
+    const auto revision = equipmentRevisions_[guid];
+    auto* assets = assetManager_;
     AsyncEquipmentLoad load;
-    load.future = std::async(std::launch::async,
-        [am, guid, displayInfoIds, inventoryTypes, paths = std::move(texturePaths)]() -> PreparedEquipmentUpdate {
-            PreparedEquipmentUpdate result;
-            result.guid = guid;
-            result.displayInfoIds = displayInfoIds;
-            result.inventoryTypes = inventoryTypes;
-            for (const auto& path : paths) {
-                std::string key = path;
-                std::replace(key.begin(), key.end(), '/', '\\');
-                std::transform(key.begin(), key.end(), key.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (result.predecodedTextures.count(key)) continue;
-                auto blp = am->loadTexture(key);
-                if (blp.isValid()) {
-                    result.predecodedTextures[key] = std::move(blp);
+    load.future = ThreadPool::ioWorkers().submit( [assets, guid, equipment, snapshot, revision] {
+        PreparedEquipmentUpdate ready;
+        ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.revision = revision;
+        ready.displayInfoIds = equipment.first; ready.inventoryTypes = equipment.second;
+        std::vector<std::string> paths{snapshot.bodySkinPath};
+        paths.insert(paths.end(), snapshot.underwearPaths.begin(), snapshot.underwearPaths.end());
+        auto keyFor = [](std::string path) {
+            std::replace(path.begin(), path.end(), '/', '\\');
+            std::transform(path.begin(), path.end(), path.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return path;
+        };
+        auto prepareModel = [&](const std::string& path) {
+            if (path.empty()) return;
+            const auto key = keyFor(path);
+            if (ready.models.count(key)) return;
+            auto model = std::make_shared<pipeline::M2Model>();
+            if (!pipeline::loadM2WithSkin(*assets, path, *model)) {
+                ready.models[key] = nullptr;
+                return;
+            }
+            for (const auto& texture : model->textures)
+                if (texture.type == 0) paths.push_back(texture.filename);
+            ready.models[key] = std::move(model);
+        };
+        if (ready.displayInfoIds[0]) {
+            const auto helm = resolveHelmVisual(*assets, ready.displayInfoIds[0], snapshot.raceId, snapshot.genderId);
+            prepareModel(helm.racialModelPath); prepareModel(helm.baseModelPath);
+            paths.push_back(helm.texturePath);
+        }
+        if (auto dbc = assets->loadDBC("ItemDisplayInfo.dbc")) {
+            const auto* layout = pipeline::getActiveDBCLayout()
+                ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
+            uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
+            for (int slot = 0; slot < 19; ++slot) {
+                const auto row = dbc->findRecordById(ready.displayInfoIds[slot]);
+                if (row < 0 || ready.displayInfoIds[slot] == 0) continue;
+                for (int region = 0; region < 8; ++region) {
+                    const auto name = dbc->getString(row, fields[region]);
+                    if (name.empty()) continue;
+                    const auto path = pipeline::resolveItemRegionTexture(*assets, region, name, snapshot.genderId == 1);
+                    if (!path.empty()) { ready.regions.emplace_back(region, path); paths.push_back(path); }
+                }
+                if (slot == 2) {
+                    for (int side = 0; side < 2; ++side) {
+                        auto name = dbc->getString(row, layout ? (*layout)[side ? "RightModel" : "LeftModel"] : 1u + side);
+                        if (auto dot = name.rfind('.'); dot != std::string::npos) name.resize(dot);
+                        if (name.empty()) continue;
+                        const auto base = "Item\\ObjectComponents\\Shoulder\\" + name;
+                        const auto suffix = raceGenderSuffix(snapshot.raceId, snapshot.genderId);
+                        prepareModel(base + suffix + ".m2"); prepareModel(base + ".m2");
+                        const auto tex = dbc->getString(row, layout ? (*layout)[side ? "RightModelTexture" : "LeftModelTexture"] : 3u + side);
+                        if (!tex.empty()) {
+                            paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + suffix + ".blp");
+                            paths.push_back("Item\\ObjectComponents\\Shoulder\\" + tex + ".blp");
+                        }
+                    }
+                }
+                if (slot == 14) {
+                    for (const auto field : {layout ? (*layout)["LeftModelTexture"] : 3u,
+                                             layout ? (*layout)["RightModelTexture"] : 4u}) {
+                        const auto name = dbc->getString(row, field);
+                        const auto candidates = pipeline::capeTextureCandidates(name, snapshot.genderId == 1);
+                        paths.insert(paths.end(), candidates.begin(), candidates.end());
+                    }
+                }
+                if (slot == 15 || slot == 16) {
+                    const auto art = pipeline::readItemDisplayArt(*dbc, row);
+                    if (!art.modelFile.empty()) {
+                        prepareModel("Item\\ObjectComponents\\Weapon\\" + art.modelFile);
+                        prepareModel("Item\\ObjectComponents\\Shield\\" + art.modelFile);
+                    }
+                    if (!art.textureName.empty()) {
+                        paths.push_back("Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp");
+                        paths.push_back("Item\\ObjectComponents\\Shield\\" + art.textureName + ".blp");
+                    }
                 }
             }
-            return result;
-        });
+        }
+        for (const auto& path : paths) {
+            if (path.empty()) continue;
+            const auto key = keyFor(path);
+            if (!ready.predecodedTextures.count(key))
+                ready.predecodedTextures[key] = rendering::CharacterRenderer::prepareTexture(assets, path);
+        }
+        rendering::CharacterRenderer::prepareCompositeWithRegions(assets, snapshot.bodySkinPath,
+            snapshot.underwearPaths, ready.regions, ready.predecodedTextures);
+        return ready;
+    });
     asyncEquipmentLoads_.push_back(std::move(load));
 }
 
@@ -986,7 +1108,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             PendingGameObjectSpawn capture = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
-            load.future = std::async(std::launch::async,
+            load.future = ThreadPool::ioWorkers().submit(
                 [am, capture, capturePath]() -> PreparedGameObjectWMO {
                     PreparedGameObjectWMO result;
                     result.guid = capture.guid;
@@ -1438,256 +1560,12 @@ void EntitySpawner::processPendingTransportDoodads() {
 void EntitySpawner::processPendingMount() {
     if (pendingMountDisplayId_ == 0) return;
     uint32_t mountDisplayId = pendingMountDisplayId_;
-    pendingMountDisplayId_ = 0;
-    LOG_INFO("processPendingMount: loading displayId ", mountDisplayId);
-
-    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return;
-    auto* charRenderer = renderer_->getCharacterRenderer();
-
-    std::string m2Path = getModelPathForDisplayId(mountDisplayId);
-    if (m2Path.empty()) {
-        LOG_WARNING("No model path for mount displayId ", mountDisplayId);
-        return;
-    }
-
-    // Check model cache
     uint32_t modelId = 0;
-    auto cacheIt = displayIdModelCache_.find(mountDisplayId);
-    if (cacheIt != displayIdModelCache_.end()) {
-        modelId = cacheIt->second;
-    } else {
-        modelId = nextCreatureModelId_++;
-
-        auto m2Data = assetManager_->readFile(m2Path);
-        if (m2Data.empty()) {
-            LOG_WARNING("Failed to read mount M2: ", m2Path);
-            return;
-        }
-
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.name.empty()) model.name = m2Path;
-        if (model.vertices.empty()) {
-            LOG_WARNING("Failed to parse mount M2: ", m2Path);
-            return;
-        }
-
-        // Load skin file (only for WotLK M2s - vanilla has embedded skin)
-        if (model.version >= 264) {
-            std::string skinPath = pipeline::skinPathForM2(m2Path);
-            auto skinData = assetManager_->readFile(skinPath);
-            if (!skinData.empty()) {
-                pipeline::M2Loader::loadSkin(skinData, model);
-            } else {
-                LOG_WARNING("Missing skin file for WotLK mount M2: ", skinPath);
-            }
-        }
-
-        // Load external .anim files (only idle + run needed for mounts)
-        // Only what a mount does while standing still; the rest would stall.
-        pipeline::loadExternalAnimations(
-            *assetManager_, m2Path, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
-
-        if (!charRenderer->loadModel(model, modelId)) {
-            LOG_WARNING("Failed to load mount model: ", m2Path);
-            return;
-        }
-
-        displayIdModelCache_[mountDisplayId] = modelId;
-    }
-
-    // Apply creature skin textures from CreatureDisplayInfo.dbc.
-    // Re-apply even for cached models so transient failures can self-heal.
-    std::string modelDir;
-    size_t lastSlash = m2Path.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        modelDir = m2Path.substr(0, lastSlash + 1);
-    }
-
-    auto itDisplayData = displayDataMap_.find(mountDisplayId);
-    bool haveDisplayData = false;
-    CreatureDisplayData dispData{};
-    if (itDisplayData != displayDataMap_.end()) {
-        dispData = itDisplayData->second;
-        haveDisplayData = true;
-    } else {
-        // Some taxi mount display IDs are sparse; recover skins by matching model path.
-        std::string lowerMountPath = m2Path;
-        std::transform(lowerMountPath.begin(), lowerMountPath.end(), lowerMountPath.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        int bestScore = -1;
-        for (const auto& [dispId, data] : displayDataMap_) {
-            auto pit = modelIdToPath_.find(data.modelId);
-            if (pit == modelIdToPath_.end()) continue;
-            std::string p = pit->second;
-            std::transform(p.begin(), p.end(), p.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (p != lowerMountPath) continue;
-            int score = 0;
-            if (!data.skin1.empty()) {
-                std::string p1 = modelDir + data.skin1 + ".blp";
-                score += assetManager_->fileExists(p1) ? 30 : 3;
-            }
-            if (!data.skin2.empty()) {
-                std::string p2 = modelDir + data.skin2 + ".blp";
-                score += assetManager_->fileExists(p2) ? 20 : 2;
-            }
-            if (!data.skin3.empty()) {
-                std::string p3 = modelDir + data.skin3 + ".blp";
-                score += assetManager_->fileExists(p3) ? 10 : 1;
-            }
-            if (score > bestScore) {
-                bestScore = score;
-                dispData = data;
-                haveDisplayData = true;
-            }
-        }
-        if (haveDisplayData) {
-            LOG_INFO("Recovered mount display data by model path for displayId=", mountDisplayId,
-                     " skin1='", dispData.skin1, "' skin2='", dispData.skin2,
-                     "' skin3='", dispData.skin3, "'");
-        }
-    }
-    if (haveDisplayData) {
-        // If this displayId has no skins, try to find another displayId for the same model with skins.
-        if (dispData.skin1.empty() && dispData.skin2.empty() && dispData.skin3.empty()) {
-            uint32_t sourceModelId = dispData.modelId;
-            int bestScore = -1;
-            for (const auto& [dispId, data] : displayDataMap_) {
-                if (data.modelId != sourceModelId) continue;
-                int score = 0;
-                if (!data.skin1.empty()) {
-                    std::string p = modelDir + data.skin1 + ".blp";
-                    score += assetManager_->fileExists(p) ? 30 : 3;
-                }
-                if (!data.skin2.empty()) {
-                    std::string p = modelDir + data.skin2 + ".blp";
-                    score += assetManager_->fileExists(p) ? 20 : 2;
-                }
-                if (!data.skin3.empty()) {
-                    std::string p = modelDir + data.skin3 + ".blp";
-                    score += assetManager_->fileExists(p) ? 10 : 1;
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    dispData = data;
-                }
-            }
-            LOG_INFO("Mount skin fallback for displayId=", mountDisplayId,
-                     " modelId=", sourceModelId, " skin1='", dispData.skin1,
-                     "' skin2='", dispData.skin2, "' skin3='", dispData.skin3, "'");
-        }
-        const auto* md = charRenderer->getModelData(modelId);
-        if (md) {
-            LOG_INFO("Mount model textures: ", md->textures.size(), " slots, skin1='", dispData.skin1,
-                     "' skin2='", dispData.skin2, "' skin3='", dispData.skin3, "'");
-            for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                LOG_INFO("  tex[", ti, "] type=", md->textures[ti].type,
-                         " filename='", md->textures[ti].filename, "'");
-            }
-
-            int replaced = 0;
-            for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                const auto& tex = md->textures[ti];
-                std::string texPath;
-                if (tex.type == 11 && !dispData.skin1.empty()) {
-                    texPath = modelDir + dispData.skin1 + ".blp";
-                } else if (tex.type == 12 && !dispData.skin2.empty()) {
-                    texPath = modelDir + dispData.skin2 + ".blp";
-                } else if (tex.type == 13 && !dispData.skin3.empty()) {
-                    texPath = modelDir + dispData.skin3 + ".blp";
-                }
-                if (!texPath.empty()) {
-                    rendering::VkTexture* skinTex = charRenderer->loadTexture(texPath);
-                    if (skinTex) {
-                        charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), skinTex);
-                        LOG_INFO("  Applied skin texture slot ", ti, ": ", texPath);
-                        replaced++;
-                    } else {
-                        LOG_WARNING("  Failed to load skin texture slot ", ti, ": ", texPath);
-                    }
-                }
-            }
-
-            // Force skin textures onto type-0 (hardcoded) slots that have no filename
-            if (replaced == 0) {
-                for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                    const auto& tex = md->textures[ti];
-                    if (tex.type == 0 && tex.filename.empty()) {
-                        // Empty hardcoded slot - try skin1 then skin2
-                        std::string texPath;
-                        if (!dispData.skin1.empty() && replaced == 0) {
-                            texPath = modelDir + dispData.skin1 + ".blp";
-                        } else if (!dispData.skin2.empty()) {
-                            texPath = modelDir + dispData.skin2 + ".blp";
-                        }
-                        if (!texPath.empty()) {
-                            rendering::VkTexture* skinTex = charRenderer->loadTexture(texPath);
-                            if (skinTex) {
-                                charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), skinTex);
-                                LOG_INFO("  Forced skin on empty hardcoded slot ", ti, ": ", texPath);
-                                replaced++;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If still no textures, try hardcoded model texture filenames
-            if (replaced == 0) {
-                for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                    if (!md->textures[ti].filename.empty()) {
-                        rendering::VkTexture* texId = charRenderer->loadTexture(md->textures[ti].filename);
-                        if (texId) {
-                            charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), texId);
-                            LOG_INFO("  Used model embedded texture slot ", ti, ": ", md->textures[ti].filename);
-                            replaced++;
-                        }
-                    }
-                }
-            }
-
-            // Final fallback for gryphon/wyvern: try well-known skin texture names
-            if (replaced == 0 && !md->textures.empty()) {
-                std::string lowerMountPath = m2Path;
-                std::transform(lowerMountPath.begin(), lowerMountPath.end(), lowerMountPath.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (lowerMountPath.find("gryphon") != std::string::npos) {
-                    const char* gryphonSkins[] = {
-                        "Creature\\Gryphon\\Gryphon_Skin.blp",
-                        "Creature\\Gryphon\\Gryphon_Skin01.blp",
-                        "Creature\\Gryphon\\GRYPHON_SKIN01.BLP",
-                        nullptr
-                    };
-                    for (const char** p = gryphonSkins; *p; ++p) {
-                        rendering::VkTexture* texId = charRenderer->loadTexture(*p);
-                        if (texId) {
-                            charRenderer->setModelTexture(modelId, 0, texId);
-                            LOG_INFO("  Forced gryphon skin fallback: ", *p);
-                            replaced++;
-                            break;
-                        }
-                    }
-                } else if (lowerMountPath.find("wyvern") != std::string::npos) {
-                    const char* wyvernSkins[] = {
-                        "Creature\\Wyvern\\Wyvern_Skin.blp",
-                        "Creature\\Wyvern\\Wyvern_Skin01.blp",
-                        nullptr
-                    };
-                    for (const char** p = wyvernSkins; *p; ++p) {
-                        rendering::VkTexture* texId = charRenderer->loadTexture(*p);
-                        if (texId) {
-                            charRenderer->setModelTexture(modelId, 0, texId);
-                            LOG_INFO("  Forced wyvern skin fallback: ", *p);
-                            replaced++;
-                            break;
-                        }
-                    }
-                }
-            }
-            LOG_INFO("Mount texture setup: ", replaced, " textures applied");
-        }
-    }
+    std::string m2Path;
+    float preparedRiderHeight = 0.0f;
+    if (!loadRemoteMountModel(mountDisplayId, modelId, m2Path, preparedRiderHeight)) return;
+    pendingMountDisplayId_ = 0;
+    auto* charRenderer = renderer_->getCharacterRenderer();
 
     mountModelId_ = modelId;
 
@@ -1792,56 +1670,64 @@ bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
     if (cached != displayIdModelCache_.end() && cr->getModelData(cached->second)) {
         modelId = cached->second;
     } else {
-        auto m2Data = assetManager_->readFile(modelPath);
-        if (m2Data.empty()) return false;
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.name.empty()) model.name = modelPath;
-        if (model.vertices.empty()) return false;
-
-        if (model.version >= 264 && modelPath.size() >= 3) {
-            std::string skinPath = pipeline::skinPathForM2(modelPath);
-            auto skinData = assetManager_->readFile(skinPath);
-            if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, model);
+        pipeline::M2Model model;
+        if (!loadWeaponM2(modelPath, model)) return false;
+        auto skins = getCreatureSkinPaths(displayId, modelPath);
+        if (skins.empty()) {
+            auto display = displayDataMap_.find(displayId);
+            for (const auto& [candidateId, candidate] : displayDataMap_) {
+                auto path = modelIdToPath_.find(candidate.modelId);
+                if ((display != displayDataMap_.end() && candidate.modelId == display->second.modelId) ||
+                    (display == displayDataMap_.end() && path != modelIdToPath_.end() && path->second == modelPath)) {
+                    skins = getCreatureSkinPaths(candidateId, modelPath);
+                    if (!skins.empty()) break;
+                }
+            }
         }
-        if (!model.isValid()) return false;
-
-        pipeline::loadExternalAnimations(
-            *assetManager_, modelPath, m2Data, model,
-            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
-             rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
-
+        if (skins.empty()) {
+            std::string lower = modelPath;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::vector<std::string> fallbacks = lower.find("gryphon") != std::string::npos
+                ? std::vector<std::string>{"Creature\\Gryphon\\Gryphon_Skin.blp",
+                                           "Creature\\Gryphon\\Gryphon_Skin01.blp"}
+                : lower.find("wyvern") != std::string::npos
+                ? std::vector<std::string>{"Creature\\Wyvern\\Wyvern_Skin.blp",
+                                           "Creature\\Wyvern\\Wyvern_Skin01.blp"}
+                : std::vector<std::string>{};
+            for (const auto& path : fallbacks) {
+                if (!assetManager_->fileExists(path)) continue;
+                skins.emplace_back(11u, path);
+                break;
+            }
+        }
+        // All skin decoding is also queued; a pending mount stays pending until
+        // both its geometry and appearance can be published together.
+        bool ready = true;
+        for (const auto& [type, path] : skins) {
+            (void)type;
+            if (!loadWeaponM2(modelPath, model, path)) ready = false;
+        }
+        if (!ready) return false;
+        cr->setPredecodedBLPCache(&preparedAttachmentTextures_, true);
+        struct TextureGuard {
+            rendering::CharacterRenderer* renderer;
+            ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }
+        } guard{cr};
         modelId = nextCreatureModelId_++;
         if (!cr->loadModel(model, modelId)) return false;
         displayIdModelCache_[displayId] = modelId;
-
-        // CreatureDisplayInfo supplies the replaceable mount skins. Mount model
-        // IDs are cached per display ID, so applying them to the model is safe.
-        auto displayIt = displayDataMap_.find(displayId);
-        if (displayIt != displayDataMap_.end()) {
-            CreatureDisplayData skin = displayIt->second;
-            if (skin.skin1.empty() && skin.skin2.empty() && skin.skin3.empty()) {
-                for (const auto& [candidateId, candidate] : displayDataMap_) {
-                    (void)candidateId;
-                    if (candidate.modelId == skin.modelId &&
-                        (!candidate.skin1.empty() || !candidate.skin2.empty() || !candidate.skin3.empty())) {
-                        skin = candidate;
-                        break;
-                    }
-                }
-            }
-            const size_t slash = modelPath.find_last_of("\\/");
-            const std::string dir = slash == std::string::npos ? "" : modelPath.substr(0, slash + 1);
-            if (const auto* md = cr->getModelData(modelId)) {
-                for (size_t ti = 0; ti < md->textures.size(); ++ti) {
-                    std::string name;
-                    if (md->textures[ti].type == 11) name = skin.skin1;
-                    else if (md->textures[ti].type == 12) name = skin.skin2;
-                    else if (md->textures[ti].type == 13) name = skin.skin3;
-                    if (name.empty()) continue;
-                    if (auto* texture = cr->loadTexture(dir + name + ".blp")) {
-                        cr->setModelTexture(modelId, static_cast<uint32_t>(ti), texture);
-                    }
-                }
+        size_t forcedSlot = 0;
+        for (size_t ti = 0; ti < model.textures.size(); ++ti) {
+            const auto& slot = model.textures[ti];
+            for (const auto& [type, path] : skins) {
+                const bool emptyNamedSlot = slot.type == 0 && slot.filename.empty() &&
+                    !skins.empty() && &path == &skins[std::min(forcedSlot, skins.size() - 1)].second;
+                if (slot.type != type && !emptyNamedSlot) continue;
+                if (auto* texture = cr->loadTexture(path))
+                    cr->setModelTexture(modelId, static_cast<uint32_t>(ti), texture);
+                if (emptyNamedSlot) ++forcedSlot;
+                break;
             }
         }
     }
@@ -1868,8 +1754,8 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
     auto* cr = renderer_->getCharacterRenderer();
     if (!cr) return;
 
-    // Mount model loading can touch disk and upload GPU resources. Process at
-    // most one transition per frame, consistent with the other spawn queues.
+    // Workers prepare mount geometry and textures; publish at most one ready
+    // transition per frame, retaining the current visual while loading.
     for (auto it = pendingRemotePlayerMounts_.begin();
          it != pendingRemotePlayerMounts_.end(); ++it) {
         const uint64_t guid = it->first;
@@ -1888,18 +1774,15 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             pendingRemotePlayerMounts_.erase(it);
             return;
         }
-        removeRemotePlayerMount(guid);
-
         uint32_t modelId = 0;
         float riderHeight = 0.0f;
         std::string modelPath;
         if (!loadRemoteMountModel(displayId, modelId, modelPath, riderHeight)) {
-            LOG_WARNING("Failed to load remote player mount: guid=0x", std::hex, guid,
-                        std::dec, " displayId=", displayId);
-            pendingRemotePlayerMounts_.erase(it);
-            return;
+            // Background preparation is still pending. Other riders can advance.
+            continue;
         }
 
+        removeRemotePlayerMount(guid);
         glm::vec3 pos(0.0f);
         cr->getInstancePosition(playerIt->second, pos);
         uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
@@ -2165,11 +2048,82 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
     LOG_DEBUG("Despawned gameobject: guid=0x", std::hex, guid, std::dec);
 }
 
-bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel) {
-    // pipeline/m2_asset_loader.hpp. This copy did not name the model after its
-    // path, so a weapon loaded here was a model nothing downstream could
-    // identify.
-    return pipeline::loadM2WithSkin(*assetManager_, m2Path, outModel);
+bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel,
+                                 const std::string& texturePath) {
+    if (preparedEquipmentUpdate_) {
+        std::string key = m2Path;
+        std::replace(key.begin(), key.end(), '/', '\\');
+        std::transform(key.begin(), key.end(), key.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        auto ready = preparedEquipmentUpdate_->models.find(key);
+        if (ready == preparedEquipmentUpdate_->models.end() || !ready->second) return false;
+        outModel = *ready->second;
+        return outModel.isValid();
+    }
+    auto normalize = [](std::string path) {
+        std::replace(path.begin(), path.end(), '/', '\\');
+        std::transform(path.begin(), path.end(), path.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return path;
+    };
+    const std::string key = normalize(m2Path);
+    const std::string skinKey = normalize(texturePath);
+    const std::string taskKey = key + '|' + skinKey;
+    if (auto pending = asyncAttachmentLoads_.find(taskKey); pending != asyncAttachmentLoads_.end()) {
+        if (pending->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return false;
+        auto result = pending->second.get();
+        asyncAttachmentLoads_.erase(pending);
+        attachmentModelData_[key] = result.models[key];
+        for (auto& [path, texture] : result.predecodedTextures)
+            preparedAttachmentTextures_[path] = std::move(texture);
+    }
+    auto cached = attachmentModelData_.find(key);
+    if (cached != attachmentModelData_.end() && !cached->second) return false;
+    if (cached != attachmentModelData_.end() &&
+        (skinKey.empty() || preparedAttachmentTextures_.count(skinKey))) {
+        outModel = *cached->second;
+        return outModel.isValid();
+    }
+    if (asyncAttachmentLoads_.size() >= 2) return false;
+    auto model = cached == attachmentModelData_.end() ? nullptr : cached->second;
+    auto* assets = assetManager_;
+    asyncAttachmentLoads_[taskKey] = ThreadPool::ioWorkers().submit([assets, key, skinKey, model] {
+        PreparedEquipmentUpdate ready;
+        auto parsed = model;
+        if (!parsed) {
+            parsed = std::make_shared<pipeline::M2Model>();
+            auto bytes = assets->readFile(key);
+            if (bytes.empty()) {
+                parsed.reset();
+            } else {
+                *parsed = pipeline::M2Loader::load(bytes);
+                if (parsed->name.empty()) parsed->name = key;
+                if (parsed->version >= 264) {
+                    auto skin = assets->readFile(pipeline::skinPathForM2(key));
+                    if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, *parsed);
+                }
+                if (!parsed->isValid()) parsed.reset();
+                else pipeline::loadExternalAnimations(*assets, key, bytes, *parsed,
+                    {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
+                     rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
+            }
+        }
+        ready.models[key] = parsed;
+        if (parsed) {
+            for (const auto& texture : parsed->textures) {
+                if (texture.type != 0) continue;
+                auto path = texture.filename;
+                std::replace(path.begin(), path.end(), '/', '\\');
+                std::transform(path.begin(), path.end(), path.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                ready.predecodedTextures[path] = rendering::CharacterRenderer::prepareTexture(assets, path);
+            }
+        }
+        if (!skinKey.empty())
+            ready.predecodedTextures[skinKey] = rendering::CharacterRenderer::prepareTexture(assets, skinKey);
+        return ready;
+    });
+    return false;
 }
 
 

@@ -1,0 +1,689 @@
+{
+  "root": "/mnt/d/games/WoWee",
+  "kept_executables": [
+    "asset_extract.exe",
+    "wowee-before-entity-streaming-20261011-184520.exe",
+    "wowee.exe",
+    "wowee_assets.exe",
+    "wowee_extension_host.exe"
+  ],
+  "targets": [
+    {
+      "path": "build/bin/rt-halo-probe.exe",
+      "kind": "file",
+      "bytes": 5847377,
+      "files": 1
+    },
+    {
+      "path": "build/bin/rt_probe.exe",
+      "kind": "file",
+      "bytes": 5839228,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_adt_alpha.exe",
+      "kind": "file",
+      "bytes": 1400705,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_adt_truncation.exe",
+      "kind": "file",
+      "bytes": 1391430,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_camera_pivot.exe",
+      "kind": "file",
+      "bytes": 1328053,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_font_em_scale.exe",
+      "kind": "file",
+      "bytes": 2404275,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_grass_terrain.exe",
+      "kind": "file",
+      "bytes": 1478817,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_light_bands.exe",
+      "kind": "file",
+      "bytes": 1371340,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_m2_blend_mode.exe",
+      "kind": "file",
+      "bytes": 1316917,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_m2_material.exe",
+      "kind": "file",
+      "bytes": 1515879,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_m2_sky_material.exe",
+      "kind": "file",
+      "bytes": 1473239,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_m2_sway.exe",
+      "kind": "file",
+      "bytes": 1273114,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_server_extension.exe",
+      "kind": "file",
+      "bytes": 1860262,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_spatial_grid.exe",
+      "kind": "file",
+      "bytes": 1382333,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_warden_challenge.exe",
+      "kind": "file",
+      "bytes": 1342996,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_warden_memory.exe",
+      "kind": "file",
+      "bytes": 1410696,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_warden_reloc.exe",
+      "kind": "file",
+      "bytes": 1264765,
+      "files": 1
+    },
+    {
+      "path": "build/bin/test_world_socket.exe",
+      "kind": "file",
+      "bytes": 1577963,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-before-warden-fix.exe",
+      "kind": "file",
+      "bytes": 19086444,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-before-world-socket-fix.exe",
+      "kind": "file",
+      "bytes": 19263989,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-distance-fog.exe",
+      "kind": "file",
+      "bytes": 19263989,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-entity-streaming.exe",
+      "kind": "file",
+      "bytes": 19379707,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-fast-login.exe",
+      "kind": "file",
+      "bytes": 19228874,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-fountain-fix.exe",
+      "kind": "file",
+      "bytes": 19395725,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-pending.exe",
+      "kind": "file",
+      "bytes": 19090360,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-render-speckles.exe",
+      "kind": "file",
+      "bytes": 19242171,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-sculpture-fix.exe",
+      "kind": "file",
+      "bytes": 19256536,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-sky-fix.exe",
+      "kind": "file",
+      "bytes": 19242171,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-streaming-batched-baseline.exe",
+      "kind": "file",
+      "bytes": 19276276,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-terrain-fix.exe",
+      "kind": "file",
+      "bytes": 19243836,
+      "files": 1
+    },
+    {
+      "path": "build/bin/wowee-world-socket-fix.exe",
+      "kind": "file",
+      "bytes": 19395725,
+      "files": 1
+    },
+    {
+      "path": "build/distance-fog-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/distance-fog.ninja",
+      "kind": "file",
+      "bytes": 2539977,
+      "files": 1
+    },
+    {
+      "path": "build/entity-streaming-batched-baseline-config",
+      "kind": "directory",
+      "bytes": 61,
+      "files": 1
+    },
+    {
+      "path": "build/entity-streaming-batched-config",
+      "kind": "directory",
+      "bytes": 61,
+      "files": 1
+    },
+    {
+      "path": "build/entity-streaming-batched-validated-config",
+      "kind": "directory",
+      "bytes": 61,
+      "files": 1
+    },
+    {
+      "path": "build/entity-streaming-batched-validated-expanded-config",
+      "kind": "directory",
+      "bytes": 61,
+      "files": 1
+    },
+    {
+      "path": "build/entity-streaming.ninja",
+      "kind": "file",
+      "bytes": 2548677,
+      "files": 1
+    },
+    {
+      "path": "build/fast-login.ninja",
+      "kind": "file",
+      "bytes": 2527582,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-before-0-config",
+      "kind": "directory",
+      "bytes": 16,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-before-2-config",
+      "kind": "directory",
+      "bytes": 16,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-fix.ninja",
+      "kind": "file",
+      "bytes": 2539973,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-link.rsp",
+      "kind": "file",
+      "bytes": 36956,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-object-manifest.json",
+      "kind": "file",
+      "bytes": 88740,
+      "files": 1
+    },
+    {
+      "path": "build/render-fix.ninja",
+      "kind": "file",
+      "bytes": 2501789,
+      "files": 1
+    },
+    {
+      "path": "build/render-probe.ninja",
+      "kind": "file",
+      "bytes": 2501771,
+      "files": 1
+    },
+    {
+      "path": "build/render-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/render-speckles-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/render-speckles.ninja",
+      "kind": "file",
+      "bytes": 2501851,
+      "files": 1
+    },
+    {
+      "path": "build/rt-halo-probe.ninja",
+      "kind": "file",
+      "bytes": 2496635,
+      "files": 1
+    },
+    {
+      "path": "build/sculpture-fix-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/sculpture-fix.ninja",
+      "kind": "file",
+      "bytes": 2537215,
+      "files": 1
+    },
+    {
+      "path": "build/sky-background-probe-0-config",
+      "kind": "directory",
+      "bytes": 16,
+      "files": 1
+    },
+    {
+      "path": "build/sky-background-probe-2-config",
+      "kind": "directory",
+      "bytes": 16,
+      "files": 1
+    },
+    {
+      "path": "build/sky-background-probe-3-config",
+      "kind": "directory",
+      "bytes": 16,
+      "files": 1
+    },
+    {
+      "path": "build/sky-fix.ninja",
+      "kind": "file",
+      "bytes": 2531301,
+      "files": 1
+    },
+    {
+      "path": "build/sky-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/terrain-fix.ninja",
+      "kind": "file",
+      "bytes": 2531337,
+      "files": 1
+    },
+    {
+      "path": "build/terrain-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/world-socket-fix-smoke-config",
+      "kind": "directory",
+      "bytes": 0,
+      "files": 0
+    },
+    {
+      "path": "build/world-socket-fix.ninja",
+      "kind": "file",
+      "bytes": 2548703,
+      "files": 1
+    },
+    {
+      "path": "build/fountain-objects",
+      "kind": "directory",
+      "bytes": 184427478,
+      "files": 465
+    },
+    {
+      "path": "build/CMakeFiles/wowee-world-socket-snapshot.dir",
+      "kind": "directory",
+      "bytes": 184427478,
+      "files": 465
+    },
+    {
+      "path": "build-extension-x86",
+      "kind": "directory",
+      "bytes": 4634,
+      "files": 4
+    },
+    {
+      "path": "wowee-wotlk-sharper-20261011.zip",
+      "kind": "file",
+      "bytes": 34215878,
+      "files": 1
+    },
+    {
+      "path": "build/CMakeFiles/warden-final.rsp",
+      "kind": "file",
+      "bytes": 27488,
+      "files": 1
+    },
+    {
+      "path": "build/CMakeFiles/wowee-fountain.rsp",
+      "kind": "file",
+      "bytes": 27655,
+      "files": 1
+    },
+    {
+      "path": "build/CMakeFiles/wowee-world-socket-snapshot.rsp",
+      "kind": "file",
+      "bytes": 37885,
+      "files": 1
+    },
+    {
+      "path": "build/CMakeFiles/wowee-world-socket.rsp",
+      "kind": "file",
+      "bytes": 27655,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/catch2_main.dir/__/extern/catch2/catch_amalgamated.cpp.obj",
+      "kind": "file",
+      "bytes": 1492241,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/server_extension_fixture.dir/server_extension_fixture.cpp.obj",
+      "kind": "file",
+      "bytes": 4783,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_adt_alpha.dir/__/src/pipeline/adt_alpha.cpp.obj",
+      "kind": "file",
+      "bytes": 4098,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_adt_alpha.dir/__/src/pipeline/adt_loader.cpp.obj",
+      "kind": "file",
+      "bytes": 82923,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_adt_alpha.dir/test_adt_alpha.cpp.obj",
+      "kind": "file",
+      "bytes": 45077,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_adt_truncation.dir/__/src/pipeline/adt_loader.cpp.obj",
+      "kind": "file",
+      "bytes": 82923,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_adt_truncation.dir/test_adt_truncation.cpp.obj",
+      "kind": "file",
+      "bytes": 38662,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_camera_pivot.dir/test_camera_pivot.cpp.obj",
+      "kind": "file",
+      "bytes": 43519,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_font_em_scale.dir/__/src/ui/interface_fonts.cpp.obj",
+      "kind": "file",
+      "bytes": 60884,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_font_em_scale.dir/test_font_em_scale.cpp.obj",
+      "kind": "file",
+      "bytes": 66834,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/__/src/pipeline/adt_alpha.cpp.obj",
+      "kind": "file",
+      "bytes": 4098,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/__/src/pipeline/adt_loader.cpp.obj",
+      "kind": "file",
+      "bytes": 82923,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/__/src/pipeline/grass_profile.cpp.obj",
+      "kind": "file",
+      "bytes": 9823,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/__/src/pipeline/grass_terrain.cpp.obj",
+      "kind": "file",
+      "bytes": 8612,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/__/src/pipeline/terrain_mesh.cpp.obj",
+      "kind": "file",
+      "bytes": 33450,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_grass_terrain.dir/test_grass_terrain.cpp.obj",
+      "kind": "file",
+      "bytes": 94757,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_light_bands.dir/test_distance_fog.cpp.obj",
+      "kind": "file",
+      "bytes": 31784,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_light_bands.dir/test_light_bands.cpp.obj",
+      "kind": "file",
+      "bytes": 74991,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_blend_mode.dir/test_m2_blend_mode.cpp.obj",
+      "kind": "file",
+      "bytes": 25408,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_material.dir/__/src/pipeline/m2_loader.cpp.obj",
+      "kind": "file",
+      "bytes": 163379,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_material.dir/test_m2_material.cpp.obj",
+      "kind": "file",
+      "bytes": 126640,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_sky_material.dir/__/src/pipeline/m2_loader.cpp.obj",
+      "kind": "file",
+      "bytes": 163379,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_sky_material.dir/test_m2_sky_material.cpp.obj",
+      "kind": "file",
+      "bytes": 72539,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_m2_sway.dir/test_m2_sway.cpp.obj",
+      "kind": "file",
+      "bytes": 25862,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_server_extension.dir/__/src/core/https_get.cpp.obj",
+      "kind": "file",
+      "bytes": 24632,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_server_extension.dir/__/src/game/server_extension.cpp.obj",
+      "kind": "file",
+      "bytes": 378030,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_server_extension.dir/__/src/game/server_protocol.cpp.obj",
+      "kind": "file",
+      "bytes": 60562,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_server_extension.dir/test_server_extension.cpp.obj",
+      "kind": "file",
+      "bytes": 459809,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_spatial_grid.dir/test_spatial_grid.cpp.obj",
+      "kind": "file",
+      "bytes": 109537,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_challenge.dir/__/src/auth/crypto.cpp.obj",
+      "kind": "file",
+      "bytes": 3071,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_challenge.dir/__/src/game/warden_crypto.cpp.obj",
+      "kind": "file",
+      "bytes": 27324,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_challenge.dir/test_warden_challenge.cpp.obj",
+      "kind": "file",
+      "bytes": 28700,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_memory.dir/__/src/game/warden_memory.cpp.obj",
+      "kind": "file",
+      "bytes": 132407,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_memory.dir/test_warden_memory.cpp.obj",
+      "kind": "file",
+      "bytes": 48762,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_warden_reloc.dir/test_warden_reloc.cpp.obj",
+      "kind": "file",
+      "bytes": 13429,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/auth/crypto.cpp.obj",
+      "kind": "file",
+      "bytes": 3071,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/auth/rc4.cpp.obj",
+      "kind": "file",
+      "bytes": 13094,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/auth/vanilla_crypt.cpp.obj",
+      "kind": "file",
+      "bytes": 1692,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/game/opcode_table.cpp.obj",
+      "kind": "file",
+      "bytes": 137121,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/network/packet.cpp.obj",
+      "kind": "file",
+      "bytes": 16749,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/__/src/network/world_socket.cpp.obj",
+      "kind": "file",
+      "bytes": 121738,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/test_world_socket.dir/test_world_socket.cpp.obj",
+      "kind": "file",
+      "bytes": 90272,
+      "files": 1
+    },
+    {
+      "path": "build/tests/CMakeFiles/wowee_test_common.dir/__/src/core/logger.cpp.obj",
+      "kind": "file",
+      "bytes": 52816,
+      "files": 1
+    }
+  ],
+  "total_bytes": 724036579,
+  "total_files": 1036,
+  "completed_utc": "2026-10-11T16:59:36.537163+00:00",
+  "preserved_primary_sha256": "6bb0e46cbbdea7b6696b01e24e70d6dcb09e2082af1e2646baec0f38e877a19a",
+  "preserved_backup_sha256": "331182493da157cc9acb173dbf42d8916b60b37ac8d71403dcdad3fd59a0939c"
+}

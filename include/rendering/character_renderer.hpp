@@ -204,10 +204,24 @@ public:
     void clearShadowMap() {}
 
     // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
-    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
+    static pipeline::BLPImage prepareTexture(pipeline::AssetManager* assets, const std::string& path);
+    // CPU-only preparation: safe on workers; no renderer/GPU state is accessed.
+    static void prepareCompositeTextures(pipeline::AssetManager* assets,
+        const std::vector<std::string>& layers,
+        std::unordered_map<std::string, pipeline::BLPImage>& decoded);
+    static void prepareCompositeWithRegions(pipeline::AssetManager* assets,
+        const std::string& base, const std::vector<std::string>& layers,
+        const std::vector<std::pair<int, std::string>>& regions,
+        std::unordered_map<std::string, pipeline::BLPImage>& decoded);
+    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache,
+                              bool preparedOnly = false) {
+        predecodedBLPCache_ = cache;
+        preparedTexturesOnly_ = cache && preparedOnly;
+    }
 
 private:
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
+    bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
     struct M2ModelGPU {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
