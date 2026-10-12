@@ -1,0 +1,21 @@
+// The light a model takes from the frame, given where the model stands.
+// `interior` is rgb = the MOHD ambient of the WMO whose interior group holds
+// the model, w = 1 when an interior group holds it and 0 outdoors.
+//
+// The sun does not reach an interior group. wmo.frag lights one from MOHD and
+// its baked vertex colours and ignores the frame's light, so a model inside
+// takes the same ambient and no directional light, and matches the walls
+// around it. The frame's own light stays the outdoor one, which is what lights
+// everything seen through a door.
+//
+// An all-zero ambient is not taken: with no directional light beside it the
+// model would draw black, so the frame's ambient is kept.
+vec3 interiorAmbient(vec4 interior, vec3 frameAmbient) {
+    bool usable = interior.w > 0.5f && interior.r + interior.g + interior.b > 0.0f;
+    return usable ? vec3(interior.r, interior.g, interior.b) : frameAmbient;
+}
+
+// The share of the frame's directional light a model takes.
+float interiorSunScale(vec4 interior) {
+    return interior.w > 0.5f ? 0.0f : 1.0f;
+}

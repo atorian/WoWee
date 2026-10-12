@@ -28,6 +28,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "sky_atmosphere.glsli"
+#include "interior_light.glsli"
+
+layout(push_constant) uniform Push {
+    mat4 model;          // read by character.vert
+    vec4 interiorLight;
+} push;
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -392,6 +398,7 @@ void main() {
     } else {
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
+        vec3 sunColor = lightColor.rgb * interiorSunScale(push.interiorLight);
 
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
         vec3 halfDir = normalize(ldir + viewDir);
@@ -418,8 +425,8 @@ void main() {
         RtLight rt = rtLightAt(FragPos, vertexNormal);
         shadow = rtShadow(rt, shadow);
 
-        result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+        result = rtAmbient(rt, interiorAmbient(push.interiorLight, ambientColor.rgb)) * texColor.rgb
+               + shadow * (diff * sunColor * texColor.rgb + spec * sunColor);
     }
 
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);

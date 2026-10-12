@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "rt_lighting.glsli"
 #include "sky_atmosphere.glsli"
+#include "interior_light.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
@@ -67,6 +68,7 @@ layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
 layout(location = 8) in vec4 AuthoredUVs;
+layout(location = 9) flat in vec4 vInteriorLight;
 
 layout(location = 0) out vec4 outColor;
 
@@ -345,6 +347,7 @@ void main() {
         }
     } else {
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
+        vec3 sunColor = lightColor.rgb * interiorSunScale(vInteriorLight);
 
         float spec = 0.0;
         float shadow = 1.0;
@@ -377,7 +380,7 @@ void main() {
             float backLit = max(-nDotL, 0.0);
             float viewDotLight = max(dot(viewDir, -ldir), 0.0);
             float sssAmount = backLit * pow(viewDotLight, 4.0) * 0.35 * texColor.a;
-            sss = sssAmount * vec3(1.0, 0.9, 0.5) * lightColor.rgb;
+            sss = sssAmount * vec3(1.0, 0.9, 0.5) * sunColor;
         }
 
         // Sky-bounce ambient for foliage: upward-facing leaves catch more
@@ -385,12 +388,12 @@ void main() {
         // of a uniformly-lit blob.
         RtLight rt = rtLightAt(FragPos, vertexNormal);
         shadow = rtShadow(rt, shadow);
-        vec3 ambientTerm = rtAmbient(rt, ambientColor.rgb);
+        vec3 ambientTerm = rtAmbient(rt, interiorAmbient(vInteriorLight, ambientColor.rgb));
         if (isFoliage) {
             ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
         }
         result = ambientTerm * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb)
+               + shadow * (diff * sunColor * texColor.rgb + spec * sunColor)
                + sss;
 
         if (interiorDarken > 0.0) {

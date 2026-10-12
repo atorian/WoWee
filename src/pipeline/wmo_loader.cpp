@@ -31,6 +31,7 @@ constexpr uint32_t MOCV = 0x4D4F4356;  // Vertex colors
 constexpr uint32_t MONR = 0x4D4F4E52;  // Normals
 constexpr uint32_t MOTV = 0x4D4F5456;  // Texture coords
 constexpr uint32_t MLIQ = 0x4D4C4951;  // Liquid
+constexpr uint32_t MODR = 0x4D4F4452;  // Doodad references
 
 // Read utilities
 template<typename T>
@@ -413,6 +414,17 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
     return model;
 }
 
+std::vector<bool> interiorDoodads(const WMOModel& model) {
+    std::vector<bool> interior(model.doodads.size(), false);
+    for (const auto& group : model.groups) {
+        if (!(group.flags & kWMOGroupIndoor)) continue;
+        for (uint16_t ref : group.doodadRefs) {
+            if (ref < interior.size()) interior[ref] = true;
+        }
+    }
+    return interior;
+}
+
 bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                           WMOModel& model,
                           uint32_t groupIndex) {
@@ -459,7 +471,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             mogpOffset += 4; // skip groupName offset
             mogpOffset += 4; // skip descriptiveGroupName offset
             group.flags = read<uint32_t>(groupData, mogpOffset);
-            bool isInterior = (group.flags & 0x2000) != 0;
+            bool isInterior = (group.flags & kWMOGroupIndoor) != 0;
             core::Logger::getInstance().debug("  Group flags: 0x", std::hex, group.flags, std::dec,
                                               (isInterior ? " (INTERIOR)" : " (exterior)"));
             group.boundingBoxMin.x = read<float>(groupData, mogpOffset);
@@ -609,6 +621,13 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                                 " count=", batch.indexCount, " verts=[", batch.startVertex, "-",
                                 batch.lastVertex, "] mat=", static_cast<int>(batch.materialId), " flags=", static_cast<int>(batch.flags));
                         }
+                    }
+                }
+                else if (subChunkId == MODR) {
+                    const uint32_t refCount = subChunkSize / 2;
+                    group.doodadRefs.reserve(refCount);
+                    for (uint32_t i = 0; i < refCount; i++) {
+                        group.doodadRefs.push_back(read<uint16_t>(groupData, mogpOffset));
                     }
                 }
                 else if (subChunkId == MLIQ) { // MLIQ - WMO liquid data

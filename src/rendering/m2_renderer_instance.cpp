@@ -326,6 +326,13 @@ void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
     }
 }
 
+void M2Renderer::setInteriorLight(uint32_t instanceId, std::optional<glm::vec3> wmoAmbient) {
+    auto it = instanceIndexById.find(instanceId);
+    if (it == instanceIndexById.end()) return;
+    instances[it->second].interiorLight =
+        wmoAmbient ? glm::vec4(*wmoAmbient, 1.0f) : glm::vec4(0.0f);
+}
+
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     if (instanceIds.empty() || instances.empty()) {
         return;

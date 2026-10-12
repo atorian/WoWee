@@ -1542,6 +1542,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                 e.highlight = inst.highlight;
                 e.flags = inst.afloat > 0 ? 1 : 0;
+                e.interiorLight = inst.interiorLight;
                 instanceDataCount_++;
                 ++writtenInstances;
             }
@@ -1834,6 +1835,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
                             e.highlight = inst.highlight;
                             e.flags = inst.afloat > 0 ? 1 : 0;
+                            e.interiorLight = inst.interiorLight;
                             instanceDataCount_++;
                         }
                     }
@@ -2130,6 +2132,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
             e.highlight = instance.highlight;
             e.flags = instance.afloat > 0 ? 1 : 0;
+            e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
 
             // Pipeline selection

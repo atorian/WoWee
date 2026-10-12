@@ -4,7 +4,6 @@
 #include <vector>
 #include <map>
 #include <memory>
-#include <optional>
 #include <string>
 #include <glm/glm.hpp>
 
@@ -56,7 +55,7 @@ struct LightingParams {
 void applyZoneAmbienceOverride(uint32_t zoneId, LightingParams& params);
 
 /** Resolve the sky clock shown for a zone without changing the world clock. */
-float resolveZoneVisualTimeHours(uint32_t zoneId, bool isIndoors, float worldTimeHours);
+float resolveZoneVisualTimeHours(uint32_t zoneId, float worldTimeHours);
 
 /**
  * Light set keyframe for time-of-day interpolation
@@ -216,14 +215,11 @@ public:
      */
     [[nodiscard]] const LightingParams& getLightingParams() const { return currentParams_; }
 
-    /// Whether the camera is inside a WMO interior group, given as that WMO's
-    /// MOHD ambient colour; no value is outdoors. Indoors the sky models fade
-    /// out, the zone ambience is not applied and the frame is lit by the
-    /// building rather than the sun - see applyInteriorLight.
-    void setIndoors(std::optional<glm::vec3> wmoAmbient) {
-        isIndoors_ = wmoAmbient.has_value();
-        indoorAmbient_ = wmoAmbient.value_or(glm::vec3(0.0f));
-    }
+    /// Whether the camera is inside a WMO interior group. Indoors the sky
+    /// models fade out. The frame's light stays the outdoor one: it lights
+    /// what is seen through a door, and each model inside an interior group
+    /// takes its own light instead - see interior_light.glsli.
+    void setIndoors(bool indoors) { isIndoors_ = indoors; }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
     /// How far the distance fog is pulled toward the sky's horizon colour.
     /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
@@ -340,7 +336,6 @@ private:
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
-    glm::vec3 indoorAmbient_{0.0f};
     float fogSkyBlend_ = 0.7f;
     float fogStrength_ = 0.4f;
 

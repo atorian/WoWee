@@ -2111,14 +2111,21 @@ void Renderer::update(float deltaTime) {
     }
     playerIndoors_ = insideWmo;
 
+    // Characters, creatures and their weapons take the light of the interior
+    // group they stand in. WMO doodads are told theirs when they are placed.
+    if (characterRenderer && wmoRenderer) {
+        characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
+            return wmoRenderer->interiorAmbientAt(p.x, p.y, p.z);
+        });
+    }
+
     // Update lighting system
     if (lightingManager) {
-        // Lit by the building only inside one of its interior groups. Being
-        // inside any group is not enough: Stormwind's streets are exterior
-        // groups of the city's WMO, and so are porches, bridges and archways.
-        lightingManager->setIndoors(insideWmo
-            ? wmoRenderer->interiorAmbientAt(camPos.x, camPos.y, camPos.z)
-            : std::nullopt);
+        // Indoors only inside one of a WMO's interior groups. Being inside any
+        // group is not enough: Stormwind's streets are exterior groups of the
+        // city's WMO, and so are porches, bridges and archways.
+        lightingManager->setIndoors(insideWmo &&
+            wmoRenderer->isInsideInteriorWMO(camPos.x, camPos.y, camPos.z));
 
         const auto* gh = core::Application::getInstance().getGameHandler();
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;

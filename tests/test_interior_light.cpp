@@ -1,19 +1,23 @@
-// What lights the frame while the camera is inside a WMO interior group:
-// which groups count as inside, where the building's ambient comes from in the
-// file, and what that ambient replaces.
+// What lights a model standing inside a WMO interior group: which groups count
+// as inside, which doodads the file puts inside them, where the building's
+// ambient comes from, and what that ambient replaces in the shaders.
 
 #include <catch_amalgamated.hpp>
 
 #include "pipeline/wmo_loader.hpp"
-#include "rendering/interior_light.hpp"
-#include "rendering/lighting_manager.hpp"
 #include "rendering/wmo_group_containment.hpp"
+
+#include <glm/glm.hpp>
 
 #include <cstring>
 #include <vector>
 
-using wowee::rendering::LightingParams;
-using wowee::rendering::applyInteriorLight;
+namespace interior_light {
+using glm::vec3;
+using glm::vec4;
+#include "../assets/shaders/interior_light.glsli"
+}
+
 using wowee::rendering::groupContainsPoint;
 
 namespace {
@@ -30,6 +34,12 @@ void put32(std::vector<uint8_t>& out, uint32_t v) {
     std::memcpy(&out[at], &v, 4);
 }
 
+void put16(std::vector<uint8_t>& out, uint16_t v) {
+    const size_t at = out.size();
+    out.resize(at + 2);
+    std::memcpy(&out[at], &v, 2);
+}
+
 // A root WMO holding only MVER and MOHD, with MOHD's ambient written as the
 // four bytes the file stores, in file order.
 std::vector<uint8_t> rootWithAmbientBytes(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
@@ -42,6 +52,28 @@ std::vector<uint8_t> rootWithAmbientBytes(uint8_t b0, uint8_t b1, uint8_t b2, ui
     for (int i = 0; i < 7; ++i) put32(file, 0);  // the seven counts
     file.insert(file.end(), {b0, b1, b2, b3});
     while (file.size() < 8 + 12 + 64) file.push_back(0);  // wmoID, box, flags
+    return file;
+}
+
+// A group file holding MVER and a MOGP whose only sub-chunk is a MODR listing
+// `refs`.
+std::vector<uint8_t> groupWithDoodadRefs(uint32_t flags, const std::vector<uint16_t>& refs) {
+    std::vector<uint8_t> modr;
+    put32(modr, 0x4D4F4452);  // MODR
+    put32(modr, static_cast<uint32_t>(refs.size() * 2));
+    for (uint16_t ref : refs) put16(modr, ref);
+
+    std::vector<uint8_t> file;
+    put32(file, 0x4D564552);  // MVER
+    put32(file, 4);
+    put32(file, 17);
+    put32(file, 0x4D4F4750);  // MOGP
+    put32(file, static_cast<uint32_t>(68 + modr.size()));
+    put32(file, 0);  // group name
+    put32(file, 0);  // descriptive name
+    put32(file, flags);
+    file.resize(file.size() + 68 - 12, 0);  // box, portals, batches, fogs, liquid, id...
+    file.insert(file.end(), modr.begin(), modr.end());
     return file;
 }
 
@@ -79,46 +111,53 @@ TEST_CASE("MOHD ambient is read as blue, green, red, alpha bytes", "[interior_li
     REQUIRE(model.ambientColor.b == Catch::Approx(1.0f));
 }
 
-TEST_CASE("indoors the frame is lit by the WMO's ambient and not by the sun",
-          "[interior_light]") {
-    LightingParams params;
-    params.ambientColor = glm::vec3(0.4f, 0.4f, 0.5f);   // the zone's LightParams
-    params.diffuseColor = glm::vec3(1.0f, 0.95f, 0.8f);  // the sun
+TEST_CASE("a group's MODR lists the doodads standing in it", "[interior_light]") {
+    wowee::pipeline::WMOModel model;
+    model.groups.resize(1);
 
-    applyInteriorLight(params, glm::vec3(0.25f, 0.2f, 0.15f));
+    wowee::pipeline::WMOLoader::loadGroup(groupWithDoodadRefs(0x2000, {3, 7, 12}), model, 0);
 
-    REQUIRE(params.ambientColor == glm::vec3(0.25f, 0.2f, 0.15f));
-    REQUIRE(params.diffuseColor == glm::vec3(0.0f));
+    REQUIRE(model.groups[0].doodadRefs == std::vector<uint16_t>{3, 7, 12});
 }
 
-TEST_CASE("indoors the fog and sky stay the outdoor ones seen through the door",
-          "[interior_light]") {
-    LightingParams params;
-    params.fogColor = glm::vec3(0.1f, 0.2f, 0.3f);
-    params.fogStart = 120.0f;
-    params.fogEnd = 640.0f;
-    params.skyTopColor = glm::vec3(0.02f, 0.03f, 0.08f);  // night
-    params.skyMiddleColor = glm::vec3(0.05f, 0.06f, 0.1f);
-    params.directionalDir = glm::vec3(0.0f, 0.6f, -0.8f);
+TEST_CASE("only doodads an interior group lists stand inside", "[interior_light]") {
+    wowee::pipeline::WMOModel model;
+    model.doodads.resize(5);
+    model.groups.resize(2);
+    model.groups[0].flags = 0x2000;  // the hall
+    model.groups[0].doodadRefs = {0, 3};
+    model.groups[1].flags = 0x8;     // the porch outside its door
+    model.groups[1].doodadRefs = {1, 2};
 
-    applyInteriorLight(params, glm::vec3(0.25f, 0.2f, 0.15f));
-
-    REQUIRE(params.fogColor == glm::vec3(0.1f, 0.2f, 0.3f));
-    REQUIRE(params.fogStart == 120.0f);
-    REQUIRE(params.fogEnd == 640.0f);
-    REQUIRE(params.skyTopColor == glm::vec3(0.02f, 0.03f, 0.08f));
-    REQUIRE(params.skyMiddleColor == glm::vec3(0.05f, 0.06f, 0.1f));
-    REQUIRE(params.directionalDir == glm::vec3(0.0f, 0.6f, -0.8f));
+    REQUIRE(wowee::pipeline::interiorDoodads(model) ==
+            std::vector<bool>{true, false, false, true, false});
 }
 
-TEST_CASE("a WMO with an all-zero ambient keeps the zone's ambient indoors",
+TEST_CASE("a model inside an interior group is lit by the WMO's ambient and not by the sun",
           "[interior_light]") {
-    LightingParams params;
-    params.ambientColor = glm::vec3(0.4f, 0.4f, 0.5f);
-    params.diffuseColor = glm::vec3(1.0f, 0.95f, 0.8f);
+    const glm::vec4 inHall(0.25f, 0.2f, 0.15f, 1.0f);
+    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
 
-    applyInteriorLight(params, glm::vec3(0.0f));
+    REQUIRE(interior_light::interiorAmbient(inHall, zoneAmbient) ==
+            glm::vec3(0.25f, 0.2f, 0.15f));
+    REQUIRE(interior_light::interiorSunScale(inHall) == 0.0f);
+}
 
-    REQUIRE(params.ambientColor == glm::vec3(0.4f, 0.4f, 0.5f));
-    REQUIRE(params.diffuseColor == glm::vec3(0.0f));
+TEST_CASE("a model outdoors keeps the frame's ambient and the sun", "[interior_light]") {
+    const glm::vec4 outdoors(0.0f);
+    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
+
+    REQUIRE(interior_light::interiorAmbient(outdoors, zoneAmbient) ==
+            glm::vec3(0.4f, 0.4f, 0.5f));
+    REQUIRE(interior_light::interiorSunScale(outdoors) == 1.0f);
+}
+
+TEST_CASE("a WMO with an all-zero ambient leaves the frame's ambient on models inside",
+          "[interior_light]") {
+    const glm::vec4 inBlackHall(0.0f, 0.0f, 0.0f, 1.0f);
+    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
+
+    REQUIRE(interior_light::interiorAmbient(inBlackHall, zoneAmbient) ==
+            glm::vec3(0.4f, 0.4f, 0.5f));
+    REQUIRE(interior_light::interiorSunScale(inBlackHall) == 0.0f);
 }

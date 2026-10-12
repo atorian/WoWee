@@ -1,6 +1,5 @@
 #include "core/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
-#include "rendering/interior_light.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/light_headroom.hpp"
@@ -304,8 +303,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
 
     // Duskwood's visible sky is permanently late-night even while the global
     // world clock continues normally for gameplay and every other zone.
-    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(
-        zoneId, isIndoors_, timeOfDay_ * 24.0f);
+    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(zoneId, timeOfDay_ * 24.0f);
 
     // Convert visual time to half-minutes (WoW DBC format: 0-2879).
     const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
@@ -382,9 +380,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                   [](const SkyboxLayer& a, const SkyboxLayer& b) { return a.weight > b.weight; });
     }
 
-    // Sample and blend lighting. Indoors too: the sky and fog seen through a
-    // doorway are the outdoor ones, and applyInteriorLight below replaces only
-    // the light on the frame's surfaces.
+    // Sample and blend lighting. Indoors too: this is the outdoor light, which
+    // lights what is seen through a door; models inside an interior group take
+    // their own light in the shaders.
     LightingParams newParams;
 
     if (!activeVolumes_.empty()) {
@@ -455,11 +453,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    if (isIndoors_) {
-        applyInteriorLight(newParams, indoorAmbient_);
-    } else {
-        applyZoneAmbienceOverride(zoneId, newParams);
-    }
+    applyZoneAmbienceOverride(zoneId, newParams);
 
     // Keep the authored fog colour. The surface shaders blend it toward the
     // actual sky band along each camera ray; one CPU-side mid-sky tint made

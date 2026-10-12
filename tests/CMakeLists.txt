@@ -2151,9 +2151,10 @@ wowee_add_test(test_light_headroom
             ${TEST_COMMON_SOURCES})
 
 # ── test_interior_light ──────────────────────────────────────
-# The light inside a WMO interior group. LightingManager's indoor mode was
-# never switched on, so doodads and characters inside a WMO took the sun
-# and the zone's LightParams instead of the building's MOHD ambient.
+# The light of a model inside a WMO interior group. Doodads and characters
+# inside a WMO took the sun and the zone's LightParams instead of the
+# building's MOHD ambient; the shaders now light each model by where it
+# stands, from interior_light.glsli.
 wowee_add_test(test_interior_light
     SOURCES test_interior_light.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp

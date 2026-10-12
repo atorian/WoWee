@@ -110,6 +110,8 @@ struct PendingTile {
         pipeline::M2Model model;
         glm::vec3 worldPosition;   // For frustum culling
         glm::mat4 modelMatrix;     // Pre-computed world transform
+        // The WMO's MOHD ambient when an interior group holds the doodad
+        std::optional<glm::vec3> interiorAmbient;
     };
     std::vector<WMODoodadReady> wmoDoodads;
 

@@ -9,6 +9,10 @@
 namespace wowee {
 namespace pipeline {
 
+/// MOGP flag 0x2000: the group is indoors. It is what separates a building's
+/// inside from the porch and the roof, which are groups of the same model.
+inline constexpr uint32_t kWMOGroupIndoor = 0x2000;
+
 /**
  * WMO (World Model Object) Format
  *
@@ -166,6 +170,9 @@ struct WMOGroup {
     // BSP tree (for collision - optional)
     std::vector<uint8_t> bspNodes;
 
+    // MODR: the MODD entries standing in this group
+    std::vector<uint16_t> doodadRefs;
+
     // Liquid data (MLIQ chunk)
     WMOLiquid liquid;
 
@@ -228,6 +235,10 @@ struct WMOModel {
         return nGroups > 0 && !groups.empty();
     }
 };
+
+/// Per MODD entry, whether an interior group lists it in its MODR: the doodad
+/// stands inside and is lit by the building rather than the sun.
+[[nodiscard]] std::vector<bool> interiorDoodads(const WMOModel& model);
 
 class WMOLoader {
 public:
