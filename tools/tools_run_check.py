@@ -48,6 +48,7 @@ TOOLS = Path(__file__).resolve().parent
 #: Not sweeps: libraries, generators, and things that open a window.
 SKIP = {
     "framexml_source.py", "ownership_walk.py", "opcode_map_utils.py",
+    "source_index.py",
     "m2_viewer.py", "upscale_textures.py",
     "gen_opcode_registry.py", "tools_run_check.py", "sweep_guard.py",
 }

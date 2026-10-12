@@ -35,8 +35,10 @@ sound before deciding which of the three it is.
 import argparse
 import pathlib
 import re
-import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from source_index import SourceIndex  # noqa: E402  (a sibling, not a package)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 AUDIO_HEADERS = ROOT / "include" / "audio"
@@ -54,19 +56,16 @@ def collections():
     return found
 
 
-def mentions(name):
-    out = subprocess.run(["grep", "-rn", name, "src/", "include/"],
-                         capture_output=True, text=True, cwd=ROOT).stdout
-    return out.splitlines()
-
-
 def scan():
+    # Read here rather than once at import: the canary edits two files and
+    # scans again, and has to be seen by the second read.
+    index = SourceIndex([ROOT / "src", ROOT / "include"])
     hits = []
     for name, header in sorted(collections().items()):
-        lines = mentions(name)
-        used = [l for l in lines
-                if not l.split(":")[0].endswith(".hpp")
-                and not any(tok in l for tok in LOAD_ONLY)]
+        lines = list(index.lines_containing(name))
+        used = [line for path, _, line in lines
+                if path.suffix != ".hpp"
+                and not any(tok in line for tok in LOAD_ONLY)]
         if lines and not used:
             hits.append((name, header, len(lines)))
     return hits

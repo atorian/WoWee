@@ -89,11 +89,13 @@ struct LightVolume {
     float innerRadius = 0.0f;   // Full weight radius
     float outerRadius = 0.0f;   // Fade-out radius
 
-    // LightParams IDs for different conditions
-    uint32_t lightParamsId = 0;        // Normal/clear weather
-    uint32_t lightParamsIdRain = 0;    // Rainy weather
-    uint32_t lightParamsIdUnderwater = 0;
-    // More variants exist for phases, death, etc.
+    // LightParams IDs for different conditions, in Light.dbc's column order.
+    // Zero where the volume has nothing special for that case.
+    uint32_t lightParamsId = 0;                 // Clear
+    uint32_t lightParamsIdUnderwater = 0;       // Clear, camera under water
+    uint32_t lightParamsIdStorm = 0;            // Rain or storm
+    uint32_t lightParamsIdStormUnderwater = 0;  // Storm, camera under water
+    // More variants exist for death etc.
 };
 
 /**
@@ -168,7 +170,9 @@ struct LightParamsProfile {
         CELESTIAL_GLOW_THROUGH = 2,
         // Channel 3 is the curve that actually varies: 0 to 5, mean 0.50.
         CLOUD_DENSITY = 3,
-        FOG_DENSITY = 3,
+        // No channel is a fog density. One was declared as a second name for
+        // channel 3, and the cloud curve dimmed the lens flare and the stars
+        // twice, once as cloud and once as fog.
         // ... more channels
         FLOAT_CHANNEL_COUNT = 6
     };
@@ -201,7 +205,7 @@ public:
      * @param mapId Current map ID
      * @param gameTime Optional game time in seconds (use -1 for real time)
      * @param isRaining Whether it's raining
-     * @param isUnderwater Whether player is underwater
+     * @param isUnderwater Whether the camera is under water
      *
      * Note: WoW uses server-sent game time, not local PC time.
      * Pass gameTime from SMSG_LOGIN_SETTIMESPEED or similar.
@@ -292,26 +296,6 @@ private:
      * Find light volumes for blending (up to 4 with weight > 0)
      */
     [[nodiscard]] std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
-
-    /**
-     * Get LightParams ID based on conditions
-     */
-    uint32_t selectLightParamsId(const LightVolume* volume, bool isRaining, bool isUnderwater) const;
-
-    /**
-     * Sample lighting from LightParams profile
-     */
-    LightingParams sampleLightParams(const LightParamsProfile* profile, uint16_t timeHalfMinutes) const;
-
-    /**
-     * Sample color from band
-     */
-    [[nodiscard]] glm::vec3 sampleColorBand(const ColorBand& band, uint16_t timeHalfMinutes) const;
-
-    /**
-     * Sample float from band
-     */
-    [[nodiscard]] float sampleFloatBand(const FloatBand& band, uint16_t timeHalfMinutes) const;
 
     /**
      * Convert DBC BGR color to RGB vec3

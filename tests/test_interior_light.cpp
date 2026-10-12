@@ -1,10 +1,12 @@
 // What lights a model standing inside a WMO interior group: which groups count
 // as inside, which doodads the file puts inside them, where the building's
-// ambient comes from, and what that ambient replaces in the shaders.
+// ambient comes from, how a unit is lit by the floor under it, and what that
+// light replaces in the shaders.
 
 #include <catch_amalgamated.hpp>
 
 #include "pipeline/wmo_loader.hpp"
+#include "rendering/interior_light.hpp"
 #include "rendering/wmo_group_containment.hpp"
 
 #include <glm/glm.hpp>
@@ -18,7 +20,13 @@ using glm::vec4;
 #include "../assets/shaders/interior_light.glsli"
 }
 
+using wowee::rendering::colorAtPoint;
+using wowee::rendering::doodadInteriorLight;
 using wowee::rendering::groupContainsPoint;
+using wowee::rendering::InteriorLight;
+using wowee::rendering::InteriorLightGPU;
+using wowee::rendering::packInteriorLight;
+using wowee::rendering::unitInteriorLight;
 
 namespace {
 
@@ -133,31 +141,117 @@ TEST_CASE("only doodads an interior group lists stand inside", "[interior_light]
             std::vector<bool>{true, false, false, true, false});
 }
 
-TEST_CASE("a model inside an interior group is lit by the WMO's ambient and not by the sun",
+TEST_CASE("a unit on a dim floor is lit from above, brought up to the client's minimum",
           "[interior_light]") {
-    const glm::vec4 inHall(0.25f, 0.2f, 0.15f, 1.0f);
-    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
+    // MOHD 0.1 grey, the floor's MOCV a dim orange: the floor draws with
+    // 0.1 + 2 * (0.1, 0.05, 0.0) = (0.3, 0.2, 0.1).
+    const InteriorLight light =
+        unitInteriorLight(glm::vec3(0.1f), glm::vec3(0.1f, 0.05f, 0.0f));
 
-    REQUIRE(interior_light::interiorAmbient(inHall, zoneAmbient) ==
-            glm::vec3(0.25f, 0.2f, 0.15f));
-    REQUIRE(interior_light::interiorSunScale(inHall) == 0.0f);
+    // Direct: scaled until its brightest channel is 0xA8 / 255.
+    REQUIRE(light.direct.r == Catch::Approx(0.658824f));
+    REQUIRE(light.direct.g == Catch::Approx(0.439216f));
+    REQUIRE(light.direct.b == Catch::Approx(0.219608f));
+    // Ambient: under 0x60 / 255 already, so the floor's colour as it is.
+    REQUIRE(light.ambient.r == Catch::Approx(0.3f));
+    REQUIRE(light.ambient.g == Catch::Approx(0.2f));
+    REQUIRE(light.ambient.b == Catch::Approx(0.1f));
+}
+
+TEST_CASE("a unit on a bright floor keeps it as direct light and a capped ambient",
+          "[interior_light]") {
+    // 0.2 + 2 * (0.3, 0.3, 0.1) = (0.8, 0.8, 0.4).
+    const InteriorLight light =
+        unitInteriorLight(glm::vec3(0.2f), glm::vec3(0.3f, 0.3f, 0.1f));
+
+    REQUIRE(light.direct.r == Catch::Approx(0.8f));
+    REQUIRE(light.direct.g == Catch::Approx(0.8f));
+    REQUIRE(light.direct.b == Catch::Approx(0.4f));
+    // Scaled until its brightest channel is 0x60 / 255.
+    REQUIRE(light.ambient.r == Catch::Approx(0.376471f));
+    REQUIRE(light.ambient.g == Catch::Approx(0.376471f));
+    REQUIRE(light.ambient.b == Catch::Approx(0.188235f));
+}
+
+TEST_CASE("a floor brighter than white lights a unit as white", "[interior_light]") {
+    // 0.5 + 2 * 0.6 = 1.7 in every channel, which the floor cannot draw.
+    const InteriorLight light = unitInteriorLight(glm::vec3(0.5f), glm::vec3(0.6f));
+
+    REQUIRE(light.direct.r == Catch::Approx(1.0f));
+    REQUIRE(light.ambient.r == Catch::Approx(0.376471f));
+}
+
+TEST_CASE("a unit with no vertex colour under it is lit by the WMO's ambient alone",
+          "[interior_light]") {
+    const InteriorLight light = unitInteriorLight(glm::vec3(0.2f, 0.1f, 0.1f), std::nullopt);
+
+    REQUIRE(light.direct.r == Catch::Approx(0.658824f));
+    REQUIRE(light.direct.g == Catch::Approx(0.329412f));
+    REQUIRE(light.ambient.r == Catch::Approx(0.2f));
+    REQUIRE(light.ambient.g == Catch::Approx(0.1f));
+}
+
+TEST_CASE("a unit in a black room with a black floor gets no interior light",
+          "[interior_light]") {
+    const InteriorLight light = unitInteriorLight(glm::vec3(0.0f), glm::vec3(0.0f));
+
+    REQUIRE(light.direct == glm::vec3(0.0f));
+    REQUIRE(light.ambient == glm::vec3(0.0f));
+}
+
+TEST_CASE("a floor's colour is interpolated between the corners of the triangle hit",
+          "[interior_light]") {
+    const glm::vec3 a(0, 0, 0), b(4, 0, 0), c(0, 4, 0);
+    const glm::vec3 red(1, 0, 0), green(0, 1, 0), blue(0, 0, 1);
+
+    REQUIRE(colorAtPoint(b, a, b, c, red, green, blue) == glm::vec3(0, 1, 0));
+    const glm::vec3 midAB = colorAtPoint(glm::vec3(2, 0, 0), a, b, c, red, green, blue);
+    REQUIRE(midAB.r == Catch::Approx(0.5f));
+    REQUIRE(midAB.g == Catch::Approx(0.5f));
+    REQUIRE(midAB.b == Catch::Approx(0.0f).margin(1e-6));
+    const glm::vec3 inside = colorAtPoint(glm::vec3(1, 2, 0), a, b, c, red, green, blue);
+    REQUIRE(inside.r == Catch::Approx(0.25f));
+    REQUIRE(inside.g == Catch::Approx(0.25f));
+    REQUIRE(inside.b == Catch::Approx(0.5f));
+}
+
+TEST_CASE("a doodad inside is lit by the WMO's ambient and its MODD colour from above",
+          "[interior_light]") {
+    const glm::vec3 mohd(0.25f, 0.2f, 0.15f);
+    const glm::vec3 modd(0.9f, 0.7f, 0.5f);
+    const InteriorLightGPU gpu = packInteriorLight(doodadInteriorLight(mohd, modd));
+    const glm::vec3 frameAmbient(0.4f, 0.4f, 0.5f);
+    const glm::vec3 sun(1.0f, 1.0f, 0.9f);
+    const glm::vec3 eveningSunDir(0.9f, 0.0f, -0.436f);
+
+    REQUIRE(interior_light::interiorAmbient(gpu.ambient, frameAmbient) == mohd);
+    REQUIRE(interior_light::interiorDirect(gpu.ambient, gpu.direct, sun) == modd);
+    // Falls from above along the client's fixed interior direction, not
+    // along the low sun outside.
+    const glm::vec3 dir = interior_light::interiorLightDir(gpu.ambient, eveningSunDir);
+    REQUIRE(dir.x == Catch::Approx(-0.30822f));
+    REQUIRE(dir.y == Catch::Approx(-0.30822f));
+    REQUIRE(dir.z == Catch::Approx(-0.9f));
 }
 
 TEST_CASE("a model outdoors keeps the frame's ambient and the sun", "[interior_light]") {
-    const glm::vec4 outdoors(0.0f);
-    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
+    const InteriorLightGPU gpu = packInteriorLight(std::nullopt);
+    const glm::vec3 frameAmbient(0.4f, 0.4f, 0.5f);
+    const glm::vec3 sun(1.0f, 1.0f, 0.9f);
+    const glm::vec3 sunDir(0.5f, 0.0f, -0.866f);
 
-    REQUIRE(interior_light::interiorAmbient(outdoors, zoneAmbient) ==
-            glm::vec3(0.4f, 0.4f, 0.5f));
-    REQUIRE(interior_light::interiorSunScale(outdoors) == 1.0f);
+    REQUIRE(interior_light::interiorAmbient(gpu.ambient, frameAmbient) == frameAmbient);
+    REQUIRE(interior_light::interiorDirect(gpu.ambient, gpu.direct, sun) == sun);
+    REQUIRE(interior_light::interiorLightDir(gpu.ambient, sunDir) == sunDir);
 }
 
 TEST_CASE("a WMO with an all-zero ambient leaves the frame's ambient on models inside",
           "[interior_light]") {
-    const glm::vec4 inBlackHall(0.0f, 0.0f, 0.0f, 1.0f);
-    const glm::vec3 zoneAmbient(0.4f, 0.4f, 0.5f);
+    const InteriorLightGPU gpu =
+        packInteriorLight(doodadInteriorLight(glm::vec3(0.0f), glm::vec3(0.5f)));
+    const glm::vec3 frameAmbient(0.4f, 0.4f, 0.5f);
 
-    REQUIRE(interior_light::interiorAmbient(inBlackHall, zoneAmbient) ==
-            glm::vec3(0.4f, 0.4f, 0.5f));
-    REQUIRE(interior_light::interiorSunScale(inBlackHall) == 0.0f);
+    REQUIRE(interior_light::interiorAmbient(gpu.ambient, frameAmbient) == frameAmbient);
+    REQUIRE(interior_light::interiorDirect(gpu.ambient, gpu.direct, glm::vec3(1.0f)) ==
+            glm::vec3(0.5f));
 }

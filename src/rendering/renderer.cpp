@@ -11,6 +11,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
+#include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/performance_hud.hpp"
 #include "rendering/water_renderer.hpp"
@@ -629,13 +630,11 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
-        if (waterRenderer && camera) {
-            glm::vec3 camPos = camera->getPosition();
-            auto waterH = waterRenderer->getNearestWaterHeightAt(camPos.x, camPos.y, camPos.z);
+        {
             constexpr float MIN_SUBMERSION = 2.0f;
-            if (waterH && camPos.z < (*waterH - MIN_SUBMERSION)
-                       && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
-                float depth = *waterH - camPos.z - MIN_SUBMERSION;
+            const auto eyeDepth = cameraWaterDepth();
+            if (eyeDepth && *eyeDepth > MIN_SUBMERSION) {
+                float depth = *eyeDepth - MIN_SUBMERSION;
                 float blend = glm::clamp(1.0f - std::exp(-depth * 0.08f), 0.0f, 0.7f);
                 glm::vec3 underwaterFog(0.03f, 0.09f, 0.18f);
                 glm::vec3 blendedFog = glm::mix(lp.fogColor, underwaterFog, blend);
@@ -2115,7 +2114,7 @@ void Renderer::update(float deltaTime) {
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
         characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorAmbientAt(p.x, p.y, p.z);
+            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
         });
     }
 
@@ -2131,7 +2130,10 @@ void Renderer::update(float deltaTime) {
         uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
         float gameTime    = gh ? gh->getGameTime() : -1.0f;
         bool isRaining    = gh ? gh->isRaining() : false;
-        bool isUnderwater = cameraController ? cameraController->isSwimming() : false;
+        // The camera's eye under the surface, not the player swimming: on the
+        // surface the camera is above the water and sees the dry light.
+        const auto eyeDepth = cameraWaterDepth();
+        const bool isUnderwater = eyeDepth && *eyeDepth > 0.0f;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
@@ -3585,6 +3587,24 @@ void Renderer::syncSwimEffectsTargetPass() {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
     }
+}
+
+std::optional<float> Renderer::cameraWaterDepth() const {
+    if (!waterRenderer || !camera) return std::nullopt;
+    const glm::vec3 camPos = camera->getPosition();
+    if (waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) return std::nullopt;
+    // Far enough for deep ocean; see renderUnderwaterOverlay for what the
+    // default 15 units did.
+    constexpr float kUnderwaterReach = 400.0f;
+    const auto waterH = waterRenderer->getNearestWaterHeightAt(
+        camPos.x, camPos.y, camPos.z, kUnderwaterReach);
+    if (!waterH) return std::nullopt;
+    // That reach also finds a lake over a dry cave; the ground tells the two
+    // apart. See camera_water_depth.hpp.
+    const auto groundH = terrainManager ? terrainManager->getHeightAt(camPos.x, camPos.y)
+                                        : std::nullopt;
+    const bool hole = terrainManager && terrainManager->isHoleAt(camPos.x, camPos.y);
+    return rendering::cameraWaterDepth(camPos.z, waterH, groundH, hole);
 }
 
 void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {

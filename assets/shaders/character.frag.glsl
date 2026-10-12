@@ -32,7 +32,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(push_constant) uniform Push {
     mat4 model;          // read by character.vert
-    vec4 interiorLight;
+    vec4 interiorAmbient;
+    vec4 interiorDirect;
 } push;
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
@@ -396,16 +397,17 @@ void main() {
         vec3 warm = emissiveTint * emissiveBoost;
         result = texColor.rgb * (1.0 + warm);
     } else {
-        vec3 ldir = normalize(-lightDir.xyz);
+        bool inside = insideInterior(push.interiorAmbient);
+        vec3 ldir = normalize(-interiorLightDir(push.interiorAmbient, lightDir.xyz));
         float diff = max(dot(norm, ldir), 0.0);
-        vec3 sunColor = lightColor.rgb * interiorSunScale(push.interiorLight);
+        vec3 sunColor = interiorDirect(push.interiorAmbient, push.interiorDirect, lightColor.rgb);
 
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
         vec3 halfDir = normalize(ldir + viewDir);
         float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
 
         float shadow = 1.0;
-        if (shadowParams.x > 0.5) {
+        if (!inside && shadowParams.x > 0.5) {
             // Texture relief changes lighting, not the caster geometry. Offsetting
             // along its perturbed normal can push the lookup into the surface.
             vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
@@ -423,9 +425,9 @@ void main() {
             shadow = mix(1.0, shadow, shadowParams.y);
         }
         RtLight rt = rtLightAt(FragPos, vertexNormal);
-        shadow = rtShadow(rt, shadow);
+        if (!inside) shadow = rtShadow(rt, shadow);
 
-        result = rtAmbient(rt, interiorAmbient(push.interiorLight, ambientColor.rgb)) * texColor.rgb
+        result = rtAmbient(rt, interiorAmbient(push.interiorAmbient, ambientColor.rgb)) * texColor.rgb
                + shadow * (diff * sunColor * texColor.rgb + spec * sunColor);
     }
 

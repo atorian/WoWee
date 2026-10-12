@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/collision_geometry.hpp"
+#include "rendering/interior_light.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
@@ -399,9 +400,10 @@ public:
      */
     bool isInsideInteriorWMO(float glX, float glY, float glZ) const;
 
-    /// The MOHD ambient colour of the WMO whose interior group holds the
-    /// point, or no value when no interior group does.
-    [[nodiscard]] std::optional<glm::vec3> interiorAmbientAt(float glX, float glY, float glZ) const;
+    /// The light of a character or creature at the point: from the floor
+    /// under it in the WMO interior group that holds it, or no value when no
+    /// interior group does.
+    [[nodiscard]] std::optional<InteriorLight> interiorLightAt(float glX, float glY, float glZ) const;
 
     /** Gather local orange point lights derived from visible lava materials. */
     uint32_t gatherLavaLights(const glm::vec3& cameraPos,
@@ -551,6 +553,10 @@ private:
         // Collision geometry (positions only, for floor raycasting)
         std::vector<glm::vec3> collisionVertices;
         std::vector<uint16_t> collisionIndices;
+        /// MOCV per collision vertex, for an interior group that has them:
+        /// the floor's colour is what lights a unit standing on it. Empty
+        /// for every other group.
+        std::vector<glm::vec3> collisionVertexColors;
 
         // 2D spatial grid for fast triangle lookup (built at load time).
         // Bins triangles by their XY bounding box into grid cells.
@@ -721,6 +727,19 @@ private:
 
     /// Whether a collision focus is set and this instance is outside it.
     bool outsideCollisionFocus(const WMOInstance& instance) const;
+
+    /// A group holding a point, and the point in its model's space.
+    struct GroupHolding {
+        const ModelData* model;
+        const WMOInstance* instance;
+        const GroupResources* group;
+        glm::vec3 localPos;
+    };
+
+    /// The first of a WMO's groups, or only of its interior ones, that holds
+    /// a point.
+    std::optional<GroupHolding> findGroupHolding(float glX, float glY, float glZ,
+                                                 bool interiorOnly) const;
 
     /// Whether a point is inside any of a WMO's groups, or only its
     /// interior ones. The two public queries above differ by that flag.

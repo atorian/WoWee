@@ -104,6 +104,8 @@ FREE_DEFN = re.compile(
     r"(?:noexcept\s*)?\{")
 
 # A double-quoted string, blanked before names are counted.
+WORD = re.compile(r"\w+")
+
 STRING_LITERAL = re.compile(r'"(?:[^"\\\\]|\\\\.)*"')
 
 # Names that mean something else, or whose callers are not C++.
@@ -142,7 +144,6 @@ def use_counts(names):
     declaration or out-of-line definition."""
     counts = collections.Counter()
     wanted = set(names)
-    pattern = re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b")
     for folder in ("src", "include", "tools", "tests"):
         base = ROOT / folder
         if not base.exists():
@@ -151,6 +152,11 @@ def use_counts(names):
             if path.suffix not in (".cpp", ".hpp", ".lua", ".py", ".xml"):
                 continue
             for line in path.read_text(errors="ignore").split("\n"):
+                # Most lines name none of these, and nothing below can change
+                # that - except a block comment, whose removal joins the words
+                # either side of it into one.
+                if "/*" not in line and wanted.isdisjoint(WORD.findall(line)):
+                    continue
                 stripped = line.strip()
                 statement = bool(STATEMENT_START.match(line))
 
@@ -187,11 +193,12 @@ def use_counts(names):
                 # This file's own prose is counted too, so do not name a dead
                 # function here.
                 stripped_line = re.sub(r"//.*|/\*.*?\*/", "", stripped_line)
-                for match in pattern.finditer(stripped_line):
-                    name = match.group(1)
+                for name in WORD.findall(stripped_line):
+                    if name not in wanted:
+                        continue
                     # A function's own definition is not a use of it; anything
                     # else on the same line still is.
-                    if name == defined_here and name in wanted:
+                    if name == defined_here:
                         continue
                     counts[name] += 1
     return counts

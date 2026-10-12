@@ -67,7 +67,8 @@ layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
 layout(location = 8) in vec4 AuthoredUVs;
-layout(location = 9) flat in vec4 vInteriorLight;
+layout(location = 9) flat in vec4 vInteriorAmbient;
+layout(location = 10) flat in vec4 vInteriorDirect;
 
 layout(location = 0) out vec4 outColor;
 
@@ -327,7 +328,8 @@ void main() {
         norm = normalize(norm + vec3(nx, ny, 0.0));
     }
 
-    vec3 ldir = normalize(-lightDir.xyz);
+    bool inside = insideInterior(vInteriorAmbient);
+    vec3 ldir = normalize(-interiorLightDir(vInteriorAmbient, lightDir.xyz));
         float nDotL = dot(norm, ldir);
         float diff = foliageTwoSided ? abs(nDotL) : max(nDotL, 0.0);
 
@@ -346,7 +348,7 @@ void main() {
         }
     } else {
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 sunColor = lightColor.rgb * interiorSunScale(vInteriorLight);
+        vec3 sunColor = interiorDirect(vInteriorAmbient, vInteriorDirect, lightColor.rgb);
 
         float spec = 0.0;
         float shadow = 1.0;
@@ -355,7 +357,7 @@ void main() {
             spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
         }
 
-        if (shadowParams.x > 0.5) {
+        if (!inside && shadowParams.x > 0.5) {
             // Texture relief changes lighting, not the caster geometry. Offsetting
             // along its perturbed normal can push the lookup into the surface.
             vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
@@ -386,8 +388,8 @@ void main() {
         // ambient than the canopy underside, giving the crown depth instead
         // of a uniformly-lit blob.
         RtLight rt = rtLightAt(FragPos, vertexNormal);
-        shadow = rtShadow(rt, shadow);
-        vec3 ambientTerm = rtAmbient(rt, interiorAmbient(vInteriorLight, ambientColor.rgb));
+        if (!inside) shadow = rtShadow(rt, shadow);
+        vec3 ambientTerm = rtAmbient(rt, interiorAmbient(vInteriorAmbient, ambientColor.rgb));
         if (isFoliage) {
             ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
         }

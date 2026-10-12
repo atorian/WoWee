@@ -1,21 +1,33 @@
 // The light a model takes from the frame, given where the model stands.
-// `interior` is rgb = the MOHD ambient of the WMO whose interior group holds
-// the model, w = 1 when an interior group holds it and 0 outdoors.
+// `ambient` is rgb = the ambient of the WMO interior group that holds the
+// model, w = 1 when one holds it and 0 outdoors; `direct` is rgb = the colour
+// of the light falling on it from above in there. See interior_light.hpp for
+// where both come from.
 //
-// The sun does not reach an interior group. wmo.frag lights one from MOHD and
-// its baked vertex colours and ignores the frame's light, so a model inside
-// takes the same ambient and no directional light, and matches the walls
-// around it. The frame's own light stays the outdoor one, which is what lights
-// everything seen through a door.
-//
-// An all-zero ambient is not taken: with no directional light beside it the
-// model would draw black, so the frame's ambient is kept.
-vec3 interiorAmbient(vec4 interior, vec3 frameAmbient) {
-    bool usable = interior.w > 0.5f && interior.r + interior.g + interior.b > 0.0f;
-    return usable ? vec3(interior.r, interior.g, interior.b) : frameAmbient;
+// The sun does not reach an interior group, and neither does its shadow. The
+// frame's own light stays the outdoor one, which is what lights everything
+// seen through a door.
+
+// The way the interior light travels: down, and a little across so that a
+// model's sides are not lit alike. The client's fixed interior sun direction.
+const vec3 kInteriorLightDir = vec3(-0.30822f, -0.30822f, -0.9f);
+
+bool insideInterior(vec4 ambient) {
+    return ambient.w > 0.5f;
 }
 
-// The share of the frame's directional light a model takes.
-float interiorSunScale(vec4 interior) {
-    return interior.w > 0.5f ? 0.0f : 1.0f;
+// An all-zero ambient is not taken: the model's side away from the light
+// would draw black, so the frame's ambient is kept.
+vec3 interiorAmbient(vec4 ambient, vec3 frameAmbient) {
+    bool usable = insideInterior(ambient) && ambient.r + ambient.g + ambient.b > 0.0f;
+    return usable ? vec3(ambient.r, ambient.g, ambient.b) : frameAmbient;
+}
+
+vec3 interiorDirect(vec4 ambient, vec4 direct, vec3 frameLight) {
+    return insideInterior(ambient) ? vec3(direct.r, direct.g, direct.b) : frameLight;
+}
+
+// The way the directional light travels, as the frame's lightDir does.
+vec3 interiorLightDir(vec4 ambient, vec3 frameLightDir) {
+    return insideInterior(ambient) ? kInteriorLightDir : frameLightDir;
 }
