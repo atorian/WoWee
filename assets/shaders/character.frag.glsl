@@ -38,30 +38,7 @@ layout(push_constant) uniform Push {
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
-layout(set = 1, binding = 1) uniform CharMaterial {
-    float opacity;
-    int alphaTest;
-    int colorKeyBlack;
-    int unlit;
-    float emissiveBoost;
-    // Keep these as scalar floats to match the C++ UBO packing. A std140 vec3
-    // would insert padding here and shift the following material flags.
-    float emissiveTintR;
-    float emissiveTintG;
-    float emissiveTintB;
-    float specularIntensity;
-    int enableNormalMap;
-    int enablePOM;
-    float pomScale;
-    int pomMaxSamples;
-    float heightMapVariance;
-    float normalMapStrength;
-    int hairMaterial;
-    int ignoreTextureAlpha;
-    // 0 for every layer but Mod (1) and Mod2x (0.5): the colour that
-    // multiplies the scene by nothing, which fog and fades move toward.
-    float modulateNeutral;
-};
+#include "character_material.glsli"
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 

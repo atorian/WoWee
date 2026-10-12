@@ -21,6 +21,8 @@ layout(push_constant) uniform Push {
     vec4 interiorDirect;   // read by character.frag
 } push;
 
+#include "character_material.glsli"
+
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
     mat4 bones[];
 };
@@ -31,12 +33,15 @@ layout(location = 2) in uvec4 aBoneIndices;
 layout(location = 3) in vec3 aNormal;
 layout(location = 4) in vec2 aTexCoord;
 layout(location = 5) in vec4 aTangent;
+layout(location = 6) in vec2 aTexCoord2;
 
 layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
+
+#include "sphere_map.glsli"
 
 vec3 safeNormalize(vec3 v, vec3 fallback) {
     float len2 = dot(v, v);
@@ -68,7 +73,15 @@ void main() {
     mat3 modelMat3 = mat3(push.model);
     FragPos = worldPos.xyz;
     Normal = modelMat3 * skinnedNorm;
-    TexCoord = aTexCoord;
+    vec2 uv = texCoordSet == 1 ? aTexCoord2 : aTexCoord;
+    if (texCoordSet == -1) {
+        // Env-mapped armour and metal sample eye-space sphere coordinates,
+        // not the atlas UV, as doodads do in m2.vert.
+        vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
+        vec3 eyeNormal = safeNormalize(mat3(view) * Normal, vec3(0.0, 0.0, 1.0));
+        uv = sphereMapUV(eyePosition, eyeNormal);
+    }
+    TexCoord = vec2(dot(uvRow0.xy, uv) + uvRow0.z, dot(uvRow1.xy, uv) + uvRow1.z);
 
     // Gram-Schmidt re-orthogonalize tangent w.r.t. normal
     vec3 N = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));

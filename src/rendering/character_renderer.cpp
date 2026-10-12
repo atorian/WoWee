@@ -18,6 +18,7 @@
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_material.hpp"
+#include "rendering/m2_uv_transform.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
@@ -267,7 +268,12 @@ struct CharMaterialUBO {
     int32_t hairMaterial;
     int32_t ignoreTextureAlpha;
     float modulateNeutral;
+    int32_t texCoordSet;
+    int32_t pad0;
+    M2UVTransform uvTransform;
 };
+static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
+static_assert(sizeof(CharMaterialUBO) == 112, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -277,7 +283,8 @@ struct CharVertexGPU {
     glm::vec3 normal;        // 12 bytes, offset 20
     glm::vec2 texCoords;     // 8 bytes,  offset 32
     glm::vec4 tangent;       // 16 bytes, offset 40 (xyz=dir, w=handedness)
-};  // 56 bytes total
+    glm::vec2 texCoords2;    // 8 bytes,  offset 56
+};  // 64 bytes total
 
 CharacterRenderer::CharacterRenderer() {
 }
@@ -299,7 +306,8 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                                                wowee::rendering::VkShaderModule& charFrag) {
     // --- Vertex input ---
     // CharVertexGPU: vec3 pos(12) + uint8[4] boneWeights(4) + uint8[4] boneIndices(4) +
-    //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) = 56 bytes
+    //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) +
+    //               vec2 texCoords2(8) = 64 bytes
     VkVertexInputBindingDescription charBinding{};
     charBinding.binding = 0;
     charBinding.stride = sizeof(CharVertexGPU);
@@ -312,6 +320,7 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
         {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,  .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, normal))},
         {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords))},
         {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, tangent))},
+        {.location = 6, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords2))},
     };
 
     // --- Build pipelines ---
@@ -379,7 +388,8 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         bindings[1].binding = 1;
         bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // The vertex stage reads the batch's UV set and texture animation.
+        bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[2].binding = 2;
         bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[2].descriptorCount = 1;
@@ -1984,7 +1994,8 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         std::memcpy(dst.boneWeights, src.boneWeights, 4);
         std::memcpy(dst.boneIndices, src.boneIndices, 4);
         dst.normal = src.normal;
-        dst.texCoords = src.texCoords[0]; // Use first UV set
+        dst.texCoords = src.texCoords[0];
+        dst.texCoords2 = src.texCoords[1];
         dst.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // default
 
         // Diagnostic: check bone indices
@@ -2054,7 +2065,7 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         gpuVerts[i].tangent = glm::vec4(tOrtho, w);
     }
 
-    // Upload vertex buffer (CharVertexGPU, 56 bytes per vertex)
+    // Upload vertex buffer (CharVertexGPU, 64 bytes per vertex)
     auto vb = uploadBuffer(*vkCtx_,
         gpuVerts.data(),
         gpuVerts.size() * sizeof(CharVertexGPU),
@@ -3127,6 +3138,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.modulateNeutral =
                     blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
                     : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
+                matData.texCoordSet = m2TextureCoordSet(
+                    gpuModel.data.textureCoordLookup,
+                    static_cast<uint16_t>(batch.textureUnit + resolved.comboOffset));
+                const size_t animLookup = batch.textureAnimIndex == 0xFFFF
+                    ? size_t{0xFFFF}
+                    : size_t{batch.textureAnimIndex} + resolved.comboOffset;
+                if (const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
+                                                          gpuModel.data.textureTransforms,
+                                                          animLookup)) {
+                    matData.uvTransform = m2SampleUVTransform(
+                        *tt, instance.currentSequenceIndex, instance.animationTime,
+                        instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
+                }
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;
@@ -3169,6 +3193,13 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     matData.specularIntensity = 0.08f;
                     matData.enableNormalMap = 0;
                     matData.enablePOM = 0;
+                    matData.heightMapVariance = 0.0f;
+                }
+                // The tangent frame follows UV0. A batch sampling UV1 or the
+                // sphere map would have its relief turned the wrong way.
+                if (matData.texCoordSet != 0) {
+                    normalMap = flatNormalTexture_.get();
+                    matData.enableNormalMap = 0;
                     matData.heightMapVariance = 0.0f;
                 }
                 if (usePreviewSimpleShader) {
@@ -3681,7 +3712,8 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
                 }
 
                 if (!hasFirst) {
-                    first = {.texture = texPtr, .wrapFlags = wrapFlags};
+                    first = {.texture = texPtr, .wrapFlags = wrapFlags,
+                             .comboOffset = static_cast<uint16_t>(i)};
                     hasFirst = true;
                 }
 
@@ -3689,11 +3721,13 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
 
                 // Prefer the hair texture slot (type 6) whenever present in the combo.
                 if (texType == 6) {
-                    return {.texture = texPtr, .wrapFlags = wrapFlags};
+                    return {.texture = texPtr, .wrapFlags = wrapFlags,
+                            .comboOffset = static_cast<uint16_t>(i)};
                 }
 
                 if (!hasFirstNonWhite) {
-                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags};
+                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags,
+                                     .comboOffset = static_cast<uint16_t>(i)};
                     hasFirstNonWhite = true;
                 }
             }

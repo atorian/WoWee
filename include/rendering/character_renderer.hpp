@@ -546,6 +546,9 @@ private:
         static constexpr uint8_t kRepeatBoth = 0x3;
         VkTexture* texture = nullptr;
         uint8_t wrapFlags = kRepeatBoth;
+        /// Which of the batch's combo textures this is. Its UV set and texture
+        /// animation sit at the same offset in their own combo tables.
+        uint16_t comboOffset = 0;
     };
 
     /// Which texture a batch draws with. Shared by the main pass and the shadow
