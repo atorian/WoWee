@@ -68,6 +68,33 @@ inline VkPipelineColorBlendAttachmentState m2ModulateBlendState(bool twice) {
     return state;
 }
 
+// M2Texture flags: bit 0 repeats U, bit 1 repeats V; a clear bit clamps.
+//
+// The wrap belongs to the texture slot of one model, not to the image: the
+// same BLP is clamped by one model and tiled by another. So a batch samples
+// through a sampler built from its own flags, not through whatever sampler the
+// texture cache made for the first model that loaded the image.
+inline VkSamplerCreateInfo m2TextureSamplerInfo(uint8_t texFlags, uint32_t mipLevels,
+                                                float mipLodBias) {
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.minFilter = VK_FILTER_LINEAR;
+    info.magFilter = VK_FILTER_LINEAR;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.addressModeU = (texFlags & 0x1) ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                         : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeV = (texFlags & 0x2) ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                         : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    info.anisotropyEnable = VK_TRUE;
+    info.maxAnisotropy = 16.0f;
+    info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    info.mipLodBias = mipLodBias;
+    info.minLod = 0.0f;
+    info.maxLod = static_cast<float>(mipLevels > 0 ? mipLevels - 1 : 0);
+    return info;
+}
+
 // NoAlphaAdd: the texture's alpha does not attenuate what is added, so a fade
 // has to come through the colour (see m2.frag.glsl).
 inline VkPipelineColorBlendAttachmentState m2NoAlphaAddBlendState() {

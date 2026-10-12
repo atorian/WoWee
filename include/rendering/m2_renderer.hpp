@@ -55,6 +55,7 @@ struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
         VkTexture* secondTexture = nullptr; // second stage of an RGBA-masked layer
+        uint8_t secondTexFlags = 0;         // M2Texture.flags of the mask's slot
         uint16_t colorTrackIndex = UINT16_MAX;
         uint16_t weightTrackIndex = UINT16_MAX;
         uint8_t secondTexCoordSet = 0;
@@ -672,6 +673,9 @@ public:
     /// model loads, and again if it is marked a spell effect afterwards; the
     /// draw loops write nothing into it.
     void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch) const;
+    /// The texture as one batch samples it: its image, with a sampler built
+    /// from that batch's own wrap flags.
+    VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
 
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }

@@ -1403,6 +1403,15 @@ bool isForgeFireTexture(const std::string& texKeyLower,
 
 } // namespace
 
+VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
+                                                 uint8_t texFlags) const {
+    VkDescriptorImageInfo info = texture.descriptorInfo();
+    const VkSampler sampler = vkCtx_->getOrCreateSampler(m2TextureSamplerInfo(
+        texFlags, texture.getMipLevels(), skyMode_ ? m2SkyMipBias() : 0.0f));
+    if (sampler != VK_NULL_HANDLE) info.sampler = sampler;
+    return info;
+}
+
 void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
                                     M2ModelGPU::BatchGPU& batch) const {
     M2BatchMaterialInputs in;
@@ -2283,6 +2292,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     const uint16_t mask = model.textureLookup[second];
                     if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
                         bgpu.secondTexture = allTextures[mask];
+                    if (mask < model.textures.size())
+                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[mask].flags & 0x3);
                 }
                 const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
                 if (coord < model.textureCoordLookup.size())
@@ -2589,7 +2600,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             ? bgpu.texture : whiteTexture_.get();
         if (!batchTex || !batchTex->isValid()) bgpu.materialSet = VK_NULL_HANDLE;
         if (bgpu.materialSet) {
-            VkDescriptorImageInfo imgInfo = batchTex->descriptorInfo();
+            VkDescriptorImageInfo imgInfo = batchImageInfo(*batchTex, bgpu.texFlags);
 
             VkDescriptorBufferInfo matBufInfo{};
             matBufInfo.buffer = bgpu.materialUBO;
@@ -2612,9 +2623,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].pBufferInfo = &matBufInfo;
 
-            VkTexture* maskTex = bgpu.secondTexture && bgpu.secondTexture->isValid()
-                ? bgpu.secondTexture : batchTex;
-            VkDescriptorImageInfo maskInfo = maskTex->descriptorInfo();
+            const bool hasMask = bgpu.secondTexture && bgpu.secondTexture->isValid();
+            VkDescriptorImageInfo maskInfo = hasMask
+                ? batchImageInfo(*bgpu.secondTexture, bgpu.secondTexFlags) : imgInfo;
             writes[2] = writes[0];
             writes[2].dstBinding = 3;
             writes[2].pImageInfo = &maskInfo;
