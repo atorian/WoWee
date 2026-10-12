@@ -3083,11 +3083,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // to handle thread-unsafe GPU allocations (descriptor pools, bone SSBOs).
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
-        if (m2Renderer && cameraController) {
-            // Use isInsideInteriorWMO (flag 0x2000) - not isInsideWMO which includes
-            // outdoor WMO groups like archways/bridges that should receive shadows.
-            m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
-        }
         auto prepStart = std::chrono::steady_clock::now();
         if (wmoRenderer) wmoRenderer->prepareRender();
         auto prepWmoEnd = std::chrono::steady_clock::now();
@@ -3433,10 +3428,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
 
         if (m2Renderer && camera && !skipM2) {
-            if (cameraController) {
-                // Use isInsideInteriorWMO (flag 0x2000) for correct indoor detection
-                m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
-            }
             m2Renderer->prepareRender(frameIdx, *camera);
             auto m2Start = std::chrono::steady_clock::now();
             m2Renderer->render(currentCmd, perFrameSet, *camera);

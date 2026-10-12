@@ -41,7 +41,6 @@ layout(set = 1, binding = 2) uniform M2Material {
     int unlit;
     int blendMode;
     int cullBackFaces;
-    float interiorDarken;
     float specularIntensity;
     float emissiveBoost;
     float tintR;
@@ -395,10 +394,6 @@ void main() {
         result = ambientTerm * texColor.rgb
                + shadow * (diff * sunColor * texColor.rgb + spec * sunColor)
                + sss;
-
-        if (interiorDarken > 0.0) {
-            result *= mix(1.0, 0.5, interiorDarken);
-        }
     }
 
     // Canopy ambient occlusion (foliage only). ModelHeight arrives as the
