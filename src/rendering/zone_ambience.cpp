@@ -84,8 +84,7 @@ const DarkZone* findDarkZone(uint32_t zoneId) {
 
 }  // namespace
 
-float resolveZoneVisualTimeHours(uint32_t zoneId, bool isIndoors, float worldTimeHours) {
-    if (isIndoors) return worldTimeHours;
+float resolveZoneVisualTimeHours(uint32_t zoneId, float worldTimeHours) {
     const DarkZone* zone = findDarkZone(zoneId);
     if (!zone || zone->visualTimeHours < 0.0f) return worldTimeHours;
     return zone->visualTimeHours;

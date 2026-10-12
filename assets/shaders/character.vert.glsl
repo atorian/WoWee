@@ -17,6 +17,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(push_constant) uniform Push {
     mat4 model;
+    vec4 interiorLight;  // read by character.frag
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {

@@ -19,10 +19,9 @@ TEST_CASE("Duskwood ADT coverage follows client map bounds", "[zone_ambience]") 
 }
 
 TEST_CASE("Duskwood uses a permanent late-night sky clock", "[zone_ambience]") {
-    REQUIRE(resolveZoneVisualTimeHours(10, false, 12.0f) == Catch::Approx(22.0f));
-    REQUIRE(resolveZoneVisualTimeHours(10, false, 6.0f) == Catch::Approx(22.0f));
-    REQUIRE(resolveZoneVisualTimeHours(10, true, 12.0f) == Catch::Approx(12.0f));
-    REQUIRE(resolveZoneVisualTimeHours(12, false, 12.0f) == Catch::Approx(12.0f));
+    REQUIRE(resolveZoneVisualTimeHours(10, 12.0f) == Catch::Approx(22.0f));
+    REQUIRE(resolveZoneVisualTimeHours(10, 6.0f) == Catch::Approx(22.0f));
+    REQUIRE(resolveZoneVisualTimeHours(12, 12.0f) == Catch::Approx(12.0f));
 }
 
 TEST_CASE("Duskwood ambience stays dark and foggy", "[zone_ambience]") {

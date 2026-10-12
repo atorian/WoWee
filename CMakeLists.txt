@@ -1318,11 +1318,9 @@ else()
     add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
 endif()
 
-# Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF
+# Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF. Set up on
+# wowee_base, which the client and every tool linking the libraries share.
 if(WOWEE_ENABLE_TRACY)
-    target_sources(wowee PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
-    target_compile_definitions(wowee PRIVATE TRACY_ENABLE)
-    target_include_directories(wowee SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public)
     message(STATUS "Tracy profiler: ENABLED")
 endif()
 
@@ -1527,10 +1525,14 @@ elseif(glm_FOUND)
     target_include_directories(wowee_base PUBLIC ${GLM_INCLUDE_DIRS})
 endif()
 # The profiler macros expand differently with Tracy on, so every library that
-# uses them has to agree with the client. TracyClient.cpp stays in the client.
+# uses them has to agree with the client, and the runtime goes with the
+# definition: a tool linking instrumented pipeline objects needs TracyClient
+# as much as the client does.
 if(WOWEE_ENABLE_TRACY)
+    target_sources(wowee_base PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
     target_compile_definitions(wowee_base PUBLIC TRACY_ENABLE)
     target_include_directories(wowee_base SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
+    target_link_libraries(wowee_base PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
@@ -1565,6 +1567,20 @@ option(WOWEE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 # the sanitizers in an ASAN build, and outside the LTO link in Release.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
+# See the GNU branch of wowee_apply_client_flags. Each name is checked, since
+# an older GCC that lacks one rejects -Wno-error= for it.
+set(WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS "")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    include(CheckCXXCompilerFlag)
+    foreach(_w array-bounds stringop-overflow stringop-overread restrict
+               free-nonheap-object maybe-uninitialized)
+        string(MAKE_C_IDENTIFIER "WOWEE_GCC_HAS_W_${_w}" _have)
+        check_cxx_compiler_flag(-W${_w} ${_have})
+        if(${_have})
+            list(APPEND WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS -Wno-error=${_w})
+        endif()
+    endforeach()
+endif()
 function(wowee_apply_client_flags target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
@@ -1592,6 +1608,13 @@ function(wowee_apply_client_flags target)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
             target_compile_options(${target} PRIVATE -Wno-odr)
             target_link_options(${target} PRIVATE -Wno-odr)
+            # Warnings, not errors, for GCC's checks that run after inlining.
+            # They fire inside libstdc++ on ordinary code: GCC 13 on
+            # std::string(1, c) + ".wav", GCC 16 on vector<uint8_t>::resize.
+            # An LTO build never runs them at compile time, which is why the
+            # Release builds never saw them; a build without LTO (the dev
+            # preset, pull-request CI) stopped on them.
+            target_compile_options(${target} PRIVATE ${WOWEE_GCC_LATE_WARNINGS_NOT_ERRORS})
         endif()
     endif()
 
@@ -1633,7 +1656,10 @@ function(wowee_apply_client_flags target)
             )
         else()
             target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+            # PUBLIC so that every executable linking an instrumented static
+            # library (the tools link wowee_pipeline) links the sanitizer
+            # runtimes too, rather than failing on __asan_* symbols.
+            target_link_options(${target} PUBLIC -fsanitize=address,undefined)
         endif()
     endif()
 

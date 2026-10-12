@@ -42,6 +42,8 @@ struct InstanceData {
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
     int flags;
+    // See interior_light.glsli.
+    vec4 interiorLight;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -63,6 +65,9 @@ layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec4 AuthoredUVs;
+layout(location = 9) flat out vec4 vInteriorLight;
+
+#include "sphere_map.glsli"
 
 // Matches m2WindDistanceFade in m2_sway.hpp, used by the shadow pass.
 float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
@@ -291,9 +296,7 @@ void main() {
         // atlas UVs expose the entire map as bright stripes on polished meshes.
         vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
         vec3 eyeNormal = normalize(mat3(view) * Normal);
-        vec3 reflection = reflect(-normalize(eyePosition), eyeNormal);
-        reflection.z += 1.0;
-        uv = reflection.xy / max(length(reflection), 1e-6) * 0.5 + 0.5;
+        uv = sphereMapUV(eyePosition, eyeNormal);
     }
     TexCoord = uv + uvOff;
     AuthoredUVs = vec4(aTexCoord, aTexCoord2);
@@ -306,6 +309,7 @@ void main() {
     vFadeAlpha = fade;
     vSkyMode = push.isFoliage < 0 ? 1 : 0;
     vHighlight = instanceData[instIdx].highlight;
+    vInteriorLight = instanceData[instIdx].interiorLight;
 
     gl_Position = projection * view * worldPos;
     // A sky model sits on the far plane whatever its radius, so the depth

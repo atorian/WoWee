@@ -1879,6 +1879,13 @@ endif()
 wowee_add_test(test_m2_sway
     SOURCES test_m2_sway.cpp)
 
+# ── test_sphere_map ──────────────────────────────────────────
+# The sphere environment map coordinates m2.vert.glsl computes, run from the
+# shader's own include. The incident vector was negated, which put a surface
+# nearly facing the camera at the rim of the map instead of near its centre.
+wowee_add_test(test_sphere_map
+    SOURCES test_sphere_map.cpp)
+
 # ── test_m2_classifier_foliage ───────────────────────────────
 # Pins the wind-sway classification against substring collisions: foliage
 # tokens are matched inside concatenated names, so "thorn" landed inside
@@ -2141,6 +2148,16 @@ register_test_target(test_light_bands)
 # grass went searing yellow, Teldrassil's canopies magenta.
 wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_interior_light ──────────────────────────────────────
+# The light of a model inside a WMO interior group. Doodads and characters
+# inside a WMO took the sun and the zone's LightParams instead of the
+# building's MOHD ambient; the shaders now light each model by where it
+# stands, from interior_light.glsli.
+wowee_add_test(test_interior_light
+    SOURCES test_interior_light.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_m2_view_distance ────────────────────────────────────

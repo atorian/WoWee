@@ -305,8 +305,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
 
     // Duskwood's visible sky is permanently late-night even while the global
     // world clock continues normally for gameplay and every other zone.
-    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(
-        zoneId, isIndoors_, timeOfDay_ * 24.0f);
+    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(zoneId, timeOfDay_ * 24.0f);
 
     // Convert visual time to half-minutes (WoW DBC format: 0-2879).
     const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
@@ -383,17 +382,12 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                   [](const SkyboxLayer& a, const SkyboxLayer& b) { return a.weight > b.weight; });
     }
 
-    // Sample and blend lighting
+    // Sample and blend lighting. Indoors too: this is the outdoor light, which
+    // lights what is seen through a door; models inside an interior group take
+    // their own light in the shaders.
     LightingParams newParams;
 
-    if (isIndoors_) {
-        // Indoor lighting: static ambient-heavy
-        newParams.ambientColor = glm::vec3(0.6f, 0.6f, 0.65f);
-        newParams.diffuseColor = glm::vec3(0.3f, 0.3f, 0.35f);
-        newParams.fogColor = glm::vec3(0.3f, 0.3f, 0.4f);
-        newParams.fogStart = 50.0f;
-        newParams.fogEnd = 300.0f;
-    } else if (!activeVolumes_.empty()) {
+    if (!activeVolumes_.empty()) {
         // Outdoor with DBC lighting - blend multiple volumes
         newParams = LightingParams::blendAccumulator();
         glm::vec3 blendedDir(0.0f);  // Accumulate weighted directions
@@ -461,9 +455,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    if (!isIndoors_) {
-        applyZoneAmbienceOverride(zoneId, newParams);
-    }
+    applyZoneAmbienceOverride(zoneId, newParams);
 
     // Keep the authored fog colour. The surface shaders blend it toward the
     // actual sky band along each camera ray; one CPU-side mid-sky tint made

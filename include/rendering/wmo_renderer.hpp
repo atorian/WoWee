@@ -399,6 +399,10 @@ public:
      */
     bool isInsideInteriorWMO(float glX, float glY, float glZ) const;
 
+    /// The MOHD ambient colour of the WMO whose interior group holds the
+    /// point, or no value when no interior group does.
+    [[nodiscard]] std::optional<glm::vec3> interiorAmbientAt(float glX, float glY, float glZ) const;
+
     /** Gather local orange point lights derived from visible lava materials. */
     uint32_t gatherLavaLights(const glm::vec3& cameraPos,
                               glm::vec4* outPosRadius,
