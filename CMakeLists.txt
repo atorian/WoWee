@@ -1114,6 +1114,26 @@ set(WOWEE_SOURCES
     src/main.cpp
 )
 
+# Libraries carved out of the client, so the editor, the tools and the probes
+# link them instead of compiling the same files again. The editor alone used
+# to compile all 170 pipeline files a second time.
+#
+#   wowee_base      the infrastructure every module may use: the logger and
+#                   the memory monitor; coordinates, data paths and the
+#                   profiler are header-only and come with its include path
+#   wowee_pipeline  asset formats and loaders; depends on wowee_base only
+#
+# Nothing in src/pipeline includes another module, which is what makes it the
+# first to come out. The rest of the client stays one target until the cycles
+# between its modules are broken (issues #33, #34).
+set(WOWEE_BASE_SOURCES
+    src/core/logger.cpp
+    src/core/memory_monitor.cpp
+)
+set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})
+list(FILTER WOWEE_PIPELINE_SOURCES INCLUDE REGEX "^src/pipeline/")
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_BASE_SOURCES} ${WOWEE_PIPELINE_SOURCES})
+
 set(WOWEE_HEADERS
     include/core/application.hpp
     include/core/window.hpp
@@ -1403,11 +1423,6 @@ target_precompile_headers(wowee PRIVATE
     <glm/glm.hpp>
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
-# A clang PCH carries its build time, and ccache would treat every rebuilt PCH
-# as a different input. See WOWEE_USE_CCACHE.
-if(WOWEE_COMPILER_CACHE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(wowee PRIVATE -Xclang -fno-pch-timestamp)
-endif()
 # Vendored headers as SYSTEM to suppress third-party warnings
 target_include_directories(wowee SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
@@ -1497,6 +1512,42 @@ elseif(glm_FOUND)
     target_include_directories(wowee PRIVATE ${GLM_INCLUDE_DIRS})
 endif()
 
+# wowee_base and wowee_pipeline: see where their sources are split off
+# WOWEE_SOURCES. Static, and position-independent on Android, where they are
+# linked into the client's shared library.
+add_library(wowee_base STATIC ${WOWEE_BASE_SOURCES})
+target_include_directories(wowee_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(wowee_base PUBLIC cxx_std_20)
+target_link_libraries(wowee_base PUBLIC Threads::Threads)
+if(TARGET glm::glm-header-only)
+    target_link_libraries(wowee_base PUBLIC glm::glm-header-only)
+elseif(TARGET glm::glm)
+    target_link_libraries(wowee_base PUBLIC glm::glm)
+elseif(glm_FOUND)
+    target_include_directories(wowee_base PUBLIC ${GLM_INCLUDE_DIRS})
+endif()
+# The profiler macros expand differently with Tracy on, so every library that
+# uses them has to agree with the client. TracyClient.cpp stays in the client.
+if(WOWEE_ENABLE_TRACY)
+    target_compile_definitions(wowee_base PUBLIC TRACY_ENABLE)
+    target_include_directories(wowee_base SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
+endif()
+
+add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
+target_link_libraries(wowee_pipeline PUBLIC wowee_base)
+target_include_directories(wowee_pipeline SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+target_precompile_headers(wowee_pipeline PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+
+if(ANDROID)
+    set_target_properties(wowee_base wowee_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+target_link_libraries(wowee PRIVATE wowee_pipeline wowee_base)
+
 # Compiler warnings.
 #
 # Errors by default: a warning left standing accumulates into tech debt and
@@ -1508,59 +1559,108 @@ endif()
 # build, where an unfamiliar diagnostic should not stop the build outright.
 option(WOWEE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
-if(MSVC)
-    target_compile_options(wowee PRIVATE /W4)
-    if(WOWEE_WARNINGS_AS_ERRORS)
-        target_compile_options(wowee PRIVATE /WX)
+# The client's compile settings, for every target built from client sources:
+# the client itself and the libraries carved out of it. A library built with
+# other flags would be the one part of the client without -Werror, without
+# the sanitizers in an ASAN build, and outside the LTO link in Release.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
+function(wowee_apply_client_flags target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+        if(WOWEE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+        # A constant left behind by a deleted function is not in -Wall for C++ on
+        # every clang, and the macOS and Windows runners have it where the clang
+        # here does not, so it failed two of five CI jobs and no local build.
+        #
+        # Clang only. GCC applies the same flag to header constants that exist to
+        # write down a whole wire enum, InvType::AMMO and GuildEvent::SIGNED_ON
+        # among them, and those are documentation rather than dead code.
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${target} PRIVATE -Wunused-const-variable)
+        endif()
+        if(WOWEE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+        # GCC LTO emits -Wodr for FFX enum-name mismatches across SDK generations.
+        # We intentionally keep FSR2+FSR3 integrations in separate TUs and suppress
+        # this linker-time diagnostic to avoid CI noise.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${target} PRIVATE -Wno-odr)
+            target_link_options(${target} PRIVATE -Wno-odr)
+        endif()
     endif()
-else()
-    target_compile_options(wowee PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
-    # A constant left behind by a deleted function is not in -Wall for C++ on
-    # every clang, and the macOS and Windows runners have it where the clang
-    # here does not, so it failed two of five CI jobs and no local build.
-    #
-    # Clang only. GCC applies the same flag to header constants that exist to
-    # write down a whole wire enum, InvType::AMMO and GuildEvent::SIGNED_ON
-    # among them, and those are documentation rather than dead code.
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        target_compile_options(wowee PRIVATE -Wunused-const-variable)
-    endif()
-    if(WOWEE_WARNINGS_AS_ERRORS)
-        target_compile_options(wowee PRIVATE -Werror)
-    endif()
-    # GCC LTO emits -Wodr for FFX enum-name mismatches across SDK generations.
-    # We intentionally keep FSR2+FSR3 integrations in separate TUs and suppress
-    # this linker-time diagnostic to avoid CI noise.
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_options(wowee PRIVATE -Wno-odr)
-        target_link_options(wowee PRIVATE -Wno-odr)
-    endif()
-endif()
 
-# Debug build flags
-if(MSVC)
-    # /ZI  - Edit-and-Continue debug info (works with hot-reload in VS 2022)
-    # /RTC1 - stack-frame and uninitialised-variable runtime checks (Debug only)
-    # /sdl  - additional SDL security checks
-    # /Od   - disable optimisation so stepping matches source lines exactly
-    target_compile_options(wowee PRIVATE
-        $<$<CONFIG:Debug>:/ZI /RTC1 /sdl /Od>
-    )
-    # Ensure the linker emits a .pdb alongside the .exe for every config
-    target_link_options(wowee PRIVATE
-        $<$<CONFIG:Debug>:/DEBUG:FULL>
-        $<$<CONFIG:RelWithDebInfo>:/DEBUG:FASTLINK>
-    )
-else()
-    # -g3          - maximum DWARF debug info (includes macro definitions)
-    # -Og          - optimise for debugging (better than -O0, keeps most frames)
-    # -fno-omit-frame-pointer - preserve frame pointers so stack traces are clean
-    # Frame pointers in all configs (negligible perf cost, critical for crash backtraces)
-    target_compile_options(wowee PRIVATE
-        -fno-omit-frame-pointer
-        $<$<CONFIG:Debug>:-g3 -Og>
-        $<$<CONFIG:RelWithDebInfo>:-g>
-    )
+    # Debug build flags
+    if(MSVC)
+        # /ZI  - Edit-and-Continue debug info (works with hot-reload in VS 2022)
+        # /RTC1 - stack-frame and uninitialised-variable runtime checks (Debug only)
+        # /sdl  - additional SDL security checks
+        # /Od   - disable optimisation so stepping matches source lines exactly
+        target_compile_options(${target} PRIVATE
+            $<$<CONFIG:Debug>:/ZI /RTC1 /sdl /Od>
+        )
+        # Ensure the linker emits a .pdb alongside the .exe for every config
+        target_link_options(${target} PRIVATE
+            $<$<CONFIG:Debug>:/DEBUG:FULL>
+            $<$<CONFIG:RelWithDebInfo>:/DEBUG:FASTLINK>
+        )
+    else()
+        # -g3          - maximum DWARF debug info (includes macro definitions)
+        # -Og          - optimise for debugging (better than -O0, keeps most frames)
+        # -fno-omit-frame-pointer - preserve frame pointers so stack traces are clean
+        # Frame pointers in all configs (negligible perf cost, critical for crash backtraces)
+        target_compile_options(${target} PRIVATE
+            -fno-omit-frame-pointer
+            $<$<CONFIG:Debug>:-g3 -Og>
+            $<$<CONFIG:RelWithDebInfo>:-g>
+        )
+    endif()
+
+    # AddressSanitizer - catch buffer overflows, use-after-free, etc.
+    # Enable with:  cmake ... -DWOWEE_ENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
+    if(WOWEE_ENABLE_ASAN)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /fsanitize=address)
+            # ASAN on MSVC requires the dynamic CRT (/MD or /MDd)
+            target_compile_options(${target} PRIVATE
+                $<$<CONFIG:Debug>:/MDd>
+                $<$<CONFIG:Release>:/MD>
+            )
+        else()
+            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        endif()
+    endif()
+
+    # Release build optimizations
+    if(_ipo_supported AND WOWEE_ENABLE_LTO)
+        set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+    if(NOT MSVC)
+        # -O3: more aggressive inlining and auto-vectorization vs CMake's default -O2
+        target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O3>)
+        # -fvisibility=hidden: keeps all symbols internal by default, shrinks binary
+        # and gives the linker and optimizer more freedom to dead-strip and inline
+        target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-fvisibility=hidden -fvisibility-inlines-hidden>)
+    endif()
+    # A clang PCH carries its build time, and ccache would treat every rebuilt
+    # PCH as a different input. See WOWEE_USE_CCACHE.
+    get_target_property(_pch ${target} PRECOMPILE_HEADERS)
+    if(_pch AND WOWEE_COMPILER_CACHE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${target} PRIVATE -Xclang -fno-pch-timestamp)
+    endif()
+endfunction()
+
+foreach(_client_target wowee wowee_base wowee_pipeline)
+    wowee_apply_client_flags(${_client_target})
+endforeach()
+if(WOWEE_ENABLE_ASAN)
+    message(STATUS "AddressSanitizer + UBSan: ENABLED")
 endif()
 
 # Defined here rather than beside the tools that use it: tests/ is added
@@ -1607,36 +1707,7 @@ if(WOWEE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-# AddressSanitizer - catch buffer overflows, use-after-free, etc.
-# Enable with:  cmake ... -DWOWEE_ENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
-if(WOWEE_ENABLE_ASAN)
-    if(MSVC)
-        target_compile_options(wowee PRIVATE /fsanitize=address)
-        # ASAN on MSVC requires the dynamic CRT (/MD or /MDd)
-        target_compile_options(wowee PRIVATE
-            $<$<CONFIG:Debug>:/MDd>
-            $<$<CONFIG:Release>:/MD>
-        )
-    else()
-        target_compile_options(wowee PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(wowee PRIVATE -fsanitize=address,undefined)
-    endif()
-    message(STATUS "AddressSanitizer + UBSan: ENABLED")
-endif()
 
-# Release build optimizations
-include(CheckIPOSupported)
-check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
-if(_ipo_supported AND WOWEE_ENABLE_LTO)
-    set_property(TARGET wowee PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-endif()
-if(NOT MSVC)
-    # -O3: more aggressive inlining and auto-vectorization vs CMake's default -O2
-    target_compile_options(wowee PRIVATE $<$<CONFIG:Release>:-O3>)
-    # -fvisibility=hidden: keeps all symbols internal by default, shrinks binary
-    # and gives the linker and optimizer more freedom to dead-strip and inline
-    target_compile_options(wowee PRIVATE $<$<CONFIG:Release>:-fvisibility=hidden -fvisibility-inlines-hidden>)
-endif()
 
 # Copy assets next to the executable (runs every build, not just configure).
 # Uses $<TARGET_FILE_DIR:wowee> so MSVC multi-config generators place assets
@@ -1877,17 +1948,8 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         tools/asset_extract/path_mapper.cpp
         tools/asset_extract/manifest_writer.cpp
         tools/asset_extract/open_format_emitter.cpp
-        src/pipeline/dbc_loader.cpp
-        src/pipeline/blp_loader.cpp
-    src/pipeline/dds_loader.cpp
-        src/pipeline/m2_loader.cpp
-        src/pipeline/wmo_loader.cpp
-        src/pipeline/adt_loader.cpp
-        src/pipeline/wowee_model.cpp
-        src/pipeline/wowee_building.cpp
-        src/pipeline/wowee_collision.cpp
-        src/core/logger.cpp
     )
+    target_link_libraries(asset_extract PRIVATE wowee_pipeline)
     target_include_directories(asset_extract PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
@@ -1958,23 +2020,13 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL3_FOUND AND EXISTS ${IMGUI_D
         tools/asset_manager/model_import.cpp
         tools/asset_manager/model_source.cpp
         tools/asset_manager/folder_picker.cpp
-        src/pipeline/asset_inventory.cpp
         src/rendering/m2_model_classifier.cpp
         tools/asset_extract/extractor.cpp
         tools/asset_extract/path_mapper.cpp
         tools/asset_extract/manifest_writer.cpp
         tools/asset_extract/open_format_emitter.cpp
-        src/pipeline/dbc_loader.cpp
-        src/pipeline/blp_loader.cpp
-        src/pipeline/dds_loader.cpp
-        src/pipeline/m2_loader.cpp
-        src/pipeline/wmo_loader.cpp
-        src/pipeline/adt_loader.cpp
-        src/pipeline/wowee_model.cpp
-        src/pipeline/wowee_building.cpp
-        src/pipeline/wowee_collision.cpp
-        src/core/logger.cpp
     )
+    target_link_libraries(wowee_assets PRIVATE wowee_pipeline)
     # The folder chooser is the operating system's own where there is one. On
     # Linux and the BSDs there is no such call - the usual answer is to run
     # zenity or kdialog, which is a program that may not be installed and a
@@ -2078,9 +2130,8 @@ endif()
 # ---- Tool: dbc_to_csv (DBC → CSV text) ----
 add_executable(dbc_to_csv
     tools/dbc_to_csv/main.cpp
-    src/pipeline/dbc_loader.cpp
-    src/core/logger.cpp
 )
+target_link_libraries(dbc_to_csv PRIVATE wowee_pipeline)
 target_include_directories(dbc_to_csv PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
@@ -2100,8 +2151,8 @@ add_executable(auth_probe
     src/network/packet.cpp
     src/network/socket.cpp
     src/network/tcp_socket.cpp
-    src/core/logger.cpp
 )
+target_link_libraries(auth_probe PRIVATE wowee_base)
 target_include_directories(auth_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2124,8 +2175,8 @@ add_executable(auth_login_probe
     src/network/packet.cpp
     src/network/socket.cpp
     src/network/tcp_socket.cpp
-    src/core/logger.cpp
 )
+target_link_libraries(auth_login_probe PRIVATE wowee_base)
 target_include_directories(auth_login_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2139,10 +2190,8 @@ install(TARGETS auth_login_probe RUNTIME DESTINATION bin)
 # ---- Tool: blp_convert (BLP ↔ PNG) ----
 add_executable(blp_convert
     tools/blp_convert/main.cpp
-    src/pipeline/blp_loader.cpp
-    src/pipeline/dds_loader.cpp
-    src/core/logger.cpp
 )
+target_link_libraries(blp_convert PRIVATE wowee_pipeline)
 target_include_directories(blp_convert PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
@@ -2418,172 +2467,7 @@ add_executable(wowee_editor
     tools/editor/adt_writer.cpp
 
     # Pipeline (asset loading)
-    src/pipeline/blp_loader.cpp
-    src/pipeline/dds_loader.cpp
-    src/pipeline/dbc_loader.cpp
-    src/pipeline/char_sections.cpp
     src/ui/settings_schema.cpp
-    src/pipeline/item_textures.cpp
-    src/pipeline/m2_asset_loader.cpp
-    src/pipeline/dbc_layout.cpp
-    src/pipeline/spell_icon_paths.cpp
-    src/pipeline/asset_manager.cpp
-    src/pipeline/asset_inventory.cpp
-    src/pipeline/asset_manifest.cpp
-    src/pipeline/loose_file_reader.cpp
-    src/pipeline/m2_loader.cpp
-    src/pipeline/wmo_loader.cpp
-    src/pipeline/adt_loader.cpp
-    src/pipeline/wdt_loader.cpp
-    src/pipeline/wowee_terrain_loader.cpp
-    src/pipeline/wowee_model.cpp
-    src/pipeline/wowee_model_fromm2.cpp
-    src/pipeline/wowee_building.cpp
-    src/pipeline/wowee_collision.cpp
-    src/pipeline/wowee_light.cpp
-    src/pipeline/wowee_weather.cpp
-    src/pipeline/wowee_world_map.cpp
-    src/pipeline/wowee_sound.cpp
-    src/pipeline/wowee_spawns.cpp
-    src/pipeline/wowee_items.cpp
-    src/pipeline/wowee_loot.cpp
-    src/pipeline/wowee_creatures.cpp
-    src/pipeline/wowee_quests.cpp
-    src/pipeline/wowee_objects.cpp
-    src/pipeline/wowee_factions.cpp
-    src/pipeline/wowee_locks.cpp
-    src/pipeline/wowee_skills.cpp
-    src/pipeline/wowee_spells.cpp
-    src/pipeline/wowee_achievements.cpp
-    src/pipeline/wowee_trainers.cpp
-    src/pipeline/wowee_gossip.cpp
-    src/pipeline/wowee_taxi.cpp
-    src/pipeline/wowee_talents.cpp
-    src/pipeline/wowee_maps.cpp
-    src/pipeline/wowee_chars.cpp
-    src/pipeline/wowee_tokens.cpp
-    src/pipeline/wowee_triggers.cpp
-    src/pipeline/wowee_titles.cpp
-    src/pipeline/wowee_events.cpp
-    src/pipeline/wowee_mounts.cpp
-    src/pipeline/wowee_battlegrounds.cpp
-    src/pipeline/wowee_mail.cpp
-    src/pipeline/wowee_gems.cpp
-    src/pipeline/wowee_guilds.cpp
-    src/pipeline/wowee_conditions.cpp
-    src/pipeline/wowee_pets.cpp
-    src/pipeline/wowee_auction.cpp
-    src/pipeline/wowee_channels.cpp
-    src/pipeline/wowee_cinematics.cpp
-    src/pipeline/wowee_glyphs.cpp
-    src/pipeline/wowee_vehicles.cpp
-    src/pipeline/wowee_holidays.cpp
-    src/pipeline/wowee_liquids.cpp
-    src/pipeline/wowee_animations.cpp
-    src/pipeline/wowee_spell_visuals.cpp
-    src/pipeline/wowee_world_state_ui.cpp
-    src/pipeline/wowee_player_conditions.cpp
-    src/pipeline/wowee_trade_skills.cpp
-    src/pipeline/wowee_creature_equipment.cpp
-    src/pipeline/wowee_item_sets.cpp
-    src/pipeline/wowee_game_tips.cpp
-    src/pipeline/wowee_companions.cpp
-    src/pipeline/wowee_spell_mechanics.cpp
-    src/pipeline/wowee_keybindings.cpp
-    src/pipeline/wowee_spell_schools.cpp
-    src/pipeline/wowee_lfg.cpp
-    src/pipeline/wowee_macros.cpp
-    src/pipeline/wowee_char_features.cpp
-    src/pipeline/wowee_pvp.cpp
-    src/pipeline/wowee_bags.cpp
-    src/pipeline/wowee_runes.cpp
-    src/pipeline/wowee_loading_screens.cpp
-    src/pipeline/wowee_item_suffixes.cpp
-    src/pipeline/wowee_combat_ratings.cpp
-    src/pipeline/wowee_unit_movement.cpp
-    src/pipeline/wowee_quest_sorts.cpp
-    src/pipeline/wowee_spell_ranges.cpp
-    src/pipeline/wowee_spell_cast_times.cpp
-    src/pipeline/wowee_spell_durations.cpp
-    src/pipeline/wowee_spell_cooldowns.cpp
-    src/pipeline/wowee_creature_families.cpp
-    src/pipeline/wowee_spell_power_costs.cpp
-    src/pipeline/wowee_glyph_slots.cpp
-    src/pipeline/wowee_creature_difficulties.cpp
-    src/pipeline/wowee_item_materials.cpp
-    src/pipeline/wowee_player_spawn_profiles.cpp
-    src/pipeline/wowee_talent_tabs.cpp
-    src/pipeline/wowee_currency_types.cpp
-    src/pipeline/wowee_spell_reagents.cpp
-    src/pipeline/wowee_achievement_criteria.cpp
-    src/pipeline/wowee_spell_effect_types.cpp
-    src/pipeline/wowee_spell_aura_types.cpp
-    src/pipeline/wowee_item_qualities.cpp
-    src/pipeline/wowee_skill_costs.cpp
-    src/pipeline/wowee_item_flags.cpp
-    src/pipeline/wowee_npc_services.cpp
-    src/pipeline/wowee_token_rewards.cpp
-    src/pipeline/wowee_spell_procs.cpp
-    src/pipeline/wowee_creature_patrols.cpp
-    src/pipeline/wowee_boss_encounters.cpp
-    src/pipeline/wowee_instance_lockouts.cpp
-    src/pipeline/wowee_stable_slots.cpp
-    src/pipeline/wowee_stat_curves.cpp
-    src/pipeline/wowee_action_bars.cpp
-    src/pipeline/wowee_group_compositions.cpp
-    src/pipeline/wowee_hearth_binds.cpp
-    src/pipeline/wowee_server_broadcasts.cpp
-    src/pipeline/wowee_combat_maneuvers.cpp
-    src/pipeline/wowee_realm_list.cpp
-    src/pipeline/wowee_emotes.cpp
-    src/pipeline/wowee_buff_book.cpp
-    src/pipeline/wowee_tabards.cpp
-    src/pipeline/wowee_spell_markers.cpp
-    src/pipeline/wowee_learning_notifications.cpp
-    src/pipeline/wowee_creature_resists.cpp
-    src/pipeline/wowee_pet_talents.cpp
-    src/pipeline/wowee_heroic_scaling.cpp
-    src/pipeline/wowee_reputation_rewards.cpp
-    src/pipeline/wowee_minimap_levels.cpp
-    src/pipeline/wowee_pet_care.cpp
-    src/pipeline/wowee_movie_credits.cpp
-    src/pipeline/wowee_spell_variants.cpp
-    src/pipeline/wowee_voiceovers.cpp
-    src/pipeline/wowee_trade_rules.cpp
-    src/pipeline/wowee_word_filters.cpp
-    src/pipeline/wowee_raid_markers.cpp
-    src/pipeline/wowee_loot_modes.cpp
-    src/pipeline/wowee_sky_params.cpp
-    src/pipeline/wowee_server_config.cpp
-    src/pipeline/wowee_anniversary_events.cpp
-    src/pipeline/wowee_pvp_ranks.cpp
-    src/pipeline/wowee_localization.cpp
-    src/pipeline/wowee_global_channels.cpp
-    src/pipeline/wowee_addon_manifest.cpp
-    src/pipeline/wowee_spell_pack.cpp
-    src/pipeline/wowee_player_movement_anim.cpp
-    src/pipeline/wowee_transit_schedule.cpp
-    src/pipeline/wowee_mage_portals.cpp
-    src/pipeline/wowee_combat_stats.cpp
-    src/pipeline/wowee_guild_bank.cpp
-    src/pipeline/wowee_quest_graph.cpp
-    src/pipeline/wowee_crafting_recipes.cpp
-    src/pipeline/wowee_world_locations.cpp
-    src/pipeline/wowee_soulbind_rules.cpp
-    src/pipeline/wowee_creature_behavior.cpp
-    src/pipeline/wowee_random_property.cpp
-    src/pipeline/wowee_spell_proc_rules.cpp
-    src/pipeline/wowee_auction_houses.cpp
-    src/pipeline/wowee_battleground_rewards.cpp
-    src/pipeline/wowee_sound_swap.cpp
-    src/pipeline/wowee_tutorial_steps.cpp
-    src/pipeline/wowee_chat_commands.cpp
-    src/pipeline/wowee_camera_presets.cpp
-    src/pipeline/wowee_combat_formulas.cpp
-    src/pipeline/wowee_chat_links.cpp
-    src/pipeline/custom_zone_discovery.cpp
-    src/pipeline/terrain_mesh.cpp
-    src/pipeline/adt_alpha.cpp
 
     # Rendering core
     src/rendering/vk_context.cpp
@@ -2614,14 +2498,13 @@ add_executable(wowee_editor
 
     # Core
     src/core/window.cpp
-    src/core/logger.cpp
-    src/core/memory_monitor.cpp
 
     # stb_image (needed by AssetManager for PNG overrides)
     tools/editor/stb_image_impl.cpp
 
     ${WOWEE_MACOS_SOURCES}
 )
+target_link_libraries(wowee_editor PRIVATE wowee_pipeline)
 target_include_directories(wowee_editor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
