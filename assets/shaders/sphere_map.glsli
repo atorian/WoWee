@@ -1,0 +1,9 @@
+// Sphere environment map coordinates, as OpenGL's GL_SPHERE_MAP defines them.
+// Both inputs are in view space: eyePosition runs from the camera to the
+// vertex, eyeNormal is the unit surface normal. A surface facing the camera
+// samples the centre of the map.
+vec2 sphereMapUV(vec3 eyePosition, vec3 eyeNormal) {
+    vec3 reflection = reflect(normalize(eyePosition), eyeNormal);
+    reflection.z += 1.0f;
+    return vec2(reflection.x, reflection.y) / max(length(reflection), 1e-6f) * 0.5f + 0.5f;
+}
