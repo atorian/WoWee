@@ -1,5 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/helm_visual.hpp"
+#include "core/weapon_sheath.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/character_paths.hpp"
 #include "pipeline/char_sections.hpp"
@@ -258,7 +259,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         return;
     }
 
-    const OnlinePlayerAppearanceState& st = appIt->second;
+    OnlinePlayerAppearanceState& st = appIt->second;
 
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
@@ -631,52 +632,49 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 
     // --- Weapon model attachment ---
-    // Slot indices in the 19-element EquipSlot array:
-    //   15 = MAIN_HAND → attachment 1 (right hand)
-    //   16 = OFF_HAND  → attachment 2 (left hand)
-    struct OnlineWeaponSlot {
-        int slotIndex;
-        uint32_t attachmentId;
+    // The main and off hand (slots 15 and 16 of the 19), in the hands - or,
+    // on a mount, on the back, whatever their sheath state says. Every point
+    // a weapon can be on is cleared first, so one that moved leaves no copy.
+    for (const uint32_t point : kWeaponAttachmentPoints) charRenderer->detachWeapon(st.instanceId, point);
+    const bool sheathed = remotePlayerMounts_.count(guid) != 0;
+    st.weaponsSheathed = sheathed;
+    static constexpr std::pair<int, game::EquipSlot> weaponSlots[] = {
+        {15, game::EquipSlot::MAIN_HAND},
+        {16, game::EquipSlot::OFF_HAND},
     };
-    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
-    // columns are its field names, with the struct in view directly above.
-    static constexpr OnlineWeaponSlot weaponSlots[] = {
-        { 15, 1 },  // MAIN_HAND → right hand
-        { 16, 2 },  // OFF_HAND  → left hand
-    };
-    // NOLINTEND(modernize-use-designated-initializers)
 
-    for (const auto& ws : weaponSlots) {
-        uint32_t weapDisplayId = displayInfoIds[ws.slotIndex];
-        if (weapDisplayId == 0) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-            continue;
-        }
+    for (size_t hand = 0; hand < 2; ++hand) {
+        const auto [slotIndex, equipSlot] = weaponSlots[hand];
+        st.weapons[hand] = {};
+        const uint32_t weapDisplayId = displayInfoIds[slotIndex];
+        if (weapDisplayId == 0) continue;
 
         int32_t recIdx = displayInfoDbc->findRecordById(weapDisplayId);
         if (recIdx < 0) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
+            LOG_WARNING("Player 0x", std::hex, guid, std::dec, " weapon display ", weapDisplayId,
+                        " is not in ItemDisplayInfo; drawn without it");
             continue;
         }
 
         const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
                                                       static_cast<uint32_t>(recIdx));
-        if (art.modelFile.empty()) {
-            charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-            continue;
-        }
+        if (art.modelFile.empty()) continue;  // an item with no model of its own
         const std::string& modelFile = art.modelFile;
         const std::string& textureName = art.textureName;
 
-        // Try Weapon directory first, then Shield
+        // In the Weapon directory, or for a shield the Shield one. Chosen by
+        // which holds the file, so the loader is asked for that one only and
+        // a shield does not report its absence from the Weapon directory.
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
+        if (!assetManager_->fileExists(m2Path)) {
+            const std::string shieldPath = "Item\\ObjectComponents\\Shield\\" + modelFile;
+            if (assetManager_->fileExists(shieldPath)) m2Path = shieldPath;
+        }
         pipeline::M2Model weaponModel;
         if (!loadWeaponM2(m2Path, weaponModel)) {
-            m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
-            if (!loadWeaponM2(m2Path, weaponModel)) {
-                charRenderer->detachWeapon(st.instanceId, ws.attachmentId);
-                continue;
-            }
+            LOG_WARNING("Player 0x", std::hex, guid, std::dec, " weapon display ", weapDisplayId,
+                        ": model ", m2Path, " not loaded; drawn without it");
+            continue;
         }
 
         // Build texture path
@@ -689,10 +687,36 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             }
         }
 
+        const uint8_t inventoryType = inventoryTypes[slotIndex];
+        const uint32_t point = sheathed ? riderWeaponAttachment(equipSlot, inventoryType)
+                                        : weaponAttachment(false, equipSlot, inventoryType);
         uint32_t weaponModelId = nextWeaponModelId_++;
-        charRenderer->attachWeapon(st.instanceId, ws.attachmentId,
-                                   weaponModel, weaponModelId, texturePath);
+        if (!charRenderer->attachWeapon(st.instanceId, point, weaponModel, weaponModelId, texturePath)) {
+            continue;  // attachWeapon says why
+        }
+        st.weapons[hand] = {.attached = true, .inventoryType = inventoryType};
     }
+}
+
+void EntitySpawner::setRemotePlayerWeaponsSheathed(uint64_t guid, bool sheathed) {
+    auto appIt = onlinePlayerAppearance_.find(guid);
+    if (appIt == onlinePlayerAppearance_.end() || !renderer_) return;
+    OnlinePlayerAppearanceState& st = appIt->second;
+    auto* charRenderer = renderer_->getCharacterRenderer();
+    if (!charRenderer || st.instanceId == 0 || st.weaponsSheathed == sheathed) return;
+
+    static constexpr game::EquipSlot kHands[] = {game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND};
+    for (size_t hand = 0; hand < 2; ++hand) {
+        if (!st.weapons[hand].attached) continue;
+        const uint8_t inventoryType = st.weapons[hand].inventoryType;
+        auto placed = [&](bool onBack) {
+            return onBack ? riderWeaponAttachment(kHands[hand], inventoryType)
+                          : weaponAttachment(false, kHands[hand], inventoryType);
+        };
+        charRenderer->moveWeapon(st.instanceId, placed(st.weaponsSheathed), placed(sheathed),
+                                 glm::mat4(1.0f));
+    }
+    st.weaponsSheathed = sheathed;
 }
 
 /// Brings each visible player's drawn form in line with their unit.

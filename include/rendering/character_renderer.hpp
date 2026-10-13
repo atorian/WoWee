@@ -177,6 +177,11 @@ public:
 
     /** Detach a weapon from the given attachment point (drops its enchant effects too). */
     void detachWeapon(uint32_t charInstanceId, uint32_t attachmentId);
+    /** Move the weapon at one attachment point to another, the same model and
+     *  instance with its enchants: sheathing and drawing need no reload. False,
+     *  and logged, when the character's model has no such point. */
+    bool moveWeapon(uint32_t charInstanceId, uint32_t fromAttachmentId,
+                    uint32_t toAttachmentId, const glm::mat4& localTransform);
 
     // Free a model's GPU buffers and map entry once no instance references it.
     // For per-instance model ids (weapons/effects/player composites, which get

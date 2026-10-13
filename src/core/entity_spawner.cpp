@@ -322,6 +322,7 @@ void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
         }
     }
     remotePlayerMounts_.erase(it);
+    setRemotePlayerWeaponsSheathed(guid, false);
 }
 
 void EntitySpawner::queueTransportRegistration(uint64_t guid, uint32_t entry, uint32_t displayId,
@@ -543,8 +544,11 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         const std::string& modelFile = art.modelFile;
         const std::string& textureName = art.textureName;
 
-        // Main-hand NPC weapon path: only use actual weapon models.
+        // Main-hand NPC weapon path: only use actual weapon models. The fields
+        // tried are candidates, and one naming a shield is simply not this
+        // one - rejected here, not handed to the loader to report missing.
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
+        if (!assetManager_->fileExists(m2Path)) return false;
         pipeline::M2Model weaponModel;
         std::string texturePath;
         if (!textureName.empty()) {

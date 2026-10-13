@@ -4422,6 +4422,38 @@ void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmen
     }
 }
 
+bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachmentId,
+                                   uint32_t toAttachmentId, const glm::mat4& localTransform) {
+    auto charIt = instances.find(charInstanceId);
+    if (charIt == instances.end()) return false;
+    auto& attachments = charIt->second.weaponAttachments;
+    auto it = std::find_if(attachments.begin(), attachments.end(),
+        [&](const WeaponAttachment& a) { return a.attachmentId == fromAttachmentId; });
+    if (it == attachments.end()) return false;
+    uint16_t boneIndex = 0;
+    glm::vec3 offset(0.0f);
+    if (!findAttachmentBone(charIt->second.modelId, toAttachmentId, boneIndex, offset)) {
+        LOG_WARNING("moveWeapon: the model of instance ", charInstanceId, " has no attachment ",
+                    toAttachmentId, "; the weapon stays at ", fromAttachmentId);
+        return false;
+    }
+    // Whatever was at the destination makes room, as attachWeapon does.
+    if (toAttachmentId != fromAttachmentId) {
+        WeaponAttachment moved = std::move(*it);
+        attachments.erase(it);
+        detachWeapon(charInstanceId, toAttachmentId);
+        moved.attachmentId = toAttachmentId;
+        moved.boneIndex = boneIndex;
+        moved.offset = offset;
+        moved.localTransform = localTransform;
+        moved.sheathPush = 0.0f;
+        instances.at(charInstanceId).weaponAttachments.push_back(std::move(moved));
+    } else {
+        it->localTransform = localTransform;
+    }
+    return true;
+}
+
 void CharacterRenderer::unloadModelIfUnused(uint32_t modelId) {
     auto modelIt = models.find(modelId);
     if (modelIt == models.end()) return;
