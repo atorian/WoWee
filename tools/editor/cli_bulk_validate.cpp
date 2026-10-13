@@ -2,6 +2,7 @@
 #include "cli_arg_parse.hpp"
 #include "cli_format_table.hpp"
 #include "cli_paths.hpp"
+#include "cli_subprocess.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -14,9 +15,6 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 
 namespace wowee {
 namespace editor {
@@ -65,20 +63,7 @@ int handleBulk(int& i, int argc, char** argv) {
             rows.push_back(std::move(pf));
             continue;
         }
-        std::string cmd = shellQuote(self) + " " +
-                           validateFlag + " " +
-                           shellQuote(entry.path().string()) +
-                           " >/dev/null 2>&1";
-        int rc = std::system(cmd.c_str());
-        // std::system returns the wait-status; on POSIX
-        // WEXITSTATUS extracts the actual program exit code.
-#ifdef _WIN32
-        pf.exitCode = rc;
-#else
-        if (rc == -1) pf.exitCode = -1;
-        else if (WIFEXITED(rc)) pf.exitCode = WEXITSTATUS(rc);
-        else pf.exitCode = 1;
-#endif
+        pf.exitCode = runChild(self, {validateFlag, entry.path().string()}, /*quiet=*/true);
         rows.push_back(std::move(pf));
     }
     size_t total = rows.size();

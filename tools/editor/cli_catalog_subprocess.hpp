@@ -10,7 +10,8 @@
  *
  * Four commands did that, and each carried the same four steps - quote a path
  * for the shell, strip the extension the handler does not want, run the child
- * and capture its stdout, parse and check for an "entries" array. The pieces
+ * and capture its stdout, parse and check for an "entries" array. The child is
+ * now started directly (runChildCapture), so there is no shell to quote for. The pieces
  * were copied byte for byte in three of the four and reformatted in the
  * fourth.
  *
@@ -23,8 +24,6 @@
  * say which of those happened still can.
  */
 
-#include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -32,35 +31,12 @@
 
 #include "cli_format_table.hpp"
 #include "cli_paths.hpp"
+#include "cli_subprocess.hpp"
 
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 
 namespace wowee {
 namespace editor {
 namespace cli {
-
-/// Run a command and collect everything it writes to stdout.
-///
-/// `outRc` is the child's exit status, or 127 if it could not be started.
-inline std::string runAndCapture(const std::string& cmd, int& outRc) {
-    std::string buf;
-    std::FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        outRc = 127;
-        return buf;
-    }
-    char chunk[4096];
-    while (std::fgets(chunk, sizeof(chunk), pipe) != nullptr) buf += chunk;
-    const int rc = pclose(pipe);
-#ifdef WEXITSTATUS
-    outRc = (rc != -1) ? WEXITSTATUS(rc) : rc;
-#else
-    outRc = rc;
-#endif
-    return buf;
-}
 
 /// Why a file yielded no entries, for the one command that reports it.
 enum class CatalogReadStatus {
@@ -92,12 +68,11 @@ inline CatalogRead readCatalogEntries(const std::string& self,
     CatalogRead out;
     if (!fmt.infoFlag) return out;
 
-    const std::string cmd = shellQuote(self) + " " + fmt.infoFlag + " " +
-                            shellQuote(basePathFor(path.string(),
-                                                   fmt.extension)) +
-                            " --json 2>/dev/null";
-    int rc = 0;
-    const std::string text = runAndCapture(cmd, rc);
+    // Run directly, not through a shell: a path is an argument, whatever
+    // characters its zone's author put in it, on every platform.
+    std::string text;
+    const int rc = runChildCapture(
+        self, {fmt.infoFlag, basePathFor(path.string(), fmt.extension), "--json"}, text);
     out.exitCode = rc;
     if (rc != 0 || text.empty()) {
         out.status = CatalogReadStatus::HandlerFailed;

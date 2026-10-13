@@ -50,6 +50,8 @@ TEST_CASE("emitJsonFromDbc produces wowee-DBC-loadable JSON", "[emitter]") {
     std::vector<uint8_t> bytes(static_cast<size_t>(sz));
     in.seekg(0);
     in.read(reinterpret_cast<char*>(bytes.data()), sz);
+    // Closed before cleanup(): Windows will not delete a file that is open.
+    in.close();
 
     wowee::pipeline::DBCFile dbc;
     // Public DBCFile::load detects '{' prefix and dispatches to loadJSON.

@@ -41,6 +41,7 @@ one built the tree; #115 was found by GCC and reproduced here by clang,
 but that is not guaranteed for the next one.
 """
 import json
+import os
 import pathlib
 import shlex
 import subprocess
@@ -63,9 +64,23 @@ def compile_db(build_dir):
         str(p.parent) for p in candidates)
 
 
+def split_command(command):
+    r"""A compile_commands.json command line as its arguments.
+
+    The command is written for the platform's own shell. POSIX splitting reads
+    a backslash as an escape, which turns C:\msys64\mingw64\bin\c++.exe into
+    a program that does not exist; on Windows it is split the way cmd reads
+    it, and the quotes that group an argument come off afterwards.
+    """
+    if os.name != "nt":
+        return shlex.split(command)
+    args = shlex.split(command, posix=False)
+    return [a[1:-1] if len(a) >= 2 and a[0] == a[-1] == '"' else a for a in args]
+
+
 def without_unicorn(entry):
     """The entry's command, minus the define, the PCH, and the output file."""
-    args = shlex.split(entry.get("command") or " ".join(entry["arguments"]))
+    args = entry.get("arguments") or split_command(entry["command"])
     out, i = [], 0
     while i < len(args):
         arg = args[i]

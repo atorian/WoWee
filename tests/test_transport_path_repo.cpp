@@ -16,6 +16,7 @@ AssetManager::AssetManager() {}
 AssetManager::~AssetManager() {}
 std::vector<uint8_t> AssetManager::readFile(const std::string&) const { return {}; }
 std::vector<uint8_t> AssetManager::readFileOptional(const std::string&) const { return {}; }
+std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string&) { return nullptr; }
 } // namespace wowee::pipeline
 
 using namespace wowee;

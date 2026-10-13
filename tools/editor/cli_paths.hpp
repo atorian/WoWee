@@ -47,24 +47,6 @@ inline std::string basePathFor(std::string path, const char* extension) {
     return path;
 }
 
-/// Wrap a string so a POSIX shell passes it through unchanged.
-///
-/// Single quotes, with the one character that cannot appear inside them
-/// spliced in as '"'"'. Paths under Data are user-named and a directory such
-/// as "Bob's zone" would otherwise end the quoting and run the rest as
-/// commands.
-inline std::string shellQuote(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') out += "'\"'\"'";
-        else out.push_back(c);
-    }
-    out.push_back('\'');
-    return out;
-}
-
 /// The first four bytes of a file, which is its format magic.
 ///
 /// False when the file cannot be opened or is shorter than four bytes; the
@@ -85,7 +67,9 @@ inline bool peekMagic(const std::filesystem::path& path, char magic[4]) {
 /// One file found under a scanned root.
 struct FoundFile {
     std::filesystem::path path;  ///< the file as it was found
-    std::string relative;        ///< its path below the scanned root
+    /// Its path below the scanned root, with '/' on every platform: it is
+    /// what reports print and what two machines' lists are compared on.
+    std::string relative;
     std::string base;            ///< `path` without the extension, for a loader
     uint64_t bytes = 0;          ///< 0 when the size could not be read
 };
@@ -113,8 +97,8 @@ inline std::vector<FoundFile> findFilesByExtension(
         FoundFile found;
         found.path = entry.path();
         std::error_code relEc;
-        found.relative = fs::relative(entry.path(), root, relEc).string();
-        if (relEc) found.relative = entry.path().filename().string();
+        found.relative = fs::relative(entry.path(), root, relEc).generic_string();
+        if (relEc) found.relative = entry.path().filename().generic_string();
         found.base = basePathFor(entry.path().string(), extension);
         std::error_code sizeEc;
         const auto size = entry.file_size(sizeEc);

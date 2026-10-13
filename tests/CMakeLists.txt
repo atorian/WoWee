@@ -2002,11 +2002,16 @@ register_test_target(test_catalog_entry_key)
 
 # ── test_catalog_subprocess ──────────────────────────────────
 # How the catalog searches reach a file: they re-invoke this executable with
-# the format's --info flag. Four commands carried the same four steps. The
-# oracle for the quoting is POSIX sh, which the test runs.
+# the format's --info flag, started directly rather than through a shell. The
+# child is child_echo, which says back the argument it was given.
+add_executable(test_child_echo child_echo.cpp)
 add_executable(test_catalog_subprocess
     test_catalog_subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/tools/editor/cli_subprocess.cpp
     ${TEST_COMMON_SOURCES})
+add_dependencies(test_catalog_subprocess test_child_echo)
+target_compile_definitions(test_catalog_subprocess PRIVATE
+    CHILD_ECHO_PATH="$<TARGET_FILE:test_child_echo>")
 target_include_directories(test_catalog_subprocess PRIVATE
     ${TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/tools/editor

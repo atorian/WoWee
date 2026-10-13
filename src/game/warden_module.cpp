@@ -1534,16 +1534,8 @@ bool WardenModule::initializeModule() {
         }
 
     #elif defined(_WIN32)
-        // Native Windows execution (dangerous without sandboxing)
-        typedef void* (*ModuleEntryPoint)(ClientCallbacks*);
-        ModuleEntryPoint entryPoint = reinterpret_cast<ModuleEntryPoint>(moduleMemory_);
-
-        LOG_INFO("WardenModule: Calling module entry point at ", moduleMemory_);
-
-        // NOTE: This would execute native x86 code
-        // Extremely dangerous without proper validation!
-        // void* result = entryPoint(&callbacks);
-
+        // Native Windows execution would run the server's x86 code in this
+        // process unsandboxed, so it is not done: the module is not called.
         LOG_WARNING("WardenModule: Module entry point call is DISABLED (unsafe without validation)");
         LOG_INFO("WardenModule:   Would execute x86 code at ", moduleMemory_);
 

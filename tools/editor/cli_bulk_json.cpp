@@ -2,6 +2,7 @@
 #include "cli_arg_parse.hpp"
 #include "cli_format_table.hpp"
 #include "cli_paths.hpp"
+#include "cli_subprocess.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -14,9 +15,6 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 
 namespace wowee {
 namespace editor {
@@ -25,17 +23,6 @@ namespace cli {
 namespace {
 
 namespace fs = std::filesystem;
-
-int runSubprocessExitCode(const std::string& cmd) {
-    int rc = std::system(cmd.c_str());
-#ifdef _WIN32
-    return rc;
-#else
-    if (rc == -1) return -1;
-    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
-    return 1;
-#endif
-}
 
 struct JobResult {
     fs::path path;
@@ -81,9 +68,7 @@ int handleExport(int& i, int argc, char** argv) {
         if (!ext.empty() && base.size() > ext.size()) {
             base = base.substr(0, base.size() - ext.size());
         }
-        std::string cmd = shellQuote(self) + " " + flag + " " +
-                           shellQuote(base) + " >/dev/null 2>&1";
-        r.exitCode = runSubprocessExitCode(cmd);
+        r.exitCode = runChild(self, {flag, base}, /*quiet=*/true);
         rows.push_back(std::move(r));
     }
     size_t total = rows.size();
@@ -185,9 +170,7 @@ int handleImport(int& i, int argc, char** argv) {
             rows.push_back(std::move(r));
             continue;
         }
-        std::string cmd = shellQuote(self) + " " + flag + " " +
-                           shellQuote(p.string()) + " >/dev/null 2>&1";
-        r.exitCode = runSubprocessExitCode(cmd);
+        r.exitCode = runChild(self, {flag, p.string()}, /*quiet=*/true);
         rows.push_back(std::move(r));
     }
     size_t total = rows.size();

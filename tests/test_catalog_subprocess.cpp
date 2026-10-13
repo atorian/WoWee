@@ -12,83 +12,85 @@
 // item catalog was unsearchable by all four commands without a word of
 // complaint.
 //
-// The oracle for the quoting is POSIX sh itself, which the test runs.
+// The child is started directly (runChildCapture), not through a shell. It
+// used to be a popen of a command line quoted for POSIX sh, which on Windows
+// is cmd.exe: a path with '|' or '&' in it ran as a second command there. The
+// child here is child_echo, which says back what it was given.
 #include <catch_amalgamated.hpp>
 
-#include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <string>
 
-#include "cli_catalog_subprocess.hpp"
+#include "cli_subprocess.hpp"
 
-using wowee::editor::cli::runAndCapture;
-using wowee::editor::cli::shellQuote;
+using wowee::editor::cli::runChildCapture;
 
 namespace {
 
-// What a POSIX shell actually passes to a child for this argument. The point
-// of shellQuote is that this is the identity function.
-std::string throughTheShell(const std::string& argument) {
-    int rc = -1;
-    std::string out =
-        runAndCapture("printf %s " + shellQuote(argument), rc);
+const std::string kChild = CHILD_ECHO_PATH;
+
+// What the child received as its argument.
+std::string throughTheChild(const std::string& argument) {
+    std::string out;
+    const int rc = runChildCapture(kChild, {"print", argument}, out);
     CHECK(rc == 0);
     return out;
 }
 
-std::filesystem::path scratchDir() {
-    const auto dir = std::filesystem::temp_directory_path() /
-                     "wowee_catalog_subprocess_test";
-    std::filesystem::create_directories(dir);
-    return dir;
-}
-
 }  // namespace
 
-TEST_CASE("a quoted argument reaches the child unchanged", "[catalog]") {
+TEST_CASE("an argument reaches the child unchanged", "[catalog]") {
     // Data paths are named by whoever made the zone.
-    CHECK(throughTheShell("plain") == "plain");
-    CHECK(throughTheShell("with space") == "with space");
-    CHECK(throughTheShell("Bob's zone") == "Bob's zone");
-    CHECK(throughTheShell("quote\"and'both") == "quote\"and'both");
-    CHECK(throughTheShell("./Data/terrain/azeroth_32_48.whm") ==
+    CHECK(throughTheChild("plain") == "plain");
+    CHECK(throughTheChild("with space") == "with space");
+    CHECK(throughTheChild("Bob's zone") == "Bob's zone");
+    CHECK(throughTheChild("quote\"and'both") == "quote\"and'both");
+    CHECK(throughTheChild("./Data/terrain/azeroth_32_48.whm") ==
           "./Data/terrain/azeroth_32_48.whm");
+    CHECK(throughTheChild("C:\\Data\\zone\\") == "C:\\Data\\zone\\");
+    CHECK(throughTheChild("") == "");
 }
 
 TEST_CASE("shell metacharacters are data, not syntax", "[catalog]") {
-    // The command is handed to popen, so an unquoted path containing any of
-    // these would run as a command. Nothing here is exotic in a filename.
-    CHECK(throughTheShell("a;b") == "a;b");
-    CHECK(throughTheShell("$(echo no)") == "$(echo no)");
-    CHECK(throughTheShell("`echo no`") == "`echo no`");
-    CHECK(throughTheShell("a|b") == "a|b");
-    CHECK(throughTheShell("a&b") == "a&b");
-    CHECK(throughTheShell("*") == "*");
-    CHECK(throughTheShell("~") == "~");
-    CHECK(throughTheShell("a\nb") == "a\nb");
+    // A shell would act on any of these; with none in between they are only
+    // characters of a filename.
+    CHECK(throughTheChild("a;b") == "a;b");
+    CHECK(throughTheChild("$(echo no)") == "$(echo no)");
+    CHECK(throughTheChild("`echo no`") == "`echo no`");
+    CHECK(throughTheChild("a|b") == "a|b");
+    CHECK(throughTheChild("a&b") == "a&b");
+    CHECK(throughTheChild("a>b") == "a>b");
+    CHECK(throughTheChild("%PATH%") == "%PATH%");
+    CHECK(throughTheChild("*") == "*");
+    CHECK(throughTheChild("~") == "~");
+    CHECK(throughTheChild("a\nb") == "a\nb");
 }
 
 TEST_CASE("a child that fails is reported as failing", "[catalog]") {
-    // Every caller treats a nonzero status as "skip this file", so a command
-    // that cannot run must not look like one that produced nothing to search.
-    int rc = -1;
-    CHECK(runAndCapture("exit 3", rc).empty());
-    CHECK(rc == 3);
+    // Every caller treats a nonzero status as "skip this file", so a child
+    // that fails must not look like one that produced nothing to search.
+    std::string out;
+    CHECK(runChildCapture(kChild, {"exit", "3"}, out) == 3);
+    CHECK(out.empty());
+}
 
-    rc = -1;
-    const std::string text = runAndCapture("printf 'a\\nb\\n'", rc);
-    CHECK(rc == 0);
-    CHECK(text == "a\nb\n");
+TEST_CASE("a child that cannot start is -1, not a status", "[catalog]") {
+    std::string out;
+    CHECK(runChildCapture(kChild + ".missing", {"print", "x"}, out) == -1);
+    CHECK(out.empty());
 }
 
 TEST_CASE("output longer than one read is captured whole", "[catalog]") {
     // A catalog's JSON runs to hundreds of kilobytes and the capture buffer is
     // four. Truncated output parses as invalid JSON and the file is skipped,
     // which reads as an empty catalog rather than an error.
-    int rc = -1;
-    const std::string text =
-        runAndCapture("printf 'x%.0s' $(seq 1 20000)", rc);
-    CHECK(rc == 0);
-    CHECK(text.size() == 20000);
+    std::string out;
+    CHECK(runChildCapture(kChild, {"repeat", "200000"}, out) == 0);
+    CHECK(out.size() == 200000);
+}
+
+TEST_CASE("the child's stderr is not part of what is read", "[catalog]") {
+    // The handlers log to stderr; mixed into the JSON it would not parse.
+    std::string out;
+    CHECK(runChildCapture(kChild, {"stderr", "noise"}, out) == 0);
+    CHECK(out.empty());
 }

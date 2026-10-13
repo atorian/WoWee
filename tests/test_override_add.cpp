@@ -88,6 +88,15 @@ AssetManifest manifestOver(const TempTree& tree) {
     return manifest;
 }
 
+/// Whether `resolved` lies in the tree's override directory. Compared as
+/// paths rather than by searching the string: the resolver joins its pieces
+/// with '/', and the root it starts from has the platform's separator.
+bool inOverride(const TempTree& tree, const std::string& resolved) {
+    const fs::path rel = fs::path(resolved).lexically_normal()
+                             .lexically_relative((tree.root / "override").lexically_normal());
+    return !rel.empty() && *rel.begin() != "..";
+}
+
 }  // namespace
 
 TEST_CASE("an override replaces a file the manifest knows") {
@@ -99,7 +108,7 @@ TEST_CASE("an override replaces a file the manifest knows") {
     const std::string resolved =
         resolveLikeAssetManager(tree.root, manifest, "world\\trees\\old.blp");
     REQUIRE_FALSE(resolved.empty());
-    CHECK(resolved.find("/override/") != std::string::npos);
+    CHECK(inOverride(tree, resolved));
 }
 
 TEST_CASE("an override adds a file the manifest has never heard of") {
@@ -111,7 +120,7 @@ TEST_CASE("an override adds a file the manifest has never heard of") {
     const std::string resolved =
         resolveLikeAssetManager(tree.root, manifest, "world\\trees\\leaves_set.blp");
     REQUIRE_FALSE(resolved.empty());
-    CHECK(resolved.find("/override/") != std::string::npos);
+    CHECK(inOverride(tree, resolved));
 }
 
 TEST_CASE("without the override, the manifest still answers") {
@@ -122,7 +131,7 @@ TEST_CASE("without the override, the manifest still answers") {
     const std::string resolved =
         resolveLikeAssetManager(tree.root, manifest, "world\\trees\\old.blp");
     REQUIRE_FALSE(resolved.empty());
-    CHECK(resolved.find("/override/") == std::string::npos);
+    CHECK_FALSE(inOverride(tree, resolved));
 }
 
 TEST_CASE("a path nothing has resolves to nothing") {

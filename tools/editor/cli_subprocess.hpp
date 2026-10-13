@@ -26,6 +26,13 @@ int runChild(const std::string& argv0,
              const std::vector<std::string>& args,
              bool quiet = false);
 
+// The same, collecting everything the child writes to stdout into `out`;
+// its stderr goes to the null device. Returns the exit code, or -1 when the
+// child could not be started (with a diagnostic on stderr).
+int runChildCapture(const std::string& argv0,
+                    const std::vector<std::string>& args,
+                    std::string& out);
+
 } // namespace cli
 } // namespace editor
 } // namespace wowee

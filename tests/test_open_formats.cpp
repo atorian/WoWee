@@ -74,6 +74,8 @@ TEST_CASE("WOM1 binary format structure", "[wom]") {
     auto fsize = std::filesystem::file_size(path);
     REQUIRE(fsize > 100); // Minimal valid WOM1
 
+    // Closed first: Windows will not delete a file that is still open.
+    check.close();
     std::filesystem::remove(path);
 }
 
@@ -102,6 +104,7 @@ TEST_CASE("WOM rejects invalid magic", "[wom]") {
     uint32_t m; check.read(reinterpret_cast<char*>(&m), 4);
     REQUIRE(m != 0x314D4F57);
     REQUIRE(m != 0x324D4F57);
+    check.close();
     std::filesystem::remove(path);
 }
 
