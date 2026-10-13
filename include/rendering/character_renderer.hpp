@@ -423,6 +423,12 @@ private:
     // write kept on, so the faded model still self-occludes instead of showing
     // backfaces and under-armor skin through the body.
     VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
+    // A faded body (Shadowform, a ghost, a fade-in) in two steps: its solid
+    // parts into depth alone, then colour only where that depth is, so it is
+    // one even layer - the near legs hiding the far ones - not a stack of
+    // every surface in the model's own drawing order.
+    VkPipeline fadeDepthPipeline_ = VK_NULL_HANDLE;
+    VkPipeline fadeColorPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts

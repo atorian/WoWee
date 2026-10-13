@@ -41,6 +41,9 @@ layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
 layout(location = 5) out vec2 MaskUV;
+// A faded body is drawn into depth by one pipeline and coloured where that
+// depth is by another (LESS_OR_EQUAL); both must compute the same depth.
+invariant gl_Position;
 
 #include "sphere_map.glsli"
 

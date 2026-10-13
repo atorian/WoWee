@@ -334,7 +334,8 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
 
     // --- Build pipelines ---
     auto buildCharPipeline = [&](VkPipelineColorBlendAttachmentState blendState,
-                                  bool depthWrite, bool alphaToCoverage = false) -> VkPipeline {
+                                  bool depthWrite, bool alphaToCoverage = false,
+                                  VkCompareOp depthCompare = VK_COMPARE_OP_LESS) -> VkPipeline {
         auto builder = PipelineBuilder()
             .setShaders(charVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                         charFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
@@ -349,7 +350,7 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
             // inside out.
             .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE,
                               VK_FRONT_FACE_COUNTER_CLOCKWISE)
-            .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS)
+            .setDepthTest(true, depthWrite, depthCompare)
             .setDepthBias(0.0f, 0.0f)
             .setColorBlendAttachment(blendState)
             .setMultisample(samples);
@@ -369,7 +370,11 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
     modulatePipeline_ = buildCharPipeline(m2ModulateBlendState(false), false);
     modulate2xPipeline_ = buildCharPipeline(m2ModulateBlendState(true), false);
     translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
-
+    VkPipelineColorBlendAttachmentState depthOnly = PipelineBuilder::blendDisabled();
+    depthOnly.colorWriteMask = 0;
+    fadeDepthPipeline_ = buildCharPipeline(depthOnly, true);
+    fadeColorPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false, false,
+                                           VK_COMPARE_OP_LESS_OR_EQUAL);
 }
 
 bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
@@ -606,6 +611,8 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(modulatePipeline_);
     destroyPipeline(modulate2xPipeline_);
     destroyPipeline(translucentPipeline_);
+    destroyPipeline(fadeDepthPipeline_);
+    destroyPipeline(fadeColorPipeline_);
 
     destroy(device, pipelineLayout_);
 
@@ -2941,6 +2948,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // depends only on static batch metadata, so per-frame re-sorting was waste).
             const auto& sortedBatchIndices = gpuModel.sortedBatchIndices;
 
+            // A faded body goes through the batches twice: first its solid
+            // parts into depth alone (stage 0), then everything with those
+            // parts coloured only where that depth is (fadeDepthPipeline_).
+            // Drawn in one go, each surface blended over the ones the model
+            // happened to draw before it - a Shadowform drake's far legs over
+            // its near ones, its layers stacked nearly black.
+            const bool fadeDepthStage = drawOpacity < 0.999f && !instance.isEffectModel;
+            for (int stage = fadeDepthStage ? 0 : 1; stage < 2; ++stage) {
             for (int pass = 0; pass < 2; pass++) {
             for (size_t bi : sortedBatchIndices) {
                 const auto& batch = gpuModel.data.batches[bi];
@@ -3124,7 +3139,12 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 });
                 const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
                                       blendPipeline == CharacterBlendPipeline::Modulate2x;
-                VkPipeline desiredPipeline = pipelineFor(blendPipeline);
+                const bool fadedSolid = fadeDepthStage &&
+                                        blendPipeline == CharacterBlendPipeline::Translucent;
+                if (stage == 0 && !fadedSolid) continue;
+                VkPipeline desiredPipeline = stage == 0 ? fadeDepthPipeline_
+                                           : fadedSolid ? fadeColorPipeline_
+                                                        : pipelineFor(blendPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
@@ -3331,6 +3351,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
             }
             } // end pass loop
+            } // end stage loop
         } else {
             // Draw entire model with first texture
             VkTexture* texPtr = !gpuModel.textureIds.empty() ? gpuModel.textureIds[0] : whiteTexture_.get();
@@ -4549,6 +4570,8 @@ void CharacterRenderer::recreatePipelines() {
     destroy(device, modulatePipeline_);
     destroy(device, modulate2xPipeline_);
     destroy(device, translucentPipeline_);
+    destroy(device, fadeDepthPipeline_);
+    destroy(device, fadeColorPipeline_);
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
@@ -4571,7 +4594,8 @@ void CharacterRenderer::recreatePipelines() {
     charFrag.destroy();
 
     if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
-        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_) {
+        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_ ||
+        !fadeDepthPipeline_ || !fadeColorPipeline_) {
         LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
                   " alphaTest=", (void*)alphaTestPipeline_,
                   " alpha=", (void*)alphaPipeline_,
