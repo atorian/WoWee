@@ -528,3 +528,64 @@ TEST_CASE("DBC ID indexes are rebuilt by CSV and JSON reloads", "[dbc]") {
     REQUIRE(dbc.findRecordById(99) == 1);
     REQUIRE(dbc.findRecordById(42) == -1);
 }
+
+// A realm's over_<Name>.dbc: the same columns, only the rows it adds or changes.
+TEST_CASE("A DBC diff replaces rows by ID and appends new ones", "[dbc][merge]") {
+    // ID, a number, a string. "\0Fireball\0Frostbolt\0"
+    const std::string baseStrings = std::string("\0Fireball\0Frostbolt\0", 20);
+    DBCFile dbc;
+    REQUIRE(dbc.load(buildSyntheticDBC(2, 3, {{133, 10, 1}, {116, 20, 10}}, baseStrings)));
+
+    // The diff's string offsets count from its own block.
+    const std::string overStrings = std::string("\0Shadowform\0Pyroblast\0", 22);
+    DBCFile over;
+    REQUIRE(over.load(buildSyntheticDBC(2, 3, {{107904, 30, 1}, {133, 11, 12}}, overStrings)));
+
+    REQUIRE(dbc.mergeOverrides(over));
+    REQUIRE(dbc.getRecordCount() == 3);
+
+    // Changed in place, under its old index, with the diff's string.
+    REQUIRE(dbc.findRecordById(133) == 0);
+    REQUIRE(dbc.getUInt32(0, 1) == 11);
+    REQUIRE(dbc.getString(0, 2) == "Pyroblast");
+    // Untouched rows read their strings where they always did.
+    REQUIRE(dbc.findRecordById(116) == 1);
+    REQUIRE(dbc.getString(1, 2) == "Frostbolt");
+    // New, at the end.
+    REQUIRE(dbc.findRecordById(107904) == 2);
+    REQUIRE(dbc.getUInt32(2, 1) == 30);
+    REQUIRE(dbc.getString(2, 2) == "Shadowform");
+    // A string column's raw value is still the offset the file holds.
+    REQUIRE(dbc.getUInt32(2, 2) == 1);
+}
+
+TEST_CASE("A DBC diff whose empty strings sit at its own offset 0 reads empty", "[dbc][merge]") {
+    DBCFile dbc;
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 2, {{1, 1}}, std::string("\0Base\0", 6))));
+    DBCFile over;
+    REQUIRE(over.load(buildSyntheticDBC(1, 2, {{2, 0}}, std::string(1, '\0'))));
+    REQUIRE(dbc.mergeOverrides(over));
+    REQUIRE(dbc.getString(0, 1) == "Base");
+    REQUIRE(dbc.getString(1, 1).empty());
+}
+
+TEST_CASE("A DBC diff with other columns is refused and changes nothing", "[dbc][merge]") {
+    DBCFile dbc;
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 2, {{1, 5}}, std::string(1, '\0'))));
+    DBCFile over;
+    REQUIRE(over.load(buildSyntheticDBC(1, 3, {{1, 6, 7}}, std::string(1, '\0'))));
+    REQUIRE_FALSE(dbc.mergeOverrides(over));
+    REQUIRE(dbc.getRecordCount() == 1);
+    REQUIRE(dbc.getUInt32(0, 1) == 5);
+}
+
+TEST_CASE("Reloading a merged DBC forgets the diff", "[dbc][merge]") {
+    DBCFile dbc;
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 2, {{1, 1}}, std::string("\0Base\0", 6))));
+    DBCFile over;
+    REQUIRE(over.load(buildSyntheticDBC(1, 2, {{1, 1}}, std::string("\0Diff\0", 6))));
+    REQUIRE(dbc.mergeOverrides(over));
+    REQUIRE(dbc.getString(0, 1) == "Diff");
+    REQUIRE(dbc.load(buildSyntheticDBC(1, 2, {{1, 1}}, std::string("\0Base\0", 6))));
+    REQUIRE(dbc.getString(0, 1) == "Base");
+}

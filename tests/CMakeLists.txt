@@ -2711,6 +2711,27 @@ wowee_test_link_glm(test_realm_patch_sync)
 add_test(NAME realm_patch_sync COMMAND test_realm_patch_sync)
 register_test_target(test_realm_patch_sync)
 
+# ── test_archive_layer ───────────────────────────────────────
+# A realm's patch archives above the extracted data: which copy of a file is
+# read, and a table read with the realm's over_ diff merged in. Links the
+# pipeline library for the AssetManager; the MPQ half needs StormLib.
+add_executable(test_archive_layer test_archive_layer.cpp)
+target_include_directories(test_archive_layer PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_archive_layer SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_archive_layer PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_archive_layer)
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    target_sources(test_archive_layer PRIVATE ${CMAKE_SOURCE_DIR}/src/pipeline/mpq_archive_layer.cpp)
+    target_include_directories(test_archive_layer PRIVATE ${STORMLIB_INCLUDE_DIR})
+    target_compile_definitions(test_archive_layer PRIVATE WOWEE_HAVE_STORMLIB)
+    if(WOWEE_STORMLIB_SERR)
+        target_compile_definitions(test_archive_layer PRIVATE WOWEE_STORMLIB_SERR=1)
+    endif()
+    wowee_link_stormlib(test_archive_layer)
+endif()
+add_test(NAME archive_layer COMMAND test_archive_layer)
+register_test_target(test_archive_layer)
+
 # ── test_warden_hmac ─────────────────────────────────────────
 # The keyed-once HMAC-SHA1 used by the code-pattern search, against OpenSSL.
 add_executable(test_warden_hmac

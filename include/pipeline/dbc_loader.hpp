@@ -119,6 +119,24 @@ public:
      */
     int32_t findRecordById(uint32_t id) const;
 
+    /**
+     * Lay a diff table over this one, by record ID.
+     *
+     * A realm ships its changes to a table as DBFilesClient\over_<Name>.dbc:
+     * the same columns, holding only the records it adds or changes. A record
+     * whose ID is already here replaces it in place; any other is appended.
+     *
+     * The diff's strings stay in the diff's own string block, appended to this
+     * one, and the records taken from it remember where that block starts. So
+     * the merge needs no schema - which columns hold strings is not known here
+     * - and getUInt32 still returns a string column's raw offset.
+     *
+     * Call before the table is shared: it rebuilds the ID index.
+     *
+     * @return false, leaving this table as it was, when the layouts differ
+     */
+    bool mergeOverrides(const DBCFile& over);
+
 private:
     // DBC file header (20 bytes)
     struct DBCHeader {
@@ -137,6 +155,9 @@ private:
 
     std::vector<uint8_t> recordData;    // All record data
     std::vector<uint8_t> stringBlock;   // String block
+    // Where each record's strings start in stringBlock, once a diff has been
+    // merged in; empty until then, when every record's start is 0.
+    std::vector<uint32_t> recordStringBase;
 
     // Cache for record ID -> index lookup
     mutable std::unordered_map<uint32_t, uint32_t> idToIndexCache;

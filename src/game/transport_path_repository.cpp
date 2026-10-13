@@ -263,18 +263,14 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
         return false;
     }
 
-    // Load DBC file
-    auto dbcData = assetMgr->readFile("DBFilesClient\\TransportAnimation.dbc");
-    if (dbcData.empty()) {
+    // Through loadDBC, which lays a realm's over_TransportAnimation.dbc over
+    // the client's: its new ships and their paths are only in there.
+    auto loaded = assetMgr->loadDBC("TransportAnimation.dbc");
+    if (!loaded || !loaded->isLoaded()) {
         LOG_WARNING("TransportAnimation.dbc not found - transports will use fallback paths");
         return false;
     }
-
-    pipeline::DBCFile dbc;
-    if (!dbc.load(dbcData)) {
-        LOG_ERROR("Failed to parse TransportAnimation.dbc");
-        return false;
-    }
+    const pipeline::DBCFile& dbc = *loaded;
 
     LOG_INFO("TransportAnimation.dbc: ", dbc.getRecordCount(), " records, ",
              dbc.getFieldCount(), " fields per record");
@@ -651,17 +647,13 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         return false;
     }
 
-    auto dbcData = assetMgr->readFile("DBFilesClient\\TaxiPathNode.dbc");
-    if (dbcData.empty()) {
+    // Through loadDBC for the same reason as TransportAnimation.dbc.
+    auto loaded = assetMgr->loadDBC("TaxiPathNode.dbc");
+    if (!loaded || !loaded->isLoaded()) {
         LOG_WARNING("TaxiPathNode.dbc not found - MO_TRANSPORT will use fallback paths");
         return false;
     }
-
-    pipeline::DBCFile dbc;
-    if (!dbc.load(dbcData)) {
-        LOG_ERROR("Failed to parse TaxiPathNode.dbc");
-        return false;
-    }
+    const pipeline::DBCFile& dbc = *loaded;
 
     LOG_INFO("TaxiPathNode.dbc: ", dbc.getRecordCount(), " records, ",
              dbc.getFieldCount(), " fields per record");

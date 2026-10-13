@@ -1,5 +1,6 @@
 #pragma once
 
+#include "pipeline/archive_layer.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manifest.hpp"
@@ -109,6 +110,25 @@ public:
     }
 
     /**
+     * Serve the files `layer` holds in preference to the extracted data - a
+     * realm's patch archives, which replace models, textures and whole tables
+     * of the client they patch. nullptr takes it away again.
+     *
+     * The override directory still comes first: what the player put there is
+     * theirs. Beneath it the layer answers for every path it holds, and the
+     * manifest, the base fallback and loose files only for the rest.
+     *
+     * A layer holding DBFilesClient\over_<Name>.dbc changes <Name>.dbc too:
+     * loadDBC merges the diff into the table by record ID.
+     *
+     * Everything cached is forgotten, since any of it may now come from
+     * somewhere else. What callers built from earlier reads is theirs to
+     * rebuild.
+     */
+    void setArchiveLayer(std::shared_ptr<const ArchiveLayer> layer);
+    [[nodiscard]] bool hasArchiveLayer() const { return archiveLayer() != nullptr; }
+
+    /**
      * Load a DBC file
      * @param name DBC file name (e.g., "Map.dbc")
      * @return Loaded DBC file (check isLoaded())
@@ -170,6 +190,10 @@ public:
      * manifest. Public so callers (e.g. terrain_manager probing for
      * sidecar files like .whm/.wot/.woc next to a .adt) can locate the
      * extracted file's directory without reading it.
+     *
+     * A path the archive layer answers for has no file on disk, and "" is
+     * returned for it even though it exists: the extracted file it replaces
+     * is not the one being read, and neither are the sidecars beside that.
      * @return absolute or relative fs path, or "" if not found
      */
     [[nodiscard]] std::string resolveFile(const std::string& normalizedPath) const;
@@ -207,10 +231,33 @@ private:
     mutable std::atomic<uint64_t> baseFallbackHits_{0};
 
     // (resolveFile moved to public - declaration above.)
+    // Its two halves: the override directory, and what was extracted beneath
+    // the archive layer - manifest, base fallback, loose file.
+    [[nodiscard]] std::string resolveOverride(const std::string& normalizedPath) const;
+    [[nodiscard]] std::string resolveExtracted(const std::string& normalizedPath) const;
+
+    // Set on the main thread while workers read through it, so it is copied
+    // out under a lock and used from the copy.
+    [[nodiscard]] std::shared_ptr<const ArchiveLayer> archiveLayer() const;
+    mutable std::shared_mutex archiveMutex_;
+    std::shared_ptr<const ArchiveLayer> archiveLayer_;
+
+    /// The archive layer's DBFilesClient\over_<name>, merged into `dbc`.
+    void mergeDbcOverrides(const std::string& name, DBCFile& dbc) const;
+    /// The archive layer's over_<name> on its own, for a table with no base.
+    [[nodiscard]] std::shared_ptr<DBCFile> loadDbcOverridesAlone(const std::string& name) const;
 
     // dbcCache under cacheMutex. The load between them runs unlocked.
-    [[nodiscard]] std::shared_ptr<DBCFile> cachedDBC(const std::string& name) const;
-    std::shared_ptr<DBCFile> cacheDBC(const std::string& name, std::shared_ptr<DBCFile> dbc);
+    //
+    // A load can straddle setArchiveLayer: read half from the old layer,
+    // cached after the clear. The generation, bumped with every clear, keeps
+    // such a result out of the cache; the caller that asked still gets it.
+    [[nodiscard]] std::shared_ptr<DBCFile> cachedDBC(const std::string& name,
+                                                     uint64_t* generation = nullptr) const;
+    std::shared_ptr<DBCFile> cacheDBC(const std::string& name, std::shared_ptr<DBCFile> dbc,
+                                      uint64_t generation);
+    // THREAD-SAFE: protected by cacheMutex.
+    uint64_t cacheGeneration_ = 0;
 
     // Guards fileCache, dbcCache, fileCacheTotalBytes, fileCacheAccessCounter, and
     // fileCacheBudget.  Shared lock for read-only cache lookups (readFile cache hit,

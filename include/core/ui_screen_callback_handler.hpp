@@ -41,6 +41,9 @@ public:
     /// True while an attempt is in progress: its retries ask the login
     /// connection for the realm list, so that connection must be pumped.
     [[nodiscard]] bool connecting() const { return attempt_.active; }
+    /// The realm last connected to, as the realm list gives its address;
+    /// empty before the first. A realm's patch archives are mounted for it.
+    [[nodiscard]] const std::string& realmAddress() const { return lastRealmAddress_; }
 
     /// After the world connection drops: log in again, connect to the same
     /// realm and enter the world with this character, saying each step on

@@ -17,6 +17,10 @@
 #include "core/realm_patch_sync.hpp"
 #include "core/realm_patches.hpp"
 #include "core/data_paths.hpp"
+#include "pipeline/archive_layer.hpp"
+#ifdef WOWEE_HAVE_STORMLIB
+#include "pipeline/mpq_archive_layer.hpp"
+#endif
 #include "game/server_protocol.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -6141,6 +6145,133 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
         });
     }
     realmPatchSync_->start(patches, authHandler->getClientInfo().locale);
+    // For this realm, whatever comes of the run. The list itself is read from
+    // the sync when it is done: until then it is not known which archives the
+    // run will leave on disk.
+    realmPatchesToMount_ = RealmPatchSet{currentRealmPatchKey(), {}};
+}
+
+std::string Application::currentRealmPatchKey() const {
+    if (!authHandler || !uiScreenCallbacks_ || uiScreenCallbacks_->realmAddress().empty()) return {};
+    return authHandler->getServerHost() + ":" + std::to_string(authHandler->getServerPort()) + "/" +
+           uiScreenCallbacks_->realmAddress();
+}
+
+/// Brings the mounted realm archives in line with the realm connected to.
+///
+/// Mounted only once the realm's whole list is on disk and checked, and only
+/// that list - the directory is shared by every realm behind one login server
+/// and may hold archives another of them announced. Put in place only when no
+/// world is in use: the swap clears what every table reader built, and a
+/// world half-drawn from the old data would keep the rest of it.
+void Application::updateRealmPatchMount() {
+    if (!assetManager) return;
+    const bool worldInUse = state == AppState::IN_GAME || (worldLoader_ && worldLoader_->isLoadingWorld());
+    const std::string realm = currentRealmPatchKey();
+
+    // Connected somewhere else: these archives are not that realm's. Taken down
+    // as soon as the world allows, before anything is read for the new realm.
+    if (!mountedRealmPatches_.realm.empty() && realm != mountedRealmPatches_.realm && !worldInUse) {
+        LOG_INFO("Realm patches of ", mountedRealmPatches_.realm, " unmounted: now connected to ",
+                 realm.empty() ? std::string("no realm") : realm);
+        applyRealmPatchLayer(nullptr, {});
+    }
+
+    if (realmPatchesToMount_ && realmPatchSync_ && !realmPatchSync_->busy()) {
+        RealmPatchSet set = std::move(*realmPatchesToMount_);
+        realmPatchesToMount_.reset();
+        if (realmPatchSync_->progress().state != RealmPatchSync::State::Done) {
+            // Some of the list is missing or stale. Mounting the rest would
+            // serve the base files beneath the missing ones as if current.
+            LOG_WARNING("Realm patches not mounted: the download did not finish");
+        } else {
+            set.archives = realmPatchSync_->archives();
+            // Same names are not the same archives if any of them was fetched
+            // again this run.
+            const bool downloaded = realmPatchSync_->progress().fileCount != 0;
+            if (set.realm == mountedRealmPatches_.realm && set.archives == mountedRealmPatches_.archives &&
+                !downloaded) {
+                LOG_INFO("Realm patches: the ", set.archives.size(), " mounted archives are current");
+            } else if (set.archives.empty()) {
+                LOG_INFO("Realm patches: the realm announces no archives for this client");
+                if (!mountedRealmPatches_.realm.empty() && !worldInUse) applyRealmPatchLayer(nullptr, {});
+            } else {
+#ifdef WOWEE_HAVE_STORMLIB
+                // Superseded: whatever was opened or is opening was for an
+                // earlier list.
+                if (realmPatchesOpening_.valid()) realmPatchesOpening_.wait();
+                realmPatchesOpening_ = {};
+                realmPatchLayerReady_ = nullptr;
+                realmPatchesBeingOpened_ = set;
+                realmPatchesOpening_ = std::async(std::launch::async, [archives = set.archives]()
+                        -> std::shared_ptr<const pipeline::ArchiveLayer> {
+                    const auto started = std::chrono::steady_clock::now();
+                    std::string error;
+                    auto layer = pipeline::MpqArchiveLayer::open(archives, error);
+                    if (!layer) {
+                        LOG_ERROR("Realm patches not mounted: ", error);
+                        return nullptr;
+                    }
+                    const auto counts = layer->filesPerArchive();
+                    for (size_t i = 0; i < archives.size(); ++i) {
+                        LOG_INFO("Realm patch ", i + 1, "/", archives.size(), ": ",
+                                 archives[i].filename().string(), " answers for ", counts[i], " files");
+                    }
+                    LOG_INFO("Realm patches opened: ", layer->fileCount(), " files in ",
+                             layer->archiveCount(), " archives, ",
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - started).count(), " ms");
+                    return layer;
+                });
+#else
+                LOG_WARNING("Realm patches not mounted: this client was built without StormLib, "
+                            "so it cannot read the realm's archives");
+#endif
+            }
+        }
+    }
+
+    if (realmPatchesOpening_.valid() &&
+        realmPatchesOpening_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        realmPatchLayerReady_ = realmPatchesOpening_.get();
+        if (!realmPatchLayerReady_) realmPatchesBeingOpened_ = {};
+    }
+    if (realmPatchLayerReady_ && !worldInUse) {
+        if (realmPatchesBeingOpened_.realm == realm) {
+            applyRealmPatchLayer(std::move(realmPatchLayerReady_), std::move(realmPatchesBeingOpened_));
+        } else {
+            LOG_INFO("Realm patches of ", realmPatchesBeingOpened_.realm,
+                     " opened after leaving that realm; not mounted");
+        }
+        realmPatchLayerReady_ = nullptr;
+        realmPatchesBeingOpened_ = {};
+    }
+}
+
+void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLayer> layer,
+                                       RealmPatchSet set) {
+    const bool mounting = layer != nullptr;
+    assetManager->setArchiveLayer(std::move(layer));
+    mountedRealmPatches_ = std::move(set);
+    if (mounting) {
+        LOG_INFO("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
+                 mountedRealmPatches_.archives.size(), " archives above the extracted data");
+    }
+
+    // Everything built from the tables the archives change, rebuilt the way
+    // an expansion switch rebuilds it: the readers load again, lazily, from
+    // the tables with the realm's records merged in (or without them).
+    if (worldLoader_) worldLoader_->resetMapNameCache();
+    if (gameHandler) {
+        gameHandler->resetDbcCaches();
+        // Additive: a realm's transports join the client's, and the client's
+        // are found again as they were.
+        if (auto* transports = gameHandler->getTransportManager()) {
+            transports->loadTransportAnimationDBC(assetManager.get());
+            transports->loadTaxiPathNodeDBC(assetManager.get());
+        }
+    }
+    if (entitySpawner_) entitySpawner_->rebuildLookups();
 }
 
 void Application::updateConnectionAndPatches(float deltaTime) {
@@ -6155,6 +6286,7 @@ void Application::updateConnectionAndPatches(float deltaTime) {
     }
     if (uiScreenCallbacks_) uiScreenCallbacks_->update(deltaTime);
     if (realmPatchSync_) realmPatchSync_->update();
+    updateRealmPatchMount();
 
     // One status for the character screen: what the connection is doing,
     // then the patch download under it.

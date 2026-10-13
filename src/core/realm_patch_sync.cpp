@@ -158,6 +158,10 @@ void RealmPatchSync::start(const std::vector<game::EzWowPatch>& manifest, const 
     loadCache();
     LOG_INFO("Realm patches: ", plan_.size(), " of ", manifest.size(), " archives apply to locale ",
              locale, "; checking ", directory_.string());
+    // The order they mount in, later over earlier, as the realm numbered them.
+    std::string order;
+    for (const auto& entry : plan_) order += (order.empty() ? "" : ", ") + entry.patch.name;
+    LOG_INFO("Realm patch load order: ", order);
 
     state_ = State::Checking;
     checking_ = std::async(std::launch::async, [plan = plan_, dir = directory_, sums = sums_]() mutable {

@@ -33,6 +33,7 @@ bool DBCFile::load(const std::vector<uint8_t>& dbcData) {
         LOG_ERROR("DBC data is empty");
         return false;
     }
+    recordStringBase.clear();
 
     // Detect CSV format: starts with '#'
     if (dbcData[0] == '#') {
@@ -173,6 +174,13 @@ std::string DBCFile::getString(uint32_t recordIndex, uint32_t fieldIndex) const 
 
 std::string_view DBCFile::getStringView(uint32_t recordIndex, uint32_t fieldIndex) const {
     uint32_t offset = getUInt32(recordIndex, fieldIndex);
+    if (recordIndex < recordStringBase.size()) {
+        // A record merged from a diff table: its offsets count from the start
+        // of that table's strings, which follow this table's own.
+        const uint64_t rebased = uint64_t{offset} + recordStringBase[recordIndex];
+        if (rebased >= stringBlockSize) return {};
+        offset = static_cast<uint32_t>(rebased);
+    }
     return getStringViewByOffset(offset);
 }
 
@@ -210,6 +218,54 @@ int32_t DBCFile::findRecordById(uint32_t id) const {
     }
 
     return -1;
+}
+
+bool DBCFile::mergeOverrides(const DBCFile& over) {
+    if (!loaded || !over.loaded) return false;
+    // A diff is the same table with fewer rows. One with other columns is
+    // some other table, and laying it over this one would misread every field.
+    if (over.fieldCount != fieldCount || over.recordSize != recordSize || recordSize < 4) {
+        LOG_WARNING("DBC diff layout (", over.fieldCount, " fields, ", over.recordSize,
+                    " bytes) does not match the table's (", fieldCount, " fields, ",
+                    recordSize, " bytes); not merged");
+        return false;
+    }
+    if (uint64_t{stringBlockSize} + over.stringBlockSize > 256ull * 1024 * 1024 ||
+        uint64_t{recordCount} + over.recordCount > 10'000'000) {
+        LOG_WARNING("DBC diff would grow the table past its limits; not merged");
+        return false;
+    }
+
+    const uint32_t overStrings = stringBlockSize;
+    stringBlock.insert(stringBlock.end(), over.stringBlock.begin(), over.stringBlock.end());
+    stringBlockSize = static_cast<uint32_t>(stringBlock.size());
+    if (recordStringBase.empty()) recordStringBase.assign(recordCount, 0);
+    recordData.reserve(recordData.size() + static_cast<size_t>(over.recordCount) * recordSize);
+    recordStringBase.reserve(recordStringBase.size() + over.recordCount);
+
+    uint32_t replaced = 0;
+    for (uint32_t i = 0; i < over.recordCount; ++i) {
+        const uint8_t* source = over.getRecord(i);
+        const uint32_t id = over.getUInt32(i, 0);
+        // A diff merged into a table that was itself merged keeps its own
+        // records' starts, shifted past this table's strings.
+        const uint32_t base = overStrings +
+            (i < over.recordStringBase.size() ? over.recordStringBase[i] : 0);
+        auto it = idToIndexCache.find(id);
+        if (it != idToIndexCache.end()) {
+            std::memcpy(recordData.data() + static_cast<size_t>(it->second) * recordSize,
+                        source, recordSize);
+            recordStringBase[it->second] = base;
+            ++replaced;
+        } else {
+            recordData.insert(recordData.end(), source, source + recordSize);
+            recordStringBase.push_back(base);
+            idToIndexCache[id] = recordCount++;
+        }
+    }
+    LOG_DEBUG("Merged DBC diff: ", replaced, " records replaced, ",
+              over.recordCount - replaced, " added, ", recordCount, " in all");
+    return true;
 }
 
 void DBCFile::buildIdCache() const {

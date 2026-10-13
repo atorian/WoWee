@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
 #include <array>
@@ -35,7 +36,7 @@ namespace rendering { class Renderer; }
 namespace ui { class UIManager; class MapWindow; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
-namespace pipeline { class AssetManager; class DBCLayout; struct M2Model; struct WMOModel; }
+namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; }
 
@@ -361,6 +362,27 @@ private:
     std::string connectionStatus_;  // what the character screen was last told
     void startRealmPatchSync(const std::vector<game::EzWowPatch>& patches);
     void updateConnectionAndPatches(float deltaTime);
+
+    // The archives of the realm connected to, read in place above the
+    // extracted data once every one of them is on disk and checked. Each set
+    // belongs to one realm - "<login host>:<port>/<realm address>" - and is
+    // taken down when the player connects to another.
+    struct RealmPatchSet {
+        std::string realm;
+        std::vector<std::filesystem::path> archives;
+    };
+    RealmPatchSet mountedRealmPatches_;
+    // Set when a sync starts, consumed when it ends: the set it was for.
+    std::optional<RealmPatchSet> realmPatchesToMount_;
+    // Opened on a worker - reading two dozen archives' file lists is a fifth
+    // of a second, more from a cold disk - and put in place on this thread
+    // when no world is in use.
+    std::future<std::shared_ptr<const pipeline::ArchiveLayer>> realmPatchesOpening_;
+    RealmPatchSet realmPatchesBeingOpened_;
+    std::shared_ptr<const pipeline::ArchiveLayer> realmPatchLayerReady_;
+    [[nodiscard]] std::string currentRealmPatchKey() const;
+    void updateRealmPatchMount();
+    void applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLayer> layer, RealmPatchSet set);
 
     // Beat by the main loop each iteration; the watchdog treats a long silence as a
     // hang. Long but healthy work that renders its own frames (world load) must beat

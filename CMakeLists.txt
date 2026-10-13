@@ -2157,6 +2157,27 @@ else()
     message(STATUS "  asset panel in the client: DISABLED (needs StormLib and extern/imgui)")
 endif()
 
+# ---- Realm patch archives, read in place ----
+#
+# A realm's patch MPQs are read where they were downloaded rather than
+# extracted. Added to the client here rather than listed in WOWEE_SOURCES:
+# every src/pipeline file there goes into wowee_pipeline, which the tools link
+# without StormLib. A client built without it still runs, and says it cannot
+# mount a realm's archives when one sends them.
+if(TARGET wowee AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    target_sources(wowee PRIVATE src/pipeline/mpq_archive_layer.cpp)
+    target_include_directories(wowee PRIVATE ${STORMLIB_INCLUDE_DIR})
+    target_compile_definitions(wowee PRIVATE WOWEE_HAVE_STORMLIB)
+    if(WOWEE_STORMLIB_SERR)
+        set_source_files_properties(src/pipeline/mpq_archive_layer.cpp
+            PROPERTIES COMPILE_DEFINITIONS WOWEE_STORMLIB_SERR=1)
+    endif()
+    wowee_link_stormlib(wowee)
+    message(STATUS "  realm patch archives: ENABLED")
+else()
+    message(STATUS "  realm patch archives: DISABLED (needs StormLib)")
+endif()
+
 # ---- Tool: dbc_to_csv (DBC → CSV text) ----
 add_executable(dbc_to_csv
     tools/dbc_to_csv/main.cpp

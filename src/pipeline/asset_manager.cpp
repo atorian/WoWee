@@ -165,6 +165,14 @@ void AssetManager::shutdown() {
 }
 
 std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
+    std::string overridePath = resolveOverride(normalizedPath);
+    if (!overridePath.empty()) return overridePath;
+    // Held by the archive layer: there is a file, and it is not on disk.
+    if (auto layer = archiveLayer(); layer && layer->contains(normalizedPath)) return {};
+    return resolveExtracted(normalizedPath);
+}
+
+std::string AssetManager::resolveOverride(const std::string& normalizedPath) const {
     // Check override directory first (for HD upgrades, custom textures)
     if (overrideDirExists_) {
         const auto* entry = manifest_.lookup(normalizedPath);
@@ -187,6 +195,10 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
             return overrideByPath;
         }
     }
+    return {};
+}
+
+std::string AssetManager::resolveExtracted(const std::string& normalizedPath) const {
     // Primary manifest
     std::string primaryPath = manifest_.resolveFilesystemPath(normalizedPath);
     if (!primaryPath.empty()) return primaryPath;
@@ -213,6 +225,22 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
         return looseCandidate;
     }
     return {};
+}
+
+std::shared_ptr<const ArchiveLayer> AssetManager::archiveLayer() const {
+    std::shared_lock<std::shared_mutex> lock(archiveMutex_);
+    return archiveLayer_;
+}
+
+void AssetManager::setArchiveLayer(std::shared_ptr<const ArchiveLayer> layer) {
+    {
+        std::lock_guard<std::shared_mutex> lock(archiveMutex_);
+        archiveLayer_ = std::move(layer);
+    }
+    // After the swap, so that nothing read through the old layer survives it:
+    // a read already under way may still finish against the old one, and the
+    // generation this bumps keeps its result out of the caches.
+    clearCache();
 }
 
 bool AssetManager::looseFileExists(const std::string& filesystemPath) const {
@@ -468,7 +496,8 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
         return nullptr;
     }
 
-    if (auto cached = cachedDBC(name)) {
+    uint64_t generation = 0;
+    if (auto cached = cachedDBC(name, &generation)) {
         LOG_DEBUG("DBC already loaded (cached): ", name);
         return cached;
     }
@@ -609,6 +638,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
     }
 
     if (dbcData.empty()) {
+        if (auto alone = loadDbcOverridesAlone(name)) return cacheDBC(name, std::move(alone), generation);
         LOG_WARNING("DBC not found: ", name);
         return nullptr;
     }
@@ -618,8 +648,9 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
         LOG_ERROR("Failed to load DBC: ", name);
         return nullptr;
     }
+    mergeDbcOverrides(name, *dbc);
 
-    dbc = cacheDBC(name, std::move(dbc));
+    dbc = cacheDBC(name, std::move(dbc), generation);
     LOG_INFO("Loaded DBC: ", name, " (", dbc->getRecordCount(), " records)");
     return dbc;
 }
@@ -629,8 +660,10 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
 // called off the main thread - the entity spawner reads CharSections on a
 // worker - so an unlocked find could walk the table while an insert rehashed
 // it.
-std::shared_ptr<DBCFile> AssetManager::cachedDBC(const std::string& name) const {
+std::shared_ptr<DBCFile> AssetManager::cachedDBC(const std::string& name,
+                                                 uint64_t* generation) const {
     std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    if (generation) *generation = cacheGeneration_;
     auto it = dbcCache.find(name);
     return it != dbcCache.end() ? it->second : nullptr;
 }
@@ -639,13 +672,48 @@ std::shared_ptr<DBCFile> AssetManager::cachedDBC(const std::string& name) const 
 // inserts. The first one in is kept and both callers get it, so there is one
 // copy of each table rather than whichever finished last.
 std::shared_ptr<DBCFile> AssetManager::cacheDBC(const std::string& name,
-                                                std::shared_ptr<DBCFile> dbc) {
+                                                std::shared_ptr<DBCFile> dbc,
+                                                uint64_t generation) {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
+    if (generation != cacheGeneration_) return dbc;
     return dbcCache.emplace(name, std::move(dbc)).first->second;
 }
 
+// The archive layer's diff for a table. Merged here, before the table is
+// cached, because every reader takes the table from the cache: GameHandler's
+// spell names, the visual kits, the display infos - none of them knows a realm
+// added to what it reads.
+void AssetManager::mergeDbcOverrides(const std::string& name, DBCFile& dbc) const {
+    auto layer = archiveLayer();
+    if (!layer) return;
+    const std::string overPath = normalizePath("DBFilesClient\\over_" + name);
+    if (!layer->contains(overPath)) return;
+    DBCFile over;
+    if (!over.load(layer->read(overPath))) {
+        LOG_WARNING("Realm DBC diff ", overPath, " is unreadable; ", name, " stays as shipped");
+        return;
+    }
+    const uint32_t before = dbc.getRecordCount();
+    if (dbc.mergeOverrides(over)) {
+        LOG_INFO("Merged realm DBC diff into ", name, ": ", over.getRecordCount(), " records, ",
+                 dbc.getRecordCount() - before, " of them new (", dbc.getRecordCount(), " in all)");
+    }
+}
+
+std::shared_ptr<DBCFile> AssetManager::loadDbcOverridesAlone(const std::string& name) const {
+    auto layer = archiveLayer();
+    if (!layer) return nullptr;
+    const std::string overPath = normalizePath("DBFilesClient\\over_" + name);
+    if (!layer->contains(overPath)) return nullptr;
+    auto dbc = std::make_shared<DBCFile>();
+    if (!dbc->load(layer->read(overPath))) return nullptr;
+    LOG_INFO("Using realm DBC diff ", overPath, " as ", name, ", which has no base table");
+    return dbc;
+}
+
 std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) {
-    if (auto cached = cachedDBC(name)) return cached;
+    uint64_t generation = 0;
+    if (auto cached = cachedDBC(name, &generation)) return cached;
 
     // Try binary DBC
     std::vector<uint8_t> dbcData;
@@ -675,6 +743,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     }
 
     if (dbcData.empty()) {
+        if (auto alone = loadDbcOverridesAlone(name)) return cacheDBC(name, std::move(alone), generation);
         // Expected on some expansions - log at debug level only.
         LOG_DEBUG("Optional DBC not found (expected on some expansions): ", name);
         return nullptr;
@@ -685,8 +754,9 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
         LOG_ERROR("Failed to load DBC: ", name);
         return nullptr;
     }
+    mergeDbcOverrides(name, *dbc);
 
-    dbc = cacheDBC(name, std::move(dbc));
+    dbc = cacheDBC(name, std::move(dbc), generation);
     LOG_INFO("Loaded optional DBC: ", name, " (", dbc->getRecordCount(), " records)");
     return dbc;
 }
@@ -708,7 +778,9 @@ bool AssetManager::fileExists(const std::string& path) const {
     // of them took the wrong branch at once: a weapon texture that is present
     // under Weapon\ was declared missing and looked for under Shield\, where
     // it has never been, and the weapon drew white.
-    return !resolveFile(normalized).empty();
+    if (!resolveOverride(normalized).empty()) return true;
+    if (auto layer = archiveLayer(); layer && layer->contains(normalized)) return true;
+    return !resolveExtracted(normalized).empty();
 }
 
 std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
@@ -719,8 +791,10 @@ std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
     std::string normalized = normalizePath(path);
 
     // Check cache first (shared lock allows concurrent reads)
+    uint64_t generation = 0;
     {
         std::shared_lock<std::shared_mutex> cacheLock(cacheMutex);
+        generation = cacheGeneration_;
         auto it = fileCache.find(normalized);
         if (it != fileCache.end()) {
             auto data = it->second.data;
@@ -730,22 +804,35 @@ std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
         }
     }
 
-    // Read from filesystem (override dir first, then base manifest)
-    std::string fsPath = resolveFile(normalized);
+    // The override dir, then the archive layer, then what was extracted.
+    std::vector<uint8_t> data;
+    std::string fsPath = resolveOverride(normalized);
     if (fsPath.empty()) {
-        return {};
+        if (auto layer = archiveLayer(); layer && layer->contains(normalized)) {
+            data = layer->read(normalized);
+            // A damaged copy in an archive is not a missing file: the
+            // extracted one it replaced is still better than nothing.
+            if (data.empty()) LOG_WARNING("Archive entry unreadable, using the extracted file: ", normalized);
+        }
+        if (data.empty()) fsPath = resolveExtracted(normalized);
     }
-
-    auto data = LooseFileReader::readFile(fsPath);
     if (data.empty()) {
-        LOG_WARNING("Manifest entry exists but file unreadable: ", fsPath);
-        return data;
+        if (fsPath.empty()) {
+            return {};
+        }
+        data = LooseFileReader::readFile(fsPath);
+        if (data.empty()) {
+            LOG_WARNING("Manifest entry exists but file unreadable: ", fsPath);
+            return data;
+        }
     }
 
     // Add to cache if within budget
     size_t fileSize = data.size();
     if (fileSize > 0 && fileSize < fileCacheBudget / 2) {
         std::lock_guard<std::shared_mutex> cacheLock(cacheMutex);
+        // Read through a layer that has since been replaced.
+        if (generation != cacheGeneration_) return data;
         // Evict old entries if needed (LRU)
         while (fileCacheTotalBytes + fileSize > fileCacheBudget && !fileCache.empty()) {
             auto lru = fileCache.begin();
@@ -781,6 +868,7 @@ std::vector<uint8_t> AssetManager::readFileOptional(const std::string& path) con
 void AssetManager::clearDBCCache() {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     dbcCache.clear();
+    ++cacheGeneration_;
     LOG_INFO("Cleared DBC cache");
 }
 
@@ -790,6 +878,7 @@ void AssetManager::clearCache() {
         existsCache_.clear();
     }
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
+    ++cacheGeneration_;
     dbcCache.clear();
     fileCache.clear();
     fileCacheTotalBytes = 0;
