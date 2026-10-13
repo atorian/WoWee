@@ -1,4 +1,6 @@
 #include "rendering/m2_renderer.hpp"
+#include <cmath>
+#include <glm/gtc/constants.hpp>
 #include <unordered_set>
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/vk_context.hpp"
@@ -160,8 +162,19 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             p.maxLife = life;
             p.tileIndex = 0.0f;
 
-            // Position: emitter position transformed by bone matrix
+            const auto track = [&](const pipeline::M2AnimationTrack& t) {
+                return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+                                   inst.currentSequenceIndex, gpu.globalSequenceDurations);
+            };
+
+            // Position: the emitter's, anywhere across a plane emitter's area
+            // (length along x, width along y, both half extents), carried by
+            // its bone.
             glm::vec3 localPos = em.position;
+            if (em.emitterType == 1) {
+                localPos.x += distN(particleRng_) * track(em.emissionAreaLength);
+                localPos.y += distN(particleRng_) * track(em.emissionAreaWidth);
+            }
             glm::mat4 boneXform = glm::mat4(1.0f);
             if (em.bone < inst.boneMatrices.size()) {
                 boneXform = inst.boneMatrices[em.bone];
@@ -169,22 +182,18 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             glm::vec3 worldPos = glm::vec3(inst.modelMatrix * boneXform * glm::vec4(localPos, 1.0f));
             p.position = worldPos;
 
-            // Velocity: emission speed in upward direction + random spread
-            float speed = interpFloat(em.emissionSpeed, inst.animTime, inst.globalSequenceTime,
-                                      inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            float vRange = interpFloat(em.verticalRange, inst.animTime, inst.globalSequenceTime,
-                                       inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            float hRange = interpFloat(em.horizontalRange, inst.animTime, inst.globalSequenceTime,
-                                       inst.currentSequenceIndex, gpu.globalSequenceDurations);
-
-            // Base direction: up in model space, transformed to world
-            glm::vec3 dir(0.0f, 0.0f, 1.0f);
-            // Add random spread
-            dir.x += distN(particleRng_) * hRange;
-            dir.y += distN(particleRng_) * hRange;
-            dir.z += distN(particleRng_) * vRange;
-            float lenSq = glm::dot(dir, dir);
-            if (lenSq > 0.001f * 0.001f) dir *= glm::inversesqrt(lenSq);
+            // Velocity: up the emitter's axis, tilted by up to the vertical
+            // range in any direction, at the emission speed give or take its
+            // variation. Both ranges are angles in radians. They were added
+            // to the direction as lengths, so a horizontal range of 2*pi - a
+            // full turn, which leaves "up" up - laid the particles nearly flat:
+            // Shadowform's smoke column went out sideways at the feet.
+            float speed = track(em.emissionSpeed) *
+                          (1.0f + distN(particleRng_) * track(em.speedVariation));
+            const float tilt = distN(particleRng_) * track(em.verticalRange);
+            const float around = dist01(particleRng_) * glm::two_pi<float>();
+            glm::vec3 dir(std::sin(tilt) * std::cos(around), std::sin(tilt) * std::sin(around),
+                          std::cos(tilt));
 
             // Transform direction by bone + model orientation (rotation only)
             glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
@@ -244,35 +253,29 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
     if (!inst.cachedModel) return;
     const auto& gpu = *inst.cachedModel;
 
-    // Hoist per-emitter gravity out of the per-particle loop. Gravity (and the
-    // emissionSpeed fallback) depends only on the emitter and animation time -
-    // not on the particle itself - so interpFloat was being re-evaluated for
-    // every particle even when 100s of particles share one emitter.
+    // Per emitter, not per particle: its gravity and what its drag leaves of
+    // a velocity over this step. Gravity is the one the model gives, zero
+    // included - a zero used to become 4, which pulled every rising particle
+    // back down within half a second: Shadowform's smoke column fell into a
+    // swirl at the feet.
+    struct EmitterMotion { float gravity = 0.0f; float keep = 1.0f; };
     constexpr size_t kMaxStackEmitters = 16;
-    float emitterGravStack[kMaxStackEmitters];
-    std::vector<float> emitterGravHeap;
+    EmitterMotion emitterMotionStack[kMaxStackEmitters];
+    std::vector<EmitterMotion> emitterMotionHeap;
     const size_t numEm = gpu.particleEmitters.size();
-    float* emitterGrav = nullptr;
-    if (numEm > 0) {
-        if (numEm <= kMaxStackEmitters) {
-            emitterGrav = emitterGravStack;
-        } else {
-            emitterGravHeap.resize(numEm);
-            emitterGrav = emitterGravHeap.data();
-        }
-        for (size_t e = 0; e < numEm; ++e) {
-            const auto& pem = gpu.particleEmitters[e];
-            float grav = interpFloat(pem.gravity,
-                                      inst.animTime, inst.globalSequenceTime,
-                                      inst.currentSequenceIndex, gpu.globalSequenceDurations);
-            if (grav == 0.0f && !gpu.isFireflyEffect) {
-                float emSpeed = interpFloat(pem.emissionSpeed,
-                                             inst.animTime, inst.globalSequenceTime,
-                                             inst.currentSequenceIndex, gpu.globalSequenceDurations);
-                grav = (std::abs(emSpeed) > 0.1f) ? 4.0f : 1.5f;
-            }
-            emitterGrav[e] = grav;
-        }
+    EmitterMotion* emitterMotion = emitterMotionStack;
+    if (numEm > kMaxStackEmitters) {
+        emitterMotionHeap.resize(numEm);
+        emitterMotion = emitterMotionHeap.data();
+    }
+    for (size_t e = 0; e < numEm; ++e) {
+        const auto& pem = gpu.particleEmitters[e];
+        const auto track = [&](const pipeline::M2AnimationTrack& t) {
+            return interpFloat(t, inst.animTime, inst.globalSequenceTime,
+                               inst.currentSequenceIndex, gpu.globalSequenceDurations);
+        };
+        const float drag = std::max(track(pem.deceleration), 0.0f);
+        emitterMotion[e] = {.gravity = track(pem.gravity), .keep = std::exp(-drag * dt)};
     }
 
     for (size_t i = 0; i < inst.particles.size(); ) {
@@ -285,7 +288,9 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
             continue;
         }
         if (p.emitterIndex >= 0 && static_cast<size_t>(p.emitterIndex) < numEm) {
-            p.velocity.z -= emitterGrav[p.emitterIndex] * dt;
+            const EmitterMotion& motion = emitterMotion[p.emitterIndex];
+            p.velocity.z -= motion.gravity * dt;
+            p.velocity *= motion.keep;
         }
         p.position += p.velocity * dt;
         i++;
