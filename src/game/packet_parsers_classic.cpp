@@ -152,6 +152,18 @@ uint32_t classicWireMoveFlags(uint32_t internalFlags) {
     return wireFlags;
 }
 
+// The inverse of classicWireMoveFlags, for movement another unit sent.
+uint32_t classicInternalMoveFlags(uint32_t wireFlags) {
+    uint32_t internalFlags = wireFlags & ~(ClassicMoveFlags::ONTRANSPORT | ClassicMoveFlags::JUMPING);
+    if (wireFlags & ClassicMoveFlags::ONTRANSPORT) {
+        internalFlags |= static_cast<uint32_t>(MovementFlags::ONTRANSPORT);
+    }
+    if (wireFlags & ClassicMoveFlags::JUMPING) {
+        internalFlags |= static_cast<uint32_t>(MovementFlags::FALLING);
+    }
+    return internalFlags;
+}
+
 // ============================================================================
 // Classic parseMovementBlock
 // Key differences from TBC:
@@ -228,8 +240,8 @@ bool ClassicPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlo
         if (moveFlags & ClassicMoveFlags::JUMPING) {
             if (rem() < 16) return false;
             /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpCosAngle =*/ packet.readFloat();
+            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 
@@ -341,13 +353,65 @@ void ClassicPacketParsers::writeMovementPayload(network::Packet& packet, const M
     // Fall time (always present)
     packet.writeUInt32(info.fallTime);
 
-    // Jump data (Classic JUMPING = 0x2000)
+    // Jump data (Classic JUMPING = 0x2000), its direction cosine first - see
+    // MovementPacket::writeMovementPayload.
     if (wireFlags & ClassicMoveFlags::JUMPING) {
         packet.writeFloat(info.jumpVelocity);
-        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpCosAngle);
+        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpXYSpeed);
     }
+}
+
+// ============================================================================
+// Classic readMovementPayload
+// The layout writeMovementPayload sends: no flags2, transport under
+// 0x02000000 without a timestamp, pitch only while swimming, jump data under
+// JUMPING (0x2000). Flags are mapped back the way classicWireMoveFlags maps
+// them out.
+// ============================================================================
+bool ClassicPacketParsers::readMovementPayload(network::Packet& packet, MovementInfo& info) {
+    if (!packet.hasRemaining(4 + 4 + 16)) return false;
+    const uint32_t wireFlags = packet.readUInt32();
+    info.flags2 = 0;
+    info.time = packet.readUInt32();
+    info.x = packet.readFloat();
+    info.y = packet.readFloat();
+    info.z = packet.readFloat();
+    info.orientation = packet.readFloat();
+
+    if (wireFlags & ClassicMoveFlags::ONTRANSPORT) {
+        if (!packet.hasRemaining(1)) return false;
+        info.transportGuid = packet.readPackedGuid();
+        if (!packet.hasRemaining(16)) return false;
+        info.transportX = packet.readFloat();
+        info.transportY = packet.readFloat();
+        info.transportZ = packet.readFloat();
+        info.transportO = packet.readFloat();
+    }
+
+    if (wireFlags & ClassicMoveFlags::SWIMMING) {
+        if (!packet.hasRemaining(4)) return false;
+        info.pitch = packet.readFloat();
+    }
+
+    if (!packet.hasRemaining(4)) return false;
+    info.fallTime = packet.readUInt32();
+    if (wireFlags & ClassicMoveFlags::JUMPING) {
+        if (!packet.hasRemaining(16)) return false;
+        info.jumpVelocity = packet.readFloat();
+        info.jumpCosAngle = packet.readFloat();
+        info.jumpSinAngle = packet.readFloat();
+        info.jumpXYSpeed = packet.readFloat();
+    }
+
+    if (wireFlags & ClassicMoveFlags::SPLINE_ELEVATION) {
+        if (!packet.hasRemaining(4)) return false;
+        /*float splineElevation =*/ packet.readFloat();
+    }
+
+    info.flags = classicInternalMoveFlags(wireFlags);
+    return true;
 }
 
 // ============================================================================
@@ -1707,8 +1771,8 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
         if (moveFlags & TurtleMoveFlags::JUMPING) {
             if (rem() < 16) return false;
             /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpCosAngle =*/ packet.readFloat();
+            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 

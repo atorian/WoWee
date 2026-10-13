@@ -1,9 +1,46 @@
 #include "game/entity.hpp"
 #include "core/logger.hpp"
+#include "core/coordinates.hpp"
 #include <algorithm>
 
 namespace wowee {
 namespace game {
+
+void Unit::applyMovementReport(const MovementReport& report,
+                               ReportedMovement::Clock::time_point handledAt) {
+    if (!reportedMovement) {
+        // The unit speaks for itself from here on; whatever the server last
+        // had it doing is over.
+        isMoving_ = false;
+        usePathMode_ = false;
+        activeSpline_.reset();
+        reportedMovement.emplace();
+    }
+    if (reportedMovement->report(report, handledAt)) {
+        placeAtReportedMovement();
+    }
+}
+
+void Unit::updateMovement(float deltaTime, const MovementCollision* collision) {
+    if (!reportedMovement) {
+        Entity::updateMovement(deltaTime, collision);
+        return;
+    }
+    reportedMovement->advance(deltaTime, ReportedMovement::Clock::now(), movementSpeeds, collision);
+    placeAtReportedMovement();
+}
+
+bool Unit::isEntityMoving() const {
+    return reportedMovement ? reportedMovement->isMoving() : Entity::isEntityMoving();
+}
+
+void Unit::placeAtReportedMovement() {
+    const glm::vec3 p = core::coords::serverToCanonical(reportedMovement->position());
+    x = p.x;
+    y = p.y;
+    z = p.z;
+    orientation = core::coords::serverToCanonicalYaw(reportedMovement->orientation());
+}
 
 void EntityManager::addEntity(uint64_t guid, std::shared_ptr<Entity> entity) {
     if (!entity) {

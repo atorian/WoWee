@@ -221,10 +221,6 @@ public:
     uint64_t& taxiNpcGuidRef() { return taxiNpcGuid_; }
     [[nodiscard]] uint64_t getTaxiNpcGuid() const { return taxiNpcGuid_; }
 
-    // Other-player movement timing (for cleanup on despawn etc.)
-    std::unordered_map<uint64_t, uint32_t>& otherPlayerMoveTimeMsRef() { return otherPlayerMoveTimeMs_; }
-    std::unordered_map<uint64_t, float>& otherPlayerSmoothedIntervalMsRef() { return otherPlayerSmoothedIntervalMs_; }
-
     // Methods also called from GameHandler's registerOpcodeHandlers
     void handleCompressedMoves(network::Packet& packet);
     void handleForceMoveFlagChange(network::Packet& packet, const char* name, Opcode ackOpcode, uint32_t flag, bool set);
@@ -237,9 +233,14 @@ private:
     void handleMonsterMoveTransport(network::Packet& packet);
     void handleOtherPlayerMovement(network::Packet& packet);
     void handleMoveSetSpeed(network::Packet& packet);
+    /// Set one of another unit's movement speeds.
+    void applyUnitSpeed(uint64_t guid, float MovementSpeeds::* speed, float value);
     void handleForceRunSpeedChange(network::Packet& packet);
     network::Packet buildForceAck(Opcode ackOpcode, uint32_t counter);
-    void handleForceSpeedChange(network::Packet& packet, const char* name, Opcode ackOpcode, float* speedStorage);
+    /// A forced speed change. Ours is applied and acknowledged; another
+    /// unit's goes into its speeds as unitSpeed (null: not one it keeps).
+    void handleForceSpeedChange(network::Packet& packet, const char* name, Opcode ackOpcode,
+                                float* speedStorage, float MovementSpeeds::* unitSpeed);
     void handleForceMoveRootState(network::Packet& packet, bool rooted);
     void handleMoveKnockBack(network::Packet& packet);
     void handleTeleportAck(network::Packet& packet);
@@ -329,10 +330,6 @@ private:
     float serverFlightBackSpeed_ = 4.5f;
     float serverTurnRate_ = core::coords::PI;
     float serverPitchRate_ = core::coords::PI;
-
-    // Other-player movement smoothing
-    std::unordered_map<uint64_t, uint32_t> otherPlayerMoveTimeMs_;
-    std::unordered_map<uint64_t, float>    otherPlayerSmoothedIntervalMs_;
 
     // --- Taxi / Flight Path state ---
     std::unordered_map<uint64_t, bool> taxiNpcHasRoutes_;

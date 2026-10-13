@@ -979,6 +979,11 @@ wowee_add_packet_test(test_spell_damage_log_layout)
 # or a trailing uint32, and sending the extra bytes fails silently.
 wowee_add_packet_test(test_prewotlk_build_packets)
 
+# ── test_movement_payload_layout ───────────────────────────────────────
+# The MSG_MOVE_* payload read back as each expansion writes it: pitch, fall
+# time and jump data included, flags mapped to MovementFlags.
+wowee_add_packet_test(test_movement_payload_layout)
+
 # ── test_item_query_layout ─────────────────────────────────────────────
 # SMSG_ITEM_QUERY_SINGLE_RESPONSE for classic and TBC, pinned before the two
 # readers were merged. Same link set as test_char_enum_layout.
@@ -1051,6 +1056,7 @@ wowee_add_test(test_entity
     SOURCES test_entity.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/entity.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/reported_movement.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
 
 # ── test_dbc_loader ──────────────────────────────────────────

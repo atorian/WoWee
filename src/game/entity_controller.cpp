@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <bit>
 #include <set>
+#include <cmath>
 #include <cstring>
 #include <zlib.h>
 
@@ -30,6 +31,24 @@ float slowUpdateObjectBlockLogThresholdMs() {
     static const int thresholdMs =
         core::envIntClamped("WOWEE_NET_SLOW_UPDATE_BLOCK_LOG_MS", 10, 1, 60000);
     return static_cast<float>(thresholdMs);
+}
+
+// A unit's speeds as its movement block carries them. A speed an expansion
+// does not send arrives as zero and keeps what the unit had.
+void applyBlockMovementSpeeds(const UpdateBlock& block, Entity& entity) {
+    if (!block.hasMovement || !entity.isUnit()) return;
+    auto& unit = static_cast<Unit&>(entity);
+    const auto take = [&unit](float MovementSpeeds::* which, float sent) {
+        if (std::isfinite(sent) && sent > 0.01f && sent < 200.0f) unit.setMovementSpeed(which, sent);
+    };
+    take(&MovementSpeeds::walk, block.walkSpeed);
+    take(&MovementSpeeds::run, block.runSpeed);
+    take(&MovementSpeeds::runBack, block.runBackSpeed);
+    take(&MovementSpeeds::swim, block.swimSpeed);
+    take(&MovementSpeeds::swimBack, block.swimBackSpeed);
+    take(&MovementSpeeds::flight, block.flightSpeed);
+    take(&MovementSpeeds::flightBack, block.flightBackSpeed);
+    take(&MovementSpeeds::turnRate, block.turnRate);
 }
 
 } // anonymous namespace
@@ -251,7 +270,6 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
             owner_.playerDespawnCallbackRef()(guid);
             owner_.otherPlayerVisibleItemEntriesRef().erase(guid);
             owner_.otherPlayerVisibleDirtyRef().erase(guid);
-            owner_.otherPlayerMoveTimeMsRef().erase(guid);
             owner_.inspectedPlayerItemEntriesRef().erase(guid);
             owner_.pendingAutoInspectRef().erase(guid);
             // Clear pending name query so the query is re-sent when this player
@@ -2604,6 +2622,7 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         float oCanonical = core::coords::serverToCanonicalYaw(block.orientation);
         entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
         LOG_DEBUG("  Position: (", pos.x, ", ", pos.y, ", ", pos.z, ")");
+        applyBlockMovementSpeeds(block, *entity);
         if (block.guid == owner_.getPlayerGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             if (auto* movement = owner_.getMovementHandler()) {
                 movement->applyServerMovementSpeeds(
@@ -2687,6 +2706,7 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
                 float oCanonical = core::coords::serverToCanonicalYaw(block.orientation);
                 entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
                 LOG_DEBUG("Updated entity position: 0x", std::hex, block.guid, std::dec);
+                applyBlockMovementSpeeds(block, *entity);
 
                 updateNonPlayerTransportAttachment(block, entity, entity->getType());
 
@@ -2821,7 +2841,6 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
                 owner_.playerDespawnCallbackRef()(data.guid);
                 owner_.otherPlayerVisibleItemEntriesRef().erase(data.guid);
                 owner_.otherPlayerVisibleDirtyRef().erase(data.guid);
-                owner_.otherPlayerMoveTimeMsRef().erase(data.guid);
                 owner_.inspectedPlayerItemEntriesRef().erase(data.guid);
                 owner_.pendingAutoInspectRef().erase(data.guid);
                 pendingNameQueries.erase(data.guid);

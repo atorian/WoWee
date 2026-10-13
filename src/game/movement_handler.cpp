@@ -12,6 +12,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,19 @@
 
 namespace wowee {
 namespace game {
+
+namespace {
+
+// WOWEE_REMOTE_MOVE_LOG=1 logs every movement report another unit sends and
+// every server path a player is put on, with where the unit was drawn when it
+// arrived. A remote mover that runs, slides back and snaps forward shows up
+// here as the gap between drawn and reported positions.
+bool remoteMoveLogEnabled() {
+    static const bool enabled = core::envFlagEnabled("WOWEE_REMOTE_MOVE_LOG", false);
+    return enabled;
+}
+
+} // namespace
 
 namespace {
 
@@ -153,47 +167,49 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 
     // Spline speed: all opcodes share the same PackedGuid+float format, differing
     // only in which member receives the value. Factory avoids 8 copy-pasted lambdas.
-    auto makeSplineSpeedHandler = [this](float MovementHandler::* member) {
-        return [this, member](network::Packet& packet) {
+    auto makeSplineSpeedHandler = [this](float MovementHandler::* member,
+                                         float MovementSpeeds::* unitMember) {
+        return [this, member, unitMember](network::Packet& packet) {
             if (!packet.hasRemaining(5)) return;
             uint64_t guid = packet.readPackedGuid();
             if (!packet.hasRemaining(4)) return;
             float speed = packet.readFloat();
-            if (guid == owner_.getPlayerGuid() && std::isfinite(speed) && speed > 0.01f && speed < 200.0f)
-                this->*member = speed;
+            if (!std::isfinite(speed) || speed <= 0.01f || speed >= 200.0f) return;
+            if (guid == owner_.getPlayerGuid()) this->*member = speed;
+            else applyUnitSpeed(guid, unitMember, speed);
         };
     };
-    table[Opcode::SMSG_SPLINE_SET_RUN_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverRunSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_RUN_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverRunBackSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_SWIM_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverSwimSpeed_);
+    table[Opcode::SMSG_SPLINE_SET_RUN_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverRunSpeed_, &MovementSpeeds::run);
+    table[Opcode::SMSG_SPLINE_SET_RUN_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverRunBackSpeed_, &MovementSpeeds::runBack);
+    table[Opcode::SMSG_SPLINE_SET_SWIM_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverSwimSpeed_, &MovementSpeeds::swim);
 
     // Force speed changes
     table[Opcode::SMSG_FORCE_RUN_SPEED_CHANGE] = [this](network::Packet& packet) { handleForceRunSpeedChange(packet); };
     table[Opcode::SMSG_FORCE_MOVE_ROOT] = [this](network::Packet& packet) { handleForceMoveRootState(packet, true); };
     table[Opcode::SMSG_FORCE_MOVE_UNROOT] = [this](network::Packet& packet) { handleForceMoveRootState(packet, false); };
     table[Opcode::SMSG_FORCE_WALK_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "WALK_SPEED", Opcode::CMSG_FORCE_WALK_SPEED_CHANGE_ACK, &serverWalkSpeed_);
+        handleForceSpeedChange(packet, "WALK_SPEED", Opcode::CMSG_FORCE_WALK_SPEED_CHANGE_ACK, &serverWalkSpeed_, &MovementSpeeds::walk);
     };
     table[Opcode::SMSG_FORCE_RUN_BACK_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "RUN_BACK_SPEED", Opcode::CMSG_FORCE_RUN_BACK_SPEED_CHANGE_ACK, &serverRunBackSpeed_);
+        handleForceSpeedChange(packet, "RUN_BACK_SPEED", Opcode::CMSG_FORCE_RUN_BACK_SPEED_CHANGE_ACK, &serverRunBackSpeed_, &MovementSpeeds::runBack);
     };
     table[Opcode::SMSG_FORCE_SWIM_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "SWIM_SPEED", Opcode::CMSG_FORCE_SWIM_SPEED_CHANGE_ACK, &serverSwimSpeed_);
+        handleForceSpeedChange(packet, "SWIM_SPEED", Opcode::CMSG_FORCE_SWIM_SPEED_CHANGE_ACK, &serverSwimSpeed_, &MovementSpeeds::swim);
     };
     table[Opcode::SMSG_FORCE_SWIM_BACK_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "SWIM_BACK_SPEED", Opcode::CMSG_FORCE_SWIM_BACK_SPEED_CHANGE_ACK, &serverSwimBackSpeed_);
+        handleForceSpeedChange(packet, "SWIM_BACK_SPEED", Opcode::CMSG_FORCE_SWIM_BACK_SPEED_CHANGE_ACK, &serverSwimBackSpeed_, &MovementSpeeds::swimBack);
     };
     table[Opcode::SMSG_FORCE_FLIGHT_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "FLIGHT_SPEED", Opcode::CMSG_FORCE_FLIGHT_SPEED_CHANGE_ACK, &serverFlightSpeed_);
+        handleForceSpeedChange(packet, "FLIGHT_SPEED", Opcode::CMSG_FORCE_FLIGHT_SPEED_CHANGE_ACK, &serverFlightSpeed_, &MovementSpeeds::flight);
     };
     table[Opcode::SMSG_FORCE_FLIGHT_BACK_SPEED_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "FLIGHT_BACK_SPEED", Opcode::CMSG_FORCE_FLIGHT_BACK_SPEED_CHANGE_ACK, &serverFlightBackSpeed_);
+        handleForceSpeedChange(packet, "FLIGHT_BACK_SPEED", Opcode::CMSG_FORCE_FLIGHT_BACK_SPEED_CHANGE_ACK, &serverFlightBackSpeed_, &MovementSpeeds::flightBack);
     };
     table[Opcode::SMSG_FORCE_TURN_RATE_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "TURN_RATE", Opcode::CMSG_FORCE_TURN_RATE_CHANGE_ACK, &serverTurnRate_);
+        handleForceSpeedChange(packet, "TURN_RATE", Opcode::CMSG_FORCE_TURN_RATE_CHANGE_ACK, &serverTurnRate_, &MovementSpeeds::turnRate);
     };
     table[Opcode::SMSG_FORCE_PITCH_RATE_CHANGE] = [this](network::Packet& packet) {
-        handleForceSpeedChange(packet, "PITCH_RATE", Opcode::CMSG_FORCE_PITCH_RATE_CHANGE_ACK, &serverPitchRate_);
+        handleForceSpeedChange(packet, "PITCH_RATE", Opcode::CMSG_FORCE_PITCH_RATE_CHANGE_ACK, &serverPitchRate_, nullptr);
     };
 
     // Movement flag toggles
@@ -308,11 +324,11 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // Remaining spline speed opcodes - same factory as above.
-    table[Opcode::SMSG_SPLINE_SET_FLIGHT_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverFlightSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_FLIGHT_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverFlightBackSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_SWIM_BACK_SPEED]    = makeSplineSpeedHandler(&MovementHandler::serverSwimBackSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_WALK_SPEED]          = makeSplineSpeedHandler(&MovementHandler::serverWalkSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_TURN_RATE]           = makeSplineSpeedHandler(&MovementHandler::serverTurnRate_);
+    table[Opcode::SMSG_SPLINE_SET_FLIGHT_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverFlightSpeed_, &MovementSpeeds::flight);
+    table[Opcode::SMSG_SPLINE_SET_FLIGHT_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverFlightBackSpeed_, &MovementSpeeds::flightBack);
+    table[Opcode::SMSG_SPLINE_SET_SWIM_BACK_SPEED]    = makeSplineSpeedHandler(&MovementHandler::serverSwimBackSpeed_, &MovementSpeeds::swimBack);
+    table[Opcode::SMSG_SPLINE_SET_WALK_SPEED]          = makeSplineSpeedHandler(&MovementHandler::serverWalkSpeed_, &MovementSpeeds::walk);
+    table[Opcode::SMSG_SPLINE_SET_TURN_RATE]           = makeSplineSpeedHandler(&MovementHandler::serverTurnRate_, &MovementSpeeds::turnRate);
     // Pitch rate not stored locally - consume packet to keep stream aligned.
     table[Opcode::SMSG_SPLINE_SET_PITCH_RATE] = [](network::Packet& packet) { packet.skipAll(); };
 
@@ -1060,7 +1076,8 @@ network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counte
 }
 
 void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char* name,
-                                              Opcode ackOpcode, float* speedStorage) {
+                                              Opcode ackOpcode, float* speedStorage,
+                                              float MovementSpeeds::* unitSpeed) {
     const bool fscTbcLike = isPreWotlk();
     uint64_t guid = fscTbcLike
         ? packet.readUInt64() : packet.readPackedGuid();
@@ -1077,7 +1094,16 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
     LOG_INFO("SMSG_FORCE_", name, "_CHANGE: guid=0x", std::hex, guid, std::dec,
              " counter=", counter, " speed=", newSpeed);
 
-    if (guid != owner_.getPlayerGuid()) return;
+    if (guid != owner_.getPlayerGuid()) {
+        // The server tells everyone around a unit when its speed is forced -
+        // a mount, a sprint, a slow - in this same packet, and only the mover
+        // answers it. For anyone else it is that unit's new speed, which its
+        // reported movement is played back at.
+        if (unitSpeed && std::isfinite(newSpeed) && newSpeed > 0.01f && newSpeed < 200.0f) {
+            applyUnitSpeed(guid, unitSpeed, newSpeed);
+        }
+        return;
+    }
 
     // Validate BEFORE sending ACK - if we echo a bad speed back to the server
     // but don't apply it locally, the client and server desync on movement speed.
@@ -1098,7 +1124,7 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
 void MovementHandler::handleForceRunSpeedChange(network::Packet& packet) {
     // A speed change is not a dismount signal. Mount ownership is updated by
     // SMSG_DISMOUNT / UNIT_FIELD_MOUNTDISPLAYID instead.
-    handleForceSpeedChange(packet, "RUN_SPEED", Opcode::CMSG_FORCE_RUN_SPEED_CHANGE_ACK, &serverRunSpeed_);
+    handleForceSpeedChange(packet, "RUN_SPEED", Opcode::CMSG_FORCE_RUN_SPEED_CHANGE_ACK, &serverRunSpeed_, &MovementSpeeds::run);
 }
 
 void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool rooted) {
@@ -1219,15 +1245,37 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
     float speed = packet.readFloat();
     if (!std::isfinite(speed) || speed <= 0.01f || speed > 200.0f) return;
 
-    if (moverGuid != owner_.getPlayerGuid()) return;
+    struct SpeedTarget {
+        Opcode opcode;
+        float MovementHandler::* own;
+        float MovementSpeeds::* unit;
+    };
+    static constexpr SpeedTarget kTargets[] = {
+        {Opcode::MSG_MOVE_SET_RUN_SPEED,         &MovementHandler::serverRunSpeed_,        &MovementSpeeds::run},
+        {Opcode::MSG_MOVE_SET_RUN_BACK_SPEED,    &MovementHandler::serverRunBackSpeed_,    &MovementSpeeds::runBack},
+        {Opcode::MSG_MOVE_SET_WALK_SPEED,        &MovementHandler::serverWalkSpeed_,       &MovementSpeeds::walk},
+        {Opcode::MSG_MOVE_SET_SWIM_SPEED,        &MovementHandler::serverSwimSpeed_,       &MovementSpeeds::swim},
+        {Opcode::MSG_MOVE_SET_SWIM_BACK_SPEED,   &MovementHandler::serverSwimBackSpeed_,   &MovementSpeeds::swimBack},
+        {Opcode::MSG_MOVE_SET_FLIGHT_SPEED,      &MovementHandler::serverFlightSpeed_,     &MovementSpeeds::flight},
+        {Opcode::MSG_MOVE_SET_FLIGHT_BACK_SPEED, &MovementHandler::serverFlightBackSpeed_, &MovementSpeeds::flightBack},
+    };
     const uint16_t wireOp = packet.getOpcode();
-    if      (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_SPEED))        serverRunSpeed_      = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_RUN_BACK_SPEED))   serverRunBackSpeed_  = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_WALK_SPEED))       serverWalkSpeed_     = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_SWIM_SPEED))       serverSwimSpeed_     = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_SWIM_BACK_SPEED))  serverSwimBackSpeed_ = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_FLIGHT_SPEED))     serverFlightSpeed_   = speed;
-    else if (wireOp == wireOpcode(Opcode::MSG_MOVE_SET_FLIGHT_BACK_SPEED))serverFlightBackSpeed_= speed;
+    for (const auto& target : kTargets) {
+        if (wireOp != wireOpcode(target.opcode)) continue;
+        if (moverGuid == owner_.getPlayerGuid()) this->*target.own = speed;
+        else applyUnitSpeed(moverGuid, target.unit, speed);
+        return;
+    }
+}
+
+void MovementHandler::applyUnitSpeed(uint64_t guid, float MovementSpeeds::* speed, float value) {
+    auto entity = owner_.getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return;
+    if (remoteMoveLogEnabled() && entity->getType() == ObjectType::PLAYER) {
+        LOG_WARNING("RemoteMove speed guid=0x", std::hex, guid, std::dec, " value=", value,
+                    " isRun=", speed == &MovementSpeeds::run ? 1 : 0);
+    }
+    std::static_pointer_cast<Unit>(entity)->setMovementSpeed(speed, value);
 }
 
 void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
@@ -1244,90 +1292,68 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     }
 
     MovementInfo info = {};
-    info.flags = packet.readUInt32();
-    uint8_t flags2Size = owner_.getPacketParsers() ? owner_.getPacketParsers()->movementFlags2Size() : 2;
-    if (flags2Size == 2) info.flags2 = packet.readUInt16();
-    else if (flags2Size == 1) info.flags2 = packet.readUInt8();
-    info.time = packet.readUInt32();
-    info.x = packet.readFloat();
-    info.y = packet.readFloat();
-    info.z = packet.readFloat();
-    info.orientation = packet.readFloat();
-
-    const uint32_t wireTransportFlag = owner_.getPacketParsers() ? owner_.getPacketParsers()->wireOnTransportFlag() : 0x00000200;
-    const bool onTransport = (info.flags & wireTransportFlag) != 0;
-    uint64_t transportGuid = 0;
-    float tLocalX = 0, tLocalY = 0, tLocalZ = 0, tLocalO = 0;
-    if (onTransport) {
-        transportGuid = packet.readPackedGuid();
-        tLocalX = packet.readFloat();
-        tLocalY = packet.readFloat();
-        tLocalZ = packet.readFloat();
-        tLocalO = packet.readFloat();
-        if (flags2Size >= 1) {
-            /*uint32_t transportTime =*/ packet.readUInt32();
-        }
-        if (flags2Size >= 2) {
-            /*int8_t transportSeat =*/ packet.readUInt8();
-            if (info.flags2 & 0x0200) {
-                /*uint32_t transportTime2 =*/ packet.readUInt32();
-            }
-        }
-    }
+    if (!owner_.getPacketParsers()->readMovementPayload(packet, info)) return;
 
     auto entity = owner_.getEntityManager().getEntity(moverGuid);
-    if (!entity) {
+    if (!entity || !entity->isUnit()) {
         return;
     }
+    auto unit = std::static_pointer_cast<Unit>(entity);
 
-    glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(info.x, info.y, info.z));
-    float canYaw = core::coords::serverToCanonicalYaw(info.orientation);
+    if (remoteMoveLogEnabled()) {
+        const glm::vec3 drawn = core::coords::canonicalToServer(
+            glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
+        const glm::vec3 reportedPos(info.x, info.y, info.z);
+        LOG_WARNING("RemoteMove report guid=0x", std::hex, moverGuid, " op=0x", packet.getOpcode(),
+                    " flags=0x", info.flags, std::dec, " time=", info.time,
+                    " pos=(", info.x, ",", info.y, ",", info.z, ") o=", info.orientation,
+                    " drawn=(", drawn.x, ",", drawn.y, ",", drawn.z, ") gap=",
+                    glm::length(glm::vec2(drawn) - glm::vec2(reportedPos)),
+                    " run=", unit->getMovementSpeeds().run,
+                    " fall=", info.fallTime, " jumpXY=", info.jumpXYSpeed,
+                    " queued=", packet.getReceivedAt() == std::chrono::steady_clock::time_point{}
+                        ? -1 : std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - packet.getReceivedAt()).count(),
+                    "ms");
+    }
 
-    if (onTransport && transportGuid != 0 && owner_.getTransportManager()) {
+    const bool onTransport = info.hasFlag(MovementFlags::ONTRANSPORT);
+    if (onTransport && info.transportGuid != 0 && owner_.getTransportManager()) {
+        // A passenger is placed on its deck at each report and carried along
+        // by the transport between them.
         glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
-            transportGuid, glm::vec3(tLocalX, tLocalY, tLocalZ));
-        owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, true,
-                               core::coords::serverToCanonicalYaw(tLocalO));
-        glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
-        canonical = worldPos;
-    } else if (!onTransport) {
-        owner_.clearTransportAttachment(moverGuid);
-    }
-
-    uint32_t durationMs = 120;
-    auto itPrev = otherPlayerMoveTimeMs_.find(moverGuid);
-    if (itPrev != otherPlayerMoveTimeMs_.end()) {
-        uint32_t rawDt = info.time - itPrev->second;
-        if (rawDt >= 20 && rawDt <= 2000) {
-            float fDt = static_cast<float>(rawDt);
-            auto& smoothed = otherPlayerSmoothedIntervalMs_[moverGuid];
-            if (smoothed < 1.0f) smoothed = fDt;
-            smoothed = 0.7f * smoothed + 0.3f * fDt;
-            float clamped = std::max(60.0f, std::min(500.0f, smoothed));
-            durationMs = static_cast<uint32_t>(clamped);
+            info.transportGuid, glm::vec3(info.transportX, info.transportY, info.transportZ));
+        owner_.setTransportAttachment(moverGuid, entity->getType(), info.transportGuid, localCanonical, true,
+                               core::coords::serverToCanonicalYaw(info.transportO));
+        glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(info.transportGuid, localCanonical);
+        unit->setPosition(worldPos.x, worldPos.y, worldPos.z,
+                          core::coords::serverToCanonicalYaw(info.orientation));
+    } else {
+        if (!onTransport) owner_.clearTransportAttachment(moverGuid);
+        MovementReport report;
+        report.moverTime = info.time;
+        report.position = glm::vec3(info.x, info.y, info.z);
+        report.orientation = info.orientation;
+        report.pitch = info.pitch;
+        report.flags = info.flags;
+        report.fallTime = static_cast<float>(info.fallTime) / 1000.0f;
+        if (info.hasFlag(MovementFlags::FALLING)) {
+            // The 3.3.5a client sends a jump's vertical speed negative, as the
+            // server's knockback does; this client has sent it positive. Up is
+            // the only way either jumps, so the size is what counts.
+            report.jumpUpSpeed = std::abs(info.jumpVelocity);
+            report.jumpCos = info.jumpCosAngle;
+            report.jumpSin = info.jumpSinAngle;
+            report.jumpXYSpeed = info.jumpXYSpeed;
         }
-    }
-    otherPlayerMoveTimeMs_[moverGuid] = info.time;
-
-    const uint16_t wireOp = packet.getOpcode();
-    const bool isStopOpcode =
-        (wireOp == wireOpcode(Opcode::MSG_MOVE_STOP)) ||
-        (wireOp == wireOpcode(Opcode::MSG_MOVE_STOP_STRAFE)) ||
-        (wireOp == wireOpcode(Opcode::MSG_MOVE_STOP_TURN)) ||
-        (wireOp == wireOpcode(Opcode::MSG_MOVE_STOP_SWIM)) ||
-        (wireOp == wireOpcode(Opcode::MSG_MOVE_FALL_LAND));
-    const bool isJumpOpcode  = (wireOp == wireOpcode(Opcode::MSG_MOVE_JUMP));
-
-    const float entityDuration = isStopOpcode ? 0.0f : (durationMs / 1000.0f);
-    entity->startMoveTo(canonical.x, canonical.y, canonical.z, canYaw, entityDuration);
-
-    if (owner_.creatureMoveCallbackRef()) {
-        const uint32_t notifyDuration = isStopOpcode ? 0u : durationMs;
-        owner_.creatureMoveCallbackRef()(moverGuid, canonical.x, canonical.y, canonical.z, notifyDuration);
-    }
-
-    if (owner_.unitAnimHintCallbackRef() && isJumpOpcode) {
-        owner_.unitAnimHintCallbackRef()(moverGuid, 38u);
+        unit->applyMovementReport(report, std::chrono::steady_clock::now());
+        if (remoteMoveLogEnabled()) {
+            if (const auto* moved = unit->getReportedMovement()) {
+                LOG_WARNING("RemoteMove taken guid=0x", std::hex, moverGuid, std::dec,
+                            " late=", moved->lastReportLateness(), "s delay=",
+                            moved->playbackDelay(), "s rate=", moved->playbackRate());
+            }
+        }
     }
 
     if (owner_.unitMoveFlagsCallbackRef()) {
@@ -1638,6 +1664,13 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
     auto entity = owner_.getEntityManager().getEntity(data.guid);
     if (!entity) {
         return;
+    }
+    if (remoteMoveLogEnabled() && entity->getType() == ObjectType::PLAYER) {
+        LOG_WARNING("RemoteMove path guid=0x", std::hex, data.guid, std::dec,
+                    " start=(", data.x, ",", data.y, ",", data.z, ") dest=(",
+                    data.destX, ",", data.destY, ",", data.destZ, ") duration=",
+                    data.duration, " waypoints=", data.waypoints.size(),
+                    " moveType=", static_cast<int>(data.moveType));
     }
 
     // Classic/TBC creature patrols encode ground locomotion in the spline:
@@ -2232,7 +2265,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     }
     owner_.otherPlayerVisibleItemEntriesRef().clear();
     owner_.otherPlayerVisibleDirtyRef().clear();
-    otherPlayerMoveTimeMs_.clear();
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->clearUnitCastStates();
     owner_.unitAurasCacheRef().clear();
     owner_.clearCombatText();

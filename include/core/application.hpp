@@ -11,6 +11,7 @@
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
 #include "game/game_services.hpp"
+#include "game/reported_movement.hpp"
 #include "pipeline/asset_inventory.hpp"
 #include "core/update_check.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -261,6 +262,8 @@ private:
     bool mapWindowFailed_ = false;
     std::unique_ptr<auth::AuthHandler> authHandler;
     std::unique_ptr<game::GameHandler> gameHandler;
+    // The walls other players run into between their movement reports.
+    std::unique_ptr<game::MovementCollision> movementCollision_;
     std::unique_ptr<game::World> world;
     std::unique_ptr<pipeline::AssetManager> assetManager;
     std::unique_ptr<addons::AddonManager> addonManager_;

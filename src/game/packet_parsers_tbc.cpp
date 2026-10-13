@@ -111,8 +111,8 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
         if (moveFlags & TbcMoveFlags::JUMPING) {
             if (rem() < 16) return false;
             /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpCosAngle =*/ packet.readFloat();
+            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 
@@ -266,13 +266,70 @@ void TbcPacketParsers::writeMovementPayload(network::Packet& packet, const Movem
     // Fall time (always present)
     packet.writeUInt32(info.fallTime);
 
-    // Jump data (TBC JUMPING = 0x2000, WotLK FALLING = 0x1000)
+    // Jump data (TBC JUMPING = 0x2000, WotLK FALLING = 0x1000), its
+    // direction cosine first as in every expansion's layout - see
+    // MovementPacket::writeMovementPayload.
     if (info.flags & TbcMoveFlags::JUMPING) {
         packet.writeFloat(info.jumpVelocity);
-        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpCosAngle);
+        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpXYSpeed);
     }
+}
+
+// ============================================================================
+// TBC readMovementPayload
+// The layout writeMovementPayload sends: u8 flags2, transport time but no
+// seat, pitch while swimming or flying, jump data under JUMPING (0x2000).
+// ============================================================================
+bool TbcPacketParsers::readMovementPayload(network::Packet& packet, MovementInfo& info) {
+    if (!packet.hasRemaining(4 + 1 + 4 + 16)) return false;
+    const uint32_t wireFlags = packet.readUInt32();
+    info.flags2 = packet.readUInt8();
+    info.time = packet.readUInt32();
+    info.x = packet.readFloat();
+    info.y = packet.readFloat();
+    info.z = packet.readFloat();
+    info.orientation = packet.readFloat();
+
+    if (wireFlags & TbcMoveFlags::ON_TRANSPORT) {
+        if (!packet.hasRemaining(1)) return false;
+        info.transportGuid = packet.readPackedGuid();
+        if (!packet.hasRemaining(16 + 4)) return false;
+        info.transportX = packet.readFloat();
+        info.transportY = packet.readFloat();
+        info.transportZ = packet.readFloat();
+        info.transportO = packet.readFloat();
+        info.transportTime = packet.readUInt32();
+    }
+
+    if ((wireFlags & TbcMoveFlags::SWIMMING) || (wireFlags & TbcMoveFlags::ONTRANSPORT)) {
+        if (!packet.hasRemaining(4)) return false;
+        info.pitch = packet.readFloat();
+    }
+
+    if (!packet.hasRemaining(4)) return false;
+    info.fallTime = packet.readUInt32();
+    if (wireFlags & TbcMoveFlags::JUMPING) {
+        if (!packet.hasRemaining(16)) return false;
+        info.jumpVelocity = packet.readFloat();
+        info.jumpCosAngle = packet.readFloat();
+        info.jumpSinAngle = packet.readFloat();
+        info.jumpXYSpeed = packet.readFloat();
+    }
+
+    if (wireFlags & TbcMoveFlags::SPLINE_ELEVATION) {
+        if (!packet.hasRemaining(4)) return false;
+        /*float splineElevation =*/ packet.readFloat();
+    }
+
+    // In the air is JUMPING on the TBC wire and FALLING in MovementFlags.
+    info.flags = wireFlags;
+    if (wireFlags & TbcMoveFlags::JUMPING) {
+        info.flags &= ~TbcMoveFlags::JUMPING;
+        info.flags |= static_cast<uint32_t>(MovementFlags::FALLING);
+    }
+    return true;
 }
 
 // ============================================================================

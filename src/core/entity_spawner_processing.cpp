@@ -1963,7 +1963,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
         if (mountInstance != 0) {
             const bool moving = gameHandler_ && [&] {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);
-                return entity && entity->isActivelyMoving();
+                return entity && entity->isEntityMoving();
             }();
             const bool flying = creatureFlyingState_.count(guid) > 0;
             const bool walking = creatureWalkingState_.count(guid) > 0;
@@ -2039,7 +2039,7 @@ void EntitySpawner::processPendingRemotePlayerForms() {
         if (gameHandler_) {
             if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
                 yaw = entity->getOrientation() + glm::radians(90.0f);
-                const bool moving = entity->isActivelyMoving();
+                const bool moving = entity->isEntityMoving();
                 const bool flying = creatureFlyingState_.count(guid) > 0;
                 const bool swimming = creatureSwimmingState_.count(guid) > 0;
                 anim = moving ? (flying ? rendering::anim::FLY_FORWARD
@@ -2048,10 +2048,8 @@ void EntitySpawner::processPendingRemotePlayerForms() {
                                         : swimming ? rendering::anim::SWIM_IDLE : rendering::anim::STAND);
                 if (!cr->hasAnimation(formInstance, anim))
                     anim = moving ? rendering::anim::RUN : rendering::anim::STAND;
-                // So the next movement change is seen as one and animates it.
-                creatureWasMoving_[guid] = moving;
-                creatureWasFlying_[guid] = flying;
-                creatureWasSwimming_[guid] = swimming;
+                // The frame sync sees the new model and takes its locomotion
+                // from here on.
             }
         }
         cr->setInstanceRotation(formInstance, glm::vec3(0.0f, 0.0f, yaw));

@@ -168,6 +168,7 @@ void EntitySpawner::shutdown() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerLocomotion_.clear();
     remotePlayerForms_.clear();
     pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();
@@ -198,6 +199,7 @@ void EntitySpawner::resetAllState() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerLocomotion_.clear();
     remotePlayerForms_.clear();
     pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();

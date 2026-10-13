@@ -430,6 +430,7 @@ public:
      * Limit expensive collision/raycast queries to objects near a focus point.
      */
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
+    [[nodiscard]] const CollisionFocus& getCollisionFocus() const { return collisionFocus; }
 
     void resetQueryStats();
     double getQueryTimeMs() const { return queryTimeMs; }

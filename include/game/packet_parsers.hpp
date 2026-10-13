@@ -54,14 +54,6 @@ class PacketParsers {
 public:
     virtual ~PacketParsers() = default;
 
-    // Size of MovementInfo.flags2 in bytes for MSG_MOVE_* payloads.
-    // Classic: none, TBC: u8, WotLK: u16.
-    [[nodiscard]] virtual uint8_t movementFlags2Size() const { return 2; }
-
-    // Wire-format movement flag that gates transport data in MSG_MOVE_* payloads.
-    // WotLK/TBC: 0x200, Classic/Turtle: 0x02000000.
-    [[nodiscard]] virtual uint32_t wireOnTransportFlag() const { return 0x00000200; }
-
     // --- Movement ---
 
     /** Parse movement block from SMSG_UPDATE_OBJECT */
@@ -72,6 +64,13 @@ public:
     /** Write movement payload for CMSG_MOVE_* packets */
     virtual void writeMovementPayload(network::Packet& packet, const MovementInfo& info) {
         MovementPacket::writeMovementPayload(packet, info);
+    }
+
+    /** Read the payload of a MSG_MOVE_* packet another unit sent, after its
+     *  guid. Flags come back as this client's MovementFlags whatever the
+     *  expansion's wire bits are. False if the packet ends early. */
+    virtual bool readMovementPayload(network::Packet& packet, MovementInfo& info) {
+        return MovementPacket::readMovementPayload(packet, info);
     }
 
     /** Build a complete movement packet with packed GUID + payload */
@@ -370,9 +369,9 @@ class WotlkPacketParsers : public PacketParsers {
  */
 class TbcPacketParsers : public PacketParsers {
 public:
-    [[nodiscard]] uint8_t movementFlags2Size() const override { return 1; }
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     void writeMovementPayload(network::Packet& packet, const MovementInfo& info) override;
+    bool readMovementPayload(network::Packet& packet, MovementInfo& info) override;
     network::Packet buildMovementPacket(LogicalOpcode opcode,
                                          const MovementInfo& info,
                                          uint64_t playerGuid = 0) override;
@@ -466,11 +465,10 @@ public:
  */
 class ClassicPacketParsers : public TbcPacketParsers {
 public:
-    [[nodiscard]] uint8_t movementFlags2Size() const override { return 0; }
-    [[nodiscard]] uint32_t wireOnTransportFlag() const override { return 0x02000000; }
     bool parseCharEnum(network::Packet& packet, CharEnumResponse& response) override;
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     void writeMovementPayload(network::Packet& packet, const MovementInfo& info) override;
+    bool readMovementPayload(network::Packet& packet, MovementInfo& info) override;
     network::Packet buildMovementPacket(LogicalOpcode opcode,
                                          const MovementInfo& info,
                                          uint64_t playerGuid = 0) override;
@@ -548,7 +546,6 @@ public:
  */
 class TurtlePacketParsers : public ClassicPacketParsers {
 public:
-    [[nodiscard]] uint8_t movementFlags2Size() const override { return 0; }
     bool parseUpdateObject(network::Packet& packet, UpdateObjectData& data) override;
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     bool parseMonsterMove(network::Packet& packet, MonsterMoveData& data) override;

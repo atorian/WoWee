@@ -90,6 +90,16 @@ struct CollisionFocus {
         return enabled &&
                pointAABBDistanceSq(position, boundsMin, boundsMax) > radiusSq;
     }
+
+    /// Whether geometry within `reach` of the point can be inside the focus -
+    /// so whether a query there can find anything at all. Always true while
+    /// unset.
+    [[nodiscard]] bool reaches(const glm::vec3& point, float reach) const {
+        if (!enabled) return true;
+        const glm::vec3 d = point - position;
+        const float limit = radius + reach;
+        return d.x * d.x + d.y * d.y + d.z * d.z <= limit * limit;
+    }
 };
 
 }  // namespace wowee::rendering

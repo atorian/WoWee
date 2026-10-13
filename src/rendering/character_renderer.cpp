@@ -2224,18 +2224,6 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
         }
 
-        // Interpolate creature movement
-        if (inst.isMoving) {
-            inst.moveElapsed += deltaTime;
-            float t = inst.moveElapsed / inst.moveDuration;
-            if (t >= 1.0f) {
-                inst.position = inst.moveEnd;
-                inst.isMoving = false;
-            } else {
-                inst.position = glm::mix(inst.moveStart, inst.moveEnd, t);
-            }
-        }
-
         // Skip weapon instances for animation - their transforms are set by parent
         // bones. Enchant visuals are the exception: they are pure animated FX.
         if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
@@ -2255,7 +2243,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
             }
             const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
-            inst.animationTime += deltaTime * 1000.0f;
+            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
             if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
                 if (inst.animationLoop) {
                     // Subtract duration instead of fmod to preserve float precision
@@ -3809,12 +3797,12 @@ void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.position = position;
-        it->second.moveStart = position;
-        it->second.moveEnd = position;
-        it->second.moveElapsed = 0.0f;
-        it->second.moveDuration = 0.0f;
-        it->second.isMoving = false;
     }
+}
+
+void CharacterRenderer::setInstanceAnimationSpeed(uint32_t instanceId, float speed) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) it->second.animationSpeed = speed;
 }
 
 void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation) {
@@ -3828,70 +3816,6 @@ void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawR
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.torsoYawOverrideRad = deltaYawRad;
-    }
-}
-
-void CharacterRenderer::moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
-
-    auto& inst = it->second;
-
-    // Don't move dead instances (corpses shouldn't slide around)
-    if (inst.isDead) return;
-
-    auto pickMoveAnim = [&](bool preferRun) -> uint32_t {
-        // Choose movement anim from estimated speed; fall back if missing.
-        if (preferRun) {
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-        } else {
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-        }
-        return 0;
-    };
-
-    float pdx = destination.x - inst.position.x;
-    float pdy = destination.y - inst.position.y;
-    float planarDistSq = pdx * pdx + pdy * pdy;
-    bool synthesizedDuration = false;
-    if (durationSeconds <= 0.0f) {
-        if (planarDistSq < 1e-4f) {
-            // Stop at current location.
-            inst.position = destination;
-            inst.isMoving = false;
-            if (inst.currentAnimationId == anim::WALK || inst.currentAnimationId == anim::RUN) {
-                playAnimation(instanceId, anim::STAND, true);
-            }
-            return;
-        }
-        // Some cores send movement-only deltas without spline duration.
-        // Synthesize a tiny duration so movement anim/rotation still updates.
-        durationSeconds = std::clamp(std::sqrt(planarDistSq) / 7.0f, 0.05f, 0.20f);
-        synthesizedDuration = true;
-    }
-
-    inst.moveStart = inst.position;
-    inst.moveEnd = destination;
-    inst.moveDuration = durationSeconds;
-    inst.moveElapsed = 0.0f;
-    inst.isMoving = true;
-
-    // Face toward destination (yaw around Z axis since Z is up)
-    glm::vec3 dir = destination - inst.position;
-    if (dir.x * dir.x + dir.y * dir.y > 1e-6f) {
-        float angle = std::atan2(dir.y, dir.x);
-        inst.rotation.z = angle;
-    }
-
-    // Play movement animation while moving.
-    // Prefer run only when speed is clearly above normal walk pace.
-    float moveSpeed = std::sqrt(planarDistSq) / std::max(durationSeconds, 0.001f);
-    bool preferRun = (!synthesizedDuration && moveSpeed >= 4.5f);
-    uint32_t moveAnim = pickMoveAnim(preferRun);
-    if (moveAnim != 0 && inst.currentAnimationId != moveAnim) {
-        playAnimation(instanceId, moveAnim, true);
     }
 }
 

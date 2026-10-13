@@ -3,6 +3,8 @@
 #include "game/character.hpp"
 #include "game/game_services.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "rendering/animation/anim_capability_set.hpp"
+#include "rendering/animation/locomotion_fsm.hpp"
 #include <memory>
 #include <string>
 #include <utility>
@@ -200,6 +202,22 @@ public:
         auto it = remotePlayerMounts_.find(guid);
         return it != remotePlayerMounts_.end() ? &it->second : nullptr;
     }
+
+    /// How another player's models are being animated: the locomotion state
+    /// machine the local character uses, fed from their reported movement,
+    /// and what the frame sync last started on each model. Animations other
+    /// callbacks start - casts, emotes, swings - stay until the locomotion
+    /// choice changes, so the sync plays only on a change.
+    struct RemotePlayerLocomotion {
+        static constexpr uint32_t kNothingPlayed = UINT32_MAX;
+        rendering::LocomotionFSM fsm;
+        rendering::AnimCapabilitySet caps;
+        uint32_t characterInstance = 0;   // The model caps were probed on
+        uint32_t mountInstance = 0;
+        uint32_t playedCharacterAnim = kNothingPlayed;
+        uint32_t playedMountAnim = kNothingPlayed;
+    };
+    RemotePlayerLocomotion& remotePlayerLocomotion(uint64_t guid) { return remotePlayerLocomotion_[guid]; }
 
 
     // Local player GUID exclusion (EntitySpawner skips spawning the local player)
@@ -721,6 +739,7 @@ private:
     uint32_t pendingMountDisplayId_ = 0;
     void processPendingMount();
     std::unordered_map<uint64_t, RemotePlayerMount> remotePlayerMounts_;
+    std::unordered_map<uint64_t, RemotePlayerLocomotion> remotePlayerLocomotion_;
     std::unordered_map<uint64_t, uint32_t> pendingRemotePlayerMounts_;
     void processPendingRemotePlayerMounts();
     bool loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,

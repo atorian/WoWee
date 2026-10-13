@@ -702,6 +702,7 @@ set(WOWEE_SOURCES
     src/game/text_tokens.cpp
     src/game/text_tokens_subject.cpp
     src/game/movement_handler.cpp
+    src/game/reported_movement.cpp
     src/game/combat_handler.cpp
     src/game/spell_handler.cpp
     src/game/spell_description_eval.cpp
@@ -941,6 +942,7 @@ set(WOWEE_SOURCES
     src/rendering/amd_fsr3_runtime.cpp
     src/rendering/camera.cpp
     src/rendering/camera_controller.cpp
+    src/rendering/wall_sweep.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/shadow_params.cpp
