@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/ui_services.hpp"
+#include "core/event_bus.hpp"
 #include <vulkan/vulkan.h>
 #include <imgui.h>
 #include <string>
@@ -105,7 +106,7 @@ private:
     };
     static constexpr float PLAYER_LEVELUP_TOAST_DURATION = 4.0f;
     std::vector<PlayerLevelUpToastEntry> playerLevelUpToasts_;
-    bool otherPlayerLevelUpCallbackSet_ = false;
+    core::EventBus::Subscription otherPlayerLevelUpSub_;
     void renderPlayerLevelUpToasts(game::GameHandler& gameHandler);
 
     // ---- PvP honor toast ----
@@ -176,7 +177,7 @@ private:
     // ---- Resurrection flash ----
     float resurrectFlashTimer_ = 0.0f;
     static constexpr float kResurrectFlashDuration = 3.0f;
-    bool ghostStateCallbackSet_ = false;
+    core::EventBus::Subscription ghostStateSub_;
     void renderResurrectFlash();
 
     // ---- Zone discovery text ("Entering: <ZoneName>") ----

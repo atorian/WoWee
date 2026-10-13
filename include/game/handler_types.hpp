@@ -477,6 +477,27 @@ struct ArenaTeamRoster {
     std::vector<ArenaTeamMember> members;
 };
 
+// ---- Trade ----
+
+enum class TradeStatus : uint8_t {
+    None = 0, PendingIncoming, Open, Accepted, Complete
+};
+
+/// WoW trade window: 7 slots. Slots 0-5 are transferred to the partner;
+/// slot 6 (kTradeSlotNonTraded) is the "will not be traded" slot - you place
+/// your own item there so the partner can enchant or craft on it without it
+/// changing hands.
+inline constexpr int kTradeSlotCount     = 7;
+inline constexpr int kTradeSlotNonTraded = 6;
+
+struct TradeSlot {
+    uint32_t itemId      = 0;
+    uint32_t displayId   = 0;
+    uint32_t stackCount  = 0;
+    uint64_t itemGuid    = 0;
+    [[nodiscard]] bool occupied() const { return itemId != 0; }
+};
+
 // ---- Group loot roll ----
 
 struct LootRollEntry {

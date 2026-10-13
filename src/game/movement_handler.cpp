@@ -232,6 +232,14 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
     // Taxi
     table[Opcode::SMSG_SHOWTAXINODES] = [this](network::Packet& packet) { handleShowTaxiNodes(packet); };
     table[Opcode::SMSG_ACTIVATETAXIREPLY] = [this](network::Packet& packet) { handleActivateTaxiReply(packet); };
+    // guid(8) + status(1): status 1 = NPC has available/new routes for this player
+    table[Opcode::SMSG_TAXINODE_STATUS] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(9)) {
+            uint64_t npcGuid = packet.readUInt64();
+            uint8_t  status  = packet.readUInt8();
+            taxiNpcHasRoutes_[npcGuid] = (status != 0);
+        }
+    };
 
     // MSG_MOVE_* relay (other player movement)
     for (auto op : { Opcode::MSG_MOVE_START_FORWARD, Opcode::MSG_MOVE_START_BACKWARD,
@@ -906,8 +914,6 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     taxiClientActive_ = false;
     taxiClientPath_.clear();
     taxiServerCompletionPending_ = false;
-    taxiRecoverPending_ = false;
-    taxiStartGrace_ = 0.0f;
     onTaxiFlight_ = false;
 
     const bool clearingTaxiMount = taxiMountActive_;
@@ -2213,8 +2219,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     taxiClientActive_ = false;
     taxiClientPath_.clear();
     taxiServerCompletionPending_ = false;
-    taxiRecoverPending_ = false;
-    taxiStartGrace_ = 0.0f;
     owner_.currentMountDisplayIdRef() = 0;
     if (owner_.mountCallbackRef()) {
         owner_.mountCallbackRef()(0);
@@ -2722,7 +2726,6 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
     }
     taxiClientActive_ = false;
     onTaxiFlight_ = false;
-    taxiLandingCooldown_ = 2.0f;
     if (taxiMountActive_ && owner_.mountCallbackRef()) {
         owner_.mountCallbackRef()(0);
     }
@@ -2735,7 +2738,6 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
     taxiClientPath_.clear();
     taxiDestNodeId_ = 0;
     taxiServerCompletionPending_ = false;
-    taxiRecoverPending_ = false;
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     if (owner_.getSocket()) {
@@ -2927,7 +2929,6 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
             return;
         }
         onTaxiFlight_ = true;
-        taxiStartGrace_ = std::max(taxiStartGrace_, 2.0f);
         sanitizeMovementForTaxi();
         // Closed here rather than through closeTaxi, which would clear the taxi
         // mount that is about to be applied - but the event has to be sent all
@@ -2996,7 +2997,6 @@ void MovementHandler::closeTaxi() {
     taxiActivatePending_ = false;
     onTaxiFlight_ = false;
 
-    taxiLandingCooldown_ = 2.0f;
 }
 
 void MovementHandler::buildTaxiCostMap() {

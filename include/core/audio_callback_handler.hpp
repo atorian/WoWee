@@ -1,8 +1,10 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include <cstdint>
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace wowee {
 
@@ -34,6 +36,7 @@ private:
     rendering::Renderer* renderer_;
     ui::UIManager* uiManager_;
     game::GameHandler& gameHandler_;
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

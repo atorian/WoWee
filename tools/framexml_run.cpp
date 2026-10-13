@@ -67,6 +67,7 @@
 #include "ui/link_hit.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
+#include "core/event_bus.hpp"
 #include "game/game_services.hpp"
 #include "game/character.hpp"
 #include "game/spell_handler.hpp"
@@ -433,10 +434,13 @@ int main(int argc, char** argv) {
         // picks up nothing, and the failures that follow are the harness's,
         // not the interface's.
         //
-        // Nothing here talks to a server: the services are all null pointers,
-        // which GameHandler accepts, and the character is set directly.
+        // Nothing here talks to a server: the services are null pointers apart
+        // from the event bus, which GameHandler requires, and the character is
+        // set directly.
         if (std::strcmp(argv[i], "--player") == 0) {
+            static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
+            svc.events = &events;
             // The real asset manager, so bindings that read a DBC - quest reward
             // XP from QuestXP.dbc, zone names from AreaTable - answer for real
             // rather than the empty they give with no assets behind them.

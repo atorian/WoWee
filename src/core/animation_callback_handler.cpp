@@ -1,5 +1,6 @@
 #include "rendering/animation/melee_anim_chains.hpp"
 #include "core/animation_callback_handler.hpp"
+#include "game/game_events.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/coordinates.hpp"
@@ -670,13 +671,14 @@ void AnimationCallbackHandler::setupCallbacks() {
     });
 
     // Ghost state callback - make player semi-transparent when in spirit form
-    gameHandler_.setGhostStateCallback([this](bool isGhost) {
-        auto* cr = renderer_.getCharacterRenderer();
-        if (!cr) return;
-        uint32_t charInstId = renderer_.getCharacterInstanceId();
-        if (charInstId == 0) return;
-        cr->setInstanceOpacity(charInstId, isGhost ? 0.5f : 1.0f);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GhostStateChanged>(
+        [this](const game::events::GhostStateChanged& e) {
+            auto* cr = renderer_.getCharacterRenderer();
+            if (!cr) return;
+            uint32_t charInstId = renderer_.getCharacterInstanceId();
+            if (charInstId == 0) return;
+            cr->setInstanceOpacity(charInstId, e.isGhost ? 0.5f : 1.0f);
+        }));
 
     // Stand state animation callback - route through AnimationController state machine
     // for proper sit/sleep/kneel transition animations (down → loop → up)

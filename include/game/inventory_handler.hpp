@@ -53,23 +53,11 @@ public:
     void closeItemText();
     void queryItemText(uint64_t itemGuid);
 
-    // ---- Trade ----
-    enum class TradeStatus : uint8_t {
-        None = 0, PendingIncoming, Open, Accepted, Complete
-    };
-
-    // WoW trade window: 7 slots total. Slots 0-5 are transferred to the partner;
-    // slot 6 (TRADE_SLOT_NONTRADED) is the "will not be traded" slot - you place your
-    // own item there so the partner can enchant/craft on it without it changing hands.
-    static constexpr int TRADE_SLOT_COUNT        = 7;
-    static constexpr int TRADE_SLOT_NONTRADED    = 6;
-
-    struct TradeSlot {
-        uint32_t itemId      = 0;
-        uint32_t displayId   = 0;
-        uint32_t stackCount  = 0;
-        uint64_t itemGuid    = 0;
-    };
+    // ---- Trade (types in handler_types.hpp) ----
+    using TradeStatus = game::TradeStatus;
+    using TradeSlot = game::TradeSlot;
+    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
+    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
 
     TradeStatus getTradeStatus() const { return tradeStatus_; }
     bool hasPendingTradeRequest() const { return tradeStatus_ == TradeStatus::PendingIncoming; }

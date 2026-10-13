@@ -1,6 +1,8 @@
 #include "ui/framexml_takeover.hpp"
 #include "core/env_flag.hpp"
 #include "game/game_handler.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include "game/achievement_criteria.hpp"
 #include "game/packed_time.hpp"
 #include "game/protocol_constants.hpp"
@@ -188,7 +190,6 @@ void GameHandler::registerCoreOpcodes() {
     };
     dispatchTable_[Opcode::SMSG_CHAR_DELETE] = [this](network::Packet& packet) {
         uint8_t result = packet.readUInt8();
-        lastCharDeleteResult_ = result;
         pendingCharDeleteResponse_ = false;
         bool success = (result == 0x00 || result == 0x47);
         LOG_INFO("SMSG_CHAR_DELETE result: ", static_cast<int>(result), success ? " (success)" : " (failed)");
@@ -594,7 +595,7 @@ void GameHandler::registerCoreOpcodes() {
         corpseZ_ = movementInfo.z;
         corpseMapId_ = currentMapId_;
         corpsePositionValid_ = true;
-        if (ghostStateCallback_) ghostStateCallback_(false);
+        eventBus().publish(events::GhostStateChanged{false});
         fireAddonEvent("PLAYER_DEAD", {});
         addSystemChatMessage("You have been killed.");
         LOG_INFO("SMSG_FORCED_DEATH_UPDATE: player force-killed");
@@ -790,7 +791,7 @@ void GameHandler::registerCoreOpcodes() {
         // premature-estimate quirk (ignore, let updateClientTaxi() finish
         // naturally); already cleared means the server considers the flight
         // genuinely over (honor it now instead of waiting on our own spline).
-        const bool onTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
+        const bool onTaxiFlight = movementHandler_->isOnTaxiFlight();
         bool serverStillTaxiing = false;
         if (onTaxiFlight) {
             auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
@@ -799,8 +800,7 @@ void GameHandler::registerCoreOpcodes() {
                 serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
             }
         }
-        const bool nearDestination = onTaxiFlight && movementHandler_ &&
-                                     movementHandler_->isNearTaxiDestination();
+        const bool nearDestination = onTaxiFlight && movementHandler_->isNearTaxiDestination();
         LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
                  " serverStillTaxiing=", serverStillTaxiing,
                  " nearDestination=", nearDestination);
@@ -836,7 +836,7 @@ void GameHandler::registerCoreOpcodes() {
             // Discarding it there threw away the one authoritative confirmation
             // the dismount had.
             const bool awaitingOurOwnDismount =
-                movementHandler_ && movementHandler_->isDismountPending();
+                movementHandler_->isDismountPending();
             if (serverMountDisplay != 0 && !awaitingOurOwnDismount) {
                 LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
                             serverMountDisplay,
@@ -845,7 +845,7 @@ void GameHandler::registerCoreOpcodes() {
                             " spell=", getCurrentCastSpellId());
                 return;
             }
-            if (movementHandler_) movementHandler_->clearDismountPending();
+            movementHandler_->clearDismountPending();
         }
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
@@ -1102,11 +1102,6 @@ void GameHandler::registerCoreOpcodes() {
         if (itemClass == 2) weaponProficiency_ = mask;
         else if (itemClass == 4) armorProficiency_ = mask;
     };
-
-    // Loot money / misc consume
-    for (auto op : { Opcode::SMSG_LOOT_CLEAR_MONEY, Opcode::SMSG_NPC_TEXT_UPDATE }) {
-        dispatchTable_[op] = [](network::Packet& /*packet*/) {};
-    }
 
     // Play sound
     dispatchTable_[Opcode::SMSG_PLAY_SOUND] = [this](network::Packet& packet) {
@@ -1411,28 +1406,26 @@ void GameHandler::registerCoreOpcodes() {
         // Apply any pending cooldowns from spellHandler's cooldowns to newly populated slots.
         // SMSG_SPELL_COOLDOWN often arrives before SMSG_ACTION_BUTTONS during login,
         // so the per-slot cooldownRemaining would be 0 without this sync.
-        if (spellHandler_) {
-            const auto& cooldowns = spellHandler_->getSpellCooldowns();
-            for (auto& slot : actionBar) {
-                if (slot.type == ActionBarSlot::SPELL && slot.id != 0) {
-                    auto cdIt = cooldowns.find(slot.id);
-                    if (cdIt != cooldowns.end() && cdIt->second > 0.0f) {
-                        slot.cooldownRemaining = cdIt->second;
-                        slot.cooldownTotal     = cdIt->second;
-                    }
-                } else if (slot.type == ActionBarSlot::ITEM && slot.id != 0) {
-                    // Items (potions, trinkets): look up the item's on-use spell
-                    // and check if that spell has a pending cooldown.
-                    const auto* qi = getItemInfo(slot.id);
-                    if (qi && qi->valid) {
-                        for (const auto& sp : qi->spells) {
-                            if (sp.spellId == 0) continue;
-                            auto cdIt = cooldowns.find(sp.spellId);
-                            if (cdIt != cooldowns.end() && cdIt->second > 0.0f) {
-                                slot.cooldownRemaining = cdIt->second;
-                                slot.cooldownTotal     = cdIt->second;
-                                break;
-                            }
+        const auto& cooldowns = spellHandler_->getSpellCooldowns();
+        for (auto& slot : actionBar) {
+            if (slot.type == ActionBarSlot::SPELL && slot.id != 0) {
+                auto cdIt = cooldowns.find(slot.id);
+                if (cdIt != cooldowns.end() && cdIt->second > 0.0f) {
+                    slot.cooldownRemaining = cdIt->second;
+                    slot.cooldownTotal     = cdIt->second;
+                }
+            } else if (slot.type == ActionBarSlot::ITEM && slot.id != 0) {
+                // Items (potions, trinkets): look up the item's on-use spell
+                // and check if that spell has a pending cooldown.
+                const auto* qi = getItemInfo(slot.id);
+                if (qi && qi->valid) {
+                    for (const auto& sp : qi->spells) {
+                        if (sp.spellId == 0) continue;
+                        auto cdIt = cooldowns.find(sp.spellId);
+                        if (cdIt != cooldowns.end() && cdIt->second > 0.0f) {
+                            slot.cooldownRemaining = cdIt->second;
+                            slot.cooldownTotal     = cdIt->second;
+                            break;
                         }
                     }
                 }
@@ -1520,15 +1513,13 @@ void GameHandler::registerCoreOpcodes() {
         RaidTargetUpdateData rtu;
         if (!RaidTargetUpdateParser::parse(packet, rtu)) return;
 
-        if (socialHandler_) {
-            // The full list is authoritative, so icons absent from it are gone.
-            if (rtu.fullList) {
-                for (uint32_t i = 0; i < kRaidMarkCount; ++i)
-                    socialHandler_->setRaidTargetGuid(static_cast<uint8_t>(i), 0);
-            }
-            for (const auto& [icon, guid] : rtu.marks)
-                socialHandler_->setRaidTargetGuid(icon, guid);
+        // The full list is authoritative, so icons absent from it are gone.
+        if (rtu.fullList) {
+            for (uint32_t i = 0; i < kRaidMarkCount; ++i)
+                socialHandler_->setRaidTargetGuid(static_cast<uint8_t>(i), 0);
         }
+        for (const auto& [icon, guid] : rtu.marks)
+            socialHandler_->setRaidTargetGuid(icon, guid);
         LOG_DEBUG("MSG_RAID_TARGET_UPDATE: fullList=", rtu.fullList,
                   " marks=", rtu.marks.size());
         fireAddonEvent("RAID_TARGET_UPDATE", {});
@@ -1613,14 +1604,12 @@ void GameHandler::registerRemainingOpcodes() {
     //             calendars, battlefields, voice, misc consume-only)
     // -----------------------------------------------------------------------
     // uint32 currentZoneLightId + uint32 overrideLightId + uint32 transitionMs
-    dispatchTable_[Opcode::SMSG_OVERRIDE_LIGHT] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_OVERRIDE_LIGHT] = [](network::Packet& packet) {
         // uint32 currentZoneLightId + uint32 overrideLightId + uint32 transitionMs
         if (packet.hasRemaining(12)) {
             uint32_t zoneLightId     = packet.readUInt32();
             uint32_t overrideLightId = packet.readUInt32();
             uint32_t transitionMs    = packet.readUInt32();
-            overrideLightId_      = overrideLightId;
-            overrideLightTransMs_ = transitionMs;
             LOG_DEBUG("SMSG_OVERRIDE_LIGHT: zone=", zoneLightId,
                       " override=", overrideLightId, " transition=", transitionMs, "ms");
         }
@@ -1710,25 +1699,23 @@ void GameHandler::registerRemainingOpcodes() {
         uint64_t inspGuid  = packet.readUInt64();
         uint8_t  teamCount = packet.readUInt8();
         if (teamCount > 3) teamCount = 3; // 2v2, 3v3, 5v5
-        if (socialHandler_) {
-            auto& ir = socialHandler_->mutableInspectResult();
-            if (inspGuid == ir.guid || ir.guid == 0) {
-                ir.guid = inspGuid;
-                ir.arenaTeams.clear();
-                for (uint8_t t = 0; t < teamCount; ++t) {
-                    if (!packet.hasRemaining(21)) break;
-                    SocialHandler::InspectArenaTeam team;
-                    team.teamId         = packet.readUInt32();
-                    team.type           = packet.readUInt8();
-                    team.weekGames      = packet.readUInt32();
-                    team.weekWins       = packet.readUInt32();
-                    team.seasonGames    = packet.readUInt32();
-                    team.seasonWins     = packet.readUInt32();
-                    team.name           = packet.readString();
-                    if (!packet.hasRemaining(4)) break;
-                    team.personalRating = packet.readUInt32();
-                    ir.arenaTeams.push_back(std::move(team));
-                }
+        auto& ir = socialHandler_->mutableInspectResult();
+        if (inspGuid == ir.guid || ir.guid == 0) {
+            ir.guid = inspGuid;
+            ir.arenaTeams.clear();
+            for (uint8_t t = 0; t < teamCount; ++t) {
+                if (!packet.hasRemaining(21)) break;
+                SocialHandler::InspectArenaTeam team;
+                team.teamId         = packet.readUInt32();
+                team.type           = packet.readUInt8();
+                team.weekGames      = packet.readUInt32();
+                team.weekWins       = packet.readUInt32();
+                team.seasonGames    = packet.readUInt32();
+                team.seasonWins     = packet.readUInt32();
+                team.name           = packet.readString();
+                if (!packet.hasRemaining(4)) break;
+                team.personalRating = packet.readUInt32();
+                ir.arenaTeams.push_back(std::move(team));
             }
         }
         LOG_DEBUG("MSG_INSPECT_ARENA_TEAMS: guid=0x", std::hex, inspGuid, std::dec,
@@ -1767,20 +1754,11 @@ void GameHandler::registerRemainingOpcodes() {
             fireAddonEvent("UPDATE_BONUS_ACTIONBAR", {});
         }
     };
-    // guid(8) + status(1): status 1 = NPC has available/new routes for this player
-    dispatchTable_[Opcode::SMSG_TAXINODE_STATUS] = [this](network::Packet& packet) {
-        // guid(8) + status(1): status 1 = NPC has available/new routes for this player
-        if (packet.hasRemaining(9)) {
-            uint64_t npcGuid = packet.readUInt64();
-            uint8_t  status  = packet.readUInt8();
-            taxiNpcHasRoutes_[npcGuid] = (status != 0);
-        }
-    };
     // SMSG_GUILD_DECLINE - moved to SocialHandler::registerOpcodes
     // Clear cached talent data so the talent screen reflects the reset.
     dispatchTable_[Opcode::SMSG_TALENTS_INVOLUNTARILY_RESET] = [this](network::Packet& packet) {
         // Clear cached talent data so the talent screen reflects the reset.
-        if (spellHandler_) spellHandler_->resetTalentState();
+        spellHandler_->resetTalentState();
         addUIError("Your talents have been reset by the server.");
         addSystemChatMessage("Your talents have been reset by the server.");
         // The talent frame rebuilds from this; the cached state was cleared
@@ -2203,7 +2181,6 @@ void GameHandler::registerRemainingOpcodes() {
         };
         if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
         const uint32_t type = packet.readUInt32();
-        if (!socialHandler_) { packet.skipAll(); return; }
 
         const uint32_t kSlots = game::SocialHandler::kMaxEncounterSlots;
 
@@ -2405,18 +2382,16 @@ void GameHandler::registerRemainingOpcodes() {
         if (rem() < 8) return;
         uint64_t newLeaderGuid = packet.readUInt64();
 
-        if (socialHandler_) {
-            auto& pd = socialHandler_->mutablePartyData();
-            pd.groupType = newGroupType;
-            pd.leaderGuid = newLeaderGuid;
+        auto& pd = socialHandler_->mutablePartyData();
+        pd.groupType = newGroupType;
+        pd.leaderGuid = newLeaderGuid;
 
-            // Update local player's flags in the member list
-            uint64_t localGuid = playerGuid;
-            for (auto& m : pd.members) {
-                if (m.guid == localGuid) {
-                    m.flags = static_cast<uint8_t>(newMemberFlags & 0xFF);
-                    break;
-                }
+        // Update local player's flags in the member list
+        uint64_t localGuid = playerGuid;
+        for (auto& m : pd.members) {
+            if (m.guid == localGuid) {
+                m.flags = static_cast<uint8_t>(newMemberFlags & 0xFF);
+                break;
             }
         }
         LOG_DEBUG("SMSG_REAL_GROUP_UPDATE groupType=", static_cast<int>(newGroupType),
@@ -2531,17 +2506,15 @@ void GameHandler::registerRemainingOpcodes() {
         }
 
         // Populate inspect result immediately (no talent data in Classic SMSG_INSPECT)
-        if (socialHandler_) {
-            auto& ir = socialHandler_->mutableInspectResult();
-            ir.guid           = guid;
-            ir.playerName     = playerName;
-            ir.totalTalents   = 0;
-            ir.unspentTalents = 0;
-            ir.talentGroups   = 0;
-            ir.activeTalentGroup = 0;
-            ir.itemEntries    = items;
-            ir.enchantIds     = {};
-        }
+        auto& ir = socialHandler_->mutableInspectResult();
+        ir.guid           = guid;
+        ir.playerName     = playerName;
+        ir.totalTalents   = 0;
+        ir.unspentTalents = 0;
+        ir.talentGroups   = 0;
+        ir.activeTalentGroup = 0;
+        ir.itemEntries    = items;
+        ir.enchantIds     = {};
 
         cacheInspectedPlayerEquipment(guid, items);
 
@@ -2568,7 +2541,7 @@ void GameHandler::registerRemainingOpcodes() {
     // Same wire format as SMSG_COMPRESSED_MOVES: uint8 size + uint16 opcode + payload[]
     dispatchTable_[Opcode::SMSG_MULTIPLE_MOVES] = [this](network::Packet& packet) {
         // Same wire format as SMSG_COMPRESSED_MOVES: uint8 size + uint16 opcode + payload[]
-        if (movementHandler_) movementHandler_->handleCompressedMoves(packet);
+        movementHandler_->handleCompressedMoves(packet);
     };
     // Each sub-packet uses the standard WotLK server wire format:
     //   uint16_be subSize  (includes the 2-byte opcode; payload = subSize - 2)
@@ -2783,7 +2756,6 @@ void GameHandler::registerRemainingOpcodes() {
             uint8_t isSafe  = packet.readUInt8();
             uint8_t onQueue = packet.readUInt8();
             bfMgrInvitePending_ = false;
-            bfMgrActive_        = true;
             addSystemChatMessage(isSafe ? "You are in the battlefield zone (safe area)."
                                         : "You have entered the battlefield!");
             if (onQueue) addSystemChatMessage("You are in the battlefield queue.");
@@ -2909,7 +2881,6 @@ void GameHandler::registerRemainingOpcodes() {
                  " status ", static_cast<int>(battleStatus),
                  relocated ? " (relocated)" : "");
 
-        bfMgrActive_        = false;
         bfMgrInvitePending_ = false;
 
         // battleID, playerExited, relocated, battleActive, lowLevel. The four
@@ -3415,7 +3386,6 @@ void GameHandler::registerRemainingOpcodes() {
         Opcode::SMSG_REDIRECT_CLIENT,
         Opcode::SMSG_RESET_RANGED_COMBAT_TIMER,
         Opcode::SMSG_SEND_ALL_COMBAT_LOG,
-        Opcode::SMSG_SET_EXTRA_AURA_INFO_NEED_UPDATE,
         Opcode::SMSG_SET_PLAYER_DECLINED_NAMES_RESULT,
         Opcode::SMSG_SET_PROJECTILE_POSITION,
         Opcode::SMSG_SPELL_CHANCE_RESIST_PUSHBACK,
@@ -3471,7 +3441,7 @@ void GameHandler::handlePacket(network::Packet& packet) {
 
     try {
 
-    if (wardenHandler_ && wardenHandler_->handleProtocolPacket(packet)) return;
+    if (wardenHandler_->handleProtocolPacket(packet)) return;
 
     const bool allowVanillaAliases = isPreWotlk();
 
@@ -3498,7 +3468,7 @@ void GameHandler::handlePacket(network::Packet& packet) {
                     (monsterMoveTransportWire != 0xFFFF && subOpcode == monsterMoveTransportWire)) {
                     LOG_INFO("Opcode 0x006B interpreted as SMSG_COMPRESSED_MOVES (subOpcode=0x",
                              std::hex, subOpcode, std::dec, ")");
-                    if (movementHandler_) movementHandler_->handleCompressedMoves(packet);
+                    movementHandler_->handleCompressedMoves(packet);
                     return;
                 }
             }

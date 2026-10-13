@@ -371,6 +371,7 @@ bool Application::initialize() {
     gameServices_.audioCoordinator = audioCoordinator_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
+    gameServices_.events = &eventBus_;
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
@@ -2384,9 +2385,6 @@ void Application::setState(AppState newState) {
                         }
                     }
                 });
-                gameHandler->setRangedWeaponSwapCallback([this](bool show) {
-                    if (appearanceComposer_) appearanceComposer_->showRangedWeapon(show);
-                });
                 if (renderer && renderer->getAnimationController()) {
                     renderer->getAnimationController()->setRangedShotCompleteCallback([this]() {
                         if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
@@ -4068,6 +4066,9 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
 
 void Application::update(float deltaTime) {
     ZoneScopedN("Application::update");
+    // What other threads posted since the last frame, delivered here so every
+    // subscriber runs on the main thread.
+    eventBus_.dispatchPosted();
     const char* updateCheckpoint = "enter";
     try {
     // Reproduce world entry with real Kalimdor assets without a realm session.

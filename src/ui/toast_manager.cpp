@@ -1,5 +1,6 @@
 #include "game/reputation_standing.hpp"
 #include "ui/toast_manager.hpp"
+#include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
 #include "rendering/renderer.hpp"
@@ -53,20 +54,20 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     }
 
     // Other-player level-up toast callback
-    if (!otherPlayerLevelUpCallbackSet_) {
-        gameHandler.setOtherPlayerLevelUpCallback([this](uint64_t guid, uint32_t newLevel) {
+    if (!otherPlayerLevelUpSub_) {
+        otherPlayerLevelUpSub_ = gameHandler.eventBus().subscribe<game::events::OtherPlayerLevelUp>(
+            [this](const game::events::OtherPlayerLevelUp& e) {
             for (auto& t : playerLevelUpToasts_) {
-                if (t.guid == guid) {
-                    t.newLevel = newLevel;
+                if (t.guid == e.guid) {
+                    t.newLevel = e.newLevel;
                     t.age = 0.0f;
                     return;
                 }
             }
             if (playerLevelUpToasts_.size() >= 3)
                 playerLevelUpToasts_.erase(playerLevelUpToasts_.begin());
-            playerLevelUpToasts_.push_back({.guid = guid, .playerName = "", .newLevel = newLevel, .age = 0.0f});
+            playerLevelUpToasts_.push_back({.guid = e.guid, .playerName = "", .newLevel = e.newLevel, .age = 0.0f});
         });
-        otherPlayerLevelUpCallbackSet_ = true;
     }
 
     // PvP honor credit toast callback
@@ -99,13 +100,13 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     }
 
     // Ghost-state callback to flash "You have been resurrected!" on revival
-    if (!ghostStateCallbackSet_) {
-        gameHandler.setGhostStateCallback([this](bool isGhost) {
-            if (!isGhost) {
-                resurrectFlashTimer_ = kResurrectFlashDuration;
-            }
-        });
-        ghostStateCallbackSet_ = true;
+    if (!ghostStateSub_) {
+        ghostStateSub_ = gameHandler.eventBus().subscribe<game::events::GhostStateChanged>(
+            [this](const game::events::GhostStateChanged& e) {
+                if (!e.isGhost) {
+                    resurrectFlashTimer_ = kResurrectFlashDuration;
+                }
+            });
     }
 
     // Reputation change toast callback

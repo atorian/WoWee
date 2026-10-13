@@ -1,4 +1,5 @@
 #include "core/audio_callback_handler.hpp"
+#include "game/game_events.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
@@ -103,7 +104,10 @@ void AudioCallbackHandler::setupCallbacks() {
     });
 
     // Other player level-up callback - trigger 3D effect + chat notification
-    gameHandler_.setOtherPlayerLevelUpCallback([this](uint64_t guid, uint32_t newLevel) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::OtherPlayerLevelUp>(
+        [this](const game::events::OtherPlayerLevelUp& e) {
+        const uint64_t guid = e.guid;
+        const uint32_t newLevel = e.newLevel;
         if (!renderer_) return;
 
         // Trigger 3D effect at the other player's position
@@ -124,7 +128,7 @@ void AudioCallbackHandler::setupCallbacks() {
             msg.message = name + " has reached level " + std::to_string(newLevel) + "!";
             gameHandler_.addLocalChatMessage(msg);
         }
-    });
+    }));
 
     // Open dungeon finder callback - server sends SMSG_OPEN_LFG_DUNGEON_FINDER
     gameHandler_.setOpenLfgCallback([this]() {

@@ -1459,7 +1459,7 @@ static int lua_SetModifiedClick(lua_State* L) {
 
 static int pushTradeSlot(lua_State* L, game::GameHandler* gh,
                          const game::GameHandler::TradeSlot& slot) {
-    if (!slot.occupied || slot.itemId == 0) { return luaReturnNil(L); }
+    if (!slot.occupied() || slot.itemId == 0) { return luaReturnNil(L); }
     const auto* info = gh->getItemInfo(slot.itemId);
     lua_pushstring(L, info ? info->name.c_str() : "");
     lua_pushstring(L, gh->getItemIconPath(
@@ -1486,7 +1486,7 @@ static int lua_GetTradeTargetItemInfo(lua_State* L) {
 
 static int pushTradeLink(lua_State* L, game::GameHandler* gh,
                          const game::GameHandler::TradeSlot& slot) {
-    const auto* info = (gh && slot.occupied) ? gh->getItemInfo(slot.itemId) : nullptr;
+    const auto* info = (gh && slot.occupied()) ? gh->getItemInfo(slot.itemId) : nullptr;
     if (!info || info->name.empty()) { return luaReturnNil(L); }
     const std::string link = game::itemChatLink(slot.itemId, static_cast<uint32_t>(info->quality), info->name);
     lua_pushstring(L, link.c_str());

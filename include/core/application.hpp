@@ -10,6 +10,7 @@
 #include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
+#include "core/event_bus.hpp"
 #include "game/game_services.hpp"
 #include "pipeline/asset_inventory.hpp"
 #include "core/update_check.hpp"
@@ -248,6 +249,9 @@ private:
 
     static Application* instance;
 
+    /// What the game announces, for anything in the client to hear. Declared
+    /// before everything that subscribes, so it is destroyed after them.
+    core::EventBus eventBus_;
     game::GameServices gameServices_;
     /// The pad family the interface's key names were written for.
     core::Gamepad::Kind padKeyNamesFor_ = core::Gamepad::Kind::Unknown;

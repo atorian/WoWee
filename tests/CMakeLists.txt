@@ -163,6 +163,10 @@ endfunction()
 
 
 
+# The event bus: delivery, subscription lifetime, posting across threads.
+wowee_add_test(test_event_bus
+    SOURCES test_event_bus.cpp)
+
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)

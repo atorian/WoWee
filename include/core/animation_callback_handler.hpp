@@ -1,6 +1,8 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace wowee {
@@ -38,6 +40,7 @@ private:
     rendering::Renderer& renderer_;
     game::GameHandler& gameHandler_;
     AppearanceComposer& appearanceComposer_;
+    std::vector<EventBus::Subscription> subscriptions_;
 
     // Charge rush state (moved from Application)
     bool chargeActive_ = false;

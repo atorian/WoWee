@@ -1991,7 +1991,6 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_FAILED", spellcastArgs("player", data.spellId));
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
     }
-    if (owner_.spellCastFailedCallbackRef()) owner_.spellCastFailedCallbackRef()(data.spellId);
 }
 
 void SpellHandler::handleSpellStart(network::Packet& packet) {
@@ -4069,9 +4068,8 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                 }
             }
             owner_.addUIError(errMsg);
-            if (owner_.spellCastFailedCallbackRef()) owner_.spellCastFailedCallbackRef()(castResultSpellId);
-                owner_.fireAddonEvent("UNIT_SPELLCAST_FAILED", spellcastArgs("player", castResultSpellId));
-                owner_.fireAddonEvent("UNIT_SPELLCAST_STOP",   spellcastArgs("player", castResultSpellId));
+            owner_.fireAddonEvent("UNIT_SPELLCAST_FAILED", spellcastArgs("player", castResultSpellId));
+            owner_.fireAddonEvent("UNIT_SPELLCAST_STOP",   spellcastArgs("player", castResultSpellId));
             // The second of the two chat writes. See handleCastFailed.
         }
     }

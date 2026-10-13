@@ -204,21 +204,6 @@ public:
     void setFalling(bool falling) { isFalling_ = falling; }
     void setFallStartMs(uint32_t ms) { fallStartMs_ = ms; }
 
-    // Taxi state references for GameHandler update/processing
-    bool& onTaxiFlightRef() { return onTaxiFlight_; }
-    bool& taxiMountActiveRef() { return taxiMountActive_; }
-    bool& taxiActivatePendingRef() { return taxiActivatePending_; }
-    float& taxiActivateTimerRef() { return taxiActivateTimer_; }
-    bool& taxiClientActiveRef() { return taxiClientActive_; }
-    float& taxiLandingCooldownRef() { return taxiLandingCooldown_; }
-    float& taxiStartGraceRef() { return taxiStartGrace_; }
-    bool& taxiRecoverPendingRef() { return taxiRecoverPending_; }
-    uint32_t& taxiRecoverMapIdRef() { return taxiRecoverMapId_; }
-    glm::vec3& taxiRecoverPosRef() { return taxiRecoverPos_; }
-    std::unordered_map<uint64_t, bool>& taxiNpcHasRoutesRef() { return taxiNpcHasRoutes_; }
-    uint32_t* knownTaxiMaskPtr() { return knownTaxiMask_; }
-    bool& taxiMaskInitializedRef() { return taxiMaskInitialized_; }
-    uint64_t& taxiNpcGuidRef() { return taxiNpcGuid_; }
     [[nodiscard]] uint64_t getTaxiNpcGuid() const { return taxiNpcGuid_; }
 
     // Other-player movement timing (for cleanup on despawn etc.)
@@ -361,8 +346,6 @@ private:
     // updateClientTaxi()'s comment on why a dropped reply needs this now.
     static constexpr float kTaxiActivateReplyTimeoutSeconds = 8.0f;
     bool taxiClientActive_ = false;
-    float taxiLandingCooldown_ = 0.0f;
-    float taxiStartGrace_ = 0.0f;
     size_t taxiClientIndex_ = 0;
     std::vector<glm::vec3> taxiClientPath_;
     // Arc length of the smooth Catmull-Rom curve actually rendered through each
@@ -383,9 +366,6 @@ private:
     float taxiClientSpeed_ = 32.0f;
     float taxiClientSegmentProgress_ = 0.0f;
     bool taxiServerCompletionPending_ = false;
-    bool taxiRecoverPending_ = false;
-    uint32_t taxiRecoverMapId_ = 0;
-    glm::vec3 taxiRecoverPos_{0.0f};
     uint32_t knownTaxiMask_[12] = {};
     bool taxiMaskInitialized_ = false;
     std::unordered_map<uint32_t, uint32_t> taxiCostMap_;

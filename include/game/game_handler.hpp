@@ -54,6 +54,7 @@ namespace wowee::game {
 
 namespace wowee {
 namespace network { class WorldSocket; class Packet; }
+namespace core { class EventBus; }
 namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
@@ -171,6 +172,8 @@ public:
     ~GameHandler() override;
 
     const GameServices& services() const { return services_; }
+    /// Where this announces what happened; see game/game_events.hpp.
+    core::EventBus& eventBus() const { return *services_.events; }
 
     /** Access the active opcode table (wire ↔ logical mapping). */
     const OpcodeTable& getOpcodeTable() const { return opcodeTable_; }
@@ -243,7 +246,6 @@ public:
 
     using CharDeleteCallback = std::function<void(bool success, const std::string& message)>;
     void setCharDeleteCallback(CharDeleteCallback cb) { charDeleteCallback_ = std::move(cb); }
-    uint8_t getLastCharDeleteResult() const { return lastCharDeleteResult_; }
 
     // A realm extension announced the patch archives this client should hold.
     using ServerPatchManifestCallback = std::function<void(const std::vector<EzWowPatch>&)>;
@@ -360,7 +362,6 @@ public:
     bool resurrectHasTimer() const { return resurrectHasTimer_; }
     /// Seconds until the next one, and the healer it belongs to.
     float getAreaSpiritHealerTime() const { return areaSpiritHealerSeconds_; }
-    uint64_t getAreaSpiritHealerGuid() const { return areaSpiritHealerGuid_; }
     /// Announce a rune's type and readiness to the interface.
     void fireRuneUpdate(uint32_t index);
     const std::vector<std::string>& getJoinedChannels() const;
@@ -630,10 +631,6 @@ public:
     using InspectArenaTeam = game::InspectArenaTeam;
     using InspectResult = game::InspectResult;
     const InspectResult* getInspectResult() const;
-    const std::array<uint32_t, 19>* getOtherPlayerVisibleEquipment(uint64_t guid) const {
-        auto it = otherPlayerVisibleItemEntries_.find(guid);
-        return (it != otherPlayerVisibleItemEntries_.end()) ? &it->second : nullptr;
-    }
 
     // Server info commands
     void queryServerTime(bool announce = false);
@@ -720,7 +717,6 @@ public:
     uint8_t getStandState() const { return standState_; }
     bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
     bool isDead() const { return standState_ == 7; }
-    bool isKneeling() const { return standState_ == 8; }
 
     // Display toggles
     void toggleHelm();
@@ -766,16 +762,6 @@ public:
     void requestGuildEventLog();
     const std::vector<GuildEventLogEntry>& getGuildEventLog() const;
 
-    // GM ticket status accessors
-    bool hasActiveGmTicket() const { return gmTicketActive_; }
-    const std::string& getGmTicketText() const { return gmTicketText_; }
-    bool isGmSupportAvailable() const { return gmSupportAvailable_; }
-    float getGmTicketWaitHours() const { return gmTicketWaitHours_; }
-
-    // Battlefield Manager (Wintergrasp)
-    bool hasBfMgrInvite()  const { return bfMgrInvitePending_; }
-    bool isInBfMgrZone()   const { return bfMgrActive_; }
-    uint32_t getBfMgrZoneId() const { return bfMgrZoneId_; }
     uint32_t getBfMgrBattleId() const { return bfMgrBattleId_; }
     void acceptBfMgrInvite();
     void declineBfMgrInvite();
@@ -860,7 +846,6 @@ public:
         std::array<uint32_t, 6> tabSlots{};
     };
     PendingGuildRank& pendingGuildRankRef() { return pendingGuildRank_; }
-    const PendingGuildRank& getPendingGuildRank() const { return pendingGuildRank_; }
     void saveGuildRank(const std::string& rankName);
     bool hasPendingGuildInvite() const;
     const std::string& getPendingGuildInviterName() const;
@@ -905,7 +890,7 @@ public:
     using PetitionInfo = game::PetitionInfo;
     const PetitionInfo& getPetitionInfo() const;
     bool hasPetitionSignaturesUI() const;
-    void clearPetitionSignaturesUI() { petitionInfo_.showUI = false; }
+    void clearPetitionSignaturesUI();
     void signPetition(uint64_t petitionGuid);
     void turnInPetition(uint64_t petitionGuid);
     void offerPetition(uint64_t petitionGuid, uint64_t targetGuid);
@@ -937,8 +922,6 @@ public:
     // AFK/DND status
     void toggleAfk(const std::string& message = "");
     void toggleDnd(const std::string& message = "");
-    bool isAfk() const { return afkStatus_; }
-    bool isDnd() const { return dndStatus_; }
     void replyToLastWhisper(const std::string& message);
     std::string getLastWhisperSender() const {
         if (!lastWhisperSender_.empty()) return lastWhisperSender_;
@@ -950,7 +933,6 @@ public:
         }
         return "";
     }
-    void setLastWhisperSender(const std::string& name) { lastWhisperSender_ = name; }
 
     // Party/Raid management
     /// The info text on a guild bank tab. Tab is zero-based, as stored.
@@ -1075,8 +1057,6 @@ public:
     void dismissPet();
     void renamePet(const std::string& newName);
     bool hasPet() const { return petGuid_ != 0; }
-    // Returns true once after SMSG_PET_RENAMEABLE; consuming the flag clears it.
-    bool consumePetRenameablePending() { bool v = petRenameablePending_; petRenameablePending_ = false; return v; }
     /// The same flag without taking it. The unit menu asks whether a rename is
     /// offered every time it is built, and consuming there would spend the one
     /// answer this client's own naming dialog is waiting for.
@@ -1128,7 +1108,7 @@ public:
     void togglePetSpellAutocast(uint32_t spellId);
     const std::unordered_set<uint32_t>& getKnownSpells() const {
         static const std::unordered_set<uint32_t> empty;
-        return spellHandler_ ? spellHandler_->getKnownSpells() : empty;
+        return spellHandler_->getKnownSpells();
     }
 
     // Spell book tabs - groups known spells by class skill line for Lua API
@@ -1154,7 +1134,6 @@ public:
         // The stable window hides on this and nothing else.
         if (wasOpen && addonEventCallback_) addonEventCallback_("PET_STABLE_CLOSED", {});
     }
-    uint64_t getStableMasterGuid() const { return stableMasterGuid_; }
     uint8_t  getStableSlots() const { return stableNumSlots_; }
     const std::vector<StabledPet>& getStabledPets() const { return stabledPets_; }
     void requestStabledPetList();          // CMSG MSG_LIST_STABLED_PETS
@@ -1195,16 +1174,16 @@ public:
             minimapPings_.end());
     }
 
-    bool isCasting() const { return spellHandler_ ? spellHandler_->isCasting() : false; }
-    bool isChanneling() const { return spellHandler_ ? spellHandler_->isChanneling() : false; }
-    bool isRestoring() const { return spellHandler_ ? spellHandler_->isRestoring() : false; }
+    bool isCasting() const { return spellHandler_->isCasting(); }
+    bool isChanneling() const { return spellHandler_->isChanneling(); }
+    bool isRestoring() const { return spellHandler_->isRestoring(); }
     bool isGameObjectInteractionCasting() const {
-        return spellHandler_ ? spellHandler_->isGameObjectInteractionCasting() : false;
+        return spellHandler_->isGameObjectInteractionCasting();
     }
-    uint32_t getCurrentCastSpellId() const { return spellHandler_ ? spellHandler_->getCurrentCastSpellId() : 0; }
-    float getCastProgress() const { return spellHandler_ ? spellHandler_->getCastProgress() : 0.0f; }
-    float getCastTimeRemaining() const { return spellHandler_ ? spellHandler_->getCastTimeRemaining() : 0.0f; }
-    float getCastTimeTotal() const { return spellHandler_ ? spellHandler_->getCastTimeTotal() : 0.0f; }
+    uint32_t getCurrentCastSpellId() const { return spellHandler_->getCurrentCastSpellId(); }
+    float getCastProgress() const { return spellHandler_->getCastProgress(); }
+    float getCastTimeRemaining() const { return spellHandler_->getCastTimeRemaining(); }
+    float getCastTimeTotal() const { return spellHandler_->getCastTimeTotal(); }
 
     // Repeat-craft queue
     void startCraftQueue(uint32_t spellId, int count);
@@ -1213,71 +1192,58 @@ public:
     uint32_t getCraftQueueSpellId() const;
 
     // Crafting window (opened client-side by casting a profession spell)
-    bool isCraftingWindowOpen() const { return spellHandler_ ? spellHandler_->isCraftingWindowOpen() : false; }
-    uint32_t getCraftingSkillLine() const { return spellHandler_ ? spellHandler_->getCraftingSkillLine() : 0; }
-    void closeCraftingWindow() { if (spellHandler_) spellHandler_->closeCraftingWindow(); }
+    bool isCraftingWindowOpen() const { return spellHandler_->isCraftingWindowOpen(); }
+    uint32_t getCraftingSkillLine() const { return spellHandler_->getCraftingSkillLine(); }
+    void closeCraftingWindow() { spellHandler_->closeCraftingWindow(); }
 
     // 400ms spell-queue window: next spell to cast when current finishes
     uint32_t getQueuedSpellId() const;
-    void cancelQueuedSpell() { if (spellHandler_) spellHandler_->cancelQueuedSpell(); }
+    void cancelQueuedSpell() { spellHandler_->cancelQueuedSpell(); }
 
     // Unit cast state (aliased from handler_types.hpp)
     using UnitCastState = game::UnitCastState;
     // Returns cast state for any unit by GUID (delegates to SpellHandler)
     const UnitCastState* getUnitCastState(uint64_t guid) const {
-        if (spellHandler_) return spellHandler_->getUnitCastState(guid);
-        return nullptr;
+        return spellHandler_->getUnitCastState(guid);
     }
     // Convenience helpers for the current target
-    bool isTargetCasting() const { return spellHandler_ ? spellHandler_->isTargetCasting() : false; }
-    uint32_t getTargetCastSpellId() const { return spellHandler_ ? spellHandler_->getTargetCastSpellId() : 0; }
-    float getTargetCastProgress() const { return spellHandler_ ? spellHandler_->getTargetCastProgress() : 0.0f; }
-    float getTargetCastTimeRemaining() const { return spellHandler_ ? spellHandler_->getTargetCastTimeRemaining() : 0.0f; }
-    bool isTargetCastInterruptible() const { return spellHandler_ ? spellHandler_->isTargetCastInterruptible() : true; }
+    bool isTargetCasting() const { return spellHandler_->isTargetCasting(); }
+    uint32_t getTargetCastSpellId() const { return spellHandler_->getTargetCastSpellId(); }
+    float getTargetCastProgress() const { return spellHandler_->getTargetCastProgress(); }
+    float getTargetCastTimeRemaining() const { return spellHandler_->getTargetCastTimeRemaining(); }
+    bool isTargetCastInterruptible() const { return spellHandler_->isTargetCastInterruptible(); }
 
     // Talents - delegate to SpellHandler as canonical authority
-    uint8_t getActiveTalentSpec() const { return spellHandler_ ? spellHandler_->getActiveTalentSpec() : 0; }
-    uint8_t getUnspentTalentPoints() const { return spellHandler_ ? spellHandler_->getUnspentTalentPoints() : 0; }
-    uint8_t getUnspentTalentPoints(uint8_t spec) const { return spellHandler_ ? spellHandler_->getUnspentTalentPoints(spec) : 0; }
+    uint8_t getActiveTalentSpec() const { return spellHandler_->getActiveTalentSpec(); }
+    uint8_t getUnspentTalentPoints() const { return spellHandler_->getUnspentTalentPoints(); }
+    uint8_t getUnspentTalentPoints(uint8_t spec) const { return spellHandler_->getUnspentTalentPoints(spec); }
     const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents() const {
-        if (spellHandler_) return spellHandler_->getLearnedTalents();
-        static const std::unordered_map<uint32_t, uint8_t> empty;
-        return empty;
+        return spellHandler_->getLearnedTalents();
     }
     const std::unordered_map<uint32_t, uint8_t>& getLearnedTalents(uint8_t spec) const {
-        if (spellHandler_) return spellHandler_->getLearnedTalents(spec);
-        static const std::unordered_map<uint32_t, uint8_t> empty;
-        return empty;
+        return spellHandler_->getLearnedTalents(spec);
     }
 
     // Glyphs (WotLK): up to 6 glyph slots per spec (3 major + 3 minor)
     static constexpr uint8_t MAX_GLYPH_SLOTS = 6;
     const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs() const {
-        if (spellHandler_) return spellHandler_->getGlyphs();
-        static const std::array<uint16_t, MAX_GLYPH_SLOTS> empty{};
-        return empty;
+        return spellHandler_->getGlyphs();
     }
     const std::array<uint16_t, MAX_GLYPH_SLOTS>& getGlyphs(uint8_t spec) const {
-        if (spellHandler_) return spellHandler_->getGlyphs(spec);
-        static const std::array<uint16_t, MAX_GLYPH_SLOTS> empty{};
-        return empty;
+        return spellHandler_->getGlyphs(spec);
     }
     uint8_t getTalentRank(uint32_t talentId) const {
-        return spellHandler_ ? spellHandler_->getTalentRank(talentId) : 0;
+        return spellHandler_->getTalentRank(talentId);
     }
     void learnTalent(uint32_t talentId, uint32_t requestedRank);
     void switchTalentSpec(uint8_t newSpec);
 
     // Talent DBC access
     const TalentEntry* getTalentEntry(uint32_t talentId) const {
-        if (spellHandler_) return spellHandler_->getTalentEntry(talentId);
-        auto it = talentCache_.find(talentId);
-        return (it != talentCache_.end()) ? &it->second : nullptr;
+        return spellHandler_->getTalentEntry(talentId);
     }
     const TalentTabEntry* getTalentTabEntry(uint32_t tabId) const {
-        if (spellHandler_) return spellHandler_->getTalentTabEntry(tabId);
-        auto it = talentTabCache_.find(tabId);
-        return (it != talentTabCache_.end()) ? &it->second : nullptr;
+        return spellHandler_->getTalentTabEntry(tabId);
     }
     const std::unordered_map<uint32_t, TalentEntry>& getAllTalents() const;
     const std::unordered_map<uint32_t, TalentTabEntry>& getAllTalentTabs() const;
@@ -1331,19 +1297,14 @@ public:
     }
 
     const std::vector<AuraSlot>& getPlayerAuras() const {
-        if (spellHandler_) return spellHandler_->getPlayerAuras();
-        static const std::vector<AuraSlot> empty;
-        return empty;
+        return spellHandler_->getPlayerAuras();
     }
     const std::vector<AuraSlot>& getTargetAuras() const {
-        if (spellHandler_) return spellHandler_->getTargetAuras();
-        static const std::vector<AuraSlot> empty;
-        return empty;
+        return spellHandler_->getTargetAuras();
     }
     // Per-unit aura cache (populated for party members and any unit we receive updates for)
     const std::vector<AuraSlot>* getUnitAuras(uint64_t guid) const {
-        if (spellHandler_) return spellHandler_->getUnitAuras(guid);
-        return nullptr;
+        return spellHandler_->getUnitAuras(guid);
     }
 
     // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
@@ -1392,10 +1353,6 @@ public:
     using PlayerModelRebuildCallback = std::function<void()>;
     void setPlayerModelRebuildCallback(PlayerModelRebuildCallback cb) { playerModelRebuildCallback_ = std::move(cb); }
 
-    // Ghost state callback - fired when player enters or leaves ghost (spirit) form
-    using GhostStateCallback = std::function<void(bool isGhost)>;
-    void setGhostStateCallback(GhostStateCallback cb) { ghostStateCallback_ = std::move(cb); }
-
     // Melee swing callback (for driving animation/SFX)
     // spellId: 0 = regular auto-attack swing, non-zero = melee ability (special attack)
     using MeleeSwingCallback = std::function<void(uint32_t spellId)>;
@@ -1411,20 +1368,12 @@ public:
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
 
-    // Ranged weapon swap callback - show=true: swap to ranged weapon, false: back to melee
-    using RangedWeaponSwapCallback = std::function<void(bool show)>;
-    void setRangedWeaponSwapCallback(RangedWeaponSwapCallback cb) { rangedWeaponSwapCallback_ = std::move(cb); }
-
     // Spell cast animation callbacks - true=start cast/channel, false=finish/cancel
     // guid: caster (may be player or another unit), isChannel: channel vs regular cast
     // castType: DIRECTED (unit target), OMNI (self/no target), AREA (ground AoE)
     using SpellCastAnimCallback = std::function<void(uint64_t guid, bool start, bool isChannel,
                                                       SpellCastType castType)>;
     void setSpellCastAnimCallback(SpellCastAnimCallback cb) { spellCastAnimCallback_ = std::move(cb); }
-
-    // Fired when the player's own spell cast fails (spellId of the failed spell).
-    using SpellCastFailedCallback = std::function<void(uint32_t spellId)>;
-    void setSpellCastFailedCallback(SpellCastFailedCallback cb) { spellCastFailedCallback_ = std::move(cb); }
 
     // Unit animation hint: signal jump (animId=38) for other players/NPCs
     using UnitAnimHintCallback = std::function<void(uint64_t guid, uint32_t animId)>;
@@ -1491,7 +1440,6 @@ public:
     // seconds, GetGameTime split it as hours, and SMSG_SERVERTIME wrote a unix
     // timestamp into the same field.
     float getGameTime() const { return gameTime_; }
-    float getTimeSpeed() const { return timeSpeed_; }
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     float getGCDRemaining() const {
@@ -1509,9 +1457,6 @@ public:
     uint32_t getWeatherType() const { return weatherType_; }
     float getWeatherIntensity() const { return weatherIntensity_; }
     bool isRaining() const { return weatherType_ == 1 && weatherIntensity_ > 0.05f; }
-    bool isSnowing() const { return weatherType_ == 2 && weatherIntensity_ > 0.05f; }
-    uint32_t getOverrideLightId() const { return overrideLightId_; }
-    uint32_t getOverrideLightTransMs() const { return overrideLightTransMs_; }
 
     // Player skills
     const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const { return playerSkills_; }
@@ -1757,7 +1702,7 @@ public:
     float getSpellCooldownTotal(uint32_t spellId) const;
     const std::unordered_map<uint32_t, float>& getSpellCooldowns() const {
         static const std::unordered_map<uint32_t, float> empty;
-        return spellHandler_ ? spellHandler_->getSpellCooldowns() : empty;
+        return spellHandler_->getSpellCooldowns();
     }
 
     // Player GUID
@@ -1804,7 +1749,6 @@ public:
     // Player death state
     bool isPlayerDead() const { return playerDead_; }
     bool isPlayerGhost() const { return releasedSpirit_; }
-    bool showDeathDialog() const { return playerDead_ && !releasedSpirit_; }
     /// The graveyard a release would send the player to, in canonical space.
     /// False when the server has not named one, or has withdrawn it.
     bool getDeathReleaseLocation(uint32_t& mapId, glm::vec3& canonical) const {
@@ -1813,12 +1757,10 @@ public:
         canonical = deathReleaseCanonical_;
         return true;
     }
-    bool showResurrectDialog() const { return resurrectRequestPending_; }
     /** True when SMSG_PRE_RESURRECT arrived - Reincarnation/Twisting Nether available. */
     bool canSelfRes() const { return selfResAvailable_; }
     /** Send CMSG_SELF_RES to use Reincarnation / Twisting Nether. */
     void useSelfRes();
-    const std::string& getResurrectCasterName() const { return resurrectCasterName_; }
     bool showTalentWipeConfirmDialog() const;
     uint32_t getTalentWipeCost() const;
     void confirmTalentWipe();
@@ -1902,40 +1844,16 @@ public:
     void acceptSharedQuest();
     void declineSharedQuest();
 
-    // ---- Summon ----
-    bool hasPendingSummonRequest() const { return pendingSummonRequest_; }
     const std::string& getSummonerName() const { return summonerName_; }
     float getSummonTimeoutSec() const { return summonTimeoutSec_; }
     void acceptSummon();
     void declineSummon();
-    void tickSummonTimeout(float dt) {
-        if (!pendingSummonRequest_) return;
-        summonTimeoutSec_ -= dt;
-        if (summonTimeoutSec_ <= 0.0f) {
-            pendingSummonRequest_ = false;
-            summonTimeoutSec_ = 0.0f;
-        }
-    }
 
-    // ---- Trade ----
-    enum class TradeStatus : uint8_t {
-        None = 0, PendingIncoming, Open, Accepted, Complete
-    };
-
-    // 7 slots total: 0-5 are transferred, slot 6 (TRADE_SLOT_NONTRADED) is the
-    // "will not be traded" slot used for enchanting/crafting on the partner's item.
-    static constexpr int TRADE_SLOT_COUNT        = 7;
-    static constexpr int TRADE_SLOT_NONTRADED    = 6;
-
-    struct TradeSlot {
-        uint32_t itemId      = 0;
-        uint32_t displayId   = 0;
-        uint32_t stackCount  = 0;
-        uint64_t itemGuid    = 0;
-        uint8_t  bag         = 0xFF;   // 0xFF = not set
-        uint8_t  bagSlot     = 0xFF;
-        bool     occupied    = false;
-    };
+    // ---- Trade (InventoryHandler's; types in handler_types.hpp) ----
+    using TradeStatus = game::TradeStatus;
+    using TradeSlot = game::TradeSlot;
+    static constexpr int TRADE_SLOT_COUNT     = kTradeSlotCount;
+    static constexpr int TRADE_SLOT_NONTRADED = kTradeSlotNonTraded;
 
     TradeStatus getTradeStatus() const;
     bool hasPendingTradeRequest() const;
@@ -2235,7 +2153,6 @@ public:
         return pendingQuestQueryIds_.count(questId) > 0;
     }
     void clearQuestQueryPending(uint32_t questId) { pendingQuestQueryIds_.erase(questId); }
-    const std::unordered_map<uint32_t, uint32_t>& getWorldStates() const { return worldStates_; }
     std::optional<uint32_t> getWorldState(uint32_t key) const {
         auto it = worldStates_.find(key);
         if (it == worldStates_.end()) return std::nullopt;
@@ -2338,7 +2255,6 @@ public:
     /// no bar of their own. Read from the file rather than written out here,
     /// because a table of class-and-form guesses is not checkable.
     uint32_t getBonusActionBarOffset() const;
-    uint64_t getComboTarget() const { return comboTarget_; }
 
     // Death Knight rune state (6 runes: 0-1=Blood, 2-3=Unholy, 4-5=Frost; may become Death=3)
     enum class RuneType : uint8_t { Blood = 0, Unholy = 1, Frost = 2, Death = 3 };
@@ -2495,26 +2411,12 @@ public:
     /// The faction this one is grouped under, or 0 for a top-level one.
     uint32_t getFactionParentId(uint32_t factionId) const;
 
-    const std::vector<FactionStandingInit>& getInitialFactions() const { return initialFactions_; }
     const std::unordered_map<uint32_t, int32_t>& getFactionStandings() const { return factionStandings_; }
 
     // Returns true if the player has "at war" toggled for the faction at repListId
     bool isFactionAtWar(uint32_t repListId) const {
         if (repListId >= initialFactions_.size()) return false;
         return (initialFactions_[repListId].flags & FACTION_FLAG_AT_WAR) != 0;
-    }
-    // Returns true if the faction is visible in the reputation list
-    bool isFactionVisible(uint32_t repListId) const {
-        if (repListId >= initialFactions_.size()) return false;
-        const uint8_t f = initialFactions_[repListId].flags;
-        if (f & FACTION_FLAG_HIDDEN) return false;
-        if (f & FACTION_FLAG_INVISIBLE_FORCED) return false;
-        return (f & FACTION_FLAG_VISIBLE) != 0;
-    }
-    // Returns true if the faction has been set inactive (hidden from the active list)
-    bool isFactionInactive(uint32_t repListId) const {
-        if (repListId >= initialFactions_.size()) return false;
-        return (initialFactions_[repListId].flags & FACTION_FLAG_INACTIVE) != 0;
     }
     // Returns true if war cannot be declared on this faction (peace forced by the server)
     bool isFactionPeaceForced(uint32_t repListId) const {
@@ -2567,8 +2469,6 @@ public:
     void setFactionAtWar(uint32_t repListId, bool atWar);
     // Move a faction to / from the inactive list (CMSG_SET_FACTION_INACTIVE).
     void setFactionInactive(uint32_t repListId, bool inactive);
-    uint32_t getLastContactListMask() const { return lastContactListMask_; }
-    uint32_t getLastContactListCount() const { return lastContactListCount_; }
     bool isServerMovementAllowed() const;
 
     // Quest giver status (! and ? markers)
@@ -2590,7 +2490,6 @@ public:
         uint32_t mana = 0;
         uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
     };
-    const LevelUpDeltas& getLastLevelUpDeltas() const { return lastLevelUpDeltas_; }
 
     // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE)
     // Slot: 0=main-hand, 1=off-hand, 2=ranged. Value: expire time (steady_clock ms).
@@ -2598,7 +2497,6 @@ public:
         uint32_t slot     = 0;
         uint64_t expireMs = 0;   // std::chrono::steady_clock ms timestamp when it expires
     };
-    const std::vector<TempEnchantTimer>& getTempEnchantTimers() const { return tempEnchantTimers_; }
     // Returns remaining ms for a given slot, or 0 if absent/expired.
     uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
     static constexpr const char* kTempEnchantSlotNames[] = { "Main Hand", "Off Hand", "Ranged" };
@@ -2607,7 +2505,6 @@ public:
     // Populated by handlePageTextQueryResponse(); multi-page items chain via nextPageId.
     struct BookPage { uint32_t pageId = 0; std::string text; };
     const std::vector<BookPage>& getBookPages() const { return bookPages_; }
-    bool hasBookOpen() const { return !bookPages_.empty(); }
     void clearBook() { bookPages_.clear(); bookTitle_.clear(); bookMaterial_ = 0; }
 
     /// What is being read, for the heading over the page. Known at every point
@@ -2634,10 +2531,6 @@ public:
     /// the third chat argument against GetDefaultLanguage() and prefixes
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
-
-    // Other player level-up callback - fires when another player gains a level
-    using OtherPlayerLevelUpCallback = std::function<void(uint64_t guid, uint32_t newLevel)>;
-    void setOtherPlayerLevelUpCallback(OtherPlayerLevelUpCallback cb) { otherPlayerLevelUpCallback_ = std::move(cb); }
 
     // Achievement earned callback - fires when SMSG_ACHIEVEMENT_EARNED is received
     using AchievementEarnedCallback = std::function<void(uint32_t achievementId, const std::string& name)>;
@@ -2960,9 +2853,6 @@ public:
     void addScriptError(const std::string& msg) {
         if (uiErrorCallback_) uiErrorCallback_(msg);
     }
-    void addUIInfoMessage(const std::string& msg) {
-        fireAddonEvent("UI_INFO_MESSAGE", {msg});
-    }
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
@@ -3093,8 +2983,7 @@ public:
     bool hasTaxiRouteTo(uint32_t destNodeId) const;
     std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
-        auto it = taxiNpcHasRoutes_.find(guid);
-        return it != taxiNpcHasRoutes_.end() && it->second;
+        return movementHandler_->taxiNpcHasRoutes(guid);
     }
 
     // Vehicle (WotLK)
@@ -3188,8 +3077,6 @@ public:
     /// dot-commands means most of it silently does not happen. Same reason
     /// sortBags has a queue, and the same drain beside it.
     void queuePacedChat(std::vector<std::string> lines);
-    /// How many of those are still waiting, so a caller can say so.
-    size_t pacedChatRemaining() const { return pacedChatQueue_.size(); }
 
     /// Whether a sort is still sending. The button reads it to disable itself.
     /// One item sort at a time, whichever container it is over.
@@ -3418,11 +3305,6 @@ public:
         auto it = itemRefundInfo_.find(itemGuid);
         return (it != itemRefundInfo_.end()) ? &it->second : nullptr;
     }
-    /// True once the request has gone out, so the interface asks once per item
-    /// rather than once per frame it is hovered.
-    bool refundInfoRequested(uint64_t itemGuid) const {
-        return itemRefundAsked_.count(itemGuid) != 0;
-    }
 
     bool isItemSoulbound(uint64_t guid) const {
         auto it = onlineItems_.find(guid);
@@ -3596,10 +3478,6 @@ public:
     // ── Movement & Transport ─────────────────────────────────────────
     auto& followRenderPosRef() { return followRenderPos_; }
     auto& followTargetGuidRef() { return followTargetGuid_; }
-    auto& onTaxiFlightRef() { return onTaxiFlight_; }
-    auto& taxiLandingCooldownRef() { return taxiLandingCooldown_; }
-    auto& taxiMountActiveRef() { return taxiMountActive_; }
-    auto& taxiStartGraceRef() { return taxiStartGrace_; }
     auto& vehicleIdRef() { return vehicleId_; }
     auto& playerTransportGuidRef() { return playerTransportGuid_; }
     auto& playerTransportOffsetRef() { return playerTransportOffset_; }
@@ -3634,7 +3512,6 @@ public:
     auto& pendingGameObjectLootRetriesRef() { return pendingGameObjectLootRetries_; }
     auto& tempEnchantTimersRef() { return tempEnchantTimers_; }
     auto& localLootStateRef() { return localLootState_; }
-    static const auto& getTempEnchantSlotNames() { return kTempEnchantSlotNames; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
@@ -3812,14 +3689,12 @@ public:
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
     auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
-    auto& ghostStateCallbackRef() { return ghostStateCallback_; }
     auto& hearthstonePreloadCallbackRef() { return hearthstonePreloadCallback_; }
     auto& hitReactionCallbackRef() { return hitReactionCallback_; }
     auto& itemLootCallbackRef() { return itemLootCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
     auto& lootWindowCallbackRef() { return lootWindowCallback_; }
     auto& meleeSwingCallbackRef() { return meleeSwingCallback_; }
-    auto& rangedWeaponSwapCallbackRef() { return rangedWeaponSwapCallback_; }
     void suppressNextMeleeSwingAnim() { suppressMeleeSwingAnim_ = true; }
     bool consumeSuppressMeleeSwingAnim() {
         bool v = suppressMeleeSwingAnim_;
@@ -3835,7 +3710,6 @@ public:
     auto& npcSwingCallbackRef() { return npcSwingCallback_; }
     auto& npcVendorCallbackRef() { return npcVendorCallback_; }
     auto& openLfgCallbackRef() { return openLfgCallback_; }
-    auto& otherPlayerLevelUpCallbackRef() { return otherPlayerLevelUpCallback_; }
     auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerEquipmentCallbackRef() { return playerEquipmentCallback_; }
@@ -3846,7 +3720,6 @@ public:
     auto& questProgressCallbackRef() { return questProgressCallback_; }
     auto& repChangeCallbackRef() { return repChangeCallback_; }
     auto& spellCastAnimCallbackRef() { return spellCastAnimCallback_; }
-    auto& spellCastFailedCallbackRef() { return spellCastFailedCallback_; }
     auto& sprintAuraCallbackRef() { return sprintAuraCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
@@ -4162,10 +4035,6 @@ private:
     // ---- XP handler ----
     void handleXpGain(network::Packet& packet);
 
-    // ---- Creature movement handler ----
-
-    // ---- Other player movement (MSG_MOVE_* from server) ----
-
     void clearPendingQuestAccept(uint32_t questId);
     void triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason);
     bool hasQuestInLog(uint32_t questId) const;
@@ -4173,10 +4042,6 @@ private:
     void addQuestToLocalLogIfMissing(uint32_t questId, const std::string& title, const std::string& objectives);
     bool resyncQuestLogFromServerSlots(bool forceQueryMetadata);
     void addMoneyCopper(uint32_t amount);
-
-    // ---- Teleport handler ----
-
-    // ---- Movement ACK handlers ----
 
     // ---- Area trigger detection ----
     void loadAreaTriggerDbc();
@@ -4188,28 +4053,6 @@ private:
     void handleDuelRequested(network::Packet& packet);
     void handleDuelComplete(network::Packet& packet);
     void handleDuelWinner(network::Packet& packet);
-
-    // ---- LFG / Dungeon Finder handlers ----
-
-    // ---- Arena / Battleground handlers ----
-
-    // ---- Bank handlers ----
-
-    // ---- Guild Bank handlers ----
-
-    // ---- Auction House handlers ----
-
-    // ---- Mail handlers ----
-
-    // ---- Taxi handlers ----
-
-    // ---- Server info handlers ----
-
-    // ---- Social handlers ----
-
-    // ---- Logout handlers ----
-
-
 
     /**
      * Send CMSG_AUTH_SESSION to server
@@ -4332,7 +4175,6 @@ private:
     uint32_t homeBindZoneId_ = 0;
     glm::vec3 homeBindPos_{0.0f};
 
-
     // ---- Friend/contact list cache ----
     std::unordered_map<std::string, uint64_t> friendsCache;  // name -> guid
     std::unordered_set<uint64_t> friendGuids_;               // all known friend GUIDs (for name backfill)
@@ -4355,9 +4197,6 @@ private:
     // ---- Ignore list cache ----
     std::unordered_map<std::string, uint64_t> ignoreCache;  // name -> guid (UI display)
     std::unordered_set<uint64_t> ignoreListGuids_;            // authoritative GUID set from server
-
-    // ---- Logout state ----
-    bool  loggingOut_        = false;
 
     // ---- Display state ----
     bool helmVisible_ = true;
@@ -4510,8 +4349,6 @@ private:
     std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
     std::unordered_map<uint32_t, std::string> macroNames_;
     std::unordered_map<uint32_t, std::string> macroIcons_;
-    std::vector<AuraSlot> playerAuras;
-    std::vector<AuraSlot> targetAuras;
     std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_; // per-unit aura cache
     uint64_t petGuid_ = 0;
     uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
@@ -4535,11 +4372,6 @@ private:
     std::vector<StabledPet> stabledPets_;
     void handleListStabledPets(network::Packet& packet);
 
-    // ---- Battleground queue state ----
-    std::array<BgQueueSlot, 3> bgQueues_{};
-
-    // ---- Available battleground list (SMSG_BATTLEFIELD_LIST) ----
-
     // Instance difficulty
     bool inInstance_ = false;
 
@@ -4552,21 +4384,9 @@ private:
     uint8_t  comboPoints_ = 0;
     uint64_t comboTarget_ = 0;
 
-    // Instance / raid lockouts
-
     // Arena team stats (indexed by team slot, updated by SMSG_ARENA_TEAM_STATS)
     // Arena team rosters (updated by SMSG_ARENA_TEAM_ROSTER)
     std::vector<ArenaTeamRoster> arenaTeamRosters_;
-
-    // BG scoreboard (MSG_PVP_LOG_DATA)
-
-    // BG flag carrier / player positions (MSG_BATTLEGROUND_PLAYER_POSITIONS)
-
-    // Instance encounter boss units (slots 0-4 from SMSG_UPDATE_INSTANCE_ENCOUNTER_UNIT)
-
-    // LFG / Dungeon Finder state
-
-    // Ready check state
 
     // Faction standings (factionId → absolute standing value)
     std::unordered_map<uint32_t, int32_t> factionStandings_;
@@ -4581,43 +4401,16 @@ private:
     mutable std::unordered_map<uint32_t, std::array<int32_t, 12>> factionRepBase_;
     mutable bool factionNameCacheLoaded_ = false;
 
-    // ---- Group ----
-    GroupListData partyData;
-    bool pendingGroupInvite = false;
-    std::string pendingInviterName;
-
-    // Item text state
-    bool        itemTextOpen_   = false;
-    std::string itemText_;
-
-    // Shared quest state
-
     // Summon state
     bool        pendingSummonRequest_ = false;
     uint64_t    summonerGuid_         = 0;
     std::string summonerName_;
     float       summonTimeoutSec_     = 0.0f;
 
-    // Who results (last SMSG_WHO response)
-
-    // Trade state
-    TradeStatus tradeStatus_  = TradeStatus::None;
-    std::string tradePeerName_;
-    std::array<TradeSlot, TRADE_SLOT_COUNT> myTradeSlots_{};
-    std::array<TradeSlot, TRADE_SLOT_COUNT> peerTradeSlots_{};
-    uint64_t myTradeGold_   = 0;
-    uint64_t peerTradeGold_ = 0;
-
     // Shaman totem state
     TotemSlot activeTotemSlots_[NUM_TOTEM_SLOTS];
 
-    // Duel state
-    std::chrono::steady_clock::time_point duelCountdownStartedAt_{};
-
     // ---- Guild state ----
-    std::unordered_map<uint32_t, std::string> guildNameCache_;  // guildId → guild name
-    std::unordered_set<uint32_t> pendingGuildNameQueries_;      // in-flight guild queries
-    PetitionInfo petitionInfo_;
 
     uint64_t activeCharacterGuid_ = 0;
     Race playerRace_ = Race::HUMAN;
@@ -4626,14 +4419,8 @@ private:
     bool barberShopOpen_ = false;
 
     // ---- Loot ----
-    bool lootWindowOpen = false;
-    bool autoLoot_ = false;
     bool autoFaceTarget_ = false;
     bool autoSelfCast_ = true;
-    bool autoSellGrey_ = false;
-    bool autoRepair_ = false;
-    LootResponseData currentLoot;
-    std::vector<uint64_t> masterLootCandidates_;  // from SMSG_LOOT_MASTER_LIST
 
     // Group loot roll state
     struct LocalLootState {
@@ -4682,16 +4469,7 @@ private:
     uint32_t pendingMoneyDelta_ = 0;
     float pendingMoneyDeltaTimer_ = 0.0f;
 
-    // Gossip
-    bool gossipWindowOpen = false;
-    GossipMessageData currentGossip;
-
     void performGameObjectInteractionNow(uint64_t guid);
-
-    // Quest details
-    bool questDetailsOpen = false;
-    std::chrono::steady_clock::time_point questDetailsOpenTime{};  // Delayed opening to allow item data to load
-    QuestDetailsData currentQuestDetails;
 
     // Quest turn-in
     // (pending quest accept timeout state lives in QuestHandler)
@@ -4721,55 +4499,10 @@ private:
     std::string arenaSortKey_;
     bool arenaSortAscending_ = true;
 
-    // Taxi / Flight Paths
-    std::unordered_map<uint64_t, bool> taxiNpcHasRoutes_;  // guid -> has new/available routes
-    std::unordered_map<uint32_t, TaxiNode> taxiNodes_;
-    std::vector<TaxiPathEdge> taxiPathEdges_;
-    std::unordered_map<uint32_t, std::vector<TaxiPathNode>> taxiPathNodes_;  // pathId -> ordered waypoints
-    // No taxiWindowOpen_ or taxiNpcGuid_ here: the movement handler owns both,
-    // and the copies this class kept were never written after the split.
-    bool onTaxiFlight_ = false;
-    bool taxiMountActive_ = false;
-    bool taxiActivatePending_ = false;
-    float taxiActivateTimer_ = 0.0f;
-    bool taxiClientActive_ = false;
-    float taxiLandingCooldown_ = 0.0f;  // Prevent re-entering taxi right after landing
-    float taxiStartGrace_ = 0.0f;       // Ignore transient landing/dismount checks right after takeoff
-    std::vector<glm::vec3> taxiClientPath_;
-    bool taxiRecoverPending_ = false;
-    uint32_t taxiRecoverMapId_ = 0;
-    glm::vec3 taxiRecoverPos_{0.0f};
     uint32_t nextMovementTimestampMs();
     void updateClientTaxi(float deltaTime);
 
-    // Mail
-    bool mailboxOpen_ = false;
-    std::vector<MailMessage> mailInbox_;
-    int selectedMailIndex_ = -1;
-    bool showMailCompose_ = false;
-    bool hasNewMail_ = false;
-    std::array<MailAttachSlot, MAIL_MAX_ATTACHMENTS> mailAttachments_{};
-
-    // Bank
-    bool bankOpen_ = false;
-    uint64_t bankerGuid_ = 0;
-    std::array<uint64_t, 28> bankSlotGuids_{};
-    std::array<uint64_t, 7> bankBagSlotGuids_{};
-    int effectiveBankSlots_ = 28;     // 24 for Classic, 28 for TBC/WotLK
-    int effectiveBankBagSlots_ = 7;   // 6 for Classic, 7 for TBC/WotLK
-
-    // Guild Bank
-    bool guildBankOpen_ = false;
-    GuildBankData guildBankData_;
-    uint8_t guildBankActiveTab_ = 0;
-
     // Auction House
-    bool auctionOpen_ = false;
-    uint64_t auctioneerGuid_ = 0;
-    AuctionListResult auctionBrowseResults_;
-    AuctionListResult auctionOwnerResults_;
-    AuctionListResult auctionBidderResults_;
-    int auctionActiveTab_ = 0;  // 0=Browse, 1=Bids, 2=Auctions
     // Last search params for re-query (pagination, auto-refresh after bid/buyout)
     struct AuctionSearchParams {
         std::string name;
@@ -4784,13 +4517,7 @@ private:
     // Routing: which result vector to populate from next SMSG_AUCTION_LIST_RESULT
     enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
 
-    // Vendor
-    bool vendorWindowOpen = false;
-    ListInventoryData currentVendorItems;
-    std::deque<BuybackItem> buybackItems_;
-
     // Trainer
-    bool trainerWindowOpen_ = false;
     mutable std::unordered_map<uint32_t, SpellNameEntry> spellNameCache_;
     mutable std::unordered_map<uint32_t, std::string> spellDescriptionVariables_;
     mutable bool spellNameCacheLoaded_ = false;
@@ -4935,7 +4662,6 @@ private:
     CharDeleteCallback charDeleteCallback_;
     ServerPatchManifestCallback serverPatchManifestCallback_;
     CharLoginFailCallback charLoginFailCallback_;
-    uint8_t lastCharDeleteResult_ = 0xFF;
     bool pendingCharDeleteResponse_ = false;
     uint64_t pendingDeleteGuid_ = 0;
     float pendingDeleteTimer_ = 0.0f;
@@ -4958,8 +4684,6 @@ private:
     };
     // Module-specific check type opcodes [9]: MEM, PAGE_A, PAGE_B, MPQ, LUA, DRIVER, TIMING, PROC, MODULE
     uint8_t wardenCheckOpcodes_[9] = {};
-
-    // Async Warden response: avoids 5-second main-loop stalls from PAGE_A/PAGE_B code pattern searches
 
     // ---- RX silence detection ----
     std::chrono::steady_clock::time_point lastRxTime_{};
@@ -5000,8 +4724,6 @@ private:
     float weatherIntensity_ = 0.0f;  // 0.0 to 1.0
 
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
-    uint32_t overrideLightId_ = 0;      // 0 = no override
-    uint32_t overrideLightTransMs_ = 0;
 
     // ---- Player skills ----
     std::unordered_map<uint32_t, PlayerSkill> playerSkills_;
@@ -5039,14 +4761,11 @@ private:
     LogoutCompleteCallback logoutCompleteCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     PlayerModelRebuildCallback playerModelRebuildCallback_;
-    GhostStateCallback ghostStateCallback_;
     MeleeSwingCallback meleeSwingCallback_;
     FaceCameraProvider faceCameraProvider_;
-    RangedWeaponSwapCallback rangedWeaponSwapCallback_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
     SpellCastAnimCallback spellCastAnimCallback_;
-    SpellCastFailedCallback spellCastFailedCallback_;
     UnitAnimHintCallback unitAnimHintCallback_;
     UnitMoveFlagsCallback unitMoveFlagsCallback_;
     NpcSwingCallback npcSwingCallback_;
@@ -5071,7 +4790,6 @@ private:
     /// Languages.dbc, read once on the first ask like the caches beside it.
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
-    OtherPlayerLevelUpCallback otherPlayerLevelUpCallback_;
     OtherPlayerMountCallback otherPlayerMountCallback_;
     AchievementEarnedCallback achievementEarnedCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
@@ -5143,8 +4861,6 @@ private:
         std::array<uint64_t, 19> itemGuids{};
     };
 
-    // forcedReactions_ moved to CombatHandler
-
     // ---- Server-triggered audio ----
     PlayMusicCallback playMusicCallback_;
     PlaySoundCallback playSoundCallback_;
@@ -5177,7 +4893,6 @@ private:
 
     // ---- Battlefield Manager state (WotLK Wintergrasp / outdoor battlefields) ----
     bool        bfMgrInvitePending_ = false; ///< True when an entry/queue invite is pending acceptance
-    bool        bfMgrActive_        = false; ///< True while the player is inside an outdoor battlefield
     uint32_t    bfMgrZoneId_        = 0;     ///< Zone ID of the pending/active battlefield
     /// The battle the invite is for, which is not the zone it is in. Every
     /// handler in the battlefield group opens `local battleID = ...` and passes

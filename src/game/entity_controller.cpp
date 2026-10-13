@@ -1,4 +1,6 @@
 #include "game/entity_controller.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include "core/env_flag.hpp"
 #include "game/game_handler.hpp"
 #include "game/protocol_constants.hpp"
@@ -1211,9 +1213,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
             if (block.guid != owner_.getPlayerGuid() &&
                 entity->getType() == ObjectType::PLAYER &&
-                val > oldLvl && oldLvl > 0 &&
-                owner_.otherPlayerLevelUpCallbackRef()) {
-                owner_.otherPlayerLevelUpCallbackRef()(block.guid, val);
+                val > oldLvl && oldLvl > 0) {
+                owner_.eventBus().publish(events::OtherPlayerLevelUp{block.guid, val});
             }
         }
         else if (key == ufi.faction) {
@@ -1530,7 +1531,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             if (!wasGhost && nowGhost) {
                 owner_.releasedSpiritRef() = true;
                 LOG_INFO("Player entered ghost form (PLAYER_FLAGS)");
-                if (owner_.ghostStateCallbackRef()) owner_.ghostStateCallbackRef()(true);
+                owner_.eventBus().publish(events::GhostStateChanged{true});
             } else if (wasGhost && !nowGhost) {
                 owner_.releasedSpiritRef() = false;
                 owner_.playerDeadRef() = false;
@@ -1543,7 +1544,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 owner_.corpseReclaimAvailableMsRef() = 0;
                 LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
                 pendingEvents_.emit("PLAYER_ALIVE", {});
-                if (owner_.ghostStateCallbackRef()) owner_.ghostStateCallbackRef()(false);
+                owner_.eventBus().publish(events::GhostStateChanged{false});
             }
             // Which unit's flags, because that is the only thing the
             // handlers do with it: TargetFrame compares arg1 against its
@@ -2082,11 +2083,12 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // Self-player post-unit-field handling
     if (block.guid == owner_.getPlayerGuid()) {
-        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !owner_.onTaxiFlightRef() && owner_.taxiLandingCooldownRef() <= 0.0f) {
-            owner_.onTaxiFlightRef() = true;
-            owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
+        // The server has us on a flight the client did not start - entering
+        // the world mid-flight. Show it as one: no walking flags, on the mount.
+        auto* movement = owner_.getMovementHandler();
+        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !movement->isOnTaxiFlight()) {
             owner_.sanitizeMovementForTaxi();
-            if (owner_.getMovementHandler()) owner_.getMovementHandler()->applyTaxiMountForCurrentNode();
+            movement->applyTaxiMountForCurrentNode();
         }
     }
     if (block.guid == owner_.getPlayerGuid() &&
@@ -2102,7 +2104,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
             owner_.releasedSpiritRef() = true;
             owner_.playerDeadRef() = true;
             LOG_INFO("Player logged in as ghost (PLAYER_FLAGS)");
-            if (owner_.ghostStateCallbackRef()) owner_.ghostStateCallbackRef()(true);
+            owner_.eventBus().publish(events::GhostStateChanged{true});
             // Query corpse position so minimap marker is accurate on reconnect
             if (owner_.getSocket()) {
                 network::Packet cq(wireOpcode(Opcode::MSG_CORPSE_QUERY));
