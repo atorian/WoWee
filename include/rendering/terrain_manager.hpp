@@ -172,6 +172,12 @@ struct FinalizingTile {
     bool terrainPreloaded = false;  // True after preloaded textures uploaded
     int terrainChunkNext = 0;       // Next chunk index to upload (0-255, row-major)
     bool terrainMeshDone = false;   // True when all chunks uploaded
+    bool terrainWaterDone = false;  // True once the tile's water is in
+    // The tile's textures, uploaded a few at a time rather than all at once:
+    // the whole set in one call took 35-41 ms on Northrend tiles.
+    std::vector<std::string> terrainTexKeys;
+    size_t terrainTexNext = 0;
+    bool terrainTexKeysCollected = false;
 
     // Accumulated results (built up across phases)
     std::vector<uint32_t> m2InstanceIds;
@@ -430,6 +436,19 @@ private:
     // Streaming parameters
     bool streamingEnabled = true;
     int loadRadius = 6;      // Load tiles within this radius (13x13 grid = 169 tiles)
+    /// Time one finalization step may take before it yields, set per frame by
+    /// processReadyTiles from how near the tile being finished is.
+    float stepBudgetMs_ = 4.0f;
+    /// Tiles around the neighbour the camera is about to cross into, queued
+    /// before it gets there. Cleared on each crossing.
+    std::vector<TileCoord> prefetchedCenters_;
+    /// Queues every tile within loadRadius of center that is not loaded,
+    /// pending or known missing, nearest first.
+    /// urgent puts them ahead of what is already queued; a prefetch goes
+    /// behind it.
+    void enqueueAround(const TileCoord& center, bool urgent);
+    /// Queues the tiles around the neighbours the camera is close to.
+    void prefetchAhead(const glm::vec3& camPos);
     int unloadRadius = 9;    // Unload tiles beyond this radius
     float updateInterval = 0.033f;  // Check streaming every 33ms (~30 fps)
     float timeSinceLastUpdate = 0.0f;

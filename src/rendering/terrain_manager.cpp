@@ -257,6 +257,8 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
         currentTile = newTile;
     }
 
+    prefetchAhead(camPos);
+
     // Stream tiles when player crosses a tile boundary
     if (newTile.x != lastStreamTile.x || newTile.y != lastStreamTile.y) {
         LOG_DEBUG("Streaming: cam=(", camPos.x, ",", camPos.y, ",", camPos.z,
@@ -266,6 +268,7 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
         streamTiles();
         streamMs = elapsedMs(tStream, clock::now());
         lastStreamTile = newTile;
+        prefetchedCenters_.clear();
     } else {
         // Proactive loading: when workers are idle, periodically re-check for
         // unloaded tiles within range. Throttled to avoid hitching right after
@@ -970,14 +973,27 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             return true;
         }
 
-        // Upload pre-loaded textures (once)
+        // Upload pre-loaded textures, as many as the step budget allows.
         if (!ft.terrainPreloaded) {
-            LOG_DEBUG("Finalizing tile [", x, ",", y, "] (incremental)");
-            if (!pending->preloadedTextures.empty()) {
-                terrainRenderer->uploadPreloadedTextures(pending->preloadedTextures);
+            if (!ft.terrainTexKeysCollected) {
+                LOG_DEBUG("Finalizing tile [", x, ",", y, "] (incremental)");
+                ft.terrainTexKeys.reserve(pending->preloadedTextures.size());
+                for (const auto& entry : pending->preloadedTextures) ft.terrainTexKeys.push_back(entry.first);
+                ft.terrainTexKeysCollected = true;
             }
+            const auto stepStart = std::chrono::steady_clock::now();
+            std::unordered_map<std::string, pipeline::BLPImage> one;
+            while (ft.terrainTexNext < ft.terrainTexKeys.size()) {
+                const auto it = pending->preloadedTextures.find(ft.terrainTexKeys[ft.terrainTexNext++]);
+                if (it == pending->preloadedTextures.end()) continue;
+                one.clear();
+                one.emplace(it->first, std::move(it->second));
+                terrainRenderer->uploadPreloadedTextures(one);
+                if (std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
+            }
+            if (ft.terrainTexNext < ft.terrainTexKeys.size()) return false;
             ft.terrainPreloaded = true;
-            // Yield after preload to give time budget a chance to interrupt
             return false;
         }
 
@@ -993,17 +1009,25 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 ft.phase = FinalizationPhase::DONE;
                 return true;
             }
-            bool allDone = terrainRenderer->loadTerrainIncremental(
-                pending->mesh, pending->terrain.textures, x, y,
-                ft.terrainChunkNext, 16);
+            // A few chunks at a time while the step budget lasts.
+            const auto stepStart = std::chrono::steady_clock::now();
+            bool allDone = false;
+            do {
+                allDone = terrainRenderer->loadTerrainIncremental(
+                    pending->mesh, pending->terrain.textures, x, y,
+                    ft.terrainChunkNext, 4);
+            } while (!allDone && std::chrono::duration<float, std::milli>(
+                         std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_);
             if (!allDone) {
                 return false; // More chunks remain - yield to time budget
             }
             ft.terrainMeshDone = true;
+            return false;  // water is a step of its own
         }
 
         // Load water after all terrain chunks are uploaded
-        if (waterRenderer) {
+        if (!ft.terrainWaterDone && waterRenderer) {
+            ft.terrainWaterDone = true;
             size_t beforeSurfaces = waterRenderer->getSurfaceCount();
             waterRenderer->loadFromTerrain(pending->terrain, true, x, y);
             size_t afterSurfaces = waterRenderer->getSurfaceCount();
@@ -1011,7 +1035,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 LOG_INFO("Water: tile [", x, ",", y, "] added ", afterSurfaces - beforeSurfaces,
                          " surfaces (total: ", afterSurfaces, ")");
             }
-        } else {
+            return false;
+        } else if (!waterRenderer) {
             LOG_WARNING("Water: waterRenderer is null during tile [", x, ",", y, "] finalization!");
         }
 
@@ -1038,9 +1063,14 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 std::lock_guard<std::mutex> lk(queueMutex);
                 workersIdle = loadQueue.empty() && readyQueue.empty();
             }
+            // By time rather than count: four or six models a step reached
+            // 41 ms when they were heavy ones. At least one, so it always moves.
             const size_t kModelsPerStep = workersIdle ? 6 : 4;
+            const auto stepStart = std::chrono::steady_clock::now();
             size_t uploaded = 0;
-            while (ft.m2ModelIndex < pending->m2Models.size() && uploaded < kModelsPerStep) {
+            while (ft.m2ModelIndex < pending->m2Models.size() && uploaded < kModelsPerStep &&
+                   (uploaded == 0 || std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_)) {
                 auto& m2Ready = pending->m2Models[ft.m2ModelIndex];
                 if (m2Renderer->loadModel(m2Ready.model, m2Ready.modelId)) {
                     ft.uploadedM2ModelIds.insert(m2Ready.modelId);
@@ -1075,7 +1105,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             // present. Bound by time instead, which holds regardless of how
             // heavy each one turns out to be.
             constexpr size_t kInstancesPerStep = 32;
-            constexpr float kInstanceBudgetMs = 4.0f;
+            const float kInstanceBudgetMs = stepBudgetMs_;
             const auto instanceStart = std::chrono::steady_clock::now();
             size_t created = 0;
             while (ft.m2InstanceIndex < pending->m2Placements.size() && created < kInstancesPerStep) {
@@ -1127,7 +1157,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             // steps: a 286-group WMO took 131ms to upload in one go, against
             // this phase's 8ms budget. Uploading two per step when the workers
             // were idle only doubled that worst case.
-            constexpr float kWmoGroupBudgetMs = 6.0f;
+            const float kWmoGroupBudgetMs = std::max(1.5f, stepBudgetMs_);
             while (ft.wmoModelIndex < pending->wmoModels.size()) {
                 auto& wmoReady = pending->wmoModels[ft.wmoModelIndex];
                 if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
@@ -1232,8 +1262,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             // Set pre-decoded BLP cache for doodad M2 textures
             m2Renderer->setPredecodedBLPCache(&pending->preloadedM2Textures);
             constexpr size_t kDoodadsPerStep = 4;
+            const auto stepStart = std::chrono::steady_clock::now();
             size_t uploaded = 0;
-            while (ft.wmoDoodadIndex < pending->wmoDoodads.size() && uploaded < kDoodadsPerStep) {
+            while (ft.wmoDoodadIndex < pending->wmoDoodads.size() && uploaded < kDoodadsPerStep &&
+                   (uploaded == 0 || std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_)) {
                 auto& doodad = pending->wmoDoodads[ft.wmoDoodadIndex];
                 if (!m2Renderer->loadModel(doodad.model, doodad.modelId)) {
                     ft.wmoDoodadIndex++;
@@ -1461,8 +1494,29 @@ void TerrainManager::processReadyTiles() {
     // advanceFinalization step is designed to be small, but texture uploads
     // and M2 model loads can occasionally spike. The budget ensures we
     // spread heavy tiles across multiple frames instead of blocking.
+    // Nearest first: a tile in view matters now, one on the far edge of the
+    // load circle - past the view distance, under the fog - can take its time.
+    // They used to be finished in the order they arrived, so a row of far
+    // tiles from a crossing held up whatever was next to the player, and
+    // took the full budget doing it.
+    auto tileDistSq = [this](const FinalizingTile& ft) {
+        if (!ft.pending) return 0;
+        const int dx = ft.pending->coord.x - currentTile.x;
+        const int dy = ft.pending->coord.y - currentTile.y;
+        return dx * dx + dy * dy;
+    };
+    if (finalizingTiles_.size() > 1) {
+        std::stable_sort(finalizingTiles_.begin(), finalizingTiles_.end(),
+                         [&](const FinalizingTile& a, const FinalizingTile& b) {
+                             return tileDistSq(a) < tileDistSq(b);
+                         });
+    }
+    const int visibleRadius = std::max(1, loadRadius - 1);
+    const bool nearestInView = tileDistSq(finalizingTiles_.front()) <= visibleRadius * visibleRadius;
+
     const auto budgetStart = std::chrono::steady_clock::now();
-    const float budgetMs = taxiStreamingMode_ ? 16.0f : 8.0f;
+    const float budgetMs = taxiStreamingMode_ ? 16.0f : (nearestInView ? 8.0f : 2.0f);
+    stepBudgetMs_ = taxiStreamingMode_ ? 8.0f : (nearestInView ? 4.0f : 1.5f);
 
     if (vkCtx) vkCtx->beginUploadBatch();
 
@@ -2438,6 +2492,61 @@ std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float
 }
 
 void TerrainManager::streamTiles() {
+    enqueueAround(currentTile, /*urgent=*/true);
+
+    // Unload tiles beyond unload radius (well past the camera far clip).
+    // Queue them rather than unloading synchronously here - processPendingUnloads()
+    // drains a time-budgeted batch per frame instead (see pendingUnloadQueue_'s comment).
+    std::unordered_set<TileCoord, TileCoord::Hash> alreadyQueued(
+        pendingUnloadQueue_.begin(), pendingUnloadQueue_.end());
+    size_t queuedNow = 0;
+
+    for (const auto& pair : loadedTiles) {
+        const TileCoord& coord = pair.first;
+
+        int dx = coord.x - currentTile.x;
+        int dy = coord.y - currentTile.y;
+
+        // Circular pattern: unload beyond radius (Euclidean distance)
+        if (dx*dx + dy*dy > unloadRadius*unloadRadius && !alreadyQueued.count(coord)) {
+            pendingUnloadQueue_.push_back(coord);
+            queuedNow++;
+        }
+    }
+
+    if (queuedNow > 0) {
+        LOG_DEBUG("Queued ", queuedNow, " distant tiles for unload (",
+                 pendingUnloadQueue_.size(), " total pending)");
+    }
+}
+
+void TerrainManager::prefetchAhead(const glm::vec3& camPos) {
+    // When the camera is this close to a tile edge, the row beyond the far
+    // side of the load circle will be wanted the moment it crosses. Asking
+    // for it now gives the workers and the low-priority finishing below the
+    // time to have it ready, instead of a whole row of thirteen tiles landing
+    // in the frames right after the crossing - which a 20-yard Blink over a
+    // boundary turned into seconds at 20 fps.
+    constexpr float kPrefetchYards = 160.0f;
+    if (currentTile.x < 0) return;
+    const float offsets[3] = {-kPrefetchYards, 0.0f, kPrefetchYards};
+    for (const float ox : offsets) {
+        for (const float oy : offsets) {
+            if (ox == 0.0f && oy == 0.0f) continue;
+            const TileCoord ahead = worldToTile(camPos.x + ox, camPos.y + oy);
+            if (ahead.x == currentTile.x && ahead.y == currentTile.y) continue;
+            if (std::find_if(prefetchedCenters_.begin(), prefetchedCenters_.end(),
+                             [&](const TileCoord& c) { return c.x == ahead.x && c.y == ahead.y; }) !=
+                prefetchedCenters_.end()) continue;
+            prefetchedCenters_.push_back(ahead);
+            LOG_DEBUG("Prefetching around tile [", ahead.x, ",", ahead.y, "] ahead of [",
+                      currentTile.x, ",", currentTile.y, "]");
+            enqueueAround(ahead, /*urgent=*/false);
+        }
+    }
+}
+
+void TerrainManager::enqueueAround(const TileCoord& center, bool urgent) {
     auto shouldSkipMissingAdt = [this](const TileCoord& coord) -> bool {
         if (!assetManager) return false;
         if (failedTiles.find(coord) != failedTiles.end()) return true;
@@ -2449,6 +2558,7 @@ void TerrainManager::streamTiles() {
         }
         return false;
     };
+    const TileCoord currentTile = center;  // the loop below was written against it
 
     // Enqueue tiles in radius around current tile for async loading.
     // Collect all newly-needed tiles, then sort by distance so the closest
@@ -2492,39 +2602,19 @@ void TerrainManager::streamTiles() {
         std::sort(newTiles.begin(), newTiles.end(),
                   [](const PendingEntry& a, const PendingEntry& b) { return a.distSq < b.distSq; });
 
-        // Insert at front so new close tiles preempt any distant tiles already queued
-        for (auto it = newTiles.rbegin(); it != newTiles.rend(); ++it) {
-            loadQueue.push_front(it->coord);
+        // Insert at front so new close tiles preempt any distant tiles already
+        // queued - unless this is a prefetch, which waits its turn.
+        if (urgent) {
+            for (auto it = newTiles.rbegin(); it != newTiles.rend(); ++it) {
+                loadQueue.push_front(it->coord);
+            }
+        } else {
+            for (const auto& entry : newTiles) loadQueue.push_back(entry.coord);
         }
     }
 
     // Notify workers that there's work
     queueCV.notify_all();
-
-    // Unload tiles beyond unload radius (well past the camera far clip).
-    // Queue them rather than unloading synchronously here - processPendingUnloads()
-    // drains a time-budgeted batch per frame instead (see pendingUnloadQueue_'s comment).
-    std::unordered_set<TileCoord, TileCoord::Hash> alreadyQueued(
-        pendingUnloadQueue_.begin(), pendingUnloadQueue_.end());
-    size_t queuedNow = 0;
-
-    for (const auto& pair : loadedTiles) {
-        const TileCoord& coord = pair.first;
-
-        int dx = coord.x - currentTile.x;
-        int dy = coord.y - currentTile.y;
-
-        // Circular pattern: unload beyond radius (Euclidean distance)
-        if (dx*dx + dy*dy > unloadRadius*unloadRadius && !alreadyQueued.count(coord)) {
-            pendingUnloadQueue_.push_back(coord);
-            queuedNow++;
-        }
-    }
-
-    if (queuedNow > 0) {
-        LOG_DEBUG("Queued ", queuedNow, " distant tiles for unload (",
-                 pendingUnloadQueue_.size(), " total pending)");
-    }
 }
 
 void TerrainManager::precacheTiles(const std::vector<std::pair<int, int>>& tiles) {
