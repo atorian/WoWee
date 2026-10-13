@@ -2588,7 +2588,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                         .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
                         .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
                         .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0,
-                                            passFlags.z, 0),
+                                            passFlags.z,
+                                            batch.drawState.alphaTest == 4 ? 224 : 0),
                         .wind = glm::vec4(globalTime,
                             m2WindDistanceFade(glm::length(origin - cachedCamPos_)), 0.0f, 0.0f)};
                     vkCmdPushConstants(cmd, shadowPipelineLayout_,

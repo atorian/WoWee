@@ -273,6 +273,9 @@ void main() {
         alphaCutoff = 0.4;
     } else if (alphaTest == 3) {
         alphaCutoff = 0.25;
+    } else if (alphaTest == 4) {
+        // The material's own alpha key: GxBlend_AlphaKey's 224/255.
+        alphaCutoff = 224.0 / 255.0;
     } else if (alphaTest != 0) {
         alphaCutoff = 0.4;
     }

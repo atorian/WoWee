@@ -146,7 +146,9 @@ struct M2BatchMaterialInputs {
 struct M2BatchDrawState {
     uint8_t drawBlendMode = M2_BLEND_OPAQUE;
     bool forceCutout = false;     ///< drawn on the opaque cutout pipeline
-    int32_t alphaTest = 0;        ///< 0 none, 1 cutout, 2 foliage, 3 ground clutter
+    /// 0 none, 1 cutout, 2 foliage, 3 ground clutter, 4 the material's own
+    /// alpha key - cut at 224/255, where a WotLK client cuts GxBlend_AlphaKey.
+    int32_t alphaTest = 0;
     bool litOverride = false;     ///< ground clutter is lit whatever its material says
     float colorKeyThreshold = 0.08f;
 };
@@ -195,8 +197,14 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
 
     s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY)
                                     : m2DrawBlendMode(in.blendMode, effectOverlay);
+    // A material the artist keyed (blend mode 1) is cut where the original
+    // client cuts it: 224/255, not a half. Dalaran's inn windows are the case
+    // that showed it - dalaran_inn_window.m2 keys DAL_WINDOWCUTOUT, whose holes
+    // sit at alpha 0.5-0.6, so cut at 0.4 the lattice drew as a solid pane.
+    // Foliage and ground clutter keep the cutoffs tuned for them.
+    const bool materialKey = in.blendMode == M2_BLEND_ALPHA_KEY && in.hasAlpha;
     if (s.forceCutout) {
-        s.alphaTest = in.groundDetail ? 3 : (foliageCutout ? 2 : 1);
+        s.alphaTest = in.groundDetail ? 3 : (foliageCutout ? 2 : (materialKey ? 4 : 1));
         s.litOverride = in.groundDetail;
     } else {
         s.alphaTest = m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ? 1 : 0;

@@ -223,6 +223,21 @@ TEST_CASE("an opaque foliage batch is cut out only where its alpha is a silhouet
     CHECK(s.alphaTest == 2);
 }
 
+TEST_CASE("a keyed material is cut at the client's own alpha key", "[m2]") {
+    // dalaran_inn_window.m2: blend mode 1 over DAL_WINDOWCUTOUT.
+    M2BatchMaterialInputs window;
+    window.blendMode = 1;
+    window.hasAlpha = true;
+    const auto s = m2BatchDrawState(window);
+    CHECK(s.forceCutout);
+    CHECK(s.alphaTest == 4);
+
+    // Keyed leaves keep the foliage cutoff.
+    M2BatchMaterialInputs leaves = window;
+    leaves.foliageLike = true;
+    CHECK(m2BatchDrawState(leaves).alphaTest == 2);
+}
+
 TEST_CASE("ground clutter is cut out and lit", "[m2]") {
     M2BatchMaterialInputs in;
     in.blendMode = 0;
