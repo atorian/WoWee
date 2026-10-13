@@ -406,6 +406,8 @@ private:
 
     // Resolve SpellVisualID from Spell.dbc cache for a given spellId.
     uint32_t resolveSpellVisualId(uint32_t spellId);
+    /// Starts loading these spells' effect models in the background.
+    void preloadSpellVisuals(const std::vector<uint32_t>& spellIds);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
     // Play the cast/precast visual effect at the caster's position.

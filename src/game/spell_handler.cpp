@@ -335,6 +335,21 @@ void SpellHandler::playSpellImpactSound(uint32_t spellId) {
 
 // ---- Spell visual effect helpers ----
 
+void SpellHandler::preloadSpellVisuals(const std::vector<uint32_t>& spellIds) {
+    auto* renderer = owner_.services().renderer;
+    if (!renderer) return;
+    auto* svs = renderer->getSpellVisualSystem();
+    if (!svs) return;
+    std::vector<uint32_t> visualIds;
+    visualIds.reserve(spellIds.size());
+    for (const uint32_t spellId : spellIds) {
+        if (const uint32_t visualId = resolveSpellVisualId(spellId)) visualIds.push_back(visualId);
+    }
+    std::sort(visualIds.begin(), visualIds.end());
+    visualIds.erase(std::unique(visualIds.begin(), visualIds.end()), visualIds.end());
+    svs->preloadVisuals(visualIds);
+}
+
 uint32_t SpellHandler::resolveSpellVisualId(uint32_t spellId) {
     owner_.loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
@@ -1838,6 +1853,10 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
 
     LOG_INFO("Learned ", knownSpells_.size(), " spells");
 
+    // The character's own effects, loaded now in the background rather than
+    // in the frame each spell is first cast.
+    preloadSpellVisuals({knownSpells_.begin(), knownSpells_.end()});
+
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
         // A crafting window's recipes are the spells that just changed, and
@@ -2484,6 +2503,7 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
 
     const bool alreadyKnown = knownSpells_.count(spellId) > 0;
     knownSpells_.insert(spellId);
+    if (!alreadyKnown) preloadSpellVisuals({spellId});
     LOG_INFO("Learned spell: ", spellId, alreadyKnown ? " (already known, skipping chat)" : "");
     if (isPreWotlk()) {
         loadTalentDbc();

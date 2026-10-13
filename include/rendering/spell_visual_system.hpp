@@ -1,6 +1,10 @@
 #pragma once
 
+#include "pipeline/blp_loader.hpp"
+
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -8,7 +12,7 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; struct M2Model; }
 namespace rendering {
 
 class M2Renderer;
@@ -58,6 +62,12 @@ public:
     // Called on map change / combat reset.
     void reset();
 
+    /// Loads, off the main thread, every effect model these visuals use -
+    /// precast, cast and impact - so the character's own spells never load
+    /// one in the frame they are cast. Kept resident from then on, and loaded
+    /// again in the background if a world change clears them.
+    void preloadVisuals(const std::vector<uint32_t>& visualIds);
+
 private:
     // Spell visual effects - transient M2 instances spawned by SMSG_PLAY_SPELL_VISUAL/IMPACT
     struct SpellVisualInstance {
@@ -80,6 +90,47 @@ private:
     };
 
     void loadSpellVisualDbc();
+
+    // ---- Background model loading ----
+    //
+    // A spell's effect model was read, parsed and its textures decoded on the
+    // main thread the first time the spell was seen - and again after the
+    // model reaper dropped it a minute later. A mage's Blink cost 15-60 ms of
+    // frame every time. Models now load on an I/O worker; a play request for
+    // one that is not resident waits for it and plays when it lands, if the
+    // cast is still current.
+    struct PreparedModel {
+        bool ok = false;
+        std::shared_ptr<pipeline::M2Model> model;
+        std::unordered_map<std::string, pipeline::BLPImage> textures;
+    };
+    struct PendingLoad {
+        std::string path;
+        uint32_t modelId = 0;
+        std::future<PreparedModel> future;
+    };
+    struct DeferredPlay {
+        enum class Kind { Precast, Cast, Impact } kind = Kind::Cast;
+        uint32_t visualId = 0;
+        glm::vec3 position{0.0f};
+        uint32_t castTimeMs = 0;
+        uint32_t attachInstanceId = 0;
+        uint32_t modelId = 0;
+        float age = 0.0f;
+    };
+    /// The model id for this path, assigned on first use; 0 when the pool is
+    /// used up.
+    uint32_t modelIdFor(const std::string& path);
+    /// True when the model is resident. Otherwise starts loading it in the
+    /// background (unless it failed before) and returns false.
+    bool ensureModel(const std::string& path, uint32_t modelId);
+    void finishPendingLoads();
+    void replayDeferredPlays(float deltaTime);
+    std::vector<PendingLoad> pendingLoads_;
+    std::unordered_set<uint32_t> pendingModelIds_;
+    std::vector<DeferredPlay> deferredPlays_;
+    std::unordered_set<std::string> preloadPaths_;
+    float preloadCheckTimer_ = 0.0f;
 
     M2Renderer* m2Renderer_ = nullptr;
     Renderer* renderer_ = nullptr;

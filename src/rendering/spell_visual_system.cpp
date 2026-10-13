@@ -8,6 +8,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "core/application.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/constants.hpp>
@@ -21,6 +22,12 @@ void SpellVisualSystem::initialize(M2Renderer* m2Renderer, Renderer* renderer) {
 }
 
 void SpellVisualSystem::shutdown() {
+    // The loads read through the asset manager, which goes away after this.
+    for (auto& load : pendingLoads_) {
+        if (load.future.valid()) load.future.wait();
+    }
+    pendingLoads_.clear();
+    pendingModelIds_.clear();
     reset();
     m2Renderer_ = nullptr;
     renderer_ = nullptr;
@@ -232,64 +239,19 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
     const std::string& modelPath = pathIt->second;
     LOG_INFO("SpellVisual: precast path resolved to: ", modelPath);
 
-    // Get or assign a model ID for this path
-    auto midIt = spellVisualModelIds_.find(modelPath);
-    uint32_t modelId = 0;
-    if (midIt != spellVisualModelIds_.end()) {
-        modelId = midIt->second;
-    } else {
-        if (nextSpellVisualModelId_ >= 999800) {
-            LOG_WARNING("SpellVisual: model ID pool exhausted");
-            return;
-        }
-        modelId = nextSpellVisualModelId_++;
-        spellVisualModelIds_[modelPath] = modelId;
-    }
-
+    const uint32_t modelId = modelIdFor(modelPath);
+    if (modelId == 0) return;
     if (spellVisualFailedModels_.count(modelId)) {
         LOG_WARNING("SpellVisual: precast model in failed-cache, skipping: ", modelPath);
         return;
     }
-
-    if (!m2Renderer_->hasModel(modelId)) {
-        auto m2Data = cachedAssetManager_->readFile(modelPath);
-        if (m2Data.empty()) {
-            LOG_WARNING("SpellVisual: could not read precast model: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            // Fall back to cast kit
-            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
-            return;
-        }
-        LOG_INFO("SpellVisual: precast M2 data read OK, size=", m2Data.size(), " bytes");
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.name.empty()) model.name = modelPath;
-        LOG_INFO("SpellVisual: precast M2 parsed: verts=", model.vertices.size(),
-                 " bones=", model.bones.size(), " particles=", model.particleEmitters.size(),
-                 " ribbons=", model.ribbonEmitters.size(),
-                 " globalSeqs=", model.globalSequenceDurations.size(),
-                 " sequences=", model.sequences.size());
-        if (model.vertices.empty() && model.particleEmitters.empty()) {
-            LOG_WARNING("SpellVisual: empty precast model: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
-            return;
-        }
-        if (model.version >= 264) {
-            std::string skinPath = pipeline::skinPathForM2(modelPath);
-            auto skinData = cachedAssetManager_->readFile(skinPath);
-            if (!skinData.empty()) {
-                pipeline::M2Loader::loadSkin(skinData, model);
-                LOG_INFO("SpellVisual: loaded skin, indices=", model.indices.size());
-            }
-        }
-        if (!m2Renderer_->loadModel(model, modelId)) {
-            LOG_WARNING("SpellVisual: failed to load precast model to GPU: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
-            return;
-        }
-        m2Renderer_->markModelAsSpellEffect(modelId);
-        LOG_INFO("SpellVisual: loaded precast model id=", modelId, " path=", modelPath);
+    // Never loaded in the frame: a model still on its way is waited for, and
+    // the effect plays when it lands if the cast is still going.
+    if (!ensureModel(modelPath, modelId)) {
+        deferredPlays_.push_back({.kind = DeferredPlay::Kind::Precast, .visualId = visualId,
+                                  .position = worldPosition, .castTimeMs = castTimeMs,
+                                  .attachInstanceId = attachInstanceId, .modelId = modelId});
+        return;
     }
 
     // Determine attachment point for bone tracking (hand/chest/head → follow
@@ -388,58 +350,19 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
     const std::string& modelPath = pathIt->second;
     LOG_INFO("SpellVisual: ", (useImpactKit ? "impact" : "cast"), " path resolved to: ", modelPath);
 
-    // Get or assign a model ID for this path
-    auto midIt = spellVisualModelIds_.find(modelPath);
-    uint32_t modelId = 0;
-    if (midIt != spellVisualModelIds_.end()) {
-        modelId = midIt->second;
-    } else {
-        if (nextSpellVisualModelId_ >= 999800) {
-            LOG_WARNING("SpellVisual: model ID pool exhausted");
-            return;
-        }
-        modelId = nextSpellVisualModelId_++;
-        spellVisualModelIds_[modelPath] = modelId;
-    }
-
+    const uint32_t modelId = modelIdFor(modelPath);
+    if (modelId == 0) return;
     // Skip models that have previously failed to load (avoid repeated I/O)
     if (spellVisualFailedModels_.count(modelId)) {
         LOG_WARNING("SpellVisual: model in failed-cache, skipping: ", modelPath);
         return;
     }
-
-    // Load the M2 model if not already loaded
-    if (!m2Renderer_->hasModel(modelId)) {
-        auto m2Data = cachedAssetManager_->readFile(modelPath);
-        if (m2Data.empty()) {
-            LOG_WARNING("SpellVisual: could not read model: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            return;
-        }
-        LOG_INFO("SpellVisual: cast/impact M2 data read OK, size=", m2Data.size(), " bytes");
-        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-        if (model.name.empty()) model.name = modelPath;
-        LOG_INFO("SpellVisual: M2 parsed: verts=", model.vertices.size(),
-                 " bones=", model.bones.size(), " particles=", model.particleEmitters.size(),
-                 " ribbons=", model.ribbonEmitters.size());
-        if (model.vertices.empty() && model.particleEmitters.empty()) {
-            LOG_WARNING("SpellVisual: empty model: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            return;
-        }
-        // Load skin file for WotLK-format M2s
-        if (model.version >= 264) {
-            std::string skinPath = pipeline::skinPathForM2(modelPath);
-            auto skinData = cachedAssetManager_->readFile(skinPath);
-            if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, model);
-        }
-        if (!m2Renderer_->loadModel(model, modelId)) {
-            LOG_WARNING("SpellVisual: failed to load model to GPU: ", modelPath);
-            spellVisualFailedModels_.insert(modelId);
-            return;
-        }
-        m2Renderer_->markModelAsSpellEffect(modelId);
-        LOG_INFO("SpellVisual: loaded model id=", modelId, " path=", modelPath);
+    if (!ensureModel(modelPath, modelId)) {
+        deferredPlays_.push_back({.kind = useImpactKit ? DeferredPlay::Kind::Impact
+                                                       : DeferredPlay::Kind::Cast,
+                                  .visualId = visualId, .position = worldPosition,
+                                  .attachInstanceId = attachInstanceId, .modelId = modelId});
+        return;
     }
 
     // Determine attachment point for bone tracking on cast effects. Only the
@@ -561,6 +484,20 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
 }
 
 void SpellVisualSystem::update(float deltaTime) {
+    finishPendingLoads();
+    replayDeferredPlays(deltaTime);
+    if (!preloadPaths_.empty() && m2Renderer_) {
+        // A world change clears every M2 model, the character's effects with
+        // them; put them back in the background rather than at the next cast.
+        preloadCheckTimer_ += deltaTime;
+        if (preloadCheckTimer_ >= 2.0f) {
+            preloadCheckTimer_ = 0.0f;
+            for (const auto& path : preloadPaths_) {
+                const auto it = spellVisualModelIds_.find(path);
+                if (it != spellVisualModelIds_.end()) ensureModel(path, it->second);
+            }
+        }
+    }
     if (activeSpellVisuals_.empty() && physicalProjectiles_.empty()) return;
 
     // Get character bone tracking context (once per frame)
@@ -631,8 +568,156 @@ void SpellVisualSystem::reset() {
             renderer_->getCharacterRenderer()->removeInstance(projectile.instanceId);
     }
     physicalProjectiles_.clear();
+    deferredPlays_.clear();
     // Reset the negative cache so models that failed during asset loading can retry.
     spellVisualFailedModels_.clear();
+}
+
+uint32_t SpellVisualSystem::modelIdFor(const std::string& path) {
+    const auto it = spellVisualModelIds_.find(path);
+    if (it != spellVisualModelIds_.end()) return it->second;
+    if (nextSpellVisualModelId_ >= 999800) {
+        LOG_WARNING("SpellVisual: model ID pool exhausted");
+        return 0;
+    }
+    const uint32_t modelId = nextSpellVisualModelId_++;
+    spellVisualModelIds_[path] = modelId;
+    return modelId;
+}
+
+bool SpellVisualSystem::ensureModel(const std::string& path, uint32_t modelId) {
+    if (!m2Renderer_ || modelId == 0) return false;
+    if (m2Renderer_->hasModel(modelId)) return true;
+    if (spellVisualFailedModels_.count(modelId) || pendingModelIds_.count(modelId)) return false;
+    if (!cachedAssetManager_) cachedAssetManager_ = core::Application::getInstance().getAssetManager();
+    auto* am = cachedAssetManager_;
+    if (!am) return false;
+
+    PendingLoad load;
+    load.path = path;
+    load.modelId = modelId;
+    load.future = core::ThreadPool::ioWorkers().submit([am, path]() -> PreparedModel {
+        PreparedModel out;
+        auto data = am->readFile(path);
+        if (data.empty()) return out;
+        auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(data));
+        if (model->name.empty()) model->name = path;
+        if (model->vertices.empty() && model->particleEmitters.empty()) return out;
+        if (model->version >= 264) {
+            auto skin = am->readFile(pipeline::skinPathForM2(path));
+            if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, *model);
+        }
+        // Decoded here, keyed as M2Renderer::loadModel asks for them, so the
+        // upload on the main thread reads nothing from disk.
+        for (const auto& tex : model->textures) {
+            std::string key = tex.filename;
+            const size_t nul = key.find('\0');
+            if (nul != std::string::npos) key.resize(nul);
+            if (key.empty()) continue;
+            std::replace(key.begin(), key.end(), '/', '\\');
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (out.textures.count(key)) continue;
+            auto blp = am->loadTexture(key, true);
+            if (blp.isValid()) out.textures[key] = std::move(blp);
+        }
+        out.model = std::move(model);
+        out.ok = true;
+        return out;
+    });
+    pendingModelIds_.insert(modelId);
+    pendingLoads_.push_back(std::move(load));
+    return false;
+}
+
+void SpellVisualSystem::finishPendingLoads() {
+    if (pendingLoads_.empty() || !m2Renderer_) return;
+    // Two uploads a frame at most: a login preloading a whole spellbook would
+    // otherwise put every one of them on the GPU in the frame they finished.
+    int uploaded = 0;
+    for (auto it = pendingLoads_.begin(); it != pendingLoads_.end() && uploaded < 2; ) {
+        if (it->future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        PreparedModel prepared = it->future.get();
+        const uint32_t modelId = it->modelId;
+        const std::string path = it->path;
+        pendingModelIds_.erase(modelId);
+        it = pendingLoads_.erase(it);
+        if (!prepared.ok) {
+            LOG_WARNING("SpellVisual: could not load effect model ", path);
+            spellVisualFailedModels_.insert(modelId);
+            continue;
+        }
+        m2Renderer_->setPredecodedBLPCache(&prepared.textures);
+        const bool loaded = m2Renderer_->loadModel(*prepared.model, modelId);
+        m2Renderer_->setPredecodedBLPCache(nullptr);
+        ++uploaded;
+        if (!loaded) {
+            LOG_WARNING("SpellVisual: failed to load effect model to GPU: ", path);
+            spellVisualFailedModels_.insert(modelId);
+            continue;
+        }
+        m2Renderer_->markModelAsSpellEffect(modelId);
+        // Kept: an effect is cast again and again, and the reaper dropped it a
+        // minute after each use, so it was loaded again the next time.
+        m2Renderer_->setModelPinned(modelId, true);
+        LOG_INFO("SpellVisual: loaded effect model id=", modelId, " path=", path);
+    }
+}
+
+void SpellVisualSystem::replayDeferredPlays(float deltaTime) {
+    if (deferredPlays_.empty() || !m2Renderer_) return;
+    std::vector<DeferredPlay> waiting;
+    waiting.swap(deferredPlays_);
+    for (auto& play : waiting) {
+        play.age += deltaTime;
+        // How long the effect still means anything: a precast for as long as
+        // the cast runs, a cast or impact flash for well under a second.
+        const float stillCurrent = play.kind == DeferredPlay::Kind::Precast
+            ? std::max(0.75f, static_cast<float>(play.castTimeMs) / 1000.0f)
+            : 0.75f;
+        if (spellVisualFailedModels_.count(play.modelId) || play.age > stillCurrent) continue;
+        if (!m2Renderer_->hasModel(play.modelId)) {
+            deferredPlays_.push_back(play);
+            continue;
+        }
+        switch (play.kind) {
+            case DeferredPlay::Kind::Precast:
+                playSpellVisualPrecast(play.visualId, play.position,
+                                       play.castTimeMs > 0 ? static_cast<uint32_t>(
+                                           std::max(0.0f, play.castTimeMs - play.age * 1000.0f))
+                                                           : 0,
+                                       play.attachInstanceId);
+                break;
+            case DeferredPlay::Kind::Cast:
+                playSpellVisual(play.visualId, play.position, false, play.attachInstanceId);
+                break;
+            case DeferredPlay::Kind::Impact:
+                playSpellVisual(play.visualId, play.position, true, play.attachInstanceId);
+                break;
+        }
+    }
+}
+
+void SpellVisualSystem::preloadVisuals(const std::vector<uint32_t>& visualIds) {
+    if (!m2Renderer_) return;
+    if (!cachedAssetManager_) cachedAssetManager_ = core::Application::getInstance().getAssetManager();
+    if (!cachedAssetManager_) return;
+    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
+    size_t queued = 0;
+    for (const uint32_t visualId : visualIds) {
+        for (const auto* map : {&spellVisualPrecastPath_, &spellVisualCastPath_, &spellVisualImpactPath_}) {
+            const auto it = map->find(visualId);
+            if (it == map->end() || it->second.empty()) continue;
+            if (!preloadPaths_.insert(it->second).second) continue;
+            const uint32_t modelId = modelIdFor(it->second);
+            if (modelId != 0 && !ensureModel(it->second, modelId)) ++queued;
+        }
+    }
+    LOG_INFO("SpellVisual: preloading ", queued, " effect model(s) for ", visualIds.size(),
+             " spell visual(s); ", preloadPaths_.size(), " kept in all");
 }
 
 } // namespace rendering
