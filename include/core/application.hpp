@@ -129,6 +129,9 @@ public:
 
     // Logout to login screen
     void logoutToLogin();
+    /// A logout the server has completed: the world goes, the connection
+    /// stays, and the character list comes back - as in the original client.
+    void logoutToCharacterSelect();
 
     // Render bounds lookup (for click targeting / selection) - delegates to EntitySpawner
     bool getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const;
@@ -368,6 +371,9 @@ private:
     bool running = false;
     bool renderingFrame_ = false;
     bool logoutToLoginPending_ = false;
+    /// Set by logoutToCharacterSelect for the teardown it shares with a
+    /// return to the login screen, which may run a frame later.
+    bool logoutKeepsConnection_ = false;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
     bool playerCharacterSpawned = false;

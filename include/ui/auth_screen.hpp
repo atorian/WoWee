@@ -49,6 +49,20 @@ public:
      * Check if authentication is in progress
      */
     [[nodiscard]] bool isAuthenticating() const { return authenticating; }
+    /// Logs in again with what is filled in - the saved account and password
+    /// hash - as the Log In button would, under this status. For a reconnect.
+    void requestReconnect(const std::string& context) {
+        reconnectRequested_ = true;
+        setStatusContext(context);
+        setStatus("Starting...", false, true);
+    }
+    /// A line shown above every status while it is set - what a reconnect is
+    /// doing and which try this is - since the status itself changes each
+    /// step. Empty to clear.
+    void setStatusContext(const std::string& context) { statusContext_ = context; }
+    [[nodiscard]] bool reconnectPending() const { return reconnectRequested_; }
+    /// Whether there is enough filled in to log in without the player.
+    [[nodiscard]] bool hasCredentials() const;
 
     void stopLoginMusic();
 
@@ -106,6 +120,8 @@ private:
     int expansionIndex = 0;     // Index into expansion registry profiles
     std::string assetProfileId_; // Empty follows expansionIndex automatically
     bool authenticating = false;
+    bool reconnectRequested_ = false;
+    std::string statusContext_;
     bool showPassword = false;
     bool pinAutoSubmitted_ = false;
     bool securityPromptFocused_ = false;
@@ -155,6 +171,25 @@ private:
      * Shared by the initial attempt and each protocol fallback retry.
      */
     void beginAuthAttempt(auth::AuthHandler& authHandler);
+    /// The second half of an attempt, once the connection is made: send the
+    /// credentials.
+    void finishConnect(auth::AuthHandler& authHandler);
+    /// Follows a connection being made in the background, retrying one the
+    /// login server does not answer. Runs each frame while connecting_.
+    void updateConnect(auth::AuthHandler& authHandler, float deltaTime);
+
+    // The login server's TCP connection, made off the main thread. A server
+    // that does not answer is asked again a few times, with the reason and the
+    // attempt on screen, before the player is told it is unreachable: on
+    // 2026-10-13 login.ezwow.org ignored three attempts in a row and took the
+    // fourth.
+    static constexpr int kMaxConnectAttempts = 4;
+    bool connecting_ = false;
+    int connectAttempt_ = 0;          // 1-based
+    bool connectRetryPending_ = false;
+    float connectRetryIn_ = 0.0f;
+    float connectPhaseTime_ = 0.0f;
+    std::string connectError_;
 
     // Auth protocol versions to try, in order. Vanilla-family servers disagree
     // on this byte - vmangos-derived 1.12 realms speak protocol 8 while stock

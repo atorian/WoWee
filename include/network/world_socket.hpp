@@ -3,6 +3,7 @@
 #include "network/socket.hpp"
 #include "network/packet.hpp"
 #include "network/net_platform.hpp"
+#include "network/async_connect.hpp"
 #include "auth/rc4.hpp"
 #include "auth/vanilla_crypt.hpp"
 #include <functional>
@@ -39,6 +40,11 @@ public:
     ~WorldSocket() override;
 
     bool connect(const std::string& host, uint16_t port) override;
+    /// Connects off the main thread; pollConnect() says when it is done and,
+    /// on success, leaves the socket as connect() would - receive pump running.
+    void beginConnect(const std::string& host, uint16_t port, int timeoutSeconds = 10);
+    net::AsyncConnect::Status pollConnect();
+    [[nodiscard]] std::string connectError() const { return connectError_; }
     void disconnect() override;
     [[nodiscard]] bool isConnected() const override;
 
@@ -97,6 +103,11 @@ private:
     void dumpRecentPacketHistoryLocked(const char* reason, size_t bufferedBytes);
 
     socket_t sockfd = INVALID_SOCK;           // THREAD-SAFE: protected by ioMutex_
+    // Main thread only: a connection still being made, and where to.
+    net::AsyncConnect pendingConnect_;
+    std::string connectHost_;
+    uint16_t connectPort_ = 0;
+    std::string connectError_;
     // Read every frame by GameHandler while the async receive pump may hold
     // ioMutex_ for a packet burst. Atomic state avoids turning that harmless
     // status check into a 50ms main-thread mutex stall.

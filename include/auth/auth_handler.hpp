@@ -27,7 +27,10 @@ enum class AuthState {
     AUTHENTICATED,
     REALM_LIST_REQUESTED,
     REALM_LIST_RECEIVED,
-    FAILED
+    FAILED,
+    /// The TCP connection is being made off the main thread. Last, so the
+    /// states logged by number keep their numbers.
+    CONNECTING
 };
 
 // Authentication callbacks
@@ -43,6 +46,10 @@ public:
 
     // Connection
     [[nodiscard]] bool connect(const std::string& host, uint16_t port = 3724);
+    /// Connects without holding up the frame: the state is CONNECTING until
+    /// update() finds the connection made (CONNECTED) or not (FAILED, with
+    /// the reason through the failure callback).
+    void beginConnect(const std::string& host, uint16_t port = 3724);
     void disconnect();
     [[nodiscard]] bool isConnected() const;
 

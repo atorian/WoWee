@@ -2320,7 +2320,7 @@ void Application::setState(AppState newState) {
                         if (window) window->setShouldClose(true);
                     } else {
                         LOG_INFO("Logout complete - returning to character select");
-                        logoutToLogin();
+                        logoutToCharacterSelect();
                     }
                 });
                 gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
@@ -2485,6 +2485,24 @@ void Application::handleWorldDisconnect() {
     LOG_WARNING("Disconnected from the world server; returning to login");
 
     disconnectNotice_ = "You have been disconnected from the server.";
+    logoutKeepsConnection_ = false;
+
+    // Who was playing, read before the teardown below forgets it. The handler
+    // has already let go of its own copy in disconnect().
+    uint64_t characterGuid = uiManager ? uiManager->getCharacterScreen().getSelectedGuid() : 0;
+    if (characterGuid == 0 && gameHandler) characterGuid = gameHandler->getPlayerGuid();
+
+    logoutToLogin();
+
+    // And straight back in, showing each step, rather than leaving the
+    // player at the login screen to do it all by hand.
+    if (uiScreenCallbacks_ && uiScreenCallbacks_->beginReconnect(characterGuid)) {
+        disconnectNotice_.clear();
+    }
+}
+
+void Application::logoutToCharacterSelect() {
+    logoutKeepsConnection_ = true;
     logoutToLogin();
 }
 
@@ -2526,6 +2544,15 @@ void Application::unloadInterface() {
 void Application::performLogoutToLogin() {
     LOG_INFO("Logout requested");
 
+    // Back to the character list when the server completed a logout and the
+    // connection is still there; to the login screen otherwise. This always
+    // went to the login screen, closing the connection the server had just
+    // kept open for the character list - and a new session asked for straight
+    // after can be refused while the old one is still closing on the server.
+    const bool keepConnection =
+        logoutKeepsConnection_ && gameHandler && gameHandler->isConnected();
+    logoutKeepsConnection_ = false;
+
     // The interface leaves the world with the character that was wearing it.
     //
     // Here rather than at character select, which is where this used to
@@ -2544,7 +2571,8 @@ void Application::performLogoutToLogin() {
     }
 
     if (gameHandler) {
-        gameHandler->disconnect();
+        if (keepConnection) gameHandler->returnToCharacterSelect();
+        else gameHandler->disconnect();
     }
 
     // --- Per-session flags ---
@@ -2606,6 +2634,13 @@ void Application::performLogoutToLogin() {
         if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
             music->stopMusic(0.0f);
         }
+    }
+
+    if (keepConnection) {
+        // Same realm, same account: the character screen asks for the list
+        // again on its own once the handler is READY.
+        setState(AppState::CHARACTER_SELECTION);
+        return;
     }
 
     // Clear stale realm/character selection so switching servers starts fresh

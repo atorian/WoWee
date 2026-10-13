@@ -14,6 +14,29 @@ TCPSocket::~TCPSocket() {
     TCPSocket::disconnect();  // qualified call: virtual dispatch is bypassed in destructors
 }
 
+void TCPSocket::beginConnect(const std::string& host, uint16_t port, int timeoutSeconds) {
+    disconnect();
+    LOG_INFO("Connecting to ", host, ":", port, " (in the background)");
+    connectHost_ = host;
+    connectPort_ = port;
+    connectError_.clear();
+    pendingConnect_.start(host, port, timeoutSeconds);
+}
+
+net::AsyncConnect::Status TCPSocket::pollConnect() {
+    const auto status = pendingConnect_.poll();
+    if (status == net::AsyncConnect::Status::Connected) {
+        sockfd = pendingConnect_.take();
+        connected = true;
+        LOG_INFO("Connected to ", connectHost_, ":", connectPort_);
+    } else if (status == net::AsyncConnect::Status::Failed) {
+        connectError_ = pendingConnect_.error();
+        pendingConnect_.cancel();
+        LOG_ERROR("Could not connect to ", connectHost_, ":", connectPort_, ": ", connectError_);
+    }
+    return status;
+}
+
 bool TCPSocket::connect(const std::string& host, uint16_t port) {
     LOG_INFO("Connecting to ", host, ":", port);
 
@@ -72,6 +95,7 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
 }
 
 void TCPSocket::disconnect() {
+    pendingConnect_.cancel();
     if (sockfd != INVALID_SOCK) {
         net::closeSocket(sockfd);
         sockfd = INVALID_SOCK;

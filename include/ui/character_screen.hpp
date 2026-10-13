@@ -94,6 +94,13 @@ public:
      */
     void selectCharacterByName(const std::string& name);
 
+    /// Enters the world with this character as soon as a character list
+    /// naming it arrives - for a reconnect, which should end where the
+    /// connection was lost without the player having to pick again. Survives
+    /// reset(), which a realm connection calls on its way here.
+    void enterWorldWhenListed(uint64_t guid) { autoEnterGuid_ = guid; }
+    void cancelAutoEnter() { autoEnterGuid_ = 0; }
+
 private:
     UIServices services_;  // Injected service references
 
@@ -103,6 +110,7 @@ private:
     uint64_t selectedCharacterGuid = 0;
     bool restoredLastCharacter = false;
     std::string newlyCreatedCharacterName;  // Auto-select this character if set
+    uint64_t autoEnterGuid_ = 0;             // enterWorldWhenListed
 
     // Status
     std::string statusMessage;

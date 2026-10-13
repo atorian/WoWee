@@ -61,6 +61,27 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     }
 
     const auto& characters = gameHandler.getCharacters();
+
+    // A reconnect enters the world with the character it lost, as soon as the
+    // list is in.
+    if (autoEnterGuid_ != 0 && gameHandler.getState() == game::WorldState::CHAR_LIST_RECEIVED) {
+        const uint64_t guid = std::exchange(autoEnterGuid_, uint64_t{0});
+        const auto it = std::find_if(characters.begin(), characters.end(),
+                                     [guid](const game::Character& c) { return c.guid == guid; });
+        if (it != characters.end()) {
+            selectedCharacterIndex = static_cast<int>(it - characters.begin());
+            selectedCharacterGuid = guid;
+            characterSelected = true;
+            saveLastCharacter(guid);
+            setStatus("Reconnected. Entering world with " + it->name + "...");
+            gameHandler.selectCharacter(guid);
+            if (onCharacterSelected) onCharacterSelected(guid);
+        } else {
+            setStatus("Reconnected, but the character that was playing is not on this "
+                      "realm's list. Pick one to continue.", true);
+        }
+    }
+
     if (characters.empty()) {
         renderNotice(gameHandler, screen.x, screen.y);
         ui_.end();

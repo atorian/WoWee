@@ -32,6 +32,32 @@ AuthHandler::~AuthHandler() {
     disconnect();
 }
 
+namespace {
+std::string trimAuthHost(std::string s) {
+    auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    size_t b = 0;
+    while (b < s.size() && isSpace(static_cast<unsigned char>(s[b]))) ++b;
+    size_t e = s.size();
+    while (e > b && isSpace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+}  // namespace
+
+void AuthHandler::beginConnect(const std::string& host, uint16_t port) {
+    const std::string hostTrimmed = trimAuthHost(host);
+    LOG_INFO("Connecting to auth server: ", hostTrimmed, ":", port);
+    realms.clear();
+    socket = std::make_unique<network::TCPSocket>();
+    socket->setPacketCallback([this](const network::Packet& packet) {
+        network::Packet mutablePacket = packet;
+        handlePacket(mutablePacket);
+    });
+    serverHost_ = hostTrimmed;
+    serverPort_ = port;
+    socket->beginConnect(hostTrimmed, port, 5);
+    setState(AuthState::CONNECTING);
+}
+
 bool AuthHandler::connect(const std::string& host, uint16_t port) {
     auto trimHost = [](std::string s) {
         auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
@@ -627,6 +653,22 @@ void AuthHandler::handlePacket(network::Packet& packet) {
 
 void AuthHandler::update(float /*deltaTime*/) {
     if (!socket) {
+        return;
+    }
+
+    if (state == AuthState::CONNECTING) {
+        switch (socket->pollConnect()) {
+            case net::AsyncConnect::Status::Connected:
+                setState(AuthState::CONNECTED);
+                LOG_INFO("Connected to auth server");
+                break;
+            case net::AsyncConnect::Status::Failed:
+                fail("Could not reach " + serverHost_ + ":" + std::to_string(serverPort_) +
+                     " (" + socket->connectError() + ")");
+                break;
+            default:
+                break;
+        }
         return;
     }
 

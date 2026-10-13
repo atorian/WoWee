@@ -204,6 +204,15 @@ public:
      */
     void disconnect();
 
+    /// Out of the world and back to the character list, on the same connection.
+    ///
+    /// What a logout is in the original client: the server has said
+    /// SMSG_LOGOUT_COMPLETE and keeps the session, so the world is cleared and
+    /// the character list asked for again. The socket and the Warden session
+    /// stay as they are - a reconnect would start a new session the server
+    /// may not grant while the old one is still closing.
+    void returnToCharacterSelect();
+
     /**
      * Check if connected to world server
      */
@@ -4048,6 +4057,11 @@ public:
 
 private:
     // Dead: autoTargetAttacker moved to CombatHandler
+
+    /// Everything of the world just left - entities, contacts, caches, the
+    /// active character - shared by a disconnect and a logout to the
+    /// character list, which differ only in whether the connection goes too.
+    void clearWorldState();
 
     /**
      * Handle incoming packet from world server

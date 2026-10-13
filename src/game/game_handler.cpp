@@ -174,18 +174,12 @@ bool GameHandler::connect(const std::string& host,
         enqueueIncomingPacket(packet);
     });
 
-    // Connect to world server
+    // Connect to world server, off the main thread: this waited in the frame
+    // for up to ten seconds when the realm did not answer. update() finishes
+    // it; until then the state is CONNECTING, which the connection screen
+    // shows and gives a deadline of its own.
     setState(WorldState::CONNECTING);
-
-    if (!socket->connect(host, port)) {
-        LOG_ERROR("Failed to connect to world server");
-        fail("Connection failed");
-        return false;
-    }
-
-    setState(WorldState::CONNECTED);
-    LOG_INFO("Connected to world server, waiting for SMSG_AUTH_CHALLENGE...");
-
+    socket->beginConnect(host, port, 10);
     return true;
 }
 
@@ -195,6 +189,26 @@ void GameHandler::disconnect() {
         socket->disconnect();
         socket.reset();
     }
+    // Warden state is WardenHandler's; this used to clear a second copy of it
+    // that nothing ever filled.
+    if (wardenHandler_) wardenHandler_->reset();
+    clearWorldState();
+    setState(WorldState::DISCONNECTED);
+    LOG_INFO("Disconnected from world server");
+}
+
+void GameHandler::returnToCharacterSelect() {
+    clearWorldState();
+    setState(WorldState::READY);
+    LOG_INFO("Left the world; back to the character list on the same connection");
+    // Asked for here, not left to the character screen: it asks only when it
+    // has no list, and it still had the one from before entering the world -
+    // so nothing asked, the handler stayed READY, and selecting a character
+    // was refused for not having a list. This also clears the stale one.
+    requestCharacterList();
+}
+
+void GameHandler::clearWorldState() {
     activeCharacterGuid_ = 0;
     knownTitleBits_.clear();
     protocolMoneyCopper_.reset();
@@ -203,9 +217,6 @@ void GameHandler::disconnect() {
     friendGuids_.clear();
     contacts_.clear();
     transportAttachments_.clear();
-    // Warden state is WardenHandler's; this used to clear a second copy of it
-    // that nothing ever filled.
-    if (wardenHandler_) wardenHandler_->reset();
     pendingIncomingPackets_.clear();
     // Fire despawn callbacks so the renderer releases M2/character model resources.
     for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
@@ -224,8 +235,6 @@ void GameHandler::disconnect() {
     if (spellHandler_) spellHandler_->clearUnitAurasCache();
     if (combatHandler_) combatHandler_->clearCombatText();
     entityController_->clearAll();
-    setState(WorldState::DISCONNECTED);
-    LOG_INFO("Disconnected from world server");
 }
 
 void GameHandler::resetDbcCaches() {
@@ -721,6 +730,20 @@ void GameHandler::update(float deltaTime) {
     // deferral that no longer happens, reads as though both still do.
     if (!socket) {
         return;
+    }
+
+    if (state == WorldState::CONNECTING) {
+        switch (socket->pollConnect()) {
+            case net::AsyncConnect::Status::Connected:
+                setState(WorldState::CONNECTED);
+                LOG_INFO("Connected to world server, waiting for SMSG_AUTH_CHALLENGE...");
+                break;
+            case net::AsyncConnect::Status::Failed:
+                fail("Could not reach the world server (" + socket->connectError() + ")");
+                return;
+            default:
+                return;  // still connecting; nothing else runs without a connection
+        }
     }
 
     updateNetworking();

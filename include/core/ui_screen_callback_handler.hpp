@@ -42,6 +42,14 @@ public:
     /// connection for the realm list, so that connection must be pumped.
     [[nodiscard]] bool connecting() const { return attempt_.active; }
 
+    /// After the world connection drops: log in again, connect to the same
+    /// realm and enter the world with this character, saying each step on
+    /// screen, a few times over before giving up. False when there is not
+    /// enough to do it with - no realm yet, or no saved credentials.
+    bool beginReconnect(uint64_t characterGuid);
+    [[nodiscard]] bool reconnecting() const { return reconnect_.active; }
+    void cancelReconnect();
+
 private:
     static constexpr int kMaxAttempts = 4;
     struct ConnectAttempt {
@@ -56,6 +64,23 @@ private:
         std::string lastError;
     };
     void scheduleRetry(const std::string& why);
+    void startReconnectRound();
+    void updateReconnect(float deltaTime);
+
+    static constexpr int kMaxReconnectRounds = 5;
+    struct Reconnect {
+        bool active = false;
+        uint64_t characterGuid = 0;
+        int round = 0;           // 1-based
+        float roundTime = 0.0f;
+        bool waiting = false;
+        float waitIn = 0.0f;
+        std::string lastError;
+    };
+    Reconnect reconnect_;
+    // The realm last connected to, for a reconnect.
+    std::string lastRealm_;
+    std::string lastRealmAddress_;
     void startRetry();
     void cancelAttempt();
     static bool isRetryable(const std::string& reason);

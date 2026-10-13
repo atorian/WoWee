@@ -139,6 +139,34 @@ WorldSocket::~WorldSocket() {
     WorldSocket::disconnect();  // qualified call: virtual dispatch is bypassed in destructors
 }
 
+void WorldSocket::beginConnect(const std::string& host, uint16_t port, int timeoutSeconds) {
+    LOG_INFO("Connecting to world server: ", host, ":", port, " (in the background)");
+    stopAsyncPump();
+    connectHost_ = host;
+    connectPort_ = port;
+    connectError_.clear();
+    pendingConnect_.start(host, port, timeoutSeconds);
+}
+
+net::AsyncConnect::Status WorldSocket::pollConnect() {
+    const auto status = pendingConnect_.poll();
+    if (status == net::AsyncConnect::Status::Connected) {
+        {
+            std::lock_guard<std::mutex> lock(ioMutex_);
+            sockfd = pendingConnect_.take();
+        }
+        connected = true;
+        LOG_INFO("Connected to world server: ", connectHost_, ":", connectPort_);
+        startAsyncPump();
+    } else if (status == net::AsyncConnect::Status::Failed) {
+        connectError_ = pendingConnect_.error();
+        pendingConnect_.cancel();
+        LOG_ERROR("Could not connect to world server ", connectHost_, ":", connectPort_, ": ",
+                  connectError_);
+    }
+    return status;
+}
+
 bool WorldSocket::connect(const std::string& host, uint16_t port) {
     LOG_INFO("Connecting to world server: ", host, ":", port);
 
@@ -205,6 +233,7 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
 }
 
 void WorldSocket::disconnect() {
+    pendingConnect_.cancel();
     stopAsyncPump();
     {
         std::lock_guard<std::mutex> lock(ioMutex_);

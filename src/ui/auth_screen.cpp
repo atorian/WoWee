@@ -313,7 +313,15 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     const bool waitingForSecurityCode = (authState == auth::AuthState::PIN_REQUIRED ||
                                          authState == auth::AuthState::AUTHENTICATOR_REQUIRED);
 
-    if (authenticating) {
+    if (reconnectRequested_ && !authenticating) {
+        reconnectRequested_ = false;
+        attemptAuth(authHandler);
+    }
+    if (authenticating && connecting_) {
+        authTimer += ImGui::GetIO().DeltaTime;
+        updateConnect(authHandler, ImGui::GetIO().DeltaTime);
+    }
+    if (authenticating && !connecting_) {
         if (!waitingForSecurityCode) {
             pinAutoSubmitted_ = false;
             securityPromptFocused_ = false;
@@ -1179,7 +1187,6 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
 }
 
 void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
-    const bool useHash = usingStoredHash && password_.text() == PASSWORD_PLACEHOLDER;
     const uint8_t protocolVersion = (authProtocolAttempt_ < authProtocols_.size())
         ? authProtocols_[authProtocolAttempt_] : uint8_t{8};
     const bool isRetry = (authProtocolAttempt_ > 0);
@@ -1225,10 +1232,92 @@ void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
         }
     }
 
-    if (authHandler.connect(hostname_.text(), static_cast<uint16_t>(port))) {
-        authenticating = true;
+    authenticating = true;
+    authTimer = 0.0f;
+    connecting_ = true;
+    connectAttempt_ = 1;
+    connectRetryPending_ = false;
+    connectPhaseTime_ = 0.0f;
+    connectError_.clear();
+    authHandler.beginConnect(hostname_.text(), static_cast<uint16_t>(port));
+}
+
+bool AuthScreen::hasCredentials() const {
+    if (username_.empty() || hostname_.empty()) return false;
+    const bool useHash = usingStoredHash && password_.text() == PASSWORD_PLACEHOLDER;
+    return useHash ? !savedPasswordHash.empty() : !password_.empty();
+}
+
+void AuthScreen::updateConnect(auth::AuthHandler& authHandler, float deltaTime) {
+    const std::string where = hostname_.text() + ":" + std::to_string(port);
+    const std::string of = connectAttempt_ > 1
+        ? " (attempt " + std::to_string(connectAttempt_) + " of " +
+              std::to_string(kMaxConnectAttempts) + ")"
+        : std::string();
+
+    if (connectRetryPending_) {
+        connectRetryIn_ -= deltaTime;
+        const int wait = static_cast<int>(std::max(0.0f, connectRetryIn_) + 0.99f);
+        setStatus("The login server did not answer (" + connectError_ + "). Trying again in " +
+                      std::to_string(wait) + " s (attempt " + std::to_string(connectAttempt_ + 1) +
+                      " of " + std::to_string(kMaxConnectAttempts) + ")...",
+                  false);
+        if (connectRetryIn_ > 0.0f) return;
+        connectRetryPending_ = false;
+        ++connectAttempt_;
+        connectPhaseTime_ = 0.0f;
+        LOG_WARNING("Connecting to the login server again: attempt ", connectAttempt_, " of ",
+                    kMaxConnectAttempts);
+        authHandler.beginConnect(hostname_.text(), static_cast<uint16_t>(port));
+        return;
+    }
+
+    connectPhaseTime_ += deltaTime;
+    const auto state = authHandler.getState();
+    if (state == auth::AuthState::CONNECTING) {
+        setStatus("Connecting to " + where + of + "... " +
+                      std::to_string(static_cast<int>(connectPhaseTime_)) + " s",
+                  false);
+        return;
+    }
+    if (state == auth::AuthState::CONNECTED) {
+        connecting_ = false;
+        if (connectAttempt_ > 1) {
+            LOG_INFO("Login server answered on attempt ", connectAttempt_);
+        }
+        finishConnect(authHandler);
+        return;
+    }
+
+    // Not reached. failureReason holds what the handler said.
+    connectError_ = failureReason;
+    if (const auto open = connectError_.find('('); open != std::string::npos) {
+        // "Could not reach host:port (no answer within 5 s)" - the part in
+        // brackets is what the line above already says the rest of.
+        const auto close = connectError_.rfind(')');
+        connectError_ = connectError_.substr(open + 1, close == std::string::npos ? std::string::npos
+                                                                                    : close - open - 1);
+    }
+    if (connectAttempt_ >= kMaxConnectAttempts) {
+        connecting_ = false;
+        authenticating = false;
+        setStatus("Could not reach the login server at " + where + " after " +
+                      std::to_string(kMaxConnectAttempts) + " attempts (" + connectError_ +
+                      "). It may be down; try again in a little while.",
+                  true);
+        return;
+    }
+    // A little longer each time, as the world connection does.
+    connectRetryPending_ = true;
+    connectRetryIn_ = static_cast<float>(connectAttempt_);
+}
+
+void AuthScreen::finishConnect(auth::AuthHandler& authHandler) {
+    const bool useHash = usingStoredHash && password_.text() == PASSWORD_PLACEHOLDER;
+    const bool isRetry = (authProtocolAttempt_ > 0);
+    {
         authTimer = 0.0f;
-        setStatus(isRetry ? "Reconnected, authenticating..." : "Connected, authenticating...", false);
+        setStatus(isRetry ? "Reconnected, authenticating..." : "Connected, signing in...", false);
         pinAutoSubmitted_ = false;
         securityPromptFocused_ = false;
 
@@ -1248,17 +1337,12 @@ void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
 
         // Don't keep the code around longer than needed.
         pinCode_.clear();
-    } else {
-        std::stringstream errSs;
-        errSs << "Failed to connect to " << hostname_.text() << ":" << port
-              << " - check that the server is online and the address is correct";
-        setStatus(errSs.str(), true);
-        authenticating = false;
     }
 }
 
 void AuthScreen::setStatus(const std::string& message, bool isError, bool prominent) {
-    statusMessage = message;
+    statusMessage = statusContext_.empty() ? message : statusContext_ + "\n" + message;
+    if (!statusContext_.empty()) prominent = true;
     statusIsError = isError;
     statusProminent = prominent;
 }
