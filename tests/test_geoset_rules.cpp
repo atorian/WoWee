@@ -244,3 +244,54 @@ TEST_CASE("the belt's base variant is the waist, not nothing", "[geoset]") {
     // a buckle on both asset sets.
     CHECK(equippedGeoset(wowee::core::equipment::kBeltBase, 1) == 1802);
 }
+
+TEST_CASE("each of an item's columns drives its own group below the belt", "[geoset]") {
+    // The geosets the stock 3.3.5 human female carries in these groups.
+    const std::unordered_set<uint16_t> model{902, 903, 1002, 1102, 1104, 1301, 1302};
+    auto resolved = [&](uint16_t id) { return resolveGeoset(id, model); };
+
+    SECTION("nothing worn is nothing at the knee, the belt or the thigh") {
+        const auto lower = lowerBodyGeosets({}, {});
+        CHECK(resolved(lower.knees) == 0);
+        CHECK(resolved(lower.shirtTail) == 0);
+        CHECK(resolved(lower.thighs) == 0);
+        CHECK(resolved(lower.trousers) == 1301);
+        // 902 is a pair of cloth trousers' knee flare; the bare set named it,
+        // and so everyone wore one.
+        const auto bare = bareCharacterGeosets(1, 1, 1, 1);
+        for (uint16_t id : bare) CHECK(geosetGroup(id) != 9);
+    }
+
+    SECTION("cloth trousers with cuffs: the second column is the knee") {
+        // Cloth_B_07Blue_Pant: 0, 1, 0.
+        const auto lower = lowerBodyGeosets({}, {0, 1, 0});
+        CHECK(resolved(lower.knees) == 902);
+        CHECK(resolved(lower.thighs) == 0);
+        CHECK(resolved(lower.trousers) == 1301);
+    }
+
+    SECTION("Northrend plate: the first column is group 11, not 13") {
+        // Plate_Northrend_B_02_Pant: 3, 0, 0. Read as group 13 this was 1304,
+        // which no model has.
+        const auto lower = lowerBodyGeosets({}, {3, 0, 0});
+        CHECK(resolved(lower.thighs) == 1104);
+        CHECK(resolved(lower.trousers) == 1301);
+        CHECK(resolved(lower.knees) == 0);
+    }
+
+    SECTION("robe leggings: the third column is the skirt") {
+        // Robe_Horde_A_01Brown_Pant: 0, 0, 1.
+        CHECK(resolved(lowerBodyGeosets({}, {0, 0, 1}).trousers) == 1302);
+    }
+
+    SECTION("a chest's second column is the tail below the belt") {
+        // Leather_A_01Dark_Chest: 0, 1, 0.
+        CHECK(resolved(lowerBodyGeosets({0, 1, 0}, {}).shirtTail) == 1002);
+    }
+
+    SECTION("a robe's skirt goes over the leggings'") {
+        const auto lower = lowerBodyGeosets({1, 0, 1}, {0, 2, 0});
+        CHECK(lower.trousers == 1302);
+        CHECK(lower.knees == 903);
+    }
+}

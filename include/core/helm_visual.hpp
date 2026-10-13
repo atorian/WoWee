@@ -75,6 +75,28 @@ HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
                              uint8_t raceId,
                              uint8_t genderId);
 
+/// The M2 attachment points the two pauldrons hang from. The model numbers
+/// them right first: 5 is the right shoulder, 6 the left.
+constexpr uint32_t kAttachShoulderRight = 5;
+constexpr uint32_t kAttachShoulderLeft = 6;
+
+/// A pair of shoulders: two models, each found the way a helm's is. Either
+/// side may be missing - a handful of items carry only one pauldron.
+struct ShoulderVisual {
+    HelmVisual left;   ///< ItemDisplayInfo's LeftModel, LShoulder_*.
+    HelmVisual right;  ///< RightModel, RShoulder_*.
+};
+
+/// Resolve both shoulder models and textures for an ItemDisplayInfo id.
+///
+/// Only other players had shoulders: the local character's appearance is put
+/// together elsewhere and never attached any. And the one path that did hung
+/// the LShoulder model on attachment 5, the right shoulder.
+ShoulderVisual resolveShoulderVisual(pipeline::AssetManager& assets,
+                                     uint32_t itemDisplayInfoId,
+                                     uint8_t raceId,
+                                     uint8_t genderId);
+
 /// Whether this head item covers the hair.
 ///
 /// Not every head slot item does: a circlet, tiara or crown sits over the hair

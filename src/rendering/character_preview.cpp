@@ -807,6 +807,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     const auto* idiL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
     const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7u;
+    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8u;
     const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9u;
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
@@ -862,20 +863,27 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     uint16_t geosetPants = pickGeoset(core::kGeosetBarePants, core::kGeosetBarePants);
 
     // Chest/Shirt/Robe → group 8 (sleeves)
+    // The chest or robe first, the shirt only without one. Searched together,
+    // the shirt's slot comes first and won: a robe worn over a shirt lost
+    // its skirt and its sleeves to the shirt under it.
+    uint32_t chestDid = findDisplayId({5, 20});
+    if (chestDid == 0) chestDid = findDisplayId({4});
     {
-        uint32_t did = findDisplayId({4, 5, 20});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
+        uint32_t gg = getGeosetGroup(chestDid, geosetGroup1Field);
         if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
-        // Robe kilt legs
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants);
     }
-    // Legs → group 13 (trousers)
-    {
-        uint32_t did = findDisplayId({7});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kLegsBare, gg), core::kGeosetBarePants);
-    }
+    // Belt down: knee, shirt tail, thigh and trousers, from the chest and legs.
+    auto columnsOf = [&](uint32_t did) {
+        return core::ItemGeosetColumns{getGeosetGroup(did, geosetGroup1Field),
+                                       getGeosetGroup(did, geosetGroup2Field),
+                                       getGeosetGroup(did, geosetGroup3Field)};
+    };
+    const core::LowerBodyGeosets lower =
+        core::lowerBodyGeosets(columnsOf(chestDid), columnsOf(findDisplayId({7})));
+    geosetPants = pickGeoset(lower.trousers, core::kGeosetBarePants);
+    const uint16_t geosetKnees = pickGeoset(lower.knees, 0);
+    const uint16_t geosetShirtTail = pickGeoset(lower.shirtTail, 0);
+    const uint16_t geosetThighs = pickGeoset(lower.thighs, 0);
     // Boots → group 5 (shins)
     {
         uint32_t did = findDisplayId({8});
@@ -910,6 +918,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     eraseGroup(4);
     eraseGroup(5);
     eraseGroup(8);
+    eraseGroup(9);
+    eraseGroup(10);
+    eraseGroup(11);
     eraseGroup(13);
     eraseGroup(15);
     eraseGroup(18);
@@ -917,6 +928,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     if (geosetBoots != 0) geosets.insert(geosetBoots);
     if (geosetSleeves != 0) geosets.insert(geosetSleeves);
     if (geosetPants != 0) geosets.insert(geosetPants);
+    if (geosetKnees != 0) geosets.insert(geosetKnees);
+    if (geosetShirtTail != 0) geosets.insert(geosetShirtTail);
+    if (geosetThighs != 0) geosets.insert(geosetThighs);
     if (geosetBelt != 0) geosets.insert(geosetBelt);
     uint32_t capeGG = getGeosetGroup(findDisplayId({16}), geosetGroup1Field);
     uint16_t geosetCape = pickGeoset(

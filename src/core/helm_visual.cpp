@@ -13,6 +13,7 @@ namespace core {
 namespace {
 
 constexpr const char* kHeadDir = "Item\\ObjectComponents\\Head\\";
+constexpr const char* kShoulderDir = "Item\\ObjectComponents\\Shoulder\\";
 
 std::string stripExtension(std::string name) {
     const size_t dot = name.rfind('.');
@@ -20,12 +21,12 @@ std::string stripExtension(std::string name) {
     return name;
 }
 
-} // namespace
-
-HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
-                             uint32_t itemDisplayInfoId,
-                             uint8_t raceId,
-                             uint8_t genderId) {
+// One model-and-texture column pair of an ItemDisplayInfo row, in `dir`: the
+// race and gender cut first, the shared one after it.
+HelmVisual resolveItemModel(pipeline::AssetManager& assets, uint32_t itemDisplayInfoId,
+                            uint8_t raceId, uint8_t genderId, const char* dir,
+                            const char* modelColumn, uint32_t modelFallback,
+                            const char* textureColumn, uint32_t textureFallback) {
     HelmVisual out;
     if (itemDisplayInfoId == 0) return out;
 
@@ -36,25 +37,49 @@ HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
 
     const auto* layout = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t modelField = layout ? (*layout)["LeftModel"] : 1u;
-    const uint32_t textureField = layout ? (*layout)["LeftModelTexture"] : 3u;
+    const uint32_t modelField = layout ? (*layout)[modelColumn] : modelFallback;
+    const uint32_t textureField = layout ? (*layout)[textureColumn] : textureFallback;
 
     const std::string modelName =
         stripExtension(dbc->getString(static_cast<uint32_t>(row), modelField));
     if (modelName.empty()) return out;
 
+    const std::string base = dir + modelName;
     const std::string suffix = raceGenderSuffix(raceId, genderId);
-    if (!suffix.empty()) out.racialModelPath = kHeadDir + modelName + suffix + ".m2";
-    out.baseModelPath = kHeadDir + modelName + ".m2";
+    if (!suffix.empty()) out.racialModelPath = base + suffix + ".m2";
+    out.baseModelPath = base + ".m2";
 
     const std::string textureName = dbc->getString(static_cast<uint32_t>(row), textureField);
     if (!textureName.empty()) {
+        const std::string textureBase = dir + textureName;
         if (!suffix.empty()) {
-            const std::string racial = kHeadDir + textureName + suffix + ".blp";
+            const std::string racial = textureBase + suffix + ".blp";
             if (assets.fileExists(racial)) out.texturePath = racial;
         }
-        if (out.texturePath.empty()) out.texturePath = kHeadDir + textureName + ".blp";
+        if (out.texturePath.empty()) out.texturePath = textureBase + ".blp";
     }
+    return out;
+}
+
+} // namespace
+
+HelmVisual resolveHelmVisual(pipeline::AssetManager& assets,
+                             uint32_t itemDisplayInfoId,
+                             uint8_t raceId,
+                             uint8_t genderId) {
+    return resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kHeadDir,
+                            "LeftModel", 1u, "LeftModelTexture", 3u);
+}
+
+ShoulderVisual resolveShoulderVisual(pipeline::AssetManager& assets,
+                                     uint32_t itemDisplayInfoId,
+                                     uint8_t raceId,
+                                     uint8_t genderId) {
+    ShoulderVisual out;
+    out.left = resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kShoulderDir,
+                                "LeftModel", 1u, "LeftModelTexture", 3u);
+    out.right = resolveItemModel(assets, itemDisplayInfoId, raceId, genderId, kShoulderDir,
+                                 "RightModel", 2u, "RightModelTexture", 4u);
     return out;
 }
 

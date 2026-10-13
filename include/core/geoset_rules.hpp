@@ -34,7 +34,9 @@ constexpr uint16_t kGeosetBareForearms     = 401;   // Group  4: no gloves
 constexpr uint16_t kGeosetBareShins        = 501;   // Group  5: no boots
 constexpr uint16_t kGeosetDefaultEars      = 702;   // Group  7: ears
 constexpr uint16_t kGeosetBareSleeves      = 801;   // Group  8: no chest armor sleeves
-constexpr uint16_t kGeosetDefaultKneepads  = 902;   // Group  9: kneepads
+constexpr uint16_t kGeosetBareKnees       = 901;   // Group  9: no flare at the knee
+constexpr uint16_t kGeosetBareShirtTail   = 1001;  // Group 10: no tail below the belt
+constexpr uint16_t kGeosetBareThighs      = 1101;  // Group 11: no skirt or thigh plate
 constexpr uint16_t kGeosetDefaultTabard    = 1201;  // Group 12: tabard base
 constexpr uint16_t kGeosetBarePants        = 1301;  // Group 13: no leggings
 constexpr uint16_t kGeosetNoCape           = 1501;  // Group 15: no cape
@@ -168,7 +170,10 @@ inline std::unordered_set<uint16_t> bareCharacterGeosets(uint16_t hairScalp,
     geosets.insert(kGeosetBareShins);       // no boots
     geosets.insert(kGeosetDefaultEars);
     geosets.insert(kGeosetBareSleeves);     // no chest sleeves
-    geosets.insert(kGeosetDefaultKneepads);
+    // Nothing at the knee, below the belt or on the thigh: groups 9, 10 and 11
+    // have no bare member on the stock models, so bare there is no mesh. This
+    // set used to name 902, which is the knee flare of a pair of cloth trousers,
+    // and so everyone wore one. lowerBodyGeosets adds them for what is worn.
     geosets.insert(kGeosetBarePants);       // no leggings
     // The feet, both spellings. The models the game shipped have no group 20 at
     // all and are unaffected; the replacements split the feet out and do not
@@ -214,18 +219,58 @@ constexpr uint16_t cloakGeoset(uint32_t geosetGroupValue) {
 /// thing. What matters is that "a chest changes the sleeves" is written once.
 namespace equipment {
 constexpr uint16_t kChestBare  = kGeosetBareSleeves;   ///< group 8
-constexpr uint16_t kLegsBare   = kGeosetBarePants;     ///< group 13
 constexpr uint16_t kBootsBare  = kGeosetBareShins;     ///< group 5
 constexpr uint16_t kGlovesBare = kGeosetBareForearms;  ///< group 4
 constexpr uint16_t kWristBare  = kGeosetBareSleeves;   ///< group 8, same as chest
 constexpr uint16_t kBeltBase   = 1801;                 ///< group 18, the buckle
 constexpr uint16_t kTabardBase = 1200;                 ///< group 12
-
-/// A robe's chest piece also names the kilt over the legs, in its second geoset
-/// column rather than its first. Reading only the first is why an NPC in a robe
-/// wore trousers under it while a player in the same robe did not.
-constexpr uint16_t kRobeKiltBare = kGeosetBarePants;   ///< group 13
 }  // namespace equipment
+
+/// An item's three ItemDisplayInfo GeosetGroup columns, in order. Zero where
+/// there is no item.
+struct ItemGeosetColumns {
+    uint32_t g1 = 0;
+    uint32_t g2 = 0;
+    uint32_t g3 = 0;
+};
+
+/// What a character wears from the belt down, one id per group. An id that
+/// means none (901, 1001, 1101) is asked for like any other, and resolveGeoset
+/// turns it into nothing on the models that have no mesh for it.
+struct LowerBodyGeosets {
+    uint16_t knees;      ///< group 9
+    uint16_t shirtTail;  ///< group 10
+    uint16_t thighs;     ///< group 11
+    uint16_t trousers;   ///< group 13
+};
+
+/// The waist and leg groups for the chest (or shirt, or robe) and the legs a
+/// character wears.
+///
+/// Each of an item's three columns drives its own group, and which one is
+/// fixed per slot. Leggings: the first is group 11 (worn by heavy Northrend armour),
+/// the second group 9 (the flare at the knee), the third group 13 (a skirt
+/// to the ankle). A chest: the first is the sleeves (group 8, not here), the
+/// second the tail of a doublet below the belt (group 10), the third a robe's
+/// skirt (group 13), which goes over whatever skirt the leggings ask for.
+///
+/// Measured against the 3.3.5 Item and ItemDisplayInfo tables: of the
+/// leggings, 205 set only the first column, all to 3 - 1104, one of the two group 11
+/// meshes a stock model has, 1102 the other - and every one is Northrend or raid
+/// plate and leather; 137 set only the second, cloth and leather trousers
+/// with cuffs, to 1 or 2, which are 902 and 903; 205 set only the third, to 1,
+/// and every one is a Robe_ texture. Reading the first column as group 13, as
+/// every path here used to, put 1304 - which no model has - on the plate and
+/// nothing at all on the other two.
+constexpr LowerBodyGeosets lowerBodyGeosets(ItemGeosetColumns chest, ItemGeosetColumns legs) {
+    LowerBodyGeosets out{kGeosetBareKnees, kGeosetBareShirtTail, kGeosetBareThighs, kGeosetBarePants};
+    if (legs.g1 > 0) out.thighs = equippedGeoset(kGeosetBareThighs, legs.g1);
+    if (legs.g2 > 0) out.knees = equippedGeoset(kGeosetBareKnees, legs.g2);
+    if (legs.g3 > 0) out.trousers = equippedGeoset(kGeosetBarePants, legs.g3);
+    if (chest.g2 > 0) out.shirtTail = equippedGeoset(kGeosetBareShirtTail, chest.g2);
+    if (chest.g3 > 0) out.trousers = equippedGeoset(kGeosetBarePants, chest.g3);
+    return out;
+}
 
 }  // namespace core
 }  // namespace wowee

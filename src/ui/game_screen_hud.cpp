@@ -100,6 +100,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     const auto* idiL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
     const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
+    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
     const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
 
     auto getGeosetGroup = [&](uint32_t displayInfoId, uint32_t fieldIdx) -> uint32_t {
@@ -188,6 +189,9 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     eraseGroup(4);
     eraseGroup(5);
     eraseGroup(8);
+    eraseGroup(9);
+    eraseGroup(10);
+    eraseGroup(11);
     eraseGroup(13);
     eraseGroup(15);
     eraseGroup(12);
@@ -196,7 +200,9 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     //   Group 4 (401+) = GLOVES (forearm area, Z~1.1-1.4)
     //   Group 5 (501+) = BOOTS  (shin area, Z~0.1-0.6)
     //   Group 8 (801+) = WRISTBANDS/SLEEVES (controlled by chest armor)
-    //   Group 9 (901+) = KNEEPADS
+    //   Group 9 (901+) = KNEE FLARE (legs, second column)
+    //   Group 10 (1001+) = SHIRT TAIL (chest, second column)
+    //   Group 11 (1101+) = THIGHS (legs, first column)
     //   Group 13 (1301+) = TROUSERS/PANTS
     //   Group 15 (1501+) = CAPE/CLOAK
     //   Group 20 (2002) = FEET
@@ -220,38 +226,29 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
 
     // Chest/Shirt: inventoryType 4 (shirt), 5 (chest), 20 (robe)
     // Controls group 8 (wristbands/sleeve length): 801=bare wrists, 802+=sleeve styles
-    // Also controls group 13 (trousers) via GeosetGroup[2] for robes
+    // The chest or robe first, the shirt only without one. Searched together,
+    // the shirt's slot comes first and won: a robe worn over a shirt lost
+    // its skirt and its sleeves to the shirt under it.
+    uint32_t chestDid = findEquippedDisplayId({5, 20});
+    if (chestDid == 0) chestDid = findEquippedDisplayId({4});
     {
-        uint32_t did = findEquippedDisplayId({4, 5, 20});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
+        uint32_t gg = getGeosetGroup(chestDid, geosetGroup1Field);
         geosets.insert(gg > 0 ? core::equippedGeoset(core::equipment::kChestBare, gg)
                               : core::kGeosetBareSleeves);
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) {
-            geosets.insert(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3));
-        }
     }
 
-    // Kneepads: group 9 (always default 902)
-    geosets.insert(core::kGeosetDefaultKneepads);
-
-    // Legs/Pants: inventoryType 7 → group 13 (trousers/thighs)
-    // 1301=bare legs, 1302+=pant/kilt styles
+    // Belt down - knee, shirt tail, thigh and trousers - from the chest and
+    // the legs together, since a robe's skirt goes over the leggings'.
     {
-        uint32_t did = findEquippedDisplayId({7});
-        uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        // Only add if robe hasn't already set a kilt geoset
-        // Only when the robe above has not already put a kilt on the legs.
-        // 1302 and 1303 are the first two kilt variants; anything in group 13
-        // beyond the bare one means something is already covering them.
-        const bool kiltAlreadySet = std::any_of(
-            geosets.begin(), geosets.end(), [](uint16_t g) {
-                return core::geosetGroup(g) == core::geosetGroup(core::kGeosetBarePants) &&
-                       !core::geosetMeansNone(g);
-            });
-        if (!kiltAlreadySet) {
-            geosets.insert(gg > 0 ? core::equippedGeoset(core::equipment::kLegsBare, gg)
-                                  : core::kGeosetBarePants);
+        auto columnsOf = [&](uint32_t did) {
+            return core::ItemGeosetColumns{getGeosetGroup(did, geosetGroup1Field),
+                                           getGeosetGroup(did, geosetGroup2Field),
+                                           getGeosetGroup(did, geosetGroup3Field)};
+        };
+        const core::LowerBodyGeosets lower =
+            core::lowerBodyGeosets(columnsOf(chestDid), columnsOf(findEquippedDisplayId({7})));
+        for (uint16_t id : {lower.knees, lower.shirtTail, lower.thighs, lower.trousers}) {
+            if (const uint16_t chosen = pickGeoset(id); chosen != 0) geosets.insert(chosen);
         }
     }
 

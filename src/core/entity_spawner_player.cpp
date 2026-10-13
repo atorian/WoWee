@@ -327,6 +327,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, st.raceId);
 
     const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
+    const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
     const uint32_t geosetGroup3Field = idiL ? (*idiL)["GeosetGroup3"] : 9;
 
     std::unordered_set<uint16_t> modelGeosets;
@@ -387,22 +388,30 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     uint16_t geosetSleeves = pickGeoset(kGeosetBareSleeves, kGeosetBareSleeves);
     uint16_t geosetPants   = pickGeoset(kGeosetBarePants, kGeosetBarePants);
 
+    auto columnsOf = [&](uint32_t did) {
+        return ItemGeosetColumns{getGeosetGroup(did, geosetGroup1Field),
+                                 getGeosetGroup(did, geosetGroup2Field),
+                                 getGeosetGroup(did, geosetGroup3Field)};
+    };
+
     // Chest/Shirt/Robe (invType 4,5,20) → wrist/sleeve group 8
+    // The chest or robe first, the shirt only without one. Searched together,
+    // the shirt's slot comes first and won: a robe worn over a shirt lost
+    // its skirt and its sleeves to the shirt under it.
+    uint32_t chestDid = findDisplayIdByInvType({5, 20});
+    if (chestDid == 0) chestDid = findDisplayIdByInvType({4});
     {
-        uint32_t did = findDisplayIdByInvType({4, 5, 20});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
+        uint32_t gg1 = getGeosetGroup(chestDid, geosetGroup1Field);
         if (gg1 > 0) geosetSleeves = pickGeoset(equippedGeoset(equipment::kChestBare, gg1), kGeosetBareSleeves);
-        // Robe kilt → leg group 13
-        uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) geosetPants = pickGeoset(equippedGeoset(equipment::kRobeKiltBare, gg3), kGeosetBarePants);
     }
 
-    // Legs (invType 7) → leg group 13
-    {
-        uint32_t did = findDisplayIdByInvType({7});
-        uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        if (gg1 > 0) geosetPants = pickGeoset(equippedGeoset(equipment::kLegsBare, gg1), kGeosetBarePants);
-    }
+    // Belt down: knee, shirt tail, thigh and trousers, from the chest and legs.
+    const LowerBodyGeosets lower =
+        lowerBodyGeosets(columnsOf(chestDid), columnsOf(findDisplayIdByInvType({7})));
+    geosetPants = pickGeoset(lower.trousers, kGeosetBarePants);
+    const uint16_t geosetKnees = pickGeoset(lower.knees, 0);
+    const uint16_t geosetShirtTail = pickGeoset(lower.shirtTail, 0);
+    const uint16_t geosetThighs = pickGeoset(lower.thighs, 0);
 
     // Feet/Boots (invType 8) → shin group 5
     {
@@ -445,6 +454,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     eraseGroup(4);
     eraseGroup(5);
     eraseGroup(8);
+    eraseGroup(9);
+    eraseGroup(10);
+    eraseGroup(11);
     eraseGroup(13);
     eraseGroup(15);
     eraseGroup(18);
@@ -452,6 +464,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     if (geosetBoots != 0) geosets.insert(geosetBoots);
     if (geosetSleeves != 0) geosets.insert(geosetSleeves);
     if (geosetPants != 0) geosets.insert(geosetPants);
+    if (geosetKnees != 0) geosets.insert(geosetKnees);
+    if (geosetShirtTail != 0) geosets.insert(geosetShirtTail);
+    if (geosetThighs != 0) geosets.insert(geosetThighs);
     if (geosetBelt != 0) geosets.insert(geosetBelt);
     // Back/Cloak (invType 16)
     uint32_t capeGG = getGeosetGroup(findDisplayIdByInvType({16}), geosetGroup1Field);
@@ -510,102 +525,24 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
     // --- Shoulder model attachment ---
     // SHOULDERS slot is index 2 in the 19-element equipment array.
-    // Shoulders have TWO M2 models (left + right) attached at points 5 and 6.
-    // ItemDisplayInfo.dbc: LeftModel → left shoulder, RightModel → right shoulder.
+    charRenderer->detachWeapon(st.instanceId, kAttachShoulderRight);
+    charRenderer->detachWeapon(st.instanceId, kAttachShoulderLeft);
     if (displayInfoIds[2] != 0) {
-        // Detach any previously attached shoulder models
-        charRenderer->detachWeapon(st.instanceId, 5);
-        charRenderer->detachWeapon(st.instanceId, 6);
-
-        int32_t shoulderIdx = displayInfoDbc->findRecordById(displayInfoIds[2]);
-        if (shoulderIdx >= 0) {
-            const uint32_t leftModelField = idiL ? (*idiL)["LeftModel"] : 1u;
-            const uint32_t rightModelField = idiL ? (*idiL)["RightModel"] : 2u;
-            const uint32_t leftTexField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
-            const uint32_t rightTexField = idiL ? (*idiL)["RightModelTexture"] : 4u;
-
-            // The same suffix helmets use, and from the same place: this had
-            // its own copy of the ten race codes.
-            const std::string raceSuffix = raceGenderSuffix(st.raceId, st.genderId);
-
-            // Attach left shoulder (attachment point 5) using LeftModel
-            std::string leftModelName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), leftModelField);
-            if (!leftModelName.empty()) {
-                size_t dotPos = leftModelName.rfind('.');
-                if (dotPos != std::string::npos) leftModelName = leftModelName.substr(0, dotPos);
-
-                std::string leftPath;
-                pipeline::M2Model leftModel;
-                if (!raceSuffix.empty()) {
-                    leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + raceSuffix + ".m2";
-                    if (!loadWeaponM2(leftPath, leftModel)) leftModel = {};
-                }
-                if (!leftModel.isValid()) {
-                    leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + ".m2";
-                    loadWeaponM2(leftPath, leftModel);
-                }
-
-                if (leftModel.isValid()) {
-                    uint32_t leftModelId = nextWeaponModelId_++;
-                    std::string leftTexName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), leftTexField);
-                    std::string leftTexPath;
-                    if (!leftTexName.empty()) {
-                        if (!raceSuffix.empty()) {
-                            std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + raceSuffix + ".blp";
-                            if (assetManager_->fileExists(suffixedTex)) leftTexPath = suffixedTex;
-                        }
-                        if (leftTexPath.empty()) {
-                            leftTexPath = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + ".blp";
-                        }
-                    }
-                    bool attached = charRenderer->attachWeapon(st.instanceId, 5, leftModel, leftModelId, leftTexPath);
-                    if (attached) {
-                        LOG_DEBUG("Attached left shoulder: ", leftPath, " tex: ", leftTexPath);
-                    }
-                }
+        const ShoulderVisual shoulders =
+            resolveShoulderVisual(*assetManager_, displayInfoIds[2], st.raceId, st.genderId);
+        auto attachSide = [&](const HelmVisual& side, uint32_t attachmentId) {
+            if (!side.valid()) return;
+            pipeline::M2Model model;
+            if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
+            if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
+            if (charRenderer->attachWeapon(st.instanceId, attachmentId, model,
+                                           nextWeaponModelId_++, side.texturePath)) {
+                LOG_DEBUG("Attached shoulder ", attachmentId, ": ", side.baseModelPath,
+                          " tex: ", side.texturePath);
             }
-
-            // Attach right shoulder (attachment point 6) using RightModel
-            std::string rightModelName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), rightModelField);
-            if (!rightModelName.empty()) {
-                size_t dotPos = rightModelName.rfind('.');
-                if (dotPos != std::string::npos) rightModelName = rightModelName.substr(0, dotPos);
-
-                std::string rightPath;
-                pipeline::M2Model rightModel;
-                if (!raceSuffix.empty()) {
-                    rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + raceSuffix + ".m2";
-                    if (!loadWeaponM2(rightPath, rightModel)) rightModel = {};
-                }
-                if (!rightModel.isValid()) {
-                    rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + ".m2";
-                    loadWeaponM2(rightPath, rightModel);
-                }
-
-                if (rightModel.isValid()) {
-                    uint32_t rightModelId = nextWeaponModelId_++;
-                    std::string rightTexName = displayInfoDbc->getString(static_cast<uint32_t>(shoulderIdx), rightTexField);
-                    std::string rightTexPath;
-                    if (!rightTexName.empty()) {
-                        if (!raceSuffix.empty()) {
-                            std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + raceSuffix + ".blp";
-                            if (assetManager_->fileExists(suffixedTex)) rightTexPath = suffixedTex;
-                        }
-                        if (rightTexPath.empty()) {
-                            rightTexPath = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + ".blp";
-                        }
-                    }
-                    bool attached = charRenderer->attachWeapon(st.instanceId, 6, rightModel, rightModelId, rightTexPath);
-                    if (attached) {
-                        LOG_DEBUG("Attached right shoulder: ", rightPath, " tex: ", rightTexPath);
-                    }
-                }
-            }
-        }
-    } else {
-        // No shoulders equipped - detach any existing shoulder models
-        charRenderer->detachWeapon(st.instanceId, 5);
-        charRenderer->detachWeapon(st.instanceId, 6);
+        };
+        attachSide(shoulders.left, kAttachShoulderLeft);
+        attachSide(shoulders.right, kAttachShoulderRight);
     }
 
     // --- Cape texture (group 15 / texture type 2) ---

@@ -1416,7 +1416,8 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
+        uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
+        ItemGeosetColumns chestColumns, legsColumns;
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
             auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
@@ -1488,14 +1489,32 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 // Read GeosetGroup1 from equipment to drive clothed mesh selection
                 if (itemDisplayDbc) {
                     const uint32_t fGG1 = idiL ? (*idiL)["GeosetGroup1"] : 7;
+                    const uint32_t fGG2 = idiL ? (*idiL)["GeosetGroup2"] : 8;
+                    const uint32_t fGG3 = idiL ? (*idiL)["GeosetGroup3"] : 9;
                     auto readGG = [&](uint32_t did) -> uint32_t {
                         if (did == 0) return 0;
                         int32_t idx = itemDisplayDbc->findRecordById(did);
                         return (idx >= 0) ? itemDisplayDbc->getUInt32(static_cast<uint32_t>(idx), fGG1) : 0;
                     };
+                    auto readColumns = [&](uint32_t did) {
+                        ItemGeosetColumns c;
+                        if (did == 0) return c;
+                        int32_t idx = itemDisplayDbc->findRecordById(did);
+                        if (idx < 0) return c;
+                        const auto row = static_cast<uint32_t>(idx);
+                        c.g1 = itemDisplayDbc->getUInt32(row, fGG1);
+                        c.g2 = itemDisplayDbc->getUInt32(row, fGG2);
+                        c.g3 = itemDisplayDbc->getUInt32(row, fGG3);
+                        return c;
+                    };
                     equipChestGG = readGG(itExtra->second.equipDisplayId[3]);
                     if (equipChestGG == 0) equipChestGG = readGG(itExtra->second.equipDisplayId[2]); // shirt fallback
-                    equipLegsGG = readGG(itExtra->second.equipDisplayId[5]);
+                    // The chest's skirt and tail are the chest's, the shirt's
+                    // only when there is no chest - as the player's are.
+                    const uint32_t chestDid = itExtra->second.equipDisplayId[3] != 0
+                        ? itExtra->second.equipDisplayId[3] : itExtra->second.equipDisplayId[2];
+                    chestColumns = readColumns(chestDid);
+                    legsColumns = readColumns(itExtra->second.equipDisplayId[5]);
                     equipFeetGG = readGG(itExtra->second.equipDisplayId[6]);
                     equipGlovesGG = readGG(itExtra->second.equipDisplayId[8]);
                     equipCapeGG = readGG(itExtra->second.equipDisplayId[10]);
@@ -1507,6 +1526,14 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         for (uint16_t sid : allGeosets) {
             const uint16_t group = static_cast<uint16_t>(sid / 100);
             if (group == 3 || group == 4 || group == 8 || group == 12 || group == 13 || group == 15) continue;
+            // The rest of the alternatives, chosen one per group below or not at
+            // all. Passed through, a stock human female wore all five boots
+            // (501-505) inside one another, both knee pieces (902, 903), the
+            // shirt tail (1002), both skirts (1102, 1104) and both ears (701,
+            // 702) - every Stormwind barmaid with lumps at the knee and a
+            // smear of leather for feet. Each is picked below by the rule the
+            // player uses: ears by name, the rest from what is worn.
+            if (group == 5 || group == 7 || group == 9 || group == 10 || group == 11) continue;
             // Group 17 = eye glow (DK/Night Elf "shining eyes" overlay), group 18 = related
             // glow geosets. NPCs are never DK/NE players opting into eye glow, so strip
             // these groups so creatures don't get unwanted glowing blue night-elf eyes.
@@ -1570,6 +1597,18 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (shinSid != 0) normalizedGeosets.insert(shinSid);
         }
 
+        // Ears: the player's variant, and only when the model has exactly that
+        // one - the player inserts it by name, so a model without it draws
+        // nothing there rather than a substitute.
+        if (allGeosets.count(kGeosetDefaultEars) > 0) normalizedGeosets.insert(kGeosetDefaultEars);
+
+        // Belt down, by the same rule as the player: knee, shirt tail and thigh
+        // here, trousers in the group 13 block below.
+        const LowerBodyGeosets lower = lowerBodyGeosets(chestColumns, legsColumns);
+        for (uint16_t want : {lower.knees, lower.shirtTail, lower.thighs}) {
+            if (const uint16_t sid = resolveGeoset(want, allGeosets); sid != 0) normalizedGeosets.insert(sid);
+        }
+
         // Add sleeve/wrist meshes when chest armor calls for them.
         if (hasGroup8 && equipChestGG > 0) {
             uint16_t wantSleeves = equippedGeoset(equipment::kChestBare, equipChestGG);
@@ -1629,12 +1668,9 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (eyeGlowSid != 0) normalizedGeosets.insert(eyeGlowSid);
         }
 
-        // Prefer trousers geoset; use covered variant when legs armor exists.
+        // Trousers, or the skirt of a robe or of robe leggings over them.
         if (hasGroup13) {
-            uint16_t wantPants = (equipLegsGG > 0)
-                ? equippedGeoset(equipment::kLegsBare, equipLegsGG)
-                : kGeosetBarePants;
-            uint16_t pantsSid = resolveGeoset(wantPants, allGeosets);
+            uint16_t pantsSid = resolveGeoset(lower.trousers, allGeosets);
             if (pantsSid != 0) normalizedGeosets.insert(pantsSid);
         }
 
