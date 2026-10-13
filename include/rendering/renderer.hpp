@@ -18,7 +18,8 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
-#include "core/screen_recorder.hpp"
+#include "rendering/viewer_motion.hpp"
+#include "rendering/world_environment.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
@@ -27,19 +28,16 @@
 #include "pipeline/grass_profile.hpp"
 
 namespace wowee {
-namespace core { class Window; }
 namespace rendering { class VkContext; }
-namespace game { class World; class ZoneManager; class GameHandler; }
-namespace audio { class AudioCoordinator; }
 namespace pipeline { class AssetManager; }
 
 namespace rendering {
 
 class Camera;
-class CameraController;
+class OffscreenComposite;
+class RenderSurface;
 class TerrainRenderer;
 class TerrainManager;
-class PerformanceHUD;
 class WaterRenderer;
 class Skybox;
 class SkyBackground;
@@ -58,15 +56,10 @@ class CharacterRenderer;
 class WMORenderer;
 class M2Renderer;
 class Minimap;
-namespace world_map { class WorldMapFacade; }
-using WorldMap = world_map::WorldMapFacade;
 class QuestMarkerRenderer;
 class FootprintRenderer;
-class CharacterPreview;
 class AmdFsr3Runtime;
-class SpellVisualSystem;
 class PostProcessPipeline;
-class AnimationController;
 class LevelUpEffect;
 class ChargeEffect;
 class SwimEffects;
@@ -81,13 +74,14 @@ class LootSparkles;
 class CorpseBones;
 class SunShafts;
 class ScreenCapture;
+class FrameSink;
 
 class Renderer {
 public:
     Renderer();
     ~Renderer();
 
-    bool initialize(core::Window* window);
+    bool initialize(RenderSurface* surface);
     void shutdown();
 
     void beginFrame();
@@ -99,8 +93,35 @@ public:
     void setAfterInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
         afterInterface_ = std::move(recorder);
     }
+    /// Records the interface over the finished picture, inside the overlay
+    /// pass at the end of the frame. The client's draws its ImGui frame; with
+    /// none set there is no interface, as in an offline scene.
+    void setInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
+        interface_ = std::move(recorder);
+    }
 
-    void renderWorld(game::World* world, game::GameHandler* gameHandler = nullptr);
+    void renderWorld();
+
+    /// What the game says about the world this frame - see WorldEnvironment.
+    /// Set before update(); kept until it is set again.
+    void setWorldEnvironment(const WorldEnvironment& environment) { environment_ = environment; }
+    const WorldEnvironment& getWorldEnvironment() const { return environment_; }
+    /// How the viewer moves this frame - see ViewerMotion. Set before update().
+    void setViewerMotion(const ViewerMotion& motion) { viewerMotion_ = motion; }
+    /// Whether the world is on screen this frame, set before beginFrame(). The
+    /// sky is captured for it ahead of the scene pass, and a login screen has
+    /// no sky to capture.
+    void setWorldInView(bool inView) { worldInView_ = inView; }
+    /// How a terrain area id resolves to its zone, for the grass biomes. The
+    /// area itself when unset.
+    void setAreaZoneResolver(std::function<uint32_t(uint32_t)> resolver) {
+        areaZoneResolver_ = std::move(resolver);
+    }
+    /// Where streamed terrain sends its sound emitters - see TerrainManager.
+    /// Set before initializeRenderers().
+    void setAmbientEmitterSink(std::function<void(const glm::vec3&, uint32_t)> sink) {
+        ambientEmitterSink_ = std::move(sink);
+    }
 
     /**
      * Update renderer (camera, etc.)
@@ -141,16 +162,10 @@ public:
 
 
 
-    /**
-     * Render performance HUD
-     */
-    void renderHUD();
 
     Camera* getCamera() { return camera.get(); }
-    CameraController* getCameraController() { return cameraController.get(); }
     TerrainRenderer* getTerrainRenderer() const { return terrainRenderer.get(); }
     TerrainManager* getTerrainManager() const { return terrainManager.get(); }
-    PerformanceHUD* getPerformanceHUD() { return performanceHUD.get(); }
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
     Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
@@ -163,16 +178,13 @@ public:
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
-    WorldMap* getWorldMap() const { return worldMap.get(); }
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
     FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
     SkySystem* getSkySystem() const { return skySystem.get(); }
-    const std::string& getCurrentZoneName() const;
-    uint32_t getCurrentZoneId() const;
-    /// The area under the player, asked of AreaTable rather than resolved to a
-    /// zone first - the world PvP flag is on the subzone. See ZoneManager.
-    bool isOnOutdoorPvpObjective() const;
     bool isPlayerIndoors() const { return playerIndoors_; }
+    /// The WMO the camera is inside, 0 outside; with isPlayerIndoors, as of
+    /// the last update().
+    uint32_t getInsideWmoId() const { return insideWmoId_; }
     VkContext* getVkContext() const { return vkCtx; }
     VkDescriptorSetLayout getPerFrameSetLayout() const { return perFrameSetLayout; }
     /// What a per-frame set allocated elsewhere binds at binding 2: a fog
@@ -194,30 +206,24 @@ public:
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
 
-    /// Start writing the screen, interface included, and what the client
-    /// plays to a video file. False, with the reason in error, when it cannot.
-    bool startRecording(const std::string& path, std::string& error);
-    /// Finish the file and close it.
-    core::ScreenRecorder::Stats stopRecording();
-    [[nodiscard]] bool isRecording() const;
-    /// Why a recording stopped by itself - the disk filled, the encoder gave
-    /// up - once, for the interface to say; empty otherwise. The file is
-    /// finished properly all the same.
-    std::string takeRecordingFailure();
-
-    // Spell visual effects (SMSG_PLAY_SPELL_VISUAL / SMSG_PLAY_SPELL_IMPACT)
-    // Delegates to SpellVisualSystem (owned by Renderer)
-    SpellVisualSystem* getSpellVisualSystem() const { return spellVisualSystem_.get(); }
-
-    // Combat visual state (compound: resets AnimationController + SpellVisualSystem)
-    void resetCombatVisualState();
+    /// Read every frame back, interface included, at width x height, and
+    /// hand the frames to sink as it asks for them - see FrameSink. False when
+    /// the readback cannot be set up.
+    bool beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t height);
+    /// Hand over the frames still on the GPU, oldest first. Before the sink
+    /// is finished, so the recording ends where it was stopped.
+    void flushFrameCapture();
+    /// Stop reading back and release the buffers - after the sink is done
+    /// with them.
+    void endFrameCapture();
+    [[nodiscard]] bool isCapturingFrames() const { return frameSink_ != nullptr; }
 
     // Sub-system accessors (§4.2)
-    AnimationController* getAnimationController() const { return animationController_.get(); }
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
     LootSparkles* getLootSparkles() const { return lootSparkles_.get(); }
     CorpseBones* getCorpseBones() const { return corpseBones_.get(); }
     ChargeEffect* getChargeEffect() const { return chargeEffect.get(); }
+    MountDust* getMountDust() const { return mountDust.get(); }
     SwimEffects* getSwimEffects() const { return swimEffects.get(); }
 
     // Selection circle for targeted entity
@@ -227,20 +233,16 @@ public:
     // CPU timing stats (milliseconds, last frame).
     double getLastUpdateMs() const { return lastUpdateMs; }
     double getLastRenderMs() const { return lastRenderMs; }
-    double getLastCameraUpdateMs() const { return lastCameraUpdateMs; }
     double getLastTerrainRenderMs() const { return lastTerrainRenderMs; }
     double getLastWMORenderMs() const { return lastWMORenderMs; }
     double getLastM2RenderMs() const { return lastM2RenderMs; }
-    // Audio coordinator - owned by Application, set via setAudioCoordinator().
-    void setAudioCoordinator(audio::AudioCoordinator* ac) { audioCoordinator_ = ac; }
-    audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_; }
-    game::ZoneManager* getZoneManager() { return zoneManager.get(); }
     LightingManager* getLightingManager() { return lightingManager.get(); }
 
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
 
 private:
     std::function<void(VkCommandBuffer)> afterInterface_;
+    std::function<void(VkCommandBuffer)> interface_;
 
     // True when water is drawn in the scene continuation pass rather than in
     // the scene pass itself (see renderWorld).
@@ -258,8 +260,8 @@ private:
     /// camera in a cave below the ground under it. WMO liquid is left out, as
     /// the underwater overlay leaves it out.
     [[nodiscard]] std::optional<float> cameraWaterDepth() const;
-    void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
-    void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
+    void renderPostSceneOverlays(VkCommandBuffer cmd);
+    void renderMinimapOverlay(VkCommandBuffer cmd);
 
     /// Point the swim spray at whichever pass the water ends up drawing in, so
     /// it can be recorded after the water rather than under it. Must run before
@@ -283,9 +285,8 @@ private:
 
     void runDeferredWorldInitStep(float deltaTime);
 
-    core::Window* window = nullptr;
+    RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
-    std::unique_ptr<CameraController> cameraController;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
     /// How much of the line from the eye to the sun is blocked, smoothed.
     ///
@@ -297,7 +298,6 @@ private:
     [[nodiscard]] float sampleSunOcclusion() const;
 
     std::unique_ptr<TerrainManager> terrainManager;
-    std::unique_ptr<PerformanceHUD> performanceHUD;
     std::unique_ptr<WaterRenderer> waterRenderer;
     std::unique_ptr<Skybox> skybox;
     std::unique_ptr<Celestial> celestial;
@@ -318,15 +318,11 @@ private:
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;
-    /// The last zone a terrain chunk actually named. Many chunks carry an area
-    /// id of zero, and a tile being loaded carries none at all, so the lookup
-    /// answers "do not know" often - and answering from somewhere else instead
-    /// made the zone flip at chunk boundaries while walking. Mutable because
-    /// getCurrentZoneId() is const and this is a cache of what it last learnt.
-    mutable uint32_t lastResolvedZoneId_ = 0;
-    /// The map that answer belongs to, so it is dropped on a
-    /// continent change rather than held across one.
-    mutable uint32_t lastResolvedZoneMapId_ = 0xFFFFFFFFu;
+    WorldEnvironment environment_;
+    ViewerMotion viewerMotion_;
+    bool worldInView_ = false;
+    std::function<uint32_t(uint32_t)> areaZoneResolver_;
+    std::function<void(const glm::vec3&, uint32_t)> ambientEmitterSink_;
 
     /// The original client's sky models that are up, one instance each, faded
     /// by the weight LightingManager gives them. See updateSkyboxLayers.
@@ -342,12 +338,8 @@ private:
     /// not read off disk again on every frame it is wanted.
     std::unordered_set<std::string> failedSkyboxPaths_;
     std::unique_ptr<Minimap> minimap;
-    std::unique_ptr<WorldMap> worldMap;
     std::unique_ptr<QuestMarkerRenderer> questMarkerRenderer;
     std::unique_ptr<FootprintRenderer> footprintRenderer;
-    audio::AudioCoordinator* audioCoordinator_ = nullptr;  // Owned by Application
-    std::unique_ptr<AnimationController> animationController_;  // §4.2
-    std::unique_ptr<game::ZoneManager> zoneManager;
     // Shadow mapping (Vulkan)
     /// The shadow map is square and this is its side, chosen before the
     /// per-frame resources are built and not changed after.
@@ -359,11 +351,6 @@ private:
     /// marked as needing a restart in the panel instead, which is what the
     /// original client does for the settings it cannot change live.
     uint32_t SHADOW_MAP_SIZE = 4096;
-    void setShadowMapSize(uint32_t side) {
-        // Powers of two between 512 and 4096: the quality slider has five
-        // steps and these are they.
-        SHADOW_MAP_SIZE = std::clamp(side, 512u, 4096u);
-    }
     // Per-frame shadow resources: each in-flight frame has its own depth image and
     // framebuffer so that frame N's shadow read and frame N+1's shadow write don't
     // race on the same image across concurrent GPU submissions.
@@ -392,14 +379,19 @@ private:
 
 
 public:
-    // Character preview registration (for off-screen composite pass)
-    void registerPreview(CharacterPreview* preview);
-    void unregisterPreview(CharacterPreview* preview);
+    /// Images the interface shows, drawn ahead of the world each frame - see
+    /// OffscreenComposite. Registered by their owners, who unregister them
+    /// before they go.
+    void registerComposite(OffscreenComposite* composite);
+    void unregisterComposite(OffscreenComposite* composite);
 
     /// Held on. Turning shadows off loses the device within a second - see
     /// the note in settings_schema.cpp - so a saved 0 from before that was
     /// known, or any other caller, cannot switch them off.
     void setShadowsEnabled(bool /*enabled*/) { shadowsEnabled = true; }
+    /// The shadow quality level, 0-4, that sizes the shadow map. Only before
+    /// initialize(): see SHADOW_MAP_SIZE for why it is not live.
+    void setShadowQualityLevel(int level);
     bool areShadowsEnabled() const { return shadowsEnabled; }
     void setShadowDistance(float dist) { shadowDistance_ = glm::clamp(dist, 40.0f, 500.0f); }
     float getShadowDistance() const { return shadowDistance_; }
@@ -448,13 +440,11 @@ private:
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
 
-    // Spell visual effects - owned SpellVisualSystem (extracted from Renderer §4.4)
-    std::unique_ptr<SpellVisualSystem> spellVisualSystem_;
-
     // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
+    uint32_t insideWmoId_ = 0;
     bool deferredWorldInitEnabled_ = true;
     bool deferredWorldInitPending_ = false;
     uint8_t deferredWorldInitStage_ = 0;
@@ -496,7 +486,7 @@ private:
     GPUPerFrameData currentFrameData{};
     std::unique_ptr<SkyBackground> skyBackground_;
     VkDescriptorSet skyPerFrameDescSets[MAX_FRAMES]{};
-    void renderSkyBackground(game::GameHandler* gameHandler, float timeOfDay,
+    void renderSkyBackground(float timeOfDay,
                              bool drawSkyModels, bool useOriginalSkybox);
     float globalTime = 0.0f;
 
@@ -551,17 +541,15 @@ private:
     VkFramebuffer activeFramebuffer_ = VK_NULL_HANDLE;
     VkExtent2D activeRenderExtent_ = {.width = 0, .height = 0};
 
-    // Active character previews for off-screen rendering
-    std::vector<CharacterPreview*> activePreviews_;
+    std::vector<OffscreenComposite*> offscreenComposites_;
 
     bool terrainEnabled = true;
     bool terrainLoaded = false;
 
-    bool ghostMode_ = false;  // set each frame from gameHandler->isPlayerGhost()
 
     // Render Graph - declarative pass ordering with automatic barriers
     std::unique_ptr<RenderGraph> renderGraph_;
-    void buildFrameGraph(game::GameHandler* gameHandler);
+    void buildFrameGraph();
 
     // HiZ occlusion culling - builds depth pyramid each frame
     std::unique_ptr<HiZSystem> hizSystem_;
@@ -593,8 +581,7 @@ private:
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.
     std::unique_ptr<ScreenCapture> screenCapture_;
-    std::unique_ptr<core::ScreenRecorder> recorder_;
-    std::string recordingFailure_;
+    FrameSink* frameSink_ = nullptr;
     void collectRecordedFrame();
     void recordScreenCapture();
 
@@ -663,7 +650,6 @@ private:
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;
     double lastRenderMs = 0.0;
-    double lastCameraUpdateMs = 0.0;
     double lastTerrainRenderMs = 0.0;
     double lastWMORenderMs = 0.0;
     double lastM2RenderMs = 0.0;

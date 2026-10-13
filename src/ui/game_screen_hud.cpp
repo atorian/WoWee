@@ -1,4 +1,5 @@
 #include "ui/game_screen.hpp"
+#include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/ui_texture_load.hpp"
@@ -744,7 +745,7 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
         });
     }
 
-    auto* wm = renderer->getWorldMap();
+    auto* wm = (services_.worldMap ? services_.worldMap() : nullptr);
     if (!wm) return;
 
     // Flight master window drives the world map's flight-map (taxi selection)
@@ -1744,13 +1745,13 @@ std::string capturePath(const char* folder, const char* extension) {
 }  // namespace
 
 void GameScreen::startRecording() {
-    auto* renderer = services_.renderer;
-    if (!renderer || !services_.gameHandler || renderer->isRecording()) return;
+    auto* recording = services_.screenRecording;
+    if (!recording || !services_.gameHandler || recording->isRecording()) return;
     const std::string path = capturePath("recordings", "mp4");
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     std::string error;
-    if (renderer->startRecording(path, error)) {
+    if (recording->start(path, error)) {
         recordingPath_ = path;
         services_.gameHandler->addSystemChatMessage(
             "Recording to " + path + ". Type /record again to stop.");
@@ -1760,9 +1761,9 @@ void GameScreen::startRecording() {
 }
 
 void GameScreen::stopRecording() {
-    auto* renderer = services_.renderer;
-    if (!renderer || !services_.gameHandler || !renderer->isRecording()) return;
-    const auto stats = renderer->stopRecording();
+    auto* recording = services_.screenRecording;
+    if (!recording || !services_.gameHandler || !recording->isRecording()) return;
+    const auto stats = recording->stop();
     const int seconds = static_cast<int>(stats.seconds + 0.5);
     char length[32];
     std::snprintf(length, sizeof(length), "%d:%02d", seconds / 60, seconds % 60);
@@ -1775,9 +1776,9 @@ void GameScreen::stopRecording() {
 }
 
 void GameScreen::toggleRecording() {
-    auto* renderer = services_.renderer;
-    if (!renderer) return;
-    if (renderer->isRecording()) {
+    auto* recording = services_.screenRecording;
+    if (!recording) return;
+    if (recording->isRecording()) {
         stopRecording();
     } else {
         startRecording();
@@ -1785,9 +1786,9 @@ void GameScreen::toggleRecording() {
 }
 
 void GameScreen::reportRecordingFailure() {
-    auto* renderer = services_.renderer;
-    if (!renderer || !services_.gameHandler) return;
-    const std::string failure = renderer->takeRecordingFailure();
+    auto* recording = services_.screenRecording;
+    if (!recording || !services_.gameHandler) return;
+    const std::string failure = recording->takeFailure();
     if (failure.empty()) return;
     services_.gameHandler->addSystemChatMessage(
         "Recording stopped: " + failure + ". What was recorded is saved in " + recordingPath_ + ".");

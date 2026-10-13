@@ -33,7 +33,15 @@
 namespace wowee {
 
 // Forward declarations
-namespace rendering { class Renderer; }
+namespace rendering {
+class Renderer;
+class PerformanceHUD;
+class CameraController;
+class AnimationController;
+class SpellVisualSystem;
+namespace world_map { class WorldMapFacade; }
+using WorldMap = world_map::WorldMapFacade;
+}
 namespace ui { class UIManager; class MapWindow; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
@@ -45,6 +53,9 @@ namespace core {
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
+class ZoneTracker;
+class PlayerView;
+class ScreenRecording;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -166,8 +177,41 @@ public:
     // Audio coordinator access
     audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_.get(); }
 
+    /// Which zone the player is in - see ZoneTracker.
+    ZoneTracker* getZoneTracker() { return zoneTracker_.get(); }
+
+    /// The local player's camera, facing and animation - see PlayerView.
+    PlayerView* getPlayerView() { return playerView_.get(); }
+    rendering::CameraController* getCameraController();
+    rendering::AnimationController* getAnimationController();
+    /// Spell effects in the world, for every caster.
+    rendering::SpellVisualSystem* getSpellVisualSystem() { return spellVisualSystem_.get(); }
+    /// The screen being recorded to a video file.
+    ScreenRecording* getScreenRecording() { return screenRecording_.get(); }
+    /// The frame statistics overlay, F1.
+    rendering::PerformanceHUD* getPerformanceHUD() { return performanceHUD_.get(); }
+    /// The world map; null until the world's renderers are up.
+    rendering::WorldMap* getWorldMap() { return worldMap_.get(); }
+
+    /// After the renderer has built the world's renderers - on entering a
+    /// world, or a map without terrain: the camera collides with them, the
+    /// spell visuals draw through them, and the world map is built.
+    void onWorldRenderersReady();
+    /// The map every view of the world is looking at: the renderer's, and the
+    /// world map's.
+    void setActiveMapName(const std::string& name);
+
 private:
     void update(float deltaTime);
+
+    /// Tell the renderer what the game knows about the world - the zone,
+    /// the realm's clock and weather, the player's state - before it updates.
+    /// The renderer asks the game nothing itself.
+    void presentWorldToRenderer(float deltaTime);
+    /// What follows the renderer's update and depends on what it worked out:
+    /// sound placed where the camera is, the zone's music and ambience, and
+    /// the indoor/outdoor crossing announced to the interface.
+    void followRendererUpdate(float deltaTime);
 
     /// Opens or closes the map window to match its setting, and builds its
     /// frame. After the game's own interface frame, before the frame is
@@ -349,6 +393,16 @@ private:
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
     std::unique_ptr<audio::AudioCoordinator> audioCoordinator_;
+    std::unique_ptr<ZoneTracker> zoneTracker_;
+    std::unique_ptr<rendering::SpellVisualSystem> spellVisualSystem_;
+    std::unique_ptr<PlayerView> playerView_;
+    std::unique_ptr<ScreenRecording> screenRecording_;
+    std::unique_ptr<rendering::PerformanceHUD> performanceHUD_;
+    std::unique_ptr<rendering::WorldMap> worldMap_;
+    bool spellVisualsAttached_ = false;
+    /// Whether the camera was inside a WMO last frame, for announcing the
+    /// crossing once.
+    bool cameraIndoors_ = false;
 
     // Callback handlers (extracted from setupUICallbacks)
     std::unique_ptr<NPCInteractionCallbackHandler> npcInteractionCallbacks_;

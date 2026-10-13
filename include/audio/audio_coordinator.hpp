@@ -22,7 +22,7 @@ class CombatSoundManager;
 class SpellSoundManager;
 class MovementSoundManager;
 
-/// Flat context passed from Renderer into updateZoneAudio() each frame.
+/// Flat context passed from Application into updateZoneAudio() each frame.
 /// All values are pre-queried so AudioCoordinator needs no rendering pointers.
 struct ZoneAudioContext {
     float deltaTime = 0.0f;
@@ -64,8 +64,22 @@ public:
     /// Shutdown all audio managers and engine.
     void shutdown();
 
+    /// Load the world's sounds on first entering it: music, footsteps and
+    /// voices now, and - unless WOWEE_DEFER_WORLD_SYSTEMS=0 - ambience, the
+    /// interface, combat, spells and movement over the frames that follow,
+    /// one a step (see updateDeferredLoad), so entering the world is not one
+    /// long stall. Later calls do nothing.
+    void loadWorldSounds(pipeline::AssetManager* assets, const game::ZoneManager* zones);
+    /// One step of the deferred loading, once a frame in the world.
+    void updateDeferredLoad(float deltaTime);
+
+    /// The listener, where the camera is.
+    void setListener(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up);
+    /// The engine's own upkeep - finished sounds released - once a frame.
+    void update(float deltaTime);
+
     /// Per-frame zone detection, music transitions, and ambient weather sync.
-    /// Called from Renderer::update() with a pre-filled context.
+    /// Called once a frame in the world with a pre-filled context.
     void updateZoneAudio(const ZoneAudioContext& ctx);
 
     [[nodiscard]] const std::string& getCurrentZoneName() const { return currentZoneName_; }
@@ -106,6 +120,13 @@ private:
     std::unique_ptr<MovementSoundManager> movementSoundManager_;
 
     bool audioAvailable_ = false;
+
+    /// Load one deferred group; false once there are none left.
+    bool loadDeferredGroup(uint8_t group);
+    bool worldSoundsLoaded_ = false;
+    pipeline::AssetManager* deferredAssets_ = nullptr;
+    uint8_t deferredGroup_ = 0;
+    float deferredCooldown_ = 0.0f;
 
     // Zone/music state - moved from Renderer
     uint32_t currentZoneId_ = 0;

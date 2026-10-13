@@ -5,7 +5,7 @@
 namespace wowee {
 namespace rendering {
 
-class Renderer;
+struct AnimationContext;
 class FootstepDriver;
 
 // ============================================================================
@@ -19,7 +19,7 @@ public:
     SfxStateDriver() = default;
 
     /// Track state transitions and trigger appropriate SFX.
-    void update(float deltaTime, Renderer* renderer,
+    void update(float deltaTime, const AnimationContext& ctx,
                 bool mounted, bool taxiFlight,
                 FootstepDriver& footstepDriver);
 

@@ -14,11 +14,14 @@ namespace core { class EntitySpawner; class WorldLoader; }
 
 namespace core {
 
+class PlayerView;
+
 /// Handles world entry, unstuck, hearthstone, and bind point callbacks.
 /// Owns hearth-teleport state and worldEntryMovementGraceTimer.
 class WorldEntryCallbackHandler {
 public:
     WorldEntryCallbackHandler(rendering::Renderer& renderer,
+                              PlayerView& playerView,
                               game::GameHandler& gameHandler,
                               WorldLoader* worldLoader,
                               EntitySpawner* entitySpawner,
@@ -66,6 +69,8 @@ private:
     void forceServerTeleportCommand(const glm::vec3& renderPos);
 
     rendering::Renderer& renderer_;
+
+    PlayerView& playerView_;
     game::GameHandler& gameHandler_;
     WorldLoader* worldLoader_;
     EntitySpawner* entitySpawner_;

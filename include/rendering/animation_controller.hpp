@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <glm/glm.hpp>
+#include "rendering/animation/animation_context.hpp"
 #include "rendering/animation/footstep_driver.hpp"
 #include "rendering/animation/sfx_state_driver.hpp"
 #include "rendering/animation/weapon_type.hpp"
@@ -16,6 +17,8 @@ namespace wowee {
 namespace rendering {
 
 class Renderer;
+class CameraController;
+class SpellVisualSystem;
 
 // ============================================================================
 // AnimationController - thin adapter wrapping CharacterAnimator
@@ -37,7 +40,10 @@ public:
     AnimationController();
     ~AnimationController();
 
-    void initialize(Renderer* renderer);
+    /// What the character is drawn by, moved by, sounds through, and the
+    /// spell visuals reset with it. All owned by the client.
+    void initialize(Renderer* renderer, CameraController* cameraController,
+                    audio::AudioCoordinator* audio, SpellVisualSystem* spellVisuals);
 
     /// Probe (or re-probe) animation capabilities for the current character model.
     /// Called once during initialize() / onCharacterFollow() and after model changes.
@@ -198,6 +204,12 @@ public:
 
 private:
     Renderer* renderer_ = nullptr;
+    CameraController* cameraController_ = nullptr;
+    audio::AudioCoordinator* audio_ = nullptr;
+    SpellVisualSystem* spellVisuals_ = nullptr;
+    [[nodiscard]] AnimationContext context() const {
+        return {.renderer = renderer_, .cameraController = cameraController_, .audio = audio_};
+    }
 
     // ── CharacterAnimator: owns the complete character animation FSM ─────
     CharacterAnimator characterAnimator_;

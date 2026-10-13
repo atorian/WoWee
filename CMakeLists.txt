@@ -650,6 +650,9 @@ set(WOWEE_SOURCES
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
     src/core/world_loader.cpp
+    src/core/zone_tracker.cpp
+    src/core/player_view.cpp
+    src/core/screen_recording.cpp
     src/core/npc_interaction_callback_handler.cpp
     src/core/audio_callback_handler.cpp
     src/core/entity_spawn_callback_handler.cpp
@@ -1126,10 +1129,21 @@ set(WOWEE_SOURCES
 #                   the memory monitor; coordinates, data paths and the
 #                   profiler are header-only and come with its include path
 #   wowee_pipeline  asset formats and loaders; depends on wowee_base only
+#   wowee_render    the Vulkan renderer: the context, every sub-renderer, the
+#                   sky, light, shadows and post-processing, and the frame that
+#                   puts them together; depends on wowee_pipeline only. Told
+#                   what the game knows (WorldEnvironment) and how the viewer
+#                   moves (ViewerMotion) rather than asking, so a scene can be
+#                   drawn without the client - see tools/scene_render.
 #
 # Nothing in src/pipeline includes another module, which is what makes it the
 # first to come out. The rest of the client stays one target until the cycles
 # between its modules are broken (issues #33, #34).
+#
+# src/rendering also holds the client's presentation of the player and its
+# interface images, which stay in the client: they drive the renderer from
+# input, animation state, sound and the game. tools/render_dependency_check.py
+# fails the build's check if anything in wowee_render reaches for the client.
 set(WOWEE_BASE_SOURCES
     src/core/logger.cpp
     src/core/memory_monitor.cpp
@@ -1137,6 +1151,20 @@ set(WOWEE_BASE_SOURCES
 set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_PIPELINE_SOURCES INCLUDE REGEX "^src/pipeline/")
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_BASE_SOURCES} ${WOWEE_PIPELINE_SOURCES})
+set(WOWEE_RENDER_CLIENT_SOURCES
+    src/rendering/animation_controller.cpp
+    src/rendering/camera_controller.cpp
+    src/rendering/character_preview.cpp
+    src/rendering/loading_screen.cpp
+    src/rendering/performance_hud.cpp
+    src/rendering/spell_visual_state.cpp
+    src/rendering/spell_visual_system.cpp
+)
+set(WOWEE_RENDER_SOURCES ${WOWEE_SOURCES})
+list(FILTER WOWEE_RENDER_SOURCES INCLUDE REGEX "^src/rendering/")
+list(FILTER WOWEE_RENDER_SOURCES EXCLUDE REGEX "^src/rendering/(animation|world_map)/")
+list(REMOVE_ITEM WOWEE_RENDER_SOURCES ${WOWEE_RENDER_CLIENT_SOURCES})
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_RENDER_SOURCES})
 
 set(WOWEE_HEADERS
     include/core/application.hpp
@@ -1548,11 +1576,34 @@ target_precompile_headers(wowee_pipeline PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
 
-if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(wowee_render STATIC ${WOWEE_RENDER_SOURCES})
+target_link_libraries(wowee_render PUBLIC wowee_pipeline wowee_base SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
+# Its private headers sit beside its sources (rendering/m2_renderer_internal.h).
+target_include_directories(wowee_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(wowee_render SYSTEM PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src
+)
+foreach(_render_dep imgui vk-bootstrap wowee_fsr2_amd_vk wowee_fsr3_framegen_amd_vk_probe)
+    if(TARGET ${_render_dep})
+        target_link_libraries(wowee_render PUBLIC ${_render_dep})
+    endif()
+endforeach()
+target_precompile_headers(wowee_render PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+# The shaders it loads at run time are built beside the binaries that use it.
+if(TARGET wowee_shaders)
+    add_dependencies(wowee_render wowee_shaders)
 endif()
 
-target_link_libraries(wowee PRIVATE wowee_pipeline wowee_base)
+if(ANDROID)
+    set_target_properties(wowee_base wowee_pipeline wowee_render PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_base)
 
 # Compiler warnings.
 #
@@ -1686,7 +1737,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_base wowee_pipeline)
+foreach(_client_target wowee wowee_base wowee_pipeline wowee_render)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
@@ -1893,6 +1944,20 @@ if(WOWEE_BUILD_FRAMEXML_RUN)
     endif()
 endif()
 
+
+# ---- Tool: scene_render ----
+# One frame of a static scene - models placed on a map, a camera, an hour -
+# drawn by the client's renderer and written to a PNG. It links the renderer
+# library and nothing of the client, so checking how something looks is a
+# rebuild of the renderer and a few seconds, not a login and a walk.
+# See tools/scene_render/main.cpp for the scene file.
+add_executable(scene_render
+    tools/scene_render/main.cpp
+    tools/scene_render/stb_image_impl.cpp
+)
+target_link_libraries(scene_render PRIVATE wowee_render)
+target_precompile_headers(scene_render REUSE_FROM wowee_render)
+wowee_apply_client_flags(scene_render)
 
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer

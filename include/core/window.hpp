@@ -4,6 +4,7 @@
 #include <memory>
 #include <SDL3/SDL.h>
 #include <vulkan/vulkan.h>
+#include "rendering/render_surface.hpp"
 
 namespace wowee {
 namespace rendering { class VkContext; }
@@ -19,10 +20,10 @@ struct WindowConfig {
     bool resizable = true;
 };
 
-class Window {
+class Window : public rendering::RenderSurface {
 public:
     explicit Window(const WindowConfig& config);
-    ~Window();
+    ~Window() override;
 
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
@@ -47,18 +48,17 @@ public:
     /// 14-inch MacBook Pro is 3024x1964 pixels and 1512x982 points. Every
     /// mouse position and every interface coordinate is in these, so this is
     /// what the interface asks for - and what a window can be sized to.
-    [[nodiscard]] int getWidth() const { return width; }
-    [[nodiscard]] int getHeight() const { return height; }
+    [[nodiscard]] int getWidth() const override { return width; }
+    [[nodiscard]] int getHeight() const override { return height; }
     /// The surface behind it, in pixels. What the swapchain has to be.
     ///
     /// Equal to the size above wherever a point is a pixel, which is every
     /// platform this runs on but macOS. There it is twice it, and rendering
     /// at the point size means drawing a 1512-wide picture and letting the
     /// display stretch it over 3024 - which is what this client did.
-    [[nodiscard]] int getDrawableWidth() const { return drawableWidth; }
-    [[nodiscard]] int getDrawableHeight() const { return drawableHeight; }
+    [[nodiscard]] int getDrawableWidth() const override { return drawableWidth; }
+    [[nodiscard]] int getDrawableHeight() const override { return drawableHeight; }
     void setSize(int w, int h) { width = w; height = h; refreshDrawableSize(); }
-    [[nodiscard]] float getAspectRatio() const { return static_cast<float>(width) / height; }
     [[nodiscard]] bool isFullscreen() const { return fullscreen; }
     [[nodiscard]] bool isVsyncEnabled() const { return vsync; }
 
@@ -77,7 +77,7 @@ public:
     [[nodiscard]] SDL_Window* getSDLWindow() const { return window; }
 
     // Vulkan context access
-    [[nodiscard]] rendering::VkContext* getVkContext() const { return vkContext.get(); }
+    [[nodiscard]] rendering::VkContext* getVkContext() const override { return vkContext.get(); }
 
 private:
     WindowConfig config;

@@ -1,4 +1,10 @@
 #include "core/application.hpp"
+#include <imgui_impl_vulkan.h>
+#include "core/screen_recording.hpp"
+#include "rendering/spell_visual_system.hpp"
+#include "core/player_view.hpp"
+#include "audio/ambient_sound_manager.hpp"
+#include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/env_flag.hpp"
 #include "core/character_paths.hpp"
@@ -319,6 +325,26 @@ bool Application::initialize() {
 
     // Create renderer
     renderer = std::make_unique<rendering::Renderer>();
+    // What the player last chose for shadow quality, before the resources that
+    // bake it in are built. Read from the CVar file rather than waited for:
+    // the interface that would normally hand it over does not load until well
+    // after this, and by then the shadow map exists at whatever size it was
+    // given here. See Renderer::SHADOW_MAP_SIZE.
+    //
+    // 2048 by default. 4096 is 64 MB a map, two of them in flight, 128 MB of
+    // depth before anything is drawn, refilled every frame - a lot to ask of
+    // a machine nobody checked, and a good part of the reports of this client
+    // running badly are hardware that was never going to carry it. A phone
+    // starts lower again: its GPU memory is the system's memory.
+    {
+#ifdef __ANDROID__
+        constexpr const char* kDefaultShadowLevel = "1";   // 1024, 8 MB the pair
+#else
+        constexpr const char* kDefaultShadowLevel = "2";   // 2048, 32 MB the pair
+#endif
+        renderer->setShadowQualityLevel(
+            std::atoi(addons::storedCVarValue("extShadowQuality", kDefaultShadowLevel).c_str()));
+    }
     if (!renderer->initialize(window.get())) {
         LOG_FATAL("Failed to initialize renderer");
         return false;
@@ -328,7 +354,28 @@ bool Application::initialize() {
     audioCoordinator_ = std::make_unique<audio::AudioCoordinator>();
     if (!audioCoordinator_->initialize())
         LOG_WARNING("Audio coordinator initialization failed - game will run without audio");
-    renderer->setAudioCoordinator(audioCoordinator_.get());
+
+    // The player as the client presents them, and the spell visuals; the
+    // renderer draws what they decide.
+    spellVisualSystem_ = std::make_unique<rendering::SpellVisualSystem>();
+    playerView_ = std::make_unique<PlayerView>(*renderer, audioCoordinator_.get(),
+                                               spellVisualSystem_.get());
+    screenRecording_ = std::make_unique<ScreenRecording>(*renderer);
+    performanceHUD_ = std::make_unique<rendering::PerformanceHUD>();
+    performanceHUD_->setPosition(rendering::PerformanceHUD::Position::TOP_LEFT);
+
+    // The renderer knows terrain and the sounds it places; which zone that
+    // terrain is and what plays there are the client's, joined here.
+    zoneTracker_ = std::make_unique<ZoneTracker>();
+    renderer->setAreaZoneResolver([zones = zoneTracker_.get()](uint32_t areaId) {
+        return zones->resolveAreaZoneId(areaId);
+    });
+    renderer->setAmbientEmitterSink([audio = audioCoordinator_.get()](const glm::vec3& position,
+                                                                        uint32_t type) {
+        if (auto* ambient = audio->getAmbientSoundManager()) {
+            ambient->addEmitter(position, static_cast<audio::AmbientSoundManager::AmbientType>(type));
+        }
+    });
 
     // Create UI manager
     uiManager = std::make_unique<ui::UIManager>();
@@ -336,6 +383,10 @@ bool Application::initialize() {
         LOG_FATAL("Failed to initialize UI manager");
         return false;
     }
+    // The interface is ImGui's frame, drawn over the picture at its end.
+    renderer->setInterfaceRecorder([](VkCommandBuffer cmd) {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+    });
 
     // The saved anti-aliasing setting, applied here rather than from the game
     // screen's update.
@@ -369,6 +420,9 @@ bool Application::initialize() {
     // Populate game services - all subsystems now available
     gameServices_.renderer = renderer.get();
     gameServices_.audioCoordinator = audioCoordinator_.get();
+    gameServices_.cameraController = playerView_->getCameraController();
+    gameServices_.animationController = playerView_->getAnimationController();
+    gameServices_.spellVisualSystem = spellVisualSystem_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -467,6 +521,7 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
+        zoneTracker_->loadZoneTable(assetManager.get());
 
         // Fonts, now the archives are open and still before any frame is
         // drawn - the only moment the glyph atlas can take another face
@@ -498,6 +553,7 @@ bool Application::initialize() {
         // to a realm or changing the user's login/configuration files.
         if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && renderer && assetManager) {
             if (!renderer->initializeRenderers(assetManager.get(), "Northrend")) return false;
+            onWorldRenderersReady();
             renderer->getCamera()->setPosition(glm::vec3(5818.0f, 405.0f, 650.0f));
             renderer->getLightingManager()->update(glm::vec3(5818.0f, 405.0f, 650.0f),
                                                    571, 4395, 43200.0f);
@@ -559,92 +615,13 @@ bool Application::initialize() {
                      " lamp batches=", lamp.batches.size());
         }
 
-        // Offline look at one model, without a realm: how a material renders is
-        // checked in seconds instead of a login and a walk.
-        //
-        //   WOWEE_SKY_BACKGROUND_PROBE=1 WOWEE_MODEL_PROBE=<path.m2|path.wmo>
-        //   WOWEE_PROBE_CAMERA="dx,dy,dz,yaw,pitch"   (optional)
-        //   WOWEE_SCREENSHOT=<file.png>               (writes it and quits)
-        //
-        // The model goes through the real loaders and renderers at the sky
-        // probe's origin, under Dalaran's noon light. The camera is placed
-        // relative to the model's bounding-box centre, yaw 0 looking along +X
-        // and 90 along +Y; by default it stands off along -X to see the whole.
-        if (const char* probePath = std::getenv("WOWEE_MODEL_PROBE");
-            probePath && *probePath && renderer && assetManager) {
-            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) {
-                LOG_ERROR("WOWEE_MODEL_PROBE needs WOWEE_SKY_BACKGROUND_PROBE for its renderers");
-                return false;
-            }
-            const std::string path = probePath;
-            const glm::vec3 origin(5818.0f, 405.0f, 650.0f);
-            glm::vec3 boundMin(0.0f), boundMax(0.0f);
-            std::string lower = path;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0) {
-                auto wmo = pipeline::WMOLoader::load(assetManager->readFile(path));
-                for (uint32_t group = 0; group < wmo.nGroups; ++group) {
-                    const auto candidates = pipeline::wmoGroupCandidates(path, group);
-                    if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), wmo, group)) {
-                        LOG_ERROR("Model probe: cannot load group ", group, " of ", path);
-                        return false;
-                    }
-                }
-                if (!renderer->getWMORenderer()->loadModel(wmo, 0xFFFF0301)) return false;
-                renderer->getWMORenderer()->createInstance(0xFFFF0301, origin);
-                boundMin = wmo.boundingBoxMin;
-                boundMax = wmo.boundingBoxMax;
-                LOG_INFO("Model probe: ", path, " groups=", wmo.nGroups, " materials=", wmo.materials.size());
-            } else {
-                auto model = pipeline::M2Loader::load(assetManager->readFile(path));
-                model.name = path;
-                if (!pipeline::M2Loader::loadSkin(assetManager->readFile(pipeline::skinPathForM2(path)), model)) {
-                    LOG_ERROR("Model probe: cannot load the skin of ", path);
-                    return false;
-                }
-                if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
-                renderer->getM2Renderer()->createInstance(0xFFFF0301, origin);
-                // From the vertices: the header's box is not always filled in,
-                // and a doodad is often modelled well away from its origin.
-                if (!model.vertices.empty()) {
-                    boundMin = boundMax = model.vertices.front().position;
-                    for (const auto& v : model.vertices) {
-                        boundMin = glm::min(boundMin, v.position);
-                        boundMax = glm::max(boundMax, v.position);
-                    }
-                }
-                LOG_INFO("Model probe: ", path, " batches=", model.batches.size());
-            }
-            const glm::vec3 centre = origin + (boundMin + boundMax) * 0.5f;
-            const float reach = std::max(glm::length(boundMax - boundMin), 1.0f);
-            glm::vec3 offset(-reach, 0.0f, 0.0f);
-            float yaw = 0.0f, pitch = 0.0f;
-            if (const char* cam = std::getenv("WOWEE_PROBE_CAMERA"); cam && *cam) {
-                float v[5] = {offset.x, offset.y, offset.z, yaw, pitch};
-                std::stringstream in(cam);
-                std::string field;
-                for (int i = 0; i < 5 && std::getline(in, field, ','); ++i) v[i] = std::stof(field);
-                offset = glm::vec3(v[0], v[1], v[2]);
-                yaw = v[3];
-                pitch = v[4];
-            }
-            // The follow camera would put itself back behind a character; the
-            // probe's camera stays where it is put.
-            if (auto* controller = renderer->getCameraController()) controller->setEnabled(false);
-            renderer->getCharacterPosition() = centre + offset;
-            renderer->getCamera()->setPosition(centre + offset);
-            renderer->getCamera()->setRotation(yaw, pitch);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
-        }
-
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
             renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_);
         entitySpawner_->initialize();
 
         appearanceComposer_ = std::make_unique<AppearanceComposer>(
-            renderer.get(), assetManager.get(), gameHandler.get(),
+            renderer.get(), playerView_.get(), assetManager.get(), gameHandler.get(),
             entitySpawner_.get());
 
         // Wire AppearanceComposer to UI components (Phase A singleton breaking)
@@ -660,6 +637,11 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = addonManager_.get();  // May be nullptr here, re-wire later
             uiServices.audioCoordinator = audioCoordinator_.get();
+            uiServices.zoneTracker = zoneTracker_.get();
+            uiServices.screenRecording = screenRecording_.get();
+            uiServices.cameraController = getCameraController();
+            uiServices.animationController = getAnimationController();
+            uiServices.worldMap = [this] { return getWorldMap(); };
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
@@ -810,9 +792,8 @@ bool Application::initialize() {
             if (!uim || !gh) return false;
             return uim->getGameScreen().getChatPanel().runRegistryCommand(*gh, alias, args);
         };
-        luaSvc.playEmoteAnimation = [rend = renderer.get()](const std::string& name) {
-            if (!rend) return;
-            if (auto* ac = rend->getAnimationController()) ac->playEmote(name);
+        luaSvc.playEmoteAnimation = [this](const std::string& name) {
+            if (auto* ac = getAnimationController()) ac->playEmote(name);
         };
         luaSvc.getGamma = [uim = uiManager.get()]() -> float {
             return uim ? uim->getGameScreen().getGamma() : 1.0f;
@@ -824,13 +805,13 @@ bool Application::initialize() {
         // the zones, their overlays and the area POIs and drew them only
         // itself; FrameXML's map has readers for exactly these and had nothing
         // behind them.
-        luaSvc.getMapFileName = [r = renderer.get()]() -> std::string {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapFileName = [this]() -> std::string {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->currentMapFolder() : std::string();
         };
-        luaSvc.getMapOverlays = [r = renderer.get()]() {
+        luaSvc.getMapOverlays = [this]() {
             std::vector<addons::LuaServices::MapOverlay> out;
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+            auto* wmap = getWorldMap();
             if (!wmap) return out;
             const std::string folder = wmap->currentMapFolder();
             for (const auto& o : wmap->currentOverlays()) {
@@ -850,9 +831,9 @@ bool Application::initialize() {
             }
             return out;
         };
-        luaSvc.getMapLandmarks = [r = renderer.get()]() {
+        luaSvc.getMapLandmarks = [this]() {
             std::vector<addons::LuaServices::MapLandmark> out;
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+            auto* wmap = getWorldMap();
             if (!wmap) return out;
             for (const auto& l : wmap->currentLandmarks()) {
                 addons::LuaServices::MapLandmark m;
@@ -865,61 +846,61 @@ bool Application::initialize() {
             }
             return out;
         };
-        luaSvc.getMapZoneNameAt = [r = renderer.get()](float u, float v) -> std::string {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapZoneNameAt = [this](float u, float v) -> std::string {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->zoneNameAtMapPoint(u, v) : std::string();
         };
-        luaSvc.clickMapPoint = [r = renderer.get()](float u, float v) -> bool {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.clickMapPoint = [this](float u, float v) -> bool {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->clickMapPoint(u, v) : false;
         };
-        luaSvc.mapUVForWorldPos = [r = renderer.get()](float x, float y, float z,
+        luaSvc.mapUVForWorldPos = [this](float x, float y, float z,
                                                       float& u, float& v) -> bool {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+            auto* wmap = getWorldMap();
             return wmap ? wmap->mapUVForCanonical(x, y, z, u, v) : false;
         };
-        luaSvc.zoomMapOut = [r = renderer.get()]() {
-            if (auto* wmap = r ? r->getWorldMap() : nullptr) wmap->zoomOutOneLevel();
+        luaSvc.zoomMapOut = [this]() {
+            if (auto* wmap = getWorldMap()) wmap->zoomOutOneLevel();
         };
-        luaSvc.getMapContinentNames = [r = renderer.get()]() -> std::vector<std::string> {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapContinentNames = [this]() -> std::vector<std::string> {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->continentNames() : std::vector<std::string>();
         };
-        luaSvc.getMapZoneNames = [r = renderer.get()](int continent) -> std::vector<std::string> {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapZoneNames = [this](int continent) -> std::vector<std::string> {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->zoneNames(continent) : std::vector<std::string>();
         };
-        luaSvc.setMapByIndex = [r = renderer.get()](int continent, int zone) -> bool {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.setMapByIndex = [this](int continent, int zone) -> bool {
+            auto* wmap = getWorldMap();
             return wmap && wmap->showMap(continent, zone);
         };
-        luaSvc.getMapContinentIndex = [r = renderer.get()]() -> int {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapContinentIndex = [this]() -> int {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->currentContinentIndex() : 0;
         };
-        luaSvc.getMapZoneIndex = [r = renderer.get()]() -> int {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapZoneIndex = [this]() -> int {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->currentZoneIndex() : 0;
         };
-        luaSvc.canZoomMapOut = [r = renderer.get()]() -> bool {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.canZoomMapOut = [this]() -> bool {
+            auto* wmap = getWorldMap();
             return wmap && wmap->canZoomOut();
         };
-        luaSvc.showPlayerMapZone = [r = renderer.get()]() {
-            if (auto* wmap = r ? r->getWorldMap() : nullptr) wmap->showPlayerZone();
+        luaSvc.showPlayerMapZone = [this]() {
+            if (auto* wmap = getWorldMap()) wmap->showPlayerZone();
         };
-        luaSvc.getMapWorldAreaId = [r = renderer.get()]() -> uint32_t {
-            auto* wmap = r ? r->getWorldMap() : nullptr;
+        luaSvc.getMapWorldAreaId = [this]() -> uint32_t {
+            auto* wmap = getWorldMap();
             return wmap ? wmap->currentWorldMapAreaId() : 0u;
         };
-        luaSvc.setMapWorldAreaId = [r = renderer.get()](uint32_t id) {
-            if (auto* wmap = r ? r->getWorldMap() : nullptr) wmap->showWorldMapArea(id);
+        luaSvc.setMapWorldAreaId = [this](uint32_t id) {
+            if (auto* wmap = getWorldMap()) wmap->showWorldMapArea(id);
         };
-        luaSvc.getLiveZoneId = [r = renderer.get()]() -> uint32_t {
-            return r ? r->getCurrentZoneId() : 0u;
+        luaSvc.getLiveZoneId = [zones = zoneTracker_.get()]() -> uint32_t {
+            return zones->zoneId();
         };
-        luaSvc.isOnOutdoorPvpObjective = [r = renderer.get()]() -> bool {
-            return r && r->isOnOutdoorPvpObjective();
+        luaSvc.isOnOutdoorPvpObjective = [zones = zoneTracker_.get()]() -> bool {
+            return zones->isOnOutdoorPvpObjective();
         };
         luaSvc.takeScreenshot = [uim = uiManager.get()]() {
             if (uim) uim->getGameScreen().takeScreenshot();
@@ -1424,6 +1405,11 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = addonManager_.get();
             uiServices.audioCoordinator = audioCoordinator_.get();
+            uiServices.zoneTracker = zoneTracker_.get();
+            uiServices.screenRecording = screenRecording_.get();
+            uiServices.cameraController = getCameraController();
+            uiServices.animationController = getAnimationController();
+            uiServices.worldMap = [this] { return getWorldMap(); };
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
@@ -1542,8 +1528,8 @@ void Application::run() {
             if (window && window->getSDLWindow()) {
                 SDL_SetWindowMouseGrab(window->getSDLWindow(), false);
             }
-            if (renderer && renderer->getCameraController()) {
-                renderer->getCameraController()->releaseMouseCapture();
+            if (getCameraController()) {
+                getCameraController()->releaseMouseCapture();
             }
             LOG_WARNING("Watchdog: force-released mouse capture on main thread");
         }
@@ -1567,8 +1553,8 @@ void Application::run() {
         // integrates over it.
         const float deltaTime = FramePacer::toSeconds(deltaNs);
 
-        if (renderer && renderer->getCameraController() && ImGui::GetIO().WantCaptureMouse) {
-            renderer->getCameraController()->releaseMouseCapture();
+        if (getCameraController() && ImGui::GetIO().WantCaptureMouse) {
+            getCameraController()->releaseMouseCapture();
         }
 
         // Poll events
@@ -1669,12 +1655,12 @@ void Application::run() {
             }
 
             // Pass mouse events to camera controller (skip when UI has mouse focus)
-            if (renderer && renderer->getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
+            if (getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
                 if (event.type == SDL_EVENT_MOUSE_MOTION) {
-                    renderer->getCameraController()->processMouseMotion(event.motion);
+                    getCameraController()->processMouseMotion(event.motion);
                 }
                 else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                    renderer->getCameraController()->processMouseButton(event.button);
+                    getCameraController()->processMouseButton(event.button);
                 }
                 else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
                     // The interface gets first refusal, and only where a
@@ -1695,7 +1681,7 @@ void Application::run() {
                             wheelClicks(event.wheel.y, event.wheel.timestamp));
                     }
                     if (!takenByUi) {
-                        renderer->getCameraController()->processMouseWheel(
+                        getCameraController()->processMouseWheel(
                             static_cast<float>(event.wheel.y));
                     }
                 }
@@ -1931,9 +1917,9 @@ void Application::run() {
 #ifndef NDEBUG
                 // F1: Toggle performance HUD
                 if (event.key.scancode == SDL_SCANCODE_F1) {
-                    if (renderer && renderer->getPerformanceHUD()) {
-                        renderer->getPerformanceHUD()->toggle();
-                        bool enabled = renderer->getPerformanceHUD()->isEnabled();
+                    if (performanceHUD_) {
+                        performanceHUD_->toggle();
+                        bool enabled = performanceHUD_->isEnabled();
                         LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
                     }
                 }
@@ -1970,8 +1956,8 @@ void Application::run() {
         namePadKeysForInterface();
         ui::gamepadControls().setInWorld(state == AppState::IN_GAME);
         ui::gamepadControls().setWindow(window ? window->getSDLWindow() : nullptr);
-        if (renderer && renderer->getCameraController()) {
-            auto* cam = renderer->getCameraController();
+        if (getCameraController()) {
+            auto* cam = getCameraController();
             ui::gamepadControls().setCameraController(cam);
             ui::gamepadControls().update(deltaTime);
             cam->setSteering(ui::gamepadControls().isSteering());
@@ -2219,6 +2205,21 @@ void Application::shutdown() {
     // Explicitly shut down the renderer before destroying it - this ensures
     // all sub-renderers free their VMA allocations in the correct order,
     // before VkContext::shutdown() calls vmaDestroyAllocator().
+    // What draws through the renderer goes first: the recording's readback,
+    // the world map's images, the spell visuals' M2 instances.
+    screenRecording_.reset();
+    if (worldMap_) {
+        if (renderer) renderer->unregisterComposite(worldMap_.get());
+        worldMap_->shutdown();
+        worldMap_.reset();
+    }
+    playerView_.reset();
+    if (spellVisualSystem_) {
+        spellVisualSystem_->shutdown();
+        spellVisualSystem_.reset();
+        spellVisualsAttached_ = false;
+    }
+
     LOG_DEBUG("Shutting down renderer...");
     if (renderer) {
         renderer->shutdown();
@@ -2298,16 +2299,16 @@ void Application::setState(AppState newState) {
             if (renderer && renderer->getCharacterRenderer()) {
                 uint32_t oldInst = renderer->getCharacterInstanceId();
                 if (oldInst > 0) {
-                    renderer->setCharacterFollow(0);
-                    if (auto* ac = renderer->getAnimationController()) ac->clearMount();
+                    playerView_->setCharacterFollow(0);
+                    if (auto* ac = getAnimationController()) ac->clearMount();
                     renderer->getCharacterRenderer()->removeInstance(oldInst);
                 }
             }
             break;
         case AppState::IN_GAME: {
             // Wire up movement opcodes from camera controller
-            if (renderer && renderer->getCameraController()) {
-                auto* cc = renderer->getCameraController();
+            if (getCameraController()) {
+                auto* cc = getCameraController();
                 cc->setMovementCallback([this](uint32_t opcode) {
                     if (gameHandler) {
                         gameHandler->sendMovement(static_cast<game::Opcode>(opcode));
@@ -2323,7 +2324,7 @@ void Application::setState(AppState newState) {
                         gameHandler->setStandState(rendering::AnimationController::STAND_STATE_SIT);
                     }
                     if (renderer) {
-                        if (auto* ac = renderer->getAnimationController()) {
+                        if (auto* ac = getAnimationController()) {
                             ac->setStandState(rendering::AnimationController::STAND_STATE_SIT);
                         }
                     }
@@ -2345,22 +2346,22 @@ void Application::setState(AppState newState) {
                     // canonical space (same camera-yaw→canonical mapping as the per-frame
                     // orientation sync). Lets a fishing cast drop the bobber in front of
                     // where the player is aiming even while standing still.
-                    if (!renderer || !renderer->getCameraController())
+                    if (!renderer || !getCameraController())
                         return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
                     // Use the CAMERA's live look yaw (getYaw), not getFacingYaw: the latter is
                     // the character's facing, which is NOT updated by left-mouse orbit, so while
                     // aiming at the water standing still it is stale. Turn the character to the
                     // camera aim and use the same yaw→canonical mapping the (working) melee
                     // facing uses, so the bobber lands where the player is looking.
-                    float camYawDeg = renderer->getCameraController()->getYaw();
+                    float camYawDeg = getCameraController()->getYaw();
                     renderer->setCharacterYaw(camYawDeg);
-                    renderer->getCameraController()->setFacingYaw(camYawDeg);
+                    getCameraController()->setFacingYaw(camYawDeg);
                     // "Face land to fish" ⇒ the bobber landed 180° opposite the aim, so the
                     // canonical is a half-turn off here (getYaw's zero is opposite the look
                     // vector). Add the half-turn so the bobber lands where the camera looks.
                     float canon = core::coords::normalizeAngleRad(glm::radians(360.0f - camYawDeg));
                     LOG_WARNING("[FISH-AIM] getYaw=", camYawDeg,
-                                " getFacingYaw=", renderer->getCameraController()->getFacingYaw(),
+                                " getFacingYaw=", getCameraController()->getFacingYaw(),
                                 " charYaw=", renderer->getCharacterYaw(),
                                 " canonicalDeg=", canon * 57.29578f,
                                 " serverYawDeg=", core::coords::canonicalToServerYaw(canon) * 57.29578f);
@@ -2373,20 +2374,20 @@ void Application::setState(AppState newState) {
                         if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
                             if (appearanceComposer_ && !appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(true);
-                            if (auto* ac = renderer->getAnimationController()) ac->triggerRangedShot();
+                            if (auto* ac = getAnimationController()) ac->triggerRangedShot();
                         } else if (spellId != 0) {
                             if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = renderer->getAnimationController()) ac->triggerSpecialAttack(spellId);
+                            if (auto* ac = getAnimationController()) ac->triggerSpecialAttack(spellId);
                         } else {
                             if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = renderer->getAnimationController()) ac->triggerMeleeSwing();
+                            if (auto* ac = getAnimationController()) ac->triggerMeleeSwing();
                         }
                     }
                 });
-                if (renderer && renderer->getAnimationController()) {
-                    renderer->getAnimationController()->setRangedShotCompleteCallback([this]() {
+                if (getAnimationController()) {
+                    getAnimationController()->setRangedShotCompleteCallback([this]() {
                         if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
                     });
                 }
@@ -2406,21 +2407,21 @@ void Application::setState(AppState newState) {
                     }
                 });
                 gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
-                    if (renderer && renderer->getCameraController()) {
-                        renderer->getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
+                    if (getCameraController()) {
+                        getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
                     }
                 });
                 gameHandler->setCameraShakeCallback([this](float magnitude, float frequency, float duration) {
-                    if (renderer && renderer->getCameraController()) {
-                        renderer->getCameraController()->triggerShake(magnitude, frequency, duration);
+                    if (getCameraController()) {
+                        getCameraController()->triggerShake(magnitude, frequency, duration);
                     }
                 });
                 gameHandler->setAutoFollowCallback([this](const glm::vec3* renderPos) {
-                    if (renderer && renderer->getCameraController()) {
+                    if (getCameraController()) {
                         if (renderPos) {
-                            renderer->getCameraController()->setAutoFollow(renderPos);
+                            getCameraController()->setAutoFollow(renderPos);
                         } else {
-                            renderer->getCameraController()->cancelAutoFollow();
+                            getCameraController()->cancelAutoFollow();
                         }
                     }
                 });
@@ -2687,7 +2688,7 @@ void Application::performLogoutToLogin() {
     world.reset();
 
     if (renderer) {
-        renderer->resetCombatVisualState();
+        playerView_->resetCombatVisualState();
         // Remove old player model so it doesn't persist into next session
         if (auto* charRenderer = renderer->getCharacterRenderer()) {
             charRenderer->removeInstance(1);
@@ -2711,8 +2712,8 @@ void Application::performLogoutToLogin() {
         if (auto* footprints = renderer->getFootprintRenderer()) {
             footprints->clear();
         }
-        if (auto* ac = renderer->getAnimationController()) ac->clearMount();
-        renderer->setCharacterFollow(0);
+        if (auto* ac = getAnimationController()) ac->clearMount();
+        playerView_->setCharacterFollow(0);
         if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
             music->stopMusic(0.0f);
         }
@@ -2755,27 +2756,27 @@ void Application::performLogoutToLogin() {
 // overrides. The camera owns the movement, so this is where the server's word
 // about it lands.
 void Application::applyServerMovementState(float deltaTime) {
-    if (renderer && gameHandler && renderer->getCameraController()) {
-        renderer->getCameraController()->setRunSpeedOverride(gameHandler->getServerRunSpeed());
-        renderer->getCameraController()->setWalkSpeedOverride(gameHandler->getServerWalkSpeed());
-        renderer->getCameraController()->setSwimSpeedOverride(gameHandler->getServerSwimSpeed());
-        renderer->getCameraController()->setSwimBackSpeedOverride(gameHandler->getServerSwimBackSpeed());
-        renderer->getCameraController()->setFlightSpeedOverride(gameHandler->getServerFlightSpeed());
-        renderer->getCameraController()->setFlightBackSpeedOverride(gameHandler->getServerFlightBackSpeed());
-        renderer->getCameraController()->setRunBackSpeedOverride(gameHandler->getServerRunBackSpeed());
-        renderer->getCameraController()->setTurnRateOverride(gameHandler->getServerTurnRate());
-        renderer->getCameraController()->setMovementRooted(gameHandler->isPlayerRooted());
-        renderer->getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
-        renderer->getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
-        renderer->getCameraController()->setWaterWalkActive(gameHandler->isWaterWalking());
+    if (renderer && gameHandler && getCameraController()) {
+        getCameraController()->setRunSpeedOverride(gameHandler->getServerRunSpeed());
+        getCameraController()->setWalkSpeedOverride(gameHandler->getServerWalkSpeed());
+        getCameraController()->setSwimSpeedOverride(gameHandler->getServerSwimSpeed());
+        getCameraController()->setSwimBackSpeedOverride(gameHandler->getServerSwimBackSpeed());
+        getCameraController()->setFlightSpeedOverride(gameHandler->getServerFlightSpeed());
+        getCameraController()->setFlightBackSpeedOverride(gameHandler->getServerFlightBackSpeed());
+        getCameraController()->setRunBackSpeedOverride(gameHandler->getServerRunBackSpeed());
+        getCameraController()->setTurnRateOverride(gameHandler->getServerTurnRate());
+        getCameraController()->setMovementRooted(gameHandler->isPlayerRooted());
+        getCameraController()->setGravityDisabled(gameHandler->isGravityDisabled());
+        getCameraController()->setFeatherFallActive(gameHandler->isFeatherFalling());
+        getCameraController()->setWaterWalkActive(gameHandler->isWaterWalking());
         // Flight physics engage on the CAN_FLY ability (flying mount
         // or .gm fly), not isPlayerFlying() which also needs the
         // FLYING flag the client only sets once already airborne.
-        renderer->getCameraController()->setFlyingActive(gameHandler->canFly());
+        getCameraController()->setFlyingActive(gameHandler->canFly());
         // And whether the player is up in it, which the camera worked out
         // last frame: take-off and landing are decided where the floor is.
-        gameHandler->setFlightAirborne(renderer->getCameraController()->isFlightAirborne());
-        renderer->getCameraController()->setHoverActive(gameHandler->isHovering());
+        gameHandler->setFlightAirborne(getCameraController()->isFlightAirborne());
+        getCameraController()->setHoverActive(gameHandler->isHovering());
 
         // Sync camera forward pitch to movement packets during flight / swimming.
         // The server writes the pitch field when FLYING or SWIMMING flags are set;
@@ -2785,12 +2786,12 @@ void Application::applyServerMovementState(float deltaTime) {
             // The mount's pitch, which the camera sets only while it steers -
             // orbiting it to look around does not tilt the mount or change
             // what the server is told.
-            const float pitchRad = renderer->getCameraController()->getFlightPitchRad();
+            const float pitchRad = getCameraController()->getFlightPitchRad();
             gameHandler->setMovementPitch(pitchRad);
             // Tilt the mount/character model to match flight direction
             // (taxi flight uses setTaxiOrientationCallback for this instead)
             if (gameHandler->isMounted()) {
-                if (auto* ac = renderer->getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
+                if (auto* ac = getAnimationController()) ac->setMountPitchRoll(pitchRad, 0.0f);
             }
         } else if (gameHandler->isSwimming()) {
             // A swimmer goes where the camera looks, so its pitch is the camera's.
@@ -2803,7 +2804,7 @@ void Application::applyServerMovementState(float deltaTime) {
             }
         } else if (gameHandler->isMounted()) {
             // Reset mount pitch when not flying
-            if (auto* ac = renderer->getAnimationController()) ac->setMountPitchRoll(0.0f, 0.0f);
+            if (auto* ac = getAnimationController()) ac->setMountPitchRoll(0.0f, 0.0f);
         }
     }
 
@@ -2850,14 +2851,14 @@ void Application::applyServerMovementState(float deltaTime) {
             worldEntryCallbacks_->getWorldEntryMovementGraceTimer() - deltaTime);
         // Clear stale movement from before teleport each frame
         // until grace period expires (keys may still be held)
-        if (renderer && renderer->getCameraController())
-            renderer->getCameraController()->clearMovementInputs();
+        if (getCameraController())
+            getCameraController()->clearMovementInputs();
     }
     // Hearth teleport: delegated to WorldEntryCallbackHandler
     if (worldEntryCallbacks_) {
         worldEntryCallbacks_->update(deltaTime);
     }
-    if (renderer && renderer->getCameraController()) {
+    if (getCameraController()) {
     // A ship carries the player's reference frame, but it must not
     // freeze local controls like a taxi flight. On-deck walking is
     // folded into the transport-local offset in the sync block below.
@@ -2871,17 +2872,17 @@ void Application::applyServerMovementState(float deltaTime) {
     bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                               worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
                               !gameHandler->isMounted();
-    renderer->getCameraController()->setExternalFollow(
+    getCameraController()->setExternalFollow(
         externallyDrivenMotion || landingClampActive || hearthFreeze ||
         transportTransferFreeze || deckFloorPending_);
-    renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
+    getCameraController()->setExternalMoving(externallyDrivenMotion);
     if (externallyDrivenMotion) {
         // Drop any stale local movement toggles while server drives taxi motion.
-        renderer->getCameraController()->clearMovementInputs();
+        getCameraController()->clearMovementInputs();
         if (worldEntryCallbacks_) worldEntryCallbacks_->setTaxiLandingClampTimer(0.0f);
     }
     if (worldEntryCallbacks_ && worldEntryCallbacks_->getLastTaxiFlight() && !onTaxi) {
-        renderer->getCameraController()->clearMovementInputs();
+        getCameraController()->clearMovementInputs();
         // Keep clamping until terrain loads at landing position.
         // Timer only counts down once a valid floor is found.
         if (worldEntryCallbacks_) {
@@ -2992,16 +2993,16 @@ void Application::applyServerMovementState(float deltaTime) {
             // No floor found: don't decrement timer, keep player frozen until terrain loads
         }
     }
-    bool idleOrbit = renderer->getCameraController()->isIdleOrbit();
+    bool idleOrbit = getCameraController()->isIdleOrbit();
     if (idleOrbit && !idleYawned_ && renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->playEmote("yawn");
+        if (auto* ac = getAnimationController()) ac->playEmote("yawn");
         idleYawned_ = true;
     } else if (!idleOrbit) {
         idleYawned_ = false;
     }
     }
     if (renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->setTaxiFlight(onTaxi);
+        if (auto* ac = getAnimationController()) ac->setTaxiFlight(onTaxi);
         // Round to the character's face while the barber has them in the chair,
         // and back to the player's own view when either ends.
         //
@@ -3009,7 +3010,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // the seat and the shop arrive in either order - they are two packets
         // sent together - and a view set from whichever came first would have
         // been set on half the story.
-        if (auto* cam = renderer->getCameraController()) {
+        if (auto* cam = getCameraController()) {
             cam->setBarberShopView(gameHandler && gameHandler->isBarberShopOpen() &&
                                    cam->isSeatedInChair());
         }
@@ -3066,8 +3067,8 @@ void Application::applyServerMovementState(float deltaTime) {
         if (haveCanonical) {
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
             renderer->getCharacterPosition() = renderPos;
-            if (renderer->getCameraController()) {
-                glm::vec3* followTarget = renderer->getCameraController()->getFollowTargetMutable();
+            if (getCameraController()) {
+                glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
                 if (followTarget) {
                     *followTarget = renderPos;
                 }
@@ -3102,14 +3103,14 @@ void Application::applyServerMovementState(float deltaTime) {
             if (!sameRideFrame && !tr->isM2) {
                 deckFloorPending_ = true;
             }
-            if (sameRideFrame && renderer->getCameraController()) {
+            if (sameRideFrame && getCameraController()) {
                 const glm::vec3 localMotion =
                     tentativeRender - lastWMORideLockedRender_;
-                if (renderer->getCameraController()->isMoving()) {
+                if (getCameraController()->isMoving()) {
                     intendedRender.x += localMotion.x;
                     intendedRender.y += localMotion.y;
                 }
-                if (!renderer->getCameraController()->isGrounded()) {
+                if (!getCameraController()->isGrounded()) {
                     intendedRender.z += localMotion.z;
                 }
             }
@@ -3125,7 +3126,7 @@ void Application::applyServerMovementState(float deltaTime) {
             // returns the height of whatever deck/stair is under the player, so
             // walking up onto a higher deck just follows the collision. An upward
             // jump remains fully controlled by vertical physics (skipped below).
-            auto* cameraController = renderer->getCameraController();
+            auto* cameraController = getCameraController();
             if (!tr->isM2 && cameraController &&
                 !cameraController->isJumping()) {
                 const glm::vec3 intendedCanonical =
@@ -3175,8 +3176,8 @@ void Application::applyServerMovementState(float deltaTime) {
         lastWMORideTransportGuid_ = gameHandler->getPlayerTransportGuid();
         lastWMORideMapId_ = gameHandler->getCurrentMapId();
         gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
-        if (renderer->getCameraController()) {
-            glm::vec3* followTarget = renderer->getCameraController()->getFollowTargetMutable();
+        if (getCameraController()) {
+            glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
             if (followTarget) {
                 *followTarget = renderPos;
             }
@@ -3234,8 +3235,8 @@ void Application::applyServerMovementState(float deltaTime) {
                     // walking animation) so gravity noise while stationary is ignored
                     // instead of accumulated; only apply the delta when the player is
                     // actually pressing a movement key.
-                    const bool hasMovementInput = renderer->getCameraController() &&
-                        renderer->getCameraController()->isMoving();
+                    const bool hasMovementInput = getCameraController() &&
+                        getCameraController()->isMoving();
                     if (hasMovementInput) {
                         localOffset.x += walkDelta.x;
                         localOffset.y += walkDelta.y;
@@ -3261,8 +3262,8 @@ void Application::applyServerMovementState(float deltaTime) {
                 // unable to jump while riding (coyote time never has a
                 // grounded frame to key off). Suppress it every frame the
                 // lock is active so nothing is queued up to unleash later.
-                if (isDeeprunTram && renderer->getCameraController()) {
-                    renderer->getCameraController()->suppressVerticalPhysics();
+                if (isDeeprunTram && getCameraController()) {
+                    getCameraController()->suppressVerticalPhysics();
                 }
                 // Thunder Bluff lifts have real floor at both ends of their travel,
                 // so letting Z track physics while airborne (jumping) is recoverable -
@@ -3274,8 +3275,8 @@ void Application::applyServerMovementState(float deltaTime) {
                 // the tram with nothing to land on - reported live as falling through
                 // the tram/tunnel and dying. Keep Z fully locked for the tram; only
                 // lifts get the airborne exception.
-                if (!isDeeprunTram && renderer->getCameraController() &&
-                    !renderer->getCameraController()->isGrounded()) {
+                if (!isDeeprunTram && getCameraController() &&
+                    !getCameraController()->isGrounded()) {
                     // While airborne (jump/fall), let vertical offset track normal
                     // physics instead of staying pinned to the boarding-time value.
                     // Without this, floor clamping can hold world-Z static unless the
@@ -3293,7 +3294,7 @@ void Application::applyServerMovementState(float deltaTime) {
         } else {
             hasM2RideLock_ = false;
         }
-        if (auto* ac = renderer->getAnimationController()) {
+        if (auto* ac = getAnimationController()) {
             ac->setM2TransportRiding(hasM2RideLock_);
         }
 
@@ -3322,11 +3323,11 @@ void Application::applyServerMovementState(float deltaTime) {
                     LOG_WARNING("Player Z reversal: z=", renderPos.z,
                                 " step=", dz, " prevStep=", lastDz,
                                 " grounded=",
-                                renderer->getCameraController() &&
-                                renderer->getCameraController()->isGrounded() ? 1 : 0,
+                                getCameraController() &&
+                                getCameraController()->isGrounded() ? 1 : 0,
                                 " moving=",
-                                renderer->getCameraController() &&
-                                renderer->getCameraController()->isMoving() ? 1 : 0);
+                                getCameraController() &&
+                                getCameraController()->isMoving() ? 1 : 0);
                 }
             }
             if (std::abs(dz) > 0.02f) lastDz = dz;
@@ -3832,8 +3833,8 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     updateCheckpoint = "in_game: gameHandler update";
 #ifdef __ANDROID__
     ui::touchControls().update();
-    if (renderer && renderer->getCameraController()) {
-        auto* cam = renderer->getCameraController();
+    if (getCameraController()) {
+        auto* cam = getCameraController();
         ui::touchControls().setCameraController(cam);
         // The touch controls turn the view themselves, from whichever finger is
         // doing it. SDL's own translation of the first finger must not turn it
@@ -3874,8 +3875,8 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         const bool hasDrawableWeapon = !mainHand.empty() || hasOffHandWeapon || hasRangedWeapon;
         if (attackWeaponNeeded && hasDrawableWeapon && appearanceComposer_ &&
             appearanceComposer_->isWeaponsSheathed()) {
-            if (renderer && renderer->getAnimationController()) {
-                renderer->getAnimationController()->playWeaponSheathAnimation(
+            if (getAnimationController()) {
+                getAnimationController()->playWeaponSheathAnimation(
                     appearanceComposer_->sheathSpot(game::EquipSlot::MAIN_HAND),
                     appearanceComposer_->sheathSpot(game::EquipSlot::OFF_HAND));
             }
@@ -3894,7 +3895,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     // the swim cycle. No reach animation: the character is already swimming, and
     // the sheathe reach would be played over a stroke it does not fit.
     {
-        auto* cc = renderer ? renderer->getCameraController() : nullptr;
+        auto* cc = renderer ? getCameraController() : nullptr;
         const bool swimmingNow = cc && cc->isSwimming();
         if (swimmingNow && !wasSwimmingForSheath_ && appearanceComposer_
             && !appearanceComposer_->isWeaponsSheathed()) {
@@ -3912,8 +3913,8 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
                                      ui::interfaceTakingTypedInput();
         auto& input = Input::getInstance();
         if (!uiWantsKeyboard && input.isKeyJustPressed(SDL_SCANCODE_Z) && appearanceComposer_) {
-            if (renderer && renderer->getAnimationController()) {
-                renderer->getAnimationController()->playWeaponSheathAnimation(
+            if (getAnimationController()) {
+                getAnimationController()->playWeaponSheathAnimation(
                     appearanceComposer_->sheathSpot(game::EquipSlot::MAIN_HAND),
                     appearanceComposer_->sheathSpot(game::EquipSlot::OFF_HAND));
             }
@@ -4062,6 +4063,117 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         LOG_ERROR("Exception inside AppState::IN_GAME at step '", inGameStep, "': ", e.what());
         throw;
     }
+}
+
+rendering::CameraController* Application::getCameraController() {
+    return playerView_ ? playerView_->getCameraController() : nullptr;
+}
+
+rendering::AnimationController* Application::getAnimationController() {
+    return playerView_ ? playerView_->getAnimationController() : nullptr;
+}
+
+void Application::onWorldRenderersReady() {
+    if (!renderer) return;
+    if (auto* m2 = renderer->getM2Renderer(); m2 && !spellVisualsAttached_) {
+        spellVisualSystem_->initialize(m2, renderer.get());
+        spellVisualsAttached_ = true;
+    }
+    if (!worldMap_ && assetManager) {
+        auto map = std::make_unique<rendering::WorldMap>();
+        if (map->initialize(renderer->getVkContext(), assetManager.get())) {
+            worldMap_ = std::move(map);
+            renderer->registerComposite(worldMap_.get());
+        } else {
+            LOG_ERROR("Failed to initialize world map");
+        }
+    }
+    playerView_->attachWorld();
+}
+
+void Application::setActiveMapName(const std::string& name) {
+    if (renderer) renderer->setActiveMapName(name);
+    if (worldMap_) worldMap_->setMapName(name);
+}
+
+void Application::presentWorldToRenderer(float deltaTime) {
+    playerView_->beforeRendererUpdate(deltaTime);
+
+    zoneTracker_->update(renderer->getTerrainManager(), renderer->getCharacterPosition(),
+                         gameHandler.get(), audioCoordinator_.get());
+
+    rendering::WorldEnvironment environment;
+    environment.zoneId = zoneTracker_->zoneId();
+    if (gameHandler) {
+        environment.mapId = gameHandler->getCurrentMapId();
+        environment.gameTime = gameHandler->getGameTime();
+        environment.raining = gameHandler->isRaining();
+        environment.weatherType = gameHandler->getWeatherType();
+        environment.weatherIntensity = gameHandler->getWeatherIntensity();
+        environment.ghost = gameHandler->isPlayerGhost();
+    }
+    renderer->setWorldEnvironment(environment);
+
+    audioCoordinator_->updateDeferredLoad(deltaTime);
+}
+
+void Application::followRendererUpdate(float deltaTime) {
+    playerView_->afterRendererUpdate(deltaTime);
+
+    // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
+    // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
+    // ZONE_CHANGED - there is no outdoors counterpart.
+    const bool indoors = renderer->isPlayerIndoors();
+    if (indoors != cameraIndoors_ && gameHandler) {
+        gameHandler->fireAddonEvent(indoors ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
+    }
+    cameraIndoors_ = indoors;
+
+    // The listener stands where the camera does.
+    if (const auto* camera = renderer->getCamera()) {
+        const glm::vec3 fwd = camera->getForward();
+        glm::vec3 right = glm::cross(fwd, glm::vec3(0.0f, 0.0f, 1.0f));
+        const float rLen = glm::length(right);
+        right = (rLen < 1e-6f) ? glm::vec3(1.0f, 0.0f, 0.0f) : right / rLen;
+        glm::vec3 up = glm::cross(right, fwd);
+        const float uLen = glm::length(up);
+        up = (uLen < 1e-6f) ? glm::vec3(0.0f, 0.0f, 1.0f) : up / uLen;
+        audioCoordinator_->setListener(camera->getPosition(), fwd, up);
+    }
+    audioCoordinator_->update(deltaTime);
+
+    // Ambient environmental sounds + zone/music transitions.
+    audio::ZoneAudioContext zctx;
+    zctx.deltaTime = deltaTime;
+    zctx.cameraPosition = renderer->getCamera() ? renderer->getCamera()->getPosition() : glm::vec3(0.0f);
+    zctx.isSwimming = getCameraController()->isSwimming();
+    zctx.insideWmo = indoors;
+    zctx.insideWmoId = renderer->getInsideWmoId();
+    if (const auto* weather = renderer->getWeather()) {
+        const auto wt = weather->getWeatherType();
+        if (wt == rendering::Weather::Type::RAIN)       zctx.weatherType = 1;
+        else if (wt == rendering::Weather::Type::SNOW)  zctx.weatherType = 2;
+        else if (wt == rendering::Weather::Type::STORM) zctx.weatherType = 3;
+        zctx.weatherIntensity = weather->getIntensity();
+    }
+    if (auto* lighting = renderer->getLightingManager()) {
+        zctx.gameTimeHours = lighting->getVisualTimeOfDayHours();
+    }
+    if (const auto* terrain = renderer->getTerrainManager()) {
+        const auto tile = terrain->getCurrentTile();
+        zctx.tileX = tile.x;
+        zctx.tileY = tile.y;
+        zctx.hasTile = true;
+    }
+    // The precise MCNK area classification when available; this avoids stale
+    // server world-state zones and whole-ADT ambiguity at river banks.
+    zctx.serverZoneId = zoneTracker_->zoneId();
+    zctx.zoneManager = zoneTracker_->getZoneManager();
+    audioCoordinator_->updateZoneAudio(zctx);
+
+    performanceHUD_->setZoneName(audioCoordinator_->getCurrentZoneName());
+    performanceHUD_->setCameraUpdateMs(playerView_->lastCameraUpdateMs());
+    performanceHUD_->update(deltaTime);
 }
 
 void Application::update(float deltaTime) {
@@ -4380,7 +4492,9 @@ void Application::update(float deltaTime) {
     if (renderer && state == AppState::IN_GAME) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
+            presentWorldToRenderer(deltaTime);
             renderer->update(deltaTime);
+            followRendererUpdate(deltaTime);
             if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
                 glm::vec3 feet = renderer->getCharacterPosition();
                 static std::optional<float> floor;
@@ -4502,19 +4616,22 @@ void Application::render() {
 #endif
 
     renderingFrame_ = true;
+    // The offline stream fixture draws its uploads through the real world path.
+    const bool drawWorld = state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
+        std::getenv("WOWEE_FOUNTAIN_PROBE");
+    renderer->setWorldInView(state == AppState::IN_GAME);
+    screenRecording_->update();
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
-    // The offline stream fixture draws its uploads through the real world path.
-    if (state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") || std::getenv("WOWEE_FOUNTAIN_PROBE") ||
-        std::getenv("WOWEE_MODEL_PROBE")) {
-        runRenderStage("renderWorld", [&] {
-            renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
-        });
+    if (drawWorld) {
+        runRenderStage("renderWorld", [&] { renderer->renderWorld(); });
     }
 
     // Render performance HUD (within ImGui frame, before UI ends the frame)
     if (renderer) {
-        runRenderStage("renderHUD", [&] { renderer->renderHUD(); });
+        runRenderStage("renderHUD", [&] {
+            if (renderer->getCamera()) performanceHUD_->render(renderer.get(), renderer->getCamera());
+        });
     }
 
     // Addon-built frames, drawn under the client's own interface while the two
@@ -4567,7 +4684,7 @@ void Application::render() {
                 // like the minimap it is told where to be rather than handed
                 // a picture. The detail frame, not the outer one: that is the
                 // map area inside the panel FrameXML drew.
-                if (auto* wmap = renderer->getWorldMap()) {
+                if (auto* wmap = getWorldMap()) {
                     // The map settles on the player's zone a frame after the
                     // interface asked where it was, so it says when it has and
                     // the dropdowns are rebuilt from the answer rather than
@@ -5316,7 +5433,7 @@ void Application::render() {
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
             if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
-                !std::getenv("WOWEE_SHADOW_PROBE_SCENE") && !std::getenv("WOWEE_MODEL_PROBE"))
+                !std::getenv("WOWEE_SHADOW_PROBE_SCENE"))
                 uiManager->render(state, authHandler.get(), gameHandler.get());
         });
 
@@ -5370,7 +5487,7 @@ void Application::render() {
         ++envRecordFrames_;
         if (envRecordFrames_ == kScreenshotFrame) {
             std::string error;
-            if (renderer->startRecording(record, error)) {
+            if (screenRecording_->start(record, error)) {
                 envRecordStart_ = std::chrono::steady_clock::now();
             } else {
                 LOG_WARNING("WOWEE_RECORD: could not start: ", error);
@@ -5549,7 +5666,7 @@ void Application::setupUICallbacks() {
 
     // ── World entry, unstuck, hearthstone, bind point ──
     worldEntryCallbacks_ = std::make_unique<WorldEntryCallbackHandler>(
-        *renderer, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
+        *renderer, *playerView_, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
         assetManager.get());
     worldEntryCallbacks_->setupCallbacks();
 
@@ -5567,7 +5684,7 @@ void Application::setupUICallbacks() {
 
     // ── Animation: death, respawn, swing, hit, spell, emote, charge, etc. ──
     animationCallbacks_ = std::make_unique<AnimationCallbackHandler>(
-        *entitySpawner_, *renderer, *gameHandler, *appearanceComposer_);
+        *entitySpawner_, *renderer, *playerView_, *gameHandler, *appearanceComposer_);
     animationCallbacks_->setupCallbacks();
 
     // ── NPC interaction: greeting, farewell, vendor, aggro voice ──
@@ -5577,13 +5694,13 @@ void Application::setupUICallbacks() {
 
     // ── Audio: music, sound effects, level-up, achievement, LFG ──
     audioCallbacks_ = std::make_unique<AudioCallbackHandler>(
-        *assetManager, audioCoordinator_.get(), renderer.get(),
+        *assetManager, audioCoordinator_.get(), renderer.get(), playerView_.get(),
         uiManager.get(), *gameHandler);
     audioCallbacks_->setupCallbacks();
 
     // ── Transport: mount, taxi, transport spawn/move ──
     transportCallbacks_ = std::make_unique<TransportCallbackHandler>(
-        *entitySpawner_, *renderer, *gameHandler, appearanceComposer_.get());
+        *entitySpawner_, *renderer, *playerView_, *gameHandler, appearanceComposer_.get());
     transportCallbacks_->setupCallbacks();
 }
 
@@ -5717,7 +5834,7 @@ void Application::spawnPlayerCharacter() {
 
     // Spawn character at the camera controller's default position (matches hearthstone).
     // Most presets snap to floor; explicit WMO-floor presets keep their authored Z.
-    auto* camCtrl = renderer->getCameraController();
+    auto* camCtrl = getCameraController();
     glm::vec3 spawnPos = camCtrl ? camCtrl->getDefaultPosition()
                                  : (camera->getPosition() - glm::vec3(0.0f, 0.0f, 5.0f));
     if (spawnSnapToGround && renderer->getTerrainManager()) {
@@ -5732,7 +5849,7 @@ void Application::spawnPlayerCharacter() {
     if (instanceId > 0) {
 	        // Set up third-person follow
 	        renderer->getCharacterPosition() = spawnPos;
-	        renderer->setCharacterFollow(instanceId);
+	        playerView_->setCharacterFollow(instanceId);
 
 	        // Build default geosets for the active character via AppearanceComposer
 	        uint8_t hairStyleId = 0;
@@ -5793,8 +5910,8 @@ void Application::spawnPlayerCharacter() {
         }
 
         // Set up camera controller for first-person player hiding
-        if (renderer->getCameraController()) {
-            renderer->getCameraController()->setCharacterRenderer(charRenderer, instanceId);
+        if (getCameraController()) {
+            getCameraController()->setCharacterRenderer(charRenderer, instanceId);
         }
 
         // Load equipped weapons (sword + shield)
@@ -5822,8 +5939,8 @@ void Application::refreshPlayerCharacterModel() {
     if (renderer && renderer->getCharacterRenderer()) {
         uint32_t oldInst = renderer->getCharacterInstanceId();
         if (oldInst > 0) {
-            renderer->setCharacterFollow(0);
-            if (auto* ac = renderer->getAnimationController()) ac->clearMount();
+            playerView_->setCharacterFollow(0);
+            if (auto* ac = getAnimationController()) ac->clearMount();
             renderer->getCharacterRenderer()->removeInstance(oldInst);
         }
     }

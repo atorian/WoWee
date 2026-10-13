@@ -1,4 +1,5 @@
 #include "game/group_defines.hpp"
+#include "core/zone_tracker.hpp"
 
 #include <set>
 #include "ui/game_screen.hpp"
@@ -1378,7 +1379,8 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
         // nothing. The server tells us its zone on SMSG_INIT_WORLD_STATES and
         // at no other time, so preferring it left this label naming the last
         // zone the server announced rather than the one being walked through.
-        uint32_t zoneId = renderer ? renderer->getCurrentZoneId() : 0u;
+        auto* zones = services_.zoneTracker;
+        uint32_t zoneId = zones ? zones->zoneId() : 0u;
         const uint32_t serverZoneId = gameHandler.getWorldStateZoneId();
         if (zoneId == 0) zoneId = serverZoneId;
         // Said once each time the pair changes. The two disagreeing is not by
@@ -1403,15 +1405,15 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
         if (zoneId != 0) {
             zoneName = gameHandler.getWhoAreaName(zoneId);
             if (zoneName.empty()) {
-                if (auto* zmRenderer = renderer ? renderer->getZoneManager() : nullptr) {
-                    if (const game::ZoneInfo* zi = zmRenderer->getZoneInfo(zoneId)) {
+                if (auto* zoneTable = zones ? zones->getZoneManager() : nullptr) {
+                    if (const game::ZoneInfo* zi = zoneTable->getZoneInfo(zoneId)) {
                         zoneName = zi->name;
                     }
                 }
             }
         }
-        if (zoneName.empty() && renderer) {
-            zoneName = renderer->getCurrentZoneName();
+        if (zoneName.empty() && services_.audioCoordinator) {
+            zoneName = services_.audioCoordinator->getCurrentZoneName();
         }
         if (!zoneName.empty()) {
             ImFont* font = ImGui::GetFont();

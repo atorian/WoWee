@@ -4,6 +4,7 @@
 // graphics preset logic.
 // ============================================================
 #include "addons/addon_lua_snippets.hpp"
+#include "core/zone_tracker.hpp"
 #include "ui/graphics_choices.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
@@ -425,7 +426,7 @@ void SettingsPanel::renderSettingsWindow(ChatPanel& chatPanel,
             renderer->setShadowsEnabled(pendingShadows);
             renderer->setShadowDistance(pendingShadowDistance);
             // Read non-volume settings from actual state (volumes come from saved settings)
-            if (auto* cameraController = renderer->getCameraController()) {
+            if (auto* cameraController = services_.cameraController) {
                 cameraController->setMouseSensitivity(pendingMouseSensitivity);
                 cameraController->setInvertMouse(pendingInvertMouse);
                 cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
@@ -1207,7 +1208,7 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     // and needs none.
     auto* renderer = services_.renderer;
     auto* camera = renderer ? renderer->getCamera() : nullptr;
-    auto* cameraController = renderer ? renderer->getCameraController() : nullptr;
+    auto* cameraController = services_.cameraController;
     auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
     auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
     auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
@@ -1442,13 +1443,11 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         // The interface's options panel has offered this since the schema grew
         // and it did nothing but store the answer, because the only copy of
         // this lived beside the checkbox in the settings window.
-        if (renderer) {
-            if (auto* zm = renderer->getZoneManager()) {
-                zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
-                if (!pendingUseOriginalSoundtrack) {
-                    if (auto* ac = renderer->getAudioCoordinator()) {
-                        ac->onOriginalSoundtrackDisabled(zm);
-                    }
+        if (auto* zm = services_.zoneTracker ? services_.zoneTracker->getZoneManager() : nullptr) {
+            zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
+            if (!pendingUseOriginalSoundtrack) {
+                if (auto* ac = services_.audioCoordinator) {
+                    ac->onOriginalSoundtrackDisabled(zm);
                 }
             }
         }

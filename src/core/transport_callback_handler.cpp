@@ -1,4 +1,5 @@
 #include "core/transport_callback_handler.hpp"
+#include "core/player_view.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/world_loader.hpp"
@@ -20,10 +21,12 @@ namespace wowee { namespace core {
 TransportCallbackHandler::TransportCallbackHandler(
     EntitySpawner& entitySpawner,
     rendering::Renderer& renderer,
+    PlayerView& playerView,
     game::GameHandler& gameHandler,
     AppearanceComposer* appearanceComposer)
     : entitySpawner_(entitySpawner)
     , renderer_(renderer)
+    , playerView_(playerView)
     , gameHandler_(gameHandler)
     , appearanceComposer_(appearanceComposer)
 {
@@ -39,7 +42,7 @@ void TransportCallbackHandler::setupCallbacks() {
                 entitySpawner_.clearMountState();
             }
             entitySpawner_.setMountDisplayId(0);
-            if (auto* ac = renderer_.getAnimationController()) ac->clearMount();
+            if (auto* ac = playerView_.getAnimationController()) ac->clearMount();
             LOG_INFO("Dismounted");
             return;
         }
@@ -108,13 +111,13 @@ void TransportCallbackHandler::setupCallbacks() {
 
     // Taxi orientation callback - update mount rotation during flight
     gameHandler_.setTaxiOrientationCallback([this](float yaw, float pitch, float roll) {
-        if (renderer_.getCameraController()) {
+        if (playerView_.getCameraController()) {
             // Taxi callback now provides render-space yaw directly.
             float yawDegrees = glm::degrees(yaw);
-            renderer_.getCameraController()->setFacingYaw(yawDegrees);
+            playerView_.getCameraController()->setFacingYaw(yawDegrees);
             renderer_.setCharacterYaw(yawDegrees);
             // Set mount pitch and roll for realistic flight animation
-            if (auto* ac = renderer_.getAnimationController()) ac->setMountPitchRoll(pitch, roll);
+            if (auto* ac = playerView_.getAnimationController()) ac->setMountPitchRoll(pitch, roll);
         }
     });
 
@@ -124,8 +127,8 @@ void TransportCallbackHandler::setupCallbacks() {
     gameHandler_.setPlayerPositionCorrectionCallback([this](float x, float y, float z) {
         glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
         renderer_.getCharacterPosition() = renderPos;
-        if (renderer_.getCameraController()) {
-            glm::vec3* followTarget = renderer_.getCameraController()->getFollowTargetMutable();
+        if (playerView_.getCameraController()) {
+            glm::vec3* followTarget = playerView_.getCameraController()->getFollowTargetMutable();
             if (followTarget) {
                 *followTarget = renderPos;
             }
@@ -223,7 +226,7 @@ void TransportCallbackHandler::setupCallbacks() {
 
         // Move player with transport if riding it
         if (gameHandler_.isOnTransport() && gameHandler_.getPlayerTransportGuid() == guid) {
-            auto* cc = renderer_.getCameraController();
+            auto* cc = playerView_.getCameraController();
             if (cc) {
                 glm::vec3* ft = cc->getFollowTargetMutable();
                 if (ft) {

@@ -42,7 +42,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
             preview_.reset();
             return;
         }
-        renderer->registerPreview(preview_.get());
+        renderer->registerComposite(preview_.get());
         registered_ = true;
     }
 
@@ -129,7 +129,7 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
             preview_.reset();
             return false;
         }
-        renderer->registerPreview(preview_.get());
+        renderer->registerComposite(preview_.get());
         registered_ = true;
     }
 
@@ -197,7 +197,7 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
             preview_.reset();
             return false;
         }
-        renderer->registerPreview(preview_.get());
+        renderer->registerComposite(preview_.get());
         registered_ = true;
     }
 
@@ -239,7 +239,7 @@ void UnitPortrait::rotate(float yawDelta) {
 }
 
 void UnitPortrait::shutdown(rendering::Renderer* renderer) {
-    if (preview_ && registered_ && renderer) renderer->unregisterPreview(preview_.get());
+    if (preview_ && registered_ && renderer) renderer->unregisterComposite(preview_.get());
     registered_ = false;
     preview_.reset();
     initialized_ = false;

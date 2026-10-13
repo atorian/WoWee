@@ -2,7 +2,7 @@
 
 #include "game/game_handler.hpp"
 #include "game/inventory.hpp"
-// WorldMap is now owned by Renderer, accessed via getWorldMap()
+// WorldMap is owned by the Application, reached through UIServices::worldMap
 #include "rendering/character_preview.hpp"
 #include "ui/inventory_screen.hpp"
 #include "ui/spellbook_screen.hpp"
@@ -355,7 +355,7 @@ private:
     InventoryScreen inventoryScreen;
     uint64_t inventoryScreenCharGuid_ = 0;  // GUID of character inventory screen was initialized for
     SpellbookScreen spellbookScreen;
-    // WorldMap is now owned by Renderer (accessed via renderer->getWorldMap())
+    // WorldMap is owned by the Application (reached through UIServices::worldMap)
 
     // Spell icon cache: spellId -> GL texture ID
     std::unordered_map<uint32_t, VkDescriptorSet> spellIconCache_;

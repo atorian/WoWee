@@ -1,0 +1,11 @@
+// Stormwind's trade district on its own terrain and buildings, late
+// afternoon: shadows from the city across the street.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1519,
+  "hour": 16.5,
+  "server": [-8833.0, 628.0, 94.0],
+  "terrain": true,
+  "camera": { "offset": [-25, -25, 12], "lookAt": [0, 0, 2] },
+  "size": [1280, 720],
+  "frames": 60
+}

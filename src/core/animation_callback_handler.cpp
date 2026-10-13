@@ -1,4 +1,5 @@
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "core/player_view.hpp"
 #include "core/animation_callback_handler.hpp"
 #include "game/game_events.hpp"
 #include "core/appearance_composer.hpp"
@@ -26,10 +27,12 @@ namespace wowee { namespace core {
 AnimationCallbackHandler::AnimationCallbackHandler(
     EntitySpawner& entitySpawner,
     rendering::Renderer& renderer,
+    PlayerView& playerView,
     game::GameHandler& gameHandler,
     AppearanceComposer& appearanceComposer)
     : entitySpawner_(entitySpawner)
     , renderer_(renderer)
+    , playerView_(playerView)
     , gameHandler_(gameHandler)
     , appearanceComposer_(appearanceComposer)
 {
@@ -60,7 +63,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
         dir *= glm::inversesqrt(dirLenSq);
         float yawDeg = glm::degrees(std::atan2(dir.x, dir.y));
         renderer_.setCharacterYaw(yawDeg);
-        if (auto* ac = renderer_.getAnimationController()) ac->emitChargeEffect(renderPos, dir);
+        if (auto* ac = playerView_.getAnimationController()) ac->emitChargeEffect(renderPos, dir);
     }
 
     // Sync to game handler
@@ -68,8 +71,8 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
     gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
 
     // Update camera follow target
-    if (renderer_.getCameraController()) {
-        glm::vec3* followTarget = renderer_.getCameraController()->getFollowTargetMutable();
+    if (playerView_.getCameraController()) {
+        glm::vec3* followTarget = playerView_.getCameraController()->getFollowTargetMutable();
         if (followTarget) {
             *followTarget = renderPos;
         }
@@ -78,10 +81,10 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
     // Charge complete
     if (t >= 1.0f) {
         chargeActive_ = false;
-        if (auto* ac = renderer_.getAnimationController()) ac->setCharging(false);
-        if (auto* ac = renderer_.getAnimationController()) ac->stopChargeEffect();
-        renderer_.getCameraController()->setExternalFollow(false);
-        renderer_.getCameraController()->setExternalMoving(false);
+        if (auto* ac = playerView_.getAnimationController()) ac->setCharging(false);
+        if (auto* ac = playerView_.getAnimationController()) ac->stopChargeEffect();
+        playerView_.getCameraController()->setExternalFollow(false);
+        playerView_.getCameraController()->setExternalMoving(false);
 
         // Snap to melee range of target's CURRENT position (it may have moved)
         if (chargeTargetGuid_ != 0) {
@@ -97,14 +100,14 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
                     renderer_.getCharacterPosition() = snapPos;
                     glm::vec3 snapCanonical = core::coords::renderToCanonical(snapPos);
                     gameHandler_.setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
-                    if (renderer_.getCameraController()) {
-                        glm::vec3* ft = renderer_.getCameraController()->getFollowTargetMutable();
+                    if (playerView_.getCameraController()) {
+                        glm::vec3* ft = playerView_.getCameraController()->getFollowTargetMutable();
                         if (ft) *ft = snapPos;
                     }
                 }
             }
             gameHandler_.startAutoAttack(chargeTargetGuid_);
-            if (auto* ac = renderer_.getAnimationController()) ac->triggerMeleeSwing();
+            if (auto* ac = playerView_.getAnimationController()) ac->triggerMeleeSwing();
         }
 
         // Send movement heartbeat so server knows our new position
@@ -117,7 +120,7 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
 void AnimationCallbackHandler::setupCallbacks() {
     // Sprint aura callback - use SPRINT(143) animation when sprint-type buff is active
     gameHandler_.setSprintAuraCallback([this](bool active) {
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (ac) ac->setSprintAuraActive(active);
     });
 
@@ -131,7 +134,7 @@ void AnimationCallbackHandler::setupCallbacks() {
 
     // Charge callback - warrior rushes toward target
     gameHandler_.setChargeCallback([this](uint64_t targetGuid, float tx, float ty, float tz) {
-        if (!renderer_.getCameraController()) return;
+        if (!playerView_.getCameraController()) return;
 
         // Get current player position in render coords
         glm::vec3 startRender = renderer_.getCharacterPosition();
@@ -164,13 +167,13 @@ void AnimationCallbackHandler::setupCallbacks() {
         chargeTargetGuid_ = targetGuid;
 
         // Disable player input, play charge animation
-        renderer_.getCameraController()->setExternalFollow(true);
-        renderer_.getCameraController()->clearMovementInputs();
-        if (auto* ac = renderer_.getAnimationController()) ac->setCharging(true);
+        playerView_.getCameraController()->setExternalFollow(true);
+        playerView_.getCameraController()->clearMovementInputs();
+        if (auto* ac = playerView_.getAnimationController()) ac->setCharging(true);
 
         // Start charge visual effect (red haze + dust)
         glm::vec3 chargeDir = glm::normalize(endRender - startRender);
-        if (auto* ac = renderer_.getAnimationController()) ac->startChargeEffect(startRender, chargeDir);
+        if (auto* ac = playerView_.getAnimationController()) ac->startChargeEffect(startRender, chargeDir);
 
         // Charge's cast kit points at SoundEntries 3330 ("HeroicLeap"), whose file name
         // carries Blizzard's own typo. There is no Sound\Spells\Charge.wav.
@@ -260,7 +263,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         // For local player: use AnimationController state
         bool isLocalPlayer = (victimGuid == gameHandler_.getPlayerGuid());
         if (isLocalPlayer) {
-            auto* ac = renderer_.getAnimationController();
+            auto* ac = playerView_.getAnimationController();
             if (ac) {
                 uint32_t charInstId = renderer_.getCharacterInstanceId();
                 if (charInstId && cr->hasAnimation(charInstId, animId))
@@ -278,19 +281,19 @@ void AnimationCallbackHandler::setupCallbacks() {
 
     // Stun state callback - enters/exits STUNNED animation on local player
     gameHandler_.setStunStateCallback([this](bool stunned) {
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (ac) ac->setStunned(stunned);
     });
 
     // Stealth state callback - switches to stealth animation variants
     gameHandler_.setStealthStateCallback([this](bool stealthed) {
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (ac) ac->setStealthed(stealthed);
     });
 
     // Player health callback - switches to wounded idle when HP < 20%
     gameHandler_.setPlayerHealthCallback([this](uint32_t health, uint32_t maxHealth) {
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (!ac) return;
         bool lowHp = (maxHealth > 0) && (health > 0) && (health * 5 <= maxHealth);
         ac->setLowHealth(lowHp);
@@ -463,7 +466,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             }
 
             if (restChannel != game::spellclass::RestChannelKind::NONE) {
-                if (auto* ac = renderer_.getAnimationController()) {
+                if (auto* ac = playerView_.getAnimationController()) {
                     if (restChannel == game::spellclass::RestChannelKind::CANNIBALIZE) {
                         // Standing, and looping for the length of the channel.
                         //
@@ -520,7 +523,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                     rendering::anim::EMOTE_WORK,
                     rendering::anim::EMOTE_USE_STANDING
                 });
-                if (auto* ac = renderer_.getAnimationController()) {
+                if (auto* ac = playerView_.getAnimationController()) {
                     ac->startSpellCast(0, mineAnim ? mineAnim : rendering::anim::STAND, true, 0);
                 }
             } else if (isBandage || isGathering) {
@@ -541,7 +544,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                     rendering::anim::USE_STANDING_END,
                     rendering::anim::STAND
                 });
-                if (auto* ac = renderer_.getAnimationController()) {
+                if (auto* ac = playerView_.getAnimationController()) {
                     ac->startSpellCast(useStart, useLoop ? useLoop : rendering::anim::STAND, true, useEnd);
                 }
             } else if (isFishing && cr->hasAnimation(instanceId, rendering::anim::FISHING_LOOP)) {
@@ -554,7 +557,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                         appearanceComposer_.loadEquippedWeapons();
                     }
                     appearanceComposer_.showFishingPole(true);
-                    auto* ac = renderer_.getAnimationController();
+                    auto* ac = playerView_.getAnimationController();
                     if (ac) {
                         uint32_t castAnim = cr->hasAnimation(instanceId, rendering::anim::FISHING_CAST)
                             ? rendering::anim::FISHING_CAST : 0;
@@ -648,7 +651,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             }
 
             if (isLocalPlayer) {
-                auto* ac = renderer_.getAnimationController();
+                auto* ac = playerView_.getAnimationController();
                 if (ac) ac->startSpellCast(precastAnim, castAnim, true, finalizeAnim);
             } else {
                 cr->playAnimation(instanceId, castAnim, true);
@@ -659,7 +662,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             if (isLocalPlayer) {
                 appearanceComposer_.showMiningPick(false);
                 appearanceComposer_.showFishingPole(false);
-                auto* ac = renderer_.getAnimationController();
+                auto* ac = playerView_.getAnimationController();
                 if (ac) {
                     ac->setSeatedLoopAnimation(0);
                     ac->stopSpellCast();
@@ -695,11 +698,11 @@ void AnimationCallbackHandler::setupCallbacks() {
         // applyServerStandState never ran again: seatedInChair_ stayed false,
         // the chair stayed a floor, and a character sat down in the right pose
         // on top of the furniture rather than in it.
-        if (auto* cc = renderer_.getCameraController()) {
+        if (auto* cc = playerView_.getCameraController()) {
             cc->applyServerStandState(standState);
         }
 
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (!ac) return;
 
         // Death is special - play directly, not through sit state machine
@@ -726,7 +729,7 @@ void AnimationCallbackHandler::setupCallbacks() {
 
     // Loot window callback - play kneel/loot animation while looting
     gameHandler_.setLootWindowCallback([this](bool open) {
-        auto* ac = renderer_.getAnimationController();
+        auto* ac = playerView_.getAnimationController();
         if (!ac) return;
         if (open) ac->startLooting();
         else      ac->stopLooting();

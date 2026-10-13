@@ -4,6 +4,7 @@
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
+#include "rendering/offscreen_composite.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -20,13 +21,15 @@ namespace pipeline { class AssetManager; }
 namespace rendering {
 namespace world_map {
 
-class WorldMapFacade {
+class WorldMapFacade : public OffscreenComposite {
 public:
     /// Backward-compatible alias for old WorldMap::QuestPoi usage.
     using QuestPoi = QuestPOI;
 
     WorldMapFacade();
-    ~WorldMapFacade();
+    ~WorldMapFacade() override;
+
+    void compositeOffscreen(VkCommandBuffer cmd, uint32_t /*frameIndex*/) override { compositePass(cmd); }
 
     bool initialize(VkContext* ctx, pipeline::AssetManager* am);
     void shutdown();

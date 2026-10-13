@@ -16,12 +16,15 @@ namespace ui { class UIManager; }
 
 namespace core {
 
+class PlayerView;
+
 /// Handles audio-related callbacks: music, sound effects, level-up, achievement, LFG.
 class AudioCallbackHandler {
 public:
     AudioCallbackHandler(pipeline::AssetManager& assetManager,
                          audio::AudioCoordinator* audioCoordinator,
                          rendering::Renderer* renderer,
+                         PlayerView* playerView,
                          ui::UIManager* uiManager,
                          game::GameHandler& gameHandler);
 
@@ -34,6 +37,7 @@ private:
     pipeline::AssetManager& assetManager_;
     audio::AudioCoordinator* audioCoordinator_;
     rendering::Renderer* renderer_;
+    PlayerView* playerView_;
     ui::UIManager* uiManager_;
     game::GameHandler& gameHandler_;
     std::vector<EventBus::Subscription> subscriptions_;

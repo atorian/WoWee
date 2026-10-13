@@ -13,6 +13,7 @@
 #include "audio/movement_sound_manager.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "game/zone_manager.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 
 namespace wowee {
@@ -70,6 +71,86 @@ void AudioCoordinator::shutdown() {
     }
 
     LOG_INFO("AudioCoordinator shutdown complete");
+}
+
+void AudioCoordinator::loadWorldSounds(pipeline::AssetManager* assets,
+                                       const game::ZoneManager* zones) {
+    if (worldSoundsLoaded_ || !assets || !musicManager_) return;
+    worldSoundsLoaded_ = true;
+
+    AudioEngine::instance().setAssetManager(assets);
+    musicManager_->initialize(assets);
+    footstepManager_->initialize(assets);
+    activitySoundManager_->initialize(assets);
+    mountSoundManager_->initialize(assets);
+    npcVoiceManager_->initialize(assets);
+    playerVoiceManager_->initialize(assets);
+
+    deferredAssets_ = assets;
+    if (core::envFlagEnabled("WOWEE_DEFER_WORLD_SYSTEMS", true)) {
+        deferredGroup_ = 0;
+        deferredCooldown_ = 0.25f;
+        return;
+    }
+    for (uint8_t group = 0; loadDeferredGroup(group); ++group) {}
+    deferredAssets_ = nullptr;
+
+    if (core::envFlagEnabled("WOWEE_PREWARM_ZONE_MUSIC", false)) {
+        if (zones) {
+            for (const auto& musicPath : zones->getAllMusicPaths()) {
+                musicManager_->preloadMusic(musicPath);
+            }
+        }
+        const std::string tavernRemix =
+            game::ZoneManager::resolveOriginalMusicFile("TavernAllianceREMIX.mp3");
+        const std::vector<std::string> tavernTracks = {
+            tavernRemix.empty()
+                ? std::string("Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance01.mp3")
+                : tavernRemix,
+            "Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance02.mp3",
+            "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern1A.mp3",
+            "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern2A.mp3",
+        };
+        for (const auto& musicPath : tavernTracks) {
+            musicManager_->preloadMusic(musicPath);
+        }
+    }
+}
+
+bool AudioCoordinator::loadDeferredGroup(uint8_t group) {
+    pipeline::AssetManager* assets = deferredAssets_;
+    switch (group) {
+        case 0: ambientSoundManager_->initialize(assets); return true;
+        case 1: uiSoundManager_->initialize(assets); return true;
+        case 2: combatSoundManager_->initialize(assets); return true;
+        case 3: spellSoundManager_->initialize(assets); return true;
+        case 4: movementSoundManager_->initialize(assets); return true;
+        default: return false;
+    }
+}
+
+void AudioCoordinator::updateDeferredLoad(float deltaTime) {
+    if (!deferredAssets_) return;
+    if (deferredCooldown_ > 0.0f) {
+        deferredCooldown_ = std::max(0.0f, deferredCooldown_ - deltaTime);
+        if (deferredCooldown_ > 0.0f) return;
+    }
+    if (!loadDeferredGroup(deferredGroup_)) {
+        deferredAssets_ = nullptr;
+        return;
+    }
+    ++deferredGroup_;
+    deferredCooldown_ = 0.12f;
+}
+
+void AudioCoordinator::setListener(const glm::vec3& position, const glm::vec3& forward,
+                                   const glm::vec3& up) {
+    AudioEngine::instance().setListenerPosition(position);
+    AudioEngine::instance().setListenerOrientation(forward, up);
+}
+
+void AudioCoordinator::update(float deltaTime) {
+    AudioEngine::instance().update(deltaTime);
 }
 
 void AudioCoordinator::playZoneMusic(const std::string& music) {

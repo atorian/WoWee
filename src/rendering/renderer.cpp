@@ -1,19 +1,18 @@
 #include "rendering/renderer.hpp"
+#include "rendering/offscreen_composite.hpp"
+#include "rendering/frame_sink.hpp"
 #include "rendering/sun_direction.hpp"
 
 #include <fstream>
 #include <iterator>
-#include "addons/lua_api_registrations.hpp"
 #include "core/env_flag.hpp"
 #include "rendering/sky_params_from_lighting.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/camera.hpp"
-#include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
-#include "rendering/performance_hud.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
@@ -31,7 +30,6 @@
 #include "rendering/charge_effect.hpp"
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
-#include "rendering/character_preview.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -48,10 +46,8 @@
 #include "rendering/loot_sparkles.hpp"
 #include "rendering/corpse_bones.hpp"
 #include "rendering/minimap.hpp"
-#include "rendering/world_map.hpp"
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
-#include "game/game_handler.hpp"
 #include "pipeline/m2_loader.hpp"
 #include <algorithm>
 #include "pipeline/asset_manager.hpp"
@@ -60,37 +56,17 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
-#include "core/application.hpp"
-#include "core/window.hpp"
+#include "rendering/render_surface.hpp"
 #include "core/logger.hpp"
-#include "game/world.hpp"
-#include "game/zone_manager.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/audio_engine.hpp"
-#include "audio/music_manager.hpp"
-#include "audio/footstep_manager.hpp"
-#include "audio/activity_sound_manager.hpp"
-#include "audio/mount_sound_manager.hpp"
-#include "audio/npc_voice_manager.hpp"
-#include "audio/player_voice_manager.hpp"
-#include "audio/ambient_sound_manager.hpp"
-#include "audio/ui_sound_manager.hpp"
-#include "audio/combat_sound_manager.hpp"
-#include "audio/spell_sound_manager.hpp"
-#include "audio/movement_sound_manager.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/amd_fsr3_runtime.hpp"
-#include "rendering/spell_visual_system.hpp"
 #include "rendering/post_process_pipeline.hpp"
-#include "rendering/animation_controller.hpp"
 #include "rendering/render_graph.hpp"
 #include "rendering/overlay_system.hpp"
-#include <imgui.h>
-#include <imgui_impl_vulkan.h>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -843,22 +819,29 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
 
     // Water ripple gate: swimming and actually moving.
-    if (cameraController) {
-        bool inWater = cameraController->isSwimming();
-        bool moving = cameraController->isMoving();
-        currentFrameData.fogParams.w = (inWater && moving) ? 1.0f : 0.0f;
-    } else {
-        currentFrameData.fogParams.w = 0.0f;
-    }
+    currentFrameData.fogParams.w = (viewerMotion_.swimming && viewerMotion_.moving) ? 1.0f : 0.0f;
 
     // Copy to current frame's mapped UBO
     uint32_t frame = vkCtx->getCurrentFrame();
     std::memcpy(perFrameUBOMapped[frame], &currentFrameData, sizeof(GPUPerFrameData));
 }
 
-bool Renderer::initialize(core::Window* win) {
-    window = win;
-    vkCtx = win->getVkContext();
+void Renderer::setShadowQualityLevel(int level) {
+    // The top two levels are the same size on purpose, and it is worth
+    // saying why before someone raises the last one to 8192 as an easy win
+    // for modern hardware. Each level doubles the side, so it quadruples
+    // the image: at 4096 a depth map is 64 MB and there are two of them,
+    // one per frame in flight, which is 128 MB. 8192 would be 512 MB of
+    // VRAM for shadows alone - not a step a machine that can run this is
+    // certain to have spare, and the allocation failing at start-up is not
+    // a path this renderer handles gently.
+    constexpr uint32_t kShadowSideForLevel[] = {512, 1024, 2048, 4096, 4096};
+    SHADOW_MAP_SIZE = kShadowSideForLevel[std::clamp(level, 0, 4)];
+}
+
+bool Renderer::initialize(RenderSurface* surface) {
+    surface_ = surface;
+    vkCtx = surface->getVkContext();
     deferredWorldInitEnabled_ = core::envFlagEnabled("WOWEE_DEFER_WORLD_SYSTEMS", true);
     LOG_INFO("Initializing renderer (Vulkan)");
 
@@ -866,53 +849,8 @@ bool Renderer::initialize(core::Window* win) {
     camera = std::make_unique<Camera>();
     camera->setPosition(glm::vec3(-8900.0f, -170.0f, 150.0f));
     camera->setRotation(0.0f, -5.0f);
-    camera->setAspectRatio(window->getAspectRatio());
+    camera->setAspectRatio(surface_->getAspectRatio());
     camera->setFov(60.0f);
-
-    // Create camera controller
-    cameraController = std::make_unique<CameraController>(camera.get());
-    cameraController->setUseWoWSpeed(true);  // Use realistic WoW movement speed
-    cameraController->setMouseSensitivity(0.15f);
-
-    // Create performance HUD
-    performanceHUD = std::make_unique<PerformanceHUD>();
-    performanceHUD->setPosition(PerformanceHUD::Position::TOP_LEFT);
-
-    // What the player last chose for shadow quality, before the resources that
-    // bake it in are built. Read from the CVar file rather than waited for:
-    // the interface that would normally hand it over does not load until well
-    // after this, and by then the shadow map exists at whatever size it was
-    // given here. See Renderer::SHADOW_MAP_SIZE.
-    {
-        // The top two levels are the same size on purpose, and it is worth
-        // saying why before someone raises the last one to 8192 as an easy win
-        // for modern hardware. Each level doubles the side, so it quadruples
-        // the image: at 4096 a depth map is 64 MB and there are two of them,
-        // one per frame in flight, which is 128 MB. 8192 would be 512 MB of
-        // VRAM for shadows alone - not a step a machine that can run this is
-        // certain to have spare, and the allocation failing at start-up is not
-        // a path this renderer handles gently. setShadowMapSize clamps to 4096
-        // for the same reason.
-        constexpr uint32_t kShadowSideForLevel[] = {512, 1024, 2048, 4096, 4096};
-        // 4096 was the default, and the arithmetic above says what that costs:
-        // 64 MB a map, two of them in flight, 128 MB of depth before anything
-        // is drawn, refilled every frame. That is a lot to ask of a machine
-        // nobody checked, and a good part of the reports of this client running
-        // badly are hardware that was never going to carry it. 2048 is a
-        // quarter of the fill and 32 MB for the pair, and the slider still
-        // reaches the top for anyone who wants to spend it.
-        //
-        // A phone starts lower again: its GPU memory is the system's memory.
-#ifdef __ANDROID__
-        constexpr const char* kDefaultShadowLevel = "1";   // 1024, 8 MB the pair
-#else
-        constexpr const char* kDefaultShadowLevel = "2";   // 2048, 32 MB the pair
-#endif
-        const int level = std::clamp(
-            std::atoi(addons::storedCVarValue("extShadowQuality", kDefaultShadowLevel).c_str()),
-            0, 4);
-        setShadowMapSize(kShadowSideForLevel[level]);
-    }
 
     // Create per-frame UBO and descriptor sets
     if (!createPerFrameResources()) {
@@ -975,17 +913,6 @@ bool Renderer::initialize(core::Window* win) {
 
     // LightingManager doesn't use GL - initialize for data-only use
     lightingManager = std::make_unique<LightingManager>();
-    auto* assetManager = core::Application::getInstance().getAssetManager();
-
-    // Create zone manager; enrich music paths from DBC if available
-    zoneManager = std::make_unique<game::ZoneManager>();
-    zoneManager->initialize();
-    if (assetManager) {
-        zoneManager->enrichFromDBC(assetManager);
-    }
-
-    // Audio is now owned by AudioCoordinator (created by Application).
-    // Renderer receives AudioCoordinator* via setAudioCoordinator().
 
     // Create secondary command buffer resources for multithreaded rendering.
     //
@@ -1050,9 +977,7 @@ bool Renderer::initialize(core::Window* win) {
 }
 
 void Renderer::shutdown() {
-    // A recording in progress is finished, not abandoned: the file is only
-    // playable once its index is written.
-    if (recorder_) stopRecording();
+    endFrameCapture();
 
     destroySecondaryCommandResources();
 
@@ -1079,12 +1004,6 @@ void Renderer::shutdown() {
     if (minimap) {
         minimap->shutdown();
         minimap.reset();
-    }
-
-    LOG_DEBUG("Renderer::shutdown - worldMap...");
-    if (worldMap) {
-        worldMap->shutdown();
-        worldMap.reset();
     }
 
     if (sunShafts_) {
@@ -1131,18 +1050,11 @@ void Renderer::shutdown() {
     }
 
     // Shutdown AnimationController before renderers it references (§4.2)
-    animationController_.reset();
 
     LOG_DEBUG("Renderer::shutdown - wmoRenderer...");
     if (wmoRenderer) {
         wmoRenderer->shutdown();
         wmoRenderer.reset();
-    }
-
-    // Shutdown SpellVisualSystem before M2Renderer (it holds M2Renderer pointer) (§4.4)
-    if (spellVisualSystem_) {
-        spellVisualSystem_->shutdown();
-        spellVisualSystem_.reset();
     }
 
     if (grassRenderer_) {
@@ -1174,9 +1086,6 @@ void Renderer::shutdown() {
         loadedSkyModels_.clear();
     }
 
-    // Audio shutdown is handled by AudioCoordinator (owned by Application).
-    audioCoordinator_ = nullptr;
-
     // Cleanup selection circle + overlay resources
     if (overlaySystem_) {
         overlaySystem_->cleanup();
@@ -1194,28 +1103,20 @@ void Renderer::shutdown() {
 
     destroyPerFrameResources();
 
-    zoneManager.reset();
-
-    performanceHUD.reset();
-    cameraController.reset();
     camera.reset();
 
     LOG_INFO("Renderer shutdown");
 }
 
-void Renderer::registerPreview(CharacterPreview* preview) {
-    if (!preview) return;
-    auto it = std::find(activePreviews_.begin(), activePreviews_.end(), preview);
-    if (it == activePreviews_.end()) {
-        activePreviews_.push_back(preview);
+void Renderer::registerComposite(OffscreenComposite* composite) {
+    if (composite && std::find(offscreenComposites_.begin(), offscreenComposites_.end(), composite) ==
+                         offscreenComposites_.end()) {
+        offscreenComposites_.push_back(composite);
     }
 }
 
-void Renderer::unregisterPreview(CharacterPreview* preview) {
-    auto it = std::find(activePreviews_.begin(), activePreviews_.end(), preview);
-    if (it != activePreviews_.end()) {
-        activePreviews_.erase(it);
-    }
+void Renderer::unregisterComposite(OffscreenComposite* composite) {
+    std::erase(offscreenComposites_, composite);
 }
 
 void Renderer::setWaterRefractionEnabled(bool /*enabled*/) {
@@ -1267,10 +1168,10 @@ void Renderer::applyMsaaChange() {
 
     // Set new MSAA and recreate swapchain (render pass, depth, MSAA image, framebuffers)
     vkCtx->setMsaaSamples(samples);
-    if (!vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight())) {
+    if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) {
         LOG_ERROR("MSAA change failed - reverting to 1x");
         vkCtx->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
-        (void)vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight());
+        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
     }
 
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
@@ -1431,8 +1332,8 @@ void Renderer::beginFrame() {
         // Skip recreation while window is minimized (0×0 extent is a Vulkan spec violation)
         // Pixels, like the extent below: a window with a surface behind it is
         // never rebuilt from the size the desktop places it at.
-        if (window->getDrawableWidth() == 0 || window->getDrawableHeight() == 0) return;
-        (void)vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight());
+        if (surface_->getDrawableWidth() == 0 || surface_->getDrawableHeight() == 0) return;
+        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
         // Rebuild water resources that reference swapchain extent/views
         if (waterRenderer) {
             waterRenderer->recreatePipelines();
@@ -1533,7 +1434,7 @@ void Renderer::beginFrame() {
     // --- Off-screen pre-passes ---
     // Build frame graph: registers pre-passes as graph nodes with dependencies.
     // compile() topologically sorts; execute() runs them with auto barriers.
-    buildFrameGraph(nullptr);
+    buildFrameGraph();
     if (renderGraph_) {
         renderGraph_->execute(currentCmd);
     }
@@ -1541,11 +1442,10 @@ void Renderer::beginFrame() {
     // The real atmosphere is ready after the fog pre-pass. Capture it before
     // the main pass so its full-resolution MSAA attachments are cleared once.
     const bool skyProbe = std::getenv("WOWEE_SKY_BACKGROUND_PROBE") != nullptr;
-    const bool inWorld = core::Application::getInstance().getState() == core::AppState::IN_GAME;
     const bool skipSkyCapture = std::getenv("WOWEE_SKIP_SKY") ||
         std::getenv("WOWEE_SKIP_ALL_RENDER") ||
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
-    if (skySystem && camera && (inWorld || skyProbe) && !skipSkyCapture) {
+    if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
             skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
             skyboxModelRenderer_->update(0.016f, camera->getPosition(), camera->getViewProjectionMatrix());
@@ -1556,8 +1456,7 @@ void Renderer::beginFrame() {
             for (const auto& layer : lightingManager->getSkyboxLayers()) coverage += layer.weight;
         }
         const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
-        renderSkyBackground(skyProbe ? nullptr : core::Application::getInstance().getGameHandler(),
-                            timeOfDay, authored, authored && coverage >= 0.5f);
+        renderSkyBackground(timeOfDay, authored, authored && coverage >= 0.5f);
         if (skyProbe) {
             static bool logged = false;
             if (!logged) {
@@ -1692,9 +1591,9 @@ void Renderer::endFrame() {
         // Under the interface, over everything else.
         if (sunShafts_) sunShafts_->composite(currentCmd, vkCtx->getCurrentFrame());
 
-        // ImGui's pipelines are built against the overlay pass, so it always
-        // records inline here rather than into a scene-pass secondary buffer.
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), currentCmd);
+        // The interface's pipelines are built against the overlay pass, so it
+        // always records inline here rather than into a scene-pass secondary.
+        if (interface_) interface_(currentCmd);
         vkCmdEndRenderPass(currentCmd);
         if (vkCtx) vkCtx->gpuMark(currentCmd, "interface");
     } else {
@@ -1716,113 +1615,69 @@ void Renderer::endFrame() {
 
 void Renderer::setCharacterFollow(uint32_t instanceId) {
     characterInstanceId = instanceId;
-    if (cameraController && instanceId > 0) {
-        cameraController->setFollowTarget(&characterPosition);
-    }
-    if (animationController_) animationController_->onCharacterFollow(instanceId);
 }
 
-bool Renderer::startRecording(const std::string& path, std::string& error) {
-    if (recorder_ && recorder_->isRecording()) {
-        error = "already recording";
-        return false;
-    }
-    if (!vkCtx) {
-        error = "there is no renderer to record from";
-        return false;
-    }
-    if (!core::ScreenRecorder::compiledIn()) {
-        error = "this build was made without FFmpeg 5.1 or later, which recording needs";
-        return false;
-    }
-    const VkExtent2D extent = vkCtx->getSwapchainExtent();
-    const core::RecordingSize size = core::recordingFrameSize(extent.width, extent.height);
+bool Renderer::beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t height) {
+    if (!vkCtx || !sink || frameSink_) return false;
     auto capture = std::make_unique<ScreenCapture>();
-    if (!capture->initialize(vkCtx, size.width, size.height)) {
-        capture->shutdown();
-        error = "could not set up reading frames back from the GPU";
-        return false;
-    }
-    auto recorder = std::make_unique<core::ScreenRecorder>();
-    if (!recorder->start(path, size, error)) {
+    if (!capture->initialize(vkCtx, width, height)) {
         capture->shutdown();
         return false;
     }
     screenCapture_ = std::move(capture);
-    recorder_ = std::move(recorder);
-    recordingFailure_.clear();
+    frameSink_ = sink;
     return true;
 }
 
-core::ScreenRecorder::Stats Renderer::stopRecording() {
-    core::ScreenRecorder::Stats stats;
-    if (!recorder_) return stats;
-    // The frames still on the GPU are finished and handed over, oldest first,
-    // so the file ends where the recording did rather than two frames short.
-    if (vkCtx && screenCapture_) {
-        vkDeviceWaitIdle(vkCtx->getDevice());
-        ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
-        if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
-        ScreenCapture* capture = screenCapture_.get();
-        for (const auto& r : ready) {
-            if (!r.valid) continue;
-            const uint32_t buffer = r.buffer;
-            recorder_->submit({.bgra = r.bgra, .stride = r.stride, .pts = r.pts,
-                               .release = [capture, buffer] { capture->release(buffer); }});
-        }
+void Renderer::flushFrameCapture() {
+    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
+    vkDeviceWaitIdle(vkCtx->getDevice());
+    ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
+    if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
+    ScreenCapture* capture = screenCapture_.get();
+    for (const auto& r : ready) {
+        if (!r.valid) continue;
+        const uint32_t buffer = r.buffer;
+        frameSink_->submit({.bgra = r.bgra, .stride = r.stride, .pts = r.pts,
+                            .release = [capture, buffer] { capture->release(buffer); }});
     }
-    // The recorder first: its thread holds readback buffers until it is done.
-    stats = recorder_->stop();
-    recorder_.reset();
+}
+
+void Renderer::endFrameCapture() {
+    frameSink_ = nullptr;
     if (screenCapture_) {
         screenCapture_->shutdown();
         screenCapture_.reset();
     }
-    return stats;
-}
-
-bool Renderer::isRecording() const {
-    return recorder_ && recorder_->isRecording();
-}
-
-std::string Renderer::takeRecordingFailure() {
-    std::string failure;
-    failure.swap(recordingFailure_);
-    return failure;
 }
 
 void Renderer::collectRecordedFrame() {
-    if (!recorder_ || !screenCapture_ || !vkCtx) return;
+    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
     const ScreenCapture::Ready ready = screenCapture_->collect(vkCtx->getCurrentFrame());
     if (ready.valid) {
         ScreenCapture* capture = screenCapture_.get();
         const uint32_t buffer = ready.buffer;
-        recorder_->submit({.bgra = ready.bgra, .stride = ready.stride, .pts = ready.pts,
-                           .release = [capture, buffer] { capture->release(buffer); }});
-    }
-    // Given up on its own: finish what it has and say why, once.
-    if (recorder_->failed()) {
-        recordingFailure_ = recorder_->failure();
-        stopRecording();
+        frameSink_->submit({.bgra = ready.bgra, .stride = ready.stride, .pts = ready.pts,
+                            .release = [capture, buffer] { capture->release(buffer); }});
     }
 }
 
 void Renderer::recordScreenCapture() {
-    if (!recorder_ || !screenCapture_ || !recorder_->isRecording() || currentCmd == VK_NULL_HANDLE) return;
+    if (!frameSink_ || !screenCapture_ || currentCmd == VK_NULL_HANDLE) return;
     const auto& images = vkCtx->getSwapchainImages();
     const VkExtent2D extent = vkCtx->getSwapchainExtent();
     int64_t pts = 0;
-    if (currentImageIndex < images.size() && recorder_->frameDue(&pts)) {
+    if (currentImageIndex < images.size() && frameSink_->frameDue(&pts)) {
         if (!screenCapture_->record(currentCmd, vkCtx->getCurrentFrame(), images[currentImageIndex],
                                     extent, pts)) {
-            recorder_->frameDropped();
+            frameSink_->frameDropped();
         }
-        recorder_->frameTaken(pts);
+        frameSink_->frameTaken(pts);
     }
     const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
     if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
         screenCapture_->drawIndicator(currentCmd, overlayFbs[currentImageIndex], extent,
-                                      static_cast<float>(recorder_->elapsedSeconds()));
+                                      static_cast<float>(frameSink_->elapsedSeconds()));
     }
 }
 
@@ -1928,16 +1783,6 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
     return ok != 0;
 }
 
-void Renderer::resetCombatVisualState() {
-    if (animationController_) animationController_->resetCombatVisualState();
-    if (spellVisualSystem_) spellVisualSystem_->reset();
-}
-
-const std::string& Renderer::getCurrentZoneName() const {
-    static const std::string empty;
-    return audioCoordinator_ ? audioCoordinator_->getCurrentZoneName() : empty;
-}
-
 bool Renderer::updateSkyboxLayers() {
     // Which skybox models a place uses is Light.dbc's answer, not a map id:
     // LightParams names a LightSkybox row and LightSkybox names the model.
@@ -2040,62 +1885,6 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
     return modelId;
 }
 
-bool Renderer::isOnOutdoorPvpObjective() const {
-    if (!zoneManager || !terrainManager) return false;
-    if (const auto areaId = terrainManager->getAreaIdAt(
-            characterPosition.x, characterPosition.y)) {
-        return zoneManager->isOutdoorPvpArea(*areaId);
-    }
-    return false;
-}
-
-uint32_t Renderer::getCurrentZoneId() const {
-    // A zone remembered from the last map is worse than none: the sticky
-    // answer below would hold Duskwood's pinned midnight over a continent
-    // away until the first chunk of the new one loaded.
-    if (const auto* gh = core::Application::getInstance().getGameHandler()) {
-        const uint32_t mapId = gh->getCurrentMapId();
-        if (mapId != lastResolvedZoneMapId_) {
-            lastResolvedZoneMapId_ = mapId;
-            lastResolvedZoneId_ = 0;
-        }
-    }
-
-    uint32_t tileZoneId = 0;
-    if (zoneManager && terrainManager) {
-        if (const auto areaId = terrainManager->getAreaIdAt(
-                characterPosition.x, characterPosition.y)) {
-            lastResolvedZoneId_ = zoneManager->resolveAreaZoneId(*areaId);
-            return lastResolvedZoneId_;
-        }
-        const auto tile = terrainManager->getCurrentTile();
-        tileZoneId = zoneManager->getZoneId(tile.x, tile.y);
-    }
-
-    // The chunk under the player did not say which area it is - either its
-    // ADT is not resident yet, or its area id is zero, which a great many
-    // chunks carry. That is "this chunk does not know", not "the zone
-    // changed", and answering from a different source instead made the zone
-    // id flip back and forth as the player walked from a chunk that knew to
-    // one that did not.
-    //
-    // Nothing about that is quiet. The zone id picks the dark-zone ambience
-    // override, which replaces the four sky colours outright, and in Duskwood
-    // it also pins the visual hour to the small hours - so the sky changed
-    // brightness every time a chunk boundary was crossed and held still the
-    // moment the player did. Keep the last chunk that did know.
-    if (lastResolvedZoneId_ != 0) return lastResolvedZoneId_;
-
-    const auto* gh = core::Application::getInstance().getGameHandler();
-    if (gh && gh->getWorldStateZoneId() != 0) {
-        const uint32_t areaId = gh->getWorldStateZoneId();
-        return zoneManager ? zoneManager->resolveAreaZoneId(areaId) : areaId;
-    }
-    if (audioCoordinator_ && audioCoordinator_->getCurrentZoneId() != 0)
-        return audioCoordinator_->getCurrentZoneId();
-    return tileZoneId;
-}
-
 float Renderer::sampleSunOcclusion() const {
     if (!camera) return 1.0f;
     const glm::vec3 eye = camera->getPosition();
@@ -2175,44 +1964,6 @@ void Renderer::update(float deltaTime) {
     if (wmoRenderer) wmoRenderer->resetQueryStats();
     if (m2Renderer) m2Renderer->resetQueryStats();
 
-    if (cameraController) {
-        auto cameraStart = std::chrono::steady_clock::now();
-        cameraController->update(deltaTime);
-        auto cameraEnd = std::chrono::steady_clock::now();
-        lastCameraUpdateMs = std::chrono::duration<double, std::milli>(cameraEnd - cameraStart).count();
-        if (lastCameraUpdateMs > 50.0) {
-            LOG_WARNING("SLOW cameraController->update: ", lastCameraUpdateMs, "ms");
-        }
-
-        endPhase("camera");
-        // Update 3D audio listener position/orientation to match camera.
-        // getUp() internally calls getRight() which calls getForward() again,
-        // and we ask for getForward() once more on the same line - that's 3
-        // independent trig sequences. Cache the basis vectors once.
-        if (camera) {
-            const glm::vec3 fwd = camera->getForward();
-            const glm::vec3 worldUp(0.0f, 0.0f, 1.0f);
-            glm::vec3 right = glm::cross(fwd, worldUp);
-            float rLen = glm::length(right);
-            right = (rLen < 1e-6f) ? glm::vec3(1.0f, 0.0f, 0.0f) : right / rLen;
-            glm::vec3 up = glm::cross(right, fwd);
-            float uLen = glm::length(up);
-            up = (uLen < 1e-6f) ? glm::vec3(0.0f, 0.0f, 1.0f) : up / uLen;
-            audio::AudioEngine::instance().setListenerPosition(camera->getPosition());
-            audio::AudioEngine::instance().setListenerOrientation(fwd, up);
-        }
-    } else {
-        lastCameraUpdateMs = 0.0;
-    }
-
-    // Visibility hardening: ensure player instance cannot stay hidden after
-    // taxi/camera transitions, but preserve first-person self-hide.
-    if (characterRenderer && characterInstanceId > 0 && cameraController) {
-        if ((cameraController->isThirdPerson() && !cameraController->isFirstPersonView()) || (animationController_ && animationController_->isTaxiFlight())) {
-            characterRenderer->setInstanceVisible(characterInstanceId, true);
-        }
-    }
-
     // Resolve WMO containment before weather and ambience consume it. Server
     // weather remains authoritative outdoors, but particles must not follow the
     // camera through a roof into Ironforge or other enclosed WMOs.
@@ -2221,16 +1972,8 @@ void Renderer::update(float deltaTime) {
     uint32_t insideWmoId = 0;
     const bool insideWmo = canQueryWmo &&
         wmoRenderer->isInsideWMO(camPos.x, camPos.y, camPos.z, &insideWmoId);
-    // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
-    // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
-    // ZONE_CHANGED - there is no outdoors counterpart. Nothing fired either,
-    // so the state was known here and never left this file.
-    if (insideWmo != playerIndoors_) {
-        if (auto* gh = core::Application::getInstance().getGameHandler()) {
-            gh->fireAddonEvent(insideWmo ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
-        }
-    }
     playerIndoors_ = insideWmo;
+    insideWmoId_ = insideWmoId;
 
     // Characters, creatures and their weapons take the light of the interior
     // group they stand in. WMO doodads are told theirs when they are placed.
@@ -2248,25 +1991,21 @@ void Renderer::update(float deltaTime) {
         lightingManager->setIndoors(insideWmo &&
             wmoRenderer->isInsideInteriorWMO(camPos.x, camPos.y, camPos.z));
 
-        const auto* gh = core::Application::getInstance().getGameHandler();
-        uint32_t mapId    = gh ? gh->getCurrentMapId() : 0;
-        float gameTime    = gh ? gh->getGameTime() : -1.0f;
-        bool isRaining    = gh ? gh->isRaining() : false;
         // The camera's eye under the surface, not the player swimming: on the
         // surface the camera is above the water and sees the dry light.
         const auto eyeDepth = cameraWaterDepth();
         const bool isUnderwater = eyeDepth && *eyeDepth > 0.0f;
-        const uint32_t resolvedZoneId = getCurrentZoneId();
+        const uint32_t resolvedZoneId = environment_.zoneId;
 
         endPhase("pre-lighting");
-        lightingManager->update(characterPosition, mapId, resolvedZoneId,
-                                gameTime, isRaining, isUnderwater);
+        lightingManager->update(characterPosition, environment_.mapId, resolvedZoneId,
+                                environment_.gameTime, environment_.raining, isUnderwater);
         endPhase("lighting");
 
         // Sync weather visual renderer with game state
-        if (weather && gh) {
-            uint32_t wType = gh->getWeatherType();
-            float wInt = gh->getWeatherIntensity();
+        if (weather) {
+            const uint32_t wType = environment_.weatherType;
+            const float wInt = environment_.weatherIntensity;
             if (resolvedZoneId == 10) {
                 // Duskwood's defining effect is persistent ground fog. Some
                 // realms continuously report rain here; suppress those streak
@@ -2282,7 +2021,7 @@ void Renderer::update(float deltaTime) {
                 weather->setIntensity(wInt);
             } else {
                 // No server weather - use zone-based weather configuration
-                weather->updateZoneWeather(getCurrentZoneId(), deltaTime);
+                weather->updateZoneWeather(resolvedZoneId, deltaTime);
             }
             weather->setEnabled(!insideWmo);
 
@@ -2290,67 +2029,6 @@ void Renderer::update(float deltaTime) {
             if (lightning) {
                 lightning->setEnabled(false);
             }
-        } else if (weather) {
-            // No game handler (single-player without network) - zone weather only
-            weather->updateZoneWeather(getCurrentZoneId(), deltaTime);
-            weather->setEnabled(!insideWmo);
-        }
-    }
-
-    // Sync character model position/rotation and animation with follow target
-    if (characterInstanceId > 0 && characterRenderer && cameraController) {
-        characterRenderer->setInstancePosition(characterInstanceId, characterPosition);
-
-        // Movement-facing comes from camera controller and is decoupled from LMB orbit.
-        bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
-        bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
-                             && !cameraController->isMovingBackward();
-        float torsoYawDeltaDeg = 0.0f;
-        if (taxiFlight) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (cameraController->isMoving() && activeStrafe) {
-            characterYaw = cameraController->getTravelYaw();
-            torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
-        } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
-                   cameraController->isTurningLeft() || cameraController->isTurningRight()) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (animationController_ && animationController_->isInCombat() &&
-                   animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
-            glm::vec3 toTarget = *animationController_->getTargetPosition() - characterPosition;
-            if (toTarget.x * toTarget.x + toTarget.y * toTarget.y > 0.01f) {
-                // Go through canonical, the way spawning and the camera do.
-                // Taking atan2 of the render delta directly yields a heading in
-                // a different convention - a mirror about 135 degrees - so the
-                // spin looked roughly right but the frame loop then converted it
-                // back to a canonical yaw that pointed somewhere else, and the
-                // server rejected the cast for not facing the target.
-                const glm::vec3 toTargetCanonical = ::wowee::core::coords::renderToCanonical(toTarget);
-                const float canonYawToTarget =
-                    std::atan2(-toTargetCanonical.y, toTargetCanonical.x);
-                float targetYaw = ::wowee::core::coords::canonicalToCharacterYawDeg(canonYawToTarget);
-                float diff = targetYaw - characterYaw;
-                while (diff > 180.0f) diff -= 360.0f;
-                while (diff < -180.0f) diff += 360.0f;
-                float rotSpeed = 360.0f * deltaTime;
-                if (std::abs(diff) < rotSpeed) {
-                    characterYaw = targetYaw;
-                } else {
-                    characterYaw += (diff > 0 ? rotSpeed : -rotSpeed);
-                }
-            }
-        }
-        float yawRad = glm::radians(characterYaw);
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
-
-        while (torsoYawDeltaDeg > 180.0f) torsoYawDeltaDeg -= 360.0f;
-        while (torsoYawDeltaDeg < -180.0f) torsoYawDeltaDeg += 360.0f;
-        characterRenderer->setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
-
-        // Update animation based on movement state (delegated to AnimationController §4.2)
-        if (animationController_) {
-            animationController_->updateMeleeTimers(deltaTime);
-            animationController_->setDeltaTime(deltaTime);
-            animationController_->updateCharacterAnimation();
         }
     }
 
@@ -2390,25 +2068,20 @@ void Renderer::update(float deltaTime) {
     }
 
     // Update swim effects
-    if (swimEffects && camera && cameraController && waterRenderer) {
-        swimEffects->update(*camera, *cameraController, *waterRenderer, deltaTime);
+    if (swimEffects && camera && waterRenderer) {
+        swimEffects->update(*camera, viewerMotion_, characterPosition, *waterRenderer, deltaTime);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
     // is thrown by SwimEffects above; this is the froth on the surface itself,
     // which has to come from the water shader to move and light with the water.
-    if (waterRenderer && camera && cameraController) {
-        glm::vec3 charPos = camera->getPosition();
-        const glm::vec3* followTarget = cameraController->getFollowTarget();
-        if (cameraController->isThirdPerson() && followTarget) {
-            charPos = *followTarget;
-        }
-
-        const bool swimming = cameraController->isSwimming();
+    if (waterRenderer && camera) {
+        const glm::vec3 charPos = viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+        const bool swimming = viewerMotion_.swimming;
         float intensity = 0.0f;
         bool wading = false;
 
-        if (cameraController->isMoving()) {
+        if (viewerMotion_.moving) {
             if (auto waterH = waterRenderer->getWaterHeightAt(charPos.x, charPos.y)) {
                 if (swimming) {
                     // A wake only exists where the swimmer meets the surface -
@@ -2427,7 +2100,7 @@ void Renderer::update(float deltaTime) {
             }
         }
 
-        const float yawRad = glm::radians(cameraController->getYaw());
+        const float yawRad = glm::radians(viewerMotion_.yawDeg);
         const glm::vec2 travelDir(std::sin(yawRad), -std::cos(yawRad));
         waterRenderer->updateWake(deltaTime, glm::vec2(charPos.x, charPos.y),
                                   travelDir, intensity, wading);
@@ -2437,24 +2110,6 @@ void Renderer::update(float deltaTime) {
     if (mountDust) {
         mountDust->update(deltaTime);
 
-        // Spawn dust when mounted and moving on ground
-        if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
-            bool isMoving = cameraController->isMoving();
-            bool onGround = cameraController->isGrounded();
-
-            if (isMoving && onGround) {
-                // Calculate velocity from camera direction and speed
-                glm::vec3 forward = camera->getForward();
-                float speed = cameraController->getMovementSpeed();
-                glm::vec3 velocity = forward * speed;
-                velocity.z = 0.0f;  // Ignore vertical component
-
-                // Spawn dust at mount's feet (slightly below character position)
-                float mho = animationController_ ? animationController_->getMountHeightOffset() : 0.0f;
-                glm::vec3 dustPos = characterPosition - glm::vec3(0.0f, 0.0f, mho * 0.8f);
-                mountDust->spawnDust(dustPos, velocity, isMoving);
-            }
-        }
     }
     // Update level-up effect
     if (levelUpEffect) {
@@ -2464,8 +2119,6 @@ void Renderer::update(float deltaTime) {
     if (chargeEffect) {
         chargeEffect->update(deltaTime);
     }
-    // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
-    if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
     endPhase("sky/effects");
 
 
@@ -2489,9 +2142,6 @@ void Renderer::update(float deltaTime) {
     }
     endPhase("characters");
 
-    // Update AudioEngine (cleanup finished sounds, etc.)
-    audio::AudioEngine::instance().update(deltaTime);
-    endPhase("audio");
 
     // M2Renderer::update may rebuild the instance spatial index when streaming
     // marked it dirty. Footprint spawning below performs an M2 floor query and
@@ -2509,46 +2159,7 @@ void Renderer::update(float deltaTime) {
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
-    if (animationController_) animationController_->updateFootsteps(deltaTime);
 
-    // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
-    if (animationController_) animationController_->updateSfxState(deltaTime);
-
-    // Ambient environmental sounds + zone/music transitions (delegated to AudioCoordinator)
-    if (audioCoordinator_) {
-        audio::ZoneAudioContext zctx;
-        zctx.deltaTime = deltaTime;
-        zctx.cameraPosition = camPos;
-        zctx.isSwimming = cameraController ? cameraController->isSwimming() : false;
-        zctx.insideWmo = insideWmo;
-        zctx.insideWmoId = insideWmoId;
-        if (weather) {
-            auto wt = weather->getWeatherType();
-            if (wt == Weather::Type::RAIN)       zctx.weatherType = 1;
-            else if (wt == Weather::Type::SNOW)  zctx.weatherType = 2;
-            else if (wt == Weather::Type::STORM) zctx.weatherType = 3;
-            zctx.weatherIntensity = weather->getIntensity();
-        }
-        if (lightingManager) {
-            zctx.gameTimeHours = lightingManager->getVisualTimeOfDayHours();
-        }
-        if (terrainManager) {
-            auto tile = terrainManager->getCurrentTile();
-            zctx.tileX = tile.x;
-            zctx.tileY = tile.y;
-            zctx.hasTile = true;
-        }
-        // Use the precise MCNK area classification when available; this avoids
-        // stale server world-state zones and whole-ADT ambiguity at river banks.
-        zctx.serverZoneId = getCurrentZoneId();
-        zctx.zoneManager = zoneManager.get();
-        audioCoordinator_->updateZoneAudio(zctx);
-    }
-
-    // Update performance HUD
-    if (performanceHUD) {
-        performanceHUD->update(deltaTime);
-    }
 
     // Periodic cache hygiene: drop model GPU data no longer referenced by active instances.
     static float modelCleanupTimer = 0.0f;
@@ -2591,26 +2202,6 @@ void Renderer::runDeferredWorldInitStep(float deltaTime) {
 
     switch (deferredWorldInitStage_) {
         case 0:
-            if (audioCoordinator_->getAmbientSoundManager()) {
-                audioCoordinator_->getAmbientSoundManager()->initialize(cachedAssetManager);
-            }
-            if (terrainManager && audioCoordinator_->getAmbientSoundManager()) {
-                terrainManager->setAmbientSoundManager(audioCoordinator_->getAmbientSoundManager());
-            }
-            break;
-        case 1:
-            if (audioCoordinator_->getUiSoundManager()) audioCoordinator_->getUiSoundManager()->initialize(cachedAssetManager);
-            break;
-        case 2:
-            if (audioCoordinator_->getCombatSoundManager()) audioCoordinator_->getCombatSoundManager()->initialize(cachedAssetManager);
-            break;
-        case 3:
-            if (audioCoordinator_->getSpellSoundManager()) audioCoordinator_->getSpellSoundManager()->initialize(cachedAssetManager);
-            break;
-        case 4:
-            if (audioCoordinator_->getMovementSoundManager()) audioCoordinator_->getMovementSoundManager()->initialize(cachedAssetManager);
-            break;
-        case 5:
             if (questMarkerRenderer && !questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, cachedAssetManager))
                 LOG_WARNING("Quest marker renderer re-init failed (non-fatal)");
             if (footprintRenderer && !footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, cachedAssetManager))
@@ -2744,8 +2335,7 @@ uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
     if (cachedBiome != grassBiomeForArea_.end()) {
         biomeIdx = cachedBiome->second;
     } else {
-        const uint32_t zoneId =
-            zoneManager ? zoneManager->resolveAreaZoneId(areaId) : areaId;
+        const uint32_t zoneId = areaZoneResolver_ ? areaZoneResolver_(areaId) : areaId;
         biomeIdx = grassBiomes_.findFor(areaId, zoneId);
         grassBiomeForArea_[areaId] = biomeIdx;
     }
@@ -3133,7 +2723,7 @@ void Renderer::updateGrassPopulation() {
              complete ? "" : " - hit the blade cap");
 }
 
-void Renderer::renderSkyBackground(game::GameHandler* gameHandler, float timeOfDay,
+void Renderer::renderSkyBackground(float timeOfDay,
                                    bool drawSkyModels, bool useOriginalSkybox) {
     const uint32_t slot = vkCtx->getCurrentFrame();
     if (!skyBackground_ || !skyBackground_->view(slot)) return;
@@ -3144,8 +2734,7 @@ void Renderer::renderSkyBackground(game::GameHandler* gameHandler, float timeOfD
     // Render only the background, including authored sky layers and the air.
     skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
-        timeOfDay, gameHandler ? gameHandler->getGameTime() : -1.0f,
-        gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+        timeOfDay, environment_.gameTime, environment_.weatherIntensity,
         lightingManager ? &lightingManager->getLightingParams() : nullptr,
         useOriginalSkybox);
     params.sunOcclusion = 1.0f; // Lens flare is an optical overlay, not background haze.
@@ -3157,9 +2746,8 @@ void Renderer::renderSkyBackground(game::GameHandler* gameHandler, float timeOfD
     skyBackground_->end(currentCmd, slot);
 }
 
-void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
+void Renderer::renderWorld() {
     ZoneScopedN("Renderer::renderWorld");
-    (void)world;
 
     // Guard against null command buffer (e.g. after VK_ERROR_DEVICE_LOST)
     if (currentCmd == VK_NULL_HANDLE) return;
@@ -3175,9 +2763,6 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     lastTerrainRenderMs = 0.0;
     lastWMORenderMs = 0.0;
     lastM2RenderMs = 0.0;
-
-    // Cache ghost state for use in overlay and FXAA passes this frame.
-    ghostMode_ = (gameHandler && gameHandler->isPlayerGhost());
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets[frameIdx];
@@ -3338,8 +2923,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (skySystem && camera && !skipSky) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
-                    gameHandler ? gameHandler->getGameTime() : -1.0f,
-                    gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+                    environment_.gameTime, environment_.weatherIntensity,
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
@@ -3400,7 +2984,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
 
             renderUnderwaterOverlay(cmd);
-            renderPostSceneOverlays(cmd, gameHandler);
+            renderPostSceneOverlays(cmd);
             vkEndCommandBuffer(cmd);
             return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
@@ -3542,8 +3126,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (skySystem && camera && !skipSky) {
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
-                gameHandler ? gameHandler->getGameTime() : -1.0f,
-                gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+                environment_.gameTime, environment_.weatherIntensity,
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;
@@ -3614,7 +3197,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // in the parallel path they were already recorded into SEC_POST above.
     if (!parallelRecordingEnabled_) {
         renderUnderwaterOverlay(currentCmd);
-        renderPostSceneOverlays(currentCmd, gameHandler);
+        renderPostSceneOverlays(currentCmd);
     }
 
     // Water is drawn last, in a continuation of the scene pass, so that the
@@ -3695,7 +3278,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
         // And the minimap, last of all: it is the interface rather than the
         // world, and nothing in the world belongs over it.
-        if (minimapDrawsWithWater_) renderMinimapOverlay(currentCmd, gameHandler);
+        if (minimapDrawsWithWater_) renderMinimapOverlay(currentCmd);
     }
 
     auto renderEnd = std::chrono::steady_clock::now();
@@ -3872,10 +3455,9 @@ if (overlaySystem_ && waterRenderer && camera) {
     }
 }
 
-void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd,
-                                       game::GameHandler* gameHandler) {
+void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
     // Ghost mode desaturation: cold blue-grey overlay when dead/ghost
-    if (ghostMode_ && overlaySystem_) {
+    if (environment_.ghost && overlaySystem_) {
         overlaySystem_->renderOverlay(glm::vec4(0.30f, 0.35f, 0.42f, 0.45f), cmd);
     }
 
@@ -3895,34 +3477,20 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd,
 
     // Unless it is following water into the pass after this one, where it is
     // drawn instead - see renderMinimapOverlay's caller below the water.
-    if (!minimapDrawsWithWater_) renderMinimapOverlay(cmd, gameHandler);
+    if (!minimapDrawsWithWater_) renderMinimapOverlay(cmd);
 }
 
 /// The minimap disc, over whatever has been drawn so far.
-void Renderer::renderMinimapOverlay(VkCommandBuffer cmd,
-                                    game::GameHandler* gameHandler) {
-    if (minimap && minimap->isEnabled() && camera && window) {
-        glm::vec3 minimapCenter = camera->getPosition();
-        if (cameraController && cameraController->isThirdPerson())
-            minimapCenter = characterPosition;
-        float minimapPlayerOrientation = 0.0f;
-        bool hasMinimapPlayerOrientation = false;
-        if (cameraController) {
-            // Render-space character yaw faces north at 180 degrees; the
-            // minimap shader arrow faces north at 0. Match the mirrored
-            // minimap texture by flipping the visual arrow vertically.
-            minimapPlayerOrientation = glm::radians(characterYaw);
-            hasMinimapPlayerOrientation = true;
-        } else if (gameHandler) {
-            // movementInfo.orientation is canonical yaw: north is 0, east is +pi/2.
-            // Match the mirrored minimap texture by flipping the visual
-            // arrow vertically.
-            minimapPlayerOrientation = glm::pi<float>() - gameHandler->getMovementInfo().orientation;
-            hasMinimapPlayerOrientation = true;
-        }
+void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
+    if (minimap && minimap->isEnabled() && camera && surface_) {
+        const glm::vec3 minimapCenter =
+            viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+        // Render-space character yaw faces north at 180 degrees; the
+        // minimap shader arrow faces north at 0. Match the mirrored
+        // minimap texture by flipping the visual arrow vertically.
         minimap->render(cmd, *camera, minimapCenter,
-                        window->getWidth(), window->getHeight(),
-                        minimapPlayerOrientation, hasMinimapPlayerOrientation);
+                        surface_->getWidth(), surface_->getHeight(),
+                        glm::radians(characterYaw), true);
     }
 }
 
@@ -3944,7 +3512,6 @@ bool Renderer::waterDrawsInContinuePass() const {
 void Renderer::setActiveMapName(const std::string& name) {
     if (terrainManager) terrainManager->setMapName(name);
     if (minimap) minimap->setMapName(name);
-    if (worldMap) worldMap->setMapName(name);
     if (wmoRenderer) wmoRenderer->setMapName(name);
 }
 
@@ -4004,15 +3571,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
-    // Create world map if not already created
-    if (!worldMap) {
-        worldMap = std::make_unique<WorldMap>();
-        if (!worldMap->initialize(vkCtx, assetManager)) {
-            LOG_ERROR("Failed to initialize world map");
-            worldMap.reset();
-        }
-    }
-
     // Create M2, WMO, and Character renderers
     if (!m2Renderer) {
         m2Renderer = std::make_unique<M2Renderer>();
@@ -4025,11 +3583,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         });
         if (swimEffects) {
             swimEffects->setM2Renderer(m2Renderer.get());
-        }
-        // Initialize SpellVisualSystem once M2Renderer is available (§4.4)
-        if (!spellVisualSystem_) {
-            spellVisualSystem_ = std::make_unique<SpellVisualSystem>();
-            spellVisualSystem_->initialize(m2Renderer.get(), this);
         }
     }
 
@@ -4086,12 +3639,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
-    // Initialize AnimationController (§4.2)
-    if (!animationController_) {
-        animationController_ = std::make_unique<AnimationController>();
-        animationController_->initialize(this);
-    }
-
     // Create and initialize terrain manager
     if (!terrainManager) {
         terrainManager = std::make_unique<TerrainManager>();
@@ -4122,10 +3669,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (wmoRenderer && m2Renderer) {
             wmoRenderer->setM2Renderer(m2Renderer.get());
         }
-        // Set ambient sound manager for environmental audio emitters
-        if (audioCoordinator_->getAmbientSoundManager()) {
-            terrainManager->setAmbientSoundManager(audioCoordinator_->getAmbientSoundManager());
-        }
+        terrainManager->setAmbientEmitterSink(ambientEmitterSink_);
         // Pass asset manager to character renderer for texture loading
         if (characterRenderer) {
             characterRenderer->setAssetManager(assetManager);
@@ -4134,59 +3678,15 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (minimap) {
             minimap->setAssetManager(assetManager);
         }
-        // Wire terrain manager, WMO renderer, and water renderer to camera controller
-        if (cameraController) {
-            cameraController->setTerrainManager(terrainManager.get());
-            if (wmoRenderer) {
-                cameraController->setWMORenderer(wmoRenderer.get());
-            }
-            if (m2Renderer) {
-                cameraController->setM2Renderer(m2Renderer.get());
-            }
-            if (waterRenderer) {
-                cameraController->setWaterRenderer(waterRenderer.get());
-            }
-        }
     }
 
     // Set map name on sub-renderers
     setActiveMapName(mapName);
 
-    // Initialize audio managers
-    if (audioCoordinator_->getMusicManager() && assetManager && !cachedAssetManager) {
-        audio::AudioEngine::instance().setAssetManager(assetManager);
-        audioCoordinator_->getMusicManager()->initialize(assetManager);
-        if (audioCoordinator_->getFootstepManager()) {
-            audioCoordinator_->getFootstepManager()->initialize(assetManager);
-        }
-        if (audioCoordinator_->getActivitySoundManager()) {
-            audioCoordinator_->getActivitySoundManager()->initialize(assetManager);
-        }
-        if (audioCoordinator_->getMountSoundManager()) {
-            audioCoordinator_->getMountSoundManager()->initialize(assetManager);
-        }
-        if (audioCoordinator_->getNpcVoiceManager()) {
-            audioCoordinator_->getNpcVoiceManager()->initialize(assetManager);
-        }
-        if (audioCoordinator_->getPlayerVoiceManager()) {
-            audioCoordinator_->getPlayerVoiceManager()->initialize(assetManager);
-        }
+    // The renderers that load their art on first entering the world - now,
+    // or over the first frames (see runDeferredWorldInitStep).
+    if (assetManager && !cachedAssetManager) {
         if (!deferredWorldInitEnabled_) {
-            if (audioCoordinator_->getAmbientSoundManager()) {
-                audioCoordinator_->getAmbientSoundManager()->initialize(assetManager);
-            }
-            if (audioCoordinator_->getUiSoundManager()) {
-                audioCoordinator_->getUiSoundManager()->initialize(assetManager);
-            }
-            if (audioCoordinator_->getCombatSoundManager()) {
-                audioCoordinator_->getCombatSoundManager()->initialize(assetManager);
-            }
-            if (audioCoordinator_->getSpellSoundManager()) {
-                audioCoordinator_->getSpellSoundManager()->initialize(assetManager);
-            }
-            if (audioCoordinator_->getMovementSoundManager()) {
-                audioCoordinator_->getMovementSoundManager()->initialize(assetManager);
-            }
             if (questMarkerRenderer) {
                 if (!questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
                     LOG_WARNING("Quest marker renderer initialization failed (non-fatal)");
@@ -4195,27 +3695,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
                 if (!footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, assetManager))
                     LOG_WARNING("Footprint renderer initialization failed (non-fatal)");
             }
-
-            if (core::envFlagEnabled("WOWEE_PREWARM_ZONE_MUSIC", false)) {
-                if (zoneManager) {
-                    for (const auto& musicPath : zoneManager->getAllMusicPaths()) {
-                        audioCoordinator_->getMusicManager()->preloadMusic(musicPath);
-                    }
-                }
-                const std::string tavernRemix =
-                    game::ZoneManager::resolveOriginalMusicFile("TavernAllianceREMIX.mp3");
-                const std::vector<std::string> tavernTracks = {
-                    tavernRemix.empty()
-                        ? std::string("Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance01.mp3")
-                        : tavernRemix,
-                    "Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance02.mp3",
-                    "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern1A.mp3",
-                    "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern2A.mp3",
-                };
-                for (const auto& musicPath : tavernTracks) {
-                    audioCoordinator_->getMusicManager()->preloadMusic(musicPath);
-                }
-            }
         } else {
             deferredWorldInitPending_ = true;
             deferredWorldInitStage_ = 0;
@@ -4223,16 +3702,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
 
         cachedAssetManager = assetManager;
-
-        // Enrich zone music from DBC if not already done (e.g. asset manager was null at init).
-        if (zoneManager && assetManager) {
-            zoneManager->enrichFromDBC(assetManager);
-        }
-    }
-
-    // Snap camera to ground
-    if (cameraController) {
-        cameraController->reset();
     }
 
     return true;
@@ -4367,12 +3836,6 @@ void Renderer::setViewDistance(float distance) {
 int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = core::coords::TILE_SIZE;
     return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
-}
-void Renderer::renderHUD() {
-    if (currentCmd == VK_NULL_HANDLE) return;
-    if (performanceHUD && camera) {
-        performanceHUD->render(this, camera.get());
-    }
 }
 
 // ──────────────────────────────────────────────────────
@@ -5005,7 +4468,7 @@ float Renderer::volumetricFogExtinction() const {
 
     // Indoors the outdoor air mostly stays outside. Not all of it: a hall
     // with torches in it should still show their glow.
-    if (cameraController && cameraController->isInsideInteriorWMO()) extinction *= 0.35f;
+    if (viewerMotion_.insideInterior) extinction *= 0.35f;
     return extinction;
 }
 
@@ -5111,8 +4574,7 @@ void Renderer::recordSunShafts() {
 // Build the per-frame render graph for off-screen pre-passes.
 // Declares passes as graph nodes with input/output dependencies.
 // compile() performs topological sort; execute() runs them with auto barriers.
-void Renderer::buildFrameGraph(game::GameHandler* gameHandler) {
-    (void)gameHandler;
+void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
@@ -5124,27 +4586,18 @@ void Renderer::buildFrameGraph(game::GameHandler* gameHandler) {
     renderGraph_->addPass("minimap_composite", {}, {},
         [this](VkCommandBuffer cmd) {
             if (minimap && minimap->isEnabled() && camera) {
-                glm::vec3 minimapCenter = camera->getPosition();
-                if (cameraController && cameraController->isThirdPerson())
-                    minimapCenter = characterPosition;
+                const glm::vec3 minimapCenter =
+                    viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
                 minimap->compositePass(cmd, minimapCenter);
             }
         });
 
-    // World map composite (standalone)
-    renderGraph_->addPass("worldmap_composite", {}, {},
+    // What the interface shows from images of its own: the world map, the
+    // character previews (standalone).
+    renderGraph_->addPass("offscreen_composites", {}, {},
         [this](VkCommandBuffer cmd) {
-            if (worldMap) worldMap->compositePass(cmd);
-        });
-
-    // Character preview composites (standalone)
-    renderGraph_->addPass("preview_composite", {}, {},
-        [this](VkCommandBuffer cmd) {
-            uint32_t frame = vkCtx->getCurrentFrame();
-            for (auto* preview : activePreviews_) {
-                if (preview && preview->isModelLoaded())
-                    preview->compositePass(cmd, frame);
-            }
+            const uint32_t frame = vkCtx->getCurrentFrame();
+            for (auto* composite : offscreenComposites_) composite->compositeOffscreen(cmd, frame);
         });
 
     // Shadow pre-pass → outputs shadow_depth
