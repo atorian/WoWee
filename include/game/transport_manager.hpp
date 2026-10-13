@@ -14,9 +14,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace wowee::rendering {
-    class WMORenderer;
-    class M2Renderer;
+namespace wowee::game {
+    class TransportScene;
 }
 
 namespace wowee::pipeline {
@@ -211,8 +210,8 @@ public:
         return ((durationMs + kRoundTo / 2) / kRoundTo) * kRoundTo;
     }
 
-    void setWMORenderer(rendering::WMORenderer* renderer) { wmoRenderer_ = renderer; }
-    void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
+    /// Where the hulls are drawn and stood on. See TransportScene.
+    void setScene(TransportScene* scene) { scene_ = scene; }
 
     void update(float deltaTime);
     // Which transport the player is standing on, or 0. A cross-continent route
@@ -378,8 +377,7 @@ private:
     struct PendingRouteClock { float phase; uint32_t periodMs; };
     std::unordered_map<uint64_t, PendingRouteClock> pendingRouteClocks_;
     uint64_t riderTransportGuid_ = 0;
-    rendering::WMORenderer* wmoRenderer_ = nullptr;
-    rendering::M2Renderer* m2Renderer_ = nullptr;
+    TransportScene* scene_ = nullptr;
     bool clientSideAnimation_ = false;  // DISABLED - use server positions instead of client prediction
     // double: float loses millisecond precision after ~4.5 hours (2^23 / 1000),
     // causing transport path interpolation to visibly jerk in long play sessions.

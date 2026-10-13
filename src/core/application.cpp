@@ -4,6 +4,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
+#include "core/renderer_transport_scene.hpp"
 #include "game/emote_table.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
@@ -432,6 +433,8 @@ bool Application::initialize() {
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
+    transportScene_ = std::make_unique<RendererTransportScene>(*renderer);
+    gameHandler->getTransportManager()->setScene(transportScene_.get());
 
     // Try to get WoW data path from environment variable
     const char* dataPathEnv = std::getenv("WOW_DATA_PATH");
@@ -2227,6 +2230,10 @@ void Application::shutdown() {
         spellVisualsAttached_ = false;
     }
 
+    // The transports' hulls are the renderer's: stop posing them before it goes.
+    if (gameHandler) gameHandler->getTransportManager()->setScene(nullptr);
+    transportScene_.reset();
+
     LOG_DEBUG("Shutting down renderer...");
     if (renderer) {
         renderer->shutdown();
@@ -2655,10 +2662,6 @@ void Application::performLogoutToLogin() {
     // event is for.
     unloadInterface();
 
-    // Disconnect TransportManager from WMORenderer before tearing down
-    if (gameHandler && gameHandler->getTransportManager()) {
-        gameHandler->getTransportManager()->setWMORenderer(nullptr);
-    }
 
     if (gameHandler) {
         if (keepConnection) gameHandler->returnToCharacterSelect();
@@ -6174,9 +6177,6 @@ void Application::setupTestTransport() {
     LOG_INFO("========================================");
     LOG_INFO("   SETTING UP TEST TRANSPORT");
     LOG_INFO("========================================");
-
-    // Connect transport manager to WMO renderer
-    transportManager->setWMORenderer(wmoRenderer);
 
     // Connect WMORenderer to M2Renderer (for hierarchical transforms: doodads following WMO parents)
     if (renderer->getM2Renderer()) {

@@ -1015,14 +1015,6 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     showProgress("Finalizing world...", 0.94f);
     // setupTestTransport();
 
-    // Connect TransportManager to renderers (must happen AFTER initializeRenderers)
-    if (gameHandler_ && gameHandler_->getTransportManager()) {
-        auto* tm = gameHandler_->getTransportManager();
-        if (renderer_->getWMORenderer()) tm->setWMORenderer(renderer_->getWMORenderer());
-        if (renderer_->getM2Renderer()) tm->setM2Renderer(renderer_->getM2Renderer());
-        LOG_DEBUG("TransportManager connected: wmoR=", (renderer_->getWMORenderer() ? "yes" : "NULL"),
-                   " m2R=", (renderer_->getM2Renderer() ? "yes" : "NULL"));
-    }
 
     // Set up NPC animation callbacks (for online creatures)
     showProgress("Preparing creatures...", 0.97f);

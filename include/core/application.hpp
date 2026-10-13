@@ -56,6 +56,7 @@ class NPCInteractionCallbackHandler;
 class ZoneTracker;
 class PlayerView;
 class SpellPresentation;
+class RendererTransportScene;
 class ScreenRecording;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
@@ -312,6 +313,8 @@ private:
     bool mapWindowFailed_ = false;
     std::unique_ptr<auth::AuthHandler> authHandler;
     std::unique_ptr<game::GameHandler> gameHandler;
+    /// The renderer's side of the transports - see game::TransportScene.
+    std::unique_ptr<RendererTransportScene> transportScene_;
     std::unique_ptr<game::World> world;
     std::unique_ptr<pipeline::AssetManager> assetManager;
     std::unique_ptr<addons::AddonManager> addonManager_;
