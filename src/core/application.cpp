@@ -1,4 +1,6 @@
 #include "core/application.hpp"
+#include <imgui_impl_vulkan.h>
+#include "core/screen_recording.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "core/player_view.hpp"
 #include "audio/ambient_sound_manager.hpp"
@@ -358,6 +360,9 @@ bool Application::initialize() {
     spellVisualSystem_ = std::make_unique<rendering::SpellVisualSystem>();
     playerView_ = std::make_unique<PlayerView>(*renderer, audioCoordinator_.get(),
                                                spellVisualSystem_.get());
+    screenRecording_ = std::make_unique<ScreenRecording>(*renderer);
+    performanceHUD_ = std::make_unique<rendering::PerformanceHUD>();
+    performanceHUD_->setPosition(rendering::PerformanceHUD::Position::TOP_LEFT);
 
     // The renderer knows terrain and the sounds it places; which zone that
     // terrain is and what plays there are the client's, joined here.
@@ -378,6 +383,10 @@ bool Application::initialize() {
         LOG_FATAL("Failed to initialize UI manager");
         return false;
     }
+    // The interface is ImGui's frame, drawn over the picture at its end.
+    renderer->setInterfaceRecorder([](VkCommandBuffer cmd) {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+    });
 
     // The saved anti-aliasing setting, applied here rather than from the game
     // screen's update.
@@ -707,6 +716,7 @@ bool Application::initialize() {
             uiServices.addonManager = addonManager_.get();  // May be nullptr here, re-wire later
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
+            uiServices.screenRecording = screenRecording_.get();
             uiServices.cameraController = getCameraController();
             uiServices.animationController = getAnimationController();
             uiServices.worldMap = [this] { return getWorldMap(); };
@@ -1474,6 +1484,7 @@ bool Application::initialize() {
             uiServices.addonManager = addonManager_.get();
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
+            uiServices.screenRecording = screenRecording_.get();
             uiServices.cameraController = getCameraController();
             uiServices.animationController = getAnimationController();
             uiServices.worldMap = [this] { return getWorldMap(); };
@@ -1984,9 +1995,9 @@ void Application::run() {
 #ifndef NDEBUG
                 // F1: Toggle performance HUD
                 if (event.key.scancode == SDL_SCANCODE_F1) {
-                    if (renderer && renderer->getPerformanceHUD()) {
-                        renderer->getPerformanceHUD()->toggle();
-                        bool enabled = renderer->getPerformanceHUD()->isEnabled();
+                    if (performanceHUD_) {
+                        performanceHUD_->toggle();
+                        bool enabled = performanceHUD_->isEnabled();
                         LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
                     }
                 }
@@ -2272,8 +2283,9 @@ void Application::shutdown() {
     // Explicitly shut down the renderer before destroying it - this ensures
     // all sub-renderers free their VMA allocations in the correct order,
     // before VkContext::shutdown() calls vmaDestroyAllocator().
-    // What draws through the renderer goes first: the world map's images, the
-    // spell visuals' M2 instances.
+    // What draws through the renderer goes first: the recording's readback,
+    // the world map's images, the spell visuals' M2 instances.
+    screenRecording_.reset();
     if (worldMap_) {
         if (renderer) renderer->unregisterComposite(worldMap_.get());
         worldMap_->shutdown();
@@ -4240,9 +4252,9 @@ void Application::followRendererUpdate(float deltaTime) {
     zctx.zoneManager = zoneTracker_->getZoneManager();
     audioCoordinator_->updateZoneAudio(zctx);
 
-    if (auto* hud = renderer->getPerformanceHUD()) {
-        hud->setZoneName(audioCoordinator_->getCurrentZoneName());
-    }
+    performanceHUD_->setZoneName(audioCoordinator_->getCurrentZoneName());
+    performanceHUD_->setCameraUpdateMs(playerView_->lastCameraUpdateMs());
+    performanceHUD_->update(deltaTime);
 }
 
 void Application::update(float deltaTime) {
@@ -4686,6 +4698,7 @@ void Application::render() {
     const bool drawWorld = state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
         std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
     renderer->setWorldInView(state == AppState::IN_GAME);
+    screenRecording_->update();
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
     if (drawWorld) {
@@ -4694,7 +4707,9 @@ void Application::render() {
 
     // Render performance HUD (within ImGui frame, before UI ends the frame)
     if (renderer) {
-        runRenderStage("renderHUD", [&] { renderer->renderHUD(); });
+        runRenderStage("renderHUD", [&] {
+            if (renderer->getCamera()) performanceHUD_->render(renderer.get(), renderer->getCamera());
+        });
     }
 
     // Addon-built frames, drawn under the client's own interface while the two
@@ -5550,7 +5565,7 @@ void Application::render() {
         ++envRecordFrames_;
         if (envRecordFrames_ == kScreenshotFrame) {
             std::string error;
-            if (renderer->startRecording(record, error)) {
+            if (screenRecording_->start(record, error)) {
                 envRecordStart_ = std::chrono::steady_clock::now();
             } else {
                 LOG_WARNING("WOWEE_RECORD: could not start: ", error);

@@ -177,6 +177,12 @@ CHECKS = [
     ("posix_only_check.py",
      r"^(\d+) called directly instead", 0,
      "POSIX-only calls that break the Windows build"),
+    # The renderer library is what draws a scene without the client
+    # (tools/scene_render); one include of the game or the sound and it is
+    # the client again, with nothing but a distant link to say so.
+    ("render_dependency_check.py",
+     r"^(\d+) includes of the client from the renderer library", 0,
+     "client includes in the renderer library"),
     ("redefined_macro_check.py",
      r"^(\d+) redefined without an #ifndef", 0,
      "macros the build defines, redefined unguarded"),

@@ -20,7 +20,6 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/viewer_motion.hpp"
 #include "rendering/world_environment.hpp"
-#include "core/screen_recorder.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
@@ -29,7 +28,6 @@
 #include "pipeline/grass_profile.hpp"
 
 namespace wowee {
-namespace core { class Window; }
 namespace rendering { class VkContext; }
 namespace pipeline { class AssetManager; }
 
@@ -37,9 +35,9 @@ namespace rendering {
 
 class Camera;
 class OffscreenComposite;
+class RenderSurface;
 class TerrainRenderer;
 class TerrainManager;
-class PerformanceHUD;
 class WaterRenderer;
 class Skybox;
 class SkyBackground;
@@ -76,13 +74,14 @@ class LootSparkles;
 class CorpseBones;
 class SunShafts;
 class ScreenCapture;
+class FrameSink;
 
 class Renderer {
 public:
     Renderer();
     ~Renderer();
 
-    bool initialize(core::Window* window);
+    bool initialize(RenderSurface* surface);
     void shutdown();
 
     void beginFrame();
@@ -93,6 +92,12 @@ public:
     /// AuxSwapchain - so the frame's one fence covers it. Empty clears it.
     void setAfterInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
         afterInterface_ = std::move(recorder);
+    }
+    /// Records the interface over the finished picture, inside the overlay
+    /// pass at the end of the frame. The client's draws its ImGui frame; with
+    /// none set there is no interface, as in an offline scene.
+    void setInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
+        interface_ = std::move(recorder);
     }
 
     void renderWorld();
@@ -157,15 +162,10 @@ public:
 
 
 
-    /**
-     * Render performance HUD
-     */
-    void renderHUD();
 
     Camera* getCamera() { return camera.get(); }
     TerrainRenderer* getTerrainRenderer() const { return terrainRenderer.get(); }
     TerrainManager* getTerrainManager() const { return terrainManager.get(); }
-    PerformanceHUD* getPerformanceHUD() { return performanceHUD.get(); }
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
     Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
@@ -206,16 +206,17 @@ public:
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
 
-    /// Start writing the screen, interface included, and what the client
-    /// plays to a video file. False, with the reason in error, when it cannot.
-    bool startRecording(const std::string& path, std::string& error);
-    /// Finish the file and close it.
-    core::ScreenRecorder::Stats stopRecording();
-    [[nodiscard]] bool isRecording() const;
-    /// Why a recording stopped by itself - the disk filled, the encoder gave
-    /// up - once, for the interface to say; empty otherwise. The file is
-    /// finished properly all the same.
-    std::string takeRecordingFailure();
+    /// Read every frame back, interface included, at width x height, and
+    /// hand the frames to sink as it asks for them - see FrameSink. False when
+    /// the readback cannot be set up.
+    bool beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t height);
+    /// Hand over the frames still on the GPU, oldest first. Before the sink
+    /// is finished, so the recording ends where it was stopped.
+    void flushFrameCapture();
+    /// Stop reading back and release the buffers - after the sink is done
+    /// with them.
+    void endFrameCapture();
+    [[nodiscard]] bool isCapturingFrames() const { return frameSink_ != nullptr; }
 
     // Sub-system accessors (§4.2)
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
@@ -241,6 +242,7 @@ public:
 
 private:
     std::function<void(VkCommandBuffer)> afterInterface_;
+    std::function<void(VkCommandBuffer)> interface_;
 
     // True when water is drawn in the scene continuation pass rather than in
     // the scene pass itself (see renderWorld).
@@ -283,7 +285,7 @@ private:
 
     void runDeferredWorldInitStep(float deltaTime);
 
-    core::Window* window = nullptr;
+    RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
     /// How much of the line from the eye to the sun is blocked, smoothed.
@@ -296,7 +298,6 @@ private:
     [[nodiscard]] float sampleSunOcclusion() const;
 
     std::unique_ptr<TerrainManager> terrainManager;
-    std::unique_ptr<PerformanceHUD> performanceHUD;
     std::unique_ptr<WaterRenderer> waterRenderer;
     std::unique_ptr<Skybox> skybox;
     std::unique_ptr<Celestial> celestial;
@@ -580,8 +581,7 @@ private:
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.
     std::unique_ptr<ScreenCapture> screenCapture_;
-    std::unique_ptr<core::ScreenRecorder> recorder_;
-    std::string recordingFailure_;
+    FrameSink* frameSink_ = nullptr;
     void collectRecordedFrame();
     void recordScreenCapture();
 

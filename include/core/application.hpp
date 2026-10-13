@@ -34,6 +34,7 @@ namespace wowee {
 // Forward declarations
 namespace rendering {
 class Renderer;
+class PerformanceHUD;
 class CameraController;
 class AnimationController;
 class SpellVisualSystem;
@@ -53,6 +54,7 @@ namespace core {
 class NPCInteractionCallbackHandler;
 class ZoneTracker;
 class PlayerView;
+class ScreenRecording;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -183,6 +185,10 @@ public:
     rendering::AnimationController* getAnimationController();
     /// Spell effects in the world, for every caster.
     rendering::SpellVisualSystem* getSpellVisualSystem() { return spellVisualSystem_.get(); }
+    /// The screen being recorded to a video file.
+    ScreenRecording* getScreenRecording() { return screenRecording_.get(); }
+    /// The frame statistics overlay, F1.
+    rendering::PerformanceHUD* getPerformanceHUD() { return performanceHUD_.get(); }
     /// The world map; null until the world's renderers are up.
     rendering::WorldMap* getWorldMap() { return worldMap_.get(); }
 
@@ -386,6 +392,8 @@ private:
     std::unique_ptr<ZoneTracker> zoneTracker_;
     std::unique_ptr<rendering::SpellVisualSystem> spellVisualSystem_;
     std::unique_ptr<PlayerView> playerView_;
+    std::unique_ptr<ScreenRecording> screenRecording_;
+    std::unique_ptr<rendering::PerformanceHUD> performanceHUD_;
     std::unique_ptr<rendering::WorldMap> worldMap_;
     bool spellVisualsAttached_ = false;
     /// Whether the camera was inside a WMO last frame, for announcing the

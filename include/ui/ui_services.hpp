@@ -11,6 +11,7 @@ namespace core {
     class AppearanceComposer;
     class WorldLoader;
     class ZoneTracker;
+    class ScreenRecording;
 }
 namespace rendering {
 class Renderer;
@@ -48,6 +49,7 @@ struct UIServices {
     addons::AddonManager* addonManager = nullptr;
     audio::AudioCoordinator* audioCoordinator = nullptr;
     core::ZoneTracker* zoneTracker = nullptr;
+    core::ScreenRecording* screenRecording = nullptr;
     rendering::CameraController* cameraController = nullptr;
     rendering::AnimationController* animationController = nullptr;
     /// The world map, which is built on entering the world: null before.

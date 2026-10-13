@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/frame_sink.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -45,16 +47,12 @@ inline RecordingSize recordingFrameSize(uint32_t windowWidth, uint32_t windowHei
  * Built on FFmpeg, which the client already links; a build without it has the
  * class and every call answers that recording is unavailable.
  */
-class ScreenRecorder {
+class ScreenRecorder : public rendering::FrameSink {
 public:
     /// One frame, in memory the recorder reads and then gives back through
-    /// release - from its own thread, so release must be safe there.
-    struct Frame {
-        const uint8_t* bgra = nullptr;
-        uint32_t stride = 0;   ///< bytes from one row to the next
-        int64_t pts = 0;       ///< in frames at frameRate(), from the start
-        std::function<void()> release;
-    };
+    /// release - from its own thread, so release must be safe there. The pts
+    /// is in frames at frameRate(), from the start.
+    using Frame = rendering::FrameSink::Frame;
 
     struct Stats {
         uint64_t framesWritten = 0;
@@ -65,7 +63,7 @@ public:
     };
 
     ScreenRecorder();
-    ~ScreenRecorder();
+    ~ScreenRecorder() override;
     ScreenRecorder(const ScreenRecorder&) = delete;
     ScreenRecorder& operator=(const ScreenRecorder&) = delete;
 
@@ -85,21 +83,21 @@ public:
     /// frame. The file so far is still finished properly by stop().
     [[nodiscard]] bool failed() const;
     [[nodiscard]] std::string failure() const;
-    [[nodiscard]] double elapsedSeconds() const;
+    [[nodiscard]] double elapsedSeconds() const override;
 
     /// The frame due now, if one is: its pts goes in *pts. Frames are taken
     /// at the recording's rate however fast the client draws, and none at all
     /// while it draws slower - a still frame is held, not repeated.
-    bool frameDue(int64_t* pts) const;
+    bool frameDue(int64_t* pts) const override;
     /// That frame was captured and will be submitted when the GPU is done.
-    void frameTaken(int64_t pts);
+    void frameTaken(int64_t pts) override;
     /// That frame could not be captured - every readback buffer was still with
     /// the encoder.
-    void frameDropped();
+    void frameDropped() override;
 
     /// Hand over a captured frame. Never blocks; a frame the recorder cannot
     /// take is released at once and counted as dropped.
-    void submit(Frame frame);
+    void submit(Frame frame) override;
 
 private:
     struct Impl;

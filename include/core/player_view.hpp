@@ -50,6 +50,8 @@ public:
 
     rendering::CameraController* getCameraController() { return cameraController_.get(); }
     rendering::AnimationController* getAnimationController() { return animationController_.get(); }
+    /// How long the camera controller's last update took, in milliseconds.
+    [[nodiscard]] double lastCameraUpdateMs() const { return lastCameraUpdateMs_; }
 
 private:
     void updateCharacterFacing(float deltaTime);
@@ -60,6 +62,7 @@ private:
     rendering::SpellVisualSystem* spellVisuals_;
     std::unique_ptr<rendering::CameraController> cameraController_;
     std::unique_ptr<rendering::AnimationController> animationController_;
+    double lastCameraUpdateMs_ = 0.0;
 };
 
 } // namespace core

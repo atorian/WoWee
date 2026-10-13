@@ -1,4 +1,6 @@
 #include "rendering/renderer.hpp"
+#include "rendering/offscreen_composite.hpp"
+#include "rendering/frame_sink.hpp"
 #include "rendering/sun_direction.hpp"
 
 #include <fstream>
@@ -11,7 +13,6 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
-#include "rendering/performance_hud.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
@@ -29,7 +30,6 @@
 #include "rendering/charge_effect.hpp"
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
-#include "rendering/character_preview.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -56,7 +56,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
-#include "core/window.hpp"
+#include "rendering/render_surface.hpp"
 #include "core/logger.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_frame_data.hpp"
@@ -67,8 +67,6 @@
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/render_graph.hpp"
 #include "rendering/overlay_system.hpp"
-#include <imgui.h>
-#include <imgui_impl_vulkan.h>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -841,9 +839,9 @@ void Renderer::setShadowQualityLevel(int level) {
     SHADOW_MAP_SIZE = kShadowSideForLevel[std::clamp(level, 0, 4)];
 }
 
-bool Renderer::initialize(core::Window* win) {
-    window = win;
-    vkCtx = win->getVkContext();
+bool Renderer::initialize(RenderSurface* surface) {
+    surface_ = surface;
+    vkCtx = surface->getVkContext();
     deferredWorldInitEnabled_ = core::envFlagEnabled("WOWEE_DEFER_WORLD_SYSTEMS", true);
     LOG_INFO("Initializing renderer (Vulkan)");
 
@@ -851,12 +849,8 @@ bool Renderer::initialize(core::Window* win) {
     camera = std::make_unique<Camera>();
     camera->setPosition(glm::vec3(-8900.0f, -170.0f, 150.0f));
     camera->setRotation(0.0f, -5.0f);
-    camera->setAspectRatio(window->getAspectRatio());
+    camera->setAspectRatio(surface_->getAspectRatio());
     camera->setFov(60.0f);
-
-    // Create performance HUD
-    performanceHUD = std::make_unique<PerformanceHUD>();
-    performanceHUD->setPosition(PerformanceHUD::Position::TOP_LEFT);
 
     // Create per-frame UBO and descriptor sets
     if (!createPerFrameResources()) {
@@ -983,9 +977,7 @@ bool Renderer::initialize(core::Window* win) {
 }
 
 void Renderer::shutdown() {
-    // A recording in progress is finished, not abandoned: the file is only
-    // playable once its index is written.
-    if (recorder_) stopRecording();
+    endFrameCapture();
 
     destroySecondaryCommandResources();
 
@@ -1111,7 +1103,6 @@ void Renderer::shutdown() {
 
     destroyPerFrameResources();
 
-    performanceHUD.reset();
     camera.reset();
 
     LOG_INFO("Renderer shutdown");
@@ -1177,10 +1168,10 @@ void Renderer::applyMsaaChange() {
 
     // Set new MSAA and recreate swapchain (render pass, depth, MSAA image, framebuffers)
     vkCtx->setMsaaSamples(samples);
-    if (!vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight())) {
+    if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) {
         LOG_ERROR("MSAA change failed - reverting to 1x");
         vkCtx->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
-        (void)vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight());
+        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
     }
 
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
@@ -1341,8 +1332,8 @@ void Renderer::beginFrame() {
         // Skip recreation while window is minimized (0×0 extent is a Vulkan spec violation)
         // Pixels, like the extent below: a window with a surface behind it is
         // never rebuilt from the size the desktop places it at.
-        if (window->getDrawableWidth() == 0 || window->getDrawableHeight() == 0) return;
-        (void)vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight());
+        if (surface_->getDrawableWidth() == 0 || surface_->getDrawableHeight() == 0) return;
+        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
         // Rebuild water resources that reference swapchain extent/views
         if (waterRenderer) {
             waterRenderer->recreatePipelines();
@@ -1600,9 +1591,9 @@ void Renderer::endFrame() {
         // Under the interface, over everything else.
         if (sunShafts_) sunShafts_->composite(currentCmd, vkCtx->getCurrentFrame());
 
-        // ImGui's pipelines are built against the overlay pass, so it always
-        // records inline here rather than into a scene-pass secondary buffer.
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), currentCmd);
+        // The interface's pipelines are built against the overlay pass, so it
+        // always records inline here rather than into a scene-pass secondary.
+        if (interface_) interface_(currentCmd);
         vkCmdEndRenderPass(currentCmd);
         if (vkCtx) vkCtx->gpuMark(currentCmd, "interface");
     } else {
@@ -1626,107 +1617,67 @@ void Renderer::setCharacterFollow(uint32_t instanceId) {
     characterInstanceId = instanceId;
 }
 
-bool Renderer::startRecording(const std::string& path, std::string& error) {
-    if (recorder_ && recorder_->isRecording()) {
-        error = "already recording";
-        return false;
-    }
-    if (!vkCtx) {
-        error = "there is no renderer to record from";
-        return false;
-    }
-    if (!core::ScreenRecorder::compiledIn()) {
-        error = "this build was made without FFmpeg 5.1 or later, which recording needs";
-        return false;
-    }
-    const VkExtent2D extent = vkCtx->getSwapchainExtent();
-    const core::RecordingSize size = core::recordingFrameSize(extent.width, extent.height);
+bool Renderer::beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t height) {
+    if (!vkCtx || !sink || frameSink_) return false;
     auto capture = std::make_unique<ScreenCapture>();
-    if (!capture->initialize(vkCtx, size.width, size.height)) {
-        capture->shutdown();
-        error = "could not set up reading frames back from the GPU";
-        return false;
-    }
-    auto recorder = std::make_unique<core::ScreenRecorder>();
-    if (!recorder->start(path, size, error)) {
+    if (!capture->initialize(vkCtx, width, height)) {
         capture->shutdown();
         return false;
     }
     screenCapture_ = std::move(capture);
-    recorder_ = std::move(recorder);
-    recordingFailure_.clear();
+    frameSink_ = sink;
     return true;
 }
 
-core::ScreenRecorder::Stats Renderer::stopRecording() {
-    core::ScreenRecorder::Stats stats;
-    if (!recorder_) return stats;
-    // The frames still on the GPU are finished and handed over, oldest first,
-    // so the file ends where the recording did rather than two frames short.
-    if (vkCtx && screenCapture_) {
-        vkDeviceWaitIdle(vkCtx->getDevice());
-        ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
-        if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
-        ScreenCapture* capture = screenCapture_.get();
-        for (const auto& r : ready) {
-            if (!r.valid) continue;
-            const uint32_t buffer = r.buffer;
-            recorder_->submit({.bgra = r.bgra, .stride = r.stride, .pts = r.pts,
-                               .release = [capture, buffer] { capture->release(buffer); }});
-        }
+void Renderer::flushFrameCapture() {
+    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
+    vkDeviceWaitIdle(vkCtx->getDevice());
+    ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
+    if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
+    ScreenCapture* capture = screenCapture_.get();
+    for (const auto& r : ready) {
+        if (!r.valid) continue;
+        const uint32_t buffer = r.buffer;
+        frameSink_->submit({.bgra = r.bgra, .stride = r.stride, .pts = r.pts,
+                            .release = [capture, buffer] { capture->release(buffer); }});
     }
-    // The recorder first: its thread holds readback buffers until it is done.
-    stats = recorder_->stop();
-    recorder_.reset();
+}
+
+void Renderer::endFrameCapture() {
+    frameSink_ = nullptr;
     if (screenCapture_) {
         screenCapture_->shutdown();
         screenCapture_.reset();
     }
-    return stats;
-}
-
-bool Renderer::isRecording() const {
-    return recorder_ && recorder_->isRecording();
-}
-
-std::string Renderer::takeRecordingFailure() {
-    std::string failure;
-    failure.swap(recordingFailure_);
-    return failure;
 }
 
 void Renderer::collectRecordedFrame() {
-    if (!recorder_ || !screenCapture_ || !vkCtx) return;
+    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
     const ScreenCapture::Ready ready = screenCapture_->collect(vkCtx->getCurrentFrame());
     if (ready.valid) {
         ScreenCapture* capture = screenCapture_.get();
         const uint32_t buffer = ready.buffer;
-        recorder_->submit({.bgra = ready.bgra, .stride = ready.stride, .pts = ready.pts,
-                           .release = [capture, buffer] { capture->release(buffer); }});
-    }
-    // Given up on its own: finish what it has and say why, once.
-    if (recorder_->failed()) {
-        recordingFailure_ = recorder_->failure();
-        stopRecording();
+        frameSink_->submit({.bgra = ready.bgra, .stride = ready.stride, .pts = ready.pts,
+                            .release = [capture, buffer] { capture->release(buffer); }});
     }
 }
 
 void Renderer::recordScreenCapture() {
-    if (!recorder_ || !screenCapture_ || !recorder_->isRecording() || currentCmd == VK_NULL_HANDLE) return;
+    if (!frameSink_ || !screenCapture_ || currentCmd == VK_NULL_HANDLE) return;
     const auto& images = vkCtx->getSwapchainImages();
     const VkExtent2D extent = vkCtx->getSwapchainExtent();
     int64_t pts = 0;
-    if (currentImageIndex < images.size() && recorder_->frameDue(&pts)) {
+    if (currentImageIndex < images.size() && frameSink_->frameDue(&pts)) {
         if (!screenCapture_->record(currentCmd, vkCtx->getCurrentFrame(), images[currentImageIndex],
                                     extent, pts)) {
-            recorder_->frameDropped();
+            frameSink_->frameDropped();
         }
-        recorder_->frameTaken(pts);
+        frameSink_->frameTaken(pts);
     }
     const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
     if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
         screenCapture_->drawIndicator(currentCmd, overlayFbs[currentImageIndex], extent,
-                                      static_cast<float>(recorder_->elapsedSeconds()));
+                                      static_cast<float>(frameSink_->elapsedSeconds()));
     }
 }
 
@@ -2209,10 +2160,6 @@ void Renderer::update(float deltaTime) {
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
 
-    // Update performance HUD
-    if (performanceHUD) {
-        performanceHUD->update(deltaTime);
-    }
 
     // Periodic cache hygiene: drop model GPU data no longer referenced by active instances.
     static float modelCleanupTimer = 0.0f;
@@ -3535,14 +3482,14 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
 
 /// The minimap disc, over whatever has been drawn so far.
 void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
-    if (minimap && minimap->isEnabled() && camera && window) {
+    if (minimap && minimap->isEnabled() && camera && surface_) {
         const glm::vec3 minimapCenter =
             viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
         // Render-space character yaw faces north at 180 degrees; the
         // minimap shader arrow faces north at 0. Match the mirrored
         // minimap texture by flipping the visual arrow vertically.
         minimap->render(cmd, *camera, minimapCenter,
-                        window->getWidth(), window->getHeight(),
+                        surface_->getWidth(), surface_->getHeight(),
                         glm::radians(characterYaw), true);
     }
 }
@@ -3889,12 +3836,6 @@ void Renderer::setViewDistance(float distance) {
 int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = core::coords::TILE_SIZE;
     return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
-}
-void Renderer::renderHUD() {
-    if (currentCmd == VK_NULL_HANDLE) return;
-    if (performanceHUD && camera) {
-        performanceHUD->render(this, camera.get());
-    }
 }
 
 // ──────────────────────────────────────────────────────

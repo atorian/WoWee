@@ -7,7 +7,6 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/mount_dust.hpp"
-#include "rendering/performance_hud.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/viewer_motion.hpp"
@@ -70,7 +69,7 @@ void PlayerView::beforeRendererUpdate(float deltaTime) {
     if (cameraMs > 50.0) {
         LOG_WARNING("SLOW cameraController->update: ", cameraMs, "ms");
     }
-    if (auto* hud = renderer_.getPerformanceHUD()) hud->setCameraUpdateMs(cameraMs);
+    lastCameraUpdateMs_ = cameraMs;
 
     renderer_.setViewerMotion(viewerMotion());
 
