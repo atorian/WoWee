@@ -3374,14 +3374,25 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
         // Character recording is independent after prepareRender() and no
         // longer shares the selection-circle overlay command buffer.
+        // The faded ones go in a buffer of their own, queued after the M2s, or
+        // after the water in its pass: drawn here they would hide the effects
+        // inside them. Recorded by the same worker, one after the other.
         charFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_CHARS);
             setSecondaryViewportScissor(cmd);
             if (characterRenderer && camera && !skipChars) {
-                characterRenderer->render(cmd, perFrameSet, *camera);
+                characterRenderer->render(cmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
             }
             vkEndCommandBuffer(cmd);
+            if (!fadedCharactersAfterWater()) {
+                VkCommandBuffer faded = beginSecondary(SEC_CHARS_FADED);
+                setSecondaryViewportScissor(faded);
+                if (characterRenderer && camera && !skipChars) {
+                    characterRenderer->render(faded, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+                }
+                vkEndCommandBuffer(faded);
+            }
             return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
         });
@@ -3478,8 +3489,8 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         }
 
         // --- Execute all secondary buffers in correct draw order ---
-        VkCommandBuffer validCmds[8];
-        const char* validLabels[8];
+        VkCommandBuffer validCmds[NUM_SECONDARIES];
+        const char* validLabels[NUM_SECONDARIES];
         uint32_t numCmds = 0;
         // Terrain first, then the sky. Every sky layer sits on the far plane
         // and depth-tests against what is already there, so drawing it after
@@ -3502,6 +3513,8 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && camera && !skipM2)
             queue(secondaryCmds_[SEC_M2][frameIdx], "m2");
+        if (!fadedCharactersAfterWater())
+            queue(secondaryCmds_[SEC_CHARS_FADED][frameIdx], "faded characters");
         queue(secondaryCmds_[SEC_POST][frameIdx], "water/effects");
 
         // One at a time, with a mark after each.
@@ -3581,7 +3594,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
         if (characterRenderer && camera && !skipChars) {
             characterRenderer->prepareRender(frameIdx);
-            characterRenderer->render(currentCmd, perFrameSet, *camera);
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "characters");
         }
 
@@ -3597,6 +3610,13 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "m2");
             lastM2RenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - m2Start).count();
+        }
+
+        // Faded characters over the blended world, unless they go after the
+        // water with it.
+        if (characterRenderer && camera && !skipChars && !fadedCharactersAfterWater()) {
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+            if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
         if (waterRenderer && camera && !waterDrawsInContinuePass()) {
@@ -3692,6 +3712,12 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // a waterfall's foam was faint and shifted over the pool and at full
         // strength only where it hung past the edge.
         if (m2Renderer && !skipM2) m2Renderer->renderAfterWater(currentCmd, perFrameSet);
+        // Faded characters over what was just drawn. A Shadowform priest's
+        // fire rises from the feet through the body; with the body drawn
+        // first, its depth hid every part of the fire inside or behind it.
+        if (characterRenderer && !skipChars && fadedCharactersAfterWater()) {
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+        }
 
         // Spray belongs on top of the surface it is thrown off. Recorded in the
         // scene pass it went under the water instead, which the sheet then hid -
@@ -3932,6 +3958,11 @@ void Renderer::renderMinimapOverlay(VkCommandBuffer cmd,
                         window->getWidth(), window->getHeight(),
                         minimapPlayerOrientation, hasMinimapPlayerOrientation);
     }
+}
+
+bool Renderer::fadedCharactersAfterWater() const {
+    return characterRenderer && characterRenderer->fadedPass() != VK_NULL_HANDLE &&
+           waterDrawsInContinuePass();
 }
 
 bool Renderer::waterDrawsInContinuePass() const {
@@ -4519,11 +4550,14 @@ void Renderer::refreshSwimEffectsPass() {
     const bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
     const bool minimapMoved = minimap && minimapDrawsWithWater_ != minimapWasWithWater;
     const bool blendedMoved = m2Renderer && m2Renderer->afterWaterPass() != blendedAfterWaterPass_;
-    if (!sprayMoved && !minimapMoved && !blendedMoved) return;
+    // Faded characters go wherever the blended world goes, after it.
+    const bool fadedMoved = characterRenderer && characterRenderer->fadedPass() != blendedAfterWaterPass_;
+    if (!sprayMoved && !minimapMoved && !blendedMoved && !fadedMoved) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
     if (blendedMoved) m2Renderer->setAfterWaterPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
+    if (fadedMoved) characterRenderer->setFadedPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
 }
 
 // ========================= Multithreaded Secondary Command Buffers =========================
@@ -4565,6 +4599,13 @@ bool Renderer::createSecondaryCommandResources() {
         for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
             if (vkAllocateCommandBuffers(device, &allocInfo, &secondaryCmds_[workerSecondaries[w]][f]) != VK_SUCCESS) {
                 LOG_ERROR("Failed to allocate worker secondary buffer w=", w, " f=", f);
+                return false;
+            }
+            // The faded characters are recorded by the characters' worker,
+            // after its own buffer, so they come from its pool.
+            if (workerSecondaries[w] == SEC_CHARS &&
+                vkAllocateCommandBuffers(device, &allocInfo, &secondaryCmds_[SEC_CHARS_FADED][f]) != VK_SUCCESS) {
+                LOG_ERROR("Failed to allocate the faded characters' secondary buffer f=", f);
                 return false;
             }
         }

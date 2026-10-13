@@ -529,7 +529,13 @@ private:
     static constexpr uint32_t SEC_M2        = 5;  // M2 + particles + glow (worker 3)
     static constexpr uint32_t SEC_POST      = 6;  // water + weather + effects (worker 4)
     static constexpr uint32_t SEC_IMGUI     = 7;  // ImGui (main thread, non-FSR only)
-    static constexpr uint32_t NUM_SECONDARIES = 8;
+    // Faded characters (worker 2, after SEC_CHARS), queued after SEC_M2 so the
+    // effects inside them show through; unused when they go after the water.
+    static constexpr uint32_t SEC_CHARS_FADED = 8;
+    static constexpr uint32_t NUM_SECONDARIES = 9;
+    /// Faded characters are drawn in the after-water pass, after the blended
+    /// M2s and particles there, rather than in the scene pass after SEC_M2.
+    [[nodiscard]] bool fadedCharactersAfterWater() const;
     static constexpr uint32_t NUM_WORKERS = 5;
 
     // Per-worker command pools (thread-safe: one pool per thread)

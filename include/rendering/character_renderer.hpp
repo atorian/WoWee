@@ -92,10 +92,22 @@ public:
 
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     void prepareRender(uint32_t frameIndex);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    /// Which instances a render call draws. A faded one - an aura's
+    /// translucent body, a ghost, a fade-in - writes depth, so whatever is
+    /// drawn after it inside or behind it is hidden: Shadowform's fire,
+    /// which rises from the feet through the body, was gone. Faded ones are
+    /// drawn after the blended world instead, laid over it as the client does.
+    enum class Part { All, Solid, Faded };
+    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                Part part = Part::All);
+    /// The pass faded instances are drawn in when it is not the scene's - the
+    /// one after the water that blended M2s and particles go to - or null.
+    /// Rebuilds pipelines: call between frames, with nothing in flight.
+    void setFadedPass(VkRenderPass pass, VkSampleCountFlagBits samples);
+    [[nodiscard]] VkRenderPass fadedPass() const { return fadedPass_; }
     void recreatePipelines();
-    /// The five main-pass pipelines, which initialize() and
-    /// recreatePipelines() both need and each used to describe.
+    /// The main-pass pipelines, which initialize() and recreatePipelines()
+    /// both need and each used to describe.
     void buildMainPassPipelines(VkDevice device, VkRenderPass mainPass,
                                 VkSampleCountFlagBits samples,
                                 wowee::rendering::VkShaderModule& charVert,
@@ -446,23 +458,37 @@ private:
     VkSampleCountFlagBits msaaSamplesOverride_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
 
-    // Vulkan pipelines (one per blend mode)
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
-    VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
-    VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;
-    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
-    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
-    // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
-    // write kept on, so the faded model still self-occludes instead of showing
-    // backfaces and under-armor skin through the body.
-    VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
-    // A faded body (Shadowform, a ghost, a fade-in) in two steps: its solid
-    // parts into depth alone, then colour only where that depth is, so it is
-    // one even layer - the near legs hiding the far ones - not a stack of
-    // every surface in the model's own drawing order.
-    VkPipeline fadeDepthPipeline_ = VK_NULL_HANDLE;
-    VkPipeline fadeColorPipeline_ = VK_NULL_HANDLE;
+    // Vulkan pipelines, one per blend mode, for one render pass.
+    struct PipelineSet {
+        VkPipeline opaque = VK_NULL_HANDLE;
+        VkPipeline alphaTest = VK_NULL_HANDLE;
+        VkPipeline alpha = VK_NULL_HANDLE;
+        VkPipeline additive = VK_NULL_HANDLE;
+        VkPipeline modulate = VK_NULL_HANDLE;      // blend mode 5
+        VkPipeline modulate2x = VK_NULL_HANDLE;    // blend mode 6
+        // Whole-instance fades (ghost form, spawn fade-in): alpha blend with
+        // depth write kept on, so the faded model still self-occludes instead
+        // of showing backfaces and under-armor skin through the body.
+        VkPipeline translucent = VK_NULL_HANDLE;
+        // A faded body (Shadowform, a ghost, a fade-in) in two steps: its
+        // solid parts into depth alone, then colour only where that depth is,
+        // so it is one even layer - the near legs hiding the far ones - not a
+        // stack of every surface in the model's own drawing order.
+        VkPipeline fadeDepth = VK_NULL_HANDLE;
+        VkPipeline fadeColor = VK_NULL_HANDLE;
+        [[nodiscard]] bool complete() const {
+            return opaque && alphaTest && alpha && additive && modulate && modulate2x &&
+                   translucent && fadeDepth && fadeColor;
+        }
+    };
+    PipelineSet buildPipelineSet(VkDevice device, VkRenderPass pass, VkSampleCountFlagBits samples,
+                                 wowee::rendering::VkShaderModule& charVert,
+                                 wowee::rendering::VkShaderModule& charFrag);
+    void destroyPipelineSet(VkDevice device, PipelineSet& set);
+    PipelineSet scenePipes_;          // the scene pass
+    PipelineSet fadedPassPipes_;      // fadedPass_, when there is one
+    VkRenderPass fadedPass_ = VK_NULL_HANDLE;
+    VkSampleCountFlagBits fadedPassSamples_ = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts

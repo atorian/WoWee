@@ -316,6 +316,16 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                                                VkSampleCountFlagBits samples,
                                                wowee::rendering::VkShaderModule& charVert,
                                                wowee::rendering::VkShaderModule& charFrag) {
+    scenePipes_ = buildPipelineSet(device, mainPass, samples, charVert, charFrag);
+    if (fadedPass_ != VK_NULL_HANDLE) {
+        fadedPassPipes_ = buildPipelineSet(device, fadedPass_, fadedPassSamples_, charVert, charFrag);
+    }
+}
+
+/// Every blend mode's pipeline for one render pass.
+CharacterRenderer::PipelineSet CharacterRenderer::buildPipelineSet(
+        VkDevice device, VkRenderPass mainPass, VkSampleCountFlagBits samples,
+        wowee::rendering::VkShaderModule& charVert, wowee::rendering::VkShaderModule& charFrag) {
     // --- Vertex input ---
     // CharVertexGPU: vec3 pos(12) + uint8[4] boneWeights(4) + uint8[4] boneIndices(4) +
     //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) +
@@ -366,18 +376,54 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
             .build(device, vkCtx_->getPipelineCache());
     };
 
-    opaquePipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true);
-    alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
-    alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
-    additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
-    modulatePipeline_ = buildCharPipeline(m2ModulateBlendState(false), false);
-    modulate2xPipeline_ = buildCharPipeline(m2ModulateBlendState(true), false);
-    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
+    PipelineSet set;
+    set.opaque = buildCharPipeline(PipelineBuilder::blendDisabled(), true);
+    set.alphaTest = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
+    set.alpha = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
+    set.additive = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    set.modulate = buildCharPipeline(m2ModulateBlendState(false), false);
+    set.modulate2x = buildCharPipeline(m2ModulateBlendState(true), false);
+    set.translucent = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
     VkPipelineColorBlendAttachmentState depthOnly = PipelineBuilder::blendDisabled();
     depthOnly.colorWriteMask = 0;
-    fadeDepthPipeline_ = buildCharPipeline(depthOnly, true);
-    fadeColorPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false, false,
-                                           VK_COMPARE_OP_LESS_OR_EQUAL);
+    set.fadeDepth = buildCharPipeline(depthOnly, true);
+    set.fadeColor = buildCharPipeline(PipelineBuilder::blendAlpha(), false, false,
+                                      VK_COMPARE_OP_LESS_OR_EQUAL);
+    return set;
+}
+
+void CharacterRenderer::destroyPipelineSet(VkDevice device, PipelineSet& set) {
+    for (VkPipeline* p : {&set.opaque, &set.alphaTest, &set.alpha, &set.additive, &set.modulate,
+                          &set.modulate2x, &set.translucent, &set.fadeDepth, &set.fadeColor}) {
+        destroy(device, *p);
+    }
+}
+
+void CharacterRenderer::setFadedPass(VkRenderPass pass, VkSampleCountFlagBits samples) {
+    if (pass == fadedPass_ && samples == fadedPassSamples_) return;
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    destroyPipelineSet(device, fadedPassPipes_);
+    fadedPass_ = pass;
+    fadedPassSamples_ = samples;
+    if (pass == VK_NULL_HANDLE) return;
+    rendering::VkShaderModule charVert, charFrag;
+    if (!charVert.loadFromFile(device, "assets/shaders/character.vert.spv") ||
+        !charFrag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        LOG_ERROR("CharacterRenderer::setFadedPass: missing shaders; faded characters "
+                  "are drawn in the scene pass, under the effects inside them");
+        fadedPass_ = VK_NULL_HANDLE;
+        return;
+    }
+    fadedPassPipes_ = buildPipelineSet(device, pass, samples, charVert, charFrag);
+    charVert.destroy();
+    charFrag.destroy();
+    if (!fadedPassPipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::setFadedPass: pipelines failed to build; faded "
+                  "characters are drawn in the scene pass, under the effects inside them");
+        destroyPipelineSet(device, fadedPassPipes_);
+        fadedPass_ = VK_NULL_HANDLE;
+    }
 }
 
 bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
@@ -604,18 +650,9 @@ void CharacterRenderer::shutdown() {
     instances.clear();
 
     // Destroy pipelines
-    auto destroyPipeline = [&](VkPipeline& p) {
-        destroy(device, p);
-    };
-    destroyPipeline(opaquePipeline_);
-    destroyPipeline(alphaTestPipeline_);
-    destroyPipeline(alphaPipeline_);
-    destroyPipeline(additivePipeline_);
-    destroyPipeline(modulatePipeline_);
-    destroyPipeline(modulate2xPipeline_);
-    destroyPipeline(translucentPipeline_);
-    destroyPipeline(fadeDepthPipeline_);
-    destroyPipeline(fadeColorPipeline_);
+    destroyPipelineSet(device, scenePipes_);
+    destroyPipelineSet(device, fadedPassPipes_);
+    fadedPass_ = VK_NULL_HANDLE;
 
     destroy(device, pipelineLayout_);
 
@@ -2631,7 +2668,7 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 // --- Rendering ---
 
 void CharacterRenderer::prepareRender(uint32_t frameIndex) {
-    if (instances.empty() || !opaquePipeline_) return;
+    if (instances.empty() || !scenePipes_.opaque) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
@@ -2698,8 +2735,13 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     }
 }
 
-void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (instances.empty() || !opaquePipeline_) {
+void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                               Part part) {
+    // Faded instances asked for on their own are drawn in fadedPass_ when
+    // there is one, and in the scene pass after the blended world when not.
+    const PipelineSet& pipes =
+        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
+    if (instances.empty() || !pipes.opaque) {
         return;
     }
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
@@ -2814,19 +2856,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
         switch (p) {
-            case CharacterBlendPipeline::Opaque: return opaquePipeline_;
-            case CharacterBlendPipeline::AlphaTest: return alphaTestPipeline_;
-            case CharacterBlendPipeline::Alpha: return alphaPipeline_;
-            case CharacterBlendPipeline::Translucent: return translucentPipeline_;
-            case CharacterBlendPipeline::Additive: return additivePipeline_;
-            case CharacterBlendPipeline::Modulate: return modulatePipeline_;
-            case CharacterBlendPipeline::Modulate2x: return modulate2xPipeline_;
+            case CharacterBlendPipeline::Opaque: return pipes.opaque;
+            case CharacterBlendPipeline::AlphaTest: return pipes.alphaTest;
+            case CharacterBlendPipeline::Alpha: return pipes.alpha;
+            case CharacterBlendPipeline::Translucent: return pipes.translucent;
+            case CharacterBlendPipeline::Additive: return pipes.additive;
+            case CharacterBlendPipeline::Modulate: return pipes.modulate;
+            case CharacterBlendPipeline::Modulate2x: return pipes.modulate2x;
         }
-        return alphaPipeline_;
+        return pipes.alpha;
     };
 
     // Start with opaque pipeline
-    VkPipeline currentPipeline = opaquePipeline_;
+    VkPipeline currentPipeline = pipes.opaque;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
     for (auto& pair : instances) {
@@ -2867,6 +2909,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // that also carries the stealth state kit is not drawn twice as faint.
         const float drawOpacity = std::min(instance.opacity, instance.stateAlpha);
         if (drawOpacity <= 0.0f) continue;
+        // A faded body goes with the faded ones, after the blended world; an
+        // enchant glow is drawn additively and covers nothing either way.
+        const bool fadedInstance = drawOpacity < 0.999f && !instance.isEffectModel;
+        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
 
         // Set model matrix (use override for weapon instances)
         const CharacterPushConstants push{
@@ -2958,7 +3004,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             // A faded body goes through the batches twice: first its solid
             // parts into depth alone (stage 0), then everything with those
-            // parts coloured only where that depth is (fadeDepthPipeline_).
+            // parts coloured only where that depth is (PipelineSet::fadeDepth).
             // Drawn in one go, each surface blended over the ones the model
             // happened to draw before it - a Shadowform drake's far legs over
             // its near ones, its layers stacked nearly black.
@@ -3150,8 +3196,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const bool fadedSolid = fadeDepthStage &&
                                         blendPipeline == CharacterBlendPipeline::Translucent;
                 if (stage == 0 && !fadedSolid) continue;
-                VkPipeline desiredPipeline = stage == 0 ? fadeDepthPipeline_
-                                           : fadedSolid ? fadeColorPipeline_
+                VkPipeline desiredPipeline = stage == 0 ? pipes.fadeDepth
+                                           : fadedSolid ? pipes.fadeColor
                                                         : pipelineFor(blendPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
@@ -3377,7 +3423,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Whole-model fallback inherits whatever pipeline was bound last;
             // pick it explicitly so instance fades blend here too.
             VkPipeline fallbackPipeline = (drawOpacity < 0.999f)
-                ? translucentPipeline_ : opaquePipeline_;
+                ? pipes.translucent : pipes.opaque;
             if (fallbackPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
                 currentPipeline = fallbackPipeline;
@@ -4632,15 +4678,8 @@ void CharacterRenderer::recreatePipelines() {
     VkDevice device = vkCtx_->getDevice();
 
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layout)
-    destroy(device, opaquePipeline_);
-    destroy(device, alphaTestPipeline_);
-    destroy(device, alphaPipeline_);
-    destroy(device, additivePipeline_);
-    destroy(device, modulatePipeline_);
-    destroy(device, modulate2xPipeline_);
-    destroy(device, translucentPipeline_);
-    destroy(device, fadeDepthPipeline_);
-    destroy(device, fadeColorPipeline_);
+    destroyPipelineSet(device, scenePipes_);
+    destroyPipelineSet(device, fadedPassPipes_);
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
@@ -4662,16 +4701,19 @@ void CharacterRenderer::recreatePipelines() {
     charVert.destroy();
     charFrag.destroy();
 
-    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
-        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_ ||
-        !fadeDepthPipeline_ || !fadeColorPipeline_) {
-        LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
-                  " alphaTest=", (void*)alphaTestPipeline_,
-                  " alpha=", (void*)alphaPipeline_,
-                  " additive=", (void*)additivePipeline_,
-                  " modulate=", (void*)modulatePipeline_,
-                  " modulate2x=", (void*)modulate2xPipeline_,
+    if (!scenePipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)scenePipes_.opaque,
+                  " alphaTest=", (void*)scenePipes_.alphaTest,
+                  " alpha=", (void*)scenePipes_.alpha,
+                  " additive=", (void*)scenePipes_.additive,
+                  " modulate=", (void*)scenePipes_.modulate,
+                  " modulate2x=", (void*)scenePipes_.modulate2x,
                   " renderPass=", (void*)mainPass, " samples=", static_cast<int>(samples));
+    } else if (fadedPass_ != VK_NULL_HANDLE && !fadedPassPipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::recreatePipelines: the faded pass's pipelines failed; "
+                  "faded characters are drawn in the scene pass, under the effects inside them");
+        destroyPipelineSet(device, fadedPassPipes_);
+        fadedPass_ = VK_NULL_HANDLE;
     } else {
         LOG_INFO("CharacterRenderer: pipelines recreated successfully (samples=",
                  static_cast<int>(samples), ")");
