@@ -141,6 +141,18 @@ enum class UF : uint16_t {
     CONTAINER_FIELD_NUM_SLOTS,
     CONTAINER_FIELD_SLOT_1,
 
+    // Corpse fields. What a corpse looks like travels on the corpse object,
+    // not on its owner, who may be out of sight or offline: race and gender
+    // in BYTES_1 (byte 1 and 2, skin in byte 3), face and hair in BYTES_2,
+    // and each equipped item as displayId | inventoryType << 24. The WotLK
+    // indices were read off the client's own field descriptor table.
+    CORPSE_FIELD_OWNER,       // guid, low half first
+    CORPSE_FIELD_DISPLAY_ID,
+    CORPSE_FIELD_ITEM,        // 19 consecutive slots, EquipSlot order
+    CORPSE_FIELD_BYTES_1,
+    CORPSE_FIELD_BYTES_2,
+    CORPSE_FIELD_FLAGS,       // CORPSE_FLAG_*
+
     COUNT
 };
 

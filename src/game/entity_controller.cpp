@@ -2193,6 +2193,22 @@ void EntityController::onCreateItem(const UpdateBlock& block, bool& newItemCreat
 }
 
 void EntityController::onCreateCorpse(const UpdateBlock& block) {
+    auto field = [&](UF f, uint32_t offset = 0) -> uint32_t {
+        const uint16_t idx = fieldIndex(f);
+        if (idx == 0xFFFF) return 0;
+        auto it = block.fields.find(static_cast<uint16_t>(idx + offset));
+        return it != block.fields.end() ? it->second : 0;
+    };
+    const uint32_t ownerLow = field(UF::CORPSE_FIELD_OWNER);
+    const uint64_t ownerGuid = (static_cast<uint64_t>(field(UF::CORPSE_FIELD_OWNER, 1)) << 32) | ownerLow;
+    const uint32_t corpseFlags = field(UF::CORPSE_FIELD_FLAGS);
+    // Bones are not a body. Application::updateCorpseBones draws them as the
+    // race's death skeleton, whoever they belonged to, for as long as the
+    // object is in view.
+    const bool bones = (corpseFlags & CORPSE_FLAG_BONES) != 0;
+    const bool own = ownerGuid == owner_.getPlayerGuid() ||
+                     (ownerLow != 0 && ownerLow == static_cast<uint32_t>(owner_.getPlayerGuid()));
+
     // Detect player's own corpse object so we have the position even when
     // SMSG_DEATH_RELEASE_LOC hasn't been received (e.g. login as ghost).
     //
@@ -2204,64 +2220,90 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
     // login-as-ghost path already sends. Gating the guid on the position
     // meant a ghost who walked back to a corpse that arrived without one
     // could never take it, however close they stood.
-    {
-        // CORPSE_FIELD_OWNER is at index 6 (uint64, low word at 6, high at 7)
-        uint16_t ownerLowIdx = 6;
-        auto ownerLowIt = block.fields.find(ownerLowIdx);
-        uint32_t ownerLow = (ownerLowIt != block.fields.end()) ? ownerLowIt->second : 0;
-        auto ownerHighIt = block.fields.find(ownerLowIdx + 1);
-        uint32_t ownerHigh = (ownerHighIt != block.fields.end()) ? ownerHighIt->second : 0;
-        uint64_t ownerGuid = (static_cast<uint64_t>(ownerHigh) << 32) | ownerLow;
-        if (ownerGuid == owner_.getPlayerGuid() || ownerLow == static_cast<uint32_t>(owner_.getPlayerGuid())) {
-            owner_.corpseGuidRef()  = block.guid;
-            // The position only where the block actually carried one; a
-            // stationary create may not, and overwriting a good answer from
-            // MSG_CORPSE_QUERY with three zeroes would put the corpse at the
-            // map origin and refuse the reclaim on distance instead.
-            if (block.hasMovement) {
-                owner_.corpseXRef()     = block.x;
-                owner_.corpseYRef()     = block.y;
-                owner_.corpseZRef()     = block.z;
-                owner_.corpseMapIdRef() = owner_.currentMapIdRef();
-                owner_.corpsePositionValidRef() = true;
-            }
-
-            // Corpse objects carry ownership and position but not a standalone
-            // render model. Reuse the owning character's appearance and equipment
-            // under the corpse GUID, then force the queued instance into DEATH.
-            auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
-                [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
-            if (characterIt != owner_.charactersRef().end() && owner_.playerSpawnCallbackRef()) {
-                glm::vec3 canonical = core::coords::serverToCanonical(
-                    glm::vec3(block.x, block.y, block.z));
-                float orientation = core::coords::serverToCanonicalYaw(block.orientation);
-                owner_.playerSpawnCallbackRef()(
-                    block.guid, 0,
-                    static_cast<uint8_t>(characterIt->race),
-                    static_cast<uint8_t>(characterIt->gender),
-                    characterIt->appearanceBytes,
-                    characterIt->facialFeatures,
-                    canonical.x, canonical.y, canonical.z, orientation);
-
-                if (owner_.playerEquipmentCallbackRef()) {
-                    std::array<uint32_t, 19> displayInfoIds{};
-                    std::array<uint8_t, 19> inventoryTypes{};
-                    const size_t count = std::min<size_t>(19, characterIt->equipment.size());
-                    for (size_t i = 0; i < count; ++i) {
-                        displayInfoIds[i] = characterIt->equipment[i].displayModel;
-                        inventoryTypes[i] = characterIt->equipment[i].inventoryType;
-                    }
-                    owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
-                }
-            }
-            if (owner_.npcDeathCallbackRef()) {
-                owner_.npcDeathCallbackRef()(block.guid);
-            }
-            LOG_INFO("Corpse object detected: guid=0x", std::hex, owner_.corpseGuidRef(), std::dec,
-                     " server=(", block.x, ", ", block.y, ", ", block.z,
-                     ") map=", owner_.corpseMapIdRef());
+    if (own && !bones) {
+        owner_.corpseGuidRef()  = block.guid;
+        // The position only where the block actually carried one; a
+        // stationary create may not, and overwriting a good answer from
+        // MSG_CORPSE_QUERY with three zeroes would put the corpse at the
+        // map origin and refuse the reclaim on distance instead.
+        if (block.hasMovement) {
+            owner_.corpseXRef()     = block.x;
+            owner_.corpseYRef()     = block.y;
+            owner_.corpseZRef()     = block.z;
+            owner_.corpseMapIdRef() = owner_.currentMapIdRef();
+            owner_.corpsePositionValidRef() = true;
         }
+
+        // Corpse objects carry ownership and position but not a standalone
+        // render model. Reuse the owning character's appearance and equipment
+        // under the corpse GUID, then force the queued instance into DEATH.
+        auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
+            [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
+        if (characterIt != owner_.charactersRef().end() && owner_.playerSpawnCallbackRef()) {
+            glm::vec3 canonical = core::coords::serverToCanonical(
+                glm::vec3(block.x, block.y, block.z));
+            float orientation = core::coords::serverToCanonicalYaw(block.orientation);
+            owner_.playerSpawnCallbackRef()(
+                block.guid, 0,
+                static_cast<uint8_t>(characterIt->race),
+                static_cast<uint8_t>(characterIt->gender),
+                characterIt->appearanceBytes,
+                characterIt->facialFeatures,
+                canonical.x, canonical.y, canonical.z, orientation);
+
+            if (owner_.playerEquipmentCallbackRef()) {
+                std::array<uint32_t, 19> displayInfoIds{};
+                std::array<uint8_t, 19> inventoryTypes{};
+                const size_t count = std::min<size_t>(19, characterIt->equipment.size());
+                for (size_t i = 0; i < count; ++i) {
+                    displayInfoIds[i] = characterIt->equipment[i].displayModel;
+                    inventoryTypes[i] = characterIt->equipment[i].inventoryType;
+                }
+                owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+            }
+        }
+        if (owner_.npcDeathCallbackRef()) {
+            owner_.npcDeathCallbackRef()(block.guid);
+        }
+        LOG_INFO("Corpse object detected: guid=0x", std::hex, owner_.corpseGuidRef(), std::dec,
+                 " server=(", block.x, ", ", block.y, ", ", block.z,
+                 ") map=", owner_.corpseMapIdRef());
+        return;
     }
+    if (own || bones || !block.hasMovement) return;
+
+    // Someone else's body, released but not yet bones. The owner may be far
+    // away or offline, so everything it looks like comes off the corpse
+    // object itself, the way the original client builds it: race, gender and
+    // skin in BYTES_1, face and hair in BYTES_2, the gear as display ids.
+    const uint32_t bytes1 = field(UF::CORPSE_FIELD_BYTES_1);
+    const uint32_t bytes2 = field(UF::CORPSE_FIELD_BYTES_2);
+    const auto race = static_cast<uint8_t>((bytes1 >> 8) & 0xFF);
+    const auto gender = static_cast<uint8_t>((bytes1 >> 16) & 0xFF);
+    if (!hasPlayerModel(static_cast<Race>(race)) || !owner_.playerSpawnCallbackRef()) return;
+    // Laid out as PLAYER_BYTES is: skin, face, hair style, hair colour.
+    const uint32_t appearance = ((bytes1 >> 24) & 0xFF) | ((bytes2 & 0xFF) << 8) |
+                                (((bytes2 >> 8) & 0xFF) << 16) | (((bytes2 >> 16) & 0xFF) << 24);
+    const auto facialHair = static_cast<uint8_t>((bytes2 >> 24) & 0xFF);
+    const glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(block.x, block.y, block.z));
+    owner_.playerSpawnCallbackRef()(block.guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
+                                    appearance, facialHair, canonical.x, canonical.y, canonical.z,
+                                    core::coords::serverToCanonicalYaw(block.orientation));
+    if (owner_.playerEquipmentCallbackRef()) {
+        std::array<uint32_t, 19> displayInfoIds{};
+        std::array<uint8_t, 19> inventoryTypes{};
+        for (uint32_t i = 0; i < 19; ++i) {
+            const uint32_t item = field(UF::CORPSE_FIELD_ITEM, i);
+            displayInfoIds[i] = item & 0x00FFFFFFu;
+            inventoryTypes[i] = static_cast<uint8_t>(item >> 24);
+        }
+        constexpr auto kHead = static_cast<size_t>(EquipSlot::HEAD);
+        constexpr auto kBack = static_cast<size_t>(EquipSlot::BACK);
+        if (corpseFlags & CORPSE_FLAG_HIDE_HELM) { displayInfoIds[kHead] = 0; inventoryTypes[kHead] = 0; }
+        if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { displayInfoIds[kBack] = 0; inventoryTypes[kBack] = 0; }
+        owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+    }
+    if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(block.guid);
 }
 
 // ============================================================

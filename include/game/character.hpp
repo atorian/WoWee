@@ -189,5 +189,11 @@ std::string getPlayerModelPath(const Character& character);
 /// go and load it.
 bool hasPlayerModel(Race race);
 
+/// The skeleton a player's bones are drawn as -
+/// World\Generic\PassiveDoodads\DeathSkeletons\<Race><Gender>DeathSkeleton.m2,
+/// the path the original client formats for a corpse marked as bones. Empty
+/// for a race this client has no character model for.
+std::string getDeathSkeletonModelPath(Race race, Gender gender);
+
 } // namespace game
 } // namespace wowee

@@ -160,6 +160,16 @@ bool hasPlayerModel(Race race) {
     }
 }
 
+std::string getDeathSkeletonModelPath(Race race, Gender gender) {
+    if (!hasPlayerModel(race)) return {};
+    // Named after the character model: HumanMale.m2 -> HumanMaleDeathSkeleton.m2.
+    const std::string body = getPlayerModelPath(race, gender);
+    const size_t slash = body.find_last_of('\\');
+    const size_t dot = body.find_last_of('.');
+    return "World\\Generic\\PassiveDoodads\\DeathSkeletons\\" +
+           body.substr(slash + 1, dot - slash - 1) + "DeathSkeleton.m2";
+}
+
 std::string getPlayerModelPath(const Character& character) {
     return getPlayerModelPath(character.race, character.gender, character.useFemaleModel);
 }

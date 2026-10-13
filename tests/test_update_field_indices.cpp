@@ -133,3 +133,37 @@ TEST_CASE("the summoner field sits where the target field says it does",
     const auto wotlk = declaredFields("wotlk");
     CHECK(wotlk.at("UNIT_FIELD_SUMMONEDBY_LO") == 14);
 }
+
+TEST_CASE("the corpse fields are where the client reads them", "[update-fields]") {
+    // Read off the 3.3.5a client's own descriptor table (CORPSE_FIELD_* in
+    // wow.exe: name, offset past OBJECT_END, size). A slipped column here
+    // reads the guild or party guid as the corpse's race, and every body of
+    // another player either vanishes or comes back a human male.
+    const std::map<std::string, int> oracle = {
+        {"CORPSE_FIELD_OWNER", 6},
+        {"CORPSE_FIELD_DISPLAY_ID", 10},
+        {"CORPSE_FIELD_ITEM", 11},
+        {"CORPSE_FIELD_BYTES_1", 30},
+        {"CORPSE_FIELD_BYTES_2", 31},
+        {"CORPSE_FIELD_FLAGS", 33},
+    };
+    const auto wotlk = declaredFields("wotlk");
+    for (const auto& [name, index] : oracle) {
+        INFO(name);
+        REQUIRE(wotlk.count(name) == 1);
+        CHECK(wotlk.at(name) == index);
+    }
+
+    // The older layouts carry the corpse's facing and position as fields too,
+    // four slots WotLK dropped for the party guid's two. The items still
+    // follow the display id, nineteen of them, then the two appearance words.
+    for (const char* expansion : {"classic", "tbc", "wotlk", "turtle"}) {
+        const auto fields = declaredFields(expansion);
+        INFO(expansion);
+        REQUIRE(fields.count("CORPSE_FIELD_ITEM") == 1);
+        CHECK(fields.at("CORPSE_FIELD_ITEM") == fields.at("CORPSE_FIELD_DISPLAY_ID") + 1);
+        CHECK(fields.at("CORPSE_FIELD_BYTES_1") == fields.at("CORPSE_FIELD_ITEM") + 19);
+        CHECK(fields.at("CORPSE_FIELD_BYTES_2") == fields.at("CORPSE_FIELD_BYTES_1") + 1);
+        CHECK(fields.at("CORPSE_FIELD_FLAGS") == fields.at("CORPSE_FIELD_BYTES_1") + 3);
+    }
+}

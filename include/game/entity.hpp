@@ -56,6 +56,14 @@ inline constexpr uint32_t UNIT_DYNFLAG_TAPPED           = 0x00000004;
 inline constexpr uint32_t UNIT_DYNFLAG_TAPPED_BY_PLAYER = 0x00000008;
 inline constexpr uint32_t UNIT_DYNFLAG_DEAD             = 0x00000020;
 
+// CORPSE_FIELD_FLAGS. A corpse with BONES set is what is left once its owner
+// has gone: the client no longer draws the body but a skeleton lying on the
+// ground (see getDeathSkeletonModelPath), and the server has cleared the
+// items. HIDE_HELM and HIDE_CLOAK carry the owner's display settings over.
+inline constexpr uint32_t CORPSE_FLAG_BONES      = 0x01;
+inline constexpr uint32_t CORPSE_FLAG_HIDE_HELM  = 0x08;
+inline constexpr uint32_t CORPSE_FLAG_HIDE_CLOAK = 0x10;
+
 /// CREATE updates may omit zero-valued health. In that case the dynamic corpse
 /// flags are the authoritative indication that the unit must spawn dead.
 inline bool isUnitCorpseState(uint32_t health, uint32_t maxHealth, uint32_t dynamicFlags) {

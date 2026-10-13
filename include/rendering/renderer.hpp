@@ -78,6 +78,7 @@ class VolumetricFog;
 class RtScene;
 class RtLighting;
 class LootSparkles;
+class CorpseBones;
 class SunShafts;
 class ScreenCapture;
 
@@ -215,6 +216,7 @@ public:
     AnimationController* getAnimationController() const { return animationController_.get(); }
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
     LootSparkles* getLootSparkles() const { return lootSparkles_.get(); }
+    CorpseBones* getCorpseBones() const { return corpseBones_.get(); }
     ChargeEffect* getChargeEffect() const { return chargeEffect.get(); }
     SwimEffects* getSwimEffects() const { return swimEffects.get(); }
 
@@ -310,6 +312,7 @@ private:
     std::unique_ptr<MountDust> mountDust;
     std::unique_ptr<LevelUpEffect> levelUpEffect;
     std::unique_ptr<LootSparkles> lootSparkles_;
+    std::unique_ptr<CorpseBones> corpseBones_;
     std::unique_ptr<ChargeEffect> chargeEffect;
     std::unique_ptr<CharacterRenderer> characterRenderer;
     std::unique_ptr<WMORenderer> wmoRenderer;

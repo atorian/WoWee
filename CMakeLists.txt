@@ -978,6 +978,7 @@ set(WOWEE_SOURCES
     src/rendering/sun_shafts.cpp
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
+    src/rendering/corpse_bones.cpp
     src/rendering/grass_renderer.cpp
     src/pipeline/adt_alpha.cpp
     src/pipeline/grass_terrain.cpp

@@ -46,6 +46,7 @@
 #include "rendering/rt_scene.hpp"
 #include "rendering/screen_capture.hpp"
 #include "rendering/loot_sparkles.hpp"
+#include "rendering/corpse_bones.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/world_map.hpp"
 #include "rendering/quest_marker_renderer.hpp"
@@ -957,6 +958,7 @@ bool Renderer::initialize(core::Window* win) {
 
     levelUpEffect = std::make_unique<LevelUpEffect>();
     lootSparkles_ = std::make_unique<LootSparkles>();
+    corpseBones_ = std::make_unique<CorpseBones>();
 
     // Non-fatal like the effects above: a device that cannot build the compute
     // pipeline still gets everything else, and isReady() gates both call sites.

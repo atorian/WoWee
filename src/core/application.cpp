@@ -31,6 +31,7 @@
 #include "core/memory_monitor.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/loot_sparkles.hpp"
+#include "rendering/corpse_bones.hpp"
 #include "rendering/vk_context.hpp"
 #include "audio/npc_voice_manager.hpp"
 #include "rendering/camera.hpp"
@@ -3956,6 +3957,9 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     runInGameStage("updateLootSparkles", [&] {
         updateLootSparkles();
     });
+    runInGameStage("updateCorpseBones", [&] {
+        updateCorpseBones();
+    });
     // Sync server run speed to camera controller
     inGameStep = "post-update sync";
     updateCheckpoint = "in_game: post-update sync";
@@ -5824,6 +5828,31 @@ void Application::updateLootSparkles() {
         if (getRenderPositionForGuid(guid, position)) corpses.emplace_back(guid, position);
     }
     sparkles->update(renderer->getM2Renderer(), assetManager.get(), corpses);
+}
+
+void Application::updateCorpseBones() {
+    auto* corpseBones = renderer ? renderer->getCorpseBones() : nullptr;
+    if (!corpseBones || !gameHandler) return;
+    const uint16_t flagsIdx = game::fieldIndex(game::UF::CORPSE_FIELD_FLAGS);
+    const uint16_t bytes1Idx = game::fieldIndex(game::UF::CORPSE_FIELD_BYTES_1);
+    std::vector<rendering::CorpseBones::Bones> bones;
+    if (flagsIdx != 0xFFFF && bytes1Idx != 0xFFFF) {
+        for (const auto& [guid, entity] : gameHandler->getEntityManager().getEntities()) {
+            if (!entity || entity->getType() != game::ObjectType::CORPSE) continue;
+            if ((entity->getField(flagsIdx) & game::CORPSE_FLAG_BONES) == 0) continue;
+            const uint32_t bytes1 = entity->getField(bytes1Idx);
+            const auto race = static_cast<game::Race>((bytes1 >> 8) & 0xFF);
+            const auto gender = static_cast<game::Gender>((bytes1 >> 16) & 0xFF);
+            std::string path = game::getDeathSkeletonModelPath(race, gender);
+            if (path.empty()) continue;
+            // Placed as a game object's M2 is: model forward is render +X.
+            bones.push_back({guid, std::move(path),
+                             core::coords::canonicalToRender(
+                                 glm::vec3(entity->getX(), entity->getY(), entity->getZ())),
+                             entity->getOrientation() + glm::radians(90.0f)});
+        }
+    }
+    corpseBones->update(renderer->getM2Renderer(), assetManager.get(), bones);
 }
 
 void Application::updateQuestMarkers() {

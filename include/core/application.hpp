@@ -423,6 +423,7 @@ private:
     void loadQuestMarkerModels();  // Now loads BLP textures
     void updateQuestMarkers();     // Updates billboard positions
     void updateLootSparkles();     // The glitter over corpses with loot
+    void updateCorpseBones();      // Players' bones, as their race's skeleton
 };
 
 } // namespace core
