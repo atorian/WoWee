@@ -694,15 +694,14 @@ void GameHandler::registerCoreOpcodes() {
         dispatchTable_[op] = [this](network::Packet& packet) {
             if (packet.hasRemaining(4)) {
                 const WowDate t = unpackWowPackedTime(packet.readUInt32());
-                gameTime_ = static_cast<float>(t.hour) +
-                            static_cast<float>(t.minute) / 60.0f;
+                gameClock_.setHours(static_cast<float>(t.hour) +
+                                    static_cast<float>(t.minute) / 60.0f);
                 // Said out loud, because this is where realm time actually
                 // comes from on servers that never send SMSG_LOGIN_SETTIMESPEED
                 // - which logged its arrival and so looked like the only
                 // source. Chasing a frozen sky through a log with no line for
                 // this in it led to exactly the wrong conclusion.
-                LOG_INFO("Realm time: ", t.hour, ":", t.minute,
-                         " (gameTime=", gameTime_, "h)");
+                LOG_INFO("Realm time: ", t.hour, ":", t.minute);
             }
             packet.skipAll();
         };
@@ -711,9 +710,9 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(8)) {
             const WowDate t = unpackWowPackedTime(packet.readUInt32());
             float timeSpeed = packet.readFloat();
-            gameTime_ = static_cast<float>(t.hour) +
-                        static_cast<float>(t.minute) / 60.0f;
-            timeSpeed_ = timeSpeed;
+            gameClock_.set(static_cast<float>(t.hour) +
+                           static_cast<float>(t.minute) / 60.0f,
+                           timeSpeed);
         }
         packet.skipAll();
     };

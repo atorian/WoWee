@@ -1207,6 +1207,18 @@ target_link_libraries(test_packed_time PRIVATE catch2_main)
 add_test(NAME packed_time COMMAND test_packed_time)
 register_test_target(test_packed_time)
 
+# ── test_game_clock ──────────────────────────────────────────
+# Header-only: the realm's time of day, run on from the hour the server sent.
+add_executable(test_game_clock
+    test_game_clock.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_game_clock PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_game_clock SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_game_clock PRIVATE catch2_main)
+add_test(NAME game_clock COMMAND test_game_clock)
+register_test_target(test_game_clock)
+
 # ── test_animation_ids ───────────────────────────────────────
 add_executable(test_animation_ids
     test_animation_ids.cpp
