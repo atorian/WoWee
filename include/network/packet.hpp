@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <vector>
 #include <cstdint>
@@ -125,10 +126,21 @@ public:
     [[nodiscard]] bool hasData() const { return readPos < data.size(); }
     void skipAll() { readPos = data.size(); }
 
+    /// When the socket took this packet off the wire; a default (zero) time
+    /// point for a packet that was built here rather than received.
+    ///
+    /// A received packet waits in two queues before its handler runs, and on
+    /// world entry it waits there for seconds behind the update-object flood.
+    /// Anything that times the server - the ping round trip above all - has to
+    /// start from this, not from whenever the handler gets to the packet.
+    [[nodiscard]] std::chrono::steady_clock::time_point getReceivedAt() const { return receivedAt; }
+    void setReceivedAt(std::chrono::steady_clock::time_point when) { receivedAt = when; }
+
 private:
     uint16_t opcode = 0;
     std::vector<uint8_t> data;
     size_t readPos = 0;
+    std::chrono::steady_clock::time_point receivedAt{};
 
     // The open bit byte on each side. 8 means none is open, which is what
     // makes flushBits() and resetBitReader() free on the byte paths.

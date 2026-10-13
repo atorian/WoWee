@@ -23,9 +23,6 @@ constexpr size_t kMaxReceiveBufferBytes = 8 * 1024 * 1024;
 constexpr int kDefaultMaxParsedPacketsPerUpdate = 64;
 constexpr int kAbsoluteMaxParsedPacketsPerUpdate = 220;
 constexpr int kMinParsedPacketsPerUpdate = 8;
-constexpr int kDefaultMaxPacketCallbacksPerUpdate = 48;
-constexpr int kAbsoluteMaxPacketCallbacksPerUpdate = 64;
-constexpr int kMinPacketCallbacksPerUpdate = 1;
 constexpr int kMaxRecvCallsPerUpdate = 64;
 constexpr size_t kMaxRecvBytesPerUpdate = 512 * 1024;
 constexpr size_t kMaxQueuedPacketCallbacks = 4096;
@@ -42,20 +39,6 @@ inline int parsedPacketsBudgetPerUpdate() {
         if (end == raw) return kDefaultMaxParsedPacketsPerUpdate;
         if (parsed < kMinParsedPacketsPerUpdate) return kMinParsedPacketsPerUpdate;
         if (parsed > kAbsoluteMaxParsedPacketsPerUpdate) return kAbsoluteMaxParsedPacketsPerUpdate;
-        return static_cast<int>(parsed);
-    }();
-    return budget;
-}
-
-inline int packetCallbacksBudgetPerUpdate() {
-    static int budget = []() {
-        const char* raw = std::getenv("WOWEE_NET_MAX_PACKET_CALLBACKS");
-        if (!raw || !*raw) return kDefaultMaxPacketCallbacksPerUpdate;
-        char* end = nullptr;
-        long parsed = std::strtol(raw, &end, 10);
-        if (end == raw) return kDefaultMaxPacketCallbacksPerUpdate;
-        if (parsed < kMinPacketCallbacksPerUpdate) return kMinPacketCallbacksPerUpdate;
-        if (parsed > kAbsoluteMaxPacketCallbacksPerUpdate) return kAbsoluteMaxPacketCallbacksPerUpdate;
         return static_cast<int>(parsed);
     }();
     return budget;
@@ -131,8 +114,7 @@ WorldSocket::WorldSocket() {
     LOG_INFO("WorldSocket net opts: fast_recv_append=", useFastRecvAppend_ ? "on" : "off",
              " async_pump=", useAsyncPump_ ? "on" : "off",
              " parse_scratch=", useParseScratchQueue_ ? "on" : "off",
-             " max_parsed_packets=", parsedPacketsBudgetPerUpdate(),
-             " max_packet_callbacks=", packetCallbacksBudgetPerUpdate());
+             " max_parsed_packets=", parsedPacketsBudgetPerUpdate());
 }
 
 WorldSocket::~WorldSocket() {
@@ -667,6 +649,9 @@ void WorldSocket::tryParsePackets() {
         parsedPacketsLocal.reserve(32);
     }
     const int maxParsedThisTick = parsedPacketsBudgetPerUpdate();
+    // Parsing follows the recv that brought these bytes in the same pump pass,
+    // so this is when they came off the wire, give or take a parse backlog.
+    const auto receivedAt = std::chrono::steady_clock::now();
     while ((receiveBuffer.size() - parseOffset) >= 4 && parsedThisTick < maxParsedThisTick) {
         uint8_t rawHeader[4] = {0, 0, 0, 0};
         std::memcpy(rawHeader, receiveBuffer.data() + parseOffset, 4);
@@ -768,6 +753,7 @@ void WorldSocket::tryParsePackets() {
             }
             // Queue packet; callbacks run after buffer state is finalized.
             parsedPackets->emplace_back(opcode, std::move(packetData));
+            parsedPackets->back().setReceivedAt(receivedAt);
         } catch (const std::bad_alloc& e) {
             LOG_ERROR("OOM while queuing world packet opcode=0x", std::hex, opcode, std::dec,
                       " payload=", payloadLen, " buffered=", receiveBuffer.size(),
@@ -821,22 +807,16 @@ void WorldSocket::tryParsePackets() {
 }
 
 void WorldSocket::dispatchQueuedPackets() {
+    // Everything queued goes over at once. The callback only queues the packet
+    // again on the game side, which is where the frame's time budget is spent;
+    // a count limit here (48 a frame) held packets back from that budget.
     std::deque<Packet> localPackets;
     {
         std::lock_guard<std::mutex> lock(callbackMutex_);
         if (!packetCallback || pendingPacketCallbacks_.empty()) {
             return;
         }
-        const int maxCallbacksThisTick = packetCallbacksBudgetPerUpdate();
-        for (int i = 0; i < maxCallbacksThisTick && !pendingPacketCallbacks_.empty(); ++i) {
-            localPackets.push_back(std::move(pendingPacketCallbacks_.front()));
-            pendingPacketCallbacks_.pop_front();
-        }
-        if (!pendingPacketCallbacks_.empty()) {
-            LOG_DEBUG("World socket callback budget reached (", localPackets.size(),
-                      " callbacks); deferring ", pendingPacketCallbacks_.size(),
-                      " queued packet callbacks");
-        }
+        localPackets.swap(pendingPacketCallbacks_);
     }
 
     while (!localPackets.empty()) {

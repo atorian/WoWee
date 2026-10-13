@@ -26,14 +26,6 @@ namespace game {
 namespace {
 
 
-int updateObjectBlocksBudgetPerUpdate(WorldState state) {
-    static const int inWorldBudget =
-        core::envIntClamped("WOWEE_NET_MAX_UPDATE_OBJECT_BLOCKS", 24, 1, 2048);
-    static const int loginBudget =
-        core::envIntClamped("WOWEE_NET_MAX_UPDATE_OBJECT_BLOCKS_LOGIN", 128, 1, 4096);
-    return state == WorldState::IN_WORLD ? inWorldBudget : loginBudget;
-}
-
 float slowUpdateObjectBlockLogThresholdMs() {
     static const int thresholdMs =
         core::envIntClamped("WOWEE_NET_SLOW_UPDATE_BLOCK_LOG_MS", 10, 1, 60000);
@@ -111,10 +103,10 @@ void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_
         return;
     }
 
-    const int maxBlocksThisUpdate = updateObjectBlocksBudgetPerUpdate(owner_.getState());
-    int processedBlocks = 0;
-
-    while (!pendingUpdateObjectWork_.empty() && processedBlocks < maxBlocksThisUpdate) {
+    // Bounded by the caller's time budget alone. A count of 24 blocks a frame
+    // used to sit beside it, and was what held a world-entry burst back for
+    // seconds; spawning what the blocks create is queued separately anyway.
+    while (!pendingUpdateObjectWork_.empty()) {
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - start).count();
         if (elapsedMs >= budgetMs) {
@@ -134,7 +126,7 @@ void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_
             work.outOfRangeProcessed = true;
         }
 
-        while (work.nextBlockIndex < work.data.blocks.size() && processedBlocks < maxBlocksThisUpdate) {
+        while (work.nextBlockIndex < work.data.blocks.size()) {
             elapsedMs = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count();
             if (elapsedMs >= budgetMs) {
@@ -156,7 +148,6 @@ void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_
                             " hasMovement=", block.hasMovement ? 1 : 0);
             }
             ++work.nextBlockIndex;
-            ++processedBlocks;
         }
 
         if (work.nextBlockIndex >= work.data.blocks.size()) {

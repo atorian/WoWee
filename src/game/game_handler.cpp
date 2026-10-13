@@ -368,7 +368,9 @@ void GameHandler::updateNetworking() {
         processQueuedIncomingPackets();
         float packetMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - packetStart).count();
-        if (packetMs > 3.0f) {
+        // Above the catch-up budget plus a handler overrunning it: anything
+        // under that is the budget being spent as intended.
+        if (packetMs > 20.0f) {
             LOG_WARNING("SLOW queued packet handling: ", packetMs, "ms");
         }
     }

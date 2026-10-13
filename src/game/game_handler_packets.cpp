@@ -84,21 +84,35 @@ bool isAuthCharPipelineOpcode(LogicalOpcode op) {
     }
 }
 
-int incomingPacketsBudgetPerUpdate(WorldState state) {
-    static const int inWorldBudget =
-        core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKETS", 24, 1, 512);
-    static const int loginBudget =
-        core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKETS_LOGIN", 96, 1, 512);
-    return state == WorldState::IN_WORLD ? inWorldBudget : loginBudget;
-}
-
+// How long a frame may spend on inbound packets. Time is the only limit: the
+// count limit that sat beside it (24 a frame in the world) was the one that
+// bound, and it held a world-entry burst of a few thousand packets back for
+// seconds - every packet in it, a pong or a spell result as much as the
+// update-object flood in front of them. The original client drains its whole
+// queue every frame; this keeps a ceiling, but one the frame can afford.
 float incomingPacketBudgetMs(WorldState state) {
     static const int inWorldBudgetMs =
-        core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKET_MS", 2, 1, 50);
+        core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKET_MS", 4, 1, 50);
     static const int loginBudgetMs =
         core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKET_MS_LOGIN", 8, 1, 50);
     return static_cast<float>(state == WorldState::IN_WORLD ? inWorldBudgetMs : loginBudgetMs);
 }
+
+// When the oldest queued packet has waited longer than this, the queue is
+// behind and the frame gives it the catch-up budget instead. A burst is then
+// paid for in a few slower frames rather than in seconds of a world that does
+// not answer.
+constexpr auto kInboundLagThreshold = std::chrono::milliseconds(100);
+
+float incomingPacketCatchUpBudgetMs() {
+    static const int budgetMs =
+        core::envIntClamped("WOWEE_NET_MAX_GAMEHANDLER_PACKET_MS_CATCHUP", 12, 1, 100);
+    return static_cast<float>(budgetMs);
+}
+
+// A lag episode is reported once it has lasted past this, so a single slow
+// frame does not fill the log.
+constexpr auto kInboundLagReportThreshold = std::chrono::milliseconds(500);
 
 float slowPacketLogThresholdMs() {
     static const int thresholdMs =
@@ -106,7 +120,9 @@ float slowPacketLogThresholdMs() {
     return static_cast<float>(thresholdMs);
 }
 
-constexpr size_t kMaxQueuedInboundPackets = 4096;
+// The socket's queue used to hold up to 4096 packets more in front of this
+// one; it now hands everything over each frame, so this holds both shares.
+constexpr size_t kMaxQueuedInboundPackets = 8192;
 
 } // end anonymous namespace
 
@@ -2585,6 +2601,7 @@ void GameHandler::registerRemainingOpcodes() {
             std::vector<uint8_t> subPayload(pdata.begin() + pos + 4,
                                             pdata.begin() + pos + 4 + payloadLen);
             subPackets.emplace_back(subOpcode, std::move(subPayload));
+            subPackets.back().setReceivedAt(packet.getReceivedAt());
             pos += 4 + payloadLen;
         }
         for (auto& subPacket : std::views::reverse(subPackets)) {
@@ -3671,16 +3688,57 @@ void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
 // enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to EntityController
 
 void GameHandler::processQueuedIncomingPackets() {
+    const auto start = std::chrono::steady_clock::now();
+
+    // How long the oldest packet still queued has waited since it came off
+    // the wire. Packets queued behind update-object work wait too, so this is
+    // the lag of the whole inbound stream.
+    std::chrono::steady_clock::duration oldestWait{};
+    if (!pendingIncomingPackets_.empty()) {
+        const auto receivedAt = pendingIncomingPackets_.front().getReceivedAt();
+        if (receivedAt != std::chrono::steady_clock::time_point{}) {
+            oldestWait = start - receivedAt;
+        }
+    }
+    const bool lagging = oldestWait >= kInboundLagThreshold;
+
+    // One lag episode at a time, reported when it ends: how long the queue was
+    // behind and how far. This is the measurement the budgets above are tuned
+    // against. There is one GameHandler, so the episode lives here.
+    static struct {
+        std::chrono::steady_clock::time_point startedAt{};
+        std::chrono::steady_clock::duration peakWait{};
+        size_t peakDepth = 0;
+    } lagEpisode;
+    if (lagging) {
+        if (lagEpisode.startedAt == std::chrono::steady_clock::time_point{}) {
+            lagEpisode.startedAt = start;
+        }
+        lagEpisode.peakWait = std::max(lagEpisode.peakWait, oldestWait);
+        lagEpisode.peakDepth = std::max(lagEpisode.peakDepth, pendingIncomingPackets_.size());
+    } else if (lagEpisode.startedAt != std::chrono::steady_clock::time_point{}) {
+        const auto lasted = start - lagEpisode.startedAt;
+        if (lasted >= kInboundLagReportThreshold) {
+            using std::chrono::duration_cast;
+            using std::chrono::milliseconds;
+            LOG_INFO("Inbound packet queue caught up: behind for ",
+                     duration_cast<milliseconds>(lasted).count(), "ms, oldest packet waited up to ",
+                     duration_cast<milliseconds>(lagEpisode.peakWait).count(), "ms, up to ",
+                     lagEpisode.peakDepth, " packets queued (state=", worldStateName(state), ")");
+        }
+        lagEpisode = {};
+    }
+
     if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
         return;
     }
 
-    const int maxPacketsThisUpdate = incomingPacketsBudgetPerUpdate(state);
-    const float budgetMs = incomingPacketBudgetMs(state);
-    const auto start = std::chrono::steady_clock::now();
+    const float budgetMs = lagging ? std::max(incomingPacketBudgetMs(state),
+                                              incomingPacketCatchUpBudgetMs())
+                                   : incomingPacketBudgetMs(state);
     int processed = 0;
 
-    while (processed < maxPacketsThisUpdate) {
+    while (true) {
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - start).count();
         if (elapsedMs >= budgetMs) {

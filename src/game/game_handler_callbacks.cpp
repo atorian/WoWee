@@ -1461,8 +1461,16 @@ void GameHandler::handlePong(network::Packet& packet) {
         return;
     }
 
-    // Measure round-trip time
-    auto rtt = std::chrono::steady_clock::now() - pingTimestamp_;
+    // Round trip to when the pong came off the wire. Timing it to here instead
+    // counted the wait in the inbound queues, which after world entry is the
+    // whole update-object flood: the meter read over eight seconds after
+    // logging in, held it until the next ping thirty seconds later, and sent
+    // it back to the server as our latency in that ping.
+    auto receivedAt = packet.getReceivedAt();
+    if (receivedAt == std::chrono::steady_clock::time_point{}) {
+        receivedAt = std::chrono::steady_clock::now();
+    }
+    auto rtt = receivedAt - pingTimestamp_;
     lastLatency = static_cast<uint32_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(rtt).count());
 
