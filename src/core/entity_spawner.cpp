@@ -891,11 +891,12 @@ void EntitySpawner::buildCreatureDisplayLookups() {
 }
 
 std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
-    // WotLK 3.3.5a CreatureDisplayInfo tops out around ~32000; values far
-    // beyond that are corrupted update-field data or packet parse errors.
-    // Silently reject to avoid pointless DBC lookups and log spam.
-    constexpr uint32_t kMaxReasonableDisplayId = 100000;
-    if (displayId == 0 || displayId > kMaxReasonableDisplayId) {
+    // No ceiling on the ID. The client's own CreatureDisplayInfo stops near
+    // 32000, but a realm's over_CreatureDisplayInfo.dbc adds its own far past
+    // that - EZWoW's run to 145678 - and a cap at 100000 dropped every one of
+    // them, so their mounts and creatures were never drawn. An ID the tables
+    // do not hold is answered below, once per ID.
+    if (displayId == 0) {
         return "";
     }
 
