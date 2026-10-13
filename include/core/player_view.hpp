@@ -1,7 +1,10 @@
 #pragma once
 
+#include "core/event_bus.hpp"
+
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace wowee {
 namespace audio { class AudioCoordinator; }
@@ -23,8 +26,9 @@ namespace core {
 /// input and the animation controller's state. Owned by the Application.
 class PlayerView {
 public:
+    /// Hears the game turn the player and get them drunk.
     PlayerView(rendering::Renderer& renderer, audio::AudioCoordinator* audio,
-               rendering::SpellVisualSystem* spellVisuals);
+               rendering::SpellVisualSystem* spellVisuals, EventBus& events);
     ~PlayerView();
 
     PlayerView(const PlayerView&) = delete;
@@ -63,6 +67,7 @@ private:
     std::unique_ptr<rendering::CameraController> cameraController_;
     std::unique_ptr<rendering::AnimationController> animationController_;
     double lastCameraUpdateMs_ = 0.0;
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

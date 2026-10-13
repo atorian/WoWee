@@ -23,6 +23,21 @@ struct OtherPlayerLevelUp {
     uint32_t newLevel = 0;
 };
 
+// ---- The player ----
+
+/// How drunk the player is, from 0 (sober, and on every character change) to
+/// 1 (completely smashed).
+struct PlayerIntoxicationChanged {
+    float amount = 0.0f;
+};
+
+/// The game turned the player to face this way - at a target, to cast - in
+/// canonical radians. Delivered before the facing is sent to the server, which
+/// checks the cast's arc against what the client then reports.
+struct PlayerFacingSet {
+    float canonicalYaw = 0.0f;
+};
+
 // ---- Spells ----
 
 /// A unit began a timed cast (SMSG_SPELL_START): the player's own, or any

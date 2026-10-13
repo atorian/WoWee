@@ -68,6 +68,7 @@
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "core/event_bus.hpp"
+#include "game/emote_table.hpp"
 #include "game/game_services.hpp"
 #include "game/character.hpp"
 #include "game/spell_handler.hpp"
@@ -441,6 +442,8 @@ int main(int argc, char** argv) {
             static wowee::core::EventBus events;
             static wowee::game::GameServices svc;
             svc.events = &events;
+            static wowee::game::EmoteTable emotes(haveAssets ? &assets : nullptr);
+            svc.emotes = &emotes;
             // The real asset manager, so bindings that read a DBC - quest reward
             // XP from QuestXP.dbc, zone names from AreaTable - answer for real
             // rather than the empty they give with no assets behind them.

@@ -2,7 +2,7 @@
 
 #include "rendering/animation/melee_anim_chains.hpp"
 #include "rendering/animation_controller.hpp"
-#include "rendering/animation/emote_registry.hpp"
+#include "game/emote_table.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
 #include "rendering/animation/mount_fsm.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -72,9 +72,11 @@ void AnimationController::onCharacterFollow(uint32_t /*instanceId*/) {
 // ── Emote support ────────────────────────────────────────────────────────────
 
 void AnimationController::playEmote(const std::string& emoteName) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    auto result = registry.findEmote(emoteName);
+    if (!emotes_) {
+        LOG_WARNING("Emote '", emoteName, "' not played: no emote table");
+        return;
+    }
+    auto result = emotes_->findEmote(emoteName);
     if (!result) return;
 
     uint32_t animId = result->animId;
@@ -139,36 +141,6 @@ void AnimationController::playWeaponSheathAnimation(SheathSpot mainHand, SheathS
 
 void AnimationController::cancelEmote() {
     characterAnimator_.cancelEmote();
-}
-
-std::string AnimationController::getEmoteText(const std::string& emoteName, const std::string* targetName) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.textFor(emoteName, targetName);
-}
-
-uint32_t AnimationController::getEmoteDbcId(const std::string& emoteName) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.dbcIdFor(emoteName);
-}
-
-std::string AnimationController::getEmoteTextByDbcId(uint32_t dbcId, const std::string& senderName,
-                                                      const std::string* targetName) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.textByDbcId(dbcId, senderName, targetName);
-}
-uint32_t AnimationController::getEmoteAnimByEmotesId(uint32_t emoteId) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.animByEmotesId(emoteId);
-}
-
-bool AnimationController::isStateEmoteById(uint32_t emoteId) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.isStateEmote(emoteId);
 }
 
 // ── Spell casting ────────────────────────────────────────────────────────────

@@ -9,7 +9,6 @@
 #include "game/entity.hpp"
 #include <set>
 #include "game/packet_parsers.hpp"
-#include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/player_voice_manager.hpp"

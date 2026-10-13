@@ -13,7 +13,6 @@
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "network/world_socket.hpp"
-#include "rendering/renderer.hpp"
 #include "core/logger.hpp"
 #include "core/application.hpp"
 #include <algorithm>

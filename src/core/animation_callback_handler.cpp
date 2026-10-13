@@ -11,7 +11,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "rendering/animation/emote_registry.hpp"
+#include "game/emote_table.hpp"
 #include "game/game_handler.hpp"
 #include "game/spell_classification.hpp"
 #include "game/world_packets.hpp"

@@ -1,4 +1,5 @@
 #include "game/chat_handler.hpp"
+#include "game/emote_table.hpp"
 
 #include <set>
 #include "addons/lua_api_registrations.hpp"
@@ -10,8 +11,6 @@
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
 #include "network/world_socket.hpp"
-#include "rendering/renderer.hpp"
-#include "rendering/animation_controller.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include <algorithm>
@@ -213,12 +212,12 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(12)) return;
         uint32_t emoteId    = packet.readUInt32();
         uint64_t sourceGuid = packet.readUInt64();
-        uint32_t animId = rendering::AnimationController::getEmoteAnimByEmotesId(emoteId);
+        uint32_t animId = owner_.emotes().animByEmotesId(emoteId);
         // Emotes.dbc EmoteSpecProc distinguishes persistent STATE_ emotes from
         // one-shots. Emote 0 (ONESHOT_NONE) cancels a one-shot but must not
         // clear a UNIT_NPC_EMOTESTATE work loop, so it is forwarded as non-state.
         const bool isState = emoteId != 0 &&
-            rendering::AnimationController::isStateEmoteById(emoteId);
+            owner_.emotes().isStateEmote(emoteId);
         if (owner_.emoteAnimCallbackRef() && sourceGuid != 0 && (animId != 0 || emoteId == 0)) {
             owner_.emoteAnimCallbackRef()(sourceGuid, animId, isState);
         } else if (emoteId != 0 && animId == 0) {
@@ -1011,7 +1010,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
 
     const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    std::string emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
+    std::string emoteText = owner_.emotes().textByDbcId(data.textEmoteId, senderName, targetPtr);
     if (emoteText.empty()) {
         emoteText = data.targetName.empty()
             ? senderName + " performs an emote."

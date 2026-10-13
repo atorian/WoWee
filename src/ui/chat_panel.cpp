@@ -1,5 +1,6 @@
 #include "ui/macro_text.hpp"
 #include "ui/chat_panel.hpp"
+#include "game/emote_table.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "ui/chat/macro_evaluator.hpp"
 #include "ui/chat/game_state_adapter.hpp"
@@ -294,14 +295,14 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
                 }
             }
 
-            std::string emoteText = rendering::AnimationController::getEmoteText(cmdLower, targetNamePtr);
+            std::string emoteText = gameHandler.emotes().textFor(cmdLower, targetNamePtr);
             if (!emoteText.empty()) {
                 auto* renderer = services_.renderer;
                 if (renderer) {
                     if (auto* ac = services_.animationController) ac->playEmote(cmdLower);
                 }
 
-                uint32_t dbcId = rendering::AnimationController::getEmoteDbcId(cmdLower);
+                uint32_t dbcId = gameHandler.emotes().dbcIdFor(cmdLower);
                 if (dbcId != 0) {
                     uint64_t targetGuid = gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0;
                     gameHandler.sendTextEmote(dbcId, targetGuid);

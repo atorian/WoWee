@@ -2,6 +2,8 @@
 
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
+#include "game/game_events.hpp"
+#include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_controller.hpp"
@@ -19,7 +21,7 @@ namespace wowee {
 namespace core {
 
 PlayerView::PlayerView(rendering::Renderer& renderer, audio::AudioCoordinator* audio,
-                       rendering::SpellVisualSystem* spellVisuals)
+                       rendering::SpellVisualSystem* spellVisuals, EventBus& events)
     : renderer_(renderer),
       spellVisuals_(spellVisuals),
       cameraController_(std::make_unique<rendering::CameraController>(renderer.getCamera())),
@@ -27,6 +29,30 @@ PlayerView::PlayerView(rendering::Renderer& renderer, audio::AudioCoordinator* a
     cameraController_->setUseWoWSpeed(true);  // Use realistic WoW movement speed
     cameraController_->setMouseSensitivity(0.15f);
     animationController_->initialize(&renderer_, cameraController_.get(), audio, spellVisuals_);
+
+    namespace ev = game::events;
+    subscriptions_.push_back(events.subscribe<ev::PlayerIntoxicationChanged>(
+        [this](const ev::PlayerIntoxicationChanged& e) {
+            cameraController_->setIntoxication(e.amount);
+            if (auto* post = renderer_.getPostProcessPipeline()) post->setIntoxication(e.amount);
+        }));
+    subscriptions_.push_back(events.subscribe<ev::PlayerFacingSet>([this](const ev::PlayerFacingSet& e) {
+        // A one-shot check that the drawn facing round-trips to the yaw the game
+        // computed. If it does not, the per-frame resync replaces it with a
+        // different heading and the server checks the arc against that instead.
+        const float fromRender = coords::characterYawDegToCanonical(renderer_.getCharacterYaw());
+        const float delta = coords::normalizeAngleRad(fromRender - e.canonicalYaw);
+        if (std::abs(delta) > 0.2f) {
+            LOG_WARNING("Facing mismatch: computed canonical=", e.canonicalYaw,
+                        " but the character's ", renderer_.getCharacterYaw(),
+                        " deg maps to ", fromRender, " (off by ",
+                        delta * 57.2957795f, " deg) - the resync will undo this");
+        }
+        // The drawn character owns facing; the game reads it back every frame.
+        const float facingDeg = coords::canonicalToCharacterYawDeg(e.canonicalYaw);
+        renderer_.setCharacterYaw(facingDeg);
+        cameraController_->setFacingYaw(facingDeg);
+    }));
 }
 
 PlayerView::~PlayerView() = default;

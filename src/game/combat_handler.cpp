@@ -9,7 +9,6 @@
 #include "game/entity.hpp"
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
-#include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/combat_sound_manager.hpp"
 #include "audio/activity_sound_manager.hpp"

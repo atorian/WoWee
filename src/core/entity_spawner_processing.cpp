@@ -9,6 +9,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "core/player_view.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
@@ -1553,7 +1554,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
                 const glm::vec3 renderPosition =
                     core::coords::canonicalToRender(restoredWorldPosition);
                 renderer_->getCharacterPosition() = renderPosition;
-                if (auto* camera = gameServices_->cameraController) {
+                if (auto* camera = playerView_ ? playerView_->getCameraController() : nullptr) {
                     camera->teleportTo(renderPosition);
                     camera->clearMovementInputs();
                     camera->suspendGravityFor(2.0f);
@@ -1798,7 +1799,7 @@ void EntitySpawner::processPendingMount() {
         }
     }
 
-    if (auto* ac = gameServices_->animationController) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
+    if (auto* ac = playerView_ ? playerView_->getAnimationController() : nullptr) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
     // For taxi mounts, start with flying animation; for ground mounts, start with stand
     bool isTaxi = gameHandler_ && gameHandler_->isOnTaxiFlight();

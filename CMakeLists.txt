@@ -743,6 +743,7 @@ set(WOWEE_SOURCES
     src/game/packet_parsers_classic.cpp
     src/game/character.cpp
     src/game/zone_manager.cpp
+    src/game/emote_table.cpp
     src/game/inventory.cpp
 
     # Audio
@@ -1024,7 +1025,6 @@ set(WOWEE_SOURCES
     src/rendering/overlay_system.cpp
     src/rendering/animation_controller.cpp
     src/rendering/animation/animation_ids.cpp
-    src/rendering/animation/emote_registry.cpp
     src/rendering/animation/footstep_driver.cpp
     src/rendering/animation/sfx_state_driver.cpp
     src/rendering/animation/anim_capability_probe.cpp

@@ -298,6 +298,8 @@ private:
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
     game::GameServices gameServices_;
+    /// What the emotes are, for the game, the interface and the animation.
+    std::unique_ptr<game::EmoteTable> emoteTable_;
     /// The pad family the interface's key names were written for.
     core::Gamepad::Kind padKeyNamesFor_ = core::Gamepad::Kind::Unknown;
 

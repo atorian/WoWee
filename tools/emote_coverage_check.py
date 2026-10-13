@@ -14,14 +14,14 @@ and no error either.
 DoEmote used to answer thirty-one names from a map written by hand, twenty-seven
 of which are real tokens. The other two hundred and twenty-one did nothing. It
 went unnoticed for as long as it did because this client's own chat never called
-DoEmote: chat_panel has an emote fallthrough that reads EmoteRegistry directly,
+DoEmote: chat_panel has an emote fallthrough that reads EmoteTable directly,
 so every emote worked right up until chat was handed over and DoEmote became the
 only route.
 
 WHAT IT CHECKS
 
 Every EMOTEn_TOKEN against the command names in EmotesText.dbc, which is what
-EmoteRegistry keys its table on - lower-cased, split on non-alphanumerics, the
+EmoteTable keys its table on - lower-cased, split on non-alphanumerics, the
 same reading parseEmoteCommands makes.
 
 It also checks that DoEmote actually goes through that registry. A binding that

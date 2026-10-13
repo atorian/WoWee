@@ -174,6 +174,8 @@ public:
     const GameServices& services() const { return services_; }
     /// Where this announces what happened; see game/game_events.hpp.
     core::EventBus& eventBus() const { return *services_.events; }
+    /// The emotes' commands, text and animations.
+    const EmoteTable& emotes() const { return *services_.emotes; }
 
     /** Access the active opcode table (wire ↔ logical mapping). */
     const OpcodeTable& getOpcodeTable() const { return opcodeTable_; }

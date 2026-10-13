@@ -1,9 +1,8 @@
-#include "rendering/animation/emote_registry.hpp"
+#include "game/emote_table.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "core/application.hpp"
 #include "core/logger.hpp"
 
 #include <algorithm>
@@ -11,7 +10,9 @@
 #include <unordered_set>
 
 namespace wowee {
-namespace rendering {
+namespace game {
+
+namespace anim = rendering::anim;
 
 // ── Helper functions (moved from animation_controller.cpp) ───────────────────
 
@@ -117,20 +118,15 @@ static std::string replacePlaceholders(const std::string& text, const std::strin
     return out;
 }
 
-// ── EmoteRegistry implementation ─────────────────────────────────────────────
+// ── EmoteTable ───────────────────────────────────────────────────────────────
 
-EmoteRegistry& EmoteRegistry::instance() {
-    static EmoteRegistry inst;
-    return inst;
-}
-
-void EmoteRegistry::loadFromDbc() {
+void EmoteTable::ensureLoaded() const {
     if (loaded_) return;
     loaded_ = true;
 
-    auto* assetManager = core::Application::getInstance().getAssetManager();
+    auto* assetManager = assets_;
     if (!assetManager) {
-        LOG_WARNING("Emotes: no AssetManager");
+        LOG_WARNING("Emotes: no AssetManager - using the built-in table");
         loadFallbackEmotes();
         return;
     }
@@ -262,7 +258,7 @@ void EmoteRegistry::loadFromDbc() {
     buildDbcIdIndex();
 }
 
-void EmoteRegistry::loadFallbackEmotes() {
+void EmoteTable::loadFallbackEmotes() const {
     if (!emoteTable_.empty()) return;
     animByEmotesId_ = makeFallbackEmotesIdMap();
     stateEmoteIds_ = makeFallbackStateEmoteIds();
@@ -296,7 +292,7 @@ void EmoteRegistry::loadFallbackEmotes() {
     buildDbcIdIndex();
 }
 
-void EmoteRegistry::buildDbcIdIndex() {
+void EmoteTable::buildDbcIdIndex() const {
     emoteByDbcId_.clear();
     for (auto& [cmd, info] : emoteTable_) {
         if (info.dbcId != 0) {
@@ -305,24 +301,28 @@ void EmoteRegistry::buildDbcIdIndex() {
     }
 }
 
-std::optional<EmoteRegistry::EmoteResult> EmoteRegistry::findEmote(const std::string& command) const {
+std::optional<EmoteTable::EmoteResult> EmoteTable::findEmote(const std::string& command) const {
+    ensureLoaded();
     auto it = emoteTable_.find(command);
     if (it == emoteTable_.end()) return std::nullopt;
     const auto& info = it->second;
     if (info.animId == 0) return std::nullopt;
     return EmoteResult{.animId = info.animId, .loop = info.loop};
 }
-uint32_t EmoteRegistry::animByEmotesId(uint32_t emoteId) const {
+uint32_t EmoteTable::animByEmotesId(uint32_t emoteId) const {
+    ensureLoaded();
     auto it = animByEmotesId_.find(emoteId);
     return it != animByEmotesId_.end() ? it->second : 0;
 }
 
-bool EmoteRegistry::isStateEmote(uint32_t emoteId) const {
+bool EmoteTable::isStateEmote(uint32_t emoteId) const {
+    ensureLoaded();
     return stateEmoteIds_.count(emoteId) != 0;
 }
 
-std::string EmoteRegistry::textFor(const std::string& emoteName,
-                                   const std::string* targetName) const {
+std::string EmoteTable::textFor(const std::string& emoteName,
+                                const std::string* targetName) const {
+    ensureLoaded();
     auto it = emoteTable_.find(emoteName);
     if (it != emoteTable_.end()) {
         const auto& info = it->second;
@@ -338,7 +338,8 @@ std::string EmoteRegistry::textFor(const std::string& emoteName,
     return "";
 }
 
-uint32_t EmoteRegistry::dbcIdFor(const std::string& emoteName) const {
+uint32_t EmoteTable::dbcIdFor(const std::string& emoteName) const {
+    ensureLoaded();
     auto it = emoteTable_.find(emoteName);
     if (it != emoteTable_.end()) {
         return it->second.dbcId;
@@ -346,9 +347,10 @@ uint32_t EmoteRegistry::dbcIdFor(const std::string& emoteName) const {
     return 0;
 }
 
-std::string EmoteRegistry::textByDbcId(uint32_t dbcId,
-                                       const std::string& senderName,
-                                       const std::string* targetName) const {
+std::string EmoteTable::textByDbcId(uint32_t dbcId,
+                                    const std::string& senderName,
+                                    const std::string* targetName) const {
+    ensureLoaded();
     auto it = emoteByDbcId_.find(dbcId);
     if (it == emoteByDbcId_.end()) return "";
 
@@ -378,5 +380,5 @@ std::string EmoteRegistry::textByDbcId(uint32_t dbcId,
    
 }
 
-} // namespace rendering
+} // namespace game
 } // namespace wowee

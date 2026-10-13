@@ -28,13 +28,15 @@ namespace game { class GameHandler; }
 namespace core {
 
 class Application;
+class PlayerView;
 
 class EntitySpawner {
 public:
     EntitySpawner(rendering::Renderer* renderer,
                   pipeline::AssetManager* assetManager,
                   game::GameHandler* gameHandler,
-                  game::GameServices* gameServices);
+                  game::GameServices* gameServices,
+                  PlayerView* playerView);
     ~EntitySpawner();
 
     EntitySpawner(const EntitySpawner&) = delete;
@@ -311,6 +313,9 @@ private:
     pipeline::AssetManager* assetManager_;
     game::GameHandler* gameHandler_;
     game::GameServices* gameServices_;
+    /// The player's camera and animation: a transport transfer moves the one,
+    /// a mount changes the other.
+    PlayerView* playerView_;
 
     // --- Creature display data (from DBC files) ---
     struct CreatureDisplayData {

@@ -10,7 +10,6 @@
 #include "game/quest_text.hpp"
 #include "game/packet_parsers.hpp"
 #include "network/world_socket.hpp"
-#include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "pipeline/asset_manager.hpp"

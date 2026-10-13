@@ -3,6 +3,7 @@
 #include <iterator>
 #include <vector>
 #include "addons/lua_api_helpers.hpp"
+#include "game/emote_table.hpp"
 #include "game/reputation_standing.hpp"
 #include "game/stationery.hpp"
 #include "rendering/animation_controller.hpp"
@@ -2342,7 +2343,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 // DoEmote the only route, and shrank the emote set to
                 // thirty-one on the way through.
                 //
-                // EmoteRegistry keys its table on lower-cased command names
+                // EmoteTable keys its table on lower-cased command names
                 // out of EmotesText.dbc; FrameXML's tokens are upper case.
                 //
                 // Only the id is needed: the server echoes SMSG_EMOTE back and
@@ -2355,7 +2356,7 @@ void registerSocialLuaAPI(lua_State* L) {
             if (!gh || !token) return 0;
             std::string name(token);
             toLowerInPlace(name);
-            const uint32_t emoteId = rendering::AnimationController::getEmoteDbcId(name);
+            const uint32_t emoteId = gh->emotes().dbcIdFor(name);
             if (emoteId == 0) return 0;
             // The second argument is whoever the emote is aimed at, and it was
             // read by nothing - so "/wave Bob" waved at the current target, or

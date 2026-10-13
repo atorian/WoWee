@@ -606,7 +606,7 @@ CHECKS = [
     # named "unused", which is a placeholder in FrameXML's own list. It was
     # two hundred and twenty-one until 2026-08-05, when DoEmote stopped
     # answering from a map written by hand and started reading EmotesText.dbc
-    # through EmoteRegistry - the same table this client's own chat had been
+    # through EmoteTable - the same table this client's own chat had been
     # reading directly all along, which is why nobody noticed until chat was
     # handed over and DoEmote became the only route.
     # Chat types FrameXML can hand SendChatMessage that it does not map. One,

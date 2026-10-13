@@ -8,15 +8,14 @@
 #include <vector>
 
 namespace wowee {
-namespace rendering {
+namespace pipeline { class AssetManager; }
+namespace game {
 
-// ============================================================================
-// EmoteRegistry - extracted from AnimationController
-//
-// Owns all static emote data, DBC loading, emote text lookup, and
-// animation ID resolution.  Singleton - loaded once on first use.
-// ============================================================================
-
+/// What the emotes are: their chat commands, the text they print and the
+/// animation each plays, from EmotesText.dbc, EmotesTextData.dbc and
+/// Emotes.dbc (a built-in table when those cannot be read). Loaded on first
+/// use. Game data - the chat, the units' emote states and the interface all
+/// ask it; the client owns one and hands it over (GameServices::emotes).
 struct EmoteInfo {
     uint32_t animId = 0;
     uint32_t dbcId = 0;
@@ -28,12 +27,12 @@ struct EmoteInfo {
     std::string command;
 };
 
-class EmoteRegistry {
+class EmoteTable {
 public:
-    static EmoteRegistry& instance();
-
-    /// Load emotes from DBC files (called once on first use).
-    void loadFromDbc();
+    /// Without an asset manager only the built-in table is known.
+    explicit EmoteTable(pipeline::AssetManager* assets) : assets_(assets) {}
+    EmoteTable(const EmoteTable&) = delete;
+    EmoteTable& operator=(const EmoteTable&) = delete;
 
     struct EmoteResult { uint32_t animId; bool loop; };
 
@@ -64,19 +63,19 @@ public:
 
 
 private:
-    EmoteRegistry() = default;
-    EmoteRegistry(const EmoteRegistry&) = delete;
-    EmoteRegistry& operator=(const EmoteRegistry&) = delete;
+    /// Reads the DBCs the first time anything is asked.
+    void ensureLoaded() const;
+    void loadFallbackEmotes() const;
+    void buildDbcIdIndex() const;
 
-    void loadFallbackEmotes();
-    void buildDbcIdIndex();
-
-    bool loaded_ = false;
-    std::unordered_map<std::string, EmoteInfo> emoteTable_;
-    std::unordered_map<uint32_t, const EmoteInfo*> emoteByDbcId_;
-    std::unordered_map<uint32_t, uint32_t> animByEmotesId_;
-    std::unordered_set<uint32_t> stateEmoteIds_;
+    pipeline::AssetManager* assets_;
+    // Filled on first use, so a const question can be the one that loads them.
+    mutable bool loaded_ = false;
+    mutable std::unordered_map<std::string, EmoteInfo> emoteTable_;
+    mutable std::unordered_map<uint32_t, const EmoteInfo*> emoteByDbcId_;
+    mutable std::unordered_map<uint32_t, uint32_t> animByEmotesId_;
+    mutable std::unordered_set<uint32_t> stateEmoteIds_;
 };
 
-} // namespace rendering
+} // namespace game
 } // namespace wowee

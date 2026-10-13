@@ -14,6 +14,7 @@
 #include "rendering/animation/character_animator.hpp"
 
 namespace wowee {
+namespace game { class EmoteTable; }
 namespace rendering {
 
 class Renderer;
@@ -74,16 +75,8 @@ public:
     void playWeaponSheathAnimation(SheathSpot mainHand, SheathSpot offHand);
     void cancelEmote();
     [[nodiscard]] bool isEmoteActive() const { return characterAnimator_.getActivity().isEmoteActive(); }
-    static std::string getEmoteText(const std::string& emoteName,
-                                    const std::string* targetName = nullptr);
-    static uint32_t getEmoteDbcId(const std::string& emoteName);
-    static std::string getEmoteTextByDbcId(uint32_t dbcId,
-                                           const std::string& senderName,
-                                           const std::string* targetName = nullptr);
-    static uint32_t getEmoteAnimByEmotesId(uint32_t emoteId);
-    /// True if the Emotes.dbc entry is a persistent STATE_ emote (loops until
-    /// cleared) rather than a one-shot.
-    static bool isStateEmoteById(uint32_t emoteId);
+    /// Where playEmote looks a command up. Without one, emotes do nothing.
+    void setEmoteTable(const game::EmoteTable* emotes) { emotes_ = emotes; }
 
     // ── Targeting / combat ─────────────────────────────────────────────────
     void setTargetPosition(const glm::vec3* pos);
@@ -203,6 +196,7 @@ public:
     [[nodiscard]] bool isTaxiFlight() const { return taxiFlight_; }
 
 private:
+    const game::EmoteTable* emotes_ = nullptr;
     Renderer* renderer_ = nullptr;
     CameraController* cameraController_ = nullptr;
     audio::AudioCoordinator* audio_ = nullptr;

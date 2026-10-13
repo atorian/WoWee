@@ -4,6 +4,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
+#include "game/emote_table.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -360,7 +361,7 @@ bool Application::initialize() {
     // renderer draws what they decide.
     spellVisualSystem_ = std::make_unique<rendering::SpellVisualSystem>();
     playerView_ = std::make_unique<PlayerView>(*renderer, audioCoordinator_.get(),
-                                               spellVisualSystem_.get());
+                                               spellVisualSystem_.get(), eventBus_);
     screenRecording_ = std::make_unique<ScreenRecording>(*renderer);
     performanceHUD_ = std::make_unique<rendering::PerformanceHUD>();
     performanceHUD_->setPosition(rendering::PerformanceHUD::Position::TOP_LEFT);
@@ -419,11 +420,12 @@ bool Application::initialize() {
     assetManager = std::make_unique<pipeline::AssetManager>();
 
     // Populate game services - all subsystems now available
-    gameServices_.renderer = renderer.get();
+    emoteTable_ = std::make_unique<game::EmoteTable>(assetManager.get());
+    if (auto* animation = playerView_->getAnimationController()) {
+        animation->setEmoteTable(emoteTable_.get());
+    }
+    gameServices_.emotes = emoteTable_.get();
     gameServices_.audioCoordinator = audioCoordinator_.get();
-    gameServices_.cameraController = playerView_->getCameraController();
-    gameServices_.animationController = playerView_->getAnimationController();
-    gameServices_.spellVisualSystem = spellVisualSystem_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -618,7 +620,8 @@ bool Application::initialize() {
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
-            renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_);
+            renderer.get(), assetManager.get(), gameHandler.get(), &gameServices_,
+            playerView_.get());
         entitySpawner_->initialize();
 
         appearanceComposer_ = std::make_unique<AppearanceComposer>(

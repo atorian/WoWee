@@ -2,15 +2,9 @@
 #include <cstdint>
 
 namespace wowee {
-namespace rendering {
-class Renderer;
-class CameraController;
-class AnimationController;
-class SpellVisualSystem;
-}
 namespace pipeline { class AssetManager; }
 namespace audio { class AudioCoordinator; }
-namespace game { class ExpansionRegistry; }
+namespace game { class ExpansionRegistry; class EmoteTable; }
 namespace core { class EventBus; }
 
 namespace game {
@@ -18,15 +12,16 @@ namespace game {
 // Explicit service dependencies for game handlers.
 // Owned by Application, passed by reference to GameHandler at construction.
 // Replaces hidden Application::getInstance() singleton access.
+//
+// Nothing here draws: the game says what happened on `events`, and the
+// client's presentation (core/) shows it. See AGENTS.md, "Layers".
 struct GameServices {
-    rendering::Renderer* renderer = nullptr;
+    /// Still played directly by the game's handlers; moving to events.
     audio::AudioCoordinator* audioCoordinator = nullptr;
-    // The client's, beside the renderer rather than inside it.
-    rendering::CameraController* cameraController = nullptr;
-    rendering::AnimationController* animationController = nullptr;
-    rendering::SpellVisualSystem* spellVisualSystem = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
     ExpansionRegistry* expansionRegistry = nullptr;
+    /// What the emotes are. Required, like `events`.
+    const EmoteTable* emotes = nullptr;
     /// Where the game announces what happened. Required: GameHandler
     /// refuses to be built without one.
     core::EventBus* events = nullptr;

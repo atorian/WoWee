@@ -24,8 +24,6 @@
 #include "game/opcodes.hpp"
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
-#include "rendering/renderer.hpp"
-#include "rendering/spell_visual_system.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -80,6 +78,9 @@ GameHandler::GameHandler(GameServices& services)
     : services_(services) {
     if (!services_.events) {
         throw std::invalid_argument("GameHandler needs GameServices::events");
+    }
+    if (!services_.emotes) {
+        throw std::invalid_argument("GameHandler needs GameServices::emotes");
     }
     LOG_DEBUG("GameHandler created");
 

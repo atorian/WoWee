@@ -1,4 +1,6 @@
 #include "game/game_handler.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include "game/reputation_standing.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "game/spell_description_eval.hpp"
@@ -23,10 +25,6 @@
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
 #include "ui/framexml_takeover.hpp"
-#include "rendering/renderer.hpp"
-#include "rendering/camera_controller.hpp"
-#include "rendering/post_process_pipeline.hpp"
-#include "rendering/spell_visual_system.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/player_voice_manager.hpp"
@@ -623,10 +621,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     std::fill(std::begin(playerSpellCritPct_), std::end(playerSpellCritPct_), -1.0f);
     std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
     spellHandler_->resetAllState();
-    if (auto* renderer = services_.renderer) {
-        if (auto* camera = services_.cameraController) camera->setIntoxication(0.0f);
-        if (auto* post = renderer->getPostProcessPipeline()) post->setIntoxication(0.0f);
-    }
+    eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     spellFlatMods_.clear();
     spellPctMods_.clear();
     actionBar = {};
@@ -1568,29 +1563,9 @@ void GameHandler::removeIgnore(const std::string& playerName) {
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     movementInfo.orientation = canonicalYaw;
 
-    // One-shot check that the renderer's facing round-trips to the same
-    // canonical yaw we just computed from positions. If it does not, the
-    // per-frame resync replaces this with a different heading and the server
-    // re-checks the arc against that instead.
-    if (auto* r = services_.renderer) {
-        const float fromRender = core::coords::characterYawDegToCanonical(r->getCharacterYaw());
-        const float delta = core::coords::normalizeAngleRad(fromRender - canonicalYaw);
-        if (std::abs(delta) > 0.2f) {
-            LOG_WARNING("Facing mismatch: computed canonical=", canonicalYaw,
-                        " but the character's ", r->getCharacterYaw(),
-                        " deg maps to ", fromRender, " (off by ",
-                        delta * 57.2957795f, " deg) - the resync will undo this");
-        }
-    }
-
-    // The renderer owns facing; the game side is downstream of it every frame.
-    if (auto* renderer = services_.renderer) {
-        const float facingDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
-        renderer->setCharacterYaw(facingDeg);
-        if (auto* cc = services_.cameraController) {
-            cc->setFacingYaw(facingDeg);
-        }
-    }
+    // Whoever draws the character turns it now, so the facing the client
+    // reports from here on is this one.
+    eventBus().publish(events::PlayerFacingSet{canonicalYaw});
 
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
 }

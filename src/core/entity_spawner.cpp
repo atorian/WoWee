@@ -19,7 +19,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "rendering/animation/emote_registry.hpp"
+#include "game/emote_table.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -55,11 +55,13 @@ namespace core {
 EntitySpawner::EntitySpawner(rendering::Renderer* renderer,
                              pipeline::AssetManager* assetManager,
                              game::GameHandler* gameHandler,
-                             game::GameServices* gameServices)
+                             game::GameServices* gameServices,
+                             PlayerView* playerView)
     : renderer_(renderer)
     , assetManager_(assetManager)
     , gameHandler_(gameHandler)
     , gameServices_(gameServices)
+    , playerView_(playerView)
 {
 }
 
@@ -1356,7 +1358,7 @@ if (deadCreatureGuids_.count(guid)) {
         }
     }
     uint32_t npcEmoteAnim = npcEmote != 0
-        ? rendering::AnimationController::getEmoteAnimByEmotesId(npcEmote)
+        ? gameHandler_->emotes().animByEmotesId(npcEmote)
         : 0;
     if (npcEmoteAnim == 0) {
         auto activeIt = creatureActiveEmotes_.find(guid);

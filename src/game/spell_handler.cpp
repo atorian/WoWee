@@ -10,7 +10,6 @@
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
-#include "rendering/camera_controller.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "core/application.hpp"
 #include "core/coordinates.hpp"
