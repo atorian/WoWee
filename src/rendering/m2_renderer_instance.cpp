@@ -33,6 +33,56 @@ thread_local std::unordered_set<uint32_t> tl_m2_candidateIdScratch;
 thread_local std::vector<uint32_t> tl_m2_collisionTriScratch;
 } // namespace m2_internal
 
+void M2Renderer::fileInCullGrid(const M2Instance& instance) {
+    // The margin the shadow pass inflates a position by, before its division
+    // by the pass's radius: the model's bound radius at this scale, times 1.5.
+    const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
+                                                   : instance.cachedBoundRadius;
+    cullGrid_.update(instance.id, M2CullGrid::Entry{
+        .position = instance.position,
+        .cullCenter = instance.cachedCullCenter,
+        .cullRadius = instance.cachedPaddedRadius,
+        .shadowRadius = boundRadius * instance.scale * 1.5f});
+}
+
+void M2Renderer::gatherViewCandidates(const glm::vec3& camPos, const Frustum& frustum,
+                                      float maxPossibleDistSq, std::vector<uint32_t>& out) const {
+    out.clear();
+    for (const auto& cell : cullGrid_.cells()) {
+        if (cell.ids.empty()) continue;
+        // Nothing in a column is drawn further away than this, and nothing
+        // whose cull sphere is outside the frustum - and the column's box
+        // holds every position and every sphere filed in it.
+        if (distanceSqToBox(camPos, cell.viewMin, cell.viewMax) > maxPossibleDistSq) continue;
+        if (!frustum.intersectsAABB(cell.viewMin, cell.viewMax)) continue;
+        for (const uint32_t id : cell.ids) {
+            const auto it = instanceIndexById.find(id);
+            if (it != instanceIndexById.end() && it->second < instances.size()) {
+                out.push_back(static_cast<uint32_t>(it->second));
+            }
+        }
+    }
+}
+
+void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shadowRadius,
+                                        std::vector<uint32_t>& out) const {
+    out.clear();
+    const float invRadius = shadowRadius > 0.0f ? 1.0f / shadowRadius : 0.0f;
+    for (const auto& cell : cullGrid_.cells()) {
+        if (cell.ids.empty()) continue;
+        // The light's box, not the camera's: a caster behind the camera can
+        // still throw its shadow into view.
+        if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
+                               cell.maxShadowRadius * invRadius)) continue;
+        for (const uint32_t id : cell.ids) {
+            const auto it = instanceIndexById.find(id);
+            if (it != instanceIndexById.end() && it->second < instances.size()) {
+                out.push_back(static_cast<uint32_t>(it->second));
+            }
+        }
+    }
+}
+
 void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
     if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z)) return;
@@ -55,6 +105,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
+    fileInCullGrid(inst);
 
     // Incrementally update spatial grid
     refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
@@ -243,6 +294,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
+    fileInCullGrid(inst);
 
     // Incrementally update spatial grid (remove old cells, add new cells)
     refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
@@ -260,6 +312,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     // Remove from spatial grid incrementally (same pattern as the move-update path)
     eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    cullGrid_.remove(instanceId);
 
     // Remove from dedup map
     if (!inst.cachedIsGroundDetail) {
@@ -376,6 +429,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
             }
         }
         destroyInstanceBones(inst, /*defer=*/true);
+        cullGrid_.remove(id);
         instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
@@ -485,6 +539,7 @@ void M2Renderer::clear() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    cullGrid_.clear();
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
@@ -519,6 +574,7 @@ void M2Renderer::clearInstances() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    cullGrid_.clear();
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
@@ -592,6 +648,8 @@ void M2Renderer::rebuildSpatialIndex() {
 
         insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
+    cullGrid_.clear();
+    for (const auto& inst : instances) fileInCullGrid(inst);
     spatialIndexDirty_ = false;
 }
 

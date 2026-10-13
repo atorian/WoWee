@@ -2735,3 +2735,14 @@ target_include_directories(test_rt_build_budget SYSTEM PRIVATE ${TEST_SYSTEM_INC
 target_link_libraries(test_rt_build_budget PRIVATE catch2_main)
 add_test(NAME rt_build_budget COMMAND test_rt_build_budget)
 register_test_target(test_rt_build_budget)
+
+# ── test_m2_cull_grid ────────────────────────────────────────
+# The M2 view and shadow passes reject whole columns of the world before
+# testing instances; a column must never be rejected while an instance in it
+# would have passed.
+add_executable(test_m2_cull_grid test_m2_cull_grid.cpp ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+target_include_directories(test_m2_cull_grid PRIVATE ${TEST_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+target_include_directories(test_m2_cull_grid SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_m2_cull_grid PRIVATE catch2_main)
+add_test(NAME m2_cull_grid COMMAND test_m2_cull_grid)
+register_test_target(test_m2_cull_grid)

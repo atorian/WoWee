@@ -212,6 +212,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
         lightInstanceIndices_.push_back(idx);
     }
     instanceIndexById[instance.id] = idx;
+    fileInCullGrid(instances[idx]);
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
@@ -319,6 +320,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         lightInstanceIndices_.push_back(idx);
     }
     instanceIndexById[instance.id] = idx;
+    fileInCullGrid(instances[idx]);
     insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
@@ -841,8 +843,6 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
 void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
     if (!cullPipeline_ || instances.empty()) return;
 
-    const uint32_t numInstances = std::min(static_cast<uint32_t>(instances.size()), MAX_CULL_INSTANCES);
-
     // --- Compute per-instance adaptive distances (same formula as old CPU cull) ---
     const float targetRenderDist = viewDistanceScale_ *
         ((instances.size() > 2000) ? 300.0f
@@ -867,6 +867,14 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     Frustum frustum;
     frustum.extractFromMatrix(vp);
     const glm::vec3 camPos = camera.getPosition();
+
+    // Only the instances in columns this camera may see go to the GPU. This
+    // took the first MAX_CULL_INSTANCES of the array whatever they were - in a
+    // city with ninety thousand resident that was a quarter of them, picked by
+    // load order, with the rest left to a CPU test in render().
+    gatherViewCandidates(camPos, frustum, maxPossibleDistSq, cullCandidates_);
+    const uint32_t numInstances =
+        std::min(static_cast<uint32_t>(cullCandidates_.size()), MAX_CULL_INSTANCES);
 
     if (cullUniformMapped_[frameIndex]) {
         auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
@@ -934,7 +942,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         cullSubmittedIds_[frameIndex].clear();
         cullSubmittedIds_[frameIndex].reserve(numInstances);
         for (uint32_t i = 0; i < numInstances; i++)
-            cullSubmittedIds_[frameIndex].push_back(instances[i].id);
+            cullSubmittedIds_[frameIndex].push_back(instances[cullCandidates_[i]].id);
     }
 
     // --- Upload per-instance cull data (SSBO, binding 1) ---
@@ -944,7 +952,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     if (cullInputMapped_[frameIndex]) {
         auto* input = static_cast<CullInstanceGPU*>(cullInputMapped_[frameIndex]);
         for (uint32_t i = 0; i < numInstances; i++) {
-            const auto& inst = instances[i];
+            const auto& inst = instances[cullCandidates_[i]];
             float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
                 maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
                 inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
@@ -1106,7 +1114,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    const uint32_t numInstances = std::min(static_cast<uint32_t>(instances.size()), MAX_CULL_INSTANCES);
+    const uint32_t verdictSerial = ++cullVerdictSerial_;
     const uint32_t* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frameIndex]);
     const bool gpuCullAvailable = (cullPipeline_ != VK_NULL_HANDLE && visibility != nullptr);
 
@@ -1140,6 +1148,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     continue;  // instance was removed since the dispatch
                 inst = &instances[idxIt->second];
             }
+            inst->cullVerdictSerial = verdictSerial;
             if (visibility[k]) {
                 inst->lastCullVisible = 1;
                 inst->hizPrevCulledFrames = 0;
@@ -1210,7 +1219,17 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
         rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
 
-    const uint32_t totalInstances = static_cast<uint32_t>(instances.size());
+    // The instances in columns this camera may see; every one the test below
+    // would keep is among them. This walked the whole resident world - ninety
+    // thousand instances in Dalaran - for the few thousand it drew.
+    std::vector<uint32_t>& candidates = viewCandidates_;
+    if (forceNoCull_) {
+        candidates.resize(instances.size());
+        for (uint32_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
+    } else {
+        gatherViewCandidates(camPos, frustum, maxPossibleDistSq, candidates);
+    }
+    const uint32_t totalInstances = static_cast<uint32_t>(candidates.size());
     struct VisibleChunk {
         std::vector<VisibleEntry> opaque;
         std::vector<VisibleEntry> transparent;
@@ -1224,11 +1243,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         ? std::min<uint32_t>(4, (totalInstances + 1023) / 1024)
         : 1;
     std::vector<VisibleChunk> chunks(chunkCount);
-    auto classifyRange = [&](uint32_t chunk, uint32_t begin, uint32_t end) {
-        auto& out = chunks[chunk];
+    auto classifyInto = [&](std::vector<VisibleChunk>& into, const std::vector<uint32_t>& list,
+                            uint32_t chunk, uint32_t begin, uint32_t end) {
+        auto& out = into[chunk];
         out.opaque.reserve((end - begin) / 3);
         out.transparent.reserve((end - begin) / 12);
-        for (uint32_t i = begin; i < end; ++i) {
+        for (uint32_t k = begin; k < end; ++k) {
+            const uint32_t i = list[k];
             const auto& instance = instances[i];
             float distSq;
             float effectiveMaxDistSq;
@@ -1247,7 +1268,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
-            } else if (gpuCullAvailable && i < numInstances) {
+            } else if (gpuCullAvailable && instance.cullVerdictSerial == verdictSerial) {
                 // Per-instance verdict scattered above - indexing visibility[]
                 // directly here would read the slot of whichever instance held
                 // this array position when the dispatch was recorded.
@@ -1285,6 +1306,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         }
     };
 
+    auto classifyRange = [&](uint32_t chunk, uint32_t begin, uint32_t end) {
+        classifyInto(chunks, candidates, chunk, begin, end);
+    };
+
     std::vector<std::future<void>> visibilityFutures;
     visibilityFutures.reserve(chunkCount > 0 ? chunkCount - 1 : 0);
     const uint32_t chunkSize = (totalInstances + chunkCount - 1) / chunkCount;
@@ -1305,6 +1330,29 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         transparentVisible_.insert(transparentVisible_.end(),
                                    std::make_move_iterator(chunk.transparent.begin()),
                                    std::make_move_iterator(chunk.transparent.end()));
+    }
+
+    // WOWEE_M2_CULL_CHECK=1: classify the whole world as well, the way this
+    // did before the columns, and say when the two disagree. Only a GPU verdict
+    // from before the camera moved can make them differ.
+    static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
+    if (cullCheck && !forceNoCull_ && !skyMode_) {
+        std::vector<uint32_t> all(instances.size());
+        for (uint32_t i = 0; i < all.size(); ++i) all[i] = i;
+        std::vector<VisibleChunk> whole(1);
+        classifyInto(whole, all, 0, 0, static_cast<uint32_t>(all.size()));
+        static std::chrono::steady_clock::time_point lastReport{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool differs = whole[0].opaque.size() != sortedVisible_.size() ||
+                             whole[0].transparent.size() != transparentVisible_.size();
+        if (now - lastReport > std::chrono::seconds(differs ? 1 : 10)) {
+            lastReport = now;
+            LOG_WARNING("M2 cull check: columns kept ", candidates.size(), " of ", instances.size(),
+                        " to classify; visible opaque ", sortedVisible_.size(), " vs ",
+                        whole[0].opaque.size(), " whole-world, transparent ",
+                        transparentVisible_.size(), " vs ", whole[0].transparent.size(),
+                        differs ? "  <-- DIFFERS" : "");
+        }
     }
 
     // The furthest doodad actually drawn, for the diagnostic that sets it
@@ -2419,14 +2467,39 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     } else {
         shadowCasters_[0].clear();
         shadowCasters_[1].clear();
-        for (uint32_t i = 0; i < instances.size(); ++i) {
-            const auto& instance = instances[i];
+        auto castsHere = [&](const M2Instance& instance) {
             if (!instance.cachedIsValid || instance.cachedIsSmoke ||
-                instance.cachedIsInvisibleTrap) continue;
-            if (!instance.cachedModel) continue;
-            const M2ModelGPU& model = *instance.cachedModel;
-            if (!insideFootprint(instance, model)) continue;
-            shadowCasters_[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
+                instance.cachedIsInvisibleTrap) return false;
+            if (!instance.cachedModel) return false;
+            return insideFootprint(instance, *instance.cachedModel);
+        };
+        // The columns the light's box reaches, chosen by the light alone: a
+        // caster outside the camera's view still throws its shadow into it.
+        // This walked every instance resident, ninety thousand in Dalaran.
+        gatherShadowCandidates(lightSpaceMatrix, shadowRadius, shadowCandidates_);
+        for (const uint32_t i : shadowCandidates_) {
+            const auto& instance = instances[i];
+            if (!castsHere(instance)) continue;
+            shadowCasters_[instance.cachedModel->shadowWindFoliage ? 1 : 0].emplace_back(
+                instance.modelId, i);
+        }
+
+        // WOWEE_M2_CULL_CHECK=1: count the casters across the whole world too.
+        // These must agree exactly: the columns are rejected only when no
+        // position in them could pass the same test.
+        static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
+        if (cullCheck && resetDescriptors) {
+            size_t whole = 0;
+            for (const auto& instance : instances) whole += castsHere(instance) ? 1 : 0;
+            const size_t kept = shadowCasters_[0].size() + shadowCasters_[1].size();
+            static std::chrono::steady_clock::time_point lastReport{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastReport > std::chrono::seconds(whole != kept ? 1 : 10)) {
+                lastReport = now;
+                LOG_WARNING("M2 shadow cull check: columns kept ", shadowCandidates_.size(), " of ",
+                            instances.size(), " to test; casters ", kept, " vs ", whole,
+                            " whole-world", whole != kept ? "  <-- DIFFERS" : "");
+            }
         }
         for (auto& bucket : shadowCasters_) {
             std::sort(bucket.begin(), bucket.end());

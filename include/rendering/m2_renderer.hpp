@@ -3,6 +3,7 @@
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/spatial_grid.hpp"
+#include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
 
 #include "pipeline/m2_loader.hpp"
@@ -37,6 +38,7 @@ namespace pipeline {
 namespace rendering {
 
 class Camera;
+class Frustum;
 class VkContext;
 class VkTexture;
 class HiZSystem;
@@ -378,6 +380,10 @@ struct M2Instance {
     // visible") so a freshly spawned instance skips the HiZ test rather than
     // being judged against depth data that never contained it.
     uint8_t hizPrevCulledFrames = 2;
+    // Which render() call last scattered a GPU verdict onto this instance.
+    // Only a verdict from the call reading it counts: the dispatch covers the
+    // instances the camera's columns held then, not a fixed prefix of the array.
+    uint32_t cullVerdictSerial = 0;
     // Server game object (mailbox, chest, node, door): exempt from the adaptive
     // ambient-doodad distance, which collapses to ~200 units in a city and hid
     // interactable objects long before the server stopped sending them.
@@ -1143,6 +1149,27 @@ private:
 
     SpatialGrid spatialGrid;
     std::unordered_map<uint32_t, size_t> instanceIndexById;
+
+    /// Instances by 64-yard column, for the view and shadow passes to reject
+    /// whole regions before looking at any instance in them. See M2CullGrid.
+    M2CullGrid cullGrid_;
+    /// Files (or refiles) an instance in cullGrid_ from its current position
+    /// and cull data. Called wherever those change.
+    void fileInCullGrid(const M2Instance& instance);
+    /// Indices of the instances in the columns this camera may see within
+    /// maxPossibleDistSq. Every instance the per-instance view test would keep
+    /// is among them.
+    void gatherViewCandidates(const glm::vec3& camPos, const Frustum& frustum,
+                              float maxPossibleDistSq, std::vector<uint32_t>& out) const;
+    /// Indices of the instances in the columns that may cast into this light
+    /// box. Every instance the per-instance shadow test would keep is among
+    /// them, whatever the camera is looking at.
+    void gatherShadowCandidates(const glm::mat4& lightSpace, float shadowRadius,
+                                std::vector<uint32_t>& out) const;
+    std::vector<uint32_t> viewCandidates_;    // reused by render()
+    std::vector<uint32_t> cullCandidates_;    // reused by dispatchCullCompute()
+    std::vector<uint32_t> shadowCandidates_;  // reused by renderShadow()
+    uint32_t cullVerdictSerial_ = 0;
     // Instance to copy bone matrices from when spawning another of the same
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of
