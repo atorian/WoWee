@@ -878,27 +878,30 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
     //
     // The wall test lets through anything whose top is within a yard of the
     // feet, on the understanding that it is a step and grounding will lift the
-    // player onto it. In the air grounding takes far less than that: nothing
-    // over lastGroundZ + 1.7 (the airborne probe in sampleFloorUnderFeet) and
-    // nothing over the feet + 1.2 (its step-up). Between the two the player was
-    // let into the solid and then not lifted out of it. The platform under the
+    // player onto it. Grounding takes nothing over the feet + 1.2 in the air
+    // (its step-up), and whatever it refuses the player was let into and then
+    // not lifted out of. The platform under the
     // floating sculpture in Dalaran is the case: a 1.67 yard rim and a dome
     // over it, entered from the street mid-jump - inside the dome there is no
     // floor until the bottom of the rock, two hundred yards down.
     //
-    // So in the air, a surface in that band that grounding would refuse stops
-    // the move. Up to a yard over the feet only, which is the band the wall
-    // test gave away - a ceiling there is one the body is already inside, and
-    // a doorway lintel over a jumping head is not.
+    // So in the air, the top of something inside the body that grounding would
+    // refuse stops the move. The whole body, not the yard the wall test gave
+    // away: past the rim the dome climbs faster than that, and the fall was
+    // into a spot where it stood 1.1 over the feet. Only a surface facing up
+    // counts - the ray is two-sided, and the underside of a doorway lintel
+    // over a jumping head is open space below a ceiling, not a solid to stop
+    // at.
     if (!grounded && !swimming && !isFlightAirborne() && !externalFollow_ && wmoRenderer) {
         constexpr float kAirborneStepUp = 1.2f;    // groundFollowedCharacter's stepUpBudget
-        constexpr float kWallStepHeight = 1.0f;    // checkWallCollision's MAX_STEP_HEIGHT
+        constexpr float kBodyHeight = 2.0f;        // checkWallCollision's PLAYER_HEIGHT
         const float feetZ = targetPos.z;
-        const float landableZ = std::min(feetZ + kAirborneStepUp,
-                                         lastGroundZ + kAirborneStepUp + 0.5f);
-        const auto top = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y,
-                                                     feetZ + kWallStepHeight);
-        if (top && *top > feetZ && *top > landableZ) {
+        const float landableZ = feetZ + kAirborneStepUp;
+        bool facesUp = false;
+        const auto top = wmoRenderer->getFloorHeight(
+            targetPos.x, targetPos.y, feetZ + kBodyHeight, nullptr,
+            std::numeric_limits<float>::quiet_NaN(), &facesUp);
+        if (top && facesUp && *top > feetZ && *top > landableZ) {
             targetPos.x = followTarget->x;
             targetPos.y = followTarget->y;
         }
@@ -947,9 +950,18 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         std::optional<float> terrainH;
         std::optional<float> wmoH;
         std::optional<float> m2H;
-        // When airborne, anchor probe to last ground level so the
-        // ceiling doesn't rise with the jump and catch roof geometry.
-        float wmoBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : lastGroundZ;
+        // From the feet, in the air as on the ground.
+        //
+        // In the air this was the last ground alone, so the ceiling would not
+        // rise with the jump and catch roof geometry. That also kept a jump
+        // from landing on anything more than 1.7 over where it left the
+        // ground, whatever height the feet reached: the platform under the
+        // floating sculpture in Dalaran - a 1.67 yard rim, a dome climbing to
+        // 648.4 from a 646.2 street - could not be jumped onto, which the
+        // game's own client does without trouble. A roof over a jump is still
+        // not taken for a floor: the pick below is anchored to the last
+        // ground, and the reachable floor to the feet plus a step.
+        float wmoBaseZ = std::max(targetPos.z, lastGroundZ);
         float wmoProbeZ = wmoBaseZ + stepUpBudget + 0.5f;
         float wmoNormalZ = 1.0f;
 
@@ -1118,12 +1130,6 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             wmoH = std::nullopt;  // Treat as unwalkable
         }
 
-        // Reject WMO floors far above last known ground when airborne
-        // (prevents snapping to roof/ceiling surfaces during jumps)
-        if (wmoH && !grounded && *wmoH > lastGroundZ + stepUpBudget + 0.5f) {
-            wmoH = std::nullopt;
-            centerWmoH = std::nullopt;
-        }
         // An M2 doodad's collision sitting well below a valid WMO
         // floor is BENEATH that floor - a decoration or structural
         // base under the walkway, not a surface to stand on. Letting

@@ -349,10 +349,16 @@ public:
     /// closest to the feet - which is what keeps a player standing on the lower
     /// of two stacked floors under an overhang, rather than being snapped up to
     /// the level above them.
+    ///
+    /// The ray is two-sided, so the surface it answers may be the top of a
+    /// floor or the underside of a ceiling, and outNormalZ cannot tell them
+    /// apart. `outFacesUp` can: true when the triangle's own (outward) normal
+    /// points up.
     std::optional<float> getFloorHeight(float glX, float glY, float glZ,
                                         float* outNormalZ = nullptr,
                                         float referenceZ =
-                                            std::numeric_limits<float>::quiet_NaN()) const;
+                                            std::numeric_limits<float>::quiet_NaN(),
+                                        bool* outFacesUp = nullptr) const;
 
     /** Query floor collision from one moving WMO instance. */
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,

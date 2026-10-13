@@ -3285,7 +3285,8 @@ void WMORenderer::GroupResources::getWallTrianglesInRange(
     gatherCellTriangles(cellWallTriangles, minX, minY, maxX, maxY, out);
 }
 
-std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ, float* outNormalZ, float referenceZ) const {
+std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ, float* outNormalZ,
+                                                 float referenceZ, bool* outFacesUp) const {
     const bool byReference = std::isfinite(referenceZ);
     // Per-frame cache disabled: camera and player query the same (x,y) at
     // different Z within a single frame. The allowAbove filter depends on glZ,
@@ -3294,6 +3295,7 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     std::optional<float> bestFloor;
     float bestNormalZ = 1.0f;
+    bool bestFacesUp = true;
     bool bestFromLowPlatform = false;
     // For the "no floor where there plainly is one" report at the end.
     bool overlappedInXY = false;
@@ -3380,10 +3382,12 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
 
                         // Use precomputed normal, ensure upward, transform to world
                         glm::vec3 localNormal = group.triNormals[triStart / 3];
-                        if (localNormal.z < 0.0f) localNormal = -localNormal;
+                        const bool flipped = localNormal.z < 0.0f;
+                        if (flipped) localNormal = -localNormal;
                         glm::vec3 worldNormal = glm::normalize(
                             glm::vec3(instance.modelMatrix * glm::vec4(localNormal, 0.0f)));
                         bestNormalZ = std::abs(worldNormal.z);
+                        bestFacesUp = (worldNormal.z > 0.0f) != flipped;
                     }
                 }
             }
@@ -3553,6 +3557,9 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
 
     if (bestFloor && outNormalZ) {
         *outNormalZ = bestNormalZ;
+    }
+    if (bestFloor && outFacesUp) {
+        *outFacesUp = bestFacesUp;
     }
 
     return bestFloor;
