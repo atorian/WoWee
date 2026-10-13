@@ -6098,8 +6098,36 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
     if (!authHandler) return;
     // Per login endpoint, named from the address the player connected to and
     // never from anything the server sent.
-    const auto directory = userDataRoot() / "realm_patches" /
+    //
+    // Beside the game, in the data folder it reads its assets from, rather
+    // than the per-user folder on the system drive: these archives run to
+    // gigabytes (3.9 GB for EZWoW) and filled a system drive that had no room
+    // for them.
+    namespace fs = std::filesystem;
+    const char* dataPathEnv = std::getenv("WOW_DATA_PATH");
+    std::error_code ec;
+    const fs::path dataRoot = fs::absolute(dataPathEnv ? dataPathEnv : "./Data", ec);
+    const std::string dirName =
         realmPatchDirName(authHandler->getServerHost(), authHandler->getServerPort());
+    const auto directory = dataRoot / "realm_patches" / dirName;
+
+    // Once, for archives already downloaded to the old place, so they are not
+    // fetched again.
+    const fs::path oldDirectory = userDataRoot() / "realm_patches" / dirName;
+    if (!userDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
+        fs::create_directories(directory.parent_path(), ec);
+        // A rename only, which is instant on one drive. Across drives it fails,
+        // and copying gigabytes here would hold up the login for minutes, so
+        // the archives are downloaded again and the old folder is left for
+        // the player to delete.
+        fs::rename(oldDirectory, directory, ec);
+        if (ec) {
+            LOG_WARNING("Realm patches at ", oldDirectory.string(), " are on another drive and will be "
+                        "downloaded again to ", directory.string(), "; the old folder can be deleted");
+        } else {
+            LOG_WARNING("Moved realm patches to ", directory.string());
+        }
+    }
     if (realmPatchSync_ && realmPatchSync_->busy()) {
         LOG_INFO("Realm patch list received again while syncing; continuing the current run");
         return;
