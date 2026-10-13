@@ -194,6 +194,12 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             const float around = dist01(particleRng_) * glm::two_pi<float>();
             glm::vec3 dir(std::sin(tilt) * std::cos(around), std::sin(tilt) * std::sin(around),
                           std::cos(tilt));
+            // A zSource above zero sends them away from that point below the
+            // emitter instead - a fountain's spray fanning out from its spout.
+            if (const float zSource = track(em.zSource); zSource > 0.0f) {
+                const glm::vec3 away = localPos - em.position + glm::vec3(0.0f, 0.0f, zSource);
+                if (glm::dot(away, away) > 1e-6f) dir = glm::normalize(away);
+            }
 
             // Transform direction by bone + model orientation (rotation only)
             glm::mat3 rotMat = glm::mat3(inst.modelMatrix * boneXform);
@@ -274,8 +280,8 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
             return interpFloat(t, inst.animTime, inst.globalSequenceTime,
                                inst.currentSequenceIndex, gpu.globalSequenceDurations);
         };
-        const float drag = std::max(track(pem.deceleration), 0.0f);
-        emitterMotion[e] = {.gravity = track(pem.gravity), .keep = std::exp(-drag * dt)};
+        emitterMotion[e] = {.gravity = track(pem.gravity),
+                            .keep = std::exp(-std::max(pem.drag, 0.0f) * dt)};
     }
 
     for (size_t i = 0; i < inst.particles.size(); ) {

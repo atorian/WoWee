@@ -1538,7 +1538,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseTrackV(0xDC, em.emissionRate);        // +28 = 0xF8
                 parseTrackV(0xF8, em.emissionAreaLength);  // +28 = 0x114
                 parseTrackV(0x114, em.emissionAreaWidth);  // +28 = 0x130
-                parseTrackV(0x130, em.deceleration);       // +28 = 0x14C
+                parseTrackV(0x130, em.zSource);            // +28 = 0x14C
 
                 // Vanilla: NO FBlocks - color/alpha/scale are static inline values
                 // Layout (empirically confirmed from real vanilla M2 files):
@@ -1601,12 +1601,17 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseTrack(0xB0, em.emissionRate);
                 parseTrack(0xC8, em.emissionAreaLength);
                 parseTrack(0xDC, em.emissionAreaWidth);
-                parseTrack(0xF0, em.deceleration);
+                parseTrack(0xF0, em.zSource);
 
                 // Parse FBlocks (color, alpha, scale) - FBlocks are 16 bytes each
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
+                // After the scale variation, the two cell tracks and the tail
+                // and twinkle settings: tailLength 0x15C, twinkle 0x160-0x16C,
+                // burstMultiplier 0x170, then drag.
+                if (base + 0x174 + sizeof(float) <= m2Data.size())
+                    em.drag = readValue<float>(m2Data, base + 0x174);
             }
 
             model.particleEmitters.push_back(std::move(em));
