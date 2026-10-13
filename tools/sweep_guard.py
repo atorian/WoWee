@@ -183,6 +183,12 @@ CHECKS = [
     ("render_dependency_check.py",
      r"^(\d+) includes of the client from the renderer library", 0,
      "client includes in the renderer library"),
+    # The game says what happened and is handed what it asks; it does not
+    # drive the client's presentation. Held where it stood when the check was
+    # written, and only lowered from here (AGENTS.md, "Layers").
+    ("game_dependency_check.py",
+     r"^(\d+) includes of the client's presentation from the game", 30,
+     "presentation includes in the game layer"),
     ("redefined_macro_check.py",
      r"^(\d+) redefined without an #ifndef", 0,
      "macros the build defines, redefined unguarded"),

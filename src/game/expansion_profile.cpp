@@ -162,7 +162,17 @@ const ExpansionProfile* ExpansionRegistry::getProfile(const std::string& id) con
     return nullptr;
 }
 
+namespace {
+std::string& activeExpansionIdStorage() {
+    static std::string id;
+    return id;
+}
+} // namespace
+
+const std::string& activeExpansionId() { return activeExpansionIdStorage(); }
+
 void ExpansionRegistry::activeChanged() {
+    activeExpansionIdStorage() = activeId_;
     // The bank is not the same shape in every expansion - vanilla has 24
     // general slots and 6 bags where 2.0 onward have 28 and 7, and the keyring
     // moves with them - and a slot number is what a move names.

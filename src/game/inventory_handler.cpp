@@ -1,5 +1,4 @@
 #include "game/inventory_handler.hpp"
-#include "addons/lua_api_registrations.hpp"
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
@@ -9,10 +8,6 @@
 #include "game/entity.hpp"
 #include <set>
 #include "game/packet_parsers.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
-#include "audio/player_voice_manager.hpp"
-#include "core/application.hpp"
 #include "core/logger.hpp"
 #include "game/sell_count.hpp"
 #include "network/world_socket.hpp"
@@ -20,6 +15,10 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "addons/lua_api_registrations.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "audio/ui_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include <algorithm>
 #include <cmath>
 #include <chrono>

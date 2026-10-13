@@ -4,7 +4,6 @@
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
 #include "game/handler_types.hpp"
-#include "audio/spell_sound_manager.hpp"
 #include "network/packet.hpp"
 #include <glm/glm.hpp>
 #include <array>

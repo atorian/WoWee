@@ -7,7 +7,6 @@
 #include "network/world_socket.hpp"
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
-#include "core/application.hpp"
 #include "game/expansion_profile.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -636,7 +635,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     wardenLoadedModule_ = std::make_shared<WardenModule>();
                     // Check the signature against the key this realm actually
                     // signs with, when its profile names one.
-                    if (auto* reg = core::Application::getInstance().getExpansionRegistry()) {
+                    if (auto* reg = owner_.services().expansionRegistry) {
                         if (const auto* profile = reg->getActive();
                             profile && !profile->wardenRsaModulus.empty()) {
                             wardenLoadedModule_->setRsaModulus(profile->wardenRsaModulus);

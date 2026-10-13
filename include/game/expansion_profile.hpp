@@ -84,5 +84,11 @@ private:
     bool loadProfile(const std::string& jsonPath, const std::string& dirPath);
 };
 
+/// The id of the expansion the client is playing ("classic", "tbc",
+/// "wotlk", ...), or empty before one is chosen. The registry keeps it, the way
+/// the active opcode table and bank layout are kept: protocol code everywhere
+/// asks, and asking should not need the Application.
+const std::string& activeExpansionId();
+
 } // namespace game
 } // namespace wowee

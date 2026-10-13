@@ -8,7 +8,6 @@
 #include "network/world_socket.hpp"
 #include "network/packet.hpp"
 #include "core/coordinates.hpp"
-#include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"

@@ -2,7 +2,6 @@
 #include "game/emote_table.hpp"
 
 #include <set>
-#include "addons/lua_api_registrations.hpp"
 #include "game/chat_filters.hpp"
 #include "game/text_tokens.hpp"
 #include "game/game_handler.hpp"
@@ -23,6 +22,7 @@
 #include <sstream>
 #include <ctime>
 #include "core/local_time.hpp"
+#include "addons/lua_api_registrations.hpp"
 
 namespace wowee {
 namespace game {

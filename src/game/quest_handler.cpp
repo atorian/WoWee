@@ -1,4 +1,3 @@
-#include "ui/framexml_takeover.hpp"
 #include "game/item_text.hpp"
 #include "game/quest_handler.hpp"
 #include "game/quest_query_layout.hpp"
@@ -10,11 +9,11 @@
 #include "game/quest_text.hpp"
 #include "game/packet_parsers.hpp"
 #include "network/world_socket.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "core/logger.hpp"
+#include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
-#include "pipeline/asset_manager.hpp"
-#include "core/application.hpp"
-#include "core/logger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
