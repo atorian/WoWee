@@ -515,6 +515,9 @@ private:
         /// Plainly-allocated staging, which has to outlive the submit just as
         /// the allocator's does.
         std::vector<RawStaging> rawStaging;
+        /// Submitted to the second queue (WOWEE_VK_ASYNC_UPLOAD_QUEUE=1), where
+        /// nothing orders it against the frame but a wait.
+        bool onTransferQueue = false;
     };
     std::vector<InFlightBatch> inFlightBatches_;
 

@@ -2741,8 +2741,14 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     registerRtModel(gpuModel, model);
+    // No rebuild of the spatial index for this. It used to be marked dirty
+    // here, against the map rehashing under the instances' cachedModel
+    // pointers - but an unordered_map's rehash moves no elements, so the
+    // pointers stand, and an existing id is assigned into the node it already
+    // has. The rebuild walked every instance in the world on the next update,
+    // for every model that loaded: 26-53 ms each time something new came into
+    // view in Dalaran.
     models[modelId] = std::move(gpuModel);
-    spatialIndexDirty_ = true;  // Map may have rehashed - refresh cachedModel pointers
 
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId].vertexCount, " vertices, ",
               models[modelId].indexCount / 3, " triangles, ", models[modelId].batches.size(), " batches)");

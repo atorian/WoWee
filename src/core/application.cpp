@@ -5317,6 +5317,23 @@ void Application::reportStageTimes() {
     // beginFrame and endFrame dominate they say nothing about which pass the
     // GPU spent it in. One frame is enough to rank the passes, and reading a
     // window of them would mean keeping the marks alive across slots.
+    // How much world there is to draw. The same city cost twice as much on
+    // one visit as another, and without these the report could not say
+    // whether the scene was larger or the work per object had grown.
+    if (renderer && state == AppState::IN_GAME) {
+        std::ostringstream scene;
+        scene << "  scene:";
+        if (auto* m2 = renderer->getM2Renderer())
+            scene << " M2 " << m2->getInstanceCount() << " instances / " << m2->getModelCount() << " models,";
+        if (auto* wmo = renderer->getWMORenderer())
+            scene << " WMO " << wmo->getInstanceCount() << " / " << wmo->getModelCount() << ",";
+        if (auto* chars = renderer->getCharacterRenderer())
+            scene << " characters " << chars->getInstanceCount() << ",";
+        if (auto* terrain = renderer->getTerrainManager())
+            scene << " terrain tiles " << terrain->getLoadedTileCount();
+        if (frameProfileEnabled_) LOG_WARNING(scene.str()); else LOG_INFO(scene.str());
+    }
+
     if (renderer && renderer->getVkContext()) {
         const auto& gpu = renderer->getVkContext()->gpuTimings();
         if (!gpu.empty()) {

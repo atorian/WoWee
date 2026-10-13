@@ -2155,6 +2155,21 @@ void Renderer::update(float deltaTime) {
     auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
 
+    // Where a slow update went. The stage timer around this call says only
+    // that it took 50-70 ms a frame for seconds at a time in Dalaran; camera
+    // and terrain, the only parts that said anything, said nothing then.
+    struct UpdatePhase { const char* name; float ms; };
+    std::array<UpdatePhase, 12> phases{};
+    size_t phaseCount = 0;
+    auto phaseStart = updateStart;
+    auto endPhase = [&](const char* name) {
+        const auto now = std::chrono::steady_clock::now();
+        if (phaseCount < phases.size()) {
+            phases[phaseCount++] = {name, std::chrono::duration<float, std::milli>(now - phaseStart).count()};
+        }
+        phaseStart = now;
+    };
+
     if (wmoRenderer) wmoRenderer->resetQueryStats();
     if (m2Renderer) m2Renderer->resetQueryStats();
 
@@ -2167,6 +2182,7 @@ void Renderer::update(float deltaTime) {
             LOG_WARNING("SLOW cameraController->update: ", lastCameraUpdateMs, "ms");
         }
 
+        endPhase("camera");
         // Update 3D audio listener position/orientation to match camera.
         // getUp() internally calls getRight() which calls getForward() again,
         // and we ask for getForward() once more on the same line - that's 3
@@ -2240,8 +2256,10 @@ void Renderer::update(float deltaTime) {
         const bool isUnderwater = eyeDepth && *eyeDepth > 0.0f;
         const uint32_t resolvedZoneId = getCurrentZoneId();
 
+        endPhase("pre-lighting");
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
                                 gameTime, isRaining, isUnderwater);
+        endPhase("lighting");
 
         // Sync weather visual renderer with game state
         if (weather && gh) {
@@ -2334,6 +2352,7 @@ void Renderer::update(float deltaTime) {
         }
     }
 
+    endPhase("weather/character anim");
     // Update terrain streaming
     if (terrainManager && camera) {
         auto terrStart = std::chrono::steady_clock::now();
@@ -2345,6 +2364,7 @@ void Renderer::update(float deltaTime) {
         }
     }
 
+    endPhase("terrain");
     // Update sky system (skybox time, star twinkle, clouds, celestial moon phases)
     if (skySystem) {
         skySystem->update(deltaTime);
@@ -2444,6 +2464,7 @@ void Renderer::update(float deltaTime) {
     }
     // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
     if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
+    endPhase("sky/effects");
 
 
     // Launch M2 doodad animation on background thread (overlaps with character animation + audio)
@@ -2464,9 +2485,11 @@ void Renderer::update(float deltaTime) {
     if (characterRenderer && camera) {
         characterRenderer->update(deltaTime, camera->getPosition());
     }
+    endPhase("characters");
 
     // Update AudioEngine (cleanup finished sounds, etc.)
     audio::AudioEngine::instance().update(deltaTime);
+    endPhase("audio");
 
     // M2Renderer::update may rebuild the instance spatial index when streaming
     // marked it dirty. Footprint spawning below performs an M2 floor query and
@@ -2480,6 +2503,7 @@ void Renderer::update(float deltaTime) {
         catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }
         m2AnimLaunched = false;
     }
+    endPhase("M2 animation wait");
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
@@ -2537,8 +2561,23 @@ void Renderer::update(float deltaTime) {
         modelCleanupTimer = 0.0f;
     }
 
+    endPhase("sounds/hud/cleanup");
     auto updateEnd = std::chrono::steady_clock::now();
     lastUpdateMs = std::chrono::duration<double, std::milli>(updateEnd - updateStart).count();
+    if (lastUpdateMs > 40.0) {
+        // At most once a second: a slow stretch is many frames in a row, and
+        // one breakdown of it says as much as all of them.
+        static std::chrono::steady_clock::time_point lastReport{};
+        if (updateEnd - lastReport > std::chrono::seconds(1)) {
+            lastReport = updateEnd;
+            std::ostringstream line;
+            line << "Renderer::update " << lastUpdateMs << "ms:";
+            for (size_t i = 0; i < phaseCount; ++i) {
+                if (phases[i].ms >= 1.0f) line << " " << phases[i].name << "=" << phases[i].ms;
+            }
+            LOG_WARNING(line.str());
+        }
+    }
 }
 
 void Renderer::runDeferredWorldInitStep(float deltaTime) {

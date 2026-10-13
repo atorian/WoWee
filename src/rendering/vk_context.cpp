@@ -2908,18 +2908,41 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
         gpuMark(frame.commandBuffer, "frame start");
     }
 
-    // If async upload batches are still in flight (submitted to the transfer queue),
-    // wait for their fences and insert a memory barrier so the graphics queue sees
-    // the completed layout transitions and transfer writes.
+    // Upload batches still in flight are ordered against this frame by the
+    // queue, not by the CPU.
+    //
+    // This waited for every one of them here, on the CPU, every frame there
+    // were any: the main thread stopped until the GPU had finished copying,
+    // which while a town streams in is most frames - a tenth of the frame in
+    // Dalaran. A batch on the graphics queue, where they go by default, was
+    // submitted before this frame's commands, and a barrier's first scope is
+    // everything earlier in submission order on its queue, so the barrier
+    // alone makes the copies and layout transitions visible. They retire in
+    // pollUploadBatches once their fences signal.
+    //
+    // Only a batch on the second queue needs the wait: the queues run
+    // independently, and nothing but the fence orders them.
     if (!inFlightBatches_.empty()) {
-        waitAllUploads();
+        const bool anyOnTransferQueue = std::any_of(
+            inFlightBatches_.begin(), inFlightBatches_.end(),
+            [](const InFlightBatch& batch) { return batch.onTransferQueue; });
+        // WOWEE_VK_WAIT_UPLOADS=1 restores the wait, to tell whether a fault
+        // that appears with this change is this change.
+        static const bool waitUploads = [] {
+            const char* v = std::getenv("WOWEE_VK_WAIT_UPLOADS");
+            return v && *v && *v != '0';
+        }();
+        if (anyOnTransferQueue || waitUploads) waitAllUploads();
 
+        // Every stage that reads what uploads write: vertex and index
+        // buffers, shaders of any stage, and copies. The wait used to stand
+        // in for all of that; a fragment-only barrier did not.
         VkMemoryBarrier2 memBarrier{};
         memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-        memBarrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        memBarrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        memBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
         VkDependencyInfo memDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         memDep.memoryBarrierCount = 1;
         memDep.pMemoryBarriers = &memBarrier;
@@ -3311,6 +3334,7 @@ void VkContext::endUploadBatch() {
     batch.cmd = batchCmd_;
     batch.stagingBuffers = std::move(batchStagingBuffers_);
     batch.rawStaging = std::move(batchRawStaging_);
+    batch.onTransferQueue = targetQueue != graphicsQueue;
     inFlightBatches_.push_back(std::move(batch));
 
     batchCmd_ = VK_NULL_HANDLE;
