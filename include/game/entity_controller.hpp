@@ -133,6 +133,8 @@ private:
     struct PendingUpdateObjectWork {
         UpdateObjectData data;
         size_t nextBlockIndex = 0;
+        size_t nextOutOfRangeIndex = 0;  // out-of-range removals done so far
+        float outOfRangeMs = 0.0f;       // spent on them, across frames
         bool outOfRangeProcessed = false;
         bool newItemCreated = false;
     };
@@ -166,6 +168,12 @@ private:
 
     // --- Entity lifecycle ---
     void processOutOfRangeObjects(const std::vector<uint64_t>& guids);
+    /// Removes out-of-range objects from `next` on until `deadline`, at least
+    /// one per call; returns the index to resume from. Times what each kind
+    /// costs into `costs` (creature, player, game object, other).
+    size_t processOutOfRangeObjectsUntil(const std::vector<uint64_t>& guids, size_t next,
+                                         std::chrono::steady_clock::time_point deadline,
+                                         float costs[4]);
     void applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated);
     void finalizeUpdateObjectBatch(bool newItemCreated);
 

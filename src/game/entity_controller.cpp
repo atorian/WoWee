@@ -115,13 +115,26 @@ void EntityController::processPendingUpdateObjectWork(const std::chrono::steady_
 
         auto& work = pendingUpdateObjectWork_.front();
         if (!work.outOfRangeProcessed) {
-            auto outOfRangeStart = std::chrono::steady_clock::now();
-            processOutOfRangeObjects(work.data.outOfRangeGuids);
-            float outOfRangeMs = std::chrono::duration<float, std::milli>(
+            // Within the frame's budget, resuming next frame. A batch of
+            // twenty-odd creatures leaving range all at once cost 20-32 ms of
+            // one frame. The blocks of this same update wait until every
+            // removal is done, so a guid that leaves and is created again in
+            // one packet still goes out before it comes back in.
+            const auto deadline = start + std::chrono::microseconds(
+                static_cast<int64_t>(budgetMs * 1000.0f));
+            static float costs[4] = {0, 0, 0, 0};
+            if (work.nextOutOfRangeIndex == 0) { for (float& c : costs) c = 0.0f; }
+            const auto outOfRangeStart = std::chrono::steady_clock::now();
+            work.nextOutOfRangeIndex = processOutOfRangeObjectsUntil(
+                work.data.outOfRangeGuids, work.nextOutOfRangeIndex, deadline, costs);
+            work.outOfRangeMs += std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - outOfRangeStart).count();
-            if (outOfRangeMs > slowUpdateObjectBlockLogThresholdMs()) {
-                LOG_WARNING("SLOW update-object out-of-range handling: ", outOfRangeMs,
-                            "ms guidCount=", work.data.outOfRangeGuids.size());
+            if (work.nextOutOfRangeIndex < work.data.outOfRangeGuids.size()) break;  // next frame
+            if (work.outOfRangeMs > slowUpdateObjectBlockLogThresholdMs()) {
+                LOG_WARNING("SLOW update-object out-of-range handling: ", work.outOfRangeMs,
+                            "ms guidCount=", work.data.outOfRangeGuids.size(),
+                            " (creatures ", costs[0], "ms, players ", costs[1],
+                            "ms, game objects ", costs[2], "ms, rest ", costs[3], "ms)");
             }
             work.outOfRangeProcessed = true;
         }
@@ -179,9 +192,22 @@ void EntityController::handleUpdateObject(network::Packet& packet) {
 }
 
 void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& guids) {
-    // Process out-of-range objects first
+    float costs[4] = {0, 0, 0, 0};
+    processOutOfRangeObjectsUntil(guids, 0, std::chrono::steady_clock::time_point::max(), costs);
+}
+
+size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& guids, size_t next,
+                                                       std::chrono::steady_clock::time_point deadline,
+                                                       float costs[4]) {
+    using clock = std::chrono::steady_clock;
+    auto since = [](clock::time_point t) {
+        return std::chrono::duration<float, std::milli>(clock::now() - t).count();
+    };
     bool inventoryChanged = false;
-    for (uint64_t guid : guids) {
+    for (; next < guids.size(); ++next) {
+        if (next > 0 && clock::now() >= deadline) break;
+        const uint64_t guid = guids[next];
+        const auto objectStart = clock::now();
         // An item leaving is how the server says it is gone. Selling one, or
         // handing it to a quest, takes it out of range rather than destroying
         // it, and handleDestroyObject is the only path that was clearing the
@@ -216,6 +242,9 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
 
         LOG_DEBUG("Entity went out of range: 0x", std::hex, guid, std::dec);
         // Trigger despawn callbacks before removing entity
+        const ObjectType type = entity->getType();
+        const int kind = type == ObjectType::UNIT ? 0 : type == ObjectType::PLAYER ? 1
+                       : type == ObjectType::GAMEOBJECT ? 2 : 3;
         if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
             owner_.creatureDespawnCallbackRef()(guid);
         } else if (entity->getType() == ObjectType::PLAYER && owner_.playerDespawnCallbackRef()) {
@@ -239,13 +268,16 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
         if (owner_.playerTransportGuidRef() == guid) {
             owner_.clearPlayerTransport();
         }
+        entity.reset();
         entityManager.removeEntity(guid);
+        costs[kind] += since(objectStart);
     }
 
-    // Once, after the whole batch: a vendor sale can take several items out of
-    // range together, and rebuilding per item would redraw the bags as many
+    // Once per batch, not per item: a vendor sale can take several items out
+    // of range together, and rebuilding per item would redraw the bags as many
     // times for one answer.
     if (inventoryChanged) owner_.rebuildOnlineInventory();
+    return next;
 }
 
 // ============================================================
