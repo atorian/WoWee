@@ -116,6 +116,11 @@ public:
         const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
+    /// The look an aura gives a unit, from its SpellVisualKit's character
+    /// procs: the lit colour is multiplied by `tint`, and the unit is drawn
+    /// no more opaque than `alpha`. White and 1 take it off. Carried to the
+    /// instance's weapons and their enchants.
+    void setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha);
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
     [[nodiscard]] const pipeline::M2Model* getInstanceModelData(uint32_t instanceId) const;
     void setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets);
@@ -308,6 +313,10 @@ private:
         float opacity = 1.0f;
         float fadeInTime = 0.0f;     // elapsed fade time (seconds)
         float fadeInDuration = 0.0f; // total fade duration (0 = no fade)
+        // An aura's look (setInstanceStateLook). Apart from `opacity`, which
+        // fades, stealth and ghosts write; the two meet at draw time.
+        glm::vec3 stateTint{1.0f};
+        float stateAlpha = 1.0f;
 
         // Movement interpolation
         bool isMoving = false;

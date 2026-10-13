@@ -17,6 +17,7 @@
 #include "audio/combat_sound_manager.hpp"
 #include "core/application.hpp"
 #include "core/coordinates.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include "network/world_socket.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -348,6 +349,39 @@ void SpellHandler::preloadSpellVisuals(const std::vector<uint32_t>& spellIds) {
     std::sort(visualIds.begin(), visualIds.end());
     visualIds.erase(std::unique(visualIds.begin(), visualIds.end()), visualIds.end());
     svs->preloadVisuals(visualIds);
+}
+
+void SpellHandler::syncAuraStateVisuals(float dt) {
+    // A few times a second is soon enough for an aura to show, and the units
+    // and their auras are walked only then.
+    // WOWEE_AURA_LOOKS=0 turns them off, to tell an aura's look apart from
+    // anything else wrong with how a unit is drawn.
+    static const bool enabled = core::envFlagEnabled("WOWEE_AURA_LOOKS", true);
+    if (!enabled) return;
+    auraStateVisualTimer_ += dt;
+    if (auraStateVisualTimer_ < 0.2f) return;
+    auraStateVisualTimer_ = 0.0f;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs) return;
+
+    std::vector<rendering::SpellVisualSystem::UnitStateVisuals> units;
+    units.reserve(unitAurasCache_.size() + 1);
+    auto addUnit = [&](uint64_t guid, const std::vector<AuraSlot>& auras) {
+        const uint32_t instanceId = owner_.resolveUnitRenderInstance(guid);
+        if (instanceId == 0) return;
+        rendering::SpellVisualSystem::UnitStateVisuals unit{.guid = guid, .instanceId = instanceId};
+        for (const auto& aura : auras) {
+            if (aura.isEmpty()) continue;
+            if (const uint32_t visualId = resolveSpellVisualId(aura.spellId)) unit.visualIds.push_back(visualId);
+        }
+        units.push_back(std::move(unit));
+    };
+    if (const uint64_t playerGuid = owner_.getPlayerGuid()) addUnit(playerGuid, playerAuras_);
+    // Every other unit's list is kept here by guid, the target's included
+    // (mirrorAurasByGuid).
+    for (const auto& [guid, auras] : unitAurasCache_) addUnit(guid, auras);
+    svs->syncStateVisuals(units);
 }
 
 uint32_t SpellHandler::resolveSpellVisualId(uint32_t spellId) {
@@ -1643,6 +1677,7 @@ void SpellHandler::syncPreWotlkTalentsFromKnownSpells() {
 }
 
 void SpellHandler::updateTimers(float dt) {
+    syncAuraStateVisuals(dt);
     // Tick down cast bar
     if (casting_ && castTimeRemaining_ > 0.0f) {
         castTimeRemaining_ -= dt;

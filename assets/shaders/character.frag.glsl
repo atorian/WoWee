@@ -417,6 +417,9 @@ void main() {
     }
 
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    // Not on a Mod layer: it multiplies what is behind it, and tinting that
+    // would colour the scene rather than the unit.
+    if (modulateNeutral == 0.0) result *= stateTint.rgb;
 
     float dist = length(viewPos.xyz - FragPos);
     if (modulateNeutral > 0.0) {

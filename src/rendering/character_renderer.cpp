@@ -272,9 +272,12 @@ struct CharMaterialUBO {
     int32_t twoSided;
 
     M2UVTransform uvTransform;
+    /// What an aura multiplies the lit colour by (w is padding).
+    glm::vec4 stateTint{1.0f};
 };
 static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
-static_assert(sizeof(CharMaterialUBO) == 112, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
+static_assert(sizeof(CharMaterialUBO) == 128, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -2831,8 +2834,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // Skip models without GPU buffers
         if (!gpuModel.vertexBuffer) continue;
 
-        // Skip fully transparent instances
-        if (instance.opacity <= 0.0f) continue;
+        // Skip fully transparent instances. An aura's opacity caps the
+        // instance's own rather than multiplying it, so a stealthed unit
+        // that also carries the stealth state kit is not drawn twice as faint.
+        const float drawOpacity = std::min(instance.opacity, instance.stateAlpha);
+        if (drawOpacity <= 0.0f) continue;
 
         // Set model matrix (use override for weapon instances)
         const CharacterPushConstants push{
@@ -3101,7 +3107,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     .materialFlags = materialFlags,
                     .effectModel = instance.isEffectModel,
                     .hairMaterial = hairMaterial,
-                    .opacity = instance.opacity * batchColorAlpha,
+                    .opacity = drawOpacity * batchColorAlpha,
                 });
                 const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
                                       blendPipeline == CharacterBlendPipeline::Modulate2x;
@@ -3143,7 +3149,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 // Create per-batch material UBO
                 CharMaterialUBO matData{};
-                matData.opacity = instance.opacity * batchColorAlpha;
+                matData.opacity = drawOpacity * batchColorAlpha;
+                matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
                                               !instance.isEffectModel) ? 1 : 0;
@@ -3286,7 +3293,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             // Whole-model fallback inherits whatever pipeline was bound last;
             // pick it explicitly so instance fades blend here too.
-            VkPipeline fallbackPipeline = (instance.opacity < 0.999f)
+            VkPipeline fallbackPipeline = (drawOpacity < 0.999f)
                 ? translucentPipeline_ : opaquePipeline_;
             if (fallbackPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
@@ -3294,7 +3301,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             }
 
             CharMaterialUBO matData{};
-            matData.opacity = instance.opacity;
+            matData.opacity = drawOpacity;
+            matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
             matData.alphaTest = 0;
             matData.ignoreTextureAlpha = 1;
             matData.colorKeyBlack = 0;
@@ -3935,6 +3943,27 @@ void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
     }
 }
 
+void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    const float clampedAlpha = std::clamp(alpha, 0.0f, 1.0f);
+    auto apply = [&](CharacterInstance& inst) {
+        inst.stateTint = tint;
+        inst.stateAlpha = clampedAlpha;
+    };
+    apply(it->second);
+    // The weapons and their enchants are instances of their own; they take
+    // the look with the body, as they take its opacity.
+    for (const auto& attachment : it->second.weaponAttachments) {
+        auto weaponIt = instances.find(attachment.weaponInstanceId);
+        if (weaponIt != instances.end()) apply(weaponIt->second);
+        for (const auto& effect : attachment.effects) {
+            auto effectIt = instances.find(effect.effectInstanceId);
+            if (effectIt != instances.end()) apply(effectIt->second);
+        }
+    }
+}
+
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
@@ -4240,6 +4269,8 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     if (weapIt != instances.end()) {
         weapIt->second.hasOverrideModelMatrix = true;
         weapIt->second.opacity = charInstance.opacity;
+        weapIt->second.stateTint = charInstance.stateTint;
+        weapIt->second.stateAlpha = charInstance.stateAlpha;
     }
 
     // Store attachment on parent character instance
@@ -4416,6 +4447,8 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     fxIt->second.isEffectModel = true;
     fxIt->second.animationLoop = true;
     fxIt->second.opacity = charIt->second.opacity;
+    fxIt->second.stateTint = charIt->second.stateTint;
+    fxIt->second.stateAlpha = charIt->second.stateAlpha;
 
     WeaponEffectAttachment fx;
     fx.effectModelId = effectModelId;

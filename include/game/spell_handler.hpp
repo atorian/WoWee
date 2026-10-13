@@ -408,6 +408,9 @@ private:
     uint32_t resolveSpellVisualId(uint32_t spellId);
     /// Starts loading these spells' effect models in the background.
     void preloadSpellVisuals(const std::vector<uint32_t>& spellIds);
+    /// Tells the spell visuals which drawn units carry which auras, so each
+    /// can wear its aura's look (SpellVisualSystem::syncStateVisuals).
+    void syncAuraStateVisuals(float dt);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
     // Play the cast/precast visual effect at the caster's position.
@@ -509,6 +512,7 @@ private:
     std::vector<AuraSlot> playerAuras_;
     std::vector<AuraSlot> targetAuras_;
     std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_;
+    float auraStateVisualTimer_ = 0.0f;
 
     // Global Cooldown
     float gcdTotal_ = 0.0f;

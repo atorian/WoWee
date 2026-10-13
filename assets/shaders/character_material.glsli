@@ -34,4 +34,7 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // See m2_uv_transform.hpp.
     vec4 uvRow0;
     vec4 uvRow1;
+    // What an aura multiplies the lit colour by: Shadowform's purple, a
+    // ghost's blue (SpellVisualKit character procs). White without one.
+    vec4 stateTint;
 };

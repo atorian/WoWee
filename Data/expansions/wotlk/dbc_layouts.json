@@ -315,15 +315,22 @@
     "ID": 0,
     "ImpactKit": 3,
     "MissileModel": 8,
-    "PrecastKit": 1
+    "PrecastKit": 1,
+    "StateKit": 4
   },
   "SpellVisualEffectName": {
     "FilePath": 2,
-    "ID": 0
+    "ID": 0,
+    "Scale": 4
   },
   "SpellVisualKit": {
     "BaseEffect": 5,
     "BreathEffect": 8,
+    "CharParamOne0": 25,
+    "CharParamThree0": 33,
+    "CharParamTwo0": 29,
+    "CharParamZero0": 21,
+    "CharProc0": 17,
     "ChestEffect": 4,
     "HeadEffect": 3,
     "ID": 0,

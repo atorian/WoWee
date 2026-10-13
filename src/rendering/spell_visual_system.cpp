@@ -486,6 +486,7 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
 void SpellVisualSystem::update(float deltaTime) {
     finishPendingLoads();
     replayDeferredPlays(deltaTime);
+    updateStateVisuals(deltaTime);
     if (!preloadPaths_.empty() && m2Renderer_) {
         // A world change clears every M2 model, the character's effects with
         // them; put them back in the background rather than at the next cast.
@@ -569,6 +570,7 @@ void SpellVisualSystem::reset() {
     }
     physicalProjectiles_.clear();
     deferredPlays_.clear();
+    resetStateVisuals();
     // Reset the negative cache so models that failed during asset loading can retry.
     spellVisualFailedModels_.clear();
 }

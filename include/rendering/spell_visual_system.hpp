@@ -68,6 +68,21 @@ public:
     /// again in the background if a world change clears them.
     void preloadVisuals(const std::vector<uint32_t>& visualIds);
 
+    /// A unit, and the spell visuals of the auras it has now.
+    struct UnitStateVisuals {
+        uint64_t guid = 0;
+        uint32_t instanceId = 0;          // its CharacterRenderer instance
+        std::vector<uint32_t> visualIds;  // SpellVisual ids, any order
+    };
+    /// What a unit looks like for as long as an aura lasts: the StateKit of
+    /// the aura's spell visual. Its effect models hang on the unit - the
+    /// shadow at a Shadowform priest's feet, a Power Word: Shield bubble -
+    /// and its character procs tint the body and make it translucent.
+    ///
+    /// `units` is every unit with auras that is drawn now. One that has gone
+    /// from it, or whose list no longer names a visual, loses that look.
+    void syncStateVisuals(const std::vector<UnitStateVisuals>& units);
+
 private:
     // Spell visual effects - transient M2 instances spawned by SMSG_PLAY_SPELL_VISUAL/IMPACT
     struct SpellVisualInstance {
@@ -155,6 +170,44 @@ private:
 
     // Apply height offset based on model path keywords (Hand → hands, Chest → chest, Base → ground)
     static glm::vec3 applyEffectHeightOffset(const glm::vec3& basePos, const std::string& modelPath);
+
+    // ---- Aura state visuals (spell_visual_state.cpp) ----
+    /// Where on the unit a kit's effect hangs: SpellVisualKit's effect columns.
+    enum class KitSlot : uint8_t { Head, Chest, Base, LeftHand, RightHand, Breath, Special };
+    struct StateKit {
+        struct Effect {
+            std::string path;
+            KitSlot slot = KitSlot::Base;
+            float scale = 1.0f;  // SpellVisualEffectName.Scale
+        };
+        std::vector<Effect> effects;
+        glm::vec3 tint{1.0f};    // CharProc 1 (Color); white when it has none
+        float alpha = 1.0f;      // CharProc 14 (UpdateAlphaEffectAlpha)
+    };
+    struct StateEffect {
+        uint32_t visualId = 0;
+        size_t effectIndex = 0;     // into StateKit::effects
+        uint32_t modelId = 0;
+        uint32_t instanceId = 0;    // M2 instance; 0 while the model loads
+        glm::vec3 lastPosition{0.0f};
+    };
+    struct UnitState {
+        uint32_t instanceId = 0;
+        std::vector<uint32_t> visualIds;  // sorted, only ones with a kit
+        std::vector<StateEffect> effects;
+        glm::vec3 tint{1.0f}, targetTint{1.0f};
+        float alpha = 1.0f, targetAlpha = 1.0f;
+    };
+    void loadStateKits();
+    void setUnitStateKits(UnitState& state, std::vector<uint32_t> visualIds);
+    void removeStateEffects(UnitState& state);
+    void updateStateVisuals(float deltaTime);
+    /// Takes every state visual down and gives the bodies their own look back.
+    void resetStateVisuals();
+    bool stateEffectPosition(uint32_t charInstanceId, KitSlot slot, glm::vec3& out);
+    std::unordered_map<uint32_t, StateKit> stateKits_;  // visualId -> its StateKit
+    bool stateKitsLoaded_ = false;
+    std::unordered_map<uint64_t, UnitState> unitStates_;  // by unit guid
 };
 
 } // namespace rendering
