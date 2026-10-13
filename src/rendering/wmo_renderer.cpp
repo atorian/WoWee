@@ -58,6 +58,18 @@ namespace {
 /// stairs stay walkable while still blocking, so its two cutoffs deliberately
 /// overlap where these do not.
 constexpr float kWallMaxAbsNormalZ = 0.65f;
+
+// A WMO group winds its outside counter-clockwise against MONR, as an M2 does:
+// 832638 of 833851 drawn triangles over 300 stock groups. Placement is
+// rotation and a positive scale, so it arrives counter-clockwise. Under the
+// builder's default of clockwise every outer wall reached wmo.frag as a back
+// face and was lit with its normal turned inward - the sunlit side dark and
+// the shaded side lit.
+//
+// The water reflection draws through these same pipelines with a mirrored
+// view, which reverses every triangle there. That pass only draws the scene
+// with multisampling off.
+constexpr VkFrontFace kWmoFrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 } // namespace
 
 // Thread-local scratch buffers for collision queries (allows concurrent getFloorHeight/checkWallCollision calls)
@@ -102,7 +114,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
         .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlendAttachment(PipelineBuilder::blendDisabled())
         .setMultisample(vkCtx_->getMsaaSamples())
@@ -123,7 +135,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
         .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlendAttachment(PipelineBuilder::blendAlpha())
         .setMultisample(vkCtx_->getMsaaSamples())
@@ -144,7 +156,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
         .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlendAttachment(PipelineBuilder::blendAlpha())
         .setMultisample(vkCtx_->getMsaaSamples())
@@ -161,7 +173,7 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
                     fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({ vertexBinding }, vertexAttribs)
         .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_LINE, VK_CULL_MODE_NONE)
+        .setRasterization(VK_POLYGON_MODE_LINE, VK_CULL_MODE_NONE, kWmoFrontFace)
         .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlendAttachment(PipelineBuilder::blendDisabled())
         .setMultisample(vkCtx_->getMsaaSamples())

@@ -46,6 +46,15 @@ namespace rendering {
 
 namespace {
 
+// A doodad winds its outside counter-clockwise against its own normals, as a
+// character does: 172499 of 174844 triangles over 400 stock doodads, and every
+// triangle of the Dalaran fountain's crystals. Placement is rotation and a
+// positive scale, so nothing on the way to the screen turns that round. Under
+// the builder's default of clockwise every outer face reached m2.frag as a
+// back face - lit with its normal turned inward, so the sunlit side was the
+// dark one, and culled outright on a single-sided blended batch, which left
+// the crystals showing their insides.
+constexpr VkFrontFace kM2FrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
 } // namespace
 
@@ -315,7 +324,7 @@ bool M2Renderer::buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout) {
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kM2FrontFace)
             // The sky model tests depth but never writes it. Its vertices are
             // pushed to the far plane, so the test is what lets ground drawn
             // before it occlude it, and a write would put the far plane over
@@ -403,7 +412,7 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kM2FrontFace)
             .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
             .setColorBlendAttachment(blendState)
             .setMultisample(samples)
