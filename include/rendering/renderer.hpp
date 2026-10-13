@@ -55,6 +55,7 @@ class MountDust;
 class LevelUpEffect;
 class ChargeEffect;
 class CharacterRenderer;
+class CharacterEmitters;
 class WMORenderer;
 class M2Renderer;
 class Minimap;
@@ -160,6 +161,7 @@ public:
     Weather* getWeather() const { return weather.get(); }
     Lightning* getLightning() const { return lightning.get(); }
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
+    CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
@@ -317,6 +319,9 @@ private:
     std::unique_ptr<CorpseBones> corpseBones_;
     std::unique_ptr<ChargeEffect> chargeEffect;
     std::unique_ptr<CharacterRenderer> characterRenderer;
+    /// The particle and ribbon emitters of what characterRenderer draws, run
+    /// by m2Renderer. Holds both; goes before either does.
+    std::unique_ptr<CharacterEmitters> characterEmitters_;
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;

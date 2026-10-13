@@ -156,7 +156,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     instance.cachedHasAnimation = mdlRef.hasAnimation;
     instance.cachedDisableAnimation = mdlRef.disableAnimation;
     instance.cachedIsSmoke = mdlRef.isSmoke;
-    instance.cachedHasParticleEmitters = !mdlRef.particleEmitters.empty();
+    instance.cachedHasEmitters = mdlRef.hasEmitters();
     instance.cachedBoundRadius = mdlRef.boundRadius;
     instance.cachedIsGroundDetail = mdlRef.isGroundDetail;
     instance.cachedIsInvisibleTrap = mdlRef.isInvisibleTrap;
@@ -200,12 +200,12 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     if (mdlRef.isInstancePortal) {
         portalInstanceIndices_.push_back(idx);
     }
-    if (!mdlRef.particleEmitters.empty()) {
+    if (mdlRef.hasEmitters()) {
         particleInstanceIndices_.push_back(idx);
     }
     if (mdlRef.hasAnimation && !mdlRef.disableAnimation) {
         animatedInstanceIndices_.push_back(idx);
-    } else if (!mdlRef.particleEmitters.empty()) {
+    } else if (mdlRef.hasEmitters()) {
         particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdlRef.canThrowLocalLight()) {
@@ -264,7 +264,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     instance.cachedHasAnimation = mdl2.hasAnimation;
     instance.cachedDisableAnimation = mdl2.disableAnimation;
     instance.cachedIsSmoke = mdl2.isSmoke;
-    instance.cachedHasParticleEmitters = !mdl2.particleEmitters.empty();
+    instance.cachedHasEmitters = mdl2.hasEmitters();
     instance.cachedBoundRadius = mdl2.boundRadius;
     instance.cachedIsGroundDetail = mdl2.isGroundDetail;
     instance.cachedIsInvisibleTrap = mdl2.isInvisibleTrap;
@@ -308,12 +308,12 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     if (mdl2.isSmoke) {
         smokeInstanceIndices_.push_back(idx);
     }
-    if (!mdl2.particleEmitters.empty()) {
+    if (mdl2.hasEmitters()) {
         particleInstanceIndices_.push_back(idx);
     }
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
         animatedInstanceIndices_.push_back(idx);
-    } else if (!mdl2.particleEmitters.empty()) {
+    } else if (mdl2.hasEmitters()) {
         particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdl2.canThrowLocalLight()) {
@@ -571,7 +571,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
 
         // Handle animation looping / variation transitions
-        if (instance.animDuration <= 0.0f && instance.cachedHasParticleEmitters) {
+        if (instance.animDuration <= 0.0f && instance.cachedHasEmitters) {
             instance.animDuration = rendering::M2_DEFAULT_PARTICLE_ANIM_MS;
         }
         if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
@@ -2260,12 +2260,19 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 }
 
 void M2Renderer::renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (!drawsBlendedAfterWater()) return;
+    drawingAfterWater_ = true;
     // Only what render() culled and sorted this frame; a frame it skipped
     // would otherwise replay the last one's lists.
-    if (!blendedPendingAfterWater_ || !drawsBlendedAfterWater()) return;
-    blendedPendingAfterWater_ = false;
-    drawingAfterWater_ = true;
-    recordTransparentPass(cmd, perFrameSet);
+    if (blendedPendingAfterWater_) {
+        blendedPendingAfterWater_ = false;
+        recordTransparentPass(cmd, perFrameSet);
+    }
+    // Particles and ribbons are built from what is alive now, not from those
+    // lists, and not all of them belong to an instance render() saw: a
+    // creature's are posed by CharacterRenderer. Gated on render() having
+    // run, a creature's wing trails went with every frame that had no doodad
+    // in it.
     renderSmokeParticles(cmd, perFrameSet);
     renderM2Particles(cmd, perFrameSet);
     renderM2Ribbons(cmd, perFrameSet);

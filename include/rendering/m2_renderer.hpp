@@ -237,7 +237,15 @@ struct M2ModelGPU {
     // Ribbon emitter data (kept from M2Model)
     std::vector<pipeline::M2RibbonEmitter> ribbonEmitters;
     std::vector<VkTexture*> ribbonTextures;       // Resolved texture per ribbon emitter
+    std::vector<uint16_t> ribbonBlendModes;       // Blend mode of each ribbon emitter's material
     std::vector<VkDescriptorSet> ribbonTexSets;   // Descriptor sets per ribbon emitter
+
+    /// Particles or ribbons: either needs the per-frame emitter update and
+    /// an animation clock. Asking for particles alone left a model whose only
+    /// emitters are ribbons with trails that were never laid.
+    [[nodiscard]] bool hasEmitters() const {
+        return !particleEmitters.empty() || !ribbonEmitters.empty();
+    }
 
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;
@@ -318,24 +326,40 @@ struct M2Instance {
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
     std::vector<M2Particle> particles;
 
-    // Ribbon emitter state
+    // Ribbon emitter state, kept the way the original client's CRibbonEmitter
+    // keeps it. An edge is two world-space vertices laid across the emitter's
+    // own Y axis - bone and model orientation included - at the moment it is
+    // born, and left where it was put but for gravity. A trail from a turning
+    // bone therefore twists, as the phoenix's wing trails do.
     struct RibbonEdge {
-        glm::vec3 worldPos;   // Spine world position when this edge was born
-        glm::vec3 color;      // Interpolated color at birth
-        float     alpha;      // Interpolated alpha at birth
-        float     heightAbove;// Half-width above spine
-        float     heightBelow;// Half-width below spine
-        float     age;        // Seconds since spawned
+        glm::vec3 below{0.0f};  // heightBelow down the emitter's Y axis
+        glm::vec3 above{0.0f};  // heightAbove up it
+        glm::vec3 color{1.0f};
+        float alpha = 1.0f;
+        float age = 0.0f;       // seconds; the texture's u runs with it
     };
-    // One deque of edges per ribbon emitter on this instance
-    std::vector<std::deque<RibbonEdge>> ribbonEdges;
-    std::vector<float> ribbonEdgeAccumulators; // fractional edge counter per emitter
+    struct RibbonState {
+        std::deque<RibbonEdge> edges;  // oldest first
+        /// The edge at the emitter now, laid again every update and drawn
+        /// after the rest.
+        RibbonEdge head;
+        bool hasHead = false;
+        /// Where the emitter was at the last update: the new edges are laid
+        /// along the curve from there to here.
+        bool posSet = false;
+        glm::vec3 lastPos{0.0f};
+        glm::vec3 lastDir{0.0f};
+        glm::vec3 lastVertical{0.0f};
+        /// The fraction of an edge carried to the next update.
+        float startTime = 0.0f;
+    };
+    std::vector<RibbonState> ribbons;  // one per ribbon emitter
 
     // Cached model flags (set at creation to avoid per-frame hash lookups)
     bool cachedHasAnimation = false;
     bool cachedDisableAnimation = false;
     bool cachedIsSmoke = false;
-    bool cachedHasParticleEmitters = false;
+    bool cachedHasEmitters = false;  // M2ModelGPU::hasEmitters
     bool cachedIsGroundDetail = false;
     bool cachedIsInvisibleTrap = false;
     bool cachedIsInstancePortal = false;
@@ -484,6 +508,44 @@ public:
     void unloadModel(uint32_t modelId);
     /** Mark a loaded model as a spell effect (full-brightness particles, no collision). */
     void markModelAsSpellEffect(uint32_t modelId);
+
+    // ---- Emitters of a model another renderer draws and poses ----
+    //
+    // A creature or a mount is drawn by CharacterRenderer, which has no
+    // particles or ribbons; its emitters run here, on a skeleton posed there.
+    // Such emitters live apart from the world's instances: they have no mesh,
+    // no animation of their own, no culling entry, no collision and no place
+    // in the ray-traced scene.
+
+    /// What the owner of the skeleton says about it this frame. `bones` are
+    /// in the same model-space convention as computeBoneMatrices; an empty
+    /// list leaves every bone at rest. Not `posed`: the owner did not move the
+    /// skeleton this frame (out of its animation range, or hidden), so
+    /// nothing new is emitted and what is out there plays out.
+    struct EmitterPose {
+        glm::mat4 modelMatrix{1.0f};
+        float scale = 1.0f;
+        const std::vector<glm::mat4>* bones = nullptr;
+        int sequenceIndex = 0;
+        float animationTimeMs = 0.0f;
+        float globalSequenceTimeMs = 0.0f;
+        bool posed = false;
+    };
+    /// Uploads `model`'s particle and ribbon emitters - their textures and
+    /// descriptor sets, not its geometry. Returns a handle, or 0 when the
+    /// model has no emitters.
+    uint32_t loadPosedEmitterModel(const pipeline::M2Model& model);
+    void unloadPosedEmitterModel(uint32_t handle);
+    [[nodiscard]] bool hasPosedEmitterModel(uint32_t handle) const;
+    /// One set of emitters on one skeleton. 0 when the handle is not loaded.
+    uint32_t createPosedEmitters(uint32_t modelHandle);
+    void removePosedEmitters(uint32_t id);
+    [[nodiscard]] bool hasPosedEmitters(uint32_t id) const;
+    void setPosedEmittersPose(uint32_t id, const EmitterPose& pose);
+    /// Emits and moves the particles and ribbons of every posed set. Runs on
+    /// the main thread once the frame's skeletons are final - after both
+    /// update() and the owner's own update have returned.
+    void updatePosedEmitters(float dt);
 
     /// Instances of the same model at the same spot are treated as one placement,
     /// which is right for the static world and wrong for anything whose position
@@ -1044,7 +1106,10 @@ private:
     std::vector<uint32_t> cullReadableIds_[2];
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
-    static constexpr size_t MAX_RIBBON_VERTS = 2048;  // 9 floats each
+    // 9 floats each, for every trail in view. One riding phoenix lays 660
+    // edges across its ten trails - 1300 vertices - when they run at the
+    // rate and lifetime it asks for.
+    static constexpr size_t MAX_RIBBON_VERTS = 65536;
     ::VkBuffer ribbonVB_ = VK_NULL_HANDLE;
     VmaAllocation ribbonVBAlloc_ = VK_NULL_HANDLE;
     void* ribbonVBMapped_ = nullptr;
@@ -1072,6 +1137,31 @@ private:
     // this so a reaped model is re-loaded instead of skipped as a stale hit.
     std::vector<uint32_t> reapedModelIds_;
     std::vector<M2Instance> instances;
+
+    // Emitters posed by another renderer; see loadPosedEmitterModel. Their
+    // models hold emitters only, and the instances only the emitter state,
+    // bones and transform that emitParticles and updateRibbons read.
+    struct PosedEmitterModel {
+        M2ModelGPU gpu;
+        /// The bones the emitters hang from, so a pose copies those alone.
+        std::vector<uint32_t> bones;
+        uint32_t boneCount = 0;
+    };
+    struct PosedEmitters {
+        uint32_t modelHandle = 0;
+        M2Instance inst;
+        bool posed = false;
+    };
+    std::unordered_map<uint32_t, PosedEmitterModel> posedEmitterModels_;
+    std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
+    uint32_t nextPosedEmitterModel_ = 1;
+    uint32_t nextPosedEmitters_ = 1;
+    /// Bumped whenever materialDescPool_ is reset or destroyed. A set freed
+    /// after the frames in flight are done checks it first: the reset has
+    /// returned it already. Shared, since the free can run after this
+    /// renderer is gone.
+    std::shared_ptr<uint32_t> materialPoolGeneration_ = std::make_shared<uint32_t>(0);
+    void destroyPosedEmitterModels();
 
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId
     struct DedupKey {
@@ -1345,7 +1435,12 @@ private:
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
     void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
     void updateParticles(M2Instance& inst, float dt);
-    void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt);
+    /// Ages the instance's ribbon edges and, when `emit`, lays new ones.
+    void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt, bool emit = true);
+    /// The emitter half of loadModel: per-emitter textures, blend modes and
+    /// descriptor sets, from the model's textures as loaded.
+    void setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2Model& model,
+                               const std::vector<VkTexture*>& allTextures);
 
     // Helper to allocate descriptor sets
     VkDescriptorSet allocateMaterialSet();

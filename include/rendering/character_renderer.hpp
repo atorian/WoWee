@@ -191,6 +191,25 @@ public:
     // frame-fence deferral path; shared textures stay in the cache.
     void unloadModelIfUnused(uint32_t modelId);
 
+    /// An instance whose model has particle or ribbon emitters, as the last
+    /// update() left it. This renderer draws meshes only; CharacterEmitters
+    /// runs the emitters on this skeleton. `bones` is valid until the next
+    /// update() and may be empty for a model that is not animated (a weapon).
+    struct EmitterSource {
+        uint32_t instanceId = 0;
+        uint64_t modelSerial = 0;
+        const pipeline::M2Model* model = nullptr;
+        glm::mat4 modelMatrix{1.0f};
+        float scale = 1.0f;
+        const std::vector<glm::mat4>* bones = nullptr;
+        int sequenceIndex = 0;
+        float animationTimeMs = 0.0f;
+        float globalSequenceTimeMs = 0.0f;
+        /// Moved by the last update() and shown.
+        bool posed = false;
+    };
+    void forEachEmitterSource(const std::function<void(const EmitterSource&)>& visit) const;
+
     // Model id an instance renders with (0 if the instance doesn't exist).
     [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const {
         auto it = instances.find(instanceId);
@@ -279,6 +298,12 @@ private:
         // Pre-classified at load time to avoid per-batch string ops in render loop
         bool isKoboldFlame = false;
         bool isSkyBird = false;
+
+        /// Particle or ribbon emitters, which CharacterEmitters runs.
+        bool hasEmitters = false;
+        /// Which load this is. A model id can be loaded again with other
+        /// data, so the id alone does not say what was loaded.
+        uint64_t loadSerial = 0;
     };
 
     // Character instance
@@ -359,6 +384,10 @@ private:
 
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
+        /// The last update() moved this instance - its clock, its skeleton or,
+        /// for a weapon, its place on its wielder. Not when it was out of
+        /// animation range and left as it was.
+        bool posedThisFrame = false;
         const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
         // Per-instance bone SSBO (double-buffered per frame)
@@ -517,6 +546,7 @@ private:
     std::unordered_map<uint32_t, CharacterInstance> instances;
 
     uint32_t nextInstanceId = 1;
+    uint64_t nextModelLoadSerial_ = 1;
 
     // Normal map generation (same algorithm as WMO renderer)
     std::unique_ptr<VkTexture> generateNormalHeightMap(

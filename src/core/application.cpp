@@ -54,6 +54,7 @@
 #include "rendering/weather.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/character_emitters.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/minimap.hpp"
@@ -627,8 +628,28 @@ bool Application::initialize() {
                     LOG_ERROR("Model probe: cannot load the skin of ", path);
                     return false;
                 }
-                if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
-                renderer->getM2Renderer()->createInstance(0xFFFF0301, origin);
+                // WOWEE_PROBE_CHARACTER=1 draws it the way a creature or a
+                // mount is drawn in game - through CharacterRenderer, with its
+                // emitters in M2Renderer - rather than as a doodad. Skins a
+                // creature display fills in are not filled here.
+                if (core::envFlagEnabled("WOWEE_PROBE_CHARACTER", false)) {
+                    auto* characters = renderer->getCharacterRenderer();
+                    if (!characters->loadModel(model, 0xFFFF0301)) return false;
+                    const uint32_t instance = characters->createInstance(0xFFFF0301, origin);
+                    // WOWEE_PROBE_ANIM=<animation id> plays that one instead
+                    // of the first sequence: a mount walks (4) or runs (5).
+                    if (const char* anim = std::getenv("WOWEE_PROBE_ANIM"); anim && *anim) {
+                        const auto animId = static_cast<uint32_t>(std::stoul(anim));
+                        if (!characters->hasAnimation(instance, animId)) {
+                            LOG_ERROR("Model probe: ", path, " has no animation ", animId);
+                            return false;
+                        }
+                        characters->playAnimation(instance, animId, true);
+                    }
+                } else {
+                    if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
+                    renderer->getM2Renderer()->createInstance(0xFFFF0301, origin);
+                }
                 // From the vertices: the header's box is not always filled in,
                 // and a doodad is often modelled well away from its origin.
                 if (!model.vertices.empty()) {

@@ -9,13 +9,18 @@
 # enough to see the whole model. Shader edits only need their .spv rebuilt
 # (ninja -C build-dev wowee_shaders) and copied into build-dev/bin/assets.
 #
+# WOWEE_PROBE_CHARACTER=1 draws the model the way a creature or a mount is
+# drawn in game, through CharacterRenderer with its emitters in M2Renderer;
+# skins a creature display fills in stay white. With it, WOWEE_PROBE_ANIM=<id>
+# plays that animation instead of the first sequence (4 walk, 5 run).
+#
 # Runs build-dev/bin/wowee.exe (WOWEE_BIN overrides) with its working directory
 # in that folder, and keeps per-user files under build-dev/scratch so nothing
 # lands on the system drive.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 

@@ -202,8 +202,8 @@ struct M2RibbonEmitter {
     uint32_t bone       = 0;        // Bone that drives the ribbon spine
     glm::vec3 position{0.0f};       // Offset from bone pivot
 
-    uint16_t textureIndex  = 0;     // First texture lookup index
-    uint16_t materialIndex = 0;     // First material lookup index (blend mode)
+    uint16_t textureIndex  = 0;     // First texture, an index into M2Model::textures
+    uint16_t materialIndex = 0;     // First material, an index into M2Model::materials (blend mode)
 
     // Animated tracks
     M2AnimationTrack colorTrack;       // RGB 0..1

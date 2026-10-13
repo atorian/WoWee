@@ -278,11 +278,14 @@ struct CharMaterialUBO {
     int32_t hasSecondTexture = 0;
     int32_t secondTexCoordSet = 0;
     int32_t padding[2] = {};
+    /// The batch's authored M2 colour, multiplied into the texture (w is padding).
+    glm::vec4 batchColor{1.0f};
 };
 static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
 static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
 static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 128, "after stateTint");
-static_assert(sizeof(CharMaterialUBO) == 144, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, batchColor) == 144, "std140 aligns a vec4 to 16");
+static_assert(sizeof(CharMaterialUBO) == 160, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -1903,6 +1906,8 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         model.name, model.boundMin, model.boundMax,
         model.vertices.size(), model.particleEmitters.size());
     gpuModel.isSkyBird = classification.isSkyBird;
+    gpuModel.hasEmitters = !model.particleEmitters.empty() || !model.ribbonEmitters.empty();
+    gpuModel.loadSerial = nextModelLoadSerial_++;
 
     // Every model this renderer takes on, named once.
     //
@@ -1913,9 +1918,10 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
     // reading M2Renderer's particle, glow and bone code before it was noticed
     // that the creature never goes through any of it.
     //
-    // The emitter count is worth having here for its own reason: this renderer
-    // reads it to classify and then draws none of them, so a creature whose
-    // effects are missing entirely says so on this line.
+    // The emitter counts are worth having here for their own reason: this
+    // renderer draws none of them itself - CharacterEmitters hands them to
+    // M2Renderer - so a creature whose effects are missing says here whether
+    // it has any.
     // Behind the same switch as M2Renderer's: an inventory rather than a
     // fault, and 41 more lines on top of that one's 197.
     static const bool kLoadDiag = core::envFlagEnabled("WOWEE_M2_LOAD_DIAG", false);
@@ -1927,7 +1933,6 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
                         "' id=", id,
                         " verts=", model.vertices.size(),
                         " emitters=", model.particleEmitters.size(),
-                        " (not drawn)",
                         " ribbons=", model.ribbonEmitters.size());
         }
     }
@@ -2231,6 +2236,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
     for (auto& pair : instances) {
         auto& inst = pair.second;
+        inst.posedThisFrame = false;
 
         // Update fade-in opacity
         if (inst.fadeInDuration > 0.0f && inst.opacity < 1.0f) {
@@ -2249,6 +2255,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         const bool isSkyBird = inst.cachedModel && inst.cachedModel->isSkyBird;
         const float updateRadiusSq = isSkyBird ? birdUpdateRadiusSq : animUpdateRadiusSq;
         if (distSq > updateRadiusSq && !inst.isSceneModel) continue;
+        inst.posedThisFrame = true;
 
         // Advance global sequence timer (accumulates independently of animation wrapping)
         inst.globalSequenceTime += deltaTime * 1000.0f;
@@ -2438,6 +2445,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
+            weapIt->second.posedThisFrame = true;
 
             // Enchant visuals ride the weapon, offset to their attachment point on it.
             for (const auto& fx : wa.effects) {
@@ -3160,8 +3168,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     float f3 = std::sin(frameTimeSeconds * 4.3f + phase * 2.11f);
                     float flicker = 0.90f + 0.10f * f1 + 0.06f * f2 + 0.04f * f3;
                     flicker = std::clamp(flicker, 0.72f, 1.12f);
-                    emissiveBoost = (blendMode >= 3) ? (2.4f * flicker) : (1.5f * flicker);
-                    emissiveTint = glm::vec3(1.28f, 1.04f, 0.82f);
+                    // The texture plus a warm light on top of it: the shader
+                    // multiplies by tint * boost.
+                    const float warmth = (blendMode >= 3) ? (2.4f * flicker) : (1.5f * flicker);
+                    emissiveTint = glm::vec3(1.0f) + glm::vec3(1.28f, 1.04f, 0.82f) * warmth;
                 }
 
                 // Resolve normal/height map for this texture
@@ -3184,6 +3194,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 CharMaterialUBO matData{};
                 matData.opacity = drawOpacity * batchColorAlpha;
                 matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
+                // The colour half of the batch's M2Color, beside the alpha
+                // half above. The generic M2 path tints with the same value.
+                if (batch.colorIndex < gpuModel.data.colorRGB.size())
+                    matData.batchColor = glm::vec4(gpuModel.data.colorRGB[batch.colorIndex], 1.0f);
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
                                               !instance.isEffectModel) ? 1 : 0;
@@ -3910,6 +3924,29 @@ const pipeline::M2Model* CharacterRenderer::getInstanceModelData(uint32_t instan
     auto instIt = instances.find(instanceId);
     if (instIt == instances.end()) return nullptr;
     return getModelData(instIt->second.modelId);
+}
+
+void CharacterRenderer::forEachEmitterSource(
+        const std::function<void(const EmitterSource&)>& visit) const {
+    for (const auto& [id, inst] : instances) {
+        const M2ModelGPU* model = inst.cachedModel;
+        if (!model || !model->hasEmitters) continue;
+        EmitterSource source;
+        source.instanceId = id;
+        source.modelSerial = model->loadSerial;
+        source.model = &model->data;
+        source.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
+                                                         : getModelMatrix(inst);
+        source.scale = inst.scale;
+        source.bones = &inst.boneMatrices;
+        source.sequenceIndex = inst.currentSequenceIndex;
+        source.animationTimeMs = inst.animationTime;
+        source.globalSequenceTimeMs = inst.globalSequenceTime;
+        // Hidden (the player in first person) or faded out entirely: nothing
+        // new comes off it, the way nothing of its mesh is drawn.
+        source.posed = inst.posedThisFrame && inst.visible && inst.opacity > 0.0f;
+        visit(source);
+    }
 }
 
 void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) {

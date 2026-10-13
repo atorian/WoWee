@@ -352,10 +352,10 @@ void M2Renderer::rebuildInstanceIndexLists() {
         auto& ri = instances[i];
         if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
         if (ri.cachedIsInstancePortal) portalInstanceIndices_.push_back(i);
-        if (ri.cachedHasParticleEmitters) particleInstanceIndices_.push_back(i);
+        if (ri.cachedHasEmitters) particleInstanceIndices_.push_back(i);
         if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
             animatedInstanceIndices_.push_back(i);
-        else if (ri.cachedHasParticleEmitters)
+        else if (ri.cachedHasEmitters)
             particleOnlyInstanceIndices_.push_back(i);
         if (ri.cachedModel && ri.cachedModel->canThrowLocalLight())
             lightInstanceIndices_.push_back(i);
@@ -459,6 +459,8 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 void M2Renderer::clear() {
     if (vkCtx_) {
         vkDeviceWaitIdle(vkCtx_->getDevice());
+        // Their owners see them gone (hasPosedEmitters) and ask again.
+        destroyPosedEmitterModels();
         for (auto& [id, model] : models) {
             destroyModelGPU(model);
         }
@@ -634,12 +636,12 @@ void M2Renderer::rebuildSpatialIndex() {
         if (inst.cachedIsInstancePortal) {
             portalInstanceIndices_.push_back(i);
         }
-        if (inst.cachedHasParticleEmitters) {
+        if (inst.cachedHasEmitters) {
             particleInstanceIndices_.push_back(i);
         }
         if (inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
             animatedInstanceIndices_.push_back(i);
-        } else if (inst.cachedHasParticleEmitters) {
+        } else if (inst.cachedHasEmitters) {
             particleOnlyInstanceIndices_.push_back(i);
         }
         if (inst.cachedModel && inst.cachedModel->canThrowLocalLight()) {
@@ -793,6 +795,14 @@ size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
             if (tex) inUse.insert(tex);
         }
         for (const VkTexture* tex : model.ribbonTextures) {
+            if (tex) inUse.insert(tex);
+        }
+    }
+    for (const auto& [handle, posedModel] : posedEmitterModels_) {
+        for (const VkTexture* tex : posedModel.gpu.particleTextures) {
+            if (tex) inUse.insert(tex);
+        }
+        for (const VkTexture* tex : posedModel.gpu.ribbonTextures) {
             if (tex) inUse.insert(tex);
         }
     }

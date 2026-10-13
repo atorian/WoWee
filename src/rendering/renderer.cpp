@@ -85,6 +85,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/amd_fsr3_runtime.hpp"
 #include "rendering/spell_visual_system.hpp"
+#include "rendering/character_emitters.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/render_graph.hpp"
@@ -1123,6 +1124,8 @@ void Renderer::shutdown() {
         footprintRenderer->shutdown();
         footprintRenderer.reset();
     }
+
+    characterEmitters_.reset();
 
     LOG_DEBUG("Renderer::shutdown - characterRenderer...");
     if (characterRenderer) {
@@ -2506,6 +2509,11 @@ void Renderer::update(float deltaTime) {
         m2AnimLaunched = false;
     }
     endPhase("M2 animation wait");
+
+    // Creatures' particles and ribbons, on the skeletons both updates above
+    // have just finished - not while M2Renderer's worker is still running.
+    if (characterEmitters_) characterEmitters_->update(deltaTime);
+    endPhase("character emitters");
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
@@ -4084,6 +4092,9 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             if (!characterRenderer->initializeShadow(shadowRenderPass))
                 LOG_WARNING("Character shadow pipeline initialization failed");
         }
+    }
+    if (!characterEmitters_ && characterRenderer && m2Renderer) {
+        characterEmitters_ = std::make_unique<CharacterEmitters>(*characterRenderer, *m2Renderer);
     }
 
     // Initialize AnimationController (§4.2)

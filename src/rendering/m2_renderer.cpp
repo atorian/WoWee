@@ -1159,6 +1159,7 @@ void M2Renderer::shutdown() {
     }
     models.clear();
     pinnedModelIds_.clear();
+    destroyPosedEmitterModels();
 
     // Destroy instance bone buffers
     for (auto& inst : instances) {
@@ -2138,102 +2139,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         }
     }
 
-    // Copy particle emitter data and resolve textures
-    gpuModel.particleEmitters = model.particleEmitters;
-    gpuModel.particleTextures.resize(model.particleEmitters.size(), whiteTexture_.get());
-    for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
-        uint16_t texIdx = model.particleEmitters[ei].texture;
-        if (texIdx < allTextures.size() && allTextures[texIdx] != nullptr) {
-            gpuModel.particleTextures[ei] = allTextures[texIdx];
-        } else {
-            LOG_WARNING("M2 '", model.name, "' particle emitter[", ei,
-                        "] texture index ", texIdx, " out of range (", allTextures.size(),
-                        " textures) - using white fallback");
-        }
-    }
-
-    // Pre-allocate one stable descriptor set per particle emitter to avoid per-frame allocation.
-    // This prevents materialDescPool_ exhaustion when many emitters are active each frame.
-    if (particleTexLayout_ && materialDescPool_ && !model.particleEmitters.empty()) {
-        VkDevice device = vkCtx_->getDevice();
-        gpuModel.particleTexSets.resize(model.particleEmitters.size(), VK_NULL_HANDLE);
-        for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = materialDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &particleTexLayout_;
-            if (vkAllocateDescriptorSets(device, &ai, &gpuModel.particleTexSets[ei]) == VK_SUCCESS) {
-                // Valid, not merely non-null: descriptorInfo() returns the
-                // texture's handles as they are, so one whose upload failed
-                // writes a null view and sampler into a live descriptor and
-                // declares SHADER_READ_ONLY_OPTIMAL over it.
-                VkTexture* tex = gpuModel.particleTextures[ei];
-                if (!tex || !tex->isValid()) tex = whiteTexture_.get();
-                if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = gpuModel.particleTexSets[ei];
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = &imgInfo;
-                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-            }
-        }
-    }
-
-    // Copy ribbon emitter data and resolve textures
-    gpuModel.ribbonEmitters = model.ribbonEmitters;
-    if (!model.ribbonEmitters.empty()) {
-        VkDevice device = vkCtx_->getDevice();
-        gpuModel.ribbonTextures.resize(model.ribbonEmitters.size(), whiteTexture_.get());
-        gpuModel.ribbonTexSets.resize(model.ribbonEmitters.size(), VK_NULL_HANDLE);
-        for (size_t ri = 0; ri < model.ribbonEmitters.size(); ri++) {
-            // Resolve texture: ribbon textureIndex is a direct index into the
-            // model's texture array (NOT through the textureLookup table).
-            uint16_t texDirect = model.ribbonEmitters[ri].textureIndex;
-            if (texDirect < allTextures.size() && allTextures[texDirect] != nullptr) {
-                gpuModel.ribbonTextures[ri] = allTextures[texDirect];
-            } else {
-                // Fallback: try through textureLookup table
-                uint32_t texIdx = (texDirect < model.textureLookup.size())
-                                  ? model.textureLookup[texDirect] : UINT32_MAX;
-                if (texIdx < allTextures.size() && allTextures[texIdx] != nullptr) {
-                    gpuModel.ribbonTextures[ri] = allTextures[texIdx];
-                } else {
-                    LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri,
-                                "] texIndex=", texDirect, " lookup failed"
-                                " (direct=", (texDirect < allTextures.size() ? "yes" : "OOB"),
-                                " lookup=", texIdx,
-                                " textures=", allTextures.size(),
-                                ") - using white fallback");
-                }
-            }
-            // Allocate descriptor set (reuse particleTexLayout_ = single sampler)
-            if (particleTexLayout_ && materialDescPool_) {
-                VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = materialDescPool_;
-                ai.descriptorSetCount = 1;
-                ai.pSetLayouts = &particleTexLayout_;
-                if (vkAllocateDescriptorSets(device, &ai, &gpuModel.ribbonTexSets[ri]) == VK_SUCCESS) {
-                    VkTexture* tex = gpuModel.ribbonTextures[ri];
-                    if (!tex || !tex->isValid()) tex = whiteTexture_.get();
-                    if (!tex || !tex->isValid()) continue;
-                    VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                    write.dstSet = gpuModel.ribbonTexSets[ri];
-                    write.dstBinding = 0;
-                    write.descriptorCount = 1;
-                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    write.pImageInfo = &imgInfo;
-                    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-                }
-            }
-        }
-        LOG_DEBUG("  Ribbon emitters loaded: ", model.ribbonEmitters.size());
-    }
+    setupEmitterResources(gpuModel, model, allTextures);
 
     // Copy texture transform data for UV animation
     gpuModel.textureTransforms = model.textureTransforms;
