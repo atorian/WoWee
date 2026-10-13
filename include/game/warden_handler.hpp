@@ -8,6 +8,7 @@
 #include <future>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -106,9 +107,20 @@ private:
     // Module-specific check type opcodes [9]: MEM, PAGE_A, PAGE_B, MPQ, LUA, DRIVER, TIMING, PROC, MODULE
     uint8_t wardenCheckOpcodes_[9] = {};
 
-    // Async Warden response: avoids 5-second main-loop stalls from PAGE_A/PAGE_B code pattern searches
-    std::future<std::vector<uint8_t>> wardenPendingEncrypted_;  // encrypted response bytes
-    bool wardenResponsePending_ = false;
+    // Cheat-check responses being built off the main thread, oldest first.
+    //
+    // Every check request is answered from a worker: hashing the client files
+    // an MPQ check names costs ten milliseconds a file, six to a request, and
+    // the code-pattern searches of PAGE_A/PAGE_B cost seconds. update() sends
+    // them in the order the requests came, as each front one finishes. Holds
+    // plaintext; encryption stays on the main thread, in send order, because
+    // the cipher is a stream.
+    std::deque<std::future<std::vector<uint8_t>>> wardenPendingResponses_;
+    // Held by a worker for the whole of one response: the client image it
+    // reads is also written (the tick count a MEM check asks for).
+    std::mutex wardenCheckMutex_;
+    [[nodiscard]] bool wardenResponsePending() const { return !wardenPendingResponses_.empty(); }
+    void cancelPendingWardenResponses();
 };
 
 } // namespace game
