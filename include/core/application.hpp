@@ -44,6 +44,7 @@ namespace core {
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
+class ZoneTracker;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -165,8 +166,20 @@ public:
     // Audio coordinator access
     audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_.get(); }
 
+    /// Which zone the player is in - see ZoneTracker.
+    ZoneTracker* getZoneTracker() { return zoneTracker_.get(); }
+
 private:
     void update(float deltaTime);
+
+    /// Tell the renderer what the game knows about the world - the zone,
+    /// the realm's clock and weather, the player's state - before it updates.
+    /// The renderer asks the game nothing itself.
+    void presentWorldToRenderer(float deltaTime);
+    /// What follows the renderer's update and depends on what it worked out:
+    /// sound placed where the camera is, the zone's music and ambience, and
+    /// the indoor/outdoor crossing announced to the interface.
+    void followRendererUpdate(float deltaTime);
 
     /// Opens or closes the map window to match its setting, and builds its
     /// frame. After the game's own interface frame, before the frame is
@@ -345,6 +358,10 @@ private:
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
     std::unique_ptr<audio::AudioCoordinator> audioCoordinator_;
+    std::unique_ptr<ZoneTracker> zoneTracker_;
+    /// Whether the camera was inside a WMO last frame, for announcing the
+    /// crossing once.
+    bool cameraIndoors_ = false;
 
     // Callback handlers (extracted from setupUICallbacks)
     std::unique_ptr<NPCInteractionCallbackHandler> npcInteractionCallbacks_;

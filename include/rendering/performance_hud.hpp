@@ -66,7 +66,12 @@ public:
     void setShowCamera(bool show) { showCamera = show; }
     void setShowControls(bool show) { showControls = show; }
 
+    /// The zone the player is in, shown when not empty. Told by the client,
+    /// which knows zones; the renderer does not.
+    void setZoneName(std::string name) { zoneName_ = std::move(name); }
+
 private:
+    std::string zoneName_;
     /**
      * Calculate average FPS from frame time history
      */

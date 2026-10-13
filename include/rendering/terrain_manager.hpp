@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "core/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -26,7 +28,6 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace audio { class AmbientSoundManager; }
 namespace rendering { class TerrainRenderer; class Camera; class WaterRenderer; class M2Renderer; class WMORenderer; }
 
 namespace rendering {
@@ -273,7 +274,11 @@ public:
     void setWaterRenderer(WaterRenderer* renderer) { waterRenderer = renderer; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     void setWMORenderer(WMORenderer* renderer) { wmoRenderer = renderer; }
-    void setAmbientSoundManager(audio::AmbientSoundManager* manager) { ambientSoundManager = manager; }
+    /// Where a committed tile's sound emitters go - fires, torches, fountains,
+    /// water - as a position and AmbientSoundManager's type code. Unset, the
+    /// emitters are not gathered at all.
+    using AmbientEmitterSink = std::function<void(const glm::vec3& position, uint32_t type)>;
+    void setAmbientEmitterSink(AmbientEmitterSink sink) { ambientEmitterSink_ = std::move(sink); }
 
     /**
      * Get terrain height at GL coordinates
@@ -419,7 +424,7 @@ private:
     WaterRenderer* waterRenderer = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
-    audio::AmbientSoundManager* ambientSoundManager = nullptr;
+    AmbientEmitterSink ambientEmitterSink_;
 
     std::string mapName = "Azeroth";
 

@@ -3,6 +3,8 @@
 //                /assist, /pvp, /unstuck*, /transport
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "ui/chat/i_chat_command.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "core/zone_tracker.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"
@@ -76,8 +78,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         const auto& pmi = ctx.gameHandler.getMovementInfo();
         std::string zoneName;
-        if (auto* rend = ctx.services.renderer)
-            zoneName = rend->getCurrentZoneName();
+        if (auto* audio = ctx.services.audioCoordinator)
+            zoneName = audio->getCurrentZoneName();
         char buf[256];
         snprintf(buf, sizeof(buf), "%.1f, %.1f, %.1f%s%s",
                  pmi.x, pmi.y, pmi.z,
@@ -99,8 +101,8 @@ class ZoneCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         std::string zoneName;
-        if (auto* rend = ctx.services.renderer)
-            zoneName = rend->getCurrentZoneName();
+        if (auto* audio = ctx.services.audioCoordinator)
+            zoneName = audio->getCurrentZoneName();
         game::MessageChatData sysMsg;
         sysMsg.type = game::ChatType::SYSTEM;
         sysMsg.language = game::ChatLanguage::UNIVERSAL;

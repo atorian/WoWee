@@ -440,7 +440,7 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
 
     // Zone info
     {
-        const std::string& zoneName = renderer->getCurrentZoneName();
+        const std::string& zoneName = zoneName_;
         if (!zoneName.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "ZONE");
             ImGui::Separator();

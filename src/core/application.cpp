@@ -1,4 +1,6 @@
 #include "core/application.hpp"
+#include "audio/ambient_sound_manager.hpp"
+#include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/env_flag.hpp"
 #include "core/character_paths.hpp"
@@ -319,6 +321,26 @@ bool Application::initialize() {
 
     // Create renderer
     renderer = std::make_unique<rendering::Renderer>();
+    // What the player last chose for shadow quality, before the resources that
+    // bake it in are built. Read from the CVar file rather than waited for:
+    // the interface that would normally hand it over does not load until well
+    // after this, and by then the shadow map exists at whatever size it was
+    // given here. See Renderer::SHADOW_MAP_SIZE.
+    //
+    // 2048 by default. 4096 is 64 MB a map, two of them in flight, 128 MB of
+    // depth before anything is drawn, refilled every frame - a lot to ask of
+    // a machine nobody checked, and a good part of the reports of this client
+    // running badly are hardware that was never going to carry it. A phone
+    // starts lower again: its GPU memory is the system's memory.
+    {
+#ifdef __ANDROID__
+        constexpr const char* kDefaultShadowLevel = "1";   // 1024, 8 MB the pair
+#else
+        constexpr const char* kDefaultShadowLevel = "2";   // 2048, 32 MB the pair
+#endif
+        renderer->setShadowQualityLevel(
+            std::atoi(addons::storedCVarValue("extShadowQuality", kDefaultShadowLevel).c_str()));
+    }
     if (!renderer->initialize(window.get())) {
         LOG_FATAL("Failed to initialize renderer");
         return false;
@@ -329,6 +351,19 @@ bool Application::initialize() {
     if (!audioCoordinator_->initialize())
         LOG_WARNING("Audio coordinator initialization failed - game will run without audio");
     renderer->setAudioCoordinator(audioCoordinator_.get());
+
+    // The renderer knows terrain and the sounds it places; which zone that
+    // terrain is and what plays there are the client's, joined here.
+    zoneTracker_ = std::make_unique<ZoneTracker>();
+    renderer->setAreaZoneResolver([zones = zoneTracker_.get()](uint32_t areaId) {
+        return zones->resolveAreaZoneId(areaId);
+    });
+    renderer->setAmbientEmitterSink([audio = audioCoordinator_.get()](const glm::vec3& position,
+                                                                        uint32_t type) {
+        if (auto* ambient = audio->getAmbientSoundManager()) {
+            ambient->addEmitter(position, static_cast<audio::AmbientSoundManager::AmbientType>(type));
+        }
+    });
 
     // Create UI manager
     uiManager = std::make_unique<ui::UIManager>();
@@ -466,6 +501,7 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
+        zoneTracker_->loadZoneTable(assetManager.get());
 
         // Fonts, now the archives are open and still before any frame is
         // drawn - the only moment the glyph atlas can take another face
@@ -659,6 +695,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = addonManager_.get();  // May be nullptr here, re-wire later
             uiServices.audioCoordinator = audioCoordinator_.get();
+            uiServices.zoneTracker = zoneTracker_.get();
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
@@ -914,11 +951,11 @@ bool Application::initialize() {
         luaSvc.setMapWorldAreaId = [r = renderer.get()](uint32_t id) {
             if (auto* wmap = r ? r->getWorldMap() : nullptr) wmap->showWorldMapArea(id);
         };
-        luaSvc.getLiveZoneId = [r = renderer.get()]() -> uint32_t {
-            return r ? r->getCurrentZoneId() : 0u;
+        luaSvc.getLiveZoneId = [zones = zoneTracker_.get()]() -> uint32_t {
+            return zones->zoneId();
         };
-        luaSvc.isOnOutdoorPvpObjective = [r = renderer.get()]() -> bool {
-            return r && r->isOnOutdoorPvpObjective();
+        luaSvc.isOnOutdoorPvpObjective = [zones = zoneTracker_.get()]() -> bool {
+            return zones->isOnOutdoorPvpObjective();
         };
         luaSvc.takeScreenshot = [uim = uiManager.get()]() {
             if (uim) uim->getGameScreen().takeScreenshot();
@@ -1423,6 +1460,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = addonManager_.get();
             uiServices.audioCoordinator = audioCoordinator_.get();
+            uiServices.zoneTracker = zoneTracker_.get();
             uiServices.entitySpawner = entitySpawner_.get();
             uiServices.appearanceComposer = appearanceComposer_.get();
             uiServices.worldLoader = worldLoader_.get();
@@ -4066,6 +4104,83 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     }
 }
 
+void Application::presentWorldToRenderer(float deltaTime) {
+    zoneTracker_->update(renderer->getTerrainManager(), renderer->getCharacterPosition(),
+                         gameHandler.get(), audioCoordinator_.get());
+
+    rendering::WorldEnvironment environment;
+    environment.zoneId = zoneTracker_->zoneId();
+    if (gameHandler) {
+        environment.mapId = gameHandler->getCurrentMapId();
+        environment.gameTime = gameHandler->getGameTime();
+        environment.raining = gameHandler->isRaining();
+        environment.weatherType = gameHandler->getWeatherType();
+        environment.weatherIntensity = gameHandler->getWeatherIntensity();
+        environment.ghost = gameHandler->isPlayerGhost();
+        environment.playerOrientation = gameHandler->getMovementInfo().orientation;
+    }
+    renderer->setWorldEnvironment(environment);
+
+    audioCoordinator_->updateDeferredLoad(deltaTime);
+}
+
+void Application::followRendererUpdate(float deltaTime) {
+    // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
+    // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
+    // ZONE_CHANGED - there is no outdoors counterpart.
+    const bool indoors = renderer->isPlayerIndoors();
+    if (indoors != cameraIndoors_ && gameHandler) {
+        gameHandler->fireAddonEvent(indoors ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
+    }
+    cameraIndoors_ = indoors;
+
+    // The listener stands where the camera does.
+    if (const auto* camera = renderer->getCamera()) {
+        const glm::vec3 fwd = camera->getForward();
+        glm::vec3 right = glm::cross(fwd, glm::vec3(0.0f, 0.0f, 1.0f));
+        const float rLen = glm::length(right);
+        right = (rLen < 1e-6f) ? glm::vec3(1.0f, 0.0f, 0.0f) : right / rLen;
+        glm::vec3 up = glm::cross(right, fwd);
+        const float uLen = glm::length(up);
+        up = (uLen < 1e-6f) ? glm::vec3(0.0f, 0.0f, 1.0f) : up / uLen;
+        audioCoordinator_->setListener(camera->getPosition(), fwd, up);
+    }
+    audioCoordinator_->update(deltaTime);
+
+    // Ambient environmental sounds + zone/music transitions.
+    audio::ZoneAudioContext zctx;
+    zctx.deltaTime = deltaTime;
+    zctx.cameraPosition = renderer->getCamera() ? renderer->getCamera()->getPosition() : glm::vec3(0.0f);
+    zctx.isSwimming = renderer->getCameraController() && renderer->getCameraController()->isSwimming();
+    zctx.insideWmo = indoors;
+    zctx.insideWmoId = renderer->getInsideWmoId();
+    if (const auto* weather = renderer->getWeather()) {
+        const auto wt = weather->getWeatherType();
+        if (wt == rendering::Weather::Type::RAIN)       zctx.weatherType = 1;
+        else if (wt == rendering::Weather::Type::SNOW)  zctx.weatherType = 2;
+        else if (wt == rendering::Weather::Type::STORM) zctx.weatherType = 3;
+        zctx.weatherIntensity = weather->getIntensity();
+    }
+    if (auto* lighting = renderer->getLightingManager()) {
+        zctx.gameTimeHours = lighting->getVisualTimeOfDayHours();
+    }
+    if (const auto* terrain = renderer->getTerrainManager()) {
+        const auto tile = terrain->getCurrentTile();
+        zctx.tileX = tile.x;
+        zctx.tileY = tile.y;
+        zctx.hasTile = true;
+    }
+    // The precise MCNK area classification when available; this avoids stale
+    // server world-state zones and whole-ADT ambiguity at river banks.
+    zctx.serverZoneId = zoneTracker_->zoneId();
+    zctx.zoneManager = zoneTracker_->getZoneManager();
+    audioCoordinator_->updateZoneAudio(zctx);
+
+    if (auto* hud = renderer->getPerformanceHUD()) {
+        hud->setZoneName(audioCoordinator_->getCurrentZoneName());
+    }
+}
+
 void Application::update(float deltaTime) {
     ZoneScopedN("Application::update");
     const char* updateCheckpoint = "enter";
@@ -4379,7 +4494,9 @@ void Application::update(float deltaTime) {
     if (renderer && state == AppState::IN_GAME) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
+            presentWorldToRenderer(deltaTime);
             renderer->update(deltaTime);
+            followRendererUpdate(deltaTime);
             if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
                 glm::vec3 feet = renderer->getCharacterPosition();
                 static std::optional<float> floor;
@@ -4501,14 +4618,14 @@ void Application::render() {
 #endif
 
     renderingFrame_ = true;
+    // The offline stream fixture draws its uploads through the real world path.
+    const bool drawWorld = state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
+        std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
+    renderer->setWorldInView(state == AppState::IN_GAME);
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
-    // The offline stream fixture draws its uploads through the real world path.
-    if (state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") || std::getenv("WOWEE_FOUNTAIN_PROBE") ||
-        std::getenv("WOWEE_MODEL_PROBE")) {
-        runRenderStage("renderWorld", [&] {
-            renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
-        });
+    if (drawWorld) {
+        runRenderStage("renderWorld", [&] { renderer->renderWorld(); });
     }
 
     // Render performance HUD (within ImGui frame, before UI ends the frame)

@@ -18,6 +18,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
+#include "rendering/world_environment.hpp"
 #include "core/screen_recorder.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
@@ -29,9 +30,8 @@
 namespace wowee {
 namespace core { class Window; }
 namespace rendering { class VkContext; }
-namespace game { class World; class ZoneManager; class GameHandler; }
-namespace audio { class AudioCoordinator; }
 namespace pipeline { class AssetManager; }
+namespace audio { class AudioCoordinator; }
 
 namespace rendering {
 
@@ -100,7 +100,26 @@ public:
         afterInterface_ = std::move(recorder);
     }
 
-    void renderWorld(game::World* world, game::GameHandler* gameHandler = nullptr);
+    void renderWorld();
+
+    /// What the game says about the world this frame - see WorldEnvironment.
+    /// Set before update(); kept until it is set again.
+    void setWorldEnvironment(const WorldEnvironment& environment) { environment_ = environment; }
+    const WorldEnvironment& getWorldEnvironment() const { return environment_; }
+    /// Whether the world is on screen this frame, set before beginFrame(). The
+    /// sky is captured for it ahead of the scene pass, and a login screen has
+    /// no sky to capture.
+    void setWorldInView(bool inView) { worldInView_ = inView; }
+    /// How a terrain area id resolves to its zone, for the grass biomes. The
+    /// area itself when unset.
+    void setAreaZoneResolver(std::function<uint32_t(uint32_t)> resolver) {
+        areaZoneResolver_ = std::move(resolver);
+    }
+    /// Where streamed terrain sends its sound emitters - see TerrainManager.
+    /// Set before initializeRenderers().
+    void setAmbientEmitterSink(std::function<void(const glm::vec3&, uint32_t)> sink) {
+        ambientEmitterSink_ = std::move(sink);
+    }
 
     /**
      * Update renderer (camera, etc.)
@@ -167,12 +186,10 @@ public:
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
     FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
     SkySystem* getSkySystem() const { return skySystem.get(); }
-    const std::string& getCurrentZoneName() const;
-    uint32_t getCurrentZoneId() const;
-    /// The area under the player, asked of AreaTable rather than resolved to a
-    /// zone first - the world PvP flag is on the subzone. See ZoneManager.
-    bool isOnOutdoorPvpObjective() const;
     bool isPlayerIndoors() const { return playerIndoors_; }
+    /// The WMO the camera is inside, 0 outside; with isPlayerIndoors, as of
+    /// the last update().
+    uint32_t getInsideWmoId() const { return insideWmoId_; }
     VkContext* getVkContext() const { return vkCtx; }
     VkDescriptorSetLayout getPerFrameSetLayout() const { return perFrameSetLayout; }
     /// What a per-frame set allocated elsewhere binds at binding 2: a fog
@@ -232,9 +249,9 @@ public:
     double getLastWMORenderMs() const { return lastWMORenderMs; }
     double getLastM2RenderMs() const { return lastM2RenderMs; }
     // Audio coordinator - owned by Application, set via setAudioCoordinator().
+    // Only for the animation controller, until it is owned beside it.
     void setAudioCoordinator(audio::AudioCoordinator* ac) { audioCoordinator_ = ac; }
     audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_; }
-    game::ZoneManager* getZoneManager() { return zoneManager.get(); }
     LightingManager* getLightingManager() { return lightingManager.get(); }
 
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
@@ -258,8 +275,8 @@ private:
     /// camera in a cave below the ground under it. WMO liquid is left out, as
     /// the underwater overlay leaves it out.
     [[nodiscard]] std::optional<float> cameraWaterDepth() const;
-    void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
-    void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
+    void renderPostSceneOverlays(VkCommandBuffer cmd);
+    void renderMinimapOverlay(VkCommandBuffer cmd);
 
     /// Point the swim spray at whichever pass the water ends up drawing in, so
     /// it can be recorded after the water rather than under it. Must run before
@@ -318,15 +335,10 @@ private:
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;
-    /// The last zone a terrain chunk actually named. Many chunks carry an area
-    /// id of zero, and a tile being loaded carries none at all, so the lookup
-    /// answers "do not know" often - and answering from somewhere else instead
-    /// made the zone flip at chunk boundaries while walking. Mutable because
-    /// getCurrentZoneId() is const and this is a cache of what it last learnt.
-    mutable uint32_t lastResolvedZoneId_ = 0;
-    /// The map that answer belongs to, so it is dropped on a
-    /// continent change rather than held across one.
-    mutable uint32_t lastResolvedZoneMapId_ = 0xFFFFFFFFu;
+    WorldEnvironment environment_;
+    bool worldInView_ = false;
+    std::function<uint32_t(uint32_t)> areaZoneResolver_;
+    std::function<void(const glm::vec3&, uint32_t)> ambientEmitterSink_;
 
     /// The original client's sky models that are up, one instance each, faded
     /// by the weight LightingManager gives them. See updateSkyboxLayers.
@@ -347,7 +359,6 @@ private:
     std::unique_ptr<FootprintRenderer> footprintRenderer;
     audio::AudioCoordinator* audioCoordinator_ = nullptr;  // Owned by Application
     std::unique_ptr<AnimationController> animationController_;  // §4.2
-    std::unique_ptr<game::ZoneManager> zoneManager;
     // Shadow mapping (Vulkan)
     /// The shadow map is square and this is its side, chosen before the
     /// per-frame resources are built and not changed after.
@@ -359,11 +370,6 @@ private:
     /// marked as needing a restart in the panel instead, which is what the
     /// original client does for the settings it cannot change live.
     uint32_t SHADOW_MAP_SIZE = 4096;
-    void setShadowMapSize(uint32_t side) {
-        // Powers of two between 512 and 4096: the quality slider has five
-        // steps and these are they.
-        SHADOW_MAP_SIZE = std::clamp(side, 512u, 4096u);
-    }
     // Per-frame shadow resources: each in-flight frame has its own depth image and
     // framebuffer so that frame N's shadow read and frame N+1's shadow write don't
     // race on the same image across concurrent GPU submissions.
@@ -400,6 +406,9 @@ public:
     /// the note in settings_schema.cpp - so a saved 0 from before that was
     /// known, or any other caller, cannot switch them off.
     void setShadowsEnabled(bool /*enabled*/) { shadowsEnabled = true; }
+    /// The shadow quality level, 0-4, that sizes the shadow map. Only before
+    /// initialize(): see SHADOW_MAP_SIZE for why it is not live.
+    void setShadowQualityLevel(int level);
     bool areShadowsEnabled() const { return shadowsEnabled; }
     void setShadowDistance(float dist) { shadowDistance_ = glm::clamp(dist, 40.0f, 500.0f); }
     float getShadowDistance() const { return shadowDistance_; }
@@ -455,6 +464,7 @@ private:
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
+    uint32_t insideWmoId_ = 0;
     bool deferredWorldInitEnabled_ = true;
     bool deferredWorldInitPending_ = false;
     uint8_t deferredWorldInitStage_ = 0;
@@ -496,7 +506,7 @@ private:
     GPUPerFrameData currentFrameData{};
     std::unique_ptr<SkyBackground> skyBackground_;
     VkDescriptorSet skyPerFrameDescSets[MAX_FRAMES]{};
-    void renderSkyBackground(game::GameHandler* gameHandler, float timeOfDay,
+    void renderSkyBackground(float timeOfDay,
                              bool drawSkyModels, bool useOriginalSkybox);
     float globalTime = 0.0f;
 
@@ -557,11 +567,10 @@ private:
     bool terrainEnabled = true;
     bool terrainLoaded = false;
 
-    bool ghostMode_ = false;  // set each frame from gameHandler->isPlayerGhost()
 
     // Render Graph - declarative pass ordering with automatic barriers
     std::unique_ptr<RenderGraph> renderGraph_;
-    void buildFrameGraph(game::GameHandler* gameHandler);
+    void buildFrameGraph();
 
     // HiZ occlusion culling - builds depth pyramid each frame
     std::unique_ptr<HiZSystem> hizSystem_;

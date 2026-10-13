@@ -1,4 +1,5 @@
 #include "ui/graphics_choices.hpp"
+#include "core/zone_tracker.hpp"
 #include "ui/game_screen.hpp"
 #include "ui/gamepad_controls.hpp"
 #include "core/gamepad.hpp"
@@ -402,13 +403,13 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 }
             }
             if (!settingsPanel_.zoneSettingsApplied_) {
-            if (auto* zm = renderer->getZoneManager()) {
+            if (auto* zm = services_.zoneTracker ? services_.zoneTracker->getZoneManager() : nullptr) {
                 zm->setUseOriginalSoundtrack(settingsPanel_.pendingUseOriginalSoundtrack);
                 // Setting the flag alone is not the whole apply: music that
                 // already started during the loading screen keeps playing
                 // through a disabled setting.
                 if (!settingsPanel_.pendingUseOriginalSoundtrack) {
-                    if (auto* ac = renderer->getAudioCoordinator()) {
+                    if (auto* ac = services_.audioCoordinator) {
                         ac->onOriginalSoundtrackDisabled(zm);
                     }
                 }

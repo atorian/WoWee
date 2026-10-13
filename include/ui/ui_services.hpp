@@ -8,6 +8,7 @@ namespace core {
     class EntitySpawner;
     class AppearanceComposer;
     class WorldLoader;
+    class ZoneTracker;
 }
 namespace rendering { class Renderer; }
 namespace pipeline { class AssetManager; }
@@ -39,6 +40,7 @@ struct UIServices {
     game::ExpansionRegistry* expansionRegistry = nullptr;
     addons::AddonManager* addonManager = nullptr;
     audio::AudioCoordinator* audioCoordinator = nullptr;
+    core::ZoneTracker* zoneTracker = nullptr;
     
     // Extracted classes (also available individually for Phase A compatibility)
     core::EntitySpawner* entitySpawner = nullptr;

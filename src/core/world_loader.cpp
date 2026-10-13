@@ -2,6 +2,8 @@
 // Extracted from Application as part of god-class decomposition (Section 3.3)
 
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "core/zone_tracker.hpp"
 #include "core/world_loader.hpp"
 #include "core/application.hpp"
 #include "core/world_entry_callback_handler.hpp"
@@ -327,6 +329,12 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
     }
 
     bool terrainOk = false;
+
+    // The world's sounds, on first entering it; later entries find them loaded.
+    if (auto* audio = app_.getAudioCoordinator()) {
+        auto* zones = app_.getZoneTracker();
+        audio->loadWorldSounds(assetManager_, zones ? zones->getZoneManager() : nullptr);
+    }
 
     if (isWMOOnlyMap) {
         // ---- WMO-only map (dungeon/raid/BG): load root WMO directly ----

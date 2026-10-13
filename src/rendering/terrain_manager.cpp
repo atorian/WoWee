@@ -11,7 +11,6 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/camera.hpp"
-#include "audio/ambient_sound_manager.hpp"
 #include "core/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "pipeline/wowee_model.hpp"
@@ -1300,7 +1299,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
     case FinalizationPhase::WATER: {
         // Terrain water was already loaded in TERRAIN phase.
         // Generate water ambient emitters here.
-        if (ambientSoundManager) {
+        if (ambientEmitterSink_) {
             for (size_t chunkIdx = 0; chunkIdx < pending->terrain.waterData.size(); chunkIdx++) {
                 const auto& chunkWater = pending->terrain.waterData[chunkIdx];
                 if (!chunkWater.hasWater()) continue;
@@ -1336,10 +1335,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
 
     case FinalizationPhase::AMBIENT: {
         // Register ambient sound emitters
-        if (ambientSoundManager && !pending->ambientEmitters.empty()) {
+        if (ambientEmitterSink_) {
             for (const auto& emitter : pending->ambientEmitters) {
-                auto type = static_cast<audio::AmbientSoundManager::AmbientType>(emitter.type);
-                ambientSoundManager->addEmitter(emitter.position, type);
+                ambientEmitterSink_(emitter.position, emitter.type);
             }
         }
 

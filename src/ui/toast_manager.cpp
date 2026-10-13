@@ -1,4 +1,5 @@
 #include "game/reputation_standing.hpp"
+#include "core/zone_tracker.hpp"
 #include "ui/toast_manager.hpp"
 #include "game/game_handler.hpp"
 #include "core/application.hpp"
@@ -132,8 +133,8 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
 // ---------------------------------------------------------------------------
 void ToastManager::renderEarlyToasts(float deltaTime, game::GameHandler& gameHandler) {
     // Zone entry detection - fire a toast when the renderer's zone name changes
-    if (auto* rend = services_.renderer) {
-        const std::string& curZone = rend->getCurrentZoneName();
+    if (auto* audio = services_.audioCoordinator) {
+        const std::string& curZone = audio->getCurrentZoneName();
         if (!curZone.empty() && curZone != lastKnownZone_) {
             if (!lastKnownZone_.empty()) {
                 zoneToasts_.push_back({.zoneName = curZone, .age = 0.0f});
@@ -1125,9 +1126,8 @@ void ToastManager::renderZoneText(game::GameHandler& gameHandler) {
 
     // Also poll the renderer for zone name changes (covers map-level transitions
     // where worldStateZoneId may not change immediately).
-    auto* appRenderer = services_.renderer;
-    if (appRenderer) {
-        const std::string& zoneName = appRenderer->getCurrentZoneName();
+    if (auto* audio = services_.audioCoordinator) {
+        const std::string& zoneName = audio->getCurrentZoneName();
         if (!zoneName.empty() && zoneName != lastKnownZoneName_) {
             lastKnownZoneName_ = zoneName;
             // Only override if the worldState hasn't already queued this zone
