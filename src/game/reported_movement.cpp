@@ -142,12 +142,20 @@ void ReportedMovement::advance(float dt, Clock::time_point now, const MovementSp
         correction_ = glm::dot(gap, gap) < kSnapDistance * kSnapDistance ? gap : glm::vec3(0.0f);
     }
     if (playTo > simulatedTime_) simulateTo(playTo, speeds, collision);
-    rate_ = static_cast<float>(std::max(0.0, playTo - startedAt) / (static_cast<double>(dt) * 1000.0));
+    const float coveredRate =
+        static_cast<float>(std::max(0.0, playTo - startedAt) / (static_cast<double>(dt) * 1000.0));
 
     correction_ *= std::exp(-dt / kCorrectionTime);
     if (glm::dot(correction_, correction_) < kSettledDistance * kSettledDistance) {
         correction_ = glm::vec3(0.0f);
     }
+
+    // Held at the end of what it knows, a moving unit waits for reports that
+    // are late, and its animation waits with it. A unit that has stopped
+    // waits for nothing - no report comes until it moves again - and stands
+    // breathing at its own pace. Held at zero, every player that had moved
+    // since login froze in the last frame of its stand, mount and all.
+    rate_ = isMoving() ? coveredRate : 1.0f;
 }
 
 void ReportedMovement::apply(const MovementReport& r, int64_t time) {
