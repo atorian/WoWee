@@ -151,7 +151,6 @@ custom_zones/
 wowee_editor_layout.ini
 
 #agents
-AGENTS.md
 codex-loop.sh
 
 # The headless runner keeps its config here so it cannot overwrite the

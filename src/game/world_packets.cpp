@@ -938,12 +938,67 @@ void MovementPacket::writeMovementPayload(network::Packet& packet, const Movemen
     // Jump velocity/angle data is only present when FALLING flag is set.
     packet.writeUInt32(info.fallTime);
 
+    // The jump's direction goes cosine first. The wire names nothing - these
+    // are four floats - and this was written sine first, after the order of
+    // the fields in MovementInfo, so other clients saw our jumps go off at
+    // right angles. Their own packets settle it: the first of the two follows
+    // cos(orientation), as cata_movement's layout has it too.
     if (info.hasFlag(MovementFlags::FALLING)) {
         packet.writeFloat(info.jumpVelocity);
-        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpCosAngle);
+        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpXYSpeed);
     }
+}
+
+bool MovementPacket::readMovementPayload(network::Packet& packet, MovementInfo& info) {
+    if (!packet.hasRemaining(4 + 2 + 4 + 16)) return false;
+    info.flags = packet.readUInt32();
+    info.flags2 = packet.readUInt16();
+    info.time = packet.readUInt32();
+    info.x = packet.readFloat();
+    info.y = packet.readFloat();
+    info.z = packet.readFloat();
+    info.orientation = packet.readFloat();
+
+    // The same fields in the same order writeMovementPayload sends.
+    if (info.hasFlag(MovementFlags::ONTRANSPORT)) {
+        if (!packet.hasRemaining(1)) return false;
+        info.transportGuid = packet.readPackedGuid();
+        if (!packet.hasRemaining(16 + 4 + 1)) return false;
+        info.transportX = packet.readFloat();
+        info.transportY = packet.readFloat();
+        info.transportZ = packet.readFloat();
+        info.transportO = packet.readFloat();
+        info.transportTime = packet.readUInt32();
+        info.transportSeat = static_cast<int8_t>(packet.readUInt8());
+        if (info.flags2 & 0x0400) { // MOVEMENTFLAG2_INTERPOLATED_MOVEMENT
+            if (!packet.hasRemaining(4)) return false;
+            info.transportTime2 = packet.readUInt32();
+        }
+    }
+
+    if (info.hasFlag(MovementFlags::SWIMMING) || info.hasFlag(MovementFlags::FLYING) ||
+        (info.flags2 & 0x0020)) { // MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING
+        if (!packet.hasRemaining(4)) return false;
+        info.pitch = packet.readFloat();
+    }
+
+    if (!packet.hasRemaining(4)) return false;
+    info.fallTime = packet.readUInt32();
+    if (info.hasFlag(MovementFlags::FALLING)) {
+        if (!packet.hasRemaining(16)) return false;
+        info.jumpVelocity = packet.readFloat();
+        info.jumpCosAngle = packet.readFloat();  // Cosine first - see writeMovementPayload
+        info.jumpSinAngle = packet.readFloat();
+        info.jumpXYSpeed = packet.readFloat();
+    }
+
+    if (info.flags & 0x04000000) { // MOVEMENTFLAG_SPLINE_ELEVATION
+        if (!packet.hasRemaining(4)) return false;
+        /*float splineElevation =*/ packet.readFloat();
+    }
+    return true;
 }
 
 network::Packet MovementPacket::build(Opcode opcode, const MovementInfo& info, uint64_t playerGuid) {
@@ -1099,8 +1154,8 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
         if (moveFlags & 0x00001000) { // MOVEMENTFLAG_FALLING
             if (rem() < 16) return false;
             /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpCosAngle =*/ packet.readFloat();
+            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 

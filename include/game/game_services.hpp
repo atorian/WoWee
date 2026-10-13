@@ -4,7 +4,7 @@
 namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace audio { class AudioCoordinator; }
-namespace game { class ExpansionRegistry; class EmoteTable; }
+namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
 namespace core { class EventBus; }
 
 namespace game {
@@ -25,6 +25,8 @@ struct GameServices {
     /// Where the game announces what happened. Required: GameHandler
     /// refuses to be built without one.
     core::EventBus* events = nullptr;
+    // The walls units moving themselves run into between their reports.
+    const MovementCollision* movementCollision = nullptr;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

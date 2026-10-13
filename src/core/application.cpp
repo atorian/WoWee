@@ -33,6 +33,8 @@
 #include "game/server_protocol.hpp"
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/anim_capability_probe.hpp"
+#include "rendering/wall_sweep.hpp"
 #include "rendering/animation_controller.hpp"
 #include <bit>
 #include <unordered_set>
@@ -138,6 +140,28 @@ namespace wowee {
 namespace core {
 
 namespace {
+
+// The walls of the loaded world, for movers the game plays back between
+// their reports. Server and render coordinates are the same axes: each of
+// serverToCanonical and canonicalToRender swaps x and y.
+class RendererMovementCollision final : public game::MovementCollision {
+public:
+    explicit RendererMovementCollision(rendering::Renderer& renderer) : renderer_(renderer) {}
+
+    glm::vec3 slide(const glm::vec3& from, const glm::vec3& to) const override {
+        const auto* wmo = renderer_.getWMORenderer();
+        const auto* m2 = renderer_.getM2Renderer();
+        // Collision geometry is only consulted around the local player - the
+        // focus the camera sets. Further away nothing is found, so nothing is
+        // asked: the wall checks reach this far past where the mover starts.
+        constexpr float kWallQueryReach = 8.0f;
+        if (wmo && !wmo->getCollisionFocus().reaches(from, kWallQueryReach)) return to;
+        return rendering::sweepMoverAgainstWalls(wmo, m2, from, to, /*insideWMO=*/false);
+    }
+
+private:
+    rendering::Renderer& renderer_;
+};
 
 std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
                                         const glm::vec3& renderPos,
@@ -430,6 +454,8 @@ bool Application::initialize() {
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
+    movementCollision_ = std::make_unique<RendererMovementCollision>(*renderer);
+    gameServices_.movementCollision = movementCollision_.get();
 
     // Create game handler with explicit service dependencies
     gameHandler = std::make_unique<game::GameHandler>(gameServices_);
@@ -2234,6 +2260,9 @@ void Application::shutdown() {
     if (gameHandler) gameHandler->getTransportManager()->setScene(nullptr);
     transportScene_.reset();
 
+    // Its walls belong to the renderer, which goes first.
+    gameServices_.movementCollision = nullptr;
+    movementCollision_.reset();
     LOG_DEBUG("Shutting down renderer...");
     if (renderer) {
         renderer->shutdown();
@@ -3457,16 +3486,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 if (canonDistSq > syncRadiusSq && !activeCombatTarget) continue;
             }
 
-            // Use the destination position once the entity has reached its
-            // target.  During the dead-reckoning overrun window getX/Y/Z
-            // drifts past the destination at the last known velocity;
-            // using getLatest (== moveEnd while isMoving_) avoids the
-            // visible forward-drift followed by a backward snap.
-            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving();
-            glm::vec3 canonical(
-                inOverrun ? entity->getLatestX() : entity->getX(),
-                inOverrun ? entity->getLatestY() : entity->getY(),
-                inOverrun ? entity->getLatestZ() : entity->getZ());
+            glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ());
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
             auto posIt = _creatureRenderPosCache.find(guid);
             const std::optional<glm::vec3> previousRenderPos =
@@ -3479,7 +3499,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // above a tunnel cannot move the model into/onto the WMO shell.
             const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                         !_creatureSwimmingState.count(guid);
-            if (entity->isActivelyMoving() && groundCreature) {
+            if (entity->isEntityMoving() && groundCreature) {
                 if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
                                                     previousRenderPos)) {
                     renderPos.z = *floorZ;
@@ -3510,15 +3530,11 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 auto unitPtr = std::static_pointer_cast<game::Unit>(entity);
                 const bool deadOrCorpse = unitPtr->getHealth() == 0;
                 const bool largeCorrection = (planarDistSq > 36.0f) || (dz > 3.0f);
-                // Use isActivelyMoving() so Run/Walk animation stops when the
-                // creature reaches its destination. Don't use position-change
-                // (planarDistSq) as a movement indicator when the entity is in
-                // the dead-reckoning overrun window - the residual velocity
-                // drift would keep the walk/run animation playing long after
-                // the creature has actually arrived. Only fall back to position-
-                // change detection for entities with no active movement tracking
-                // (e.g. teleports or position-only updates from the server).
-                const bool entityIsMoving = entity->isActivelyMoving();
+                // Run/Walk stops when the creature reaches its destination.
+                // Only fall back to position-change detection for entities
+                // with no active movement tracking (e.g. teleports or
+                // position-only updates from the server).
+                const bool entityIsMoving = entity->isEntityMoving();
                 constexpr float kMoveThreshSq = 0.03f * 0.03f;
                 const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
                 const bool transportAttached =
@@ -3535,15 +3551,10 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     charRenderer->setInstancePosition(instanceId, renderPos);
                 } else if (planarDistSq > kMoveThreshSq || dz > 0.08f) {
                     // Entity::updateMovement already evaluates the server spline for
-                    // this frame. Starting another renderer interpolation here resets
-                    // that interpolation every frame and leaves the model trailing its
-                    // authoritative entity position. Copy the evaluated position
-                    // directly; animation transitions remain driven below.
+                    // this frame. Copy the evaluated position directly; animation
+                    // transitions remain driven below.
                     charRenderer->setInstancePosition(instanceId, renderPos);
                 }
-                // When entity is moving but getX/Y/Z is stale (distance-culled),
-                // don't call moveInstanceTo - creatureMoveCallback_ already drove
-                // the renderer to the correct destination via the spline packet.
                 posIt->second = renderPos;
 
                 // Drive movement animation: Walk/Run/Swim (4/5/42) when moving,
@@ -3629,10 +3640,6 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
         const float pSyncRadiusSq = 320.0f * 320.0f;
 
         auto& _playerInstances = entitySpawner_->getPlayerInstances();
-        auto& _pCreatureWasMoving = entitySpawner_->getCreatureWasMoving();
-        auto& _pCreatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
-        auto& _pCreatureWasFlying = entitySpawner_->getCreatureWasFlying();
-        auto& _pCreatureWasWalking = entitySpawner_->getCreatureWasWalking();
         auto& _pCreatureSwimmingState = entitySpawner_->getCreatureSwimmingState();
         auto& _pCreatureWalkingState = entitySpawner_->getCreatureWalkingState();
         auto& _pCreatureFlyingState = entitySpawner_->getCreatureFlyingState();
@@ -3653,13 +3660,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 if (glm::dot(d, d) > pSyncRadiusSq && !activeCombatTarget) continue;
             }
 
-            // Position sync - clamp to destination during dead-reckoning
-            // overrun to avoid drift + backward snap (same as creature loop).
-            const bool inOverrun = entity->isEntityMoving() && !entity->isActivelyMoving();
-            glm::vec3 canonical(
-                inOverrun ? entity->getLatestX() : entity->getX(),
-                inOverrun ? entity->getLatestY() : entity->getY(),
-                inOverrun ? entity->getLatestZ() : entity->getZ());
+            glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ());
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
             auto posIt = _pCreatureRenderPosCache.find(guid);
             const std::optional<glm::vec3> previousRenderPos =
@@ -3667,143 +3668,190 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     ? std::optional<glm::vec3>(posIt->second)
                     : std::nullopt;
             const auto* remoteMount = entitySpawner_->getRemotePlayerMount(guid);
-            std::optional<glm::vec3> previousMountPos = previousRenderPos;
-            if (remoteMount && previousMountPos) {
-                previousMountPos->z -= remoteMount->riderHeight;
-            }
+            // The cache holds where the player stands - on the ground, or
+            // under a mount - not where a rider is drawn.
+            const std::optional<glm::vec3>& previousMountPos = previousRenderPos;
 
             // Match creature projection: terrain alone is not a valid floor in
             // WMO overlap regions (tunnels, buildings, bridges).
+            auto unitPtr = std::static_pointer_cast<game::Unit>(entity);
+            const game::ReportedMovement* reported = unitPtr->getReportedMovement();
+            const bool airborne = reported && reported->isAirborne();
             const bool groundPlayer = !_pCreatureFlyingState.count(guid) &&
                                       !_pCreatureSwimmingState.count(guid);
-            if (entity->isActivelyMoving() && groundPlayer) {
+            if (airborne) {
+                // In the air the arc decides the height, short of sinking into
+                // the floor the player is about to land on.
                 if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
+                                                    previousMountPos);
+                    floorZ && *floorZ > renderPos.z) {
+                    renderPos.z = *floorZ;
+                }
+            } else if (entity->isEntityMoving() && groundPlayer) {
+                // A reported movement carries the height of its last report
+                // only; nothing in it knows the ground. Between reports the
+                // player walks on from the floor it was drawn on, while that is
+                // still near the reported height - so a run up a steep slope
+                // keeps to the slope instead of losing it half a second in.
+                glm::vec3 probe = renderPos;
+                constexpr float kWalkOnFromDrawnFloor = 4.0f;
+                if (reported && previousMountPos &&
+                    std::abs(previousMountPos->z - renderPos.z) < kWalkOnFromDrawnFloor) {
+                    probe.z = previousMountPos->z;
+                }
+                if (auto floorZ = movingEntityFloor(renderer.get(), probe,
                                                     previousMountPos)) {
                     renderPos.z = *floorZ;
                 }
             }
 
-            const glm::vec3 mountRenderPos = renderPos;
-            if (remoteMount) renderPos.z += remoteMount->riderHeight;
-
-            if (posIt == _pCreatureRenderPosCache.end()) {
-                charRenderer->setInstancePosition(instanceId, renderPos);
-                if (remoteMount) {
-                    charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+            // The entity already moves smoothly - along its reported movement
+            // or a server path - so the model is put where it is. It used to
+            // be eased towards it by a renderer interpolation restarted every
+            // frame, which left it trailing and picked Walk or Run from each
+            // frame's step, throwing away whatever the locomotion below had
+            // chosen, a jump included.
+            const float renderYaw = entity->getOrientation() + glm::radians(90.0f);
+            if (remoteMount) {
+                // The mount stands where the player is; the rider sits in its
+                // saddle. The saddle is the mount's attachment 0, which the
+                // artist placed and its bones carry, so the rider is on the
+                // chopper's seat and the serpent's back and moves with them. A
+                // height guessed from the model's tallest vertex put riders
+                // in the air over handlebars and on the ground beside a long
+                // serpent.
+                charRenderer->setInstancePosition(remoteMount->instanceId, renderPos);
+                charRenderer->setInstanceRotation(remoteMount->instanceId,
+                                                  glm::vec3(0.0f, 0.0f, renderYaw));
+                glm::mat4 seat(1.0f);
+                if (charRenderer->getAttachmentTransform(remoteMount->instanceId,
+                                                         EntitySpawner::kMountSeatAttachment, seat)) {
+                    charRenderer->setInstancePosition(
+                        instanceId, glm::vec3(seat[3]) + glm::vec3(0.0f, 0.0f, EntitySpawner::kMountSeatLift));
+                } else {
+                    // A model without a saddle point, reported when it loaded.
+                    charRenderer->setInstancePosition(
+                        instanceId, renderPos + glm::vec3(0.0f, 0.0f, remoteMount->riderHeight));
                 }
-                _pCreatureRenderPosCache[guid] = renderPos;
             } else {
-                const glm::vec3 prevPos = posIt->second;
-                float ddx2 = renderPos.x - prevPos.x;
-                float ddy2 = renderPos.y - prevPos.y;
-                float planarDistSq = ddx2 * ddx2 + ddy2 * ddy2;
-                float dz = std::abs(renderPos.z - prevPos.z);
+                charRenderer->setInstancePosition(instanceId, renderPos);
+            }
+            bool posChanging = false;
+            if (previousRenderPos) {
+                const glm::vec3 step = renderPos - *previousRenderPos;
+                posChanging = step.x * step.x + step.y * step.y > 0.03f * 0.03f ||
+                              std::abs(step.z) > 0.08f;
+            }
+            _pCreatureRenderPosCache[guid] = renderPos;
 
-                auto unitPtr = std::static_pointer_cast<game::Unit>(entity);
-                const bool deadOrCorpse = unitPtr->getHealth() == 0;
-                const bool largeCorrection = (planarDistSq > 36.0f) || (dz > 3.0f);
-                const bool entityIsMoving = entity->isActivelyMoving();
-                constexpr float kMoveThreshSq2 = 0.03f * 0.03f;
-                const bool posChanging2 = planarDistSq > kMoveThreshSq2 || dz > 0.08f;
-                const bool transportAttached =
-                    gameHandler->transportAttachmentsRef().count(guid) != 0;
-                const bool positionOnlyLocomotion =
-                    posChanging2 && !entity->isEntityMoving() && !transportAttached;
-                const bool isMovingNow =
-                    !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
+            uint32_t curAnimId = 0;
+            float curAnimTime = 0.0f, curAnimDuration = 0.0f;
+            const bool haveAnimState = charRenderer->getAnimationState(
+                instanceId, curAnimId, curAnimTime, curAnimDuration);
+            const bool dead = unitPtr->getHealth() == 0 ||
+                              (haveAnimState && curAnimId == rendering::anim::DEATH);
 
-                if (deadOrCorpse || largeCorrection) {
-                    charRenderer->setInstancePosition(instanceId, renderPos);
-                    if (remoteMount) {
-                        charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
-                    }
-                } else if (planarDistSq > kMoveThreshSq2 || dz > 0.08f) {
-                    float planarDist = std::sqrt(planarDistSq);
-                    float duration = std::clamp(planarDist / 5.5f, 0.05f, 0.22f);
-                    charRenderer->moveInstanceTo(instanceId, renderPos, duration);
-                    if (remoteMount) {
-                        charRenderer->moveInstanceTo(remoteMount->instanceId, mountRenderPos, duration);
-                    }
+            auto& loco = entitySpawner_->remotePlayerLocomotion(guid);
+            using Locomotion = EntitySpawner::RemotePlayerLocomotion;
+            if (loco.characterInstance != instanceId) {
+                // A new model - first sight, a form, a reload. Its own
+                // animations, and nothing played on it yet.
+                loco.caps = rendering::AnimCapabilityProbe::probe(renderer.get(), instanceId);
+                loco.characterInstance = instanceId;
+                loco.playedCharacterAnim = Locomotion::kNothingPlayed;
+                loco.fsm.reset();
+            }
+            const uint32_t mountInstance = remoteMount ? remoteMount->instanceId : 0;
+            if (loco.mountInstance != mountInstance) {
+                loco.mountInstance = mountInstance;
+                loco.playedMountAnim = Locomotion::kNothingPlayed;
+                loco.playedCharacterAnim = Locomotion::kNothingPlayed;
+            }
+
+            // What the player is doing. A player that reports its own
+            // movement says so in its flags; one the server moves (a path,
+            // a placement) is moving while its entity is.
+            const uint32_t moveFlags = reported ? reported->flags() : 0u;
+            const auto held = [&](game::MovementFlags f) {
+                return (moveFlags & static_cast<uint32_t>(f)) != 0;
+            };
+            const bool transportAttached =
+                gameHandler->transportAttachmentsRef().count(guid) != 0;
+            const bool travelling = reported
+                ? reported->isTravelling()
+                : entity->isEntityMoving() || (posChanging && !transportAttached);
+            const bool isSwimmingNow = _pCreatureSwimmingState.count(guid) > 0;
+            const bool isWalkingNow  = _pCreatureWalkingState.count(guid) > 0;
+            const bool isFlyingNow   = _pCreatureFlyingState.count(guid) > 0;
+
+            // Movement played back faster to catch up after a burst of late
+            // reports plays its animation faster too, so strides keep to the
+            // ground covered and a jump lands where it lands.
+            const float playbackRate = reported ? reported->playbackRate() : 1.0f;
+            charRenderer->setInstanceAnimationSpeed(instanceId, playbackRate);
+            if (remoteMount) {
+                charRenderer->setInstanceAnimationSpeed(remoteMount->instanceId, playbackRate);
+            }
+
+            if (!dead && remoteMount) {
+                // The rider keeps the mounted seat pose - in the air too, as
+                // 3.3.5 has no rider flight poses - and the mount model does
+                // the moving.
+                uint32_t mountAnim = rendering::anim::STAND;
+                if (travelling) {
+                    if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
+                    else if (isWalkingNow) mountAnim = rendering::anim::WALK;
+                    else mountAnim = rendering::anim::RUN;
+                } else if (isFlyingNow) {
+                    mountAnim = rendering::anim::FLY_IDLE;
                 }
-                posIt->second = renderPos;
-
-                // Drive movement animation (same logic as creatures)
-                const bool isSwimmingNow = _pCreatureSwimmingState.count(guid) > 0;
-                const bool isWalkingNow  = _pCreatureWalkingState.count(guid) > 0;
-                const bool isFlyingNow   = _pCreatureFlyingState.count(guid) > 0;
-                // In Mount in the air too: 3.3.5 has no rider flight poses.
-                const uint32_t mountedRiderAnim = rendering::anim::MOUNT;
-                bool prevMoving   = _pCreatureWasMoving[guid];
-                bool prevSwimming = _pCreatureWasSwimming[guid];
-                bool prevFlying   = _pCreatureWasFlying[guid];
-                bool prevWalking  = _pCreatureWasWalking[guid];
-                const bool stateChanged = (isMovingNow  != prevMoving)   ||
-                                          (isSwimmingNow != prevSwimming) ||
-                                          (isFlyingNow   != prevFlying)   ||
-                                          (isWalkingNow  != prevWalking && isMovingNow);
-                if (stateChanged) {
-                    _pCreatureWasMoving[guid]   = isMovingNow;
-                    _pCreatureWasSwimming[guid] = isSwimmingNow;
-                    _pCreatureWasFlying[guid]   = isFlyingNow;
-                    _pCreatureWasWalking[guid]  = isWalkingNow;
-                    uint32_t curAnimId = 0; float curT = 0.0f, curDur = 0.0f;
-                    bool gotState = charRenderer->getAnimationState(instanceId, curAnimId, curT, curDur);
-                    if (!gotState || curAnimId != rendering::anim::DEATH) {
-                        uint32_t targetAnim;
-                        if (remoteMount) {
-                            // The rider keeps the mounted seat pose; locomotion
-                            // belongs to the separately rendered mount model.
-                            targetAnim = mountedRiderAnim;
-                            uint32_t mountAnim = rendering::anim::STAND;
-                            if (isMovingNow) {
-                                if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
-                                else if (isWalkingNow) mountAnim = rendering::anim::WALK;
-                                else mountAnim = rendering::anim::RUN;
-                            } else if (isFlyingNow) {
-                                mountAnim = rendering::anim::FLY_IDLE;
-                            }
-                            if (!charRenderer->hasAnimation(remoteMount->instanceId, mountAnim)) {
-                                mountAnim = isMovingNow ? rendering::anim::RUN : rendering::anim::STAND;
-                            }
-                            charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
-                        } else if (isMovingNow) {
-                            if (isFlyingNow)        targetAnim = rendering::anim::FLY_FORWARD;
-                            else if (isSwimmingNow) targetAnim = rendering::anim::SWIM;
-                            else if (isWalkingNow)  targetAnim = rendering::anim::WALK;
-                            else                    targetAnim = rendering::anim::RUN;
-                        } else {
-                            if (isFlyingNow)        targetAnim = rendering::anim::FLY_IDLE;
-                            else if (isSwimmingNow) targetAnim = rendering::anim::SWIM_IDLE;
-                            else                    targetAnim = rendering::anim::STAND;
-                        }
-                        charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
-                    }
+                if (!charRenderer->hasAnimation(remoteMount->instanceId, mountAnim)) {
+                    mountAnim = travelling ? rendering::anim::RUN : rendering::anim::STAND;
                 }
-
+                if (mountAnim != loco.playedMountAnim) {
+                    charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
+                    loco.playedMountAnim = mountAnim;
+                }
                 // Server emotes and state updates can arrive after the mount
-                // field and replace the one-shot mounted pose with Stand. A
-                // rider's mount field is authoritative, so repair that pose
-                // even when their movement state did not transition this frame.
-                if (remoteMount) {
-                    uint32_t riderAnim = 0;
-                    float riderTime = 0.0f, riderDuration = 0.0f;
-                    const bool haveRiderState = charRenderer->getAnimationState(
-                        instanceId, riderAnim, riderTime, riderDuration);
-                    if ((!haveRiderState || riderAnim != mountedRiderAnim) &&
-                        riderAnim != rendering::anim::DEATH) {
-                        charRenderer->playAnimation(instanceId, mountedRiderAnim,
-                                                    /*loop=*/true);
-                    }
+                // field and replace the mounted pose with Stand. A rider's
+                // mount field is authoritative, so the pose is repaired
+                // whatever replaced it.
+                if (!haveAnimState || curAnimId != rendering::anim::MOUNT) {
+                    charRenderer->playAnimation(instanceId, rendering::anim::MOUNT, true);
+                }
+                loco.playedCharacterAnim = rendering::anim::MOUNT;
+            } else if (!dead && isFlyingNow) {
+                const uint32_t flyAnim = travelling ? rendering::anim::FLY_FORWARD
+                                                    : rendering::anim::FLY_IDLE;
+                if (flyAnim != loco.playedCharacterAnim) {
+                    charRenderer->playAnimation(instanceId, flyAnim, true);
+                    loco.playedCharacterAnim = flyAnim;
+                }
+            } else if (!dead) {
+                rendering::LocomotionFSM::Input in;
+                in.moving = travelling;
+                in.movingForward = held(game::MovementFlags::FORWARD);
+                in.movingBackward = held(game::MovementFlags::BACKWARD);
+                in.strafeLeft = held(game::MovementFlags::STRAFE_LEFT);
+                in.strafeRight = held(game::MovementFlags::STRAFE_RIGHT);
+                in.sprinting = !isWalkingNow;
+                in.grounded = !airborne;
+                in.jumping = reported && reported->isJump();
+                in.swimming = isSwimmingNow;
+                in.deltaTime = deltaTime * playbackRate;
+                in.haveAnimState = haveAnimState;
+                in.currentAnimId = curAnimId;
+                in.currentAnimTime = curAnimTime;
+                in.currentAnimDuration = curAnimDuration;
+                const rendering::AnimOutput out = loco.fsm.resolve(in, loco.caps);
+                if (out.valid && out.animId != loco.playedCharacterAnim) {
+                    charRenderer->playAnimation(instanceId, out.animId, out.loop);
+                    loco.playedCharacterAnim = out.animId;
                 }
             }
 
             // Orientation sync
-            float renderYaw = entity->getOrientation() + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
-            if (remoteMount) {
-                charRenderer->setInstanceRotation(remoteMount->instanceId,
-                                                  glm::vec3(0.0f, 0.0f, renderYaw));
-            }
         }
     }
     {
@@ -6445,6 +6493,10 @@ void Application::updateRealmPatchMount() {
         realmPatchesOpening_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         realmPatchLayerReady_ = realmPatchesOpening_.get();
         if (!realmPatchLayerReady_) realmPatchesBeingOpened_ = {};
+        else if (worldInUse) {
+            LOG_WARNING("Realm patches opened while in the world; they are mounted when the world is left. "
+                        "Until then the realm's own models and table rows are missing");
+        }
     }
     if (realmPatchLayerReady_ && !worldInUse) {
         if (realmPatchesBeingOpened_.realm == realm) {
@@ -6464,7 +6516,7 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
     assetManager->setArchiveLayer(std::move(layer));
     mountedRealmPatches_ = std::move(set);
     if (mounting) {
-        LOG_INFO("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
+        LOG_WARNING("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
                  mountedRealmPatches_.archives.size(), " archives above the extracted data");
     }
 

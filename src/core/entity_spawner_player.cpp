@@ -718,7 +718,7 @@ void EntitySpawner::reconcileRemotePlayerForms() {
             auto disp = displayDataMap_.find(form);
             if (disp != displayDataMap_.end() && disp->second.extraDisplayId != 0) {
                 undrawableFormDisplayIds_.insert(form);
-                LOG_INFO("Remote player humanoid form displayId=", form,
+                LOG_WARNING("Remote player humanoid form displayId=", form,
                          " is not drawn yet; the player keeps their own body");
                 form = 0;
             }
@@ -761,6 +761,7 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     creatureWasSwimming_.erase(guid);
     creatureWasFlying_.erase(guid);
     creatureWasWalking_.erase(guid);
+    remotePlayerLocomotion_.erase(guid);
 }
 
 // ---------------------------------------------------------------------------

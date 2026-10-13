@@ -2412,7 +2412,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
             // These layers multiply the first texture by a second RGB/alpha
             // mask. Both aurora strands and fountain foam need this stage.
-            if (m2UsesSecondTextureMask(batch.shader, batch.textureCount, bgpu.blendMode)) {
+            if (m2UsesSecondTextureMask(batch.shader, batch.textureCount, bgpu.blendMode,
+                                        m2TextureCoordSet(model.textureCoordLookup,
+                                                          static_cast<uint16_t>(batch.textureUnit + 1)))) {
                 const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
                 if (second < model.textureLookup.size()) {
                     const uint16_t mask = model.textureLookup[second];

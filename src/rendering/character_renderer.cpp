@@ -274,10 +274,15 @@ struct CharMaterialUBO {
     M2UVTransform uvTransform;
     /// What an aura multiplies the lit colour by (w is padding).
     glm::vec4 stateTint{1.0f};
+    /// The first texture is multiplied by binding 3, read on this UV set.
+    int32_t hasSecondTexture = 0;
+    int32_t secondTexCoordSet = 0;
+    int32_t padding[2] = {};
 };
 static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
 static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
-static_assert(sizeof(CharMaterialUBO) == 128, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 128, "after stateTint");
+static_assert(sizeof(CharMaterialUBO) == 144, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -390,9 +395,10 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 
     // --- Descriptor set layouts ---
 
-    // Material set layout (set 1): binding 0 = sampler2D, binding 1 = CharMaterial UBO, binding 2 = normal/height map
+    // Material set layout (set 1): binding 0 = sampler2D, binding 1 = CharMaterial UBO,
+    // binding 2 = normal/height map, binding 3 = second texture (white when unused)
     {
-        VkDescriptorSetLayoutBinding bindings[3] = {};
+        VkDescriptorSetLayoutBinding bindings[4] = {};
         bindings[0].binding = 0;
         bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[0].descriptorCount = 1;
@@ -406,9 +412,13 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[2].descriptorCount = 1;
         bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[3].binding = 3;
+        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[3].descriptorCount = 1;
+        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 3;
+        ci.bindingCount = 4;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
     }
@@ -432,7 +442,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     // pools so we can reset safely each frame slot without exhausting descriptors.
     for (auto& materialDescPool : materialDescPools_) {
         VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 2},  // diffuse + normal/height
+            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 3},  // diffuse + normal/height + second
             {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = MAX_MATERIAL_SETS},
         };
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -2224,18 +2234,6 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
         }
 
-        // Interpolate creature movement
-        if (inst.isMoving) {
-            inst.moveElapsed += deltaTime;
-            float t = inst.moveElapsed / inst.moveDuration;
-            if (t >= 1.0f) {
-                inst.position = inst.moveEnd;
-                inst.isMoving = false;
-            } else {
-                inst.position = glm::mix(inst.moveStart, inst.moveEnd, t);
-            }
-        }
-
         // Skip weapon instances for animation - their transforms are set by parent
         // bones. Enchant visuals are the exception: they are pure animated FX.
         if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
@@ -2255,7 +2253,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
             }
             const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
-            inst.animationTime += deltaTime * 1000.0f;
+            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
             if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
                 if (inst.animationLoop) {
                     // Subtract duration instead of fmod to preserve float precision
@@ -2719,7 +2717,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
     const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
     auto getMaterialDescriptorSet = [&](VkTexture* diffuse, uint8_t wrapFlags,
-                                        VkTexture* normal) -> VkDescriptorSet {
+                                        VkTexture* normal, VkTexture* second = nullptr,
+                                        uint8_t secondWrapFlags = BatchTexture::kRepeatBoth) -> VkDescriptorSet {
         // Valid, not merely non-null. descriptorInfo() hands back whatever the
         // texture holds - VK_NULL_HANDLE for a view and a sampler that were
         // never created - and declares SHADER_READ_ONLY_OPTIMAL either way. A
@@ -2733,7 +2732,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // memory pressure that makes the texture cache start rejecting.
         if (!diffuse || !diffuse->isValid()) diffuse = whiteTexture_.get();
         if (!normal || !normal->isValid()) normal = flatNormalTexture_.get();
-        if (!diffuse || !diffuse->isValid() || !normal || !normal->isValid()) {
+        // Unused, the second stage is white, and the shader does not read it.
+        if (!second || !second->isValid()) second = whiteTexture_.get();
+        if (!diffuse || !diffuse->isValid() || !normal || !normal->isValid() ||
+            !second || !second->isValid()) {
             // Even the fallbacks are gone. Skipping the draw loses a model;
             // binding a null view loses the device.
             return VK_NULL_HANDLE;
@@ -2751,8 +2753,17 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (const VkSampler s = wrapSampler(*diffuse); s != VK_NULL_HANDLE) diffuseInfo.sampler = s;
         VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
         if (const VkSampler s = wrapSampler(*normal); s != VK_NULL_HANDLE) normalInfo.sampler = s;
+        // The second texture wraps by its own slot's flags.
+        VkDescriptorImageInfo secondInfo = second->descriptorInfo();
+        if (const VkSampler s = vkCtx_->getOrCreateSampler(
+                m2TextureSamplerInfo(secondWrapFlags, second->getMipLevels(), 0.0f));
+            s != VK_NULL_HANDLE) {
+            secondInfo.sampler = s;
+        }
         const MaterialDescriptorKey key{.diffuse = diffuseInfo.imageView, .normal = normalInfo.imageView,
-                                        .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler};
+                                        .second = secondInfo.imageView,
+                                        .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler,
+                                        .secondSampler = secondInfo.sampler};
         auto& cache = materialDescriptorCache_[frameSlot];
         if (auto it = cache.find(key); it != cache.end()) return it->second;
 
@@ -2768,14 +2779,16 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         bufferInfo.buffer = materialRingBuffer_[frameSlot];
         bufferInfo.offset = 0;
         bufferInfo.range = sizeof(CharMaterialUBO);
-        VkWriteDescriptorSet writes[3] = {};
+        VkWriteDescriptorSet writes[4] = {};
         writes[0] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 0, .dstArrayElement = 0, .descriptorCount = 1,
                      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &diffuseInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
         writes[1] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 1, .dstArrayElement = 0, .descriptorCount = 1,
                      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pImageInfo = nullptr, .pBufferInfo = &bufferInfo, .pTexelBufferView = nullptr};
         writes[2] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 2, .dstArrayElement = 0, .descriptorCount = 1,
                      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &normalInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
-        vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+        writes[3] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 3, .dstArrayElement = 0, .descriptorCount = 1,
+                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &secondInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 4, writes, 0, nullptr);
         cache.emplace(key, set);
         return set;
     };
@@ -3173,6 +3186,40 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         *tt, instance.currentSequenceIndex, instance.animationTime,
                         instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
                 }
+                // A second stage that shapes the first: a fire hawk's flame
+                // wings are the flame texture cut to feathers by its border
+                // mask, and drawn from the flame alone were bare streaks.
+                VkTexture* secondTex = nullptr;
+                uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
+                const int8_t secondCoordSet = m2TextureCoordSet(
+                    gpuModel.data.textureCoordLookup, static_cast<uint16_t>(batch.textureUnit + 1));
+                if (resolved.comboOffset == 0 &&
+                    m2UsesSecondTextureMask(batch.shader, batch.textureCount, blendMode, secondCoordSet)) {
+                    const size_t lookupPos = size_t{batch.textureIndex} + 1;
+                    const uint16_t slot = lookupPos < gpuModel.data.textureLookup.size()
+                        ? gpuModel.data.textureLookup[lookupPos] : uint16_t{0xFFFF};
+                    if (slot < gpuModel.textureIds.size()) {
+                        secondTex = gpuModel.textureIds[slot];
+                        if (auto o = instance.textureSlotOverrides.find(slot);
+                            o != instance.textureSlotOverrides.end() && o->second) {
+                            secondTex = o->second;
+                        }
+                        if (slot < gpuModel.data.textures.size())
+                            secondWrapFlags = static_cast<uint8_t>(gpuModel.data.textures[slot].flags & 0x3);
+                    }
+                    if (secondTex && secondTex->isValid() && secondTex != whiteTexture_.get()) {
+                        matData.hasSecondTexture = 1;
+                        matData.secondTexCoordSet = secondCoordSet == 1 ? 1 : 0;
+                    } else {
+                        secondTex = nullptr;
+                        static std::unordered_set<uint64_t> loggedMissingSecond;
+                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | slot).second) {
+                            LOG_WARNING("Character model '", gpuModel.data.name, "' batch ", bi,
+                                        ": its second texture (slot ", slot,
+                                        ") is not loaded; drawn without the mask that shapes it");
+                        }
+                    }
+                }
                 // Only hair and cloaks are two-sided on the stock models. The
                 // rest - a trouser leg's knee flare among them - show their
                 // inside through any gap, and lit with the normal turned round
@@ -3268,7 +3315,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 materialRingOffset_[frameSlot] = matOffset + uboStride;
 
                 VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
-                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap);
+                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap,
+                                                                       secondTex, secondWrapFlags);
                 if (!materialSet) continue;
 
                 // Bind material descriptor set (set 1)
@@ -3809,12 +3857,12 @@ void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.position = position;
-        it->second.moveStart = position;
-        it->second.moveEnd = position;
-        it->second.moveElapsed = 0.0f;
-        it->second.moveDuration = 0.0f;
-        it->second.isMoving = false;
     }
+}
+
+void CharacterRenderer::setInstanceAnimationSpeed(uint32_t instanceId, float speed) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) it->second.animationSpeed = speed;
 }
 
 void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation) {
@@ -3828,70 +3876,6 @@ void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawR
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.torsoYawOverrideRad = deltaYawRad;
-    }
-}
-
-void CharacterRenderer::moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
-
-    auto& inst = it->second;
-
-    // Don't move dead instances (corpses shouldn't slide around)
-    if (inst.isDead) return;
-
-    auto pickMoveAnim = [&](bool preferRun) -> uint32_t {
-        // Choose movement anim from estimated speed; fall back if missing.
-        if (preferRun) {
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-        } else {
-            if (hasAnimation(instanceId, 4)) return 4; // Walk
-            if (hasAnimation(instanceId, 5)) return 5; // Run
-        }
-        return 0;
-    };
-
-    float pdx = destination.x - inst.position.x;
-    float pdy = destination.y - inst.position.y;
-    float planarDistSq = pdx * pdx + pdy * pdy;
-    bool synthesizedDuration = false;
-    if (durationSeconds <= 0.0f) {
-        if (planarDistSq < 1e-4f) {
-            // Stop at current location.
-            inst.position = destination;
-            inst.isMoving = false;
-            if (inst.currentAnimationId == anim::WALK || inst.currentAnimationId == anim::RUN) {
-                playAnimation(instanceId, anim::STAND, true);
-            }
-            return;
-        }
-        // Some cores send movement-only deltas without spline duration.
-        // Synthesize a tiny duration so movement anim/rotation still updates.
-        durationSeconds = std::clamp(std::sqrt(planarDistSq) / 7.0f, 0.05f, 0.20f);
-        synthesizedDuration = true;
-    }
-
-    inst.moveStart = inst.position;
-    inst.moveEnd = destination;
-    inst.moveDuration = durationSeconds;
-    inst.moveElapsed = 0.0f;
-    inst.isMoving = true;
-
-    // Face toward destination (yaw around Z axis since Z is up)
-    glm::vec3 dir = destination - inst.position;
-    if (dir.x * dir.x + dir.y * dir.y > 1e-6f) {
-        float angle = std::atan2(dir.y, dir.x);
-        inst.rotation.z = angle;
-    }
-
-    // Play movement animation while moving.
-    // Prefer run only when speed is clearly above normal walk pace.
-    float moveSpeed = std::sqrt(planarDistSq) / std::max(durationSeconds, 0.001f);
-    bool preferRun = (!synthesizedDuration && moveSpeed >= 4.5f);
-    uint32_t moveAnim = pickMoveAnim(preferRun);
-    if (moveAnim != 0 && inst.currentAnimationId != moveAnim) {
-        playAnimation(instanceId, moveAnim, true);
     }
 }
 
@@ -3962,6 +3946,25 @@ void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec
             if (effectIt != instances.end()) apply(effectIt->second);
         }
     }
+    // One level only: a companion's own companions are not followed, so no
+    // chain of them can come back round.
+    for (const uint32_t companionId : it->second.lookCompanions) {
+        auto companionIt = instances.find(companionId);
+        if (companionIt != instances.end()) apply(companionIt->second);
+    }
+}
+
+void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companionId) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end() || companionId == instanceId || !instances.count(companionId)) return;
+    auto& companions = it->second.lookCompanions;
+    // Drop the ones already removed, so a rider mounting all day keeps a short list.
+    std::erase_if(companions, [&](uint32_t id) { return !instances.count(id); });
+    if (std::find(companions.begin(), companions.end(), companionId) == companions.end())
+        companions.push_back(companionId);
+    auto& companion = instances.at(companionId);
+    companion.stateTint = it->second.stateTint;
+    companion.stateAlpha = it->second.stateAlpha;
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {

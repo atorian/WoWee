@@ -227,7 +227,6 @@ void GameHandler::clearWorldState() {
     }
     otherPlayerVisibleItemEntries_.clear();
     otherPlayerVisibleDirty_.clear();
-    otherPlayerMoveTimeMs_.clear();
     spellHandler_->clearUnitCastStates();
     spellHandler_->clearUnitAurasCache();
     combatHandler_->clearCombatText();
@@ -445,7 +444,7 @@ void GameHandler::updateEntityInterpolation(float deltaTime) {
 for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
     (void)guid;
     if (entity && entity->isUnit()) {
-        entity->updateMovement(deltaTime);
+        entity->updateMovement(deltaTime, services_.movementCollision);
     }
 }
 }

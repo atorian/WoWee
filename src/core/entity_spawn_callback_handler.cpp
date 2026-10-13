@@ -127,50 +127,30 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         entitySpawner_.applyGameObjectState(guid, goState);
     });
 
-    // Creature move callback (online mode) - update creature positions
-    gameHandler_.setCreatureMoveCallback([this](uint64_t guid, float x, float y, float z, uint32_t durationMs) {
-        if (!renderer_.getCharacterRenderer()) return;
-        uint32_t instanceId = 0;
-        bool isPlayer = false;
-        instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        if (instanceId != 0) { isPlayer = true; }
-        else {
-            instanceId = entitySpawner_.getCreatureInstanceId(guid);
+    // Creature move callback (online mode). Position is evaluated from the
+    // Entity - its server spline, or a player's reported movement - in
+    // Application::update; starting a second renderer interpolation here made
+    // the two owners chase each other. What is left is a creature's
+    // locomotion animation for the spline it was just given. Another player's
+    // animation follows its own reported movement in the frame sync.
+    gameHandler_.setCreatureMoveCallback([this](uint64_t guid, float /*x*/, float /*y*/, float /*z*/,
+                                                uint32_t durationMs) {
+        auto* cr = renderer_.getCharacterRenderer();
+        if (!cr || durationMs == 0) return;
+        const uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
+        if (instanceId == 0) return;
+        // Monster patrols report Walk through SMSG_MONSTER_MOVE's spline flags
+        // before this callback runs. Don't override Death; the per-frame sync
+        // returns to Stand when movement stops.
+        uint32_t curAnimId = 0; float curT = 0.0f, curDur = 0.0f;
+        const bool gotState = cr->getAnimationState(instanceId, curAnimId, curT, curDur);
+        const bool walking = entitySpawner_.getCreatureWalkingState().count(guid) > 0;
+        const uint32_t targetAnim = walking ? rendering::anim::WALK : rendering::anim::RUN;
+        // Only restart when the selected locomotion animation changed.
+        if (!gotState || (curAnimId != rendering::anim::DEATH && curAnimId != targetAnim)) {
+            cr->playAnimation(instanceId, targetAnim, /*loop=*/true);
         }
-        if (instanceId != 0) {
-            // Nearby NPC position is evaluated from Entity's server spline in
-            // Application::update. Starting a second renderer interpolation here
-            // makes the two owners chase each other and produces jerky movement.
-            // Online players retain their existing interpolation path.
-            if (isPlayer) {
-                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
-                float durationSec = static_cast<float>(durationMs) / 1000.0f;
-                renderer_.getCharacterRenderer()->moveInstanceTo(instanceId, renderPos, durationSec);
-            }
-            // Play the server-selected ground locomotion animation for the
-            // duration of the spline move. Monster patrols report Walk through
-            // SMSG_MONSTER_MOVE's spline flags before this callback runs.
-            // WoW M2 animation IDs: 4=Walk, 5=Run.
-            // Don't override Death animation (1). The per-frame sync loop will return to
-            // Stand when movement stops.
-            if (durationMs > 0) {
-                // Player animation is managed by the local renderer state machine -
-                // don't reset it here or every server movement packet restarts the
-                // run cycle from frame 0, causing visible stutter.
-                if (!isPlayer) {
-                    uint32_t curAnimId = 0; float curT = 0.0f, curDur = 0.0f;
-                    auto* cr = renderer_.getCharacterRenderer();
-                    bool gotState = cr->getAnimationState(instanceId, curAnimId, curT, curDur);
-                    const bool walking = entitySpawner_.getCreatureWalkingState().count(guid) > 0;
-                    const uint32_t targetAnim = walking ? rendering::anim::WALK : rendering::anim::RUN;
-                    // Only restart when the selected locomotion animation changed.
-                    if (!gotState || (curAnimId != rendering::anim::DEATH && curAnimId != targetAnim)) {
-                        cr->playAnimation(instanceId, targetAnim, /*loop=*/true);
-                    }
-                    entitySpawner_.getCreatureWasMoving()[guid] = true;
-                }
-            }
-        }
+        entitySpawner_.getCreatureWasMoving()[guid] = true;
     });
 
     gameHandler_.setGameObjectMoveCallback([this](uint64_t guid, float x, float y, float z, float orientation) {

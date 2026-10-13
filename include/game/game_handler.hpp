@@ -3498,7 +3498,6 @@ public:
     auto& inspectedPlayerItemEntriesRef() { return inspectedPlayerItemEntries_; }
     auto& otherPlayerVisibleDirtyRef() { return otherPlayerVisibleDirty_; }
     auto& otherPlayerVisibleItemEntriesRef() { return otherPlayerVisibleItemEntries_; }
-    auto& otherPlayerMoveTimeMsRef() { return otherPlayerMoveTimeMs_; }
     auto& pendingItemPushNotifsRef() { return pendingItemPushNotifs_; }
     auto& pendingItemQueriesRef() { return pendingItemQueries_; }
     auto& pendingMoneyDeltaRef() { return pendingMoneyDelta_; }
@@ -4262,7 +4261,6 @@ private:
     bool visibleItemLayoutVerified_ = false;  // true once heuristic confirms/overrides default
     std::unordered_map<uint64_t, std::array<uint32_t, 19>> otherPlayerVisibleItemEntries_;
     std::unordered_set<uint64_t> otherPlayerVisibleDirty_;
-    std::unordered_map<uint64_t, uint32_t> otherPlayerMoveTimeMs_;
 
     // Inspect fallback (when visible item fields are missing/unreliable)
     std::unordered_map<uint64_t, std::array<uint32_t, 19>> inspectedPlayerItemEntries_;

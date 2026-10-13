@@ -16,11 +16,15 @@ inline int8_t m2TextureCoordSet(const std::vector<int16_t>& lookup, uint16_t com
     return mapping == -1 || mapping == 1 ? static_cast<int8_t>(mapping) : 0;
 }
 
-// Shader 0 with two stages and alpha-add blending combines RGBA from
-// both stages. This is shared by sky auroras and the foam on fountains.
+// Shader 0 with two stages on a blended layer multiplies RGBA from both: the
+// second texture shapes the first. Sky auroras and the foam on fountains
+// (alpha-add) use it, and so do a fire hawk's flame wings (alpha), which
+// without it are the bare flame texture - streaks instead of feathers.
+// `secondCoordSet` is m2TextureCoordSet of the second stage; -1, the sphere
+// environment map, is a reflection laid over the surface, not a mask.
 inline bool m2UsesSecondTextureMask(uint16_t shader, uint16_t textureCount,
-                                    uint16_t blendMode) {
-    return shader == 0 && textureCount == 2 && blendMode == 4;
+                                    uint16_t blendMode, int8_t secondCoordSet) {
+    return shader == 0 && textureCount == 2 && blendMode >= 2 && secondCoordSet != -1;
 }
 
 // Skin batches address a combo table, not the transparency array directly.

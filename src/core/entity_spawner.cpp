@@ -170,6 +170,7 @@ void EntitySpawner::shutdown() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerLocomotion_.clear();
     remotePlayerForms_.clear();
     pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();
@@ -200,6 +201,7 @@ void EntitySpawner::resetAllState() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerLocomotion_.clear();
     remotePlayerForms_.clear();
     pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();
@@ -224,6 +226,8 @@ void EntitySpawner::resetAllState() {
     // Clear display/spawn caches
     nonRenderableCreatureDisplayIds_.clear();
     displayIdModelCache_.clear();
+    unloadableMountDisplayIds_.clear();
+    seatlessMountDisplayIds_.clear();
     displayIdTexturesApplied_.clear();
     charSectionsCache_.clear();
     charSectionsCacheBuilt_ = false;
@@ -763,13 +767,15 @@ void EntitySpawner::buildCreatureDisplayLookups() {
     if (auto cmd = assetManager_->loadDBC("CreatureModelData.dbc"); cmd && cmd->isLoaded()) {
         const auto* cmdL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CreatureModelData") : nullptr;
         for (uint32_t i = 0; i < cmd->getRecordCount(); i++) {
-            std::string mdx = cmd->getString(i, cmdL ? (*cmdL)["ModelPath"] : 2);
-            if (mdx.empty()) continue;
-            if (mdx.size() >= 4) {
-                mdx = mdx.substr(0, mdx.size() - 4) + ".m2";
-            }
+            std::string path = cmd->getString(i, cmdL ? (*cmdL)["ModelPath"] : 2);
+            if (path.empty()) continue;
+            // The client's own rows all say .mdx, but a realm's rows can name
+            // the .M2 itself. Cutting four characters off every path turned
+            // PandarenSerpentMount.M2 into PandarenSerpentMoun.m2, and those
+            // mounts were never found.
+            path = pipeline::modelPathToM2(path);
             const uint32_t modelId = cmd->getUInt32(i, cmdL ? (*cmdL)["ID"] : 0);
-            modelIdToPath_[modelId] = mdx;
+            modelIdToPath_[modelId] = path;
             // The other half of a creature's size. Zero appears in the file
             // and means unset rather than invisible, so it keeps 1.0.
             const uint32_t scaleField = cmdL ? (*cmdL)["ModelScale"] : 4;

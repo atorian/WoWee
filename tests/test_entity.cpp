@@ -1,6 +1,7 @@
 // Entity, Unit, Player, GameObject, EntityManager tests
 #include <catch_amalgamated.hpp>
 #include "game/entity.hpp"
+#include "game/movement_flags.hpp"
 #include <algorithm>
 #include <memory>
 
@@ -38,7 +39,6 @@ TEST_CASE("Entity ignores positive-duration movement without displacement",
     e.startMoveTo(10.0f, 20.0f, 30.0f, 1.25f, 0.5f);
 
     REQUIRE_FALSE(e.isEntityMoving());
-    REQUIRE_FALSE(e.isActivelyMoving());
     REQUIRE(e.getOrientation() == Catch::Approx(1.25f));
 }
 
@@ -47,11 +47,178 @@ TEST_CASE("Entity still interpolates meaningful movement", "[entity][movement]")
     e.setPosition(0.0f, 0.0f, 0.0f, 0.0f);
 
     e.startMoveTo(5.0f, 0.0f, 0.0f, 0.0f, 1.0f);
-    REQUIRE(e.isActivelyMoving());
+    REQUIRE(e.isEntityMoving());
 
     e.updateMovement(0.5f);
     REQUIRE(e.getX() == Catch::Approx(2.5f));
-    REQUIRE(e.isActivelyMoving());
+    REQUIRE(e.isEntityMoving());
+}
+
+TEST_CASE("Entity stops at the end of a server move", "[entity][movement]") {
+    Entity e;
+    e.setPosition(0.0f, 0.0f, 0.0f, 0.0f);
+    e.startMoveTo(5.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    e.updateMovement(1.5f);
+    REQUIRE_FALSE(e.isEntityMoving());
+    REQUIRE(e.getX() == Catch::Approx(5.0f));
+}
+
+namespace {
+
+constexpr uint32_t moveBit(MovementFlags f) { return static_cast<uint32_t>(f); }
+
+ReportedMovement::Clock::time_point at(int milliseconds) {
+    return ReportedMovement::Clock::time_point(std::chrono::milliseconds(1000000 + milliseconds));
+}
+
+MovementReport running(uint32_t moverTime, float serverX, float serverY, float orientation = 0.0f) {
+    MovementReport r;
+    r.moverTime = moverTime;
+    r.position = {serverX, serverY, 10.0f};
+    r.orientation = orientation;  // 0 faces +x on the server's axes
+    r.flags = moveBit(MovementFlags::FORWARD);
+    return r;
+}
+
+/// Frames of 10 ms from one moment of this client's clock to another.
+void play(ReportedMovement& m, int fromMs, int toMs, const MovementSpeeds& speeds = {}) {
+    for (int t = fromMs + 10; t <= toMs; t += 10) m.advance(0.01f, at(t), speeds);
+}
+
+constexpr float kHalfPi = 1.5707963f;
+
+}  // namespace
+
+TEST_CASE("Reported movement carries a runner on between reports", "[entity][movement]") {
+    ReportedMovement m;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    play(m, 0, 700);
+
+    // Playback trails the report by its delay, and covers that time at run speed.
+    REQUIRE(m.isTravelling());
+    REQUIRE(m.playbackTime() > 600.0);
+    REQUIRE(m.playbackTime() < 700.0);
+    REQUIRE(m.position().x == Catch::Approx(7.0 * m.playbackTime() / 1000.0).margin(0.01f));
+    REQUIRE(m.position().y == Catch::Approx(0.0f).margin(0.001f));
+}
+
+TEST_CASE("Reported movement plays reports that come on time in order", "[entity][movement]") {
+    ReportedMovement m;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    play(m, 0, 500);
+    m.report(running(500, 3.5f, 0.0f), at(500));
+    play(m, 500, 1000);
+    m.report(running(1000, 7.0f, 0.0f, kHalfPi), at(1000));  // turns to +y
+    play(m, 1000, 1500);
+    m.report(running(1500, 7.0f, 3.5f, kHalfPi), at(1500));
+    play(m, 1500, 2000);
+
+    REQUIRE(m.playbackRate() == Catch::Approx(1.0f).margin(0.05f));
+    const double since = (m.playbackTime() - 1000.0) / 1000.0;
+    REQUIRE(m.position().x == Catch::Approx(7.0f).margin(0.02f));
+    REQUIRE(m.position().y == Catch::Approx(7.0 * since).margin(0.02f));
+}
+
+TEST_CASE("Reported movement replays a late burst faster, every turn in its place",
+          "[entity][movement]") {
+    ReportedMovement m;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    // Two seconds with nothing: it runs on as it last said, then waits.
+    play(m, 0, 2000);
+    REQUIRE(m.position().x == Catch::Approx(7.0f * 0.75f).margin(0.02f));
+
+    // The two seconds arrive at once. The turn at 1000 ms is still ahead of
+    // playback, so it is taken where it happened.
+    m.report(running(500, 3.5f, 0.0f), at(2000));
+    m.report(running(1000, 7.0f, 0.0f, kHalfPi), at(2000));
+    m.report(running(1500, 7.0f, 3.5f, kHalfPi), at(2000));
+    m.report(running(2000, 7.0f, 7.0f, kHalfPi), at(2000));
+    play(m, 2000, 2010);
+    REQUIRE(m.playbackRate() > 2.0f);
+
+    play(m, 2010, 4000);
+    REQUIRE(m.position().x == Catch::Approx(7.0f).margin(0.02f));
+    // Caught up to the newest report and on past it as far as playback goes.
+    REQUIRE(m.position().y == Catch::Approx(7.0f + 7.0f * 0.75f).margin(0.05f));
+}
+
+namespace {
+
+// A wall across the x axis at x = 5, for a mover a yard thick.
+struct WallAtFive final : MovementCollision {
+    glm::vec3 slide(const glm::vec3& from, const glm::vec3& to) const override {
+        glm::vec3 out = to;
+        if (from.x <= 4.5f && to.x > 4.5f) out.x = 4.5f;
+        return out;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Reported movement stays at a wall a runner holds forward into", "[entity][movement]") {
+    ReportedMovement m;
+    const WallAtFive wall;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    for (int t = 10; t <= 1000; t += 10) m.advance(0.01f, at(t), MovementSpeeds{}, &wall);
+    REQUIRE(m.isTravelling());
+    REQUIRE(m.position().x == Catch::Approx(4.5f));
+}
+
+TEST_CASE("Reported movement stops where a stop report says", "[entity][movement]") {
+    ReportedMovement m;
+    MovementReport stop = running(0, 3.0f, 0.0f);
+    stop.flags = 0;
+    m.report(stop, at(0));
+    play(m, 0, 1000);
+    REQUIRE_FALSE(m.isMoving());
+    REQUIRE(m.position().x == Catch::Approx(3.0f));
+}
+
+TEST_CASE("Reported movement flies a jump on its arc", "[entity][movement]") {
+    ReportedMovement m;
+    MovementReport jump = running(0, 0.0f, 0.0f);
+    jump.flags |= moveBit(MovementFlags::FALLING);
+    jump.jumpUpSpeed = 7.955547f;
+    jump.jumpCos = 1.0f;
+    jump.jumpSin = 0.0f;
+    jump.jumpXYSpeed = 7.0f;
+    m.report(jump, at(0));
+    REQUIRE(m.isAirborne());
+    REQUIRE(m.isJump());
+
+    play(m, 0, 300);
+    const float g = 19.29110527f;
+    const float t = static_cast<float>(m.playbackTime() / 1000.0);
+    REQUIRE(t > 0.2f);
+    REQUIRE(m.position().z == Catch::Approx(10.0f + 7.955547f * t - 0.5f * g * t * t).margin(0.01f));
+    REQUIRE(m.position().x == Catch::Approx(7.0f * t).margin(0.01f));
+}
+
+TEST_CASE("Reported movement drops a report older than one it took", "[entity][movement]") {
+    ReportedMovement m;
+    m.report(running(1000, 10.0f, 0.0f), at(1000));
+    REQUIRE_FALSE(m.report(running(500, 3.0f, 0.0f), at(1010)));
+    REQUIRE(m.position().x == Catch::Approx(10.0f));
+}
+
+TEST_CASE("Reported movement follows the mover's clock across its wrap", "[entity][movement]") {
+    ReportedMovement m;
+    m.report(running(0xFFFFFF00u, 0.0f, 0.0f), at(0));
+    REQUIRE(m.report(running(0x00000000u, 1.8f, 0.0f), at(256)));  // 256 ms later
+    REQUIRE(m.lastReportLateness() == Catch::Approx(0.0f));
+}
+
+TEST_CASE("A unit that reports its movement leaves it for a server path", "[entity][movement]") {
+    Unit u;
+    u.applyMovementReport(running(0, 0.0f, 0.0f), at(0));
+    REQUIRE(u.getReportedMovement() != nullptr);
+    REQUIRE(u.isEntityMoving());
+
+    u.startMoveTo(20.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+    REQUIRE(u.getReportedMovement() == nullptr);
+    u.updateMovement(2.0f);
+    REQUIRE(u.getX() == Catch::Approx(20.0f));
 }
 
 TEST_CASE("Entity field set/get/has", "[entity]") {

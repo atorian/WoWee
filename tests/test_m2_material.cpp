@@ -107,6 +107,21 @@ TEST_CASE("transparency combos resolve reordered and invisible tracks", "[m2][ma
     CHECK(m2TextureWeightOpacity({}, lookup, 0) == 1.0f);
 }
 
+TEST_CASE("a second texture shapes blended two-stage layers only", "[m2][material]") {
+    // A fire hawk's flame wings: alpha-blended flame, shaped by a feather mask on UV0.
+    CHECK(m2UsesSecondTextureMask(0, 2, 2, 0));
+    // Fountain foam: alpha-add, its border mask on UV1.
+    CHECK(m2UsesSecondTextureMask(0, 2, 4, 1));
+    // An opaque or alpha-keyed body under a second stage is not masked by it.
+    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 0, 0));
+    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 1, 0));
+    // A sphere-mapped second stage is a reflection, not a mask.
+    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 2, -1));
+    // One stage, or another combiner, has nothing to multiply.
+    CHECK_FALSE(m2UsesSecondTextureMask(0, 1, 2, 0));
+    CHECK_FALSE(m2UsesSecondTextureMask(1, 2, 2, 0));
+}
+
 TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m2][material][asset]") {
     for (const auto name : {"dalaran_fountain_01", "dalaran_fountain_02"}) {
         const std::string path = std::string("Data/expansions/wotlk/world/expansion02/doodads/dalaran/") + name;
@@ -118,7 +133,8 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
         for (const auto& batch : model.batches) {
             REQUIRE(batch.materialIndex < model.materials.size());
             const auto mode = model.materials[batch.materialIndex].blendMode;
-            if (!m2UsesSecondTextureMask(batch.shader, batch.textureCount, mode)) continue;
+            if (!m2UsesSecondTextureMask(batch.shader, batch.textureCount, mode,
+                    m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u))) continue;
             ++masks;
             REQUIRE(batch.textureIndex + 1u < model.textureLookup.size());
             const auto first = model.textureLookup[batch.textureIndex];
@@ -139,7 +155,8 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
         for (const auto& batch : model.batches) {
             if (batch.shader == 1)
                 CHECK_FALSE(m2UsesSecondTextureMask(batch.shader, batch.textureCount,
-                    model.materials[batch.materialIndex].blendMode));
+                    model.materials[batch.materialIndex].blendMode,
+                    m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u)));
         }
         if (model.batches.size() == 25) {
             const auto& crystal = model.materials[model.batches[8].materialIndex];

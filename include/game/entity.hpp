@@ -3,6 +3,7 @@
 #include "game/protocol_constants.hpp"
 #include "game/update_field_table.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 #include <string>
@@ -16,6 +17,7 @@
 #include <chrono>
 #include "math/spline.hpp"
 #include "game/flat_field_map.hpp"
+#include "game/reported_movement.hpp"
 
 namespace wowee {
 namespace game {
@@ -129,6 +131,7 @@ public:
         isMoving_ = false; // Instant position set cancels interpolation
         usePathMode_ = false;
         activeSpline_.reset();
+        endReportedMovement();
     }
 
     // Multi-segment path movement (Catmull-Rom spline interpolation)
@@ -154,6 +157,7 @@ public:
             startMoveTo(path.back()[0], path.back()[1], path.back()[2], destO, totalDuration);
             return;
         }
+        endReportedMovement();
         // Build SplineKeys with distance-proportional time
         uint32_t durationMs = static_cast<uint32_t>(totalDuration * 1000.0f);
         const float invTotalDist = static_cast<float>(durationMs) / totalDist;
@@ -165,26 +169,12 @@ public:
         activeSpline_.emplace(std::move(keys), /*timeClosed=*/false);
         splineDurationMs_ = durationMs;
 
-        // Snap position if in overrun phase
-        if (isMoving_ && moveElapsed_ >= moveDuration_) {
-            x = moveEndX_; y = moveEndY_; z = moveEndZ_;
-        }
         moveEndX_ = path.back()[0]; moveEndY_ = path.back()[1]; moveEndZ_ = path.back()[2];
         moveDuration_ = totalDuration;
         moveElapsed_ = 0.0f;
         orientation = destO;
         isMoving_ = true;
         usePathMode_ = true;
-        // Velocity for dead-reckoning after path completes
-        float fromX = isMoving_ ? moveEndX_ : x;
-        float fromY = isMoving_ ? moveEndY_ : y;
-        float impliedVX = (path.back()[0] - fromX) / totalDuration;
-        float impliedVY = (path.back()[1] - fromY) / totalDuration;
-        float impliedVZ = (path.back()[2] - path[0][2]) / totalDuration;
-        const float alpha = 0.65f;
-        velX_ = alpha * impliedVX + (1.0f - alpha) * velX_;
-        velY_ = alpha * impliedVY + (1.0f - alpha) * velY_;
-        velZ_ = alpha * impliedVZ + (1.0f - alpha) * velZ_;
     }
 
     // Movement interpolation (syncs entity position with renderer during movement)
@@ -197,7 +187,7 @@ public:
         }
         // Movement heartbeats and repeated spline destinations can carry a
         // positive duration without any actual displacement. Treat these as
-        // authoritative stops; otherwise isActivelyMoving() drives Run/Walk
+        // authoritative stops; otherwise isEntityMoving() drives Run/Walk
         // while the model has nowhere to move. This applies equally to nearby
         // players and creatures.
         const float remainingX = destX - x;
@@ -209,32 +199,9 @@ public:
             setPosition(destX, destY, destZ, destO);
             return;
         }
-        // If we're in the dead-reckoning overrun phase, snap x/y/z back to the
-        // destination before using them as the new start.  The renderer was showing
-        // the entity at moveEnd (via getLatest) during overrun, so the new
-        // interpolation must start there to avoid a visible teleport.
-        if (isMoving_ && moveElapsed_ >= moveDuration_) {
-            x = moveEndX_;
-            y = moveEndY_;
-            z = moveEndZ_;
-        }
-        // Derive velocity from the displacement this packet implies.
-        // Use the previous destination (not current lerped pos) as the "from" so
-        // variable network timing doesn't inflate/shrink the implied speed.
-        float fromX = isMoving_ ? moveEndX_ : x;
-        float fromY = isMoving_ ? moveEndY_ : y;
-        float fromZ = isMoving_ ? moveEndZ_ : z;
-        float impliedVX = (destX - fromX) / durationSec;
-        float impliedVY = (destY - fromY) / durationSec;
-        float impliedVZ = (destZ - fromZ) / durationSec;
-        // Exponential moving average on velocity - 65% new sample, 35% previous.
-        // Smooths out jitter from irregular server update intervals (~200-600ms)
-        // without introducing visible lag on direction changes.
-        const float alpha = 0.65f;
-        velX_ = alpha * impliedVX + (1.0f - alpha) * velX_;
-        velY_ = alpha * impliedVY + (1.0f - alpha) * velY_;
-        velZ_ = alpha * impliedVZ + (1.0f - alpha) * velZ_;
-
+        endReportedMovement();
+        // The new move starts from wherever the unit is drawn now, part way
+        // along the last one if it had not finished.
         moveStartX_ = x; moveStartY_ = y; moveStartZ_ = z;
         moveEndX_ = destX; moveEndY_ = destY; moveEndZ_ = destZ;
         moveDuration_ = durationSec;
@@ -243,7 +210,11 @@ public:
         isMoving_ = true;
     }
 
-    void updateMovement(float deltaTime) {
+    /// Advance the entity's movement by deltaTime seconds. A unit moving
+    /// itself meets the walls collision knows; a server path goes where the
+    /// server says.
+    virtual void updateMovement(float deltaTime, const MovementCollision* collision = nullptr) {
+        (void)collision;
         if (!isMoving_) return;
         moveElapsed_ += deltaTime;
         if (moveElapsed_ < moveDuration_) {
@@ -263,31 +234,14 @@ public:
                 z = moveStartZ_ + (moveEndZ_ - moveStartZ_) * t;
             }
         } else {
-            // Past the interpolation window: dead-reckon at the smoothed velocity
-            // rather than freezing in place. Cap to one extra interval so we don't
-            // drift endlessly if the entity stops sending packets.
-            float overrun = moveElapsed_ - moveDuration_;
-            if (overrun < moveDuration_) {
-                x = moveEndX_ + velX_ * overrun;
-                y = moveEndY_ + velY_ * overrun;
-                z = moveEndZ_ + velZ_ * overrun;
-            } else {
-                // Two intervals with no update - entity has probably stopped.
-                x = moveEndX_; y = moveEndY_; z = moveEndZ_;
-                velX_ = 0.0f; velY_ = 0.0f; velZ_ = 0.0f;
-                isMoving_ = false;
-            }
+            // A server move ends where it ends.
+            x = moveEndX_; y = moveEndY_; z = moveEndZ_;
+            isMoving_ = false;
         }
     }
 
-    [[nodiscard]] bool isEntityMoving() const { return isMoving_; }
-
-    /// True only during the active interpolation phase (before reaching destination).
-    /// Unlike isEntityMoving(), this does NOT include the dead-reckoning overrun window,
-    /// so animations (Run/Walk) should use this to avoid "running in place" after arrival.
-    [[nodiscard]] bool isActivelyMoving() const {
-        return isMoving_ && moveElapsed_ < moveDuration_;
-    }
+    /// True while the entity is on its way somewhere; false at rest.
+    [[nodiscard]] virtual bool isEntityMoving() const { return isMoving_; }
 
     // Returns the latest server-authoritative position: destination if moving, current if not.
     // Unlike getX/Y/Z (which only update via updateMovement), this always reflects the
@@ -334,6 +288,10 @@ protected:
     // Update fields (dynamic values) - flat sorted vector. See FlatFieldMap docs.
     FlatFieldMap fields;
 
+    /// A position or path from the server replaces whatever movement a unit
+    /// was reporting for itself.
+    virtual void endReportedMovement() {}
+
     // Movement interpolation state
     bool isMoving_ = false;
     bool usePathMode_ = false;
@@ -341,7 +299,6 @@ protected:
     float moveEndX_ = 0, moveEndY_ = 0, moveEndZ_ = 0;
     float moveDuration_ = 0;
     float moveElapsed_ = 0;
-    float velX_ = 0, velY_ = 0, velZ_ = 0;  // Smoothed velocity for dead reckoning
     // CatmullRom spline for multi-segment path movement (replaces linear pathPoints_/pathSegDists_)
     std::optional<math::CatmullRomSpline> activeSpline_;
     uint32_t splineDurationMs_ = 0;
@@ -448,7 +405,31 @@ public:
     [[nodiscard]] bool isHostile() const { return hostile; }
     void setHostile(bool h) { hostile = h; }
 
+    // Movement speeds, from the unit's movement block and speed changes
+    [[nodiscard]] const MovementSpeeds& getMovementSpeeds() const { return movementSpeeds; }
+    /// Set one of them, e.g. setMovementSpeed(&MovementSpeeds::run, 14.0f).
+    void setMovementSpeed(float MovementSpeeds::* which, float value) { movementSpeeds.*which = value; }
+
+    /// Take a report the unit sent of its own movement (MSG_MOVE_*), handled
+    /// at handledAt. It moves on from its reported state until the next
+    /// report, or until the server places it or sends it along a path.
+    void applyMovementReport(const MovementReport& report,
+                             ReportedMovement::Clock::time_point handledAt);
+    /// The unit's reported movement, or null while the server moves it.
+    [[nodiscard]] const ReportedMovement* getReportedMovement() const {
+        return reportedMovement ? &*reportedMovement : nullptr;
+    }
+
+    void updateMovement(float deltaTime, const MovementCollision* collision = nullptr) override;
+    [[nodiscard]] bool isEntityMoving() const override;
+
 protected:
+    void endReportedMovement() override { reportedMovement.reset(); }
+    void placeAtReportedMovement();
+
+    MovementSpeeds movementSpeeds;
+    std::optional<ReportedMovement> reportedMovement;
+
     std::string name;
     uint32_t health = 0;
     uint32_t maxHealth = 0;
