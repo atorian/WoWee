@@ -167,7 +167,7 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
 
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.6f, 1.0f), "CPU TIMINGS (ms)");
-        ImGui::Text("Update: %.2f (Camera: %.2f)", renderer->getLastUpdateMs(), renderer->getLastCameraUpdateMs());
+        ImGui::Text("Update: %.2f (Camera: %.2f)", renderer->getLastUpdateMs(), cameraUpdateMs_);
         ImGui::Text("Render: %.2f (Terrain: %.2f, WMO: %.2f, M2: %.2f)",
                     renderer->getLastRenderMs(),
                     renderer->getLastTerrainRenderMs(),

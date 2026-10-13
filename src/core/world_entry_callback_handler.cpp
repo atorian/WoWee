@@ -1,4 +1,5 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/world_loader.hpp"
@@ -21,11 +22,13 @@ namespace wowee { namespace core {
 
 WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     rendering::Renderer& renderer,
+    PlayerView& playerView,
     game::GameHandler& gameHandler,
     WorldLoader* worldLoader,
     EntitySpawner* entitySpawner,
     pipeline::AssetManager* assetManager)
     : renderer_(renderer)
+    , playerView_(playerView)
     , gameHandler_(gameHandler)
     , worldLoader_(worldLoader)
     , entitySpawner_(entitySpawner)
@@ -60,8 +63,8 @@ std::optional<float> WorldEntryCallbackHandler::sampleBestFloorAt(float x, float
 
 // Clear stuck movement state on player
 void WorldEntryCallbackHandler::clearStuckMovement() {
-    if (renderer_.getCameraController()) {
-        renderer_.getCameraController()->clearMovementInputs();
+    if (playerView_.getCameraController()) {
+        playerView_.getCameraController()->clearMovementInputs();
     }
     gameHandler_.forceClearTaxiAndMovementState();
     gameHandler_.sendMovement(game::Opcode::MSG_MOVE_STOP);
@@ -77,14 +80,14 @@ void WorldEntryCallbackHandler::clearMountForUnstuck() {
     // then remove any already-orphaned local instance left by an older reset.
     const bool hasRenderedMount =
         (entitySpawner_ && entitySpawner_->getMountInstanceId() != 0) ||
-        (renderer_.getAnimationController() && renderer_.getAnimationController()->isMounted());
+        (playerView_.getAnimationController() && playerView_.getAnimationController()->isMounted());
     if (gameHandler_.isMounted() || hasRenderedMount) {
         gameHandler_.dismount();
     }
     if (entitySpawner_) {
         entitySpawner_->clearMountState();
     }
-    if (auto* animation = renderer_.getAnimationController();
+    if (auto* animation = playerView_.getAnimationController();
         animation && animation->isMounted()) {
         animation->clearMount();
     }
@@ -147,7 +150,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     gameHandler_.setWorldEntryCallback([this](uint32_t mapId, float x, float y, float z, bool isInitialEntry) {
         LOG_INFO("Online world entry: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")"
                  " initial=", isInitialEntry);
-        renderer_.resetCombatVisualState();
+        playerView_.resetCombatVisualState();
 
         // Reconnect to the same map: terrain stays loaded but all online entities are stale.
         // Despawn them properly so the server's fresh CREATE_OBJECTs will re-populate the world.
@@ -168,17 +171,17 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(x, y, z));
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
             renderer_.getCharacterPosition() = renderPos;
-            if (renderer_.getCameraController()) {
-                auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
+            if (playerView_.getCameraController()) {
+                auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
                 if (ft) *ft = renderPos;
-                renderer_.getCameraController()->clearMovementInputs();
-                renderer_.getCameraController()->suppressMovementFor(1.0f);
-                renderer_.getCameraController()->suspendGravityFor(10.0f);
+                playerView_.getCameraController()->clearMovementInputs();
+                playerView_.getCameraController()->suppressMovementFor(1.0f);
+                playerView_.getCameraController()->suspendGravityFor(10.0f);
                 // The heightfield loads before the buildings do, and over
                 // anything underground it sits well above where the player
                 // actually is. Hold the floor to what the server said until
                 // the WMOs have had time to arrive.
-                renderer_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
+                playerView_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
             }
             worldEntryMovementGraceTimer_ = 2.0f;
             taxiLandingClampTimer_ = 0.0f;
@@ -204,13 +207,13 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                             "), deferring world reload to next frame");
                 // Update position immediately so the player doesn't keep moving at old location
                 renderer_.getCharacterPosition() = renderPos;
-                if (renderer_.getCameraController()) {
-                    auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
+                if (playerView_.getCameraController()) {
+                    auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
                     if (ft) *ft = renderPos;
-                    renderer_.getCameraController()->clearMovementInputs();
-                    renderer_.getCameraController()->suppressMovementFor(1.0f);
-                    renderer_.getCameraController()->suspendGravityFor(10.0f);
-                    renderer_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
+                    playerView_.getCameraController()->clearMovementInputs();
+                    playerView_.getCameraController()->suppressMovementFor(1.0f);
+                    playerView_.getCameraController()->suspendGravityFor(10.0f);
+                    playerView_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
                 }
                 if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
                 return;
@@ -218,17 +221,17 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             LOG_INFO("Same-map teleport (map ", mapId, "), skipping full world reload");
             // canonical and renderPos already computed above for distance check
             renderer_.getCharacterPosition() = renderPos;
-            if (renderer_.getCameraController()) {
-                auto* ft = renderer_.getCameraController()->getFollowTargetMutable();
+            if (playerView_.getCameraController()) {
+                auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
                 if (ft) *ft = renderPos;
             }
             worldEntryMovementGraceTimer_ = 2.0f;
             taxiLandingClampTimer_ = 0.0f;
             lastTaxiFlight_ = false;
             // Stop any movement that was active before the teleport
-            if (renderer_.getCameraController()) {
-                renderer_.getCameraController()->clearMovementInputs();
-                renderer_.getCameraController()->suppressMovementFor(0.5f);
+            if (playerView_.getCameraController()) {
+                playerView_.getCameraController()->clearMovementInputs();
+                playerView_.getCameraController()->suppressMovementFor(0.5f);
             }
             // Kick off async upload for any tiles that finished background
             // parsing. Bounded on purpose: finalizing every ready tile here
@@ -264,13 +267,13 @@ void WorldEntryCallbackHandler::setupCallbacks() {
 
     // /unstuck - nudge player forward and snap to floor at destination.
     gameHandler_.setUnstuckCallback([this]() {
-        if (!renderer_.getCameraController()) return;
+        if (!playerView_.getCameraController()) return;
         clearMountForUnstuck();
         worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
         taxiLandingClampTimer_ = 0.0f;
         lastTaxiFlight_ = false;
         clearStuckMovement();
-        auto* cc = renderer_.getCameraController();
+        auto* cc = playerView_.getCameraController();
         auto* ft = cc->getFollowTargetMutable();
         if (!ft) return;
 
@@ -301,13 +304,13 @@ void WorldEntryCallbackHandler::setupCallbacks() {
 
     // /unstuckgy - stronger recovery: safe/home position, then sampled floor fallback.
     gameHandler_.setUnstuckGyCallback([this]() {
-        if (!renderer_.getCameraController()) return;
+        if (!playerView_.getCameraController()) return;
         clearMountForUnstuck();
         worldEntryMovementGraceTimer_ = std::max(worldEntryMovementGraceTimer_, 1.5f);
         taxiLandingClampTimer_ = 0.0f;
         lastTaxiFlight_ = false;
         clearStuckMovement();
-        auto* cc = renderer_.getCameraController();
+        auto* cc = playerView_.getCameraController();
         auto* ft = cc->getFollowTargetMutable();
         if (!ft) return;
 
@@ -360,7 +363,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     // /unstuckhearth - teleport to hearthstone bind point (server-synced).
     // Freezes player until terrain loads at destination to prevent falling through world.
     gameHandler_.setUnstuckHearthCallback([this]() {
-        if (!renderer_.getCameraController()) return;
+        if (!playerView_.getCameraController()) return;
 
         uint32_t bindMap = 0;
         glm::vec3 bindPos(0.0f);
@@ -376,7 +379,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         lastTaxiFlight_ = false;
         clearStuckMovement();
 
-        auto* cc = renderer_.getCameraController();
+        auto* cc = playerView_.getCameraController();
         glm::vec3 renderPos = core::coords::canonicalToRender(bindPos);
         renderPos.z += 2.0f;
 
@@ -394,16 +397,16 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     });
 
     // Auto-unstuck: falling for > 5 seconds = void fall, teleport to map entry
-    if (renderer_.getCameraController()) {
-        renderer_.getCameraController()->setAutoUnstuckCallback([this]() {
+    if (playerView_.getCameraController()) {
+        playerView_.getCameraController()->setAutoUnstuckCallback([this]() {
             const char* allowAutoUnstuck = std::getenv("WOWEE_ALLOW_AUTO_UNSTUCK");
             if (!allowAutoUnstuck || std::string(allowAutoUnstuck) != "1") {
                 LOG_WARNING("Auto-unstuck suppressed. Set WOWEE_ALLOW_AUTO_UNSTUCK=1 to teleport to the map entry point after long falls.");
                 return;
             }
-            if (!renderer_.getCameraController()) return;
+            if (!playerView_.getCameraController()) return;
             clearMountForUnstuck();
-            auto* cc = renderer_.getCameraController();
+            auto* cc = playerView_.getCameraController();
 
             // Last resort: teleport to map entry point (terrain guaranteed loaded here)
             glm::vec3 spawnPos = cc->getDefaultPosition();
@@ -474,9 +477,9 @@ void WorldEntryCallbackHandler::update(float deltaTime) {
             // Terrain loaded (or timeout) - snap to floor and release
             if (terrainH) {
                 hearthTeleportPos_.z = *terrainH + 0.5f;
-                renderer_.getCameraController()->teleportTo(hearthTeleportPos_);
+                playerView_.getCameraController()->teleportTo(hearthTeleportPos_);
             }
-            renderer_.getCameraController()->setExternalFollow(false);
+            playerView_.getCameraController()->setExternalFollow(false);
             worldEntryMovementGraceTimer_ = 1.0f;
             hearthTeleportPending_ = false;
             LOG_INFO("Unstuck hearth: terrain loaded, player released",

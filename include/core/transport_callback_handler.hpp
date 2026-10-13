@@ -12,11 +12,14 @@ namespace core { class EntitySpawner; class WorldLoader; class AppearanceCompose
 
 namespace core {
 
+class PlayerView;
+
 /// Handles transport-related callbacks: transport spawn/move, taxi, mount.
 class TransportCallbackHandler {
 public:
     TransportCallbackHandler(EntitySpawner& entitySpawner,
                              rendering::Renderer& renderer,
+                             PlayerView& playerView,
                              game::GameHandler& gameHandler,
                              AppearanceComposer* appearanceComposer);
 
@@ -25,6 +28,7 @@ public:
 private:
     EntitySpawner& entitySpawner_;
     rendering::Renderer& renderer_;
+    PlayerView& playerView_;
     game::GameHandler& gameHandler_;
     AppearanceComposer* appearanceComposer_;
 };

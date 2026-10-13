@@ -18,6 +18,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
+#include "rendering/viewer_motion.hpp"
 #include "rendering/world_environment.hpp"
 #include "core/screen_recorder.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
@@ -31,12 +32,11 @@ namespace wowee {
 namespace core { class Window; }
 namespace rendering { class VkContext; }
 namespace pipeline { class AssetManager; }
-namespace audio { class AudioCoordinator; }
 
 namespace rendering {
 
 class Camera;
-class CameraController;
+class OffscreenComposite;
 class TerrainRenderer;
 class TerrainManager;
 class PerformanceHUD;
@@ -58,15 +58,10 @@ class CharacterRenderer;
 class WMORenderer;
 class M2Renderer;
 class Minimap;
-namespace world_map { class WorldMapFacade; }
-using WorldMap = world_map::WorldMapFacade;
 class QuestMarkerRenderer;
 class FootprintRenderer;
-class CharacterPreview;
 class AmdFsr3Runtime;
-class SpellVisualSystem;
 class PostProcessPipeline;
-class AnimationController;
 class LevelUpEffect;
 class ChargeEffect;
 class SwimEffects;
@@ -106,6 +101,8 @@ public:
     /// Set before update(); kept until it is set again.
     void setWorldEnvironment(const WorldEnvironment& environment) { environment_ = environment; }
     const WorldEnvironment& getWorldEnvironment() const { return environment_; }
+    /// How the viewer moves this frame - see ViewerMotion. Set before update().
+    void setViewerMotion(const ViewerMotion& motion) { viewerMotion_ = motion; }
     /// Whether the world is on screen this frame, set before beginFrame(). The
     /// sky is captured for it ahead of the scene pass, and a login screen has
     /// no sky to capture.
@@ -166,7 +163,6 @@ public:
     void renderHUD();
 
     Camera* getCamera() { return camera.get(); }
-    CameraController* getCameraController() { return cameraController.get(); }
     TerrainRenderer* getTerrainRenderer() const { return terrainRenderer.get(); }
     TerrainManager* getTerrainManager() const { return terrainManager.get(); }
     PerformanceHUD* getPerformanceHUD() { return performanceHUD.get(); }
@@ -182,7 +178,6 @@ public:
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
-    WorldMap* getWorldMap() const { return worldMap.get(); }
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
     FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
     SkySystem* getSkySystem() const { return skySystem.get(); }
@@ -222,19 +217,12 @@ public:
     /// finished properly all the same.
     std::string takeRecordingFailure();
 
-    // Spell visual effects (SMSG_PLAY_SPELL_VISUAL / SMSG_PLAY_SPELL_IMPACT)
-    // Delegates to SpellVisualSystem (owned by Renderer)
-    SpellVisualSystem* getSpellVisualSystem() const { return spellVisualSystem_.get(); }
-
-    // Combat visual state (compound: resets AnimationController + SpellVisualSystem)
-    void resetCombatVisualState();
-
     // Sub-system accessors (§4.2)
-    AnimationController* getAnimationController() const { return animationController_.get(); }
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
     LootSparkles* getLootSparkles() const { return lootSparkles_.get(); }
     CorpseBones* getCorpseBones() const { return corpseBones_.get(); }
     ChargeEffect* getChargeEffect() const { return chargeEffect.get(); }
+    MountDust* getMountDust() const { return mountDust.get(); }
     SwimEffects* getSwimEffects() const { return swimEffects.get(); }
 
     // Selection circle for targeted entity
@@ -244,14 +232,9 @@ public:
     // CPU timing stats (milliseconds, last frame).
     double getLastUpdateMs() const { return lastUpdateMs; }
     double getLastRenderMs() const { return lastRenderMs; }
-    double getLastCameraUpdateMs() const { return lastCameraUpdateMs; }
     double getLastTerrainRenderMs() const { return lastTerrainRenderMs; }
     double getLastWMORenderMs() const { return lastWMORenderMs; }
     double getLastM2RenderMs() const { return lastM2RenderMs; }
-    // Audio coordinator - owned by Application, set via setAudioCoordinator().
-    // Only for the animation controller, until it is owned beside it.
-    void setAudioCoordinator(audio::AudioCoordinator* ac) { audioCoordinator_ = ac; }
-    audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_; }
     LightingManager* getLightingManager() { return lightingManager.get(); }
 
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
@@ -302,7 +285,6 @@ private:
 
     core::Window* window = nullptr;
     std::unique_ptr<Camera> camera;
-    std::unique_ptr<CameraController> cameraController;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
     /// How much of the line from the eye to the sun is blocked, smoothed.
     ///
@@ -336,6 +318,7 @@ private:
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;
     WorldEnvironment environment_;
+    ViewerMotion viewerMotion_;
     bool worldInView_ = false;
     std::function<uint32_t(uint32_t)> areaZoneResolver_;
     std::function<void(const glm::vec3&, uint32_t)> ambientEmitterSink_;
@@ -354,11 +337,8 @@ private:
     /// not read off disk again on every frame it is wanted.
     std::unordered_set<std::string> failedSkyboxPaths_;
     std::unique_ptr<Minimap> minimap;
-    std::unique_ptr<WorldMap> worldMap;
     std::unique_ptr<QuestMarkerRenderer> questMarkerRenderer;
     std::unique_ptr<FootprintRenderer> footprintRenderer;
-    audio::AudioCoordinator* audioCoordinator_ = nullptr;  // Owned by Application
-    std::unique_ptr<AnimationController> animationController_;  // §4.2
     // Shadow mapping (Vulkan)
     /// The shadow map is square and this is its side, chosen before the
     /// per-frame resources are built and not changed after.
@@ -398,9 +378,11 @@ private:
 
 
 public:
-    // Character preview registration (for off-screen composite pass)
-    void registerPreview(CharacterPreview* preview);
-    void unregisterPreview(CharacterPreview* preview);
+    /// Images the interface shows, drawn ahead of the world each frame - see
+    /// OffscreenComposite. Registered by their owners, who unregister them
+    /// before they go.
+    void registerComposite(OffscreenComposite* composite);
+    void unregisterComposite(OffscreenComposite* composite);
 
     /// Held on. Turning shadows off loses the device within a second - see
     /// the note in settings_schema.cpp - so a saved 0 from before that was
@@ -456,9 +438,6 @@ private:
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
-
-    // Spell visual effects - owned SpellVisualSystem (extracted from Renderer §4.4)
-    std::unique_ptr<SpellVisualSystem> spellVisualSystem_;
 
     // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
@@ -561,8 +540,7 @@ private:
     VkFramebuffer activeFramebuffer_ = VK_NULL_HANDLE;
     VkExtent2D activeRenderExtent_ = {.width = 0, .height = 0};
 
-    // Active character previews for off-screen rendering
-    std::vector<CharacterPreview*> activePreviews_;
+    std::vector<OffscreenComposite*> offscreenComposites_;
 
     bool terrainEnabled = true;
     bool terrainLoaded = false;
@@ -672,7 +650,6 @@ private:
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;
     double lastRenderMs = 0.0;
-    double lastCameraUpdateMs = 0.0;
     double lastTerrainRenderMs = 0.0;
     double lastWMORenderMs = 0.0;
     double lastM2RenderMs = 0.0;

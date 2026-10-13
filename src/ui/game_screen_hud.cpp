@@ -744,7 +744,7 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
         });
     }
 
-    auto* wm = renderer->getWorldMap();
+    auto* wm = (services_.worldMap ? services_.worldMap() : nullptr);
     if (!wm) return;
 
     // Flight master window drives the world map's flight-map (taxi selection)

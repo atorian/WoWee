@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 namespace wowee {
 
 // Forward declarations
@@ -10,7 +12,12 @@ namespace core {
     class WorldLoader;
     class ZoneTracker;
 }
-namespace rendering { class Renderer; }
+namespace rendering {
+class Renderer;
+class CameraController;
+class AnimationController;
+namespace world_map { class WorldMapFacade; }
+}
 namespace pipeline { class AssetManager; }
 namespace game { 
     class GameHandler;
@@ -41,6 +48,10 @@ struct UIServices {
     addons::AddonManager* addonManager = nullptr;
     audio::AudioCoordinator* audioCoordinator = nullptr;
     core::ZoneTracker* zoneTracker = nullptr;
+    rendering::CameraController* cameraController = nullptr;
+    rendering::AnimationController* animationController = nullptr;
+    /// The world map, which is built on entering the world: null before.
+    std::function<rendering::world_map::WorldMapFacade*()> worldMap;
     
     // Extracted classes (also available individually for Phase A compatibility)
     core::EntitySpawner* entitySpawner = nullptr;

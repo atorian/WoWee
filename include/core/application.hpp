@@ -32,7 +32,14 @@
 namespace wowee {
 
 // Forward declarations
-namespace rendering { class Renderer; }
+namespace rendering {
+class Renderer;
+class CameraController;
+class AnimationController;
+class SpellVisualSystem;
+namespace world_map { class WorldMapFacade; }
+using WorldMap = world_map::WorldMapFacade;
+}
 namespace ui { class UIManager; class MapWindow; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
@@ -45,6 +52,7 @@ namespace core {
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
 class ZoneTracker;
+class PlayerView;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -168,6 +176,23 @@ public:
 
     /// Which zone the player is in - see ZoneTracker.
     ZoneTracker* getZoneTracker() { return zoneTracker_.get(); }
+
+    /// The local player's camera, facing and animation - see PlayerView.
+    PlayerView* getPlayerView() { return playerView_.get(); }
+    rendering::CameraController* getCameraController();
+    rendering::AnimationController* getAnimationController();
+    /// Spell effects in the world, for every caster.
+    rendering::SpellVisualSystem* getSpellVisualSystem() { return spellVisualSystem_.get(); }
+    /// The world map; null until the world's renderers are up.
+    rendering::WorldMap* getWorldMap() { return worldMap_.get(); }
+
+    /// After the renderer has built the world's renderers - on entering a
+    /// world, or a map without terrain: the camera collides with them, the
+    /// spell visuals draw through them, and the world map is built.
+    void onWorldRenderersReady();
+    /// The map every view of the world is looking at: the renderer's, and the
+    /// world map's.
+    void setActiveMapName(const std::string& name);
 
 private:
     void update(float deltaTime);
@@ -359,6 +384,10 @@ private:
     std::unique_ptr<WorldLoader> worldLoader_;
     std::unique_ptr<audio::AudioCoordinator> audioCoordinator_;
     std::unique_ptr<ZoneTracker> zoneTracker_;
+    std::unique_ptr<rendering::SpellVisualSystem> spellVisualSystem_;
+    std::unique_ptr<PlayerView> playerView_;
+    std::unique_ptr<rendering::WorldMap> worldMap_;
+    bool spellVisualsAttached_ = false;
     /// Whether the camera was inside a WMO last frame, for announcing the
     /// crossing once.
     bool cameraIndoors_ = false;

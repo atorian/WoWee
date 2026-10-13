@@ -6,6 +6,7 @@
 // ============================================================================
 
 #include "rendering/animation/sfx_state_driver.hpp"
+#include "rendering/animation/animation_context.hpp"
 #include "rendering/animation/footstep_driver.hpp"
 #include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -17,13 +18,13 @@
 namespace wowee {
 namespace rendering {
 
-void SfxStateDriver::update(float deltaTime, Renderer* renderer,
+void SfxStateDriver::update(float deltaTime, const AnimationContext& ctx,
                             bool mounted, bool taxiFlight,
                             FootstepDriver& footstepDriver) {
-    auto* activitySoundManager = renderer->getAudioCoordinator()->getActivitySoundManager();
+    auto* activitySoundManager = ctx.audio->getActivitySoundManager();
     if (!activitySoundManager) return;
 
-    auto* cameraController = renderer->getCameraController();
+    auto* cameraController = ctx.cameraController;
 
     activitySoundManager->update(deltaTime);
     if (cameraController && cameraController->isThirdPerson()) {
@@ -58,7 +59,7 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
         if (grounded && !prevGrounded_ && !justLeftWater) {
             bool hardLanding = prevFalling_;
             activitySoundManager->playLanding(
-                footstepDriver.resolveFootstepSurface(renderer), hardLanding);
+                footstepDriver.resolveFootstepSurface(ctx), hardLanding);
         }
 
         // Water transitions
@@ -70,8 +71,8 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
 
         activitySoundManager->setSwimmingState(swimming, moving);
 
-        if (renderer->getAudioCoordinator()->getMusicManager()) {
-            renderer->getAudioCoordinator()->getMusicManager()->setUnderwaterMode(swimming);
+        if (ctx.audio->getMusicManager()) {
+            ctx.audio->getMusicManager()->setUnderwaterMode(swimming);
         }
 
         prevGrounded_ = grounded;
@@ -80,20 +81,20 @@ void SfxStateDriver::update(float deltaTime, Renderer* renderer,
         prevSwimming_ = swimming;
     } else {
         activitySoundManager->setSwimmingState(false, false);
-        if (renderer->getAudioCoordinator()->getMusicManager()) {
-            renderer->getAudioCoordinator()->getMusicManager()->setUnderwaterMode(false);
+        if (ctx.audio->getMusicManager()) {
+            ctx.audio->getMusicManager()->setUnderwaterMode(false);
         }
         initialized_ = false;
     }
 
     // Mount ambient sounds
-    if (renderer->getAudioCoordinator()->getMountSoundManager()) {
-        renderer->getAudioCoordinator()->getMountSoundManager()->update(deltaTime);
+    if (ctx.audio->getMountSoundManager()) {
+        ctx.audio->getMountSoundManager()->update(deltaTime);
         if (cameraController && mounted) {
             bool isMoving = cameraController->isMoving();
             bool flying = taxiFlight || !cameraController->isGrounded();
-            renderer->getAudioCoordinator()->getMountSoundManager()->setMoving(isMoving);
-            renderer->getAudioCoordinator()->getMountSoundManager()->setFlying(flying);
+            ctx.audio->getMountSoundManager()->setMoving(isMoving);
+            ctx.audio->getMountSoundManager()->setFlying(flying);
         }
     }
 }

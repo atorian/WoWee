@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 
 namespace wowee {
 namespace rendering {
@@ -28,9 +27,6 @@ struct WorldEnvironment {
     float weatherIntensity = 0.0f;
     /// The player is a ghost: the world is drawn desaturated.
     bool ghost = false;
-    /// The player's facing in canonical yaw (north 0, east +pi/2), for the
-    /// minimap arrow when no follow camera says which way they face.
-    std::optional<float> playerOrientation;
 };
 
 } // namespace rendering

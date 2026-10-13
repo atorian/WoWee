@@ -625,7 +625,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
     if (spellHandler_) spellHandler_->resetAllState();
     if (auto* renderer = services_.renderer) {
-        if (auto* camera = renderer->getCameraController()) camera->setIntoxication(0.0f);
+        if (auto* camera = services_.cameraController) camera->setIntoxication(0.0f);
         if (auto* post = renderer->getPostProcessPipeline()) post->setIntoxication(0.0f);
     }
     spellFlatMods_.clear();
@@ -1690,7 +1690,7 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     if (auto* renderer = services_.renderer) {
         const float facingDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
         renderer->setCharacterYaw(facingDeg);
-        if (auto* cc = renderer->getCameraController()) {
+        if (auto* cc = services_.cameraController) {
             cc->setFacingYaw(facingDeg);
         }
     }

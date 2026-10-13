@@ -9,7 +9,7 @@ namespace wowee {
 namespace rendering {
 
 class Camera;
-class CameraController;
+struct ViewerMotion;
 class WaterRenderer;
 class M2Renderer;
 class VkContext;
@@ -47,7 +47,8 @@ public:
         targetPass_ = pass;
         targetSamples_ = samples;
     }
-    void update(const Camera& camera, const CameraController& cc,
+    /// characterPosition is where a third-person viewer's character stands.
+    void update(const Camera& camera, const ViewerMotion& viewer, const glm::vec3& characterPosition,
                 const WaterRenderer& water, float deltaTime);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     void spawnFootSplash(const glm::vec3& footPos, float waterH);

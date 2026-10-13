@@ -426,7 +426,7 @@ void SettingsPanel::renderSettingsWindow(ChatPanel& chatPanel,
             renderer->setShadowsEnabled(pendingShadows);
             renderer->setShadowDistance(pendingShadowDistance);
             // Read non-volume settings from actual state (volumes come from saved settings)
-            if (auto* cameraController = renderer->getCameraController()) {
+            if (auto* cameraController = services_.cameraController) {
                 cameraController->setMouseSensitivity(pendingMouseSensitivity);
                 cameraController->setInvertMouse(pendingInvertMouse);
                 cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
@@ -1208,7 +1208,7 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     // and needs none.
     auto* renderer = services_.renderer;
     auto* camera = renderer ? renderer->getCamera() : nullptr;
-    auto* cameraController = renderer ? renderer->getCameraController() : nullptr;
+    auto* cameraController = services_.cameraController;
     auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
     auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
     auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;

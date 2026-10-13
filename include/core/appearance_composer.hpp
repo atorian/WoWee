@@ -17,6 +17,8 @@ namespace game { class GameHandler; class Inventory; }
 
 namespace core {
 
+class PlayerView;
+
 class EntitySpawner;
 
 /// Resolved texture paths from CharSections.dbc for player character compositing.
@@ -37,6 +39,7 @@ struct PlayerTextureInfo {
 class AppearanceComposer {
 public:
     AppearanceComposer(rendering::Renderer* renderer,
+                       PlayerView* playerView,
                        pipeline::AssetManager* assetManager,
                        game::GameHandler* gameHandler,
                        EntitySpawner* entitySpawner);
@@ -103,6 +106,8 @@ private:
     void applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex, uint32_t attachmentId);
 
     rendering::Renderer* renderer_;
+
+    PlayerView* playerView_;
     pipeline::AssetManager* assetManager_;
     game::GameHandler* gameHandler_;
     EntitySpawner* entitySpawner_;

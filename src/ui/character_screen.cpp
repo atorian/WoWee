@@ -430,7 +430,7 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
                 preview_.reset();
             } else {
                 auto* renderer = core::Application::getInstance().getRenderer();
-                if (renderer) renderer->registerPreview(preview_.get());
+                if (renderer) renderer->registerComposite(preview_.get());
             }
         }
         if (preview_) {

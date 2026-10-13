@@ -1553,7 +1553,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
                 const glm::vec3 renderPosition =
                     core::coords::canonicalToRender(restoredWorldPosition);
                 renderer_->getCharacterPosition() = renderPosition;
-                if (auto* camera = renderer_->getCameraController()) {
+                if (auto* camera = gameServices_->cameraController) {
                     camera->teleportTo(renderPosition);
                     camera->clearMovementInputs();
                     camera->suspendGravityFor(2.0f);
@@ -1798,7 +1798,7 @@ void EntitySpawner::processPendingMount() {
         }
     }
 
-    if (auto* ac = renderer_->getAnimationController()) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
+    if (auto* ac = gameServices_->animationController) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
     // For taxi mounts, start with flying animation; for ground mounts, start with stand
     bool isTaxi = gameHandler_ && gameHandler_->isOnTaxiFlight();

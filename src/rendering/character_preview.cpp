@@ -236,7 +236,7 @@ bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int hei
 void CharacterPreview::shutdown() {
     // Unregister from renderer before destroying resources
     auto* appRenderer = core::Application::getInstance().getRenderer();
-    if (appRenderer) appRenderer->unregisterPreview(this);
+    if (appRenderer) appRenderer->unregisterComposite(this);
 
     if (charRenderer_) {
         charRenderer_->shutdown();

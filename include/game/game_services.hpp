@@ -2,7 +2,12 @@
 #include <cstdint>
 
 namespace wowee {
-namespace rendering { class Renderer; }
+namespace rendering {
+class Renderer;
+class CameraController;
+class AnimationController;
+class SpellVisualSystem;
+}
 namespace pipeline { class AssetManager; }
 namespace audio { class AudioCoordinator; }
 namespace game { class ExpansionRegistry; }
@@ -15,6 +20,10 @@ namespace game {
 struct GameServices {
     rendering::Renderer* renderer = nullptr;
     audio::AudioCoordinator* audioCoordinator = nullptr;
+    // The client's, beside the renderer rather than inside it.
+    rendering::CameraController* cameraController = nullptr;
+    rendering::AnimationController* animationController = nullptr;
+    rendering::SpellVisualSystem* spellVisualSystem = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
     ExpansionRegistry* expansionRegistry = nullptr;
     uint32_t gryphonDisplayId = 0;

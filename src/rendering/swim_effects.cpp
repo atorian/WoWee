@@ -1,6 +1,6 @@
 #include "rendering/swim_effects.hpp"
 #include "rendering/camera.hpp"
-#include "rendering/camera_controller.hpp"
+#include "rendering/viewer_motion.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
@@ -414,23 +414,20 @@ void SwimEffects::spawnInsect(const glm::vec3& vegPos) {
     insects.push_back(p);
 }
 
-void SwimEffects::update(const Camera& camera, const CameraController& cc,
+void SwimEffects::update(const Camera& camera, const ViewerMotion& viewer,
+                         const glm::vec3& characterPosition,
                          const WaterRenderer& water, float deltaTime) {
     glm::vec3 camPos = camera.getPosition();
 
     // Use character position for ripples in third-person mode
-    glm::vec3 charPos = camPos;
-    const glm::vec3* followTarget = cc.getFollowTarget();
-    if (cc.isThirdPerson() && followTarget) {
-        charPos = *followTarget;
-    }
+    const glm::vec3 charPos = viewer.thirdPerson ? characterPosition : camPos;
 
     // Check water at character position (for ripples) and camera position (for bubbles)
     auto charWaterH = water.getWaterHeightAt(charPos.x, charPos.y);
     auto camWaterH = water.getWaterHeightAt(camPos.x, camPos.y);
 
-    bool swimming = cc.isSwimming();
-    bool moving = cc.isMoving();
+    const bool swimming = viewer.swimming;
+    const bool moving = viewer.moving;
 
     // --- Ripple/splash spawning ---
     if (swimming && charWaterH) {
@@ -439,7 +436,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
         rippleSpawnAccum += spawnRate * deltaTime;
 
         // Compute movement direction from camera yaw
-        float yawRad = glm::radians(cc.getYaw());
+        float yawRad = glm::radians(viewer.yawDeg);
         glm::vec3 moveDir(std::cos(yawRad), std::sin(yawRad), 0.0f);
         if (moveDir.x * moveDir.x + moveDir.y * moveDir.y > 1e-6f) {
             moveDir = glm::normalize(moveDir);
@@ -475,7 +472,7 @@ void SwimEffects::update(const Camera& camera, const CameraController& cc,
 
             // Forward from yaw is (cos, sin) - the same derivation the camera
             // controller uses to move the character.
-            const float yawRad = glm::radians(cc.getYaw());
+            const float yawRad = glm::radians(viewer.yawDeg);
             const glm::vec2 travel(std::cos(yawRad), std::sin(yawRad));
 
             while (wadeSpawnAccum >= 1.0f) {

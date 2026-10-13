@@ -339,7 +339,7 @@ void SpellHandler::playSpellImpactSound(uint32_t spellId) {
 void SpellHandler::preloadSpellVisuals(const std::vector<uint32_t>& spellIds) {
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;
-    auto* svs = renderer->getSpellVisualSystem();
+    auto* svs = owner_.services().spellVisualSystem;
     if (!svs) return;
     std::vector<uint32_t> visualIds;
     visualIds.reserve(spellIds.size());
@@ -361,8 +361,7 @@ void SpellHandler::syncAuraStateVisuals(float dt) {
     auraStateVisualTimer_ += dt;
     if (auraStateVisualTimer_ < 0.2f) return;
     auraStateVisualTimer_ = 0.0f;
-    auto* renderer = owner_.services().renderer;
-    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    auto* svs = owner_.services().spellVisualSystem;
     if (!svs) return;
 
     std::vector<rendering::SpellVisualSystem::UnitStateVisuals> units;
@@ -408,7 +407,7 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
     LOG_INFO("SpellVisual: triggerCastVisual spellId=", spellId, " casterGuid=0x", std::hex, casterGuid, std::dec);
     auto* renderer = owner_.services().renderer;
     if (!renderer) { LOG_WARNING("SpellVisual: triggerCastVisual - no renderer"); return; }
-    auto* svs = renderer->getSpellVisualSystem();
+    auto* svs = owner_.services().spellVisualSystem;
     if (!svs) { LOG_WARNING("SpellVisual: triggerCastVisual - no SpellVisualSystem"); return; }
     uint32_t visualId = resolveSpellVisualId(spellId);
     if (visualId == 0) { LOG_WARNING("SpellVisual: triggerCastVisual - visualId=0 for spellId=", spellId); return; }
@@ -423,7 +422,7 @@ void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
     LOG_INFO("SpellVisual: triggerImpactVisual spellId=", spellId, " targetGuid=0x", std::hex, targetGuid, std::dec);
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;
-    auto* svs = renderer->getSpellVisualSystem();
+    auto* svs = owner_.services().spellVisualSystem;
     if (!svs) return;
     uint32_t visualId = resolveSpellVisualId(spellId);
     if (visualId == 0) { LOG_WARNING("SpellVisual: triggerImpactVisual - visualId=0 for spellId=", spellId); return; }
@@ -438,7 +437,7 @@ void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targe
     auto* renderer = owner_.services().renderer;
     auto* assets = owner_.services().assetManager;
     if (!renderer || !assets || targetGuid == 0) return;
-    auto* visuals = renderer->getSpellVisualSystem();
+    auto* visuals = owner_.services().spellVisualSystem;
     auto* characters = renderer->getCharacterRenderer();
     if (!visuals || !characters) return;
 
@@ -1201,10 +1200,8 @@ void SpellHandler::cancelCast() {
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", {"player"});
     // Remove lingering precast visual effects
-    if (auto* renderer = owner_.services().renderer) {
-        if (auto* svs = renderer->getSpellVisualSystem())
-            svs->cancelAllPrecastVisuals();
-    }
+    if (auto* svs = owner_.services().spellVisualSystem)
+        svs->cancelAllPrecastVisuals();
 }
 
 void SpellHandler::startCraftQueue(uint32_t spellId, int count) {
@@ -1927,10 +1924,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     // Remove lingering precast visual effects
-    if (auto* renderer = owner_.services().renderer) {
-        if (auto* svs = renderer->getSpellVisualSystem())
-            svs->cancelAllPrecastVisuals();
-    }
+    if (auto* svs = owner_.services().spellVisualSystem)
+        svs->cancelAllPrecastVisuals();
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
 
@@ -2319,11 +2314,9 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             // Cast-complete visual at caster (for instant spells that skip SPELL_START)
             glm::vec3 casterPos;
             if (resolveUnitPosition(data.casterUnit, casterPos)) {
-                if (auto* renderer = owner_.services().renderer) {
-                    if (auto* svs = renderer->getSpellVisualSystem()) {
-                        svs->playSpellVisual(visualId, casterPos, /*useImpactKit=*/false,
-                                             owner_.resolveUnitRenderInstance(data.casterUnit));
-                    }
+                if (auto* svs = owner_.services().spellVisualSystem) {
+                    svs->playSpellVisual(visualId, casterPos, /*useImpactKit=*/false,
+                                         owner_.resolveUnitRenderInstance(data.casterUnit));
                 }
             }
             // Impact visual at each hit target
@@ -4150,7 +4143,7 @@ void SpellHandler::handlePlaySpellVisual(network::Packet& packet) {
         glm::vec3 canonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
         spawnPos = core::coords::canonicalToRender(canonical);
     }
-    if (auto* sv = renderer->getSpellVisualSystem())
+    if (auto* sv = owner_.services().spellVisualSystem)
         sv->playSpellVisual(visualId, spawnPos, /*useImpactKit=*/false,
                             owner_.resolveUnitRenderInstance(casterGuid));
 }
@@ -4348,10 +4341,8 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         queuedSpellId_ = 0;
         queuedSpellTarget_ = 0;
         // Remove lingering precast visual effects
-        if (auto* renderer = owner_.services().renderer) {
-            if (auto* svs = renderer->getSpellVisualSystem())
-                svs->cancelAllPrecastVisuals();
-        }
+        if (auto* svs = owner_.services().spellVisualSystem)
+            svs->cancelAllPrecastVisuals();
         if (auto* ac = owner_.services().audioCoordinator) {
             if (auto* ssm = ac->getSpellSoundManager()) {
                 ssm->stopPrecast();

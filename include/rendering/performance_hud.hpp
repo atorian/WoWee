@@ -69,9 +69,13 @@ public:
     /// The zone the player is in, shown when not empty. Told by the client,
     /// which knows zones; the renderer does not.
     void setZoneName(std::string name) { zoneName_ = std::move(name); }
+    /// How long the camera controller's update took, in milliseconds. It runs
+    /// in the client, ahead of the renderer's update.
+    void setCameraUpdateMs(double ms) { cameraUpdateMs_ = ms; }
 
 private:
     std::string zoneName_;
+    double cameraUpdateMs_ = 0.0;
     /**
      * Calculate average FPS from frame time history
      */

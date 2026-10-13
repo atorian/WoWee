@@ -47,8 +47,12 @@ namespace rendering {
 AnimationController::AnimationController() = default;
 AnimationController::~AnimationController() = default;
 
-void AnimationController::initialize(Renderer* renderer) {
+void AnimationController::initialize(Renderer* renderer, CameraController* cameraController,
+                                     audio::AudioCoordinator* audio, SpellVisualSystem* spellVisuals) {
     renderer_ = renderer;
+    cameraController_ = cameraController;
+    audio_ = audio;
+    spellVisuals_ = spellVisuals;
 }
 
 void AnimationController::probeCapabilities() {
@@ -263,11 +267,11 @@ void AnimationController::resetCombatVisualState() {
     characterAnimator_.stopSpellCast();
     characterAnimator_.triggerHitReaction(0);  // Clear hit reaction
 
-    if (auto* svs = renderer_->getSpellVisualSystem()) svs->reset();
+    if (auto* svs = spellVisuals_) svs->reset();
 }
 
 bool AnimationController::isMoving() const {
-    auto* cameraController = renderer_->getCameraController();
+    auto* cameraController = cameraController_;
     return cameraController && cameraController->isMoving();
 }
 
@@ -289,8 +293,8 @@ void AnimationController::triggerMeleeSwing() {
     if (durationSec > 1.0f) durationSec = 1.0f;
     meleeSwingTimer_ = durationSec;
 
-    if (renderer_->getAudioCoordinator()->getActivitySoundManager()) {
-        renderer_->getAudioCoordinator()->getActivitySoundManager()->playMeleeSwing();
+    if (audio_->getActivitySoundManager()) {
+        audio_->getActivitySoundManager()->playMeleeSwing();
     }
 }
 
@@ -358,8 +362,8 @@ void AnimationController::triggerSpecialAttack(uint32_t /*spellId*/) {
     if (dur < 0.25f) dur = 0.25f;
     if (dur > 1.0f) dur = 1.0f;
     meleeSwingTimer_ = dur;
-    if (renderer_->getAudioCoordinator()->getActivitySoundManager()) {
-        renderer_->getAudioCoordinator()->getActivitySoundManager()->playMeleeSwing();
+    if (audio_->getActivitySoundManager()) {
+        audio_->getActivitySoundManager()->playMeleeSwing();
     }
 }
 
@@ -612,7 +616,7 @@ void AnimationController::stopChargeEffect() {
 
 void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplayId, float heightOffset, const std::string& modelPath) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
-    auto* cameraController = renderer_->getCameraController();
+    auto* cameraController = cameraController_;
 
     mountInstanceId_ = mountInstId;
     mountHeightOffset_ = heightOffset;
@@ -843,9 +847,9 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
     LOG_INFO("Mount configured: displayId=", mountDisplayId, " taxiFlight=", taxiFlight_);
     characterAnimator_.configureMountFSM(mountAnims, taxiFlight_);
 
-    if (renderer_->getAudioCoordinator()->getMountSoundManager()) {
+    if (audio_->getMountSoundManager()) {
         bool isFlying = taxiFlight_;
-        renderer_->getAudioCoordinator()->getMountSoundManager()->onMount(mountDisplayId, isFlying, modelPath);
+        audio_->getMountSoundManager()->onMount(mountDisplayId, isFlying, modelPath);
     }
 }
 
@@ -862,13 +866,13 @@ void AnimationController::clearMount() {
     // Clear MountFSM via CharacterAnimator
     characterAnimator_.clearMountFSM();
 
-    if (auto* cameraController = renderer_->getCameraController()) {
+    if (auto* cameraController = cameraController_) {
         cameraController->setMounted(false);
         cameraController->setMountHeightOffset(0.0f);
     }
 
-    if (renderer_->getAudioCoordinator()->getMountSoundManager()) {
-        renderer_->getAudioCoordinator()->getMountSoundManager()->onDismount();
+    if (audio_->getMountSoundManager()) {
+        audio_->getMountSoundManager()->onDismount();
     }
 }
 
@@ -956,7 +960,7 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
 
     // Ground mounts: try a seat attachment first.
     const glm::vec3& characterPosition = renderer_->getCharacterPosition();
-    bool moving = renderer_->getCameraController() && renderer_->getCameraController()->isMoving();
+    bool moving = cameraController_ && cameraController_->isMoving();
 
     glm::mat4 mountSeatTransform;
     bool haveSeat = false;
@@ -1034,7 +1038,7 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
 
 void AnimationController::updateMountedAnimation(float deltaTime) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
-    auto* cameraController = renderer_->getCameraController();
+    auto* cameraController = cameraController_;
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     float characterYaw = renderer_->getCharacterYaw();
     auto& mountFSM = characterAnimator_.getMountFSM();
@@ -1084,7 +1088,7 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
     }
 
     // Handle mount sounds
-    auto* mountSoundMgr = renderer_->getAudioCoordinator()->getMountSoundManager();
+    auto* mountSoundMgr = audio_->getMountSoundManager();
     if (mountOut.playJumpSound && mountSoundMgr) {
         mountSoundMgr->playJumpSound();
     }
@@ -1112,7 +1116,7 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
 
 void AnimationController::updateCharacterAnimation() {
     auto* characterRenderer = renderer_->getCharacterRenderer();
-    auto* cameraController = renderer_->getCameraController();
+    auto* cameraController = cameraController_;
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
 
     // Lazy probe: populate capability set once per model.
@@ -1215,14 +1219,14 @@ void AnimationController::updateCharacterAnimation() {
 // ── Footstep update (delegated to FootstepDriver) ───────────────────────────
 
 void AnimationController::updateFootsteps(float deltaTime) {
-    footstepDriver_.update(deltaTime, renderer_, isMounted(), mountInstanceId_,
+    footstepDriver_.update(deltaTime, context(), isMounted(), mountInstanceId_,
                             taxiFlight_, isFootstepAnimationState());
 }
 
 // ── Activity SFX state tracking ──────────────────────────────────────────────
 
 void AnimationController::updateSfxState(float deltaTime) {
-    sfxStateDriver_.update(deltaTime, renderer_, isMounted(), taxiFlight_,
+    sfxStateDriver_.update(deltaTime, context(), isMounted(), taxiFlight_,
                            footstepDriver_);
 }
 

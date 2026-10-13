@@ -298,7 +298,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
             if (!emoteText.empty()) {
                 auto* renderer = services_.renderer;
                 if (renderer) {
-                    if (auto* ac = renderer->getAnimationController()) ac->playEmote(cmdLower);
+                    if (auto* ac = services_.animationController) ac->playEmote(cmdLower);
                 }
 
                 uint32_t dbcId = rendering::AnimationController::getEmoteDbcId(cmdLower);

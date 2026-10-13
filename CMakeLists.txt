@@ -651,6 +651,7 @@ set(WOWEE_SOURCES
     src/core/helm_visual.cpp
     src/core/world_loader.cpp
     src/core/zone_tracker.cpp
+    src/core/player_view.cpp
     src/core/npc_interaction_callback_handler.cpp
     src/core/audio_callback_handler.cpp
     src/core/entity_spawn_callback_handler.cpp

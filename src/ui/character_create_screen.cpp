@@ -180,7 +180,7 @@ void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
         preview_ = std::make_unique<rendering::CharacterPreview>();
         if (preview_->initialize(am)) {
             auto* renderer = core::Application::getInstance().getRenderer();
-            if (renderer) renderer->registerPreview(preview_.get());
+            if (renderer) renderer->registerComposite(preview_.get());
         }
     }
     if (preview_) preview_->resetView();

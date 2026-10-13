@@ -1,4 +1,5 @@
 #include "rendering/animation/footstep_driver.hpp"
+#include "rendering/animation/animation_context.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
@@ -55,14 +56,14 @@ FootprintFallback fallbackForMount(audio::MountFamily family) {
     return FootprintFallback::BIPED;
 }
 
-void spawnFootprint(Renderer* renderer, CharacterRenderer* characterRenderer,
+void spawnFootprint(const AnimationContext& ctx, CharacterRenderer* characterRenderer,
                     uint32_t instanceId, bool leftFoot, FootprintFallback fallback) {
-    auto* footprints = renderer->getFootprintRenderer();
+    auto* footprints = ctx.renderer->getFootprintRenderer();
     if (!footprints || !characterRenderer || instanceId == 0) return;
     std::string modelName;
     characterRenderer->getInstanceModelName(instanceId, modelName);
-    footprints->spawn(modelName, renderer->getCharacterPosition(),
-                      glm::radians(renderer->getCharacterYaw()), leftFoot, fallback);
+    footprints->spawn(modelName, ctx.renderer->getCharacterPosition(),
+                      glm::radians(ctx.renderer->getCharacterYaw()), leftFoot, fallback);
 }
 
 } // namespace
@@ -118,13 +119,13 @@ bool FootstepDriver::shouldTriggerFootstepEvent(uint32_t animationId, float anim
     return trigger;
 }
 
-audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer) const {
-    auto* cameraController = renderer->getCameraController();
+audio::FootstepSurface FootstepDriver::resolveFootstepSurface(const AnimationContext& ctx) const {
+    auto* cameraController = ctx.cameraController;
     if (!cameraController || !cameraController->isThirdPerson()) {
         return audio::FootstepSurface::STONE;
     }
 
-    const glm::vec3& p = renderer->getCharacterPosition();
+    const glm::vec3& p = ctx.renderer->getCharacterPosition();
 
     float distSq = glm::dot(p - cachedFootstepPosition_, p - cachedFootstepPosition_);
     if (distSq < 2.25f && cachedFootstepUpdateTimer_ < 0.5f) {
@@ -139,7 +140,7 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
         return audio::FootstepSurface::WATER;
     }
 
-    auto* waterRenderer = renderer->getWaterRenderer();
+    auto* waterRenderer = ctx.renderer->getWaterRenderer();
     if (waterRenderer) {
         auto waterH = waterRenderer->getWaterHeightAt(p.x, p.y);
         if (waterH && p.z < (*waterH + 0.25f)) {
@@ -148,8 +149,8 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
         }
     }
 
-    auto* wmoRenderer = renderer->getWMORenderer();
-    auto* terrainManager = renderer->getTerrainManager();
+    auto* wmoRenderer = ctx.renderer->getWMORenderer();
+    auto* terrainManager = ctx.renderer->getTerrainManager();
     if (wmoRenderer) {
         auto wmoFloor = wmoRenderer->getFloorHeight(p.x, p.y, p.z + 1.5f);
         auto terrainFloor = terrainManager ? terrainManager->getHeightAt(p.x, p.y) : std::nullopt;
@@ -181,14 +182,14 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
     return surface;
 }
 
-void FootstepDriver::playWaterStepExtras(Renderer* renderer) const {
-    if (renderer->getAudioCoordinator()->getMovementSoundManager()) {
-        renderer->getAudioCoordinator()->getMovementSoundManager()->playWaterFootstep(audio::MovementSoundManager::CharacterSize::MEDIUM);
+void FootstepDriver::playWaterStepExtras(const AnimationContext& ctx) const {
+    if (ctx.audio->getMovementSoundManager()) {
+        ctx.audio->getMovementSoundManager()->playWaterFootstep(audio::MovementSoundManager::CharacterSize::MEDIUM);
     }
-    auto* swimEffects = renderer->getSwimEffects();
-    auto* waterRenderer = renderer->getWaterRenderer();
+    auto* swimEffects = ctx.renderer->getSwimEffects();
+    auto* waterRenderer = ctx.renderer->getWaterRenderer();
     if (swimEffects && waterRenderer) {
-        const glm::vec3& characterPosition = renderer->getCharacterPosition();
+        const glm::vec3& characterPosition = ctx.renderer->getCharacterPosition();
         auto wh = waterRenderer->getWaterHeightAt(characterPosition.x, characterPosition.y);
         if (wh) {
             swimEffects->spawnFootSplash(characterPosition, *wh);
@@ -198,15 +199,15 @@ void FootstepDriver::playWaterStepExtras(Renderer* renderer) const {
 
 // ── Footstep update (moved from AnimationController::updateFootsteps) ────────
 
-void FootstepDriver::update(float deltaTime, Renderer* renderer,
+void FootstepDriver::update(float deltaTime, const AnimationContext& ctx,
                              bool mounted, uint32_t mountInstanceId, bool taxiFlight,
                              bool isFootstepState) {
-    auto* footstepManager = renderer->getAudioCoordinator()->getFootstepManager();
+    auto* footstepManager = ctx.audio->getFootstepManager();
     if (!footstepManager) return;
 
-    auto* characterRenderer = renderer->getCharacterRenderer();
-    auto* cameraController = renderer->getCameraController();
-    uint32_t characterInstanceId = renderer->getCharacterInstanceId();
+    auto* characterRenderer = ctx.renderer->getCharacterRenderer();
+    auto* cameraController = ctx.cameraController;
+    uint32_t characterInstanceId = ctx.renderer->getCharacterInstanceId();
 
     footstepManager->update(deltaTime);
     cachedFootstepUpdateTimer_ += deltaTime;
@@ -243,7 +244,7 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                     return mountFootstepLastNormTime_ < eventNorm || eventNorm <= norm;
                 };
 
-                auto* mountSounds = renderer->getAudioCoordinator()->getMountSoundManager();
+                auto* mountSounds = ctx.audio->getMountSoundManager();
                 const auto family = mountSounds
                     ? mountSounds->getCurrentMountFamily()
                     : audio::MountFamily::UNKNOWN;
@@ -290,12 +291,12 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                 }
 
                 if (beat) {
-                    const auto surface = resolveFootstepSurface(renderer);
+                    const auto surface = resolveFootstepSurface(ctx);
                     footstepManager->playMountFootstep(surface, bank);
                     if (surface == audio::FootstepSurface::WATER) {
-                        playWaterStepExtras(renderer);
+                        playWaterStepExtras(ctx);
                     } else {
-                        spawnFootprint(renderer, characterRenderer, mountInstanceId,
+                        spawnFootprint(ctx, characterRenderer, mountInstanceId,
                                        nextMountFootLeft_, fallbackForMount(family));
                         nextMountFootLeft_ = !nextMountFootLeft_;
                     }
@@ -313,12 +314,12 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
         if (characterRenderer->getAnimationState(characterInstanceId, animId, animTimeMs, animDurationMs) &&
             shouldTriggerFootstepEvent(animId, animTimeMs, animDurationMs,
                                        characterRenderer->getFootstepEventTimes(characterInstanceId))) {
-            auto surface = resolveFootstepSurface(renderer);
+            auto surface = resolveFootstepSurface(ctx);
             footstepManager->playFootstep(surface, cameraController->isSprinting());
             if (surface == audio::FootstepSurface::WATER) {
-                playWaterStepExtras(renderer);
+                playWaterStepExtras(ctx);
             } else {
-                spawnFootprint(renderer, characterRenderer, characterInstanceId,
+                spawnFootprint(ctx, characterRenderer, characterInstanceId,
                                nextPlayerFootLeft_, FootprintFallback::BIPED);
                 nextPlayerFootLeft_ = !nextPlayerFootLeft_;
             }

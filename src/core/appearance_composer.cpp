@@ -1,4 +1,5 @@
 #include "core/appearance_composer.hpp"
+#include "core/player_view.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
@@ -82,10 +83,12 @@ glm::mat4 weaponLocalTransform(bool sheathed, game::EquipSlot /*slot*/,
 } // namespace
 
 AppearanceComposer::AppearanceComposer(rendering::Renderer* renderer,
+                                       PlayerView* playerView,
                                        pipeline::AssetManager* assetManager,
                                        game::GameHandler* gameHandler,
                                        EntitySpawner* entitySpawner)
     : renderer_(renderer)
+    , playerView_(playerView)
     , assetManager_(assetManager)
     , gameHandler_(gameHandler)
     , entitySpawner_(entitySpawner)
@@ -487,8 +490,8 @@ void AppearanceComposer::loadEquippedWeapons() {
         miningPickInstanceId_ = 0;
     }
     showingRanged_ = false;
-    if (renderer_ && renderer_->getAnimationController())
-        renderer_->getAnimationController()->setRangedWeaponActive(false);
+    if (renderer_ && playerView_->getAnimationController())
+        playerView_->getAnimationController()->setRangedWeaponActive(false);
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized())
         return;
     if (!gameHandler_) return;
@@ -717,8 +720,8 @@ void AppearanceComposer::showMiningPick(bool show) {
         showingMiningPick_ = true;
         miningPickInstanceId_ = charInstanceId;
         showingRanged_ = false;
-        if (renderer_->getAnimationController())
-            renderer_->getAnimationController()->setRangedWeaponActive(false);
+        if (playerView_->getAnimationController())
+            playerView_->getAnimationController()->setRangedWeaponActive(false);
         LOG_INFO("Mining pick attached at right hand: ", m2Path);
     } else {
         // Do not leave the player empty-handed if the temporary model failed.
@@ -799,8 +802,8 @@ void AppearanceComposer::showFishingPole(bool show) {
                                    modelId, texturePath)) {
         showingFishingPole_ = true;
         showingRanged_ = false;
-        if (renderer_->getAnimationController())
-            renderer_->getAnimationController()->setRangedWeaponActive(false);
+        if (playerView_->getAnimationController())
+            playerView_->getAnimationController()->setRangedWeaponActive(false);
         LOG_INFO("Fishing pole attached at right hand: ", m2Path);
     } else {
         loadEquippedWeapons();
@@ -819,8 +822,8 @@ void AppearanceComposer::showRangedWeapon(bool show) {
 
     if (!show) {
         showingRanged_ = false;
-        if (renderer_->getAnimationController())
-            renderer_->getAnimationController()->setRangedWeaponActive(false);
+        if (playerView_->getAnimationController())
+            playerView_->getAnimationController()->setRangedWeaponActive(false);
         // Swap back to normal melee weapons
         loadEquippedWeapons();
         return;
@@ -871,8 +874,8 @@ void AppearanceComposer::showRangedWeapon(bool show) {
     bool ok = charRenderer->attachWeapon(charInstanceId, 1, weaponModel, weaponModelId, texturePath);
     if (ok) {
         showingRanged_ = true;
-        if (renderer_->getAnimationController())
-            renderer_->getAnimationController()->setRangedWeaponActive(true);
+        if (playerView_->getAnimationController())
+            playerView_->getAnimationController()->setRangedWeaponActive(true);
         LOG_INFO("Swapped to ranged weapon: ", m2Path, " at attachment 1 (right hand)");
     }
 }

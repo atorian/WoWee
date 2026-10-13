@@ -541,7 +541,7 @@ void GameHandler::registerCoreOpcodes() {
                 else if (threshold >= 3) addSystemChatMessage("You feel completely smashed.");
                 else addSystemChatMessage("You feel sober again.");
                 if (auto* renderer = services_.renderer) {
-                    if (auto* camera = renderer->getCameraController()) {
+                    if (auto* camera = services_.cameraController) {
                         camera->setIntoxication(amount);
                     }
                     if (auto* post = renderer->getPostProcessPipeline()) {
@@ -2464,7 +2464,7 @@ void GameHandler::registerRemainingOpcodes() {
             glm::vec3 canonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
             spawnPos = core::coords::canonicalToRender(canonical);
         }
-        if (auto* sv = renderer->getSpellVisualSystem()) sv->playSpellVisual(impVisualId, spawnPos, /*useImpactKit=*/true);
+        if (auto* sv = services_.spellVisualSystem) sv->playSpellVisual(impVisualId, spawnPos, /*useImpactKit=*/true);
     };
     // SMSG_READ_ITEM_OK - moved to InventoryHandler::registerOpcodes
     // SMSG_READ_ITEM_FAILED - moved to InventoryHandler::registerOpcodes

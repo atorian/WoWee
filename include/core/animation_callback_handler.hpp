@@ -11,6 +11,8 @@ namespace core { class AppearanceComposer; class EntitySpawner; }
 
 namespace core {
 
+class PlayerView;
+
 /// Handles animation callbacks: death, respawn, swing, hit reaction, spell cast, emote,
 /// stun, stealth, health, ghost, stand state, loot, sprint, vehicle, charge.
 /// Owns charge rush state (interpolated in update).
@@ -18,6 +20,7 @@ class AnimationCallbackHandler {
 public:
     AnimationCallbackHandler(EntitySpawner& entitySpawner,
                              rendering::Renderer& renderer,
+                             PlayerView& playerView,
                              game::GameHandler& gameHandler,
                              AppearanceComposer& appearanceComposer);
 
@@ -36,6 +39,7 @@ public:
 private:
     EntitySpawner& entitySpawner_;
     rendering::Renderer& renderer_;
+    PlayerView& playerView_;
     game::GameHandler& gameHandler_;
     AppearanceComposer& appearanceComposer_;
 

@@ -1,4 +1,5 @@
 #include "core/audio_callback_handler.hpp"
+#include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
@@ -17,11 +18,13 @@ AudioCallbackHandler::AudioCallbackHandler(
     pipeline::AssetManager& assetManager,
     audio::AudioCoordinator* audioCoordinator,
     rendering::Renderer* renderer,
+    PlayerView* playerView,
     ui::UIManager* uiManager,
     game::GameHandler& gameHandler)
     : assetManager_(assetManager)
     , audioCoordinator_(audioCoordinator)
     , renderer_(renderer)
+    , playerView_(playerView)
     , uiManager_(uiManager)
     , gameHandler_(gameHandler)
 {
@@ -52,7 +55,7 @@ void AudioCallbackHandler::setupCallbacks() {
             uiManager_->getGameScreen().toastManager().triggerDing(newLevel);
         }
         if (renderer_) {
-            if (auto* ac = renderer_->getAnimationController()) ac->triggerLevelUpEffect(renderer_->getCharacterPosition());
+            if (auto* ac = playerView_->getAnimationController()) ac->triggerLevelUpEffect(renderer_->getCharacterPosition());
         }
     });
 
@@ -111,7 +114,7 @@ void AudioCallbackHandler::setupCallbacks() {
         if (entity) {
             glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ());
             glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
-            if (auto* ac = renderer_->getAnimationController()) ac->triggerLevelUpEffect(renderPos);
+            if (auto* ac = playerView_->getAnimationController()) ac->triggerLevelUpEffect(renderPos);
         }
 
         // Show chat message if in group

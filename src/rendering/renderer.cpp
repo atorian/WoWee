@@ -7,7 +7,6 @@
 #include "rendering/sky_params_from_lighting.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/camera.hpp"
-#include "rendering/camera_controller.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/camera_water_depth.hpp"
@@ -47,7 +46,6 @@
 #include "rendering/loot_sparkles.hpp"
 #include "rendering/corpse_bones.hpp"
 #include "rendering/minimap.hpp"
-#include "rendering/world_map.hpp"
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -66,9 +64,7 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/amd_fsr3_runtime.hpp"
-#include "rendering/spell_visual_system.hpp"
 #include "rendering/post_process_pipeline.hpp"
-#include "rendering/animation_controller.hpp"
 #include "rendering/render_graph.hpp"
 #include "rendering/overlay_system.hpp"
 #include <imgui.h>
@@ -825,13 +821,7 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
 
     // Water ripple gate: swimming and actually moving.
-    if (cameraController) {
-        bool inWater = cameraController->isSwimming();
-        bool moving = cameraController->isMoving();
-        currentFrameData.fogParams.w = (inWater && moving) ? 1.0f : 0.0f;
-    } else {
-        currentFrameData.fogParams.w = 0.0f;
-    }
+    currentFrameData.fogParams.w = (viewerMotion_.swimming && viewerMotion_.moving) ? 1.0f : 0.0f;
 
     // Copy to current frame's mapped UBO
     uint32_t frame = vkCtx->getCurrentFrame();
@@ -863,11 +853,6 @@ bool Renderer::initialize(core::Window* win) {
     camera->setRotation(0.0f, -5.0f);
     camera->setAspectRatio(window->getAspectRatio());
     camera->setFov(60.0f);
-
-    // Create camera controller
-    cameraController = std::make_unique<CameraController>(camera.get());
-    cameraController->setUseWoWSpeed(true);  // Use realistic WoW movement speed
-    cameraController->setMouseSensitivity(0.15f);
 
     // Create performance HUD
     performanceHUD = std::make_unique<PerformanceHUD>();
@@ -1029,12 +1014,6 @@ void Renderer::shutdown() {
         minimap.reset();
     }
 
-    LOG_DEBUG("Renderer::shutdown - worldMap...");
-    if (worldMap) {
-        worldMap->shutdown();
-        worldMap.reset();
-    }
-
     if (sunShafts_) {
         sunShafts_->shutdown();
         sunShafts_.reset();
@@ -1079,18 +1058,11 @@ void Renderer::shutdown() {
     }
 
     // Shutdown AnimationController before renderers it references (§4.2)
-    animationController_.reset();
 
     LOG_DEBUG("Renderer::shutdown - wmoRenderer...");
     if (wmoRenderer) {
         wmoRenderer->shutdown();
         wmoRenderer.reset();
-    }
-
-    // Shutdown SpellVisualSystem before M2Renderer (it holds M2Renderer pointer) (§4.4)
-    if (spellVisualSystem_) {
-        spellVisualSystem_->shutdown();
-        spellVisualSystem_.reset();
     }
 
     if (grassRenderer_) {
@@ -1140,25 +1112,20 @@ void Renderer::shutdown() {
     destroyPerFrameResources();
 
     performanceHUD.reset();
-    cameraController.reset();
     camera.reset();
 
     LOG_INFO("Renderer shutdown");
 }
 
-void Renderer::registerPreview(CharacterPreview* preview) {
-    if (!preview) return;
-    auto it = std::find(activePreviews_.begin(), activePreviews_.end(), preview);
-    if (it == activePreviews_.end()) {
-        activePreviews_.push_back(preview);
+void Renderer::registerComposite(OffscreenComposite* composite) {
+    if (composite && std::find(offscreenComposites_.begin(), offscreenComposites_.end(), composite) ==
+                         offscreenComposites_.end()) {
+        offscreenComposites_.push_back(composite);
     }
 }
 
-void Renderer::unregisterPreview(CharacterPreview* preview) {
-    auto it = std::find(activePreviews_.begin(), activePreviews_.end(), preview);
-    if (it != activePreviews_.end()) {
-        activePreviews_.erase(it);
-    }
+void Renderer::unregisterComposite(OffscreenComposite* composite) {
+    std::erase(offscreenComposites_, composite);
 }
 
 void Renderer::setWaterRefractionEnabled(bool /*enabled*/) {
@@ -1657,10 +1624,6 @@ void Renderer::endFrame() {
 
 void Renderer::setCharacterFollow(uint32_t instanceId) {
     characterInstanceId = instanceId;
-    if (cameraController && instanceId > 0) {
-        cameraController->setFollowTarget(&characterPosition);
-    }
-    if (animationController_) animationController_->onCharacterFollow(instanceId);
 }
 
 bool Renderer::startRecording(const std::string& path, std::string& error) {
@@ -1869,11 +1832,6 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
     return ok != 0;
 }
 
-void Renderer::resetCombatVisualState() {
-    if (animationController_) animationController_->resetCombatVisualState();
-    if (spellVisualSystem_) spellVisualSystem_->reset();
-}
-
 bool Renderer::updateSkyboxLayers() {
     // Which skybox models a place uses is Light.dbc's answer, not a map id:
     // LightParams names a LightSkybox row and LightSkybox names the model.
@@ -2055,28 +2013,6 @@ void Renderer::update(float deltaTime) {
     if (wmoRenderer) wmoRenderer->resetQueryStats();
     if (m2Renderer) m2Renderer->resetQueryStats();
 
-    if (cameraController) {
-        auto cameraStart = std::chrono::steady_clock::now();
-        cameraController->update(deltaTime);
-        auto cameraEnd = std::chrono::steady_clock::now();
-        lastCameraUpdateMs = std::chrono::duration<double, std::milli>(cameraEnd - cameraStart).count();
-        if (lastCameraUpdateMs > 50.0) {
-            LOG_WARNING("SLOW cameraController->update: ", lastCameraUpdateMs, "ms");
-        }
-
-        endPhase("camera");
-    } else {
-        lastCameraUpdateMs = 0.0;
-    }
-
-    // Visibility hardening: ensure player instance cannot stay hidden after
-    // taxi/camera transitions, but preserve first-person self-hide.
-    if (characterRenderer && characterInstanceId > 0 && cameraController) {
-        if ((cameraController->isThirdPerson() && !cameraController->isFirstPersonView()) || (animationController_ && animationController_->isTaxiFlight())) {
-            characterRenderer->setInstanceVisible(characterInstanceId, true);
-        }
-    }
-
     // Resolve WMO containment before weather and ambience consume it. Server
     // weather remains authoritative outdoors, but particles must not follow the
     // camera through a roof into Ironforge or other enclosed WMOs.
@@ -2145,63 +2081,6 @@ void Renderer::update(float deltaTime) {
         }
     }
 
-    // Sync character model position/rotation and animation with follow target
-    if (characterInstanceId > 0 && characterRenderer && cameraController) {
-        characterRenderer->setInstancePosition(characterInstanceId, characterPosition);
-
-        // Movement-facing comes from camera controller and is decoupled from LMB orbit.
-        bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
-        bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
-                             && !cameraController->isMovingBackward();
-        float torsoYawDeltaDeg = 0.0f;
-        if (taxiFlight) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (cameraController->isMoving() && activeStrafe) {
-            characterYaw = cameraController->getTravelYaw();
-            torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
-        } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
-                   cameraController->isTurningLeft() || cameraController->isTurningRight()) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (animationController_ && animationController_->isInCombat() &&
-                   animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
-            glm::vec3 toTarget = *animationController_->getTargetPosition() - characterPosition;
-            if (toTarget.x * toTarget.x + toTarget.y * toTarget.y > 0.01f) {
-                // Go through canonical, the way spawning and the camera do.
-                // Taking atan2 of the render delta directly yields a heading in
-                // a different convention - a mirror about 135 degrees - so the
-                // spin looked roughly right but the frame loop then converted it
-                // back to a canonical yaw that pointed somewhere else, and the
-                // server rejected the cast for not facing the target.
-                const glm::vec3 toTargetCanonical = ::wowee::core::coords::renderToCanonical(toTarget);
-                const float canonYawToTarget =
-                    std::atan2(-toTargetCanonical.y, toTargetCanonical.x);
-                float targetYaw = ::wowee::core::coords::canonicalToCharacterYawDeg(canonYawToTarget);
-                float diff = targetYaw - characterYaw;
-                while (diff > 180.0f) diff -= 360.0f;
-                while (diff < -180.0f) diff += 360.0f;
-                float rotSpeed = 360.0f * deltaTime;
-                if (std::abs(diff) < rotSpeed) {
-                    characterYaw = targetYaw;
-                } else {
-                    characterYaw += (diff > 0 ? rotSpeed : -rotSpeed);
-                }
-            }
-        }
-        float yawRad = glm::radians(characterYaw);
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
-
-        while (torsoYawDeltaDeg > 180.0f) torsoYawDeltaDeg -= 360.0f;
-        while (torsoYawDeltaDeg < -180.0f) torsoYawDeltaDeg += 360.0f;
-        characterRenderer->setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
-
-        // Update animation based on movement state (delegated to AnimationController §4.2)
-        if (animationController_) {
-            animationController_->updateMeleeTimers(deltaTime);
-            animationController_->setDeltaTime(deltaTime);
-            animationController_->updateCharacterAnimation();
-        }
-    }
-
     endPhase("weather/character anim");
     // Update terrain streaming
     if (terrainManager && camera) {
@@ -2238,25 +2117,20 @@ void Renderer::update(float deltaTime) {
     }
 
     // Update swim effects
-    if (swimEffects && camera && cameraController && waterRenderer) {
-        swimEffects->update(*camera, *cameraController, *waterRenderer, deltaTime);
+    if (swimEffects && camera && waterRenderer) {
+        swimEffects->update(*camera, viewerMotion_, characterPosition, *waterRenderer, deltaTime);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
     // is thrown by SwimEffects above; this is the froth on the surface itself,
     // which has to come from the water shader to move and light with the water.
-    if (waterRenderer && camera && cameraController) {
-        glm::vec3 charPos = camera->getPosition();
-        const glm::vec3* followTarget = cameraController->getFollowTarget();
-        if (cameraController->isThirdPerson() && followTarget) {
-            charPos = *followTarget;
-        }
-
-        const bool swimming = cameraController->isSwimming();
+    if (waterRenderer && camera) {
+        const glm::vec3 charPos = viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+        const bool swimming = viewerMotion_.swimming;
         float intensity = 0.0f;
         bool wading = false;
 
-        if (cameraController->isMoving()) {
+        if (viewerMotion_.moving) {
             if (auto waterH = waterRenderer->getWaterHeightAt(charPos.x, charPos.y)) {
                 if (swimming) {
                     // A wake only exists where the swimmer meets the surface -
@@ -2275,7 +2149,7 @@ void Renderer::update(float deltaTime) {
             }
         }
 
-        const float yawRad = glm::radians(cameraController->getYaw());
+        const float yawRad = glm::radians(viewerMotion_.yawDeg);
         const glm::vec2 travelDir(std::sin(yawRad), -std::cos(yawRad));
         waterRenderer->updateWake(deltaTime, glm::vec2(charPos.x, charPos.y),
                                   travelDir, intensity, wading);
@@ -2285,24 +2159,6 @@ void Renderer::update(float deltaTime) {
     if (mountDust) {
         mountDust->update(deltaTime);
 
-        // Spawn dust when mounted and moving on ground
-        if ((animationController_ && animationController_->isMounted()) && camera && cameraController && !(animationController_ && animationController_->isTaxiFlight())) {
-            bool isMoving = cameraController->isMoving();
-            bool onGround = cameraController->isGrounded();
-
-            if (isMoving && onGround) {
-                // Calculate velocity from camera direction and speed
-                glm::vec3 forward = camera->getForward();
-                float speed = cameraController->getMovementSpeed();
-                glm::vec3 velocity = forward * speed;
-                velocity.z = 0.0f;  // Ignore vertical component
-
-                // Spawn dust at mount's feet (slightly below character position)
-                float mho = animationController_ ? animationController_->getMountHeightOffset() : 0.0f;
-                glm::vec3 dustPos = characterPosition - glm::vec3(0.0f, 0.0f, mho * 0.8f);
-                mountDust->spawnDust(dustPos, velocity, isMoving);
-            }
-        }
     }
     // Update level-up effect
     if (levelUpEffect) {
@@ -2312,8 +2168,6 @@ void Renderer::update(float deltaTime) {
     if (chargeEffect) {
         chargeEffect->update(deltaTime);
     }
-    // Update transient spell visual instances (delegated to SpellVisualSystem §4.4)
-    if (spellVisualSystem_) spellVisualSystem_->update(deltaTime);
     endPhase("sky/effects");
 
 
@@ -2354,10 +2208,6 @@ void Renderer::update(float deltaTime) {
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
-    if (animationController_) animationController_->updateFootsteps(deltaTime);
-
-    // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
-    if (animationController_) animationController_->updateSfxState(deltaTime);
 
     // Update performance HUD
     if (performanceHUD) {
@@ -3686,26 +3536,14 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
 /// The minimap disc, over whatever has been drawn so far.
 void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
     if (minimap && minimap->isEnabled() && camera && window) {
-        glm::vec3 minimapCenter = camera->getPosition();
-        if (cameraController && cameraController->isThirdPerson())
-            minimapCenter = characterPosition;
-        float minimapPlayerOrientation = 0.0f;
-        bool hasMinimapPlayerOrientation = false;
-        if (cameraController) {
-            // Render-space character yaw faces north at 180 degrees; the
-            // minimap shader arrow faces north at 0. Match the mirrored
-            // minimap texture by flipping the visual arrow vertically.
-            minimapPlayerOrientation = glm::radians(characterYaw);
-            hasMinimapPlayerOrientation = true;
-        } else if (environment_.playerOrientation) {
-            // Canonical yaw: north is 0, east is +pi/2. Match the mirrored
-            // minimap texture by flipping the visual arrow vertically.
-            minimapPlayerOrientation = glm::pi<float>() - *environment_.playerOrientation;
-            hasMinimapPlayerOrientation = true;
-        }
+        const glm::vec3 minimapCenter =
+            viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+        // Render-space character yaw faces north at 180 degrees; the
+        // minimap shader arrow faces north at 0. Match the mirrored
+        // minimap texture by flipping the visual arrow vertically.
         minimap->render(cmd, *camera, minimapCenter,
                         window->getWidth(), window->getHeight(),
-                        minimapPlayerOrientation, hasMinimapPlayerOrientation);
+                        glm::radians(characterYaw), true);
     }
 }
 
@@ -3727,7 +3565,6 @@ bool Renderer::waterDrawsInContinuePass() const {
 void Renderer::setActiveMapName(const std::string& name) {
     if (terrainManager) terrainManager->setMapName(name);
     if (minimap) minimap->setMapName(name);
-    if (worldMap) worldMap->setMapName(name);
     if (wmoRenderer) wmoRenderer->setMapName(name);
 }
 
@@ -3787,15 +3624,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
-    // Create world map if not already created
-    if (!worldMap) {
-        worldMap = std::make_unique<WorldMap>();
-        if (!worldMap->initialize(vkCtx, assetManager)) {
-            LOG_ERROR("Failed to initialize world map");
-            worldMap.reset();
-        }
-    }
-
     // Create M2, WMO, and Character renderers
     if (!m2Renderer) {
         m2Renderer = std::make_unique<M2Renderer>();
@@ -3808,11 +3636,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         });
         if (swimEffects) {
             swimEffects->setM2Renderer(m2Renderer.get());
-        }
-        // Initialize SpellVisualSystem once M2Renderer is available (§4.4)
-        if (!spellVisualSystem_) {
-            spellVisualSystem_ = std::make_unique<SpellVisualSystem>();
-            spellVisualSystem_->initialize(m2Renderer.get(), this);
         }
     }
 
@@ -3869,12 +3692,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
-    // Initialize AnimationController (§4.2)
-    if (!animationController_) {
-        animationController_ = std::make_unique<AnimationController>();
-        animationController_->initialize(this);
-    }
-
     // Create and initialize terrain manager
     if (!terrainManager) {
         terrainManager = std::make_unique<TerrainManager>();
@@ -3914,19 +3731,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (minimap) {
             minimap->setAssetManager(assetManager);
         }
-        // Wire terrain manager, WMO renderer, and water renderer to camera controller
-        if (cameraController) {
-            cameraController->setTerrainManager(terrainManager.get());
-            if (wmoRenderer) {
-                cameraController->setWMORenderer(wmoRenderer.get());
-            }
-            if (m2Renderer) {
-                cameraController->setM2Renderer(m2Renderer.get());
-            }
-            if (waterRenderer) {
-                cameraController->setWaterRenderer(waterRenderer.get());
-            }
-        }
     }
 
     // Set map name on sub-renderers
@@ -3951,11 +3755,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
 
         cachedAssetManager = assetManager;
-    }
-
-    // Snap camera to ground
-    if (cameraController) {
-        cameraController->reset();
     }
 
     return true;
@@ -4728,7 +4527,7 @@ float Renderer::volumetricFogExtinction() const {
 
     // Indoors the outdoor air mostly stays outside. Not all of it: a hall
     // with torches in it should still show their glow.
-    if (cameraController && cameraController->isInsideInteriorWMO()) extinction *= 0.35f;
+    if (viewerMotion_.insideInterior) extinction *= 0.35f;
     return extinction;
 }
 
@@ -4846,27 +4645,18 @@ void Renderer::buildFrameGraph() {
     renderGraph_->addPass("minimap_composite", {}, {},
         [this](VkCommandBuffer cmd) {
             if (minimap && minimap->isEnabled() && camera) {
-                glm::vec3 minimapCenter = camera->getPosition();
-                if (cameraController && cameraController->isThirdPerson())
-                    minimapCenter = characterPosition;
+                const glm::vec3 minimapCenter =
+                    viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
                 minimap->compositePass(cmd, minimapCenter);
             }
         });
 
-    // World map composite (standalone)
-    renderGraph_->addPass("worldmap_composite", {}, {},
+    // What the interface shows from images of its own: the world map, the
+    // character previews (standalone).
+    renderGraph_->addPass("offscreen_composites", {}, {},
         [this](VkCommandBuffer cmd) {
-            if (worldMap) worldMap->compositePass(cmd);
-        });
-
-    // Character preview composites (standalone)
-    renderGraph_->addPass("preview_composite", {}, {},
-        [this](VkCommandBuffer cmd) {
-            uint32_t frame = vkCtx->getCurrentFrame();
-            for (auto* preview : activePreviews_) {
-                if (preview && preview->isModelLoaded())
-                    preview->compositePass(cmd, frame);
-            }
+            const uint32_t frame = vkCtx->getCurrentFrame();
+            for (auto* composite : offscreenComposites_) composite->compositeOffscreen(cmd, frame);
         });
 
     // Shadow pre-pass → outputs shadow_depth

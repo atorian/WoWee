@@ -472,9 +472,7 @@ void ToastManager::triggerDing(uint32_t newLevel, uint32_t hpDelta, uint32_t man
             sfx->playLevelUp();
         }
     }
-    if (auto* renderer = services_.renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->playEmote("cheer");
-    }
+    if (auto* ac = services_.animationController) ac->playEmote("cheer");
 }
 
 void ToastManager::renderDingEffect() {

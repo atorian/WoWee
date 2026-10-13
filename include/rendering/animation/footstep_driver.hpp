@@ -10,7 +10,7 @@ namespace audio { enum class FootstepSurface : uint8_t; }
 
 namespace rendering {
 
-class Renderer;
+struct AnimationContext;
 
 // ============================================================================
 // FootstepDriver - extracted from AnimationController
@@ -23,7 +23,7 @@ public:
     FootstepDriver() = default;
 
     /// Process footstep events for this frame (called from Renderer::update).
-    void update(float deltaTime, Renderer* renderer,
+    void update(float deltaTime, const AnimationContext& ctx,
                 bool mounted, uint32_t mountInstanceId, bool taxiFlight,
                 bool isFootstepState);
 
@@ -36,12 +36,12 @@ public:
                                     const std::vector<uint32_t>* eventTimesMs = nullptr);
 
     /// Resolve the surface type under the character for footstep sound selection.
-    audio::FootstepSurface resolveFootstepSurface(Renderer* renderer) const;
+    audio::FootstepSurface resolveFootstepSurface(const AnimationContext& ctx) const;
 
 private:
     /// Water-step side effects shared by on-foot and mounted steps
     /// (splash sound layer + visual foot splash).
-    void playWaterStepExtras(Renderer* renderer) const;
+    void playWaterStepExtras(const AnimationContext& ctx) const;
 
     // Player footstep event tracking (animation-driven)
     uint32_t footstepLastAnimationId_ = 0;

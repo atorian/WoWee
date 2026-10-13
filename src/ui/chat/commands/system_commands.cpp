@@ -222,8 +222,7 @@ public:
 class ClimbCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        auto* renderer = ctx.services.renderer;
-        auto* cam = renderer ? renderer->getCameraController() : nullptr;
+        auto* cam = ctx.services.cameraController;
         if (!cam) {
             ctx.gameHandler.addLocalChatMessage(
                 chat_utils::makeSystemMessage("Climb: no camera to set it on."));

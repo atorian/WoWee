@@ -271,7 +271,7 @@ void GameScreen::applyCameraControlSettings() {
     // defaults to, only ever reached it when the slider was moved.
     if (auto* cam = renderer->getCamera()) cam->setFov(settingsPanel_.pendingFov);
 
-    if (auto* cam = renderer->getCameraController()) {
+    if (auto* cam = services_.cameraController) {
         cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
         cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
         cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
@@ -799,13 +799,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         updateCharacterGeosets(gameHandler.getInventory());
         updateCharacterTextures(gameHandler.getInventory());
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
-        // Update renderer weapon type for animation selection
-        auto* r = services_.renderer;
-        if (r) {
+        // Update the weapon type for animation selection
+        if (services_.animationController) {
             const auto& mh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::MAIN_HAND);
             const auto& oh = gameHandler.getInventory().getEquipSlot(game::EquipSlot::OFF_HAND);
             if (mh.empty()) {
-                if (auto* ac = r->getAnimationController()) ac->setEquippedWeaponType(0, false);
+                if (auto* ac = services_.animationController) ac->setEquippedWeaponType(0, false);
             } else {
                 // Polearms and staves use ATTACK_2H_LOOSE instead of ATTACK_2H
                 bool is2HLoose = (mh.item.subclassName == "Polearm" || mh.item.subclassName == "Staff");
@@ -816,18 +815,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 bool hasShield = !oh.empty() && oh.item.inventoryType == game::InvType::SHIELD;
                 bool offHandIsFist = hasOffHand && oh.item.subclassName == "Fist Weapon";
                 bool offHandIsDagger = hasOffHand && oh.item.subclassName == "Dagger";
-                if (auto* ac = r->getAnimationController()) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield, offHandIsFist, offHandIsDagger);
+                if (auto* ac = services_.animationController) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield, offHandIsFist, offHandIsDagger);
             }
             // Detect ranged weapon type from RANGED slot
             const auto& rangedSlot = gameHandler.getInventory().getEquipSlot(game::EquipSlot::RANGED);
             if (rangedSlot.empty()) {
-                if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
+                if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
             } else if (rangedSlot.item.inventoryType == game::InvType::RANGED_BOW) {
                 // subclassName distinguishes Bow vs Crossbow
                 if (rangedSlot.item.subclassName == "Crossbow") {
-                    if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::CROSSBOW);
+                    if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::CROSSBOW);
                 } else {
-                    if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::BOW);
+                    if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::BOW);
                 }
             } else if (rangedSlot.item.inventoryType == game::InvType::RANGED_GUN) {
                 // That inventory type is guns, crossbows and wands together, so
@@ -835,14 +834,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 // a crossbow above. Without this a wand was shouldered and fired
                 // like a rifle.
                 if (rangedSlot.item.subclassName == "Wand") {
-                    if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::WAND);
-                } else if (auto* ac = r->getAnimationController()) {
+                    if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::WAND);
+                } else if (auto* ac = services_.animationController) {
                     ac->setEquippedRangedType(rendering::RangedWeaponType::GUN);
                 }
             } else if (rangedSlot.item.inventoryType == game::InvType::THROWN) {
-                if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::THROWN);
+                if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::THROWN);
             } else {
-                if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
+                if (auto* ac = services_.animationController) ac->setEquippedRangedType(rendering::RangedWeaponType::NONE);
             }
         }
     }
@@ -850,7 +849,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Update renderer face-target position and selection circle
     auto* renderer = services_.renderer;
     if (renderer) {
-        if (auto* ac = renderer->getAnimationController()) ac->setInCombat(gameHandler.isInCombat() &&
+        if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.isInCombat() &&
                               !gameHandler.isPlayerDead() &&
                               !gameHandler.isPlayerGhost());
         if (auto* cr = renderer->getCharacterRenderer()) {
@@ -891,7 +890,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                         targetGLPos.z = footZ;
                     }
                 }
-                if (auto* ac = renderer->getAnimationController()) ac->setTargetPosition(&targetGLPos);
+                if (auto* ac = services_.animationController) ac->setTargetPosition(&targetGLPos);
 
                 // Selection circle color: WoW-canonical level-based colors
                 bool showSelectionCircle = false;
@@ -931,11 +930,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     renderer->clearSelectionCircle();
                 }
             } else {
-                if (auto* ac = renderer->getAnimationController()) ac->setTargetPosition(nullptr);
+                if (auto* ac = services_.animationController) ac->setTargetPosition(nullptr);
                 renderer->clearSelectionCircle();
             }
         } else {
-            if (auto* ac = renderer->getAnimationController()) ac->setTargetPosition(nullptr);
+            if (auto* ac = services_.animationController) ac->setTargetPosition(nullptr);
             renderer->clearSelectionCircle();
         }
     }

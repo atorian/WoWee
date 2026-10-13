@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/character.hpp"
+#include "rendering/offscreen_composite.hpp"
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -22,10 +23,14 @@ class VkContext;
 class VkTexture;
 class VkRenderTarget;
 
-class CharacterPreview {
+class CharacterPreview : public OffscreenComposite {
 public:
     CharacterPreview();
-    ~CharacterPreview();
+    ~CharacterPreview() override;
+
+    void compositeOffscreen(VkCommandBuffer cmd, uint32_t frameIndex) override {
+        if (isModelLoaded()) compositePass(cmd, frameIndex);
+    }
 
     /// Build the offscreen view. The size is the render target's, in pixels,
     /// and it is worth choosing: this is a full character pass every frame,

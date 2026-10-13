@@ -2,6 +2,7 @@
 // Extracted from Application as part of god-class decomposition (Section 3.3)
 
 #include "rendering/animation/melee_anim_chains.hpp"
+#include "core/player_view.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/world_loader.hpp"
@@ -283,10 +284,10 @@ void WorldLoader::processPendingEntry() {
         app_.worldEntryCallbacks_->setLastTaxiFlight(false);
     }
     // Clear camera movement inputs before loading terrain
-    if (renderer_ && renderer_->getCameraController()) {
-        renderer_->getCameraController()->clearMovementInputs();
-        renderer_->getCameraController()->suppressMovementFor(1.0f);
-        renderer_->getCameraController()->suspendGravityFor(10.0f);
+    if (app_.getCameraController()) {
+        app_.getCameraController()->clearMovementInputs();
+        app_.getCameraController()->suppressMovementFor(1.0f);
+        app_.getCameraController()->suspendGravityFor(10.0f);
     }
     loadOnlineWorldTerrain(entry.mapId, entry.x, entry.y, entry.z);
 }
@@ -346,11 +347,12 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
         if (!renderer_->getWMORenderer() || !renderer_->getTerrainManager()) {
             renderer_->initializeRenderers(assetManager_, mapName);
         }
+        app_.onWorldRenderersReady();
 
         // Every sub-renderer, not the two this used to name: the minimap looks
         // its tiles up by map, and left on the last one it found none - a
         // dungeon with no dungeon on its minimap.
-        renderer_->setActiveMapName(mapName);
+        app_.setActiveMapName(mapName);
         if (renderer_->getWMORenderer()) {
             renderer_->getWMORenderer()->setWMOOnlyMap(true);
         }
@@ -580,6 +582,7 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
 
         // Load the initial terrain tile
         terrainOk = renderer_->loadTestTerrain(assetManager_, adtPath);
+        if (terrainOk) app_.onWorldRenderersReady();
         if (!terrainOk) {
             LOG_WARNING("Could not load terrain for online world - atmospheric rendering only");
         } else {
@@ -588,7 +591,7 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
 
         // Every sub-renderer. initializeRenderers does this too, and it runs
         // once - so on a map change what it set stayed on the first map.
-        renderer_->setActiveMapName(mapName);
+        app_.setActiveMapName(mapName);
 
         // Character renderer is created inside loadTestTerrain(), so spawn the
         // player model now that the renderer actually exists.
@@ -832,7 +835,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             // VK_ERROR_DEVICE_LOST on some drivers.
             if (auto* cr = renderer_->getCharacterRenderer()) {
                 cr->clear();
-                renderer_->setCharacterFollow(0);
+                app_.getPlayerView()->setCharacterFollow(0);
             }
             // Reset equipment dirty tracking so composited textures are rebuilt
             // after spawnPlayerCharacter() recreates the character instance.
@@ -850,7 +853,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             if (auto* footprints = renderer_->getFootprintRenderer()) {
                 footprints->clear();
             }
-            if (auto* ac = renderer_->getAnimationController()) ac->clearMount();
+            if (auto* ac = app_.getAnimationController()) ac->clearMount();
         }
 
         // Clear application-level instance tracking (after renderer cleanup)
@@ -918,15 +921,15 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         float canonicalYaw = gameHandler_->getMovementInfo().orientation;
         spawnYawDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
     }
-    if (renderer_->getCameraController()) {
-        renderer_->getCameraController()->setOnlineMode(true);
-        renderer_->getCameraController()->setDefaultSpawn(spawnRender, spawnYawDeg, -15.0f);
-        renderer_->getCameraController()->reset();
+    if (app_.getCameraController()) {
+        app_.getCameraController()->setOnlineMode(true);
+        app_.getCameraController()->setDefaultSpawn(spawnRender, spawnYawDeg, -15.0f);
+        app_.getCameraController()->reset();
     }
     renderer_->setCharacterYaw(spawnYawDeg);
 
     // Every sub-renderer, and out of instance mode.
-    renderer_->setActiveMapName(mapName);
+    app_.setActiveMapName(mapName);
     if (renderer_->getWMORenderer()) {
         renderer_->getWMORenderer()->setWMOOnlyMap(false);
     }
@@ -971,8 +974,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 if (renderer_ && renderer_->getCharacterRenderer()) {
                     uint32_t oldInst = renderer_->getCharacterInstanceId();
                     if (oldInst > 0) {
-                        renderer_->setCharacterFollow(0);
-                        if (auto* ac = renderer_->getAnimationController()) ac->clearMount();
+                        app_.getPlayerView()->setCharacterFollow(0);
+                        if (auto* ac = app_.getAnimationController()) ac->clearMount();
                         renderer_->getCharacterRenderer()->removeInstance(oldInst);
                     }
                 }
@@ -1002,8 +1005,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     loadMapGeometry(mapId, mapName, spawnCanonical, spawnRender, loadingUi);
 
     // Snap player to loaded terrain so they don't spawn underground
-    if (renderer_->getCameraController()) {
-        renderer_->getCameraController()->reset();
+    if (app_.getCameraController()) {
+        app_.getCameraController()->reset();
     }
     renderer_->setCharacterYaw(spawnYawDeg);
     spawnInstancePortalVisuals(mapId, renderer_, assetManager_);
@@ -1211,8 +1214,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     }
 
     // Start intro pan right before entering gameplay so it's visible after loading.
-    if (renderer_->getCameraController()) {
-        renderer_->getCameraController()->startIntroPan(2.8f, 140.0f);
+    if (app_.getCameraController()) {
+        app_.getCameraController()->startIntroPan(2.8f, 140.0f);
     }
 
     showProgress("Entering world...", 1.0f);
