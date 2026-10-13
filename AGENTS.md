@@ -31,6 +31,21 @@
 - Another session may be working in the same tree. Check `git status` and
   stage only your own hunks when committing.
 
+## Errors are logged, never swallowed
+
+- Every failure is visible in the log at the default level: `LOG_WARNING` or
+  `LOG_ERROR`, never only `LOG_INFO`/`LOG_DEBUG`. Say what failed, for which
+  id or path, why when it is known, and what the player sees instead ("rider
+  drawn unmounted").
+- No silent fallback. A missing file, a model that does not parse, a table row
+  that is not there, a texture that falls back to white, work deferred because
+  the world is in use - each is reported when it happens. A fallback that keeps
+  something on screen is fine; doing it without a log line is not.
+- Distinguish "not ready yet" from "failed". A function that returns `false`
+  for both leaves its caller retrying a failure every frame with no trace. Give
+  failure its own result, log it once, and stop retrying.
+- Log a failure once per id/path, not once per frame.
+
 ## Game layer architecture (`src/game`, `include/game`)
 
 `GameHandler` is being taken apart into domain handlers (branch
