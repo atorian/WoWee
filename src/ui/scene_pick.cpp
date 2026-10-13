@@ -5,6 +5,8 @@
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/renderer.hpp"
+#include "rendering/wmo_renderer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +42,8 @@ ScenePick pickScene(game::GameHandler& gameHandler,
                     const ScenePickHit& onHit) {
     ScenePick pick;
     const uint64_t myGuid = gameHandler.getPlayerGuid();
+    auto* renderer = core::Application::getInstance().getRenderer();
+    const rendering::WMORenderer* wmo = renderer ? renderer->getWMORenderer() : nullptr;
 
     for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
         if (!entity) continue;
@@ -106,6 +110,23 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         float hitT = 0.0f;
         if (!raySphereIntersect(ray, hitCenter, hitRadius, hitT)) continue;
         const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+
+        // Only what the pointer can see. The spheres knew nothing of the
+        // world, so a crocodile in Dalaran's Underbelly took the click
+        // through the street over its head and wore its ring on the cobbles.
+        // Tested to where the ray passes nearest the centre rather than to
+        // where it enters the sphere: a sphere is a forgiving size, and the
+        // top of one can poke up through a floor the creature is under.
+        //
+        // Not for an object without bounds of its own: that is a door or a
+        // gate drawn as a building, and the line to its centre crosses the
+        // object itself.
+        const bool objectIsBuilding = type == game::ObjectType::GAMEOBJECT && !hasBounds;
+        if (wmo && !objectIsBuilding &&
+            wmo->segmentBlocked(ray.origin,
+                                       ray.origin + ray.direction * std::max(centerT, hitT))) {
+            continue;
+        }
 
         if (type == game::ObjectType::UNIT || type == game::ObjectType::PLAYER) {
             // Rank the living ahead of the dead rather than by distance alone. A
