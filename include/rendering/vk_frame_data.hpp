@@ -80,6 +80,8 @@ struct ShadowPush {
     /// All zero for anything that does not sway.
     glm::vec4 sway{0.0f};
     /// x: sample the texture. y: alpha-test it. z: bend in the wind.
+    /// w: where the alpha test cuts, in 255ths; 0 is a half. A WMO's alpha
+    /// key cuts at 224, as the original client's does.
     ///
     /// These were in the uniform buffer, and the M2 pass writes that buffer
     /// twice a frame - once for its solid casters, once for its foliage. A

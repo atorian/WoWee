@@ -888,6 +888,13 @@ private:
     /// The set the shadow pass binds. Five separate members before,
     /// built and torn down here and in three other renderers.
     ShadowParamsSet shadowParams_;
+    /// Sets binding an alpha-keyed material's texture for the shadow pass, so
+    /// a lattice casts the lattice and not a solid pane. One pool per frame in
+    /// flight, reset at the top of that frame's shadow pass.
+    static constexpr uint32_t kShadowTexPoolFrames = 2;
+    VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
+    std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
+    VkDescriptorSet shadowTexSet(VkTexture* tex, uint32_t frameIndex);
 
     // Descriptor set layouts
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;

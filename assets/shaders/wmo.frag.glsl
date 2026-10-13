@@ -261,7 +261,10 @@ void main() {
     }
 
     vec4 texColor = hasTexture != 0 ? textureGrad(uTexture, finalUV, uvDx, uvDy) : vec4(1.0);
-    if (alphaTest != 0 && texColor.a < 0.5) discard;
+    // A WMO material's alpha key cuts at 224/255, as the original client's
+    // does, not at a half. Dalaran's lattice windows (DAL_WINDOWCUTOUT) leave
+    // their holes at alpha 0.5-0.6; cut at a half, they drew as solid panes.
+    if (alphaTest != 0 && texColor.a < 224.0 / 255.0) discard;
 
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;

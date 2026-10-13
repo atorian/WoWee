@@ -70,6 +70,11 @@ constexpr float kWallMaxAbsNormalZ = 0.65f;
 // view, which reverses every triangle there. That pass only draws the scene
 // with multisampling off.
 constexpr VkFrontFace kWmoFrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+// Where an alpha-keyed WMO material (MOMT blend mode 1) is cut, in 255ths: the
+// original client's 224, which wmo.frag uses too. The shadow pass is handed it
+// so a cutout casts the same shape it draws.
+constexpr int kWmoAlphaKeyRef = 224;
 } // namespace
 
 // Thread-local scratch buffers for collision queries (allows concurrent getFloorHeight/checkWallCollision calls)
@@ -402,6 +407,8 @@ void WMORenderer::shutdown() {
     // Destroy shadow resources
     destroy(device, shadowPipeline_);
     destroy(device, shadowPipelineLayout_);
+    shadowTexSetCache_.clear();
+    for (auto& pool : shadowTexPool_) destroy(device, pool);
     destroyShadowParamsSet(device, allocator, shadowParams_);
 
     vkCtx_ = nullptr;
@@ -1866,6 +1873,24 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         return false;
     }
 
+    {
+        VkDescriptorPoolSize texPoolSizes[2]{};
+        texPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        texPoolSizes[0].descriptorCount = 256;
+        texPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        texPoolSizes[1].descriptorCount = 256;
+        VkDescriptorPoolCreateInfo texPoolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        texPoolCI.maxSets = 256;
+        texPoolCI.poolSizeCount = 2;
+        texPoolCI.pPoolSizes = texPoolSizes;
+        for (uint32_t f = 0; f < kShadowTexPoolFrames; ++f) {
+            if (vkCreateDescriptorPool(device, &texPoolCI, nullptr, &shadowTexPool_[f]) != VK_SUCCESS) {
+                LOG_ERROR("WMORenderer: failed to create shadow texture pool ", f);
+                return false;
+            }
+        }
+    }
+
     // Create shadow pipeline layout: set 1 = shadowParams_.layout, push constants = 128 bytes
     VkPushConstantRange pc{};
     // The fragment stage reads the alpha-test flags out of the same block.
@@ -1919,6 +1944,13 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || loadedModels.empty()) return;
 
+    // Once a frame: the WMO pass casts into the sun's map only.
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
+        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+    }
+    shadowTexSetCache_.clear();
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
         0, 1, &shadowParams_.set, 0, nullptr);
@@ -1944,6 +1976,7 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
         vkCmdPushConstants(cmd, shadowPipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(ShadowPush), &push);
+        bool cutoutBound = false;
 
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             const auto& group = model.groups[gi];
@@ -1968,12 +2001,81 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             for (const auto& mb : group.mergedBatches) {
+                // An alpha-keyed material casts what it draws: Dalaran's
+                // lattice windows, grates, fences. Until its texture is in, it
+                // casts nothing rather than the solid quad.
+                if (mb.alphaTest) {
+                    if (!mb.hasTexture) continue;
+                    const VkDescriptorSet texSet = shadowTexSet(mb.texture, frameIndex);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
+                }
+                if (mb.alphaTest != cutoutBound) {
+                    cutoutBound = mb.alphaTest;
+                    if (!cutoutBound) {
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
+                    }
+                    push.flags = cutoutBound ? glm::ivec4(1, 1, 0, kWmoAlphaKeyRef) : glm::ivec4(0);
+                    vkCmdPushConstants(cmd, shadowPipelineLayout_,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(ShadowPush), &push);
+                }
                 for (const auto& dr : mb.draws) {
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
                 }
             }
         }
+        if (cutoutBound) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
+        }
     }
+}
+
+VkDescriptorSet WMORenderer::shadowTexSet(VkTexture* tex, uint32_t frameIndex) {
+    // A texture whose upload failed has a null view; binding it to a sampled
+    // descriptor is undefined, so it casts as a solid pane instead.
+    if (!tex || !tex->isValid()) return shadowParams_.set;
+    if (frameIndex >= kShadowTexPoolFrames || !shadowTexPool_[frameIndex]) return shadowParams_.set;
+
+    const VkImageView view = tex->getImageView();
+    if (auto it = shadowTexSetCache_.find(view); it != shadowTexSetCache_.end()) return it->second;
+
+    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = shadowTexPool_[frameIndex];
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &shadowParams_.layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
+        return shadowParams_.set;
+    }
+
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imgInfo.imageView = view;
+    imgInfo.sampler = tex->getSampler();
+    VkDescriptorBufferInfo bufInfo{};
+    bufInfo.buffer = shadowParams_.ubo;
+    bufInfo.offset = 0;
+    bufInfo.range = sizeof(ShadowParamsUBO);
+    VkWriteDescriptorSet writes[2]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].pImageInfo = &imgInfo;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[1].pBufferInfo = &bufInfo;
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
+
+    shadowTexSetCache_[view] = set;
+    return set;
 }
 
 uint32_t WMORenderer::getTotalTriangleCount() const {
