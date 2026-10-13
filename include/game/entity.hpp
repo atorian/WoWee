@@ -395,6 +395,14 @@ public:
     // Display ID (model display)
     [[nodiscard]] uint32_t getDisplayId() const { return displayId; }
     void setDisplayId(uint32_t id) { displayId = id; }
+    // The unit's own model (UNIT_FIELD_NATIVEDISPLAYID); 0 when not sent.
+    [[nodiscard]] uint32_t getNativeDisplayId() const { return nativeDisplayId; }
+    void setNativeDisplayId(uint32_t id) { nativeDisplayId = id; }
+    /// The model a shapeshift, polymorph or illusion shows in place of the
+    /// unit's own, or 0 while it is itself. Unknown without a native ID.
+    [[nodiscard]] uint32_t getFormDisplayId() const {
+        return nativeDisplayId != 0 && displayId != 0 && displayId != nativeDisplayId ? displayId : 0;
+    }
     /// How far this unit's edge is from its centre, and how far past that it
     /// can reach. Range between two units is measured edge to edge, so both
     /// come off the centre distance - see UNIT_FIELD_COMBATREACH.
@@ -451,6 +459,7 @@ protected:
     uint32_t level = 1;
     uint32_t entry = 0;
     uint32_t displayId = 0;
+    uint32_t nativeDisplayId = 0;
     // Zero until the server says otherwise, which is the right default: it
     // makes an edge-to-edge distance fall back to centre to centre rather
     // than inventing reach for a unit whose size has not arrived.

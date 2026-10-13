@@ -701,6 +701,7 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
         .dynFlags = fieldIndex(UF::UNIT_DYNAMIC_FLAGS),
         .auraState = fieldIndex(UF::UNIT_FIELD_AURASTATE),
         .displayId = fieldIndex(UF::UNIT_FIELD_DISPLAYID),
+        .nativeDisplayId = fieldIndex(UF::UNIT_FIELD_NATIVEDISPLAYID),
         .mountDisplayId = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID),
         .npcFlags = fieldIndex(UF::UNIT_NPC_FLAGS),
         .npcEmoteState = fieldIndex(UF::UNIT_NPC_EMOTESTATE),
@@ -941,6 +942,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                 }
             }
         }
+        else if (key == ufi.nativeDisplayId) { unit->setNativeDisplayId(val); }
         else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
         else if (key == ufi.npcEmoteState) { unit->setNpcEmoteState(val); }
         else if (key == ufi.dynFlags) {
@@ -1226,6 +1228,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                 unit->setDisplayId(val);
                 result.displayIdChanged = true;
             }
+        } else if (key == ufi.nativeDisplayId) {
+            unit->setNativeDisplayId(val);
         } else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);

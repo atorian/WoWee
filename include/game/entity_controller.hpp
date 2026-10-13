@@ -223,7 +223,7 @@ private:
     struct UnitFieldIndices {
         uint16_t health, maxHealth, powerBase, maxPowerBase;
         uint16_t level, faction, flags, dynFlags, auraState;
-        uint16_t displayId, mountDisplayId, npcFlags, npcEmoteState;
+        uint16_t displayId, nativeDisplayId, mountDisplayId, npcFlags, npcEmoteState;
         /// How wide a unit is and how far it reaches, for edge-to-edge range.
         uint16_t boundingRadius, combatReach;
         uint16_t bytes0, bytes1;

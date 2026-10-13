@@ -59,6 +59,7 @@ TEST_CASE("the WotLK field indices are what the server sends", "[update-fields]"
         {"UNIT_FIELD_FACTIONTEMPLATE", 55},
         {"UNIT_FIELD_FLAGS", 59},
         {"UNIT_FIELD_DISPLAYID", 67},
+        {"UNIT_FIELD_NATIVEDISPLAYID", 68},
         {"UNIT_FIELD_MOUNTDISPLAYID", 69},
         {"UNIT_NPC_FLAGS", 82},
         {"PLAYER_EXPLORED_ZONES_START", 1041},
