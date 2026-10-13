@@ -290,6 +290,9 @@ void main() {
     vec2 uvDx = dFdx(TexCoord);
     vec2 uvDy = dFdy(TexCoord);
 
+    // The pipeline culls nothing, so a one-sided material is culled here.
+    if (twoSided == 0 && !gl_FrontFacing) discard;
+
     vec3 vertexNormal = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));
     if (!gl_FrontFacing) vertexNormal = -vertexNormal;
 

@@ -27,6 +27,9 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // The UV the texture samples: 0 or 1 for a vertex set, -1 for the sphere
     // environment map.
     int texCoordSet;
+    // 1 when the M2 material carries flag 0x04. Without it the client culls
+    // the back of the surface, and so does the fragment shader.
+    int twoSided;
     // The texture animation, as two rows of a 2x3 matrix (w is padding).
     // See m2_uv_transform.hpp.
     vec4 uvRow0;

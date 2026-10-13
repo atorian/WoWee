@@ -269,7 +269,8 @@ struct CharMaterialUBO {
     int32_t ignoreTextureAlpha;
     float modulateNeutral;
     int32_t texCoordSet;
-    int32_t pad0;
+    int32_t twoSided;
+
     M2UVTransform uvTransform;
 };
 static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
@@ -331,7 +332,15 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                         charFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({charBinding}, charAttrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+            // An M2 winds its outside counter-clockwise - 7937 of the 7963
+            // triangles of the stock human female, against their own normals -
+            // and the projection's Y flip keeps that counter-clockwise here.
+            // Under the builder's default of clockwise every outer face came
+            // through as a back face: the shader turned its normal round, and
+            // culling the back of one-sided materials turned the characters
+            // inside out.
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE,
+                              VK_FRONT_FACE_COUNTER_CLOCKWISE)
             .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS)
             .setDepthBias(0.0f, 0.0f)
             .setColorBlendAttachment(blendState)
@@ -3157,6 +3166,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         *tt, instance.currentSequenceIndex, instance.animationTime,
                         instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
                 }
+                // Only hair and cloaks are two-sided on the stock models. The
+                // rest - a trouser leg's knee flare among them - show their
+                // inside through any gap, and lit with the normal turned round
+                // that inside is a dark wedge where the client draws nothing.
+                matData.twoSided = (materialFlags & 0x04) ? 1 : 0;
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
                 matData.emissiveTintG = emissiveTint.g;
@@ -3194,7 +3208,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // armor underneath appear embossed and reflective through the
                 // cloth as the camera moves. Keep the diffuse tabard artwork,
                 // but give group 12 a flat, low-specular cloth material.
-                if (batchGroup == 12) {
+                // A cloak is cloth too, and its relief derived from the artwork
+                // read as hammered metal: ridges along every painted fold, each
+                // with a highlight. Mostly out of sight while the outer faces were lit with
+                // their normals turned round, and the first thing seen once not.
+                if (batchGroup == 12 || batchGroup == 15) {
                     normalMap = flatNormalTexture_.get();
                     matData.specularIntensity = 0.08f;
                     matData.enableNormalMap = 0;
@@ -3281,6 +3299,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.ignoreTextureAlpha = 1;
             matData.colorKeyBlack = 0;
             matData.unlit = 0;
+            matData.twoSided = 1;  // no batch, so no material to say otherwise
             matData.emissiveBoost = 1.0f;
             matData.emissiveTintR = 1.0f;
             matData.emissiveTintG = 1.0f;
