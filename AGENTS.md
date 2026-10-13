@@ -46,6 +46,48 @@
   failure its own result, log it once, and stop retrying.
 - Log a failure once per id/path, not once per frame.
 
+## Layers
+
+Dependencies point one way - who may include whom:
+
+```
+core/       -> game/, rendering/, audio/, ui/, pipeline/   (the client: owns and wires everything)
+ui/         -> game/, rendering/, pipeline/
+game/       -> pipeline/, network/                         (not rendering/, audio/, ui/, core/application)
+rendering/  -> pipeline/                                   (wowee_render: not game/, ui/, audio/, network/)
+```
+
+- **wowee_render** (`src/rendering` less the client's presentation listed in
+  `WOWEE_RENDER_CLIENT_SOURCES`) draws what it is handed and knows nothing of
+  the game, the interface, the sound or the network.
+  `tools/render_dependency_check.py` enforces it through `sweep_guard`.
+- **The game** (`src/game`) is the protocol and the state it builds. It does not
+  draw, play sounds or reach the `Application`: it publishes what happened on
+  the event bus and is handed what it must ask (`GameServices`: the emote
+  table, the movement collision; `TransportScene` for transport hulls).
+  `tools/game_dependency_check.py` counts what it still includes of the
+  presentation (the sound, the FrameXML handover, the addons' CVars); the
+  limit in `sweep_guard` only goes down.
+- **core/** is the client: it owns everything, subscribes to the game's events
+  and turns them into pictures and sound (`SpellPresentation`, `PlayerView`,
+  the `*CallbackHandler`s), and implements the game's query interfaces over
+  the renderer (`RendererTransportScene`, `RendererMovementCollision`).
+
+### Testing graphics without the client
+
+`scene_render` links `wowee_render` and nothing of the game or the interface.
+It reads a scene (map, place, models, camera, hour, weather, optional terrain),
+draws it through the client's renderer and writes a PNG:
+
+```
+ninja -C build-dev scene_render
+tools/scene_render.sh tools/scene_render/scenes/lamppost.json build-dev/scratch/lamppost.png
+```
+
+A renderer edit rebuilds only the renderer and this; shader edits only need
+`ninja -C build-dev wowee_shaders`. Use it before reaching for the client, and
+keep it building: nothing in `wowee_render` may need the game to link.
+
 ## Game layer architecture (`src/game`, `include/game`)
 
 `GameHandler` is being taken apart into domain handlers (branch
