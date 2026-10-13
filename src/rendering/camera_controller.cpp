@@ -874,6 +874,36 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
     // Use tighter steps when inside WMO for more precise collision.
     targetPos = sweepAgainstWalls(*followTarget, targetPos, true);
 
+    // A ledge the jump cannot land on is a wall.
+    //
+    // The wall test lets through anything whose top is within a yard of the
+    // feet, on the understanding that it is a step and grounding will lift the
+    // player onto it. In the air grounding takes far less than that: nothing
+    // over lastGroundZ + 1.7 (the airborne probe in sampleFloorUnderFeet) and
+    // nothing over the feet + 1.2 (its step-up). Between the two the player was
+    // let into the solid and then not lifted out of it. The platform under the
+    // floating sculpture in Dalaran is the case: a 1.67 yard rim and a dome
+    // over it, entered from the street mid-jump - inside the dome there is no
+    // floor until the bottom of the rock, two hundred yards down.
+    //
+    // So in the air, a surface in that band that grounding would refuse stops
+    // the move. Up to a yard over the feet only, which is the band the wall
+    // test gave away - a ceiling there is one the body is already inside, and
+    // a doorway lintel over a jumping head is not.
+    if (!grounded && !swimming && !isFlightAirborne() && !externalFollow_ && wmoRenderer) {
+        constexpr float kAirborneStepUp = 1.2f;    // groundFollowedCharacter's stepUpBudget
+        constexpr float kWallStepHeight = 1.0f;    // checkWallCollision's MAX_STEP_HEIGHT
+        const float feetZ = targetPos.z;
+        const float landableZ = std::min(feetZ + kAirborneStepUp,
+                                         lastGroundZ + kAirborneStepUp + 0.5f);
+        const auto top = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y,
+                                                     feetZ + kWallStepHeight);
+        if (top && *top > feetZ && *top > landableZ) {
+            targetPos.x = followTarget->x;
+            targetPos.y = followTarget->y;
+        }
+    }
+
     return targetPos;
 }
 
