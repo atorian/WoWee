@@ -198,6 +198,10 @@ public:
         float riderHeight = 0.0f;
     };
     void setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId);
+    // A rider sits at this attachment of the mount model ("MountMain", the
+    // saddle), lifted a little so the seat does not show through.
+    static constexpr uint32_t kMountSeatAttachment = 0;
+    static constexpr float kMountSeatLift = 0.08f;
     const RemotePlayerMount* getRemotePlayerMount(uint64_t guid) const {
         auto it = remotePlayerMounts_.find(guid);
         return it != remotePlayerMounts_.end() ? &it->second : nullptr;
@@ -742,8 +746,15 @@ private:
     std::unordered_map<uint64_t, RemotePlayerLocomotion> remotePlayerLocomotion_;
     std::unordered_map<uint64_t, uint32_t> pendingRemotePlayerMounts_;
     void processPendingRemotePlayerMounts();
-    bool loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
-                              std::string& modelPath, float& riderHeight);
+    // Pending while workers prepare the model; Failed once it is known never
+    // to load - logged then, and the caller stops asking.
+    enum class ModelLoad { Pending, Ready, Failed };
+    ModelLoad loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
+                                   std::string& modelPath, float& riderHeight);
+    // Displays whose model failed to load, each reported once.
+    std::unordered_set<uint32_t> unloadableMountDisplayIds_;
+    // Mounts whose model has no saddle attachment, each reported once.
+    std::unordered_set<uint32_t> seatlessMountDisplayIds_;
     void removeRemotePlayerMount(uint64_t guid);
 
     // --- Remote player forms ---

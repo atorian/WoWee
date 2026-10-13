@@ -1730,8 +1730,10 @@ void EntitySpawner::processPendingMount() {
     uint32_t modelId = 0;
     std::string m2Path;
     float preparedRiderHeight = 0.0f;
-    if (!loadRemoteMountModel(mountDisplayId, modelId, m2Path, preparedRiderHeight)) return;
+    const ModelLoad load = loadRemoteMountModel(mountDisplayId, modelId, m2Path, preparedRiderHeight);
+    if (load == ModelLoad::Pending) return;
     pendingMountDisplayId_ = 0;
+    if (load == ModelLoad::Failed) return;
     auto* charRenderer = renderer_->getCharacterRenderer();
 
     mountModelId_ = modelId;
@@ -1748,6 +1750,8 @@ void EntitySpawner::processPendingMount() {
     }
 
     mountInstanceId_ = instanceId;
+    // Shadowform darkens the mount too.
+    charRenderer->addLookCompanion(renderer_->getCharacterInstanceId(), instanceId);
 
     // Compute height offset - place player above mount's back.
     //
@@ -1820,25 +1824,43 @@ void EntitySpawner::processPendingMount() {
     LOG_INFO("processPendingMount: DONE displayId=", mountDisplayId, " model=", m2Path, " heightOffset=", heightOffset);
 }
 
-bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
-                                         std::string& modelPath, float& riderHeight) {
+EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
+                                                             std::string& modelPath, float& riderHeight) {
     modelId = 0;
     riderHeight = 1.8f;
-    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return false;
+    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return ModelLoad::Pending;
     auto* cr = renderer_->getCharacterRenderer();
+    if (unloadableMountDisplayIds_.count(displayId)) return ModelLoad::Failed;
+
+    // Reported once per display; what failed beneath it is logged where it failed.
+    auto fail = [&](const char* why) {
+        LOG_WARNING("Mount/form displayId ", displayId, " not drawn: ", why,
+                    modelPath.empty() ? std::string() : " (" + modelPath + ")",
+                    "; the player is drawn without it");
+        unloadableMountDisplayIds_.insert(displayId);
+        return ModelLoad::Failed;
+    };
 
     modelPath = getModelPathForDisplayId(displayId);
-    if (modelPath.empty()) {
-        LOG_WARNING("Remote player mount has no model path: displayId=", displayId);
-        return false;
-    }
+    if (modelPath.empty()) return fail("no model is named for it in CreatureDisplayInfo/CreatureModelData");
 
     auto cached = displayIdModelCache_.find(displayId);
     if (cached != displayIdModelCache_.end() && cr->getModelData(cached->second)) {
         modelId = cached->second;
     } else {
         pipeline::M2Model model;
-        if (!loadWeaponM2(modelPath, model)) return false;
+        if (!loadWeaponM2(modelPath, model)) {
+            // An empty entry is a model the workers could not load, not one
+            // still being prepared.
+            std::string key = modelPath;
+            std::replace(key.begin(), key.end(), '/', '\\');
+            std::transform(key.begin(), key.end(), key.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            auto loaded = attachmentModelData_.find(key);
+            if (loaded != attachmentModelData_.end() && !loaded->second)
+                return fail("its model could not be loaded");
+            return ModelLoad::Pending;
+        }
         auto skins = getCreatureSkinPaths(displayId, modelPath);
         if (skins.empty()) {
             auto display = displayDataMap_.find(displayId);
@@ -1875,15 +1897,38 @@ bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
             (void)type;
             if (!loadWeaponM2(modelPath, model, path)) ready = false;
         }
-        if (!ready) return false;
+        if (!ready) return ModelLoad::Pending;
         cr->setPredecodedBLPCache(&preparedAttachmentTextures_, true);
         struct TextureGuard {
             rendering::CharacterRenderer* renderer;
             ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }
         } guard{cr};
         modelId = nextCreatureModelId_++;
-        if (!cr->loadModel(model, modelId)) return false;
+        if (!cr->loadModel(model, modelId)) {
+            modelId = 0;
+            return fail("the renderer refused its model");
+        }
         displayIdModelCache_[displayId] = modelId;
+        if (skins.empty()) {
+            // Only a skin slot some batch draws with is missing: many models
+            // carry one their submeshes never use.
+            bool drawsSkinSlot = false;
+            for (const auto& batch : model.batches) {
+                for (uint32_t k = 0; k < batch.textureCount && !drawsSkinSlot; ++k) {
+                    const uint32_t lookup = batch.textureIndex + k;
+                    if (lookup >= model.textureLookup.size()) continue;
+                    const uint16_t ti = model.textureLookup[lookup];
+                    drawsSkinSlot = ti < model.textures.size() &&
+                                    model.textures[ti].type >= 11 && model.textures[ti].type <= 13;
+                }
+                if (drawsSkinSlot) break;
+            }
+            if (drawsSkinSlot) {
+                LOG_WARNING("Mount/form displayId ", displayId, " (", modelPath,
+                            "): no skin texture found for the creature-skin slot it draws with; "
+                            "that part is drawn untextured");
+            }
+        }
         size_t forcedSlot = 0;
         for (size_t ti = 0; ti < model.textures.size(); ++ti) {
             const auto& slot = model.textures[ti];
@@ -1913,7 +1958,7 @@ bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
             if (riderHeight < 1.0f) riderHeight = 1.8f;
         }
     }
-    return modelId != 0;
+    return ModelLoad::Ready;
 }
 
 void EntitySpawner::processPendingRemotePlayerMounts() {
@@ -1941,19 +1986,19 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             pendingRemotePlayerMounts_.erase(it);
             return;
         }
-        // No table names a model for it, and none will: asking every frame
-        // only repeated the warning, 29,000 times in one session.
-        if (getModelPathForDisplayId(displayId).empty()) {
-            LOG_WARNING("Remote player mount has no model path: displayId=", displayId);
-            pendingRemotePlayerMounts_.erase(it);
-            return;
-        }
         uint32_t modelId = 0;
         float riderHeight = 0.0f;
         std::string modelPath;
-        if (!loadRemoteMountModel(displayId, modelId, modelPath, riderHeight)) {
-            // Background preparation is still pending. Other riders can advance.
-            continue;
+        const ModelLoad load = loadRemoteMountModel(displayId, modelId, modelPath, riderHeight);
+        // Background preparation is still pending. Other riders can advance.
+        if (load == ModelLoad::Pending) continue;
+        if (load == ModelLoad::Failed) {
+            // Logged once for the display. Asking again every frame only
+            // repeated the warning, 29,000 times in one session; a mount
+            // ridden before it is not this one.
+            removeRemotePlayerMount(guid);
+            pendingRemotePlayerMounts_.erase(it);
+            return;
         }
 
         removeRemotePlayerMount(guid);
@@ -1976,11 +2021,22 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             }
             cr->playAnimation(mountInstance, mountAnim, true);
             cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
+            cr->addLookCompanion(playerIt->second, mountInstance);  // Shadowform darkens the mount too
             remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
                                          .instanceId = mountInstance, .riderHeight = riderHeight};
             LOG_INFO("Remote player mounted: guid=0x", std::hex, guid, std::dec,
                      " displayId=", displayId, " riderHeight=", riderHeight,
                      " model=", modelPath);
+            glm::mat4 seat;
+            if (!cr->getAttachmentTransform(mountInstance, kMountSeatAttachment, seat) &&
+                seatlessMountDisplayIds_.insert(displayId).second) {
+                LOG_WARNING("Mount displayId ", displayId, " (", modelPath, ") has no saddle attachment ",
+                            kMountSeatAttachment, "; its riders are placed at a guessed height of ",
+                            riderHeight);
+            }
+        } else {
+            LOG_WARNING("Remote player mount displayId ", displayId, " (", modelPath,
+                        "): the renderer created no instance; the player is drawn without it");
         }
         pendingRemotePlayerMounts_.erase(it);
         return;
@@ -2006,17 +2062,18 @@ void EntitySpawner::processPendingRemotePlayerForms() {
             pendingRemotePlayerForms_.erase(it);
             return;
         }
-        if (getModelPathForDisplayId(displayId).empty()) {
-            LOG_WARNING("Remote player form has no model: displayId=", displayId,
-                        "; players in it are drawn in their own form");
-            undrawableFormDisplayIds_.insert(displayId);
-            pendingRemotePlayerForms_.erase(it);
-            return;
-        }
         uint32_t modelId = 0;
         std::string modelPath;
         float unusedHeight = 0.0f;
-        if (!loadRemoteMountModel(displayId, modelId, modelPath, unusedHeight)) continue;
+        const ModelLoad load = loadRemoteMountModel(displayId, modelId, modelPath, unusedHeight);
+        if (load == ModelLoad::Pending) continue;
+        if (load == ModelLoad::Failed) {
+            // Logged once for the display; players in it are drawn in their own form.
+            undrawableFormDisplayIds_.insert(displayId);
+            removeRemotePlayerForm(guid);
+            pendingRemotePlayerForms_.erase(it);
+            return;
+        }
 
         // From one form to another the body stays where it was put away.
         auto existing = remotePlayerForms_.find(guid);
@@ -2351,18 +2408,30 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
         auto parsed = model;
         if (!parsed) {
             parsed = std::make_shared<pipeline::M2Model>();
+            // Each failure is reported here, where its cause is known; the
+            // empty result is cached, so this runs once per model.
             auto bytes = assets->readFile(key);
             if (bytes.empty()) {
+                LOG_WARNING("Model not found in any archive: ", key);
                 parsed.reset();
             } else {
                 *parsed = pipeline::M2Loader::load(bytes);
                 if (parsed->name.empty()) parsed->name = key;
                 if (parsed->version >= 264) {
-                    auto skin = assets->readFile(pipeline::skinPathForM2(key));
-                    if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, *parsed);
+                    const std::string skinPath = pipeline::skinPathForM2(key);
+                    auto skin = assets->readFile(skinPath);
+                    if (skin.empty()) {
+                        LOG_WARNING("Model ", key, ": skin file ", skinPath, " not found");
+                    } else if (!pipeline::M2Loader::loadSkin(skin, *parsed)) {
+                        LOG_WARNING("Model ", key, ": skin file ", skinPath, " did not parse");
+                    }
                 }
-                if (!parsed->isValid()) parsed.reset();
-                else pipeline::loadExternalAnimations(*assets, key, bytes, *parsed,
+                if (!parsed->isValid()) {
+                    LOG_WARNING("Model ", key, " has no drawable geometry (version ", parsed->version,
+                                ", ", parsed->vertices.size(), " vertices, ", parsed->indices.size(),
+                                " indices, ", bytes.size(), " bytes)");
+                    parsed.reset();
+                } else pipeline::loadExternalAnimations(*assets, key, bytes, *parsed,
                     {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
                      rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
             }

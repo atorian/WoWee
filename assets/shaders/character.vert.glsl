@@ -40,6 +40,7 @@ layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
+layout(location = 5) out vec2 MaskUV;
 
 #include "sphere_map.glsli"
 
@@ -82,6 +83,9 @@ void main() {
         uv = sphereMapUV(eyePosition, eyeNormal);
     }
     TexCoord = vec2(dot(uvRow0.xy, uv) + uvRow0.z, dot(uvRow1.xy, uv) + uvRow1.z);
+    // The mask moves with the first stage, as the M2 pass draws it.
+    vec2 maskUV = secondTexCoordSet == 1 ? aTexCoord2 : aTexCoord;
+    MaskUV = vec2(dot(uvRow0.xy, maskUV) + uvRow0.z, dot(uvRow1.xy, maskUV) + uvRow1.z);
 
     // Gram-Schmidt re-orthogonalize tangent w.r.t. normal
     vec3 N = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));

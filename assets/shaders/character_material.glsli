@@ -37,4 +37,9 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // What an aura multiplies the lit colour by: Shadowform's purple, a
     // ghost's blue (SpellVisualKit character procs). White without one.
     vec4 stateTint;
+    // A second texture the first is multiplied by (m2UsesSecondTextureMask in
+    // m2_material.hpp): the feathers that shape a fire hawk's flames. Read at
+    // set 1 binding 3, on this UV set (0 or 1).
+    int hasSecondTexture;
+    int secondTexCoordSet;
 };

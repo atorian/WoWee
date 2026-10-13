@@ -3659,10 +3659,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     ? std::optional<glm::vec3>(posIt->second)
                     : std::nullopt;
             const auto* remoteMount = entitySpawner_->getRemotePlayerMount(guid);
-            std::optional<glm::vec3> previousMountPos = previousRenderPos;
-            if (remoteMount && previousMountPos) {
-                previousMountPos->z -= remoteMount->riderHeight;
-            }
+            // The cache holds where the player stands - on the ground, or
+            // under a mount - not where a rider is drawn.
+            const std::optional<glm::vec3>& previousMountPos = previousRenderPos;
 
             // Match creature projection: terrain alone is not a valid floor in
             // WMO overlap regions (tunnels, buildings, bridges).
@@ -3697,18 +3696,36 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 }
             }
 
-            const glm::vec3 mountRenderPos = renderPos;
-            if (remoteMount) renderPos.z += remoteMount->riderHeight;
-
             // The entity already moves smoothly - along its reported movement
             // or a server path - so the model is put where it is. It used to
             // be eased towards it by a renderer interpolation restarted every
             // frame, which left it trailing and picked Walk or Run from each
             // frame's step, throwing away whatever the locomotion below had
             // chosen, a jump included.
-            charRenderer->setInstancePosition(instanceId, renderPos);
+            const float renderYaw = entity->getOrientation() + glm::radians(90.0f);
             if (remoteMount) {
-                charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                // The mount stands where the player is; the rider sits in its
+                // saddle. The saddle is the mount's attachment 0, which the
+                // artist placed and its bones carry, so the rider is on the
+                // chopper's seat and the serpent's back and moves with them. A
+                // height guessed from the model's tallest vertex put riders
+                // in the air over handlebars and on the ground beside a long
+                // serpent.
+                charRenderer->setInstancePosition(remoteMount->instanceId, renderPos);
+                charRenderer->setInstanceRotation(remoteMount->instanceId,
+                                                  glm::vec3(0.0f, 0.0f, renderYaw));
+                glm::mat4 seat(1.0f);
+                if (charRenderer->getAttachmentTransform(remoteMount->instanceId,
+                                                         EntitySpawner::kMountSeatAttachment, seat)) {
+                    charRenderer->setInstancePosition(
+                        instanceId, glm::vec3(seat[3]) + glm::vec3(0.0f, 0.0f, EntitySpawner::kMountSeatLift));
+                } else {
+                    // A model without a saddle point, reported when it loaded.
+                    charRenderer->setInstancePosition(
+                        instanceId, renderPos + glm::vec3(0.0f, 0.0f, remoteMount->riderHeight));
+                }
+            } else {
+                charRenderer->setInstancePosition(instanceId, renderPos);
             }
             bool posChanging = false;
             if (previousRenderPos) {
@@ -3825,12 +3842,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             }
 
             // Orientation sync
-            float renderYaw = entity->getOrientation() + glm::radians(90.0f);
             charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
-            if (remoteMount) {
-                charRenderer->setInstanceRotation(remoteMount->instanceId,
-                                                  glm::vec3(0.0f, 0.0f, renderYaw));
-            }
         }
     }
     {
@@ -6351,6 +6363,10 @@ void Application::updateRealmPatchMount() {
         realmPatchesOpening_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         realmPatchLayerReady_ = realmPatchesOpening_.get();
         if (!realmPatchLayerReady_) realmPatchesBeingOpened_ = {};
+        else if (worldInUse) {
+            LOG_WARNING("Realm patches opened while in the world; they are mounted when the world is left. "
+                        "Until then the realm's own models and table rows are missing");
+        }
     }
     if (realmPatchLayerReady_ && !worldInUse) {
         if (realmPatchesBeingOpened_.realm == realm) {
@@ -6370,7 +6386,7 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
     assetManager->setArchiveLayer(std::move(layer));
     mountedRealmPatches_ = std::move(set);
     if (mounting) {
-        LOG_INFO("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
+        LOG_WARNING("Realm patches mounted for ", mountedRealmPatches_.realm, ": ",
                  mountedRealmPatches_.archives.size(), " archives above the extracted data");
     }
 

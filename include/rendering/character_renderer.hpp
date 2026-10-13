@@ -122,8 +122,12 @@ public:
     /// The look an aura gives a unit, from its SpellVisualKit's character
     /// procs: the lit colour is multiplied by `tint`, and the unit is drawn
     /// no more opaque than `alpha`. White and 1 take it off. Carried to the
-    /// instance's weapons and their enchants.
+    /// instance's weapons and their enchants, and to its look companions.
     void setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha);
+    /// Draws `companionId` in `instanceId`'s aura look from now on, as it is
+    /// and as it changes: a mount takes its rider's, so a Shadowform priest's
+    /// mount goes dark and translucent with them. Ends with either instance.
+    void addLookCompanion(uint32_t instanceId, uint32_t companionId);
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
     [[nodiscard]] const pipeline::M2Model* getInstanceModelData(uint32_t instanceId) const;
     void setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets);
@@ -321,6 +325,9 @@ private:
         // fades, stealth and ghosts write; the two meet at draw time.
         glm::vec3 stateTint{1.0f};
         float stateAlpha = 1.0f;
+        // Instances drawn in this one's aura look (addLookCompanion). Ids are
+        // never reused, so one removed since is simply not found.
+        std::vector<uint32_t> lookCompanions;
 
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
@@ -428,8 +435,10 @@ private:
     struct MaterialDescriptorKey {
         VkImageView diffuse = VK_NULL_HANDLE;
         VkImageView normal = VK_NULL_HANDLE;
+        VkImageView second = VK_NULL_HANDLE;
         VkSampler diffuseSampler = VK_NULL_HANDLE;
         VkSampler normalSampler = VK_NULL_HANDLE;
+        VkSampler secondSampler = VK_NULL_HANDLE;
         bool operator==(const MaterialDescriptorKey&) const = default;
     };
     struct MaterialDescriptorKeyHash {
@@ -438,7 +447,9 @@ private:
             const size_t b = std::hash<VkImageView>{}(key.normal);
             const size_t c = std::hash<VkSampler>{}(key.diffuseSampler);
             const size_t d = std::hash<VkSampler>{}(key.normalSampler);
-            return a ^ (b << 1) ^ (c << 2) ^ (d << 3);
+            const size_t e = std::hash<VkImageView>{}(key.second);
+            const size_t f = std::hash<VkSampler>{}(key.secondSampler);
+            return a ^ (b << 1) ^ (c << 2) ^ (d << 3) ^ (e << 4) ^ (f << 5);
         }
     };
     std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>

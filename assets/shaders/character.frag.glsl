@@ -41,6 +41,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTexture;
 #include "character_material.glsli"
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
+layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -51,6 +52,7 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
+layout(location = 5) in vec2 MaskUV;
 
 layout(location = 0) out vec4 outColor;
 
@@ -262,6 +264,7 @@ void main() {
 
     if (enablePOM == PREVIEW_SIMPLE_TEXTURE_MODE) {
         vec4 texColor = samplePreviewTexture(uTexture, TexCoord);
+        if (hasSecondTexture != 0) texColor *= texture(uSecondTexture, MaskUV);
         if (isMagentaKeyColor(texColor)) {
             discard;
         }
@@ -323,6 +326,9 @@ void main() {
     }
 
     vec4 texColor = textureGrad(uTexture, finalUV, uvDx, uvDy);
+    // The second stage shapes the first, colour and alpha alike, before
+    // anything reads either.
+    if (hasSecondTexture != 0) texColor *= texture(uSecondTexture, MaskUV);
     // Only explicit instance/animation opacity may fade an opaque surface.
     if (ignoreTextureAlpha != 0) texColor.a = 1.0;
     // Repair dark DXT fringes on alpha-cut character textures such as hair.
