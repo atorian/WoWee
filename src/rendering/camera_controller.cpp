@@ -1443,7 +1443,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
     // Ground the character to terrain or WMO floor
     // Skip entirely while swimming - the swim floor clamp handles vertical bounds.
     if (!swimming) {
-        float stepUpBudget = grounded ? movement::kMaxStepUp : 1.2f;
+        // Still rising onto a ledge the jump landed on: the feet are below it by
+        // up to the jump's own step-up, and the ground's smaller one would lose
+        // the ledge halfway and drop the player off it.
+        float stepUpBudget = (grounded && !stepClimbing_) ? movement::kMaxStepUp : 1.2f;
         // 1. Center-only sample for terrain/WMO floor selection.
         //    Using only the center prevents tunnel entrances from snapping
         //    to terrain when offset samples miss the WMO floor geometry.
@@ -1945,16 +1948,33 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 // HOVER: float at fixed height above ground instead of standing on it
                 static constexpr float HOVER_HEIGHT = 4.0f;  // ~4 yards above ground
                 const float snapH = hoverActive_ ? (*groundH + HOVER_HEIGHT) : *groundH;
-                targetPos.z = snapH;
+                // A jump that lands on a ledge above the feet steps up onto it
+                // rather than appearing there. Up to the jump's step-up of 1.2,
+                // put in place in a single frame, read as a teleport - the
+                // platform under the floating sculpture in Dalaran is ~0.7 over
+                // the feet at the top of the jump. Walking keeps its instant
+                // snap: its steps are a stair's, small enough not to be seen.
+                constexpr float kStepClimbSpeed = 8.0f;   // yards per second
+                constexpr float kStepClimbMin = 0.1f;     // closer than this, just stand
+                if ((!grounded || stepClimbing_) && !hoverActive_ &&
+                    snapH - feetZ > kStepClimbMin) {
+                    targetPos.z = std::min(snapH, feetZ + kStepClimbSpeed * f.physicsDeltaTime);
+                    stepClimbing_ = targetPos.z < snapH;
+                } else {
+                    targetPos.z = snapH;
+                    stepClimbing_ = false;
+                }
                 verticalVelocity = 0.0f;
                 grounded = true;
                 lastGroundZ = *groundH;
             } else {
                 grounded = false;
+                stepClimbing_ = false;
                 lastGroundZ = *groundH;
             }
             } else {
                 hasRealGround_ = false;
+                stepClimbing_ = false;
                 noGroundTimer_ += f.physicsDeltaTime;
 
                 float dropFromLastGround = lastGroundZ - targetPos.z;
@@ -3480,6 +3500,7 @@ void CameraController::reset() {
     pitch = defaultPitch;
     verticalVelocity = 0.0f;
     grounded = true;
+    stepClimbing_ = false;
     swimming = false;
     sitting = false;
     autoRunning = false;
@@ -3714,6 +3735,7 @@ void CameraController::teleportTo(const glm::vec3& pos) {
     swimming = false;
     sitting = false;
     lastGroundZ = pos.z;
+    stepClimbing_ = false;
     noGroundTimer_ = 0.0f;  // Reset grace period so terrain has time to stream
     autoUnstuckFired_ = false;
     continuousFallTime_ = 0.0f;
