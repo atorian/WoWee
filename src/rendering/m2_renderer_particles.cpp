@@ -10,6 +10,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/frustum.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -301,6 +302,13 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
         p.position += p.velocity * dt;
         i++;
     }
+
+    float reachSq = 0.0f;
+    for (const auto& p : inst.particles) {
+        const glm::vec3 d = p.position - inst.cachedCullCenter;
+        reachSq = std::max(reachSq, glm::dot(d, d));
+    }
+    inst.particleReach = std::sqrt(reachSq);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +610,9 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     ParticleGroup* runGroup = nullptr;
 
     size_t totalParticles = 0;
+    size_t droppedForSpace = 0;
+    Frustum viewFrustum;
+    viewFrustum.extractFromMatrix(cachedViewProjection_);
 
     // Only the instances that carry emitters, not every instance in the world.
     //
@@ -725,7 +736,10 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 }
             }
 
-            if (vbWritten >= MAX_M2_PARTICLE_VERTS) break;
+            if (vbWritten >= MAX_M2_PARTICLE_VERTS) {
+                ++droppedForSpace;
+                continue;
+            }
             // A run per stretch of particles sharing a group. The group only
             // changes when the emitter does, and particles from one emitter
             // are adjacent, so this closes a run about once per emitter.
@@ -777,10 +791,29 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             }
         }
     };
+    // Only what is in view. Every emitter within the render distance used to
+    // go in, behind the camera as well: Dalaran's two mage portals alone hold
+    // 7200 particles, its sconces and candles thousands more, and the buffer
+    // filled before a Shadowform priest's fire - created last, so listed last
+    // - got any of it. The sphere is the model's and its particles' reach,
+    // with room for a particle's own size.
+    constexpr float kParticleSizeMargin = 2.0f;
     for (size_t idx : particleInstanceIndices_) {
-        if (idx < instances.size()) addInstanceParticles(instances[idx]);
+        if (idx >= instances.size()) continue;
+        const M2Instance& inst = instances[idx];
+        if (inst.particles.empty()) continue;
+        const float radius = std::max(inst.cachedPaddedRadius, inst.particleReach) + kParticleSizeMargin;
+        if (!viewFrustum.intersectsSphere(inst.cachedCullCenter, radius)) continue;
+        addInstanceParticles(inst);
     }
     for (const auto& [id, posed] : posedEmitters_) addInstanceParticles(posed.inst);
+    if (droppedForSpace > 0) {
+        static core::LogBudget overflowBudget(8, "M2 particle buffer overflows");
+        if (overflowBudget.take()) {
+            LOG_WARNING("M2 particle buffer full: ", droppedForSpace, " particles in view not drawn (",
+                        MAX_M2_PARTICLE_VERTS, " particles); the effects listed last lose them");
+        }
+    }
 
     // Periodic diagnostic: spell effect particle count
     {

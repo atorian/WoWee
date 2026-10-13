@@ -363,6 +363,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                  : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY));
     cachedMaxRenderDistSq_ = maxRenderDistance * maxRenderDistance;
 
+    cachedViewProjection_ = viewProjection;
+
     // Build frustum for culling bones
     Frustum updateFrustum;
     updateFrustum.extractFromMatrix(viewProjection);

@@ -325,6 +325,10 @@ struct M2Instance {
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
     std::vector<M2Particle> particles;
+    /// How far its live particles are from cachedCullCenter, at most, as of
+    /// the last update: with the model's own radius, the sphere they are seen
+    /// in. A mage portal's swirl and a tail of smoke leave the model's bounds.
+    float particleReach = 0.0f;
 
     // Ribbon emitter state, kept the way the original client's CRibbonEmitter
     // keeps it. An edge is two world-space vertices laid across the emitter's
@@ -1406,6 +1410,9 @@ private:
 
     // Cached camera state from update() for frustum-culling bones
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
+    /// The camera update() last saw, for the particle draw to cull by: only
+    /// what is in view goes into the particle buffer.
+    glm::mat4 cachedViewProjection_{1.0f};
     float cachedMaxRenderDistSq_ = 0.0f;
     float smoothedRenderDist_ = 1000.0f;  // Smoothed render distance to prevent flickering
     /// The distance as asked for, kept so the scale can be rebuilt when the
