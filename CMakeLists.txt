@@ -1945,6 +1945,20 @@ if(WOWEE_BUILD_FRAMEXML_RUN)
 endif()
 
 
+# ---- Tool: scene_render ----
+# One frame of a static scene - models placed on a map, a camera, an hour -
+# drawn by the client's renderer and written to a PNG. It links the renderer
+# library and nothing of the client, so checking how something looks is a
+# rebuild of the renderer and a few seconds, not a login and a walk.
+# See tools/scene_render/main.cpp for the scene file.
+add_executable(scene_render
+    tools/scene_render/main.cpp
+    tools/scene_render/stb_image_impl.cpp
+)
+target_link_libraries(scene_render PRIVATE wowee_render)
+target_precompile_headers(scene_render REUSE_FROM wowee_render)
+wowee_apply_client_flags(scene_render)
+
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer
 # on this machine's Vulkan device, without a realm to stand in. Built from the
