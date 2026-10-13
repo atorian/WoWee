@@ -175,6 +175,32 @@ TEST_CASE("Reported movement stops where a stop report says", "[entity][movement
     REQUIRE(m.position().x == Catch::Approx(3.0f));
 }
 
+TEST_CASE("Reported movement animates a stopped unit at its own pace", "[entity][movement]") {
+    // A runner stops and sends nothing more. Playback reaches the end of what
+    // it knows and stays there - but standing is not waiting for a late
+    // report, so the stand plays on rather than freezing at rate zero.
+    ReportedMovement m;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    play(m, 0, 500);
+    MovementReport stop = running(500, 3.5f, 0.0f);
+    stop.flags = 0;
+    m.report(stop, at(500));
+    play(m, 500, 5000);
+    REQUIRE_FALSE(m.isMoving());
+    REQUIRE(m.playbackRate() == Catch::Approx(1.0f));
+}
+
+TEST_CASE("Reported movement holds a runner's animation while its reports are late",
+          "[entity][movement]") {
+    // Still running by its last report, and nothing new for seconds: playback
+    // waits at the end of what it knows, and the run waits with it.
+    ReportedMovement m;
+    m.report(running(0, 0.0f, 0.0f), at(0));
+    play(m, 0, 5000);
+    REQUIRE(m.isTravelling());
+    REQUIRE(m.playbackRate() == Catch::Approx(0.0f));
+}
+
 TEST_CASE("Reported movement flies a jump on its arc", "[entity][movement]") {
     ReportedMovement m;
     MovementReport jump = running(0, 0.0f, 0.0f);

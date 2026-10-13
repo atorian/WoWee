@@ -673,7 +673,7 @@ void GameHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
     // 86400 to get a time of day, which made the sky's clock a number with no
     // relation to the hour the server sent.
     //
-    // timeScale: time speed multiplier (typically 0.0166 for 1 day = 1 hour)
+    // timeScale: game minutes per real second - 1/60 is real time.
 
     if (packet.getSize() < 8) {
         LOG_WARNING("SMSG_LOGIN_SETTIMESPEED: packet too small (", packet.getSize(), " bytes)");
@@ -683,14 +683,11 @@ void GameHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
     const WowDate now = unpackWowPackedTime(packet.readUInt32());
     float timeScale = packet.readFloat();
 
-    // Hours since midnight, which is what GetGameTime already assumed and what
-    // the sky wants. One meaning for this field, written down here.
-    gameTime_ = static_cast<float>(now.hour) + static_cast<float>(now.minute) / 60.0f;
-    timeSpeed_ = timeScale;
+    gameClock_.set(static_cast<float>(now.hour) + static_cast<float>(now.minute) / 60.0f,
+                   timeScale);
 
-    LOG_INFO("Server time: ", now.hour, ":", now.minute, " (gameTime=", gameTime_,
-             "h), timeSpeed=", timeSpeed_);
-    LOG_INFO("  (1 game day = ", (1.0f / timeSpeed_) / 60.0f, " real minutes)");
+    LOG_INFO("Server time: ", now.hour, ":", now.minute, ", timeSpeed=", timeScale,
+             " (1 game day = ", 24.0f / (gameClock_.speed() * 60.0f), " real hours)");
 }
 
 void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {

@@ -582,8 +582,19 @@ private:
         uint8_t facialFeatures = 0;
         std::string bodySkinPath;
         std::vector<std::string> underwearPaths;
+        // The main and off hand weapons as attached, and whether they are on
+        // the back, as every rider carries them (riderWeaponAttachment).
+        struct HeldWeapon {
+            bool attached = false;
+            uint8_t inventoryType = 0;
+        };
+        std::array<HeldWeapon, 2> weapons;
+        bool weaponsSheathed = false;
     };
     std::unordered_map<uint64_t, OnlinePlayerAppearanceState> onlinePlayerAppearance_;
+    /// Moves a player's attached weapons into their hands or onto their back;
+    /// drawing a mount puts them away and removing it draws them.
+    void setRemotePlayerWeaponsSheathed(uint64_t guid, bool sheathed);
     std::unordered_map<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>> pendingOnlinePlayerEquipment_;
     std::deque<std::pair<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>>> deferredEquipmentQueue_;
     void processDeferredEquipmentQueue();

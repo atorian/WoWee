@@ -42,4 +42,9 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // set 1 binding 3, on this UV set (0 or 1).
     int hasSecondTexture;
     int secondTexCoordSet;
+    // The batch's authored M2 colour, multiplied into the texture (w is
+    // padding). A glow card is painted white and coloured here: the riding
+    // phoenix's wing glows carry red, magenta and violet, and drew white
+    // without it.
+    vec4 batchColor;
 };

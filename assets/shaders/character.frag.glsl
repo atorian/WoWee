@@ -280,6 +280,7 @@ void main() {
             texColor.a *= ck;
             if (texColor.a < 0.01) discard;
         }
+        texColor.rgb *= batchColor.rgb;
         if (modulateNeutral > 0.0)
             texColor.rgb = mix(vec3(modulateNeutral), texColor.rgb, opacity);
         outColor = vec4(texColor.rgb, texColor.a * opacity);
@@ -368,6 +369,9 @@ void main() {
         texColor.a *= ck;
         if (texColor.a < 0.01) discard;
     }
+    // The batch's authored colour, after the keys: they judge the texture,
+    // and a dark-red glow would key itself out.
+    texColor.rgb *= batchColor.rgb;
 
     // Compute normal (with normal mapping if enabled)
     vec3 norm = vertexNormal;
@@ -384,9 +388,13 @@ void main() {
     vec3 result;
 
     if (unlit != 0) {
+        // The texture as it is, as on doodads, unless a flame asks for more.
+        // This was texColor * (1 + tint * boost), which with the white, 1.0
+        // defaults every batch gets is twice the texture: every unlit layer
+        // of every creature drawn double bright. The riding phoenix's orange
+        // wings came out lemon yellow.
         vec3 emissiveTint = vec3(emissiveTintR, emissiveTintG, emissiveTintB);
-        vec3 warm = emissiveTint * emissiveBoost;
-        result = texColor.rgb * (1.0 + warm);
+        result = texColor.rgb * emissiveTint * emissiveBoost;
     } else {
         bool inside = insideInterior(push.interiorAmbient);
         vec3 ldir = normalize(-interiorLightDir(push.interiorAmbient, lightDir.xyz));

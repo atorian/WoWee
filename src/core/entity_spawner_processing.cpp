@@ -2023,6 +2023,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             cr->playAnimation(mountInstance, mountAnim, true);
             cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
             cr->addLookCompanion(playerIt->second, mountInstance);  // Shadowform darkens the mount too
+            setRemotePlayerWeaponsSheathed(guid, true);  // no rider holds a weapon
             remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
                                          .instanceId = mountInstance, .riderHeight = riderHeight};
             LOG_INFO("Remote player mounted: guid=0x", std::hex, guid, std::dec,

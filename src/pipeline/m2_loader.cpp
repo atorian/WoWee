@@ -23,6 +23,7 @@
 #include "pipeline/m2_color_track.hpp"
 #include "core/logger.hpp"
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 
 namespace wowee {
@@ -1538,7 +1539,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseTrackV(0xDC, em.emissionRate);        // +28 = 0xF8
                 parseTrackV(0xF8, em.emissionAreaLength);  // +28 = 0x114
                 parseTrackV(0x114, em.emissionAreaWidth);  // +28 = 0x130
-                parseTrackV(0x130, em.deceleration);       // +28 = 0x14C
+                parseTrackV(0x130, em.zSource);            // +28 = 0x14C
 
                 // Vanilla: NO FBlocks - color/alpha/scale are static inline values
                 // Layout (empirically confirmed from real vanilla M2 files):
@@ -1601,12 +1602,17 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseTrack(0xB0, em.emissionRate);
                 parseTrack(0xC8, em.emissionAreaLength);
                 parseTrack(0xDC, em.emissionAreaWidth);
-                parseTrack(0xF0, em.deceleration);
+                parseTrack(0xF0, em.zSource);
 
                 // Parse FBlocks (color, alpha, scale) - FBlocks are 16 bytes each
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
+                // After the scale variation, the two cell tracks and the tail
+                // and twinkle settings: tailLength 0x15C, twinkle 0x160-0x16C,
+                // burstMultiplier 0x170, then drag.
+                if (base + 0x174 + sizeof(float) <= m2Data.size())
+                    em.drag = readValue<float>(m2Data, base + 0x174);
             }
 
             model.particleEmitters.push_back(std::move(em));
@@ -1616,8 +1622,12 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
     }
 
     // Parse ribbon emitters (WotLK only; vanilla format TBD).
-    // WotLK M2RibbonEmitter = 0xAC (172) bytes per entry.
-    static constexpr uint32_t RIBBON_SIZE_WOTLK = 0xAC;
+    // WotLK M2RibbonEmitter = 0xB0 (176) bytes per entry: after the
+    // visibility track at 0x98 come priorityPlane (int16), a colour index and
+    // a texture-transform lookup index (uint8 each). Stepping by 0xAC read
+    // the first ribbon right and every later one 4 bytes further off: the
+    // riding phoenix's wing trails came out with texture 371 and drew white.
+    static constexpr uint32_t RIBBON_SIZE_WOTLK = 0xB0;
     if (header.nRibbonEmitters > 0 && header.ofsRibbonEmitters > 0 &&
         header.nRibbonEmitters < 64 && header.version >= 264) {
 
@@ -1692,9 +1702,19 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 if (rib.textureRows == 0) rib.textureRows = 1;
                 if (rib.textureCols == 0) rib.textureCols = 1;
 
-                // Clamp to sane values
-                if (rib.edgesPerSecond < 1.0f  || rib.edgesPerSecond > 200.0f) rib.edgesPerSecond = 15.0f;
-                if (rib.edgeLifetime   < 0.05f || rib.edgeLifetime   > 10.0f)  rib.edgeLifetime   = 0.5f;
+                // Taken as authored; the renderer applies the client's own
+                // floors (at least one edge a second, a quarter-second life).
+                // These were replaced with 15 and 0.5 when out of a "sane"
+                // range, which hid that every ribbon after the first was being
+                // read from the wrong offset.
+                if (!std::isfinite(rib.edgesPerSecond) || !std::isfinite(rib.edgeLifetime) ||
+                    !std::isfinite(rib.gravity)) {
+                    core::Logger::getInstance().warning(
+                        "M2 '", model.name, "' ribbon emitter[", ri, "] has a non-finite rate (",
+                        rib.edgesPerSecond, "), lifetime (", rib.edgeLifetime, ") or gravity (",
+                        rib.gravity, ") - ribbon not drawn");
+                    continue;
+                }
 
                 // visibilityTrack M2TrackDisk at 0x98 - keys are uint8 (0/1), NOT float.
                 // Must read as uint8 and convert to float, else 0x01 reads as
@@ -1704,9 +1724,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                                    rib.visibilityTrack, TrackType::BYTE_BOOL, ribSeqFlags);
                 }
 
-                // Skip garbage emitters (common M2 artifact: alternating emitters
-                // have bone=UINT_MAX or other invalid state)
-                if (rib.bone == 0xFFFFFFFF) {
+                if (rib.bone >= model.bones.size()) {
+                    LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri, "] names bone ",
+                                rib.bone, " of ", model.bones.size(), " - ribbon not drawn");
                     continue;
                 }
 

@@ -1,5 +1,19 @@
 # Instructions for coding agents
 
+## Correct solutions, not quick hacks
+
+- Fix the cause, for the whole class of cases, not the one model or creature
+  in front of you. When the phoenix's wing trails are missing because creatures
+  draw no emitters, the task is creatures drawing their emitters, not the
+  phoenix.
+- No per-model special cases, magic offsets, name checks, skipped data or a
+  field made to mean two things to make one case look right. If the proper fix
+  needs a new API, a new owner for some state or a change to the frame order,
+  that is the work.
+- A larger correct change is preferred over a small one that only hides the
+  symptom. When the proper fix is a real feature, lay out the plan and its
+  costs first, then build it fully.
+
 ## Disks: everything on D:, nothing on C:
 
 - Build only inside `D:\games\WoWee` — the `build-dev` tree (preset `dev`,

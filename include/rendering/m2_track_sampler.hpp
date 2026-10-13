@@ -28,6 +28,16 @@ inline SampleTime resolveTime(const pipeline::M2AnimationTrack& track,
         if (time < 0.0f) time += duration;
         return {.sequenceIndex = 0, .timeMs = time};
     }
+    // A track with fewer key arrays than the sequence's index is read from
+    // its first one, as the client reads it (animateTrack:
+    // "if (timestamps.size <= animationIndex) animationIndex = 0"). A track
+    // that never changes is stored once, for sequence 0: the riding phoenix's
+    // trail colours and alphas are, and played on a running or flying mount
+    // they fell to the white, opaque default.
+    if (animationSequenceIndex >= 0 &&
+        static_cast<size_t>(animationSequenceIndex) >= track.sequences.size()) {
+        return {.sequenceIndex = 0, .timeMs = animationTimeMs};
+    }
     return {.sequenceIndex = animationSequenceIndex, .timeMs = animationTimeMs};
 }
 

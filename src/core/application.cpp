@@ -63,6 +63,7 @@
 #include "rendering/weather.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/character_emitters.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/minimap.hpp"

@@ -185,7 +185,11 @@ struct M2ParticleEmitter {
     M2AnimationTrack emissionRate;
     M2AnimationTrack emissionAreaLength;
     M2AnimationTrack emissionAreaWidth;
-    M2AnimationTrack deceleration;
+    /// Above zero, particles leave away from (0, 0, zSource) in the emitter's
+    /// space rather than up its axis. Read as a deceleration once; it is not.
+    M2AnimationTrack zSource;
+    /// How fast a particle slows, per second (WotLK; zero before it).
+    float drag = 0.0f;
     M2FBlock particleColor;   // vec3 RGB at 3 timestamps
     M2FBlock particleAlpha;   // float (from uint16/32767) at 3 timestamps
     M2FBlock particleScale;   // float (x component of vec2) at 3 timestamps
@@ -198,8 +202,8 @@ struct M2RibbonEmitter {
     uint32_t bone       = 0;        // Bone that drives the ribbon spine
     glm::vec3 position{0.0f};       // Offset from bone pivot
 
-    uint16_t textureIndex  = 0;     // First texture lookup index
-    uint16_t materialIndex = 0;     // First material lookup index (blend mode)
+    uint16_t textureIndex  = 0;     // First texture, an index into M2Model::textures
+    uint16_t materialIndex = 0;     // First material, an index into M2Model::materials (blend mode)
 
     // Animated tracks
     M2AnimationTrack colorTrack;       // RGB 0..1

@@ -17,6 +17,7 @@
 #include "game/movement_handler.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
+#include "game/game_clock.hpp"
 #include "network/packet.hpp"
 #include "core/logger.hpp"
 #include <glm/glm.hpp>
@@ -1427,13 +1428,15 @@ public:
     bool hasPlayerExploredZoneMasks() const { return hasPlayerExploredZones_; }
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
-    // Server game time, in HOURS since midnight (0.0-24.0).
+    // Server game time now, in HOURS since midnight (0.0-24.0), or -1 before
+    // the server has sent it.
     //
     // The unit is stated because four things disagreed about it: the wire
     // format is a packed bitfield, the sky divided by 86400 as though it were
     // seconds, GetGameTime split it as hours, and SMSG_SERVERTIME wrote a unix
     // timestamp into the same field.
-    float getGameTime() const { return gameTime_; }
+    float getGameTime() const { return gameClock_.hours(); }
+    float getTimeSpeed() const { return gameClock_.speed(); }
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     float getGCDRemaining() const {
@@ -4691,21 +4694,10 @@ private:
     uint32_t serverPlayerLevel_ = 1;
 
     // ---- Server time tracking (for deterministic celestial/sky systems) ----
-    /// Server game time in HOURS since midnight, or negative when the server
-    /// has not told us yet.
-    ///
-    /// The sentinel matters as much as the value. This was 0, which is a
-    /// perfectly good time of day - midnight - so "never received" and
-    /// "midnight" were the same number. Every consumer tests `>= 0` to decide
-    /// whether to trust it, so with 0 they all trusted it, the local-time
-    /// fallback in LightingManager became dead code, and the world sat at
-    /// midnight for the whole session: stars out, no sun, and nothing moving.
-    /// Every call site already passes -1.0f when there is no game handler at
-    /// all, so this simply agrees with them.
-    ///
-    /// The old comment said seconds. The code that assigns it writes hours.
-    float gameTime_ = -1.0f;
-    float timeSpeed_ = 0.0166f;   // Time scale (default: 1 game day = 1 real hour)
+    /// The realm's time of day, advanced from the last hour the server sent.
+    /// Reads -1 until the server has sent one, which every consumer takes as
+    /// "fall back to the local clock".
+    GameClock gameClock_;
     void handleLoginSetTimeSpeed(network::Packet& packet);
 
     // ---- Global Cooldown (GCD) ----

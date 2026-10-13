@@ -52,6 +52,22 @@ TEST_CASE("M2 track sampling respects discrete and linear interpolation", "[m2][
               track, 0, 50.0f, 0.0f, {}, -1.0f) == Catch::Approx(0.5f));
 }
 
+TEST_CASE("M2 track stored for sequence 0 alone serves every sequence", "[m2][track]") {
+    // The riding phoenix's trail alphas: one key array, for sequence 0, read
+    // while the mount plays its run or flight sequence.
+    wowee::pipeline::M2AnimationTrack track;
+    track.sequences.resize(1);
+    track.sequences[0].timestamps = {0};
+    track.sequences[0].floatValues = {0.25f};
+    CHECK(wowee::rendering::m2_track::sampleFloat(
+              track, 4, 300.0f, 0.0f, {}, -1.0f) == Catch::Approx(0.25f));
+
+    // An array that is there but empty is not one to borrow from.
+    track.sequences.resize(5);
+    CHECK(wowee::rendering::m2_track::sampleFloat(
+              track, 4, 300.0f, 0.0f, {}, -1.0f) == Catch::Approx(-1.0f));
+}
+
 TEST_CASE("M2 global tracks use their independent wrapped clock", "[m2][track]") {
     wowee::pipeline::M2AnimationTrack track;
     track.interpolationType = 1;
