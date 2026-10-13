@@ -3828,6 +3828,10 @@ uint32_t GameHandler::getSpellSchoolMask(uint32_t spellId) const {
     return spellHandler_->getSpellSchoolMask(spellId);
 }
 
+uint32_t GameHandler::getSpellVisualId(uint32_t spellId) const {
+    return spellHandler_->getSpellVisualId(spellId);
+}
+
 const std::string& GameHandler::getSkillLineName(uint32_t skillLineId) const {
     return spellHandler_->getSkillLineName(skillLineId);
 }

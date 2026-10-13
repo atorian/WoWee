@@ -1315,14 +1315,6 @@ public:
     using NpcDeathCallback = std::function<void(uint64_t guid)>;
     void setNpcDeathCallback(NpcDeathCallback cb) { npcDeathCallback_ = std::move(cb); }
 
-    // Resolves a unit GUID to its CharacterRenderer instance id (0 = not
-    // rendered). Wired by AnimationCallbackHandler; used to bone-attach spell
-    // visuals to the actual caster instead of the local player.
-    using UnitRenderInstanceResolver = std::function<uint32_t(uint64_t guid)>;
-    void setUnitRenderInstanceResolver(UnitRenderInstanceResolver cb) { unitRenderInstanceResolver_ = std::move(cb); }
-    uint32_t resolveUnitRenderInstance(uint64_t guid) const {
-        return unitRenderInstanceResolver_ ? unitRenderInstanceResolver_(guid) : 0;
-    }
 
     using NpcAggroCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
     void setNpcAggroCallback(NpcAggroCallback cb) { npcAggroCallback_ = std::move(cb); }
@@ -3329,6 +3321,7 @@ public:
     /// (0x01=Physical, 0x02=Holy, 0x04=Fire, 0x08=Nature, 0x10=Frost, 0x20=Shadow, 0x40=Arcane).
     /// Returns 0 if unknown.
     uint32_t getSpellSchoolMask(uint32_t spellId) const;
+    uint32_t getSpellVisualId(uint32_t spellId) const;
     /// Returns the Spell.dbc Targets bitmask (SpellCastTargetFlags) for the spell.
     /// 0x10 = TARGET_FLAG_ITEM, meaning the spell must be cast onto another item.
     uint32_t getSpellTargetFlags(uint32_t spellId) const;
@@ -4754,7 +4747,6 @@ private:
     void applyPackedKillCountsFromFields(QuestLogEntry& quest);
 
     NpcDeathCallback npcDeathCallback_;
-    UnitRenderInstanceResolver unitRenderInstanceResolver_;
     NpcAggroCallback npcAggroCallback_;
     NpcRespawnCallback npcRespawnCallback_;
     StandStateCallback standStateCallback_;

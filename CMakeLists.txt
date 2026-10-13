@@ -652,6 +652,7 @@ set(WOWEE_SOURCES
     src/core/world_loader.cpp
     src/core/zone_tracker.cpp
     src/core/player_view.cpp
+    src/core/spell_presentation.cpp
     src/core/screen_recording.cpp
     src/core/npc_interaction_callback_handler.cpp
     src/core/audio_callback_handler.cpp

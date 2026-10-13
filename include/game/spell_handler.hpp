@@ -82,6 +82,8 @@ public:
     [[nodiscard]] bool isCasting() const { return casting_ || restorationActive_; }
     [[nodiscard]] bool isChanneling() const { return casting_ ? castIsChannel_ : restorationActive_; }
     [[nodiscard]] bool isRestoring() const { return restorationActive_; }
+    /// Eating rather than drinking, while isRestoring().
+    [[nodiscard]] bool isRestorationFood() const { return restorationIsFood_; }
     [[nodiscard]] bool isGameObjectInteractionCasting() const;
     [[nodiscard]] uint32_t getCurrentCastSpellId() const {
         return casting_ ? currentCastSpellId_ : restorationSpellId_;
@@ -214,6 +216,10 @@ public:
     // Auras
     [[nodiscard]] const std::vector<AuraSlot>& getPlayerAuras() const { return playerAuras_; }
     [[nodiscard]] const std::vector<AuraSlot>& getTargetAuras() const { return targetAuras_; }
+    /// Every unit's auras but the player's, by guid - the target's included.
+    [[nodiscard]] const std::unordered_map<uint64_t, std::vector<AuraSlot>>& getUnitAurasByGuid() const {
+        return unitAurasCache_;
+    }
     [[nodiscard]] const std::vector<AuraSlot>* getUnitAuras(uint64_t guid) const {
         auto it = unitAurasCache_.find(guid);
         return (it != unitAurasCache_.end()) ? &it->second : nullptr;
@@ -276,6 +282,8 @@ public:
     [[nodiscard]] bool isSpellInterruptible(uint32_t spellId) const;
     [[nodiscard]] bool isSpellPassive(uint32_t spellId) const;
     [[nodiscard]] uint32_t getSpellSchoolMask(uint32_t spellId) const;
+    /// Spell.dbc SpellVisualID - the effect drawn for the spell - or 0.
+    [[nodiscard]] uint32_t getSpellVisualId(uint32_t spellId) const;
     /// Spell.dbc Targets mask (SpellCastTargetFlags): 0x10 = TARGET_FLAG_ITEM.
     [[nodiscard]] uint32_t getSpellTargetFlags(uint32_t spellId) const;
     [[nodiscard]] uint32_t getSpellTargetAuraState(uint32_t spellId) const;
@@ -396,28 +404,6 @@ private:
 
     // --- Internal helpers ---
 
-    // Resolve the magic school for a spell (for audio playback).
-    // Returns MagicSchool from the spell name cache, defaulting to ARCANE.
-    audio::SpellSoundManager::MagicSchool resolveSpellSchool(uint32_t spellId);
-
-    // Play a spell cast or impact sound via audioCoordinator, if available.
-    void playSpellCastSound(uint32_t spellId);
-    void playSpellImpactSound(uint32_t spellId);
-
-    // Resolve SpellVisualID from Spell.dbc cache for a given spellId.
-    uint32_t resolveSpellVisualId(uint32_t spellId);
-    /// Starts loading these spells' effect models in the background.
-    void preloadSpellVisuals(const std::vector<uint32_t>& spellIds);
-    /// Tells the spell visuals which drawn units carry which auras, so each
-    /// can wear its aura's look (SpellVisualSystem::syncStateVisuals).
-    void syncAuraStateVisuals(float dt);
-    // Resolve render-space position for a unit GUID (player or entity).
-    bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
-    // Play the cast/precast visual effect at the caster's position.
-    void triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs = 0);
-    // Play the impact visual effect at the target's position.
-    void triggerImpactVisual(uint32_t spellId, uint64_t targetGuid);
-    void launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid);
     void refreshRestorationFromPlayerAuras();
     void stopRestorationPresentation();
 
@@ -468,7 +454,6 @@ private:
     bool restorationIsFood_ = false;
     float restorationTimeRemaining_ = 0.0f;
     float restorationTimeTotal_ = 0.0f;
-    float restorationSoundTimer_ = 0.0f; // repeats the consume sound while active
 
     // Repeat-craft queue
     uint32_t craftQueueSpellId_ = 0;
@@ -512,7 +497,6 @@ private:
     std::vector<AuraSlot> playerAuras_;
     std::vector<AuraSlot> targetAuras_;
     std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_;
-    float auraStateVisualTimer_ = 0.0f;
 
     // Global Cooldown
     float gcdTotal_ = 0.0f;

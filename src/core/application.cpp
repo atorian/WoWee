@@ -3,6 +3,7 @@
 #include "core/screen_recording.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "core/player_view.hpp"
+#include "core/spell_presentation.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -2214,6 +2215,9 @@ void Application::shutdown() {
         worldMap_.reset();
     }
     playerView_.reset();
+    // It draws through the spell visuals and plays through the audio, and must
+    // not hear another event once they are gone.
+    spellPresentation_.reset();
     if (spellVisualSystem_) {
         spellVisualSystem_->shutdown();
         spellVisualSystem_.reset();
@@ -3848,6 +3852,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         if (gameHandler) {
             gameHandler->update(deltaTime);
         }
+        if (spellPresentation_) spellPresentation_->update(deltaTime);
     });
     if (addonManager_ && addonsLoaded_) {
         addonManager_->update(deltaTime);
@@ -5686,6 +5691,10 @@ void Application::setupUICallbacks() {
     animationCallbacks_ = std::make_unique<AnimationCallbackHandler>(
         *entitySpawner_, *renderer, *playerView_, *gameHandler, *appearanceComposer_);
     animationCallbacks_->setupCallbacks();
+
+    spellPresentation_ = std::make_unique<SpellPresentation>(
+        eventBus_, *gameHandler, *renderer, *entitySpawner_, spellVisualSystem_.get(),
+        audioCoordinator_.get(), *assetManager);
 
     // ── NPC interaction: greeting, farewell, vendor, aggro voice ──
     npcInteractionCallbacks_ = std::make_unique<NPCInteractionCallbackHandler>(

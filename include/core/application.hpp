@@ -55,6 +55,7 @@ namespace core {
 class NPCInteractionCallbackHandler;
 class ZoneTracker;
 class PlayerView;
+class SpellPresentation;
 class ScreenRecording;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
@@ -409,6 +410,8 @@ private:
     std::unique_ptr<AudioCallbackHandler> audioCallbacks_;
     std::unique_ptr<EntitySpawnCallbackHandler> entitySpawnCallbacks_;
     std::unique_ptr<AnimationCallbackHandler> animationCallbacks_;
+    /// How spells look and sound, from what the game says happened to them.
+    std::unique_ptr<SpellPresentation> spellPresentation_;
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;
     std::unique_ptr<UIScreenCallbackHandler> uiScreenCallbacks_;

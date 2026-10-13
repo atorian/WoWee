@@ -184,15 +184,6 @@ void AnimationCallbackHandler::setupCallbacks() {
         }
     });
 
-    // GUID → CharacterRenderer instance for bone-attached spell visuals:
-    // local player uses the dedicated character instance, other units the
-    // spawner's creature/player instances (0 = not rendered, no attachment).
-    gameHandler_.setUnitRenderInstanceResolver([this](uint64_t guid) -> uint32_t {
-        if (guid == gameHandler_.getPlayerGuid()) return renderer_.getCharacterInstanceId();
-        uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-        if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
-        return instanceId;
-    });
 
     // NPC/player death callback (online mode) - play death animation
     gameHandler_.setNpcDeathCallback([this](uint64_t guid) {
