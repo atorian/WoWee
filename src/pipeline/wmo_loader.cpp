@@ -415,12 +415,21 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
 }
 
 std::vector<bool> interiorDoodads(const WMOModel& model) {
+    // A doodad an outdoor group lists as well stands in the open, whatever room
+    // also lists it: it is seen from the street and takes the sun. Dalaran's inn
+    // windows are such a doodad - listed by the city's exterior group 3 and by
+    // the inn's rooms 55 and 71 - and lit as inside they took their MODD colour,
+    // a dark blue, as their light and came out teal instead of stone.
     std::vector<bool> interior(model.doodads.size(), false);
+    std::vector<bool> outdoor(model.doodads.size(), false);
     for (const auto& group : model.groups) {
-        if (!(group.flags & kWMOGroupIndoor)) continue;
+        auto& listedBy = (group.flags & kWMOGroupIndoor) ? interior : outdoor;
         for (uint16_t ref : group.doodadRefs) {
-            if (ref < interior.size()) interior[ref] = true;
+            if (ref < listedBy.size()) listedBy[ref] = true;
         }
+    }
+    for (size_t i = 0; i < interior.size(); ++i) {
+        if (outdoor[i]) interior[i] = false;
     }
     return interior;
 }

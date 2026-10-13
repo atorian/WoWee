@@ -141,6 +141,21 @@ TEST_CASE("only doodads an interior group lists stand inside", "[interior_light]
             std::vector<bool>{true, false, false, true, false});
 }
 
+TEST_CASE("a doodad an outdoor group lists too stands outside", "[interior_light]") {
+    // Dalaran's inn windows: in the city's exterior group and in the inn's rooms.
+    wowee::pipeline::WMOModel model;
+    model.doodads.resize(2);
+    model.groups.resize(3);
+    model.groups[0].flags = 0x8;
+    model.groups[0].doodadRefs = {0};
+    model.groups[1].flags = 0x2000;
+    model.groups[1].doodadRefs = {0, 1};
+    model.groups[2].flags = 0x2000;
+    model.groups[2].doodadRefs = {0};
+
+    REQUIRE(wowee::pipeline::interiorDoodads(model) == std::vector<bool>{false, true});
+}
+
 TEST_CASE("a unit on a dim floor is lit from above, brought up to the client's minimum",
           "[interior_light]") {
     // MOHD 0.1 grey, the floor's MOCV a dim orange: the floor draws with

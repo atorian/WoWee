@@ -239,8 +239,9 @@ struct WMOModel {
     }
 };
 
-/// Per MODD entry, whether an interior group lists it in its MODR: the doodad
-/// stands inside and is lit by the building rather than the sun.
+/// Per MODD entry, whether only interior groups list it in their MODR: the
+/// doodad stands inside and is lit by the building rather than the sun. One an
+/// outdoor group lists too stands in the open.
 [[nodiscard]] std::vector<bool> interiorDoodads(const WMOModel& model);
 
 class WMOLoader {
