@@ -201,6 +201,7 @@ public:
         return it != remotePlayerMounts_.end() ? &it->second : nullptr;
     }
 
+
     // Local player GUID exclusion (EntitySpawner skips spawning the local player)
     void setLocalPlayerGuid(uint64_t guid) { spawnedPlayerGuid_ = guid; }
 
@@ -725,6 +726,28 @@ private:
     bool loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
                               std::string& modelPath, float& riderHeight);
     void removeRemotePlayerMount(uint64_t guid);
+
+    // --- Remote player forms ---
+    // Another player drawn as a creature: a druid's forms, a shaman's ghost
+    // wolf, a polymorph - Unit::getFormDisplayId, whatever the server's
+    // display ID is when it is not the player's own body.
+    //
+    // While a form is shown, playerInstances_ holds the form's instance, so
+    // everything that moves, turns and animates a player moves the form; the
+    // character's instance is hidden and kept, dressed, for the way back.
+    struct RemotePlayerForm {
+        uint32_t displayId = 0;
+        uint32_t formInstanceId = 0;
+        uint32_t characterInstanceId = 0;
+    };
+    std::unordered_map<uint64_t, RemotePlayerForm> remotePlayerForms_;
+    std::unordered_map<uint64_t, uint32_t> pendingRemotePlayerForms_;
+    // Forms with no model to draw them with, asked about once.
+    std::unordered_set<uint32_t> undrawableFormDisplayIds_;
+    void reconcileRemotePlayerForms();
+    void setRemotePlayerFormDisplayId(uint64_t guid, uint32_t displayId);  // 0 = own body
+    void processPendingRemotePlayerForms();
+    void removeRemotePlayerForm(uint64_t guid);
 
     // --- Local player GUID exclusion ---
     uint64_t spawnedPlayerGuid_ = 0;

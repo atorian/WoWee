@@ -1941,6 +1941,13 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             pendingRemotePlayerMounts_.erase(it);
             return;
         }
+        // No table names a model for it, and none will: asking every frame
+        // only repeated the warning, 29,000 times in one session.
+        if (getModelPathForDisplayId(displayId).empty()) {
+            LOG_WARNING("Remote player mount has no model path: displayId=", displayId);
+            pendingRemotePlayerMounts_.erase(it);
+            return;
+        }
         uint32_t modelId = 0;
         float riderHeight = 0.0f;
         std::string modelPath;
@@ -1976,6 +1983,86 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
                      " model=", modelPath);
         }
         pendingRemotePlayerMounts_.erase(it);
+        return;
+    }
+}
+
+void EntitySpawner::processPendingRemotePlayerForms() {
+    if (pendingRemotePlayerForms_.empty() || !renderer_) return;
+    auto* cr = renderer_->getCharacterRenderer();
+    if (!cr) return;
+
+    // As for mounts: the model is prepared on workers, and one player at most
+    // changes shape per frame, keeping what is shown until the new one is in.
+    for (auto it = pendingRemotePlayerForms_.begin(); it != pendingRemotePlayerForms_.end(); ++it) {
+        const uint64_t guid = it->first;
+        const uint32_t displayId = it->second;
+        auto playerIt = playerInstances_.find(guid);
+        if (playerIt == playerInstances_.end()) continue;  // fields can precede the body
+
+        if (displayId == 0) {
+            removeRemotePlayerForm(guid);
+            LOG_INFO("Remote player back in own form: guid=0x", std::hex, guid, std::dec);
+            pendingRemotePlayerForms_.erase(it);
+            return;
+        }
+        if (getModelPathForDisplayId(displayId).empty()) {
+            LOG_WARNING("Remote player form has no model: displayId=", displayId,
+                        "; players in it are drawn in their own form");
+            undrawableFormDisplayIds_.insert(displayId);
+            pendingRemotePlayerForms_.erase(it);
+            return;
+        }
+        uint32_t modelId = 0;
+        std::string modelPath;
+        float unusedHeight = 0.0f;
+        if (!loadRemoteMountModel(displayId, modelId, modelPath, unusedHeight)) continue;
+
+        // From one form to another the body stays where it was put away.
+        auto existing = remotePlayerForms_.find(guid);
+        const uint32_t character = existing != remotePlayerForms_.end()
+            ? existing->second.characterInstanceId : playerIt->second;
+        const uint32_t shown = playerIt->second;
+        glm::vec3 pos(0.0f);
+        cr->getInstancePosition(shown, pos);
+        const uint32_t formInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
+        if (formInstance == 0) {
+            pendingRemotePlayerForms_.erase(it);
+            return;
+        }
+        if (existing != remotePlayerForms_.end()) cr->removeInstance(existing->second.formInstanceId);
+        cr->setInstanceVisible(character, false);
+        removeRemotePlayerMount(guid);  // a form is never ridden; the server drops the mount too
+
+        float yaw = 0.0f;
+        uint32_t anim = rendering::anim::STAND;
+        if (gameHandler_) {
+            if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
+                yaw = entity->getOrientation() + glm::radians(90.0f);
+                const bool moving = entity->isActivelyMoving();
+                const bool flying = creatureFlyingState_.count(guid) > 0;
+                const bool swimming = creatureSwimmingState_.count(guid) > 0;
+                anim = moving ? (flying ? rendering::anim::FLY_FORWARD
+                                        : swimming ? rendering::anim::SWIM : rendering::anim::RUN)
+                              : (flying ? rendering::anim::FLY_IDLE
+                                        : swimming ? rendering::anim::SWIM_IDLE : rendering::anim::STAND);
+                if (!cr->hasAnimation(formInstance, anim))
+                    anim = moving ? rendering::anim::RUN : rendering::anim::STAND;
+                // So the next movement change is seen as one and animates it.
+                creatureWasMoving_[guid] = moving;
+                creatureWasFlying_[guid] = flying;
+                creatureWasSwimming_[guid] = swimming;
+            }
+        }
+        cr->setInstanceRotation(formInstance, glm::vec3(0.0f, 0.0f, yaw));
+        cr->playAnimation(formInstance, anim, true);
+
+        playerIt->second = formInstance;
+        remotePlayerForms_[guid] = {.displayId = displayId, .formInstanceId = formInstance,
+                                    .characterInstanceId = character};
+        LOG_INFO("Remote player form: guid=0x", std::hex, guid, std::dec, " displayId=", displayId,
+                 " model=", modelPath);
+        pendingRemotePlayerForms_.erase(it);
         return;
     }
 }

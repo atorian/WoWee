@@ -104,6 +104,8 @@ void EntitySpawner::update() {
     processPendingTransportDoodads();
     processPendingMount();
     processPendingRemotePlayerMounts();
+    reconcileRemotePlayerForms();
+    processPendingRemotePlayerForms();
     syncCreatureStealthVisuals();
 }
 
@@ -166,6 +168,8 @@ void EntitySpawner::shutdown() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerForms_.clear();
+    pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();
 }
 
@@ -194,6 +198,8 @@ void EntitySpawner::resetAllState() {
     onlinePlayerAppearance_.clear();
     remotePlayerMounts_.clear();
     pendingRemotePlayerMounts_.clear();
+    remotePlayerForms_.clear();
+    pendingRemotePlayerForms_.clear();
     gameObjectInstances_.clear();
 
     // Clear animation state maps
@@ -260,6 +266,43 @@ void EntitySpawner::clearMountState() {
 void EntitySpawner::setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId) {
     if (guid == 0) return;
     pendingRemotePlayerMounts_[guid] = displayId;
+}
+
+void EntitySpawner::setRemotePlayerFormDisplayId(uint64_t guid, uint32_t displayId) {
+    if (guid == 0) return;
+    auto current = remotePlayerForms_.find(guid);
+    const uint32_t shown = current != remotePlayerForms_.end() ? current->second.displayId : 0;
+    if (displayId == shown) {
+        pendingRemotePlayerForms_.erase(guid);
+        return;
+    }
+    pendingRemotePlayerForms_[guid] = displayId;
+}
+
+void EntitySpawner::removeRemotePlayerForm(uint64_t guid) {
+    auto it = remotePlayerForms_.find(guid);
+    if (it == remotePlayerForms_.end()) return;
+    const RemotePlayerForm form = it->second;
+    remotePlayerForms_.erase(it);
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    auto playerIt = playerInstances_.find(guid);
+    if (playerIt != playerInstances_.end() && playerIt->second == form.formInstanceId) {
+        // The body goes back where the form was, facing the same way.
+        if (cr) {
+            glm::vec3 pos(0.0f);
+            if (cr->getInstancePosition(form.formInstanceId, pos))
+                cr->setInstancePosition(form.characterInstanceId, pos);
+            cr->setInstanceVisible(form.characterInstanceId, true);
+            cr->playAnimation(form.characterInstanceId, rendering::anim::STAND, true);
+        }
+        playerIt->second = form.characterInstanceId;
+    }
+    if (cr && form.formInstanceId != 0) cr->removeInstance(form.formInstanceId);
+    // The movement state was the form's; the body's animation is chosen afresh.
+    creatureWasMoving_.erase(guid);
+    creatureWasFlying_.erase(guid);
+    creatureWasSwimming_.erase(guid);
+    creatureWasWalking_.erase(guid);
 }
 
 void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {

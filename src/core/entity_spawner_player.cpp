@@ -695,6 +695,38 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 }
 
+/// Brings each visible player's drawn form in line with their unit.
+///
+/// The form is state the unit already holds (Unit::getFormDisplayId), so it is
+/// read rather than announced: whichever order the display and native IDs
+/// arrive in, a player who came into view mid-shift, and one re-created
+/// without a new values update all come out the same way.
+void EntitySpawner::reconcileRemotePlayerForms() {
+    if (!gameHandler_) return;
+    auto& entities = gameHandler_->getEntityManager();
+    for (const auto& [guid, instanceId] : playerInstances_) {
+        (void)instanceId;
+        auto entity = entities.getEntity(guid);
+        if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
+        uint32_t form = std::static_pointer_cast<game::Unit>(entity)->getFormDisplayId();
+        if (form != 0 && undrawableFormDisplayIds_.count(form)) form = 0;
+        // A humanoid display - an illusion or a costume into another race - is
+        // a character model dressed from CreatureDisplayInfoExtra, which only
+        // the NPC compositing path can do. Until forms are built by that path
+        // the player keeps their own body rather than a bald, untextured one.
+        if (form != 0) {
+            auto disp = displayDataMap_.find(form);
+            if (disp != displayDataMap_.end() && disp->second.extraDisplayId != 0) {
+                undrawableFormDisplayIds_.insert(form);
+                LOG_INFO("Remote player humanoid form displayId=", form,
+                         " is not drawn yet; the player keeps their own body");
+                form = 0;
+            }
+        }
+        setRemotePlayerFormDisplayId(guid, form);
+    }
+}
+
 void EntitySpawner::despawnPlayer(uint64_t guid) {
     pendingPlayerSpawnGuids_.erase(guid);
     playerSpawnRevisions_.erase(guid);
@@ -705,6 +737,10 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
     pendingRemotePlayerMounts_.erase(guid);
     removeRemotePlayerMount(guid);
+    // Before the lookup below: what is freed with the model is the character,
+    // and while a form is shown the map holds the form instead.
+    pendingRemotePlayerForms_.erase(guid);
+    removeRemotePlayerForm(guid);
     auto it = playerInstances_.find(guid);
     if (it == playerInstances_.end()) return;
     auto* charRenderer = renderer_->getCharacterRenderer();
