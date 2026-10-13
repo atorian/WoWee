@@ -17,7 +17,6 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "core/application.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <cmath>
@@ -47,7 +46,7 @@ float stepTowards(float value, float target, float step) {
 
 void SpellVisualSystem::loadStateKits() {
     if (stateKitsLoaded_) return;
-    if (!cachedAssetManager_) cachedAssetManager_ = core::Application::getInstance().getAssetManager();
+    if (!cachedAssetManager_) cachedAssetManager_ = renderer_ ? renderer_->getAssetManager() : nullptr;
     if (!cachedAssetManager_) return;  // assets not up yet; asked again next time
     stateKitsLoaded_ = true;
 
@@ -59,7 +58,9 @@ void SpellVisualSystem::loadStateKits() {
     // columns. An expansion without them simply has no aura looks.
     const uint32_t stateKitField = svLayout ? svLayout->tryField("StateKit") : kNoField;
     if (stateKitField == kNoField || !kitLayout || !fxLayout) {
-        LOG_INFO("SpellVisual: no StateKit column in this expansion's layout; aura looks are off");
+        LOG_WARNING("SpellVisual: no StateKit column in this expansion's layout (",
+                    layout ? "the layout has none" : "no layout loaded",
+                    "); aura looks - Shadowform's, a ghost's - are not drawn");
         return;
     }
 

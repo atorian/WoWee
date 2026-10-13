@@ -208,6 +208,8 @@ public:
     // Spell visual effects (SMSG_PLAY_SPELL_VISUAL / SMSG_PLAY_SPELL_IMPACT)
     // Delegates to SpellVisualSystem (owned by Renderer)
     SpellVisualSystem* getSpellVisualSystem() const { return spellVisualSystem_.get(); }
+    /// The assets the world was set up with (initializeRenderers); null before.
+    pipeline::AssetManager* getAssetManager() const { return cachedAssetManager; }
 
     // Combat visual state (compound: resets AnimationController + SpellVisualSystem)
     void resetCombatVisualState();
