@@ -131,6 +131,11 @@ public:
         const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
+    /// How far the camera's closeness fades the instance - the player, with
+    /// the camera pressed against them - multiplied on top of everything
+    /// else that makes it see-through. Carried to its weapons and their
+    /// enchants and to its look companions (a rider's mount).
+    void setInstanceCameraFade(uint32_t instanceId, float alpha);
     /// The look an aura gives a unit, from its SpellVisualKit's character
     /// procs: the lit colour is multiplied by `tint`, and the unit is drawn
     /// no more opaque than `alpha`. White and 1 take it off. Carried to the
@@ -373,6 +378,8 @@ private:
         // fades, stealth and ghosts write; the two meet at draw time.
         glm::vec3 stateTint{1.0f};
         float stateAlpha = 1.0f;
+        /// setInstanceCameraFade: multiplied on top of the two above.
+        float cameraFade = 1.0f;
         // Instances drawn in this one's aura look (addLookCompanion). Ids are
         // never reused, so one removed since is simply not found.
         std::vector<uint32_t> lookCompanions;

@@ -2907,7 +2907,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // Skip fully transparent instances. An aura's opacity caps the
         // instance's own rather than multiplying it, so a stealthed unit
         // that also carries the stealth state kit is not drawn twice as faint.
-        const float drawOpacity = std::min(instance.opacity, instance.stateAlpha);
+        // The camera's closeness fades it on top of that: the player with the
+        // camera pressed against them.
+        const float drawOpacity = std::min(instance.opacity, instance.stateAlpha) * instance.cameraFade;
         if (drawOpacity <= 0.0f) continue;
         // A faded body goes with the faded ones, after the blended world; an
         // enchant glow is drawn additively and covers nothing either way.
@@ -4058,6 +4060,27 @@ void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec
     }
 }
 
+void CharacterRenderer::setInstanceCameraFade(uint32_t instanceId, float alpha) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    const float clamped = std::clamp(alpha, 0.0f, 1.0f);
+    if (it->second.cameraFade == clamped) return;
+    auto apply = [&](CharacterInstance& inst) { inst.cameraFade = clamped; };
+    apply(it->second);
+    for (const auto& attachment : it->second.weaponAttachments) {
+        auto weaponIt = instances.find(attachment.weaponInstanceId);
+        if (weaponIt != instances.end()) apply(weaponIt->second);
+        for (const auto& effect : attachment.effects) {
+            auto effectIt = instances.find(effect.effectInstanceId);
+            if (effectIt != instances.end()) apply(effectIt->second);
+        }
+    }
+    for (const uint32_t companionId : it->second.lookCompanions) {
+        auto companionIt = instances.find(companionId);
+        if (companionIt != instances.end()) apply(companionIt->second);
+    }
+}
+
 void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companionId) {
     auto it = instances.find(instanceId);
     if (it == instances.end() || companionId == instanceId || !instances.count(companionId)) return;
@@ -4069,6 +4092,7 @@ void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companion
     auto& companion = instances.at(companionId);
     companion.stateTint = it->second.stateTint;
     companion.stateAlpha = it->second.stateAlpha;
+    companion.cameraFade = it->second.cameraFade;
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
@@ -4378,6 +4402,7 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
         weapIt->second.opacity = charInstance.opacity;
         weapIt->second.stateTint = charInstance.stateTint;
         weapIt->second.stateAlpha = charInstance.stateAlpha;
+        weapIt->second.cameraFade = charInstance.cameraFade;
     }
 
     // Store attachment on parent character instance
@@ -4493,7 +4518,8 @@ bool CharacterRenderer::getInstanceDrawnOpacity(uint32_t instanceId, float& outO
     auto it = instances.find(instanceId);
     if (it == instances.end()) return false;
     // The same as the body is drawn with in render().
-    outOpacity = std::clamp(std::min(it->second.opacity, it->second.stateAlpha), 0.0f, 1.0f);
+    outOpacity = std::clamp(std::min(it->second.opacity, it->second.stateAlpha) * it->second.cameraFade,
+                            0.0f, 1.0f);
     return true;
 }
 
@@ -4605,6 +4631,7 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     fxIt->second.opacity = charIt->second.opacity;
     fxIt->second.stateTint = charIt->second.stateTint;
     fxIt->second.stateAlpha = charIt->second.stateAlpha;
+    fxIt->second.cameraFade = charIt->second.cameraFade;
 
     WeaponEffectAttachment fx;
     fx.effectModelId = effectModelId;

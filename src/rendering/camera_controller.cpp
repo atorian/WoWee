@@ -2088,12 +2088,10 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // Camera direction from yaw/pitch (already computed as forward3D)
     glm::vec3 camDir = -f.forward3D;  // Camera looks at pivot, so it's behind
 
-    // Smooth zoom toward user target
-    float zoomLerp = 1.0f - std::exp(-ZOOM_SMOOTH_SPEED * deltaTime);
-    currentDistance += (userTargetDistance - currentDistance) * zoomLerp;
+    // Toward the distance the player chose: at the wheel's speed, or along
+    // the ease back out after a collision.
+    cameraBoomApproach(currentDistance, boomEase_, userTargetDistance, deltaTime);
 
-    // Limit max zoom when inside a WMO with a ceiling (building interior)
-    // Throttle: only recheck every 10 frames or when position changes >2 units.
     if (wmoRenderer) {
         glm::vec3 wmoCheckDelta = targetPos - lastInsideWMOCheckPos;
         float distFromLastCheckSq = glm::dot(wmoCheckDelta, wmoCheckDelta);
@@ -2102,201 +2100,59 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             insideWMOCheckCounter = 0;
             lastInsideWMOCheckPos = targetPos;
         }
-
-        // Pulled in indoors, and let back out again.
-        //
-        // This is the same containment test IsIndoors answers with - the one a
-        // macro's [indoors] reads and the one that says a mount is not allowed
-        // here - asked at the player rather than at the camera. Indoors the
-        // camera is forever being pushed off a wall and let back out, and that
-        // is what turns a corridor into a bout of motion sickness.
-        if (cachedInsideInteriorWMO) {
-            if (!indoorZoomHeld_) {
-                indoorZoomHeld_ = true;
-                outdoorTargetDistance_ = userTargetDistance;
-            }
-            if (userTargetDistance > MAX_DISTANCE_INTERIOR) {
-                userTargetDistance = MAX_DISTANCE_INTERIOR;
-            }
-        } else if (indoorZoomHeld_) {
-            indoorZoomHeld_ = false;
-            // Given back only if they have not chosen something closer while
-            // they were inside: their own wheel outranks the restore.
-            // Plus what the collision took: a zoom the sweep pulled in is not
-            // a zoom the player chose, and without this a walk down one
-            // corridor meant never getting the outdoor distance back.
-            if (userTargetDistance + collisionZoomDebt_ >= MAX_DISTANCE_INTERIOR - 0.01f &&
-                outdoorTargetDistance_ > userTargetDistance) {
-                userTargetDistance = outdoorTargetDistance_;
-            }
-        }
     }
 
-    // ===== Camera collision (WMO raycast + terrain heightfield march) =====
-    // Cast a ray from the pivot toward the camera direction to find the
-    // nearest WMO wall, and march the terrain heightfield along the same
-    // ray so hills between the pivot and camera pull the camera in too.
-    // Uses asymmetric smoothing: pull-in is fast (so the camera never
-    // visibly clips through geometry) but recovery is slow (so passing a
-    // doorway or hill crest doesn't cause a zoom-out snap).
-    collisionDistance = currentDistance;
+    // ===== The boom (CGCamera, WoW.exe 0x605d60) =====
+    // One ray from the look-at point back to where the camera would be,
+    // against the WMOs, the doodads' collision and the ground. The first
+    // thing it meets brings the camera in at once, short of it by the pad;
+    // clear again, the camera eases back out over two seconds. It does not
+    // step sideways round an obstruction - it used to turn up to 14 degrees
+    // looking for a gap - and the distance the player chose is never touched:
+    // indoors a collision used to take that in with it and give it back over
+    // seconds, so the camera stayed close long after the wall had passed.
+    const float boomReach = cameraBoomReach(currentDistance, userTargetDistance);
+    float boomHit = boomReach;
+    if (wmoRenderer) boomHit = std::min(boomHit, wmoRenderer->raycastBoundingBoxes(pivot, camDir, boomReach));
+    if (m2Renderer) boomHit = std::min(boomHit, m2Renderer->raycastBoundingBoxes(pivot, camDir, boomReach));
+    if (terrainManager && !cachedInsideInteriorWMO) {
+        boomHit = std::min(boomHit, raymarchTerrainCameraLimit(pivot, camDir, boomReach));
+    }
+    collisionDistance = cameraBoomPlace(currentDistance, boomEase_, boomHit, boomReach);
 
-    if ((wmoRenderer || terrainManager) && currentDistance > MIN_DISTANCE) {
-        // Built geometry and the ground are treated separately from here on.
-        //
-        // A wall or a pillar is a thing with a side to step around, and it wants
-        // reacting to sharply. A hillside is neither: it has no edge to clear,
-        // it is under the camera for as long as the slope lasts, and the height
-        // it reports changes a little with every step the player takes. Feeding
-        // the ground through the same sharp path made the camera jitter along a
-        // slope and shove forward at every rise.
-        auto wmoLimitAlong = [&](const glm::vec3& dir) -> float {
-            if (!wmoRenderer) return currentDistance;
-            float hit = wmoRenderer->raycastBoundingBoxes(pivot, dir, currentDistance);
-            // hit == currentDistance means no hit (returns maxDistance on miss)
-            if (hit >= currentDistance) return currentDistance;
-            return std::max(MIN_DISTANCE, hit - CAM_SPHERE_RADIUS - CAM_EPSILON);
-        };
-
-        float rawLimit = wmoLimitAlong(camDir);
-
-        // Step around what is in the way rather than only backing away from it.
-        //
-        // Pulling straight in is what puts the camera on the player's neck the
-        // moment they set their back to a wall, and from inside their own head
-        // there is nothing to steer by. A few degrees of yaw usually clears the
-        // obstruction entirely - a pillar, a doorframe, the corner of a
-        // building - and keeps the shot.
-        //
-        // Two extra rays at most, and only on a frame that is actually blocked,
-        // which is the minority of them. The winner has to buy a real amount of
-        // clearance, so the camera does not wander for nothing.
-        constexpr float DEFLECT_MAX_DEG = 14.0f;
-        constexpr float DEFLECT_MIN_GAIN = 1.0f;   // yards of clearance worth turning for
-        float deflectTarget = 0.0f;
-        if (rawLimit < currentDistance - 0.5f && rawLimit < userTargetDistance) {
-            float bestLimit = rawLimit;
-            for (float trialDeg : {DEFLECT_MAX_DEG, -DEFLECT_MAX_DEG}) {
-                const float a = glm::radians(trialDeg);
-                const float ca = std::cos(a), sa = std::sin(a);
-                // Yaw about world Z: the camera should step sideways, not rise.
-                glm::vec3 trialDir(camDir.x * ca - camDir.y * sa,
-                                   camDir.x * sa + camDir.y * ca,
-                                   camDir.z);
-                float trialLimit = wmoLimitAlong(glm::normalize(trialDir));
-                if (trialLimit > bestLimit + DEFLECT_MIN_GAIN) {
-                    bestLimit = trialLimit;
-                    deflectTarget = trialDeg;
-                }
-            }
-            rawLimit = bestLimit;
+    // Then the near plane's own rectangle (0x6059e0): a boom that misses a
+    // wall can still leave a corner of the near plane through it. Its corners,
+    // made 1.75 times as large as the client does for solid geometry, are cast
+    // out from the matching points round the look-at point, the way the boom
+    // runs, and the camera is kept in front of the first thing any of them
+    // meets. (The spec has the sweep run from the camera inward, at medium
+    // confidence; run that way it ignores what is nearest the character.)
+    if ((wmoRenderer || m2Renderer) && collisionDistance > MIN_DISTANCE) {
+        const float nearPlane = camera->getNearPlane();
+        const float halfH = nearPlane * std::tan(glm::radians(camera->getFovDegrees()) * 0.5f) * 1.75f;
+        const float halfW = halfH * camera->getAspectRatio();
+        const glm::vec3 right = glm::normalize(glm::cross(-camDir, glm::vec3(0.0f, 0.0f, 1.0f)));
+        const glm::vec3 up = glm::cross(right, -camDir);
+        const glm::vec3 nearCentre = pivot + camDir * (collisionDistance - nearPlane);
+        float clear = 1.0f;
+        for (const glm::vec2 c : {glm::vec2(-1, -1), glm::vec2(1, -1), glm::vec2(-1, 1), glm::vec2(1, 1)}) {
+            const glm::vec3 corner = right * (c.x * halfW) + up * (c.y * halfH);
+            const glm::vec3 from = pivot + corner;
+            const glm::vec3 to = nearCentre + corner;
+            const glm::vec3 along = to - from;
+            const float length = glm::length(along);
+            if (length < 1e-3f) continue;
+            const glm::vec3 dir = along / length;
+            float hit = length;
+            if (wmoRenderer) hit = std::min(hit, wmoRenderer->raycastBoundingBoxes(from, dir, length));
+            if (m2Renderer) hit = std::min(hit, m2Renderer->raycastBoundingBoxes(from, dir, length));
+            if (hit < length) clear = std::min(clear, std::max(hit - kCameraBoomPad, 0.0f) / length);
         }
-
-        // Ease into and out of the turn; snapping to it reads as the camera
-        // being knocked sideways.
-        {
-            const float tau = (deflectTarget != 0.0f) ? 0.12f : 0.30f;
-            const float alpha = 1.0f - std::exp(-deltaTime / tau);
-            cameraDeflectDeg_ += (deflectTarget - cameraDeflectDeg_) * alpha;
-            if (std::abs(cameraDeflectDeg_) > 0.05f) {
-                const float a = glm::radians(cameraDeflectDeg_);
-                const float ca = std::cos(a), sa = std::sin(a);
-                camDir = glm::normalize(glm::vec3(camDir.x * ca - camDir.y * sa,
-                                                  camDir.x * sa + camDir.y * ca,
-                                                  camDir.z));
-            }
+        if (clear < 1.0f) {
+            collisionDistance = nearPlane + clear * std::max(collisionDistance - nearPlane, 0.0f);
+            if (collisionDistance - nearPlane < 0.001f) collisionDistance = 0.0f;
+            cameraBoomPulledIn(currentDistance, boomEase_, collisionDistance);
         }
-
-        // The ground, folded in after the deflection and on its own timing.
-        //
-        // It is never a reason to turn: there is no side to a hillside to step
-        // past, so trying to yaw around one only wanders. And its own limit is
-        // smoothed before it is used, because the marched height changes a
-        // little every step the player takes and that arrives as a shudder if
-        // it is passed straight through.
-        if (!cachedInsideInteriorWMO) {
-            const float terrainLimit =
-                raymarchTerrainCameraLimit(pivot, camDir, currentDistance);
-            if (smoothedTerrainDist_ < 0.0f) smoothedTerrainDist_ = terrainLimit;
-            // Slower coming in than the built geometry above, which is what
-            // makes a slope feel like a slope rather than a series of nudges.
-            const float terrainTau = (terrainLimit < smoothedTerrainDist_) ? 0.18f : 0.45f;
-            const float terrainAlpha = 1.0f - std::exp(-deltaTime / terrainTau);
-            smoothedTerrainDist_ += (terrainLimit - smoothedTerrainDist_) * terrainAlpha;
-            rawLimit = std::min(rawLimit, smoothedTerrainDist_);
-        } else {
-            smoothedTerrainDist_ = -1.0f;
-        }
-
-        // Initialise smoothed state on first use.
-        if (smoothedCollisionDist_ < 0.0f) {
-            smoothedCollisionDist_ = rawLimit;
-        }
-
-        // Asymmetric smoothing:
-        //   • Pull-in: τ ≈ 60 ms  - react quickly to prevent clipping
-        //     (instant while actively rotating, matching the 1:1 drag snap)
-        //   • Recover: τ ≈ 400 ms - zoom out slowly after leaving geometry
-        bool rotatingNow = mouseButtonDown || f.nowTurnLeft || f.nowTurnRight;
-        if (rawLimit < smoothedCollisionDist_ && rotatingNow) {
-            smoothedCollisionDist_ = rawLimit;
-        } else {
-            const float tau = (rawLimit < smoothedCollisionDist_) ? 0.06f : 0.40f;
-            float alpha = 1.0f - std::exp(-deltaTime / tau);
-            smoothedCollisionDist_ += (rawLimit - smoothedCollisionDist_) * alpha;
-        }
-
-        collisionDistance = std::min(collisionDistance, smoothedCollisionDist_);
-
-        // A collision takes the zoom in with it.
-        //
-        // The sweep moved the camera and left the zoom where it was, so the
-        // moment the obstruction passed the camera sprang back out to a
-        // distance the room had already refused - and the next step pushed it
-        // in again. That in-and-out is the whole of what makes an interior
-        // unpleasant, and no amount of smoothing fixes it, because the target
-        // it is smoothing toward is the wrong one. Bringing the target in
-        // behind the camera is what lets the view settle.
-        // Not while something else owns the distance.
-        //
-        // The barber's chair sets it to 2.4 and holds the camera on the
-        // character's face, where the sweep meets the chair and the character
-        // constantly. Pulling in there and handing it back a second later is a
-        // slow breathe in and out at close range, which from the chair reads as
-        // the view bobbing - reported as exactly that. A scripted view is not a
-        // player deciding how far back to stand.
-        // Keep the outdoor wheel target intact. Smoothing toward a new zoom
-        // also lags the target without any obstruction, so it must not be
-        // mistaken for a collision and fed back into the requested distance.
-        const bool blocked = rawLimit < currentDistance - 0.1f;
-        const float bite = (!barberView_ && cachedInsideInteriorWMO && blocked)
-            ? userTargetDistance - smoothedCollisionDist_ : 0.0f;
-        if (bite > 0.1f) {
-            collisionClearSeconds_ = 0.0f;
-            // Toward what the sweep is asking for and no further, over about a
-            // second: passing a doorway should not collapse the zoom.
-            constexpr float kPullTau = 1.0f;
-            const float step = bite * (1.0f - std::exp(-deltaTime / kPullTau));
-            const float pulled = std::max(userTargetDistance - step, MIN_DISTANCE);
-            collisionZoomDebt_ += userTargetDistance - pulled;
-            userTargetDistance = pulled;
-        } else {
-            collisionClearSeconds_ += deltaTime;
-            // Given back only once nothing has been in the way for a moment,
-            // and more slowly than it was taken, so clearing a doorway does
-            // not throw the camera straight out into the next wall. Slower out
-            // than in is also what stops the two rules chasing each other.
-            constexpr float kSettleSeconds = 1.0f;
-            constexpr float kGiveTau = 2.5f;
-            if (collisionClearSeconds_ > kSettleSeconds && collisionZoomDebt_ > 0.001f) {
-                const float give = collisionZoomDebt_ * (1.0f - std::exp(-deltaTime / kGiveTau));
-                userTargetDistance += give;
-                collisionZoomDebt_ -= give;
-            }
-        }
-    } else {
-        smoothedCollisionDist_ = -1.0f;   // Reset when no collision sources available
-        smoothedTerrainDist_ = -1.0f;
     }
 
     // Camera collision: terrain-only floor clamping
@@ -2378,14 +2234,15 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         waterNudgeZ_ = 0.0f;
     }
 
-    // Smooth camera position to avoid jitter
-    if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f) {
-        smoothedCamPos = actualCam;  // Initialize
+    // Where the boom put it, as the client places it every frame. Easing the
+    // position toward it as well lagged the camera behind a pull-in - through
+    // the wall it had just been kept out of - and is left only to the smooth
+    // follow option for those who ask for it.
+    if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f || !smoothCameraFollow_) {
+        smoothedCamPos = actualCam;
+    } else {
+        smoothedCamPos += (actualCam - smoothedCamPos) * (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
     }
-    bool activelyRotating = mouseButtonDown || f.nowTurnLeft || f.nowTurnRight;
-    float camLerp = (activelyRotating && !smoothCameraFollow_)
-        ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
-    smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
     // ===== Final floor clearance check =====
     // Use WMO-aware floor so the camera doesn't pop above tunnels/caves.
@@ -2523,6 +2380,11 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // the squeezed one.
         bool shouldHidePlayer = isFirstPersonView();
         characterRenderer->setInstanceVisible(playerInstanceId, !shouldHidePlayer);
+        // And faded as the camera comes close, as the client fades the player
+        // (render spec 6c): pressed against a wall, the camera used to sit
+        // inside a body drawn solid, and the view looked out through it.
+        characterRenderer->setInstanceCameraFade(
+            playerInstanceId, cameraCloseFade(glm::length(smoothedCamPos - pivot), camera->getNearPlane()));
 
         // Note: the Renderer's CharAnimState machine drives player character animations
         // (Run, Walk, Jump, Swim, etc.) - no additional animation driving needed here.
@@ -2758,8 +2620,7 @@ void CameraController::update(float deltaTime) {
         idleTimer_ = 0.0f;
 
         camera->setRotation(yaw, pitch);
-        float zoomLerp = 1.0f - std::exp(-ZOOM_SMOOTH_SPEED * deltaTime);
-        currentDistance += (userTargetDistance - currentDistance) * zoomLerp;
+        cameraBoomApproach(currentDistance, boomEase_, userTargetDistance, deltaTime);
         collisionDistance = currentDistance;
 
         // Position camera behind character during taxi
@@ -2803,14 +2664,11 @@ void CameraController::update(float deltaTime) {
             }
 
             camera->setPosition(smoothedCamPos);
+            if (characterRenderer && playerInstanceId > 0) {
+                characterRenderer->setInstanceCameraFade(
+                    playerInstanceId, cameraCloseFade(glm::length(smoothedCamPos - pivot), camera->getNearPlane()));
+            }
         }
-
-        // The ground limits are not kept up in flight. Left as they were at
-        // takeoff, the first frames on the ground eased toward them from a
-        // limit measured somewhere else entirely; starting over takes the
-        // ground as it is at the landing.
-        smoothedCollisionDist_ = -1.0f;
-        smoothedTerrainDist_ = -1.0f;
 
         return;
     }
@@ -3748,18 +3606,13 @@ void CameraController::applyLookDelta(float dxPixels, float dyPixels) {
 }
 
 void CameraController::processMouseWheel(float delta) {
-    // The player's own choice clears whatever the sweep had taken: a distance
-    // they picked outranks one this arrived at, and it must not be given back
-    // on top of theirs a moment later.
-    collisionZoomDebt_ = 0.0f;
-    collisionClearSeconds_ = 0.0f;
     // Scale zoom speed proportionally to current distance for fine control up close
     float zoomSpeed = glm::max(userTargetDistance * 0.15f, 0.3f);
     userTargetDistance -= delta * zoomSpeed;
     // A multiple of the original client's limit rather than a choice between
     // two numbers, so the game's own Max Camera Distance slider means something
     // at every position instead of only at its ends.
-    float maxDist = zoomDistanceLimit(maxDistanceFactor_, cachedInsideInteriorWMO);
+    float maxDist = zoomDistanceLimit(maxDistanceFactor_);
     userTargetDistance = glm::clamp(userTargetDistance, MIN_DISTANCE, maxDist);
 }
 
