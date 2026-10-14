@@ -2435,20 +2435,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             }
             gpuModel.batches.push_back(bgpu);
         }
-    } else {
-        // Fallback: single batch covering all indices with first texture
-        M2ModelGPU::BatchGPU bgpu;
-        bgpu.indexStart = 0;
-        bgpu.indexCount = gpuModel.indexCount;
-        bgpu.texture = allTextures.empty() ? whiteTexture_.get() : allTextures[0];
-        if (bgpu.texture != nullptr && bgpu.texture != whiteTexture_.get()) {
-            auto pit = texturePropsByPtr_.find(bgpu.texture);
-            if (pit != texturePropsByPtr_.end()) {
-                bgpu.hasAlpha = pit->second.hasAlpha;
-                bgpu.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-            }
-        }
-        gpuModel.batches.push_back(bgpu);
+    } else if (gpuModel.indexCount > 0) {
+        // The client draws batches and nothing else, so a skin with geometry
+        // and no batches draws nothing - an invisible stalker's does exactly
+        // that. It used to be drawn whole with the first texture.
+        LOG_INFO("M2 '", model.name, "' has ", gpuModel.indexCount,
+                 " indices and no batches: it draws nothing but its emitters");
     }
 
     gpuModel.materialDrawOrder = m2MaterialDrawOrder(gpuModel.batches);

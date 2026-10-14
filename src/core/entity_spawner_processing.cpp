@@ -376,21 +376,9 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 continue;
             }
 
-            // Check for invisible stalkers
-            {
-                std::string lowerPath = m2Path;
-                std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (rendering::isHelperCreatureModel(lowerPath)) {
-                    nonRenderableCreatureDisplayIds_.insert(s.displayId);
-                    creaturePermanentFailureGuids_.insert(s.guid);
-                    pendingCreatureSpawnGuids_.erase(s.guid);
-                    processed++;
-                    rotationsLeft = pendingCreatureSpawns_.size();
-                    continue;
-                }
-            }
-
+            // An invisible stalker spawns like any creature. Its model has no
+            // batches and draws nothing, and the effects a script hangs on it
+            // still have somewhere to hang.
             // Launch async M2 load - file I/O and parsing happen off the main thread.
             uint32_t modelId = nextCreatureModelId_++;
             auto* am = assetManager_;

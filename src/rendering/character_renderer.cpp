@@ -2947,6 +2947,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
+        // A model with no batches draws nothing, as in the client: an
+        // invisible stalker's skin is exactly that. It used to be drawn
+        // whole with its first texture.
         if (!gpuModel.data.batches.empty()) {
             bool applyGeosetFilter = !instance.activeGeosets.empty();
             if (applyGeosetFilter) {
@@ -3366,65 +3369,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             }
             } // end pass loop
             } // end stage loop
-        } else {
-            // Draw entire model with first texture
-            VkTexture* texPtr = !gpuModel.textureIds.empty() ? gpuModel.textureIds[0] : whiteTexture_.get();
-            if (!texPtr || !texPtr->isValid()) texPtr = whiteTexture_.get();
-
-            // POM quality → sample count
-            const int pomSamples2 = pomSamplesFor(pomQuality_);
-
-            // Whole-model fallback inherits whatever pipeline was bound last;
-            // pick it explicitly so instance fades blend here too.
-            VkPipeline fallbackPipeline = (drawOpacity < 0.999f)
-                ? pipes.translucent : pipes.opaque;
-            if (fallbackPipeline != currentPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
-                currentPipeline = fallbackPipeline;
-            }
-
-            CharMaterialUBO matData{};
-            matData.opacity = drawOpacity;
-            matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
-            matData.alphaTest = 0;
-            matData.ignoreTextureAlpha = 1;
-            matData.unlit = 0;
-            matData.twoSided = 1;  // no batch, so no material to say otherwise
-            matData.specularIntensity = 0.5f;
-            const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
-                                          !instance.hasOverrideModelMatrix;
-            const bool useAdvancedMaterials = !previewMainModel;
-            const bool usePreviewSimpleShader = previewMainModel;
-            matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
-            matData.enablePOM = (useAdvancedMaterials && pomEnabled_) ? 1 : 0;
-            matData.pomScale = 0.06f;
-            matData.pomMaxSamples = pomSamples2;
-            matData.heightMapVariance = 0.0f;
-            matData.normalMapStrength = normalMapStrength_;
-            matData.hairMaterial = 0;
-            if (usePreviewSimpleShader) {
-                matData.enableNormalMap = 0;
-                matData.enablePOM = kPreviewSimpleTextureMode;
-            }
-
-            // Sub-allocate material UBO from ring buffer
-            uint32_t matOffset2 = materialRingOffset_[frameSlot];
-            if (matOffset2 + uboStride > ringCapacityBytes) continue; // ring exhausted
-            memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset2, &matData, sizeof(CharMaterialUBO));
-            materialRingOffset_[frameSlot] = matOffset2 + uboStride;
-
-            const uint8_t wrapFlags = !gpuModel.data.textures.empty()
-                ? static_cast<uint8_t>(gpuModel.data.textures[0].flags & 0x3)
-                : BatchTexture::kRepeatBoth;
-            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, wrapFlags,
-                                                                   flatNormalTexture_.get());
-            if (!materialSet) continue;
-
-            const uint32_t dynamicOffset = matOffset2;
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelineLayout_, 1, 1, &materialSet, 1, &dynamicOffset);
-
-            vkCmdDrawIndexed(cmd, gpuModel.indexCount, 1, 0, 0, 0);
         }
     }
 }

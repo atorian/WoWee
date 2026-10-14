@@ -1928,15 +1928,6 @@ wowee_add_test(test_m2_classifier_foliage
     SOURCES test_m2_classifier_foliage.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
 
-# ── test_helper_creature_models ─────────────────────────────
-# The deliberately invisible creatures scripts hang effects on. The list was
-# written out twice in the spawner and named only invisiblestalker, so
-# invisibleman and the World\\Scale measuring boxes stood in the world as
-# solid objects.
-wowee_add_test(test_helper_creature_models
-    SOURCES test_helper_creature_models.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp)
-
 # ── test_terrain_slope_limit ────────────────────────────────
 # The 50 degree limit as it applies to the ground. It governed WMO and M2
 # floors; the terrain query answers a height and no normal, so it was never
