@@ -294,17 +294,7 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
 
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
-        // Two clocks on one skeleton.
-        //
-        // A searchlight sweeps out and back, and wrapping its sequence threw
-        // the beam across its arc in one frame. Reversing the instance's whole
-        // timeline fixed that and turned the zeppelin's propeller backwards
-        // with it, because both are posed from the same animation. The bones
-        // the beam is skinned to - and only those - read the reversing clock.
-        const float boneTime =
-            (i < model.pingPongBones.size() && model.pingPongBones[i])
-                ? instance.animTimeAlt
-                : instance.animTime;
+        const float boneTime = instance.animTime;
         glm::vec3 trans = m2_track::sampleVec3(
             bone.translation, instance.currentSequenceIndex, boneTime,
             instance.globalSequenceTime, gsd, glm::vec3(0.0f));

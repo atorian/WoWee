@@ -469,20 +469,6 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         if (!instance.cachedModel) continue;
         const M2ModelGPU& model = *instance.cachedModel;
 
-        // The reversing clock, kept beside the ordinary one rather than in
-        // place of it: animTime keeps looping for the rest of the skeleton.
-        if (model.pingPongAnim) {
-            const float dur = std::max(1.0f, instance.animDuration);
-            instance.animTimeAlt += dtMs * instance.animDir;
-            if (instance.animTimeAlt >= dur) {
-                instance.animTimeAlt = dur;
-                instance.animDir = -1.0f;
-            } else if (instance.animTimeAlt <= 0.0f) {
-                instance.animTimeAlt = 0.0f;
-                instance.animDir = 1.0f;
-            }
-        }
-
         // Validate sequence index
         if (instance.currentSequenceIndex < 0 ||
             instance.currentSequenceIndex >= static_cast<int>(model.sequences.size())) {
