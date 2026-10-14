@@ -72,12 +72,19 @@ float clampFallSpeed(float upSpeed, uint32_t flags) {
 
 } // namespace
 
-bool ReportedMovement::report(const MovementReport& r, Clock::time_point receivedAt) {
+ReportedMovement::ReportOrder ReportedMovement::report(const MovementReport& r,
+                                                       Clock::time_point receivedAt) {
     // Where this report sits on the mover's clock.
     int64_t time = r.moverTime;
+    ReportOrder order = ReportOrder::InOrder;
     if (haveReport_) {
-        const int32_t step = static_cast<int32_t>(r.moverTime - newestMoverTime_);
-        if (step < 0) return false;  // Older than one already taken
+        int32_t step = static_cast<int32_t>(r.moverTime - newestMoverTime_);
+        if (step < 0) {
+            // Arrival order is the order it was sent in: it happened no earlier
+            // than the newest one, and the mover's clock stays where that left it.
+            order = ReportOrder::StampedEarlier;
+            step = 0;
+        }
         time = newestTime_ + step;
         const double sinceMs = std::max(0.0, millisecondsOf(receivedAt) - millisecondsOf(lastReceivedAt_));
         clockOffsetMs_ += kClockDriftAllowance * sinceMs;
@@ -93,7 +100,7 @@ bool ReportedMovement::report(const MovementReport& r, Clock::time_point receive
     delayMs_ = std::clamp(std::max(delayMs_, latenessMs + kDelayMarginMs), kMinDelayMs, kMaxDelayMs);
 
     newestTime_ = time;
-    newestMoverTime_ = r.moverTime;
+    if (order == ReportOrder::InOrder) newestMoverTime_ = r.moverTime;
     lastReceivedAt_ = receivedAt;
     lastLatenessMs_ = static_cast<float>(latenessMs);
 
@@ -104,7 +111,7 @@ bool ReportedMovement::report(const MovementReport& r, Clock::time_point receive
     } else {
         pending_.push_back({r, time});
     }
-    return true;
+    return order;
 }
 
 void ReportedMovement::advance(float dt, Clock::time_point now, const MovementSpeeds& speeds,

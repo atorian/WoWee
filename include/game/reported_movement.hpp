@@ -78,9 +78,19 @@ class ReportedMovement {
 public:
     using Clock = std::chrono::steady_clock;
 
-    /// Take a report that reached this client at receivedAt. False if it is
-    /// older than one already taken, and so changes nothing.
-    bool report(const MovementReport& r, Clock::time_point receivedAt);
+    /// How a report's stamp sat against the ones before it.
+    enum class ReportOrder {
+        InOrder,
+        /// Stamped before the newest report taken. It arrived after it, and the
+        /// connection keeps the order things were sent in, so it is taken as
+        /// the newest at the newest one's moment: servers re-stamp relayed
+        /// movement with their own clock, and a stop stamped a little early is
+        /// still the stop.
+        StampedEarlier,
+    };
+
+    /// Take a report that reached this client at receivedAt.
+    ReportOrder report(const MovementReport& r, Clock::time_point receivedAt);
 
     /// Play the movement on to now, dt seconds after the last call, against
     /// the walls collision knows (none if null).

@@ -16,9 +16,14 @@ void Unit::applyMovementReport(const MovementReport& report,
         activeSpline_.reset();
         reportedMovement.emplace();
     }
-    if (reportedMovement->report(report, handledAt)) {
-        placeAtReportedMovement();
+    const auto order = reportedMovement->report(report, handledAt);
+    if (order == ReportedMovement::ReportOrder::StampedEarlier && !saidReportStampedEarlier_) {
+        saidReportStampedEarlier_ = true;
+        LOG_WARNING("Movement of 0x", std::hex, getGuid(), std::dec,
+                    ": a report stamped before the one ahead of it (mover time ", report.moverTime,
+                    "); taken in the order it arrived. Said once per unit");
     }
+    placeAtReportedMovement();
 }
 
 void Unit::updateMovement(float deltaTime, const MovementCollision* collision) {

@@ -221,17 +221,30 @@ TEST_CASE("Reported movement flies a jump on its arc", "[entity][movement]") {
     REQUIRE(m.position().x == Catch::Approx(7.0f * t).margin(0.01f));
 }
 
-TEST_CASE("Reported movement drops a report older than one it took", "[entity][movement]") {
+TEST_CASE("Reported movement takes a stop stamped before the run it ends", "[entity][movement]") {
+    // Servers re-stamp relayed movement with their own clock, so a stop can
+    // arrive after a run report yet carry an earlier time. It is still the
+    // stop: dropped, the unit ran in place until it next moved.
+    using Order = ReportedMovement::ReportOrder;
     ReportedMovement m;
-    m.report(running(1000, 10.0f, 0.0f), at(1000));
-    REQUIRE_FALSE(m.report(running(500, 3.0f, 0.0f), at(1010)));
-    REQUIRE(m.position().x == Catch::Approx(10.0f));
+    REQUIRE(m.report(running(1000, 10.0f, 0.0f), at(1000)) == Order::InOrder);
+    MovementReport stop = running(500, 12.0f, 0.0f);
+    stop.flags = 0;
+    REQUIRE(m.report(stop, at(1010)) == Order::StampedEarlier);
+    play(m, 1010, 3000);
+    REQUIRE_FALSE(m.isMoving());
+    REQUIRE(m.position().x == Catch::Approx(12.0f));
+
+    // The mover's clock stays where the run left it: the next report is timed
+    // from 1000, not from the early stamp.
+    REQUIRE(m.report(running(1500, 12.0f, 0.0f), at(3000)) == Order::InOrder);
 }
 
 TEST_CASE("Reported movement follows the mover's clock across its wrap", "[entity][movement]") {
+    using Order = ReportedMovement::ReportOrder;
     ReportedMovement m;
     m.report(running(0xFFFFFF00u, 0.0f, 0.0f), at(0));
-    REQUIRE(m.report(running(0x00000000u, 1.8f, 0.0f), at(256)));  // 256 ms later
+    REQUIRE(m.report(running(0x00000000u, 1.8f, 0.0f), at(256)) == Order::InOrder);  // 256 ms later
     REQUIRE(m.lastReportLateness() == Catch::Approx(0.0f));
 }
 

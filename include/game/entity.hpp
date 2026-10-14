@@ -429,6 +429,8 @@ protected:
 
     MovementSpeeds movementSpeeds;
     std::optional<ReportedMovement> reportedMovement;
+    /// A report stamped before an earlier one has been logged for this unit.
+    bool saidReportStampedEarlier_ = false;
 
     std::string name;
     uint32_t health = 0;
