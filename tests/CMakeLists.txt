@@ -1951,6 +1951,30 @@ wowee_add_test(test_terrain_slope_limit
 wowee_add_test(test_particle_density_floor
     SOURCES test_particle_density_floor.cpp)
 
+# ── test_camera_boom ────────────────────────────────────────
+# The third-person camera's distance: pulled in on a wall, eased back out.
+wowee_add_test(test_camera_boom
+    SOURCES test_camera_boom.cpp)
+
+# ── test_game_object_animation ──────────────────────────────
+# A GameObject's animation for its state: Closed, Opened and the ways between.
+wowee_add_test(test_game_object_animation
+    SOURCES test_game_object_animation.cpp)
+
+# ── test_m2_billboard_model ─────────────────────────────────
+# Mana Shield's card through the renderer's own bone update.
+wowee_add_test(test_m2_billboard_model
+    SOURCES test_m2_billboard_model.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+            ../src/rendering/m2_model_classifier.cpp
+            ${TEST_COMMON_SOURCES})
+target_compile_definitions(test_m2_billboard_model PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+# ── test_m2_billboard ───────────────────────────────────────
+# Billboard bones, spherical and locked to one axis, as the client turns them.
+wowee_add_test(test_m2_billboard
+    SOURCES test_m2_billboard.cpp)
+
 # ── test_m2_star_layer ──────────────────────────────────────
 # Which batch of a sky model is its stars. The clouds, planets and nebulae
 # of the same dome sit in the same directory, one texture holds both stars

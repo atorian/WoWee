@@ -1176,15 +1176,10 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             m2Renderer->setSkipCollision(instanceId, true);
         }
 
-        // Transports are driven by the transport system rather than a looping idle.
-        bool isTransportGO = gameHandler_ && gameHandler_->isTransportGuid(guid);
-        if (!isTransportGO) {
-            applyGameObjectAnimationPolicy(guid, entry, instanceId);
-        }
-
         gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};
 
-        // ...and the pose the server described before this model existed.
+        // Its animation is its state's: the one the server described before
+        // this model existed.
         if (auto pending = gameObjectPendingState_.find(guid);
             pending != gameObjectPendingState_.end()) {
             applyGameObjectState(guid, pending->second);

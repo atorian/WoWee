@@ -1551,7 +1551,7 @@ void Renderer::beginFrame() {
     if (skySystem && camera && (inWorld || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
             skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
-            skyboxModelRenderer_->update(0.016f, camera->getPosition(), camera->getViewProjectionMatrix());
+            skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
         float coverage = 0.0f;
@@ -2378,8 +2378,8 @@ void Renderer::update(float deltaTime) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
             ? lightingManager->getVisualTimeOfDayHours()
             : (skybox ? skybox->getTimeOfDay() : 12.0f));
-        skyboxModelRenderer_->update(deltaTime, camera->getPosition(),
-            camera->getProjectionMatrix() * camera->getViewMatrix());
+        skyboxModelRenderer_->update(deltaTime, camera->getViewMatrix(),
+                                     camera->getProjectionMatrix());
     }
 
     // Update weather particles
@@ -2477,11 +2477,11 @@ void Renderer::update(float deltaTime) {
     bool m2AnimLaunched = false;
     if (m2Renderer && camera) {
         float m2DeltaTime = deltaTime;
-        glm::vec3 m2CamPos = camera->getPosition();
-        glm::mat4 m2ViewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
+        glm::mat4 m2View = camera->getViewMatrix();
+        glm::mat4 m2Projection = camera->getProjectionMatrix();
         m2AnimFuture = core::ThreadPool::frameWorkers().submit(
-            [this, m2DeltaTime, m2CamPos, m2ViewProj]() {
-                m2Renderer->update(m2DeltaTime, m2CamPos, m2ViewProj);
+            [this, m2DeltaTime, m2View, m2Projection]() {
+                m2Renderer->update(m2DeltaTime, m2View, m2Projection);
             });
         m2AnimLaunched = true;
     }

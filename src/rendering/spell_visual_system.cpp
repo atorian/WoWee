@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace wowee {
 namespace rendering {
@@ -33,8 +34,8 @@ void SpellVisualSystem::shutdown() {
     cachedAssetManager_ = nullptr;
 }
 
-// Load SpellVisual DBC chain: SpellVisualEffectName → SpellVisualKit → SpellVisual
-// to build cast/impact M2 path lookup maps.
+// SpellVisual -> its precast, cast and impact kits; SpellVisualKit -> every
+// effect column it fills; SpellVisualEffectName -> the model and its scale.
 void SpellVisualSystem::loadSpellVisualDbc() {
     if (spellVisualDbcLoaded_) return;
 
@@ -52,381 +53,227 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     const pipeline::DBCFieldMap* svLayout  = layout ? layout->getLayout("SpellVisual")           : nullptr;
     const pipeline::DBCFieldMap* kitLayout = layout ? layout->getLayout("SpellVisualKit")        : nullptr;
     const pipeline::DBCFieldMap* fxLayout  = layout ? layout->getLayout("SpellVisualEffectName") : nullptr;
-
-    uint32_t svCastKitField   = svLayout  ? (*svLayout)["CastKit"]       : 2;
-    uint32_t svPrecastKitField = svLayout  ? (*svLayout)["PrecastKit"]    : 1;
-    uint32_t svImpactKitField = svLayout  ? (*svLayout)["ImpactKit"]     : 3;
-    uint32_t svMissileField   = svLayout  ? (*svLayout)["MissileModel"]  : 8;
-    uint32_t fxFilePathField  = fxLayout  ? (*fxLayout)["FilePath"]       : 2;
-
-    // Kit effect fields to probe, in priority order.
-    // SpecialEffect0 > BaseEffect > LeftHand > RightHand > Chest > Head > Breath
-    struct KitField { const char* name; uint32_t fallback; };
-    static constexpr KitField kitFieldDefs[] = {
-        {.name = "SpecialEffect0",  .fallback = 11}, {.name = "BaseEffect",       .fallback = 5},
-        {.name = "LeftHandEffect",   .fallback = 6}, {.name = "RightHandEffect",  .fallback = 7},
-        {.name = "ChestEffect",      .fallback = 4}, {.name = "HeadEffect",       .fallback = 3},
-        {.name = "BreathEffect",     .fallback = 8}, {.name = "SpecialEffect1",  .fallback = 12},
-        {.name = "SpecialEffect2",  .fallback = 13},
+    const auto fieldOf = [](const pipeline::DBCFieldMap* map, const char* name, uint32_t fallback) {
+        return map ? map->field(name) : fallback;
     };
-    constexpr size_t numKitFields = sizeof(kitFieldDefs) / sizeof(kitFieldDefs[0]);
-    uint32_t kitFields[numKitFields];
-    for (size_t k = 0; k < numKitFields; ++k)
-        kitFields[k] = kitLayout ? kitLayout->field(kitFieldDefs[k].name) : kitFieldDefs[k].fallback;
 
-    // Load SpellVisualEffectName.dbc - ID → M2 path
+    // SpellVisualEffectName: id -> model, scale and its limits.
     auto fxDbc = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
-    if (!fxDbc || !fxDbc->isLoaded() || fxDbc->getFieldCount() <= fxFilePathField) {
-        LOG_DEBUG("SpellVisual: SpellVisualEffectName.dbc unavailable (fc=",
-                  fxDbc ? fxDbc->getFieldCount() : 0, ")");
+    const uint32_t fxPathField = fieldOf(fxLayout, "FilePath", 2);
+    if (!fxDbc || !fxDbc->isLoaded() || fxDbc->getFieldCount() <= fxPathField) {
+        LOG_WARNING("SpellVisual: SpellVisualEffectName.dbc unavailable (fields ",
+                    fxDbc ? fxDbc->getFieldCount() : 0, ") - no spell effects will show");
         return;
     }
-    std::unordered_map<uint32_t, std::string> effectPaths; // effectNameId → path
+    const uint32_t fxScaleField = fieldOf(fxLayout, "Scale", 4);
+    const uint32_t fxMinField = fieldOf(fxLayout, "MinAllowedScale", 5);
+    const uint32_t fxMaxField = fieldOf(fxLayout, "MaxAllowedScale", 6);
+    const uint32_t fxFields = fxDbc->getFieldCount();
+    const auto positive = [&](uint32_t row, uint32_t field, float fallback) {
+        if (field >= fxFields) return fallback;
+        const float v = fxDbc->getFloat(row, field);
+        return std::isfinite(v) && v > 0.0f ? v : fallback;
+    };
+    std::unordered_map<uint32_t, SpellKitEffect> effects;
     for (uint32_t i = 0; i < fxDbc->getRecordCount(); ++i) {
-        uint32_t id   = fxDbc->getUInt32(i, 0);
-        std::string p = fxDbc->getString(i, fxFilePathField);
-        if (id && !p.empty()) {
-            // The DBC stores the extension the art was authored with; what
-            // shipped is .m2.
-            p = pipeline::modelPathToM2(p);
-            effectPaths[id] = p;
-        }
+        const uint32_t id = fxDbc->getUInt32(i, 0);
+        std::string path = fxDbc->getString(i, fxPathField);
+        if (!id || path.empty()) continue;
+        SpellKitEffect effect;
+        // The DBC stores the extension the art was authored with; what
+        // shipped is .m2.
+        effect.modelPath = pipeline::modelPathToM2(path);
+        effect.scale = positive(i, fxScaleField, 1.0f);
+        effect.minScale = positive(i, fxMinField, 0.0f);
+        effect.maxScale = positive(i, fxMaxField, 0.0f);
+        if (effect.maxScale > 0.0f && effect.maxScale < effect.minScale)
+            std::swap(effect.minScale, effect.maxScale);
+        effects.emplace(id, std::move(effect));
     }
 
-    // Load SpellVisualKit.dbc - kitId → best SpellVisualEffectName ID
-    // Probes all effect slots in priority order and keeps the first valid hit.
+    // SpellVisualKit: every column it fills, hung where that column hangs.
     auto kitDbc = cachedAssetManager_->loadDBC("SpellVisualKit.dbc");
-    std::unordered_map<uint32_t, uint32_t> kitToEffectName; // kitId → effectNameId
-    if (kitDbc && kitDbc->isLoaded()) {
-        uint32_t fc = kitDbc->getFieldCount();
-        for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
-            uint32_t kitId = kitDbc->getUInt32(i, 0);
-            if (!kitId) continue;
-            uint32_t eff = 0;
-            for (size_t k = 0; k < numKitFields && !eff; ++k) {
-                if (kitFields[k] < fc)
-                    eff = kitDbc->getUInt32(i, kitFields[k]);
+    if (!kitDbc || !kitDbc->isLoaded()) {
+        LOG_WARNING("SpellVisual: SpellVisualKit.dbc unavailable - no spell effects will show");
+        return;
+    }
+    const uint32_t kitFields = kitDbc->getFieldCount();
+    std::vector<uint32_t> columnFields;
+    for (const auto& column : kSpellKitColumns)
+        columnFields.push_back(fieldOf(kitLayout, column.field, column.fallbackField));
+    size_t missingEffects = 0;
+    for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
+        const uint32_t kitId = kitDbc->getUInt32(i, 0);
+        if (!kitId) continue;
+        SpellVisualKit kit;
+        for (size_t c = 0; c < std::size(kSpellKitColumns); ++c) {
+            if (columnFields[c] >= kitFields) continue;
+            const uint32_t effectId = kitDbc->getUInt32(i, columnFields[c]);
+            if (!effectId) continue;
+            const auto it = effects.find(effectId);
+            if (it == effects.end()) {
+                ++missingEffects;
+                continue;
             }
-            if (eff) kitToEffectName[kitId] = eff;
+            SpellKitEffect effect = it->second;
+            effect.attachmentId = kSpellKitColumns[c].attachmentId;
+            kit.effects.push_back(std::move(effect));
         }
+        if (!kit.effects.empty()) kits_.emplace(kitId, std::move(kit));
+    }
+    if (missingEffects > 0) {
+        LOG_WARNING("SpellVisual: ", missingEffects, " kit effect(s) name a SpellVisualEffectName row "
+                    "that is not there; those effects do not show");
     }
 
-    // Helper: resolve path for a given kit ID
-    auto kitPath = [&](uint32_t kitId) -> std::string {
-        if (!kitId) return {};
-        auto kitIt = kitToEffectName.find(kitId);
-        if (kitIt == kitToEffectName.end()) return {};
-        auto fxIt = effectPaths.find(kitIt->second);
-        return (fxIt != effectPaths.end()) ? fxIt->second : std::string{};
-    };
-    auto missilePath = [&](uint32_t effId) -> std::string {
-        if (!effId) return {};
-        auto fxIt = effectPaths.find(effId);
-        return (fxIt != effectPaths.end()) ? fxIt->second : std::string{};
-    };
-
-    // Load SpellVisual.dbc - visualId → cast/impact M2 paths via kit chain
+    // SpellVisual: its three kits.
     auto svDbc = cachedAssetManager_->loadDBC("SpellVisual.dbc");
     if (!svDbc || !svDbc->isLoaded()) {
-        LOG_DEBUG("SpellVisual: SpellVisual.dbc unavailable");
+        LOG_WARNING("SpellVisual: SpellVisual.dbc unavailable - no spell effects will show");
         return;
     }
-    uint32_t svFc = svDbc->getFieldCount();
-    uint32_t loadedPrecast = 0, loadedCast = 0, loadedImpact = 0;
+    const uint32_t svFields = svDbc->getFieldCount();
+    const uint32_t precastField = fieldOf(svLayout, "PrecastKit", 1);
+    const uint32_t castField = fieldOf(svLayout, "CastKit", 2);
+    const uint32_t impactField = fieldOf(svLayout, "ImpactKit", 3);
+    const auto kitAt = [&](uint32_t record, uint32_t field) -> uint32_t {
+        if (field >= svFields) return 0;
+        const uint32_t kitId = svDbc->getUInt32(record, field);
+        return kits_.count(kitId) ? kitId : 0;
+    };
     for (uint32_t i = 0; i < svDbc->getRecordCount(); ++i) {
-        uint32_t vid = svDbc->getUInt32(i, 0);
-        if (!vid) continue;
-
-        // Precast path: PrecastKit → SpecialEffect0/BaseEffect
-        {
-            std::string path;
-            if (svPrecastKitField < svFc)
-                path = kitPath(svDbc->getUInt32(i, svPrecastKitField));
-            if (!path.empty()) { spellVisualPrecastPath_[vid] = path; ++loadedPrecast; }
-        }
-        // Cast path: CastKit → SpecialEffect0/BaseEffect, fallback to MissileModel
-        {
-            std::string path;
-            if (svCastKitField < svFc)
-                path = kitPath(svDbc->getUInt32(i, svCastKitField));
-            if (path.empty() && svMissileField < svFc)
-                path = missilePath(svDbc->getUInt32(i, svMissileField));
-            if (!path.empty()) { spellVisualCastPath_[vid] = path; ++loadedCast; }
-        }
-        // Impact path: ImpactKit → SpecialEffect0/BaseEffect, fallback to MissileModel
-        {
-            std::string path;
-            if (svImpactKitField < svFc)
-                path = kitPath(svDbc->getUInt32(i, svImpactKitField));
-            if (path.empty() && svMissileField < svFc)
-                path = missilePath(svDbc->getUInt32(i, svMissileField));
-            if (!path.empty()) { spellVisualImpactPath_[vid] = path; ++loadedImpact; }
-        }
+        const uint32_t visualId = svDbc->getUInt32(i, 0);
+        if (!visualId) continue;
+        const VisualKits kits{.precast = kitAt(i, precastField), .cast = kitAt(i, castField),
+                              .impact = kitAt(i, impactField)};
+        if (kits.precast || kits.cast || kits.impact) visualKits_.emplace(visualId, kits);
     }
-    LOG_INFO("SpellVisual: loaded precast=", loadedPrecast, " cast=", loadedCast, " impact=", loadedImpact,
-             " visual\u2192M2 mappings (of ", svDbc->getRecordCount(), " records)");
+    LOG_INFO("SpellVisual: ", kits_.size(), " kits with effects, ", visualKits_.size(),
+             " spell visuals using them (of ", svDbc->getRecordCount(), ")");
 }
 
-// ---------------------------------------------------------------------------
-// Classify model path to a character attachment point for bone tracking
-// ---------------------------------------------------------------------------
-uint32_t SpellVisualSystem::classifyAttachmentId(const std::string& modelPath) {
-    std::string lower = modelPath;
-    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-    // "hand" effects track the right hand (attachment 1)
-    if (lower.find("_hand") != std::string::npos || lower.find("hand_") != std::string::npos)
-        return 1; // RightHand
-    // "chest" effects track chest/torso (attachment 5 in M2 spec)
-    if (lower.find("_chest") != std::string::npos || lower.find("chest_") != std::string::npos)
-        return 5; // Chest
-    // "head" effects track head (attachment 11)
-    if (lower.find("_head") != std::string::npos || lower.find("head_") != std::string::npos)
-        return 11; // Head
-    return 0; // No bone tracking (static position or base effect)
+uint32_t SpellVisualSystem::kitFor(uint32_t visualId, KitKind kind) {
+    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
+    const auto it = visualKits_.find(visualId);
+    if (it == visualKits_.end()) return 0;
+    switch (kind) {
+        case KitKind::Precast: return it->second.precast;
+        case KitKind::Cast: return it->second.cast;
+        case KitKind::Impact: return it->second.impact;
+    }
+    return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Height offset for spell effect placement (fallback when no bone tracking)
-// ---------------------------------------------------------------------------
-glm::vec3 SpellVisualSystem::applyEffectHeightOffset(const glm::vec3& basePos, const std::string& modelPath) {
-    // Lowercase the path for case-insensitive matching
-    std::string lower = modelPath;
-    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+bool SpellVisualSystem::kitEffectTransform(const KitPlacement& at, const SpellKitEffect& effect,
+                                           glm::mat4& out) const {
+    if (effect.attachmentId == kSpellKitWorldPlaced || at.unitInstanceId == 0) {
+        out = glm::scale(glm::translate(glm::mat4(1.0f), at.worldPosition),
+                         glm::vec3(spellKitEffectScale(effect, 1.0f)));
+        return true;
+    }
+    auto* characters = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!characters) return false;
+    glm::mat4 parent;
+    // The attachment, or the unit itself when its model has no such point.
+    if (!characters->getAttachmentTransform(at.unitInstanceId, effect.attachmentId, parent) &&
+        !characters->getInstanceModelMatrix(at.unitInstanceId, parent)) {
+        return false;
+    }
+    // The size it is drawn at - the unit's own size times the effect's - is
+    // held within what the effect allows, so a giant's aura does not fill the
+    // zone and a critter's does not vanish.
+    const float parentScale = glm::length(glm::vec3(parent[0]));
+    if (!(parentScale > 0.0f) || !std::isfinite(parentScale)) return false;
+    out = glm::scale(parent, glm::vec3(spellKitEffectScale(effect, parentScale) / parentScale));
+    return true;
+}
 
-    // "hand" effects go at hand height (~0.8m above feet)
-    if (lower.find("_hand") != std::string::npos || lower.find("hand_") != std::string::npos) {
-        return basePos + glm::vec3(0.0f, 0.0f, 0.8f);
+void SpellVisualSystem::playKit(uint32_t kitId, KitKind kind, const KitPlacement& at,
+                                uint32_t castTimeMs) {
+    const auto kitIt = kits_.find(kitId);
+    if (kitIt == kits_.end()) return;
+    for (size_t e = 0; e < kitIt->second.effects.size(); ++e) {
+        playKitEffect(kitId, e, kind, at, castTimeMs);
     }
-    // "chest" effects go at chest height (~1.0m above feet)
-    if (lower.find("_chest") != std::string::npos || lower.find("chest_") != std::string::npos) {
-        return basePos + glm::vec3(0.0f, 0.0f, 1.0f);
+}
+
+void SpellVisualSystem::playKitEffect(uint32_t kitId, size_t effectIndex, KitKind kind,
+                                      const KitPlacement& at, uint32_t castTimeMs) {
+    const SpellKitEffect& effect = kits_.at(kitId).effects[effectIndex];
+    const uint32_t modelId = modelIdFor(effect.modelPath);
+    if (modelId == 0 || spellVisualFailedModels_.count(modelId)) return;
+    // Never loaded in the frame: a model still on its way is waited for, and
+    // the effect plays when it lands if it still means anything.
+    if (!ensureModel(effect.modelPath, modelId)) {
+        deferredPlays_.push_back({.kind = kind, .kitId = kitId, .effectIndex = effectIndex,
+                                  .at = at, .castTimeMs = castTimeMs, .modelId = modelId});
+        return;
     }
-    // "head" effects go at head height (~1.6m above feet)
-    if (lower.find("_head") != std::string::npos || lower.find("head_") != std::string::npos) {
-        return basePos + glm::vec3(0.0f, 0.0f, 1.6f);
+    glm::mat4 transform;
+    if (!kitEffectTransform(at, effect, transform)) {
+        LOG_WARNING("SpellVisual: kit ", kitId, " effect ", effect.modelPath,
+                    " has no unit to hang on (instance ", at.unitInstanceId, "); not shown");
+        return;
     }
-    // "base" / "feet" / ground effects stay at ground level
-    return basePos;
+    // Created where it belongs and then given the whole matrix; a child
+    // instance takes no part in placement dedup.
+    const uint32_t instanceId = m2Renderer_->createInstance(modelId, glm::vec3(transform[3]),
+                                                            glm::vec3(0.0f), 1.0f,
+                                                            /*allowPositionDedup=*/false);
+    if (instanceId == 0) {
+        LOG_WARNING("SpellVisual: could not place kit effect ", effect.modelPath);
+        return;
+    }
+    m2Renderer_->setInstanceTransform(instanceId, transform);
+
+    // As the client plays a kit's model: a precast loops for the cast; a
+    // one-shot plays its Stand once, then its Decay if it has one, and stops
+    // on its last frame, then finishes (WoW.exe, render spec 6b).
+    float lifetime = 0.0f;
+    const float standSeconds = m2Renderer_->hasAnimation(instanceId, 0)
+        ? m2Renderer_->getInstanceAnimDuration(instanceId) / 1000.0f : 0.0f;
+    if (kind == KitKind::Precast) {
+        m2Renderer_->playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Loop});
+        lifetime = castTimeMs > 0 ? static_cast<float>(castTimeMs) / 1000.0f
+                                  : std::max(standSeconds, kOneShotFallbackSeconds);
+    } else {
+        constexpr uint32_t kDecay = 159;
+        const bool hasDecay = m2Renderer_->hasAnimation(instanceId, kDecay);
+        float decaySeconds = 0.0f;
+        if (hasDecay) {
+            m2Renderer_->playInstanceAnimation(instanceId, {.animationId = kDecay});
+            decaySeconds = m2Renderer_->getInstanceAnimDuration(instanceId) / 1000.0f;
+            m2Renderer_->playInstanceAnimation(
+                instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Next},
+                M2AnimationPlay{.animationId = kDecay, .end = M2AnimationPlay::End::Hold});
+        } else {
+            m2Renderer_->playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Hold});
+        }
+        lifetime = standSeconds + decaySeconds;
+        // A model whose Stand is a single frame - a burst of particles on a
+        // still mesh - still has its particles to show.
+        if (lifetime < kOneShotFallbackSeconds) lifetime = kOneShotFallbackSeconds;
+    }
+    activeEffects_.push_back({.instanceId = instanceId, .kitId = kitId, .effectIndex = effectIndex,
+                              .at = at, .lastTransform = transform, .elapsed = 0.0f, .lifetime = lifetime,
+                              .isPrecast = kind == KitKind::Precast});
 }
 
 void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec3& worldPosition,
                                                 uint32_t castTimeMs, uint32_t attachInstanceId) {
-    LOG_INFO("SpellVisual: playSpellVisualPrecast visualId=", visualId,
-             " pos=(", worldPosition.x, ",", worldPosition.y, ",", worldPosition.z,
-             ") castTimeMs=", castTimeMs);
-    if (!m2Renderer_ || visualId == 0) {
-        LOG_WARNING("SpellVisual: playSpellVisualPrecast early-out: m2Renderer_=", (m2Renderer_ ? "yes" : "null"),
-                    " visualId=", visualId);
-        return;
-    }
-
-    if (!cachedAssetManager_)
-        cachedAssetManager_ = renderer_ ? renderer_->getAssetManager() : nullptr;
-    if (!cachedAssetManager_) { LOG_WARNING("SpellVisual: no AssetManager"); return; }
-
-    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
-
-    // Try precast path first, fall back to cast path
-    auto pathIt = spellVisualPrecastPath_.find(visualId);
-    if (pathIt == spellVisualPrecastPath_.end()) {
-        // No precast kit - fall back to playing cast kit
-        playSpellVisual(visualId, worldPosition, false, attachInstanceId);
-        return;
-    }
-
-    const std::string& modelPath = pathIt->second;
-    LOG_INFO("SpellVisual: precast path resolved to: ", modelPath);
-
-    const uint32_t modelId = modelIdFor(modelPath);
-    if (modelId == 0) return;
-    if (spellVisualFailedModels_.count(modelId)) {
-        LOG_WARNING("SpellVisual: precast model in failed-cache, skipping: ", modelPath);
-        return;
-    }
-    // Never loaded in the frame: a model still on its way is waited for, and
-    // the effect plays when it lands if the cast is still going.
-    if (!ensureModel(modelPath, modelId)) {
-        deferredPlays_.push_back({.kind = DeferredPlay::Kind::Precast, .visualId = visualId,
-                                  .position = worldPosition, .castTimeMs = castTimeMs,
-                                  .attachInstanceId = attachInstanceId, .modelId = modelId});
-        return;
-    }
-
-    // Determine attachment point for bone tracking (hand/chest/head → follow
-    // the CASTER's bones; attachInstanceId=0 means a non-tracked caster, so
-    // the effect stays static at their world position).
-    uint32_t attachId = classifyAttachmentId(modelPath);
-    if (attachInstanceId == 0) attachId = 0;
-    glm::vec3 spawnPos = worldPosition;
-    if (attachId != 0 && renderer_) {
-        auto* charRenderer = renderer_->getCharacterRenderer();
-        if (charRenderer) {
-            glm::mat4 attachMat;
-            if (charRenderer->getAttachmentTransform(attachInstanceId, attachId, attachMat)) {
-                spawnPos = glm::vec3(attachMat[3]);
-            } else {
-                spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-                attachId = 0;
-            }
-        } else {
-            spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-            attachId = 0;
-        }
-    } else {
-        spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-    }
-
-    uint32_t instanceId = m2Renderer_->createInstance(modelId,
-                                                       spawnPos,
-                                                       glm::vec3(0.0f), 1.0f);
-    if (instanceId == 0) {
-        LOG_WARNING("SpellVisual: createInstance returned 0 for precast model=", modelPath);
-        return;
-    }
-    m2Renderer_->restartInstanceAnimation(instanceId);
-
-    // Duration: prefer server cast time if available (long casts like Hearthstone=10s),
-    // otherwise fall back to M2 animation duration, then default.
-    float duration;
-    if (castTimeMs >= 500) {
-        // Server cast time available - precast should last the full cast duration
-        duration = std::clamp(static_cast<float>(castTimeMs) / 1000.0f, 0.5f, 30.0f);
-    } else {
-        float animDurMs = m2Renderer_->getInstanceAnimDuration(instanceId);
-        duration = (animDurMs > 100.0f)
-            ? std::clamp(animDurMs / 1000.0f, 0.5f, SPELL_VISUAL_MAX_DURATION)
-            : SPELL_VISUAL_DEFAULT_DURATION;
-    }
-    activeSpellVisuals_.push_back({.instanceId = instanceId, .elapsed = 0.0f, .duration = duration, .isPrecast = true, .attachmentId = attachId, .attachInstanceId = attachInstanceId});
-    LOG_INFO("SpellVisual: spawned precast visualId=", visualId, " instanceId=", instanceId,
-             " duration=", duration, "s castTimeMs=", castTimeMs, " attach=", attachId,
-             " model=", modelPath,
-             " active=", activeSpellVisuals_.size());
-
-    // Hand effects: spawn a mirror copy on the caster's left hand (attachment 2)
-    if (attachId == 1 /* RightHand */) {
-        glm::vec3 leftPos = worldPosition;
-        if (renderer_) {
-            auto* cr = renderer_->getCharacterRenderer();
-            if (cr) {
-                glm::mat4 lm;
-                if (cr->getAttachmentTransform(attachInstanceId, 2, lm))
-                    leftPos = glm::vec3(lm[3]);
-            }
-        }
-        uint32_t leftId = m2Renderer_->createInstance(modelId, leftPos, glm::vec3(0.0f), 1.0f);
-        if (leftId != 0) {
-            m2Renderer_->restartInstanceAnimation(leftId);
-            activeSpellVisuals_.push_back({.instanceId = leftId, .elapsed = 0.0f, .duration = duration, .isPrecast = true, .attachmentId = 2 /* LeftHand */, .attachInstanceId = attachInstanceId});
-        }
+    if (!m2Renderer_ || visualId == 0) return;
+    const KitPlacement at{.worldPosition = worldPosition, .unitInstanceId = attachInstanceId};
+    if (const uint32_t kit = kitFor(visualId, KitKind::Precast)) {
+        playKit(kit, KitKind::Precast, at, castTimeMs);
     }
 }
 
 void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
                                          bool useImpactKit, uint32_t attachInstanceId) {
-    LOG_INFO("SpellVisual: playSpellVisual visualId=", visualId, " impact=", useImpactKit,
-             " pos=(", worldPosition.x, ",", worldPosition.y, ",", worldPosition.z, ")");
     if (!m2Renderer_ || visualId == 0) return;
-
-    if (!cachedAssetManager_)
-        cachedAssetManager_ = renderer_ ? renderer_->getAssetManager() : nullptr;
-    if (!cachedAssetManager_) return;
-
-    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
-
-    // Select cast or impact path map; fall back to the other if missing
-    auto& primaryMap = useImpactKit ? spellVisualImpactPath_ : spellVisualCastPath_;
-    auto& fallbackMap = useImpactKit ? spellVisualCastPath_ : spellVisualImpactPath_;
-    auto pathIt = primaryMap.find(visualId);
-    if (pathIt == primaryMap.end()) {
-        pathIt = fallbackMap.find(visualId);
-        if (pathIt == fallbackMap.end()) {
-            return;
-        }
-    }
-
-    const std::string& modelPath = pathIt->second;
-    LOG_INFO("SpellVisual: ", (useImpactKit ? "impact" : "cast"), " path resolved to: ", modelPath);
-
-    const uint32_t modelId = modelIdFor(modelPath);
-    if (modelId == 0) return;
-    // Skip models that have previously failed to load (avoid repeated I/O)
-    if (spellVisualFailedModels_.count(modelId)) {
-        LOG_WARNING("SpellVisual: model in failed-cache, skipping: ", modelPath);
-        return;
-    }
-    if (!ensureModel(modelPath, modelId)) {
-        deferredPlays_.push_back({.kind = useImpactKit ? DeferredPlay::Kind::Impact
-                                                       : DeferredPlay::Kind::Cast,
-                                  .visualId = visualId, .position = worldPosition,
-                                  .attachInstanceId = attachInstanceId, .modelId = modelId});
-        return;
-    }
-
-    // Determine attachment point for bone tracking on cast effects. Only the
-    // caster identified by attachInstanceId may be tracked - never default to
-    // the local player (that glued every nearby unit's cast kit to the
-    // player's hands).
-    uint32_t attachId = 0;
-    if (!useImpactKit && attachInstanceId != 0) {
-        attachId = classifyAttachmentId(modelPath);
-    }
-    glm::vec3 spawnPos = worldPosition;
-    if (attachId != 0 && renderer_) {
-        auto* charRenderer = renderer_->getCharacterRenderer();
-        if (charRenderer) {
-            glm::mat4 attachMat;
-            if (charRenderer->getAttachmentTransform(attachInstanceId, attachId, attachMat)) {
-                spawnPos = glm::vec3(attachMat[3]);
-            } else {
-                spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-                attachId = 0;
-            }
-        } else {
-            spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-            attachId = 0;
-        }
-    } else {
-        spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
-    }
-
-    // Spawn instance at world position
-    uint32_t instanceId = m2Renderer_->createInstance(modelId,
-                                                       spawnPos,
-                                                       glm::vec3(0.0f), 1.0f);
-    if (instanceId == 0) {
-        LOG_WARNING("SpellVisual: failed to create instance for visualId=", visualId);
-        return;
-    }
-    m2Renderer_->restartInstanceAnimation(instanceId);
-    // Determine lifetime from M2 animation duration (clamp to reasonable range)
-    float animDurMs = m2Renderer_->getInstanceAnimDuration(instanceId);
-    float duration = (animDurMs > 100.0f)
-        ? std::clamp(animDurMs / 1000.0f, 0.5f, SPELL_VISUAL_MAX_DURATION)
-        : SPELL_VISUAL_DEFAULT_DURATION;
-    activeSpellVisuals_.push_back({.instanceId = instanceId, .elapsed = 0.0f, .duration = duration, .isPrecast = false, .attachmentId = attachId, .attachInstanceId = attachInstanceId});
-    LOG_INFO("SpellVisual: spawned ", (useImpactKit ? "impact" : "cast"), " visualId=", visualId,
-             " instanceId=", instanceId, " duration=", duration, "s animDurMs=", animDurMs,
-             " attach=", attachId, " model=", modelPath, " active=", activeSpellVisuals_.size());
-
-    // Hand effects: spawn a mirror copy on the caster's left hand (attachment 2)
-    if (attachId == 1 /* RightHand */) {
-        glm::vec3 leftPos = worldPosition;
-        if (renderer_) {
-            auto* cr = renderer_->getCharacterRenderer();
-            if (cr) {
-                glm::mat4 lm;
-                if (cr->getAttachmentTransform(attachInstanceId, 2, lm))
-                    leftPos = glm::vec3(lm[3]);
-            }
-        }
-        uint32_t leftId = m2Renderer_->createInstance(modelId, leftPos, glm::vec3(0.0f), 1.0f);
-        if (leftId != 0) {
-            m2Renderer_->restartInstanceAnimation(leftId);
-            activeSpellVisuals_.push_back({.instanceId = leftId, .elapsed = 0.0f, .duration = duration, .isPrecast = false, .attachmentId = 2 /* LeftHand */, .attachInstanceId = attachInstanceId});
-        }
-    }
+    const KitKind kind = useImpactKit ? KitKind::Impact : KitKind::Cast;
+    const KitPlacement at{.worldPosition = worldPosition, .unitInstanceId = attachInstanceId};
+    if (const uint32_t kit = kitFor(visualId, kind)) playKit(kit, kind, at, 0);
 }
 
 void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
@@ -498,31 +345,36 @@ void SpellVisualSystem::update(float deltaTime) {
             }
         }
     }
-    if (activeSpellVisuals_.empty() && physicalProjectiles_.empty()) return;
+    if (activeEffects_.empty() && physicalProjectiles_.empty()) return;
 
-    // Get character bone tracking context (once per frame)
-    CharacterRenderer* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-
-    for (auto it = activeSpellVisuals_.begin(); it != activeSpellVisuals_.end(); ) {
+    // Each effect rides its attachment every frame - bone, facing and scale -
+    // as the client parents it (0x82e550): a buff landing on a running player
+    // runs with them. It used to take the position once, or follow it without
+    // turning, and was left standing where it had been cast.
+    for (auto it = activeEffects_.begin(); it != activeEffects_.end(); ) {
         it->elapsed += deltaTime;
-        if (it->elapsed >= it->duration) {
-            m2Renderer_->removeInstance(it->instanceId);
-            it = activeSpellVisuals_.erase(it);
-        } else {
-            // Update position for bone-tracked effects - follow the CASTER's
-            // hands/chest/head, not the local player's.
-            if (it->attachmentId != 0 && it->attachInstanceId != 0 && charRenderer) {
-                glm::mat4 attachMat;
-                if (charRenderer->getAttachmentTransform(it->attachInstanceId, it->attachmentId, attachMat)) {
-                    glm::vec3 bonePos = glm::vec3(attachMat[3]);
-                    m2Renderer_->setInstancePosition(it->instanceId, bonePos);
-                }
+        bool done = it->elapsed >= it->lifetime;
+        if (!done && it->at.unitInstanceId != 0) {
+            const SpellKitEffect& effect = kits_.at(it->kitId).effects[it->effectIndex];
+            glm::mat4 transform;
+            if (!kitEffectTransform(it->at, effect, transform)) {
+                done = true;  // the unit is gone
+            } else if (transform != it->lastTransform) {
+                // Only when the attachment moved: a move refiles the instance
+                // in the culling grids.
+                m2Renderer_->setInstanceTransform(it->instanceId, transform);
+                it->lastTransform = transform;
             }
+        }
+        if (done) {
+            m2Renderer_->finishInstance(it->instanceId);
+            it = activeEffects_.erase(it);
+        } else {
             ++it;
         }
     }
 
-
+    CharacterRenderer* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (charRenderer) {
         for (auto it = physicalProjectiles_.begin(); it != physicalProjectiles_.end(); ) {
             it->elapsed += deltaTime;
@@ -546,23 +398,23 @@ void SpellVisualSystem::update(float deltaTime) {
 
 void SpellVisualSystem::cancelAllPrecastVisuals() {
     if (!m2Renderer_) return;
-    for (auto it = activeSpellVisuals_.begin(); it != activeSpellVisuals_.end(); ) {
-        if (it->isPrecast) {
-            m2Renderer_->removeInstance(it->instanceId);
-            it = activeSpellVisuals_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // Ended as the client ends an effect: the mesh goes, the particles it has
+    // made fly out.
+    std::erase_if(activeEffects_, [&](const ActiveEffect& effect) {
+        if (!effect.isPrecast) return false;
+        m2Renderer_->finishInstance(effect.instanceId);
+        return true;
+    });
+    std::erase_if(deferredPlays_, [](const DeferredPlay& play) { return play.kind == KitKind::Precast; });
 }
 
 void SpellVisualSystem::reset() {
     // Clear lingering spell visual instances from the previous map/combat session.
     // Without this, old effects could remain visible after teleport or map change.
-    for (auto& sv : activeSpellVisuals_) {
-        if (m2Renderer_) m2Renderer_->removeInstance(sv.instanceId);
+    for (auto& effect : activeEffects_) {
+        if (m2Renderer_) m2Renderer_->removeInstance(effect.instanceId);
     }
-    activeSpellVisuals_.clear();
+    activeEffects_.clear();
     if (renderer_ && renderer_->getCharacterRenderer()) {
         for (const auto& projectile : physicalProjectiles_)
             renderer_->getCharacterRenderer()->removeInstance(projectile.instanceId);
@@ -676,7 +528,7 @@ void SpellVisualSystem::replayDeferredPlays(float deltaTime) {
         play.age += deltaTime;
         // How long the effect still means anything: a precast for as long as
         // the cast runs, a cast or impact flash for well under a second.
-        const float stillCurrent = play.kind == DeferredPlay::Kind::Precast
+        const float stillCurrent = play.kind == KitKind::Precast
             ? std::max(0.75f, static_cast<float>(play.castTimeMs) / 1000.0f)
             : 0.75f;
         if (spellVisualFailedModels_.count(play.modelId) || play.age > stillCurrent) continue;
@@ -684,21 +536,9 @@ void SpellVisualSystem::replayDeferredPlays(float deltaTime) {
             deferredPlays_.push_back(play);
             continue;
         }
-        switch (play.kind) {
-            case DeferredPlay::Kind::Precast:
-                playSpellVisualPrecast(play.visualId, play.position,
-                                       play.castTimeMs > 0 ? static_cast<uint32_t>(
-                                           std::max(0.0f, play.castTimeMs - play.age * 1000.0f))
-                                                           : 0,
-                                       play.attachInstanceId);
-                break;
-            case DeferredPlay::Kind::Cast:
-                playSpellVisual(play.visualId, play.position, false, play.attachInstanceId);
-                break;
-            case DeferredPlay::Kind::Impact:
-                playSpellVisual(play.visualId, play.position, true, play.attachInstanceId);
-                break;
-        }
+        const uint32_t castLeftMs = play.castTimeMs > 0
+            ? static_cast<uint32_t>(std::max(0.0f, play.castTimeMs - play.age * 1000.0f)) : 0;
+        playKitEffect(play.kitId, play.effectIndex, play.kind, play.at, castLeftMs);
     }
 }
 
@@ -709,12 +549,14 @@ void SpellVisualSystem::preloadVisuals(const std::vector<uint32_t>& visualIds) {
     if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
     size_t queued = 0;
     for (const uint32_t visualId : visualIds) {
-        for (const auto* map : {&spellVisualPrecastPath_, &spellVisualCastPath_, &spellVisualImpactPath_}) {
-            const auto it = map->find(visualId);
-            if (it == map->end() || it->second.empty()) continue;
-            if (!preloadPaths_.insert(it->second).second) continue;
-            const uint32_t modelId = modelIdFor(it->second);
-            if (modelId != 0 && !ensureModel(it->second, modelId)) ++queued;
+        for (const KitKind kind : {KitKind::Precast, KitKind::Cast, KitKind::Impact}) {
+            const uint32_t kitId = kitFor(visualId, kind);
+            if (!kitId) continue;
+            for (const auto& effect : kits_.at(kitId).effects) {
+                if (!preloadPaths_.insert(effect.modelPath).second) continue;
+                const uint32_t modelId = modelIdFor(effect.modelPath);
+                if (modelId != 0 && !ensureModel(effect.modelPath, modelId)) ++queued;
+            }
         }
     }
     LOG_INFO("SpellVisual: preloading ", queued, " effect model(s) for ", visualIds.size(),

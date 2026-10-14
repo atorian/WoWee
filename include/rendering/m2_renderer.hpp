@@ -13,6 +13,7 @@
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/frames_in_flight.hpp"
+#include "rendering/game_object_animation.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -356,6 +357,13 @@ struct M2Instance {
     /// back to the idle sequence, which for a door is the closed pose - so an
     /// open door swung open and shut itself, over and over.
     bool holdAtEnd = false;
+    /// Played when the current one-shot ends: a GameObject's Opened after
+    /// its Open. A negative animSpeed plays the current one backwards, and
+    /// then it ends at its start.
+    std::optional<M2AnimationPlay> nextAnimation;
+    /// Ended by finishInstance: its mesh is not drawn and its emitters stop,
+    /// while the particles it made fly out their lives.
+    bool finishing = false;
 
     /// Lit while the player is pressing on this instance: 0 none, 1 full.
     ///
@@ -612,7 +620,9 @@ public:
     uint32_t createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
                                        const glm::vec3& position);
 
-    void update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4& viewProjection);
+    /// Animate, emit and cull for this frame's camera: its view (which
+    /// billboard bones turn against) and projection.
+    void update(float deltaTime, const glm::mat4& view, const glm::mat4& projection);
 
     /**
      * Render all visible instances (Vulkan)
@@ -711,6 +721,10 @@ public:
     /// the moment it opens, not to the moment it is first seen.
     void setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
                                   bool skipToEnd);
+    /// Play an animation as a plan says - forwards or back, held, looped,
+    /// or followed by another. False when the model has no such sequence.
+    bool playInstanceAnimation(uint32_t instanceId, const M2AnimationPlay& now,
+                               const std::optional<M2AnimationPlay>& next = std::nullopt);
 
     /// Light an instance while it is being pressed on. 0 clears it.
     void setInstanceHighlight(uint32_t instanceId, float amount);
@@ -745,12 +759,6 @@ public:
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
                                                 float glX, float glY, float glZ) const;
 
-    /// The id of an instance's only animation, where it has exactly one.
-    ///
-    /// A door with no OPEN or CLOSE sequence of its own carries one animation
-    /// and that animation is the opening. Undercity's lift doors are the case:
-    /// one bone, one sequence, id 0, 3333ms.
-    [[nodiscard]] std::optional<uint32_t> soleSequenceId(uint32_t instanceId) const;
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
@@ -760,6 +768,10 @@ public:
     }
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
+    /// End an effect as the client does (CEffect::Finish, WoW.exe 0x6f87c0):
+    /// its mesh goes at once, its emitters stop, and the particles and ribbons
+    /// it has already made fly out their lives; then it is removed.
+    void finishInstance(uint32_t instanceId);
     /// Mark an instance as a server game object so the adaptive doodad render
     /// distance can't cull it while the server still considers it visible.
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
@@ -1259,7 +1271,6 @@ private:
     struct TextureProperties {
         bool hasAlpha = false;
         bool alphaIsSilhouette = false;
-        bool colorKeyBlack = false;
     };
     std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
     size_t textureCacheBytes_ = 0;
@@ -1474,6 +1485,7 @@ private:
 
     // Cached camera state from update() for frustum-culling bones
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
+    glm::mat4 cachedView_ = glm::mat4(1.0f);
     /// The camera update() last saw, for the particle draw to cull by: only
     /// what is in view goes into the particle buffer.
     glm::mat4 cachedViewProjection_{1.0f};
@@ -1507,6 +1519,16 @@ private:
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
     float interpFBlockCell(const pipeline::M2FBlock& fb, float lifeRatio, uint32_t cellCount);
     void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
+    /// A one-shot ended: start the animation queued after it.
+    void advanceToNextAnimation(M2Instance& inst);
+    /// Effects ended with finishInstance, removed once nothing they made is
+    /// left, or at the deadline their longest particle life sets.
+    struct FinishingInstance {
+        uint32_t instanceId = 0;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::vector<FinishingInstance> finishingInstances_;
+    void reapFinishedInstances();
     void updateParticles(M2Instance& inst, float dt);
     /// Ages the instance's ribbon edges and, when `emit`, lays new ones.
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt, bool emit = true);

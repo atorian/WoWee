@@ -137,6 +137,7 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     auto& inst = instances[idxIt->second];
     inst.animSpeed = frozen ? 0.0f : 1.0f;
     inst.holdAtEnd = false;
+    inst.nextAnimation.reset();
     if (frozen) {
         inst.animTime = 0.0f;  // Reset to bind pose
     }
@@ -149,15 +150,7 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     inst.animTime = 0.0f;
     inst.animTimeAlt = 0.0f;
     inst.animDir = 1.0f;
-    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
-}
-
-std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return std::nullopt;
-    const auto& inst = instances[idxIt->second];
-    if (!inst.cachedModel || inst.cachedModel->sequences.size() != 1) return std::nullopt;
-    return inst.cachedModel->sequences[0].id;
+    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -173,6 +166,7 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.animDuration = static_cast<float>(seqs[i].duration);
         inst.playingVariation = false;   // not a variation: it does not go back
         inst.holdAtEnd = true;
+        inst.nextAnimation.reset();
         if (skipToEnd) {
             inst.animTime = inst.animDuration;
             inst.animSpeed = 0.0f;
@@ -181,6 +175,60 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
             inst.animSpeed = 1.0f;
         }
         return;
+    }
+}
+
+namespace {
+
+// Put one planned animation on an instance. False when the model lacks it.
+bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
+    const auto& seqs = inst.cachedModel->sequences;
+    for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
+        if (seqs[i].id != play.animationId) continue;
+        inst.currentSequenceIndex = i;
+        inst.animDuration = static_cast<float>(seqs[i].duration);
+        inst.playingVariation = false;
+        // A sequence flagged 0x01 plays once and stops at its end even when
+        // it is the resting one (WoW.exe 0x832260).
+        constexpr uint32_t kM2SequencePlaysOnce = 0x01;
+        inst.holdAtEnd = play.end != M2AnimationPlay::End::Loop ||
+                         (seqs[i].flags & kM2SequencePlaysOnce) != 0;
+        const float start = play.reversed ? inst.animDuration : 0.0f;
+        const float end = play.reversed ? 0.0f : inst.animDuration;
+        if (play.frozen || play.startAtEnd) {
+            inst.animTime = play.frozen ? start : end;
+            inst.animSpeed = 0.0f;
+            inst.holdAtEnd = true;
+        } else {
+            inst.animTime = start;
+            inst.animSpeed = play.reversed ? -1.0f : 1.0f;
+        }
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPlay& now,
+                                       const std::optional<M2AnimationPlay>& next) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel) return false;
+    if (!startPlannedAnimation(inst, now)) return false;
+    inst.nextAnimation = now.end == M2AnimationPlay::End::Next ? next : std::nullopt;
+    return true;
+}
+
+void M2Renderer::advanceToNextAnimation(M2Instance& inst) {
+    const M2AnimationPlay next = *inst.nextAnimation;
+    inst.nextAnimation.reset();
+    if (!startPlannedAnimation(inst, next)) {
+        LOG_WARNING("M2: '", inst.cachedModel->name, "' has no animation ", next.animationId,
+                    " to go on to; holding where it is");
+        inst.animSpeed = 0.0f;
+        inst.holdAtEnd = true;
     }
 }
 
@@ -200,6 +248,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
             inst.holdAtEnd = false;
+            inst.nextAnimation.reset();
             return;
         }
     }
@@ -384,6 +433,47 @@ void M2Renderer::setInteriorLight(uint32_t instanceId, const std::optional<Inter
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
     instances[idxIt->second].interiorLight = packInteriorLight(light);
+}
+
+void M2Renderer::finishInstance(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    if (inst.finishing) return;
+    inst.finishing = true;
+    // Its particles have at most their longest life left to run.
+    float longestLife = 0.0f;
+    if (inst.cachedModel) {
+        for (const auto& em : inst.cachedModel->particleEmitters) {
+            longestLife = std::max(longestLife,
+                interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+                            inst.currentSequenceIndex, inst.cachedModel->globalSequenceDurations));
+        }
+    }
+    finishingInstances_.push_back({.instanceId = instanceId,
+                                   .deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(static_cast<int64_t>(longestLife * 1000.0f) + 100)});
+}
+
+void M2Renderer::reapFinishedInstances() {
+    if (finishingInstances_.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<uint32_t> done;
+    std::erase_if(finishingInstances_, [&](const FinishingInstance& f) {
+        auto idxIt = instanceIndexById.find(f.instanceId);
+        if (idxIt == instanceIndexById.end()) return true;  // removed meanwhile
+        const auto& inst = instances[idxIt->second];
+        const bool ribbonsLeft = std::any_of(inst.ribbons.begin(), inst.ribbons.end(),
+                                             [](const auto& r) { return !r.edges.empty(); });
+        // Gone when nothing it emitted is left - or when its particles have
+        // had their whole life, though it was out of sight and not updated.
+        if ((inst.particles.empty() && !ribbonsLeft) || now >= f.deadline) {
+            done.push_back(f.instanceId);
+            return true;
+        }
+        return false;
+    });
+    if (!done.empty()) removeInstances(done);
 }
 
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
@@ -874,16 +964,6 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         return whiteTexture_.get();
     }
 
-    // The black key discards every pixel darker than the threshold, so a
-    // texture it is applied to wrongly loses its dark areas.
-    //
-    // Both the list and what it is matched against now live in
-    // assetNameLooksLikeFlame. This asked the whole path, which is what made
-    // Outland's sky flicker: HellFireSkyNebula01 has "fire" in it, so every
-    // layer of the Hellfire sky was keyed as a flame and lost whichever of its
-    // dark pixels fell under the threshold that frame.
-    const bool colorKeyBlackHint = assetNameLooksLikeFlame(key);
-
     // Check pre-decoded BLP cache first (populated by background worker threads)
     pipeline::BLPImage blp;
     if (predecodedBLPCache_) {
@@ -970,9 +1050,13 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     textureCache[key] = std::move(e);
     failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
+    // No black key from the texture's name. Every texture whose file name
+    // held "lamp", "fire", "glow", "candle" and the like had its dark pixels
+    // discarded on opaque and alpha-blended layers - 975 batches, the
+    // client keying none of them: Dalaran's lamp glass lost its leading and
+    // showed the dark inside of the lamp through the holes.
     texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha,
-                                  .alphaIsSilhouette = alphaIsSilhouette,
-                                  .colorKeyBlack = colorKeyBlackHint};
+                                  .alphaIsSilhouette = alphaIsSilhouette};
     LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
 
     return texPtr;

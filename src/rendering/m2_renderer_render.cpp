@@ -84,7 +84,7 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
 
     // No sibling to copy from, so pay for the bones now.
     if (instance.boneMatrices.empty()) {
-        computeBoneMatrices(model, instance, &cachedCamPos_);
+        computeBoneMatrices(model, instance, &cachedView_);
     }
     if (!instance.boneMatrices.empty()) {
         boneSeedInstanceByModel_.emplace(modelId, instance.id);
@@ -342,7 +342,10 @@ static bool skyBatchAllowed(bool skyMode, std::size_t index) {
     return maxBatch < 0 || static_cast<int>(index) < maxBatch;
 }
 
-void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4& viewProjection) {
+void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4& projection) {
+    const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
+    const glm::mat4 viewProjection = projection * view;
+    cachedView_ = view;
     ZoneScopedN("M2Renderer::update");
     if (spatialIndexDirty_) {
         rebuildSpatialIndex();
@@ -577,7 +580,20 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         if (instance.animDuration <= 0.0f && instance.cachedHasEmitters) {
             instance.animDuration = rendering::M2_DEFAULT_PARTICLE_ANIM_MS;
         }
-        if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
+        // Played backwards (a GameObject's Close standing in for a missing
+        // Open), a one-shot ends at its start.
+        if (instance.animSpeed < 0.0f && instance.animTime <= 0.0f) {
+            instance.animTime = 0.0f;
+            if (instance.nextAnimation) {
+                advanceToNextAnimation(instance);
+            } else {
+                instance.animSpeed = 0.0f;
+            }
+        }
+        if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration &&
+            instance.nextAnimation) {
+            advanceToNextAnimation(instance);
+        } else if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
             if (instance.holdAtEnd) {
                 // Stay on the last frame. A door's open sequence ends with the
                 // door open, and that is the pose the server is describing.
@@ -670,7 +686,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                 if (i >= instances.size()) continue;
                 auto& inst = instances[i];
                 if (!inst.cachedModel) continue;
-                computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
+                computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
             }
         } else {
             // Parallel - dispatch across worker threads
@@ -684,7 +700,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                     if (i >= instances.size()) continue;
                     auto& inst = instances[i];
                     if (!inst.cachedModel) continue;
-                    computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
+                    computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
                 }
             } else {
                 const size_t chunkSize = animCount / numThreads;
@@ -696,7 +712,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                         if (idx >= instances.size()) continue;
                         auto& inst = instances[idx];
                         if (!inst.cachedModel) continue;
-                        computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
+                        computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
                     }
                 };
 
@@ -804,11 +820,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         while (remaining > 0.0f) {
             const float step = std::min(remaining, kM2ParticleMaxStep);
             remaining -= step;
-            emitParticles(instance, model, step);
+            // A finished effect emits nothing more; what it has flies on.
+            if (!instance.finishing) emitParticles(instance, model, step);
             updateParticles(instance, step);
         }
         if (!model.ribbonEmitters.empty()) {
-            updateRibbons(instance, model, deltaTime);
+            updateRibbons(instance, model, deltaTime, !instance.finishing);
         }
     }
 
@@ -822,6 +839,7 @@ static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     if (!initialized_ || instances.empty()) return;
     (void)camera;  // reserved for future frustum-based culling
+    reapFinishedInstances();
 
     // --- Mega bone SSBO: assign ranges and upload all animated instance bones ---
     // Offset 0 is reserved as the identity/no-bones sentinel; animated instances
@@ -1324,6 +1342,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         for (uint32_t k = begin; k < end; ++k) {
             const uint32_t i = list[k];
             const auto& instance = instances[i];
+            // A finished effect shows only the particles it has left.
+            if (instance.finishing) continue;
             float distSq;
             float effectiveMaxDistSq;
 
@@ -2571,7 +2591,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         shadowCasters_[1].clear();
         auto castsHere = [&](const M2Instance& instance) {
             if (!instance.cachedIsValid || instance.cachedIsSmoke ||
-                instance.cachedIsInvisibleTrap) return false;
+                instance.cachedIsInvisibleTrap || instance.finishing) return false;
             if (!instance.cachedModel) return false;
             return insideFootprint(instance, *instance.cachedModel);
         };

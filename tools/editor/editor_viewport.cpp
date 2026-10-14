@@ -647,7 +647,7 @@ void EditorViewport::updateNpcMarkers(const std::vector<CreatureSpawn>& npcs) {
 
 void EditorViewport::update(float deltaTime) {
     if (m2Renderer_)
-        m2Renderer_->update(deltaTime, camera_->getPosition(), camera_->getViewProjectionMatrix());
+        m2Renderer_->update(deltaTime, camera_->getViewMatrix(), camera_->getProjectionMatrix());
 }
 
 void EditorViewport::setGhostPreview(const std::string& path, const glm::vec3& pos,

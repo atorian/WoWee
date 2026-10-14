@@ -37,29 +37,6 @@ constexpr uint32_t kCharProcAlpha = 14;
 // How long a body takes to go into an aura's look and back out of it.
 constexpr float kStateLookFadeSeconds = 0.5f;
 
-// The M2 attachment each SpellVisualKit effect column hangs from, as the
-// client's kit play (WoW.exe 3.3.5a 12340, 0x745230) has them: the head effect
-// at Head, not Helm; the chest effect at Chest, not ChestBloodFront; the base
-// at Base - a state kit's base too; the specials at Special1-3. The client
-// parents the effect to the attachment (CM2Model::AttachToParent 0x831630) and
-// it follows the attachment's whole matrix from then on. A model without the
-// attachment carries the effect at its own origin.
-struct KitEffectColumn {
-    const char* name;
-    uint32_t attachmentId;
-};
-constexpr KitEffectColumn kKitEffectAttachments[] = {
-    {.name = "HeadEffect",      .attachmentId = 20},  // Head
-    {.name = "ChestEffect",     .attachmentId = 34},  // Chest
-    {.name = "BaseEffect",      .attachmentId = 19},  // Base
-    {.name = "LeftHandEffect",  .attachmentId = 21},  // SpellLeftHand
-    {.name = "RightHandEffect", .attachmentId = 22},  // SpellRightHand
-    {.name = "BreathEffect",    .attachmentId = 17},  // Breath
-    {.name = "SpecialEffect0",  .attachmentId = 23},  // Special1
-    {.name = "SpecialEffect1",  .attachmentId = 24},  // Special2
-    {.name = "SpecialEffect2",  .attachmentId = 25},  // Special3
-};
-
 float stepTowards(float value, float target, float step) {
     if (value < target) return std::min(value + step, target);
     return std::max(value - step, target);
@@ -89,39 +66,12 @@ void SpellVisualSystem::loadStateKits() {
 
     auto svDbc  = cachedAssetManager_->loadDBC("SpellVisual.dbc");
     auto kitDbc = cachedAssetManager_->loadDBC("SpellVisualKit.dbc");
-    auto fxDbc  = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
-    if (!svDbc || !svDbc->isLoaded() || !kitDbc || !kitDbc->isLoaded() ||
-        !fxDbc || !fxDbc->isLoaded()) {
+    if (!svDbc || !svDbc->isLoaded() || !kitDbc || !kitDbc->isLoaded()) {
         LOG_WARNING("SpellVisual: state kits not loaded - a spell visual DBC is missing");
         return;
     }
-
-    // SpellVisualEffectName: id -> model, its scale and the sizes allowed it.
-    std::unordered_map<uint32_t, StateKit::Effect> effectNames;
-    {
-        const uint32_t pathField  = fxLayout->tryField("FilePath");
-        const uint32_t scaleField = fxLayout->tryField("Scale");
-        const uint32_t minField   = fxLayout->tryField("MinAllowedScale");
-        const uint32_t maxField   = fxLayout->tryField("MaxAllowedScale");
-        const uint32_t fc = fxDbc->getFieldCount();
-        if (pathField >= fc) return;
-        const auto positive = [&](uint32_t row, uint32_t field, float fallback) {
-            if (field >= fc) return fallback;
-            const float v = fxDbc->getFloat(row, field);
-            return std::isfinite(v) && v > 0.0f ? v : fallback;
-        };
-        for (uint32_t i = 0; i < fxDbc->getRecordCount(); ++i) {
-            const uint32_t id = fxDbc->getUInt32(i, 0);
-            std::string path = fxDbc->getString(i, pathField);
-            if (!id || path.empty()) continue;
-            StateKit::Effect effect{.path = pipeline::modelPathToM2(path),
-                                    .scale = positive(i, scaleField, 1.0f)};
-            effect.minScale = positive(i, minField, 0.0f);
-            effect.maxScale = positive(i, maxField, std::numeric_limits<float>::max());
-            if (effect.maxScale < effect.minScale) std::swap(effect.minScale, effect.maxScale);
-            effectNames[id] = std::move(effect);
-        }
-    }
+    // The kits' effect models, read once for every kind of kit.
+    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
 
     // SpellVisualKit: id -> what the kit hangs on the unit and does to it.
     const uint32_t kitFc = kitDbc->getFieldCount();
@@ -129,22 +79,17 @@ void SpellVisualSystem::loadStateKits() {
     const uint32_t paramZero  = kitLayout->tryField("CharParamZero0");
     const bool hasProcs = procField != kNoField && paramZero != kNoField &&
                           procField + 4 <= kitFc && paramZero + 4 <= kitFc;
+    const uint32_t flagsField = kitLayout->field("Flags");
 
     std::unordered_map<uint32_t, StateKit> kits;
     for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
         const uint32_t kitId = kitDbc->getUInt32(i, 0);
         if (!kitId) continue;
         StateKit kit;
-        for (const auto& column : kKitEffectAttachments) {
-            const uint32_t field = kitLayout->tryField(column.name);
-            if (field >= kitFc) continue;
-            const uint32_t effectId = kitDbc->getUInt32(i, field);
-            const auto it = effectNames.find(effectId);
-            if (it == effectNames.end()) continue;
-            StateKit::Effect effect = it->second;
-            effect.attachmentId = column.attachmentId;
-            kit.effects.push_back(std::move(effect));
-        }
+        if (const auto effectsIt = kits_.find(kitId); effectsIt != kits_.end())
+            kit.effects = effectsIt->second.effects;
+        constexpr uint32_t kKitLoopsStand = 0x20;
+        kit.loopStand = flagsField < kitFc && (kitDbc->getUInt32(i, flagsField) & kKitLoopsStand) != 0;
         if (hasProcs) {
             for (uint32_t p = 0; p < 4; ++p) {
                 const uint32_t type = kitDbc->getUInt32(i, procField + p);
@@ -228,7 +173,8 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
             ++it;
             continue;
         }
-        if (it->instanceId != 0 && m2Renderer_) m2Renderer_->removeInstance(it->instanceId);
+        // As the client ends it: the mesh goes at once, its particles fly out.
+        if (it->instanceId != 0 && m2Renderer_) m2Renderer_->finishInstance(it->instanceId);
         it = state.effects.erase(it);
     }
     glm::vec3 tint(1.0f);
@@ -241,7 +187,7 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
         alpha = std::min(alpha, kit.alpha);
         if (std::binary_search(state.visualIds.begin(), state.visualIds.end(), visualId)) continue;
         for (size_t e = 0; e < kit.effects.size(); ++e) {
-            const uint32_t modelId = modelIdFor(kit.effects[e].path);
+            const uint32_t modelId = modelIdFor(kit.effects[e].modelPath);
             if (modelId == 0) continue;
             // Instanced in update, once the model is resident.
             state.effects.push_back({.visualId = visualId, .effectIndex = e, .modelId = modelId});
@@ -255,34 +201,10 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
 void SpellVisualSystem::removeStateEffects(UnitState& state) {
     if (m2Renderer_) {
         for (const auto& effect : state.effects) {
-            if (effect.instanceId != 0) m2Renderer_->removeInstance(effect.instanceId);
+            if (effect.instanceId != 0) m2Renderer_->finishInstance(effect.instanceId);
         }
     }
     state.effects.clear();
-}
-
-bool SpellVisualSystem::stateEffectTransform(uint32_t charInstanceId,
-                                             const StateKit::Effect& effect, glm::mat4& out) {
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    if (!charRenderer) return false;
-    // The attachment's own matrix, bone and all: the effect turns with the
-    // unit and sways with the body. A tournament pennant is modelled leaning
-    // back from the chest, so placed by position alone it pointed the same
-    // way in the world whichever way its bearer faced. A model without the
-    // attachment carries the effect at its origin, as the client does.
-    glm::mat4 anchor;
-    if (!charRenderer->getAttachmentTransform(charInstanceId, effect.attachmentId, anchor) &&
-        !charRenderer->getInstanceModelMatrix(charInstanceId, anchor)) {
-        return false;
-    }
-    // The size it is drawn at - the unit's own size times the effect's - is
-    // held within what the effect allows, so a giant's aura does not fill the
-    // zone and a critter's does not vanish.
-    const float unitScale = glm::length(glm::vec3(anchor[0]));
-    if (!(unitScale > 0.0f) || !std::isfinite(unitScale)) return false;
-    const float drawn = std::clamp(unitScale * effect.scale, effect.minScale, effect.maxScale);
-    out = anchor * glm::scale(glm::mat4(1.0f), glm::vec3(drawn / unitScale));
-    return true;
 }
 
 void SpellVisualSystem::updateStateVisuals(float deltaTime) {
@@ -295,25 +217,50 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
         for (auto& effect : state.effects) {
             const auto kitIt = stateKits_.find(effect.visualId);
             if (kitIt == stateKits_.end() || effect.effectIndex >= kitIt->second.effects.size()) continue;
-            const StateKit::Effect& kitEffect = kitIt->second.effects[effect.effectIndex];
+            const SpellKitEffect& kitEffect = kitIt->second.effects[effect.effectIndex];
+            // Hung on the unit - the attachment's whole matrix, so it turns
+            // and sways with the body. A World-column effect stays where the
+            // unit stood when it appeared.
+            if (effect.instanceId == 0 && charRenderer) {
+                glm::mat4 unitMatrix;
+                if (charRenderer->getInstanceModelMatrix(state.instanceId, unitMatrix))
+                    effect.worldPosition = glm::vec3(unitMatrix[3]);
+            }
             glm::mat4 transform;
-            if (!stateEffectTransform(state.instanceId, kitEffect, transform)) continue;
+            if (!kitEffectTransform({.worldPosition = effect.worldPosition, .unitInstanceId = state.instanceId},
+                                    kitEffect, transform)) {
+                continue;
+            }
             if (effect.instanceId == 0) {
                 if (spellVisualFailedModels_.count(effect.modelId)) continue;
-                if (!ensureModel(kitEffect.path, effect.modelId)) continue;  // still loading
+                if (!ensureModel(kitEffect.modelPath, effect.modelId)) continue;  // still loading
                 // Created where it belongs and then given the whole matrix;
                 // a child instance takes no part in placement dedup.
                 effect.instanceId = m2Renderer_->createInstance(effect.modelId, glm::vec3(transform[3]),
                                                                 glm::vec3(0.0f), 1.0f,
                                                                 /*allowPositionDedup=*/false);
                 if (effect.instanceId == 0) {
-                    LOG_WARNING("SpellVisual: aura effect '", kitEffect.path, "' (visual ",
+                    LOG_WARNING("SpellVisual: aura effect '", kitEffect.modelPath, "' (visual ",
                                 effect.visualId, ") could not be placed on its unit; not drawn");
                     spellVisualFailedModels_.insert(effect.modelId);
                     continue;
                 }
                 m2Renderer_->setInstanceTransform(effect.instanceId, transform);
                 effect.lastTransform = transform;
+                // As the client plays an aura's model (render spec 6b): its
+                // Stand once, then its Hold over and over for as long as the
+                // aura lasts - or the Stand on a loop where the kit says so
+                // (flag 0x20) or the model has no Hold. Mana Shield appears
+                // in its Stand and pulses gently in its Hold; looping the
+                // Stand, it appeared again and again.
+                constexpr uint32_t kHold = 158;
+                using End = M2AnimationPlay::End;
+                if (!kitIt->second.loopStand && m2Renderer_->hasAnimation(effect.instanceId, kHold)) {
+                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Next},
+                                                       M2AnimationPlay{.animationId = kHold, .end = End::Loop});
+                } else {
+                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Loop});
+                }
             } else if (transform != effect.lastTransform) {
                 // Only when the attachment moved: a move refiles the instance
                 // in the culling grids.

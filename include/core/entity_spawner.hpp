@@ -64,17 +64,6 @@ public:
     void despawnPlayer(uint64_t guid);
     void despawnGameObject(uint64_t guid);
 
-    // Re-evaluate the animation policy for spawned game objects of this entry.
-    // Called when a GAMEOBJECT_QUERY_RESPONSE finally supplies the type that the
-    // policy depends on; harmless if nothing of that entry is waiting.
-    void onGameObjectInfoReceived(uint32_t entry);
-
-private:
-    // Freeze or animate a spawned game object based on its type, deferring the
-    // decision when the type has not been queried yet.
-    void applyGameObjectAnimationPolicy(uint64_t guid, uint32_t entry, uint32_t instanceId);
-
-public:
 
     // Clear all queues and instances (logout, reconnect)
     void clearAllQueues();
@@ -652,11 +641,9 @@ private:
         uint32_t modelId = 0;
         uint32_t instanceId = 0;
         bool isWmo = false;
+        /// The GO state its animation was last set for; none before the first.
+        std::optional<uint8_t> goState;
     };
-    // Game objects spawned before their type was known, keyed by entry. Each is
-    // frozen on the conservative assumption that it is state-driven until the
-    // query response says otherwise.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> gameObjectPendingAnimPolicy_;
 
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdModelCache_;
     std::unordered_set<uint32_t> gameObjectDisplayIdFailedCache_;

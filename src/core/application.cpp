@@ -550,8 +550,8 @@ bool Application::initialize() {
             renderer->getM2Renderer()->restartInstanceAnimation(fountain);
             renderer->getCamera()->setPosition(glm::vec3(5780.0f, 405.0f, 663.0f));
             renderer->getCamera()->setRotation(0.0f, 3.0f);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
             LOG_INFO("Fountain GPU probe: real Dalaran_Fountain_01 uploaded, batches=", model.batches.size());
         }
 
@@ -579,8 +579,8 @@ bool Application::initialize() {
             renderer->getCharacterPosition() = glm::vec3(5775.0f, 291.0f, 650.0f);
             renderer->getCamera()->setPosition(glm::vec3(5775.0f, 288.0f, 660.0f));
             renderer->getCamera()->setRotation(90.0f, 0.0f);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
             LOG_INFO("Glass/lamp GPU probe: real Dalaran city groups=", city.nGroups,
                      " lamp batches=", lamp.batches.size());
         }
@@ -680,8 +680,8 @@ bool Application::initialize() {
             renderer->getCharacterPosition() = centre + offset;
             renderer->getCamera()->setPosition(centre + offset);
             renderer->getCamera()->setRotation(yaw, pitch);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
         }
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
@@ -4458,8 +4458,8 @@ void Application::update(float deltaTime) {
         const auto* camera = renderer->getCamera();
         for (int i = 0; i < steps; ++i) {
             const float dt = perFrame / static_cast<float>(steps);
-            renderer->getM2Renderer()->update(dt, camera->getPosition(),
-                                              camera->getProjectionMatrix() * camera->getViewMatrix());
+            renderer->getM2Renderer()->update(dt, camera->getViewMatrix(),
+                                              camera->getProjectionMatrix());
             // A model probed as a creature (WOWEE_PROBE_CHARACTER) moves, and
             // its emitters follow, the way Renderer::update has them in game.
             renderer->getCharacterRenderer()->update(dt, camera->getPosition());

@@ -430,7 +430,10 @@ void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
     glm::vec3 targetPos;
     if (!resolveUnitPosition(targetGuid, targetPos)) return;
     LOG_INFO("SpellVisual: triggerImpactVisual visualId=", visualId, " pos=(", targetPos.x, ",", targetPos.y, ",", targetPos.z, ")");
-    svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true);
+    // On the target, so that it rides the target's attachments: a buff
+    // landing on a running player runs with them.
+    svs->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true,
+                         owner_.resolveUnitRenderInstance(targetGuid));
 }
 
 void SpellHandler::launchRangedWeaponProjectile(uint32_t spellId, uint64_t targetGuid) {

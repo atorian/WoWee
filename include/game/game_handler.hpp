@@ -1610,13 +1610,6 @@ public:
     using GameObjectMoveCallback = std::function<void(uint64_t guid, float x, float y, float z, float orientation)>;
     void setGameObjectMoveCallback(GameObjectMoveCallback cb) { gameObjectMoveCallback_ = std::move(cb); }
 
-    // GameObject metadata callback (triggered when a GAMEOBJECT_QUERY_RESPONSE is
-    // cached). A game object's model is spawned from its display id, which arrives
-    // before its type does, so anything that depends on the type - such as whether
-    // the model should animate - has to be revisited when this fires.
-    using GameObjectInfoCallback = std::function<void(uint32_t entry)>;
-    void setGameObjectInfoCallback(GameObjectInfoCallback cb) { gameObjectInfoCallback_ = std::move(cb); }
-
     // GameObject despawn callback (online mode - triggered when gameobject leaves view)
     using GameObjectDespawnCallback = std::function<void(uint64_t guid)>;
     void setGameObjectDespawnCallback(GameObjectDespawnCallback cb) { gameObjectDespawnCallback_ = std::move(cb); }
@@ -3809,7 +3802,6 @@ public:
     auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
     auto& emoteAnimCallbackRef() { return emoteAnimCallback_; }
     auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
-    auto& gameObjectInfoCallbackRef() { return gameObjectInfoCallback_; }
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
     auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
@@ -4458,7 +4450,6 @@ private:
     GameObjectSpawnCallback gameObjectSpawnCallback_;
     GameObjectMoveCallback gameObjectMoveCallback_;
     GameObjectDespawnCallback gameObjectDespawnCallback_;
-    GameObjectInfoCallback gameObjectInfoCallback_;
     GameObjectCustomAnimCallback gameObjectCustomAnimCallback_;
     GameObjectStateCallback gameObjectStateCallback_;
     SprintAuraCallback sprintAuraCallback_;

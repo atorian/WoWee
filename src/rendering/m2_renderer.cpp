@@ -1524,7 +1524,6 @@ void M2Renderer::applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::Bat
     if (pit == texturePropsByPtr_.end()) return;
     batch.hasAlpha = pit->second.hasAlpha;
     batch.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-    batch.colorKeyBlack = pit->second.colorKeyBlack;
     // Forge fire is drawn on cards with a black backing that has to be keyed
     // out, and some of them use effect textures carrying none of the
     // flame/glow tokens the hint looks for - coals, lava lumps,
@@ -2615,7 +2614,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             if (pit != texturePropsByPtr_.end()) {
                 bgpu.hasAlpha = pit->second.hasAlpha;
                 bgpu.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-                bgpu.colorKeyBlack = pit->second.colorKeyBlack;
             }
         }
         gpuModel.batches.push_back(bgpu);

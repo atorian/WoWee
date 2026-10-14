@@ -4,9 +4,12 @@
 
 #include "rendering/collision_geometry.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/m2_billboard.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/profiler.hpp"
+#include "core/logger.hpp"
+#include <mutex>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -272,26 +275,21 @@ inline glm::vec3 closestPointOnTriangle(const glm::vec3& p,
 // Defined in m2_renderer_instance.cpp (inline thread_local causes LLD linker
 // errors on Windows ARM64, so the definitions live in the single TU that uses them).
 
-/// M2 bone flags this renderer acts on.
-///
-/// A bone marked spherical billboard carries geometry that must always face
-/// the camera: glow cards, flame sprites, the halo on a lamp. The flag was
-/// loaded and never read, so those cards rendered at whatever angle the artist
-/// left them at and cut through the model they belong to. Orgrimmar's bonfire
-/// keeps its glow on bone 0, flagged 0x8.
-constexpr uint32_t kM2BoneSphericalBillboard = 0x8;
-
 /// Bone transforms for one instance.
 ///
-/// `cameraPosWorld` is what a billboard bone turns toward; pass nullptr and
-/// those bones keep their authored orientation.
+/// `view` is the camera's view matrix, which billboard bones turn against;
+/// pass nullptr and those bones keep their authored orientation.
 inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
-                                const glm::vec3* cameraPosWorld = nullptr) {
+                                const glm::mat4* view = nullptr) {
     ZoneScopedN("M2::computeBoneMatrices");
     size_t numBones = std::min(model.bones.size(), size_t(kMaxBonesPerInstance));
     if (numBones == 0) return;
     instance.boneMatrices.resize(numBones);
     const auto& gsd = model.globalSequenceDurations;
+    // Model space to view space and back, for billboard bones; worked out at
+    // the first one.
+    bool haveViewModel = false;
+    glm::mat4 viewModel(1.0f), invViewModel(1.0f);
 
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
@@ -320,46 +318,51 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
         if (scl.y < 0.001f) scl.y = 1.0f;
         if (scl.z < 0.001f) scl.z = 1.0f;
 
+        const glm::mat4 rotScale = glm::scale(glm::toMat4(rot), scl);
         glm::mat4 local = glm::translate(glm::mat4(1.0f), bone.pivot);
         local = glm::translate(local, trans);
-        if (cameraPosWorld && (bone.flags & kM2BoneSphericalBillboard) != 0) {
-            // Turn the bone to face the camera instead of using its authored
-            // rotation. Everything is done in model space, so the instance's
-            // own rotation and scale still apply on top.
-            //
-            // M2 model space is X forward, Y left, Z up, and a card is
-            // authored in the plane facing +X, so that axis is the one aimed
-            // at the viewer.
-            const glm::vec3 camModel =
-                glm::vec3(instance.invModelMatrix * glm::vec4(*cameraPosWorld, 1.0f));
-            glm::vec3 toCamera = camModel - bone.pivot;
-            const float len2 = glm::dot(toCamera, toCamera);
-            if (len2 > 1e-8f) {
-                toCamera *= glm::inversesqrt(len2);
-                // Up is model +Z unless the view is nearly along it, where the
-                // cross product collapses and the card would spin.
-                glm::vec3 up(0.0f, 0.0f, 1.0f);
-                if (std::abs(toCamera.z) > 0.999f) up = glm::vec3(0.0f, 1.0f, 0.0f);
-                const glm::vec3 right = glm::normalize(glm::cross(up, toCamera));
-                const glm::vec3 trueUp = glm::cross(toCamera, right);
-                glm::mat4 face(1.0f);
-                face[0] = glm::vec4(toCamera, 0.0f);
-                face[1] = glm::vec4(right, 0.0f);
-                face[2] = glm::vec4(trueUp, 0.0f);
-                local *= face;
-            } else {
-                local *= glm::toMat4(rot);
-            }
-        } else {
-            local *= glm::toMat4(rot);
-        }
-        local = glm::scale(local, scl);
+        local *= rotScale;
         local = glm::translate(local, -bone.pivot);
 
         if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones) {
             instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * local;
         } else {
             instance.boneMatrices[i] = local;
+        }
+
+        // A billboard bone is rebuilt in view space, after its whole parent
+        // chain, and brought back into model space; its children follow it.
+        // A shield stays upright and turns about its Z axis to the view.
+        // Diagnostic: WOWEE_M2_NO_BILLBOARD=1 leaves every billboard bone as
+        // authored, which tells a billboard fault from anything else.
+        static const bool kNoBillboard = std::getenv("WOWEE_M2_NO_BILLBOARD") != nullptr;
+        if (view && !kNoBillboard && (bone.flags & kM2BoneBillboardMask) != 0) {
+            if (!haveViewModel) {
+                viewModel = *view * instance.modelMatrix;
+                invViewModel = glm::inverse(viewModel);
+                haveViewModel = true;
+            }
+            const glm::mat4 boneView = viewModel * instance.boneMatrices[i];
+            const glm::mat4 billboarded = m2BillboardBone(bone.flags, boneView, glm::mat3(rotScale), bone.pivot);
+            instance.boneMatrices[i] = invViewModel * billboarded;
+            // Diagnostic: WOWEE_M2_BILLBOARD_DIAG=1 says, about once a second
+            // per spell effect model, that its billboard bones are turned and
+            // which way they ended up facing in view space.
+            static const bool kBillboardDiag = std::getenv("WOWEE_M2_BILLBOARD_DIAG") != nullptr;
+            if (kBillboardDiag && model.isSpellEffect) {
+                static std::mutex diagMutex;
+                static std::unordered_map<std::string, std::chrono::steady_clock::time_point> saidAt;
+                const auto now = std::chrono::steady_clock::now();
+                std::lock_guard<std::mutex> lock(diagMutex);
+                auto& last = saidAt[model.name];
+                if (now - last > std::chrono::seconds(1)) {
+                    last = now;
+                    const glm::vec3 x0(boneView[0]), x1(billboarded[0]);
+                    LOG_WARNING("Billboard: '", model.name, "' instance ", instance.id, " bone ", i,
+                                " flags 0x", std::hex, bone.flags, std::dec, " X in view (",
+                                x0.x, ", ", x0.y, ", ", x0.z, ") -> (", x1.x, ", ", x1.y, ", ", x1.z, ")");
+                }
+            }
         }
     }
     instance.bonesDirty[0] = instance.bonesDirty[1] = true;
