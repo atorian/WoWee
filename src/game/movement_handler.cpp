@@ -8,6 +8,7 @@
 #include "network/world_socket.hpp"
 #include "network/packet.hpp"
 #include "core/coordinates.hpp"
+#include "rendering/movement_limits.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/logger.hpp"
@@ -605,7 +606,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
             isFalling_ = true;
             fallStartMs_ = movementInfo.time;
             movementInfo.fallTime = 0;
-            movementInfo.jumpVelocity = 7.96f;
+            // As the client sends it: negated, down being positive on the wire.
+            movementInfo.jumpVelocity = -rendering::movement::kJumpUpSpeed;
             {
                 const float facingRad = movementInfo.orientation;
                 movementInfo.jumpCosAngle = std::cos(facingRad);
@@ -1343,10 +1345,9 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         report.flags = info.flags;
         report.fallTime = static_cast<float>(info.fallTime) / 1000.0f;
         if (info.hasFlag(MovementFlags::FALLING)) {
-            // The 3.3.5a client sends a jump's vertical speed negative, as the
-            // server's knockback does; this client has sent it positive. Up is
-            // the only way either jumps, so the size is what counts.
-            report.jumpUpSpeed = std::abs(info.jumpVelocity);
+            // The fall block's speed is down-positive (movement_limits.hpp):
+            // a jump arrives negative, a fall started downward positive.
+            report.jumpUpSpeed = -info.jumpVelocity;
             report.jumpCos = info.jumpCosAngle;
             report.jumpSin = info.jumpSinAngle;
             report.jumpXYSpeed = info.jumpXYSpeed;

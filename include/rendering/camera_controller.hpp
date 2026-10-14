@@ -2,6 +2,7 @@
 
 #include "rendering/camera.hpp"
 #include "rendering/camera_boom.hpp"
+#include "rendering/movement_limits.hpp"
 #include "core/input.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -732,7 +733,7 @@ private:
     static constexpr float WOW_BACK_SPEED = 4.5f;    // Backpedal
     static constexpr float WOW_TURN_SPEED = 180.0f;  // Keyboard turn deg/sec
     static constexpr float WOW_GRAVITY = -19.29f;
-    static constexpr float WOW_JUMP_VELOCITY = 7.96f;
+    static constexpr float WOW_JUMP_VELOCITY = movement::kJumpUpSpeed;
     static constexpr float MOUNT_GRAVITY = -18.0f;       // Snappy WoW-feel jump
     static constexpr float MOUNT_JUMP_HEIGHT = 1.0f;    // Desired jump height in meters
 

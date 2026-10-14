@@ -11,6 +11,10 @@ namespace wowee::rendering::movement {
 inline constexpr float kMaxWalkableSlopeDegrees = 50.0f;
 inline constexpr float kMinWalkableNormalZ = 0.642787635f; // cos(50 degrees)
 inline constexpr float kMaxStepUp = 0.60f;
+/// How fast a jump leaves the ground, yards a second. The 3.3.5a client
+/// reports it negated in a movement packet's fall block (its zspeed), as the
+/// server's knockback is: down is positive on the wire.
+inline constexpr float kJumpUpSpeed = 7.955547f;
 
 inline bool isWalkableNormal(float normalZ) {
     return normalZ >= kMinWalkableNormalZ;
