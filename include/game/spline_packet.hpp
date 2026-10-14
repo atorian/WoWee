@@ -3,7 +3,7 @@
 #pragma once
 #include "network/packet.hpp"
 
-#include "game/world_packets.hpp"  // MonsterMoveData
+#include "game/world_packet_data.hpp"  // MonsterMoveData
 #include <glm/glm.hpp>
 #include <vector>
 #include <cstdint>

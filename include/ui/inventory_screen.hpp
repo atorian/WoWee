@@ -2,7 +2,7 @@
 
 #include "game/inventory.hpp"
 #include "game/character.hpp"
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include <vulkan/vulkan.h>
 #include <imgui.h>
 #include <algorithm>

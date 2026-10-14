@@ -1,7 +1,7 @@
 #pragma once
 
 #include "game/character.hpp"
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "ui/paper_ui.hpp"
 #include "ui/text_edit.hpp"
 #include <imgui.h>

@@ -5,7 +5,7 @@
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/expansion_profile.hpp"
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "pipeline/asset_manager.hpp"
 #include <cstdlib>
 #include <cstdio>

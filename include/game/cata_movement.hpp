@@ -14,7 +14,7 @@
 //
 // This mirrors how the core itself does it, and for the same reason.
 
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "network/packet.hpp"
 
 #include <cstdint>

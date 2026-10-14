@@ -22,7 +22,7 @@ never asked for.
 
 WHAT IT COMPARES
 
-Fields of the structs in world_packets.hpp and handler_types.hpp against every
+Fields of the structs in world_packet_data.hpp and handler_types.hpp against every
 member access in the tree, split into reads and writes.
 
 WHAT COUNTS AS A WRITE, AND THE THREE WAYS THAT GOES WRONG
@@ -57,7 +57,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-HDRS = [ROOT / "include/game/world_packets.hpp",
+HDRS = [ROOT / "include/game/world_packet_data.hpp",
         ROOT / "include/game/handler_types.hpp"]
 HDRSET = {h.resolve() for h in HDRS}
 

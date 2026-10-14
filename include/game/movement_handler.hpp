@@ -1,8 +1,8 @@
 #pragma once
 
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "core/coordinates.hpp"
-#include "game/opcode_table.hpp"
+#include "game/opcodes.hpp"
 #include "network/packet.hpp"
 #include <glm/glm.hpp>
 #include <chrono>

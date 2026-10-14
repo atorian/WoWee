@@ -30,9 +30,10 @@ wire side puts the two next to each other.
 
 WHAT IT COMPARES
 
-Fields of the structs in include/game/world_packets.hpp, against every mention
-of that name in the tree. A field counts as read when it is named anywhere
-outside the packet header and the parser sources.
+Fields of the structs in include/game/world_packet_data.hpp, against every
+mention of that name in the tree. A field counts as read when it is named
+anywhere outside that header and the parsers (world_packets.hpp and its
+sources).
 
 TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO FOREVER
 
@@ -61,8 +62,10 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-HDR = ROOT / "include/game/world_packets.hpp"
-PARSER = re.compile(r"world_packets.*\.cpp$")
+HDR = ROOT / "include/game/world_packet_data.hpp"
+# The wire side: the builders and parsers, and the header declaring them, whose
+# inline readers (readCastResultArgs) fill fields rather than consume them.
+PARSER = re.compile(r"world_packets.*\.[ch]pp$")
 
 #: Fields checked once and found to be correctly unread, with the reason. A set
 #: rather than a count: a ceiling of twelve cannot tell a field being answered

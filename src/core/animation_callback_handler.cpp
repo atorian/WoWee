@@ -14,7 +14,7 @@
 #include "game/emote_table.hpp"
 #include "game/game_handler.hpp"
 #include "game/spell_classification.hpp"
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/ui_sound_manager.hpp"

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"

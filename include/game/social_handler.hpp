@@ -1,7 +1,7 @@
 #pragma once
 
-#include "game/world_packets.hpp"
-#include "game/opcode_table.hpp"
+#include "game/world_packet_data.hpp"
+#include "game/opcodes.hpp"
 #include "game/group_defines.hpp"
 #include "game/handler_types.hpp"
 #include "game/calendar_data.hpp"

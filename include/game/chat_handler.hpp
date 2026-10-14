@@ -4,7 +4,7 @@
 
 #include "game/chat_filters.hpp"
 
-#include "game/world_packets.hpp"
+#include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
 #include "game/handler_types.hpp"
 #include "network/packet.hpp"
