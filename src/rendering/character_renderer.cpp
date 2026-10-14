@@ -69,8 +69,10 @@ namespace {
 struct CharacterPushConstants {
     glm::mat4 model;
     InteriorLightGPU interiorLight;
+    /// The point lights that reach the unit (local_lights.glsli).
+    LocalLightSet localLights = kNoLocalLights;
 };
-static_assert(sizeof(CharacterPushConstants) == 96, "matches Push in character.vert/frag");
+static_assert(sizeof(CharacterPushConstants) == 112, "matches Push in character.vert/frag");
 
 // How far an instance moves before the WMO is asked again where it stands.
 constexpr float kInteriorLightRequeryDistance = 0.5f;
@@ -2913,10 +2915,15 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
 
         // Set model matrix (use override for weapon instances)
+        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                                      : getModelMatrix(instance);
+        // The lights nearest the unit's origin, as the client picks them for
+        // any model.
         const CharacterPushConstants push{
-            .model = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                     : getModelMatrix(instance),
+            .model = modelMatrix,
             .interiorLight = instance.interiorLight,
+            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
+                                        : kNoLocalLights,
         };
         vkCmdPushConstants(cmd, pipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -3718,6 +3725,53 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
 
     shadowTexSetCache_[view] = set;
     return set;
+}
+
+void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const {
+    // A unit's lights count while the client animates it: in view, or within
+    // 33 yards (local_lights.hpp). A will-o'-the-wisp or a torch-bearer lights
+    // what is around it as a lamp post does.
+    constexpr float kNearUnitSq = 33.0f * 33.0f;
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getProjectionMatrix() * camera.getViewMatrix());
+    const glm::vec3 camPos = camera.getPosition();
+    for (const auto& [id, inst] : instances) {
+        if (!inst.visible) continue;
+        const auto mit = models.find(inst.modelId);
+        if (mit == models.end() || mit->second.data.lights.empty()) continue;
+        const pipeline::M2Model& model = mit->second.data;
+        const glm::mat4 modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
+                                                                  : getModelMatrix(inst);
+        const glm::vec3 origin(modelMatrix[3]);
+        const glm::vec3 toCam = origin - camPos;
+        if (glm::dot(toCam, toCam) > kNearUnitSq && !frustum.intersectsSphere(origin, 4.0f)) continue;
+        const float alpha = std::min(inst.opacity, inst.stateAlpha);
+        for (const auto& light : model.lights) {
+            if (light.type != 1) {
+                static std::unordered_set<std::string> saidDirectional;
+                if (saidDirectional.insert(model.name).second) {
+                    LOG_WARNING("Model '", model.name, "' carries a directional light (type ",
+                                light.type, "); it is not applied - the unit lights nothing with it");
+                }
+                continue;
+            }
+            const int seq = inst.currentSequenceIndex;
+            const float t = inst.animationTime;
+            const float gt = inst.globalSequenceTime;
+            const auto& gsd = model.globalSequenceDurations;
+            if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
+            const glm::vec3 color =
+                m2_track::sampleVec3(light.diffuseColor, seq, t, gt, gsd, glm::vec3(1.0f)) *
+                m2_track::sampleFloat(light.diffuseIntensity, seq, t, gt, gsd, 1.0f) * alpha;
+            if (std::max({color.r, color.g, color.b}) <= 0.0f) continue;
+            glm::mat4 bone(1.0f);
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.boneMatrices.size()) {
+                bone = inst.boneMatrices[static_cast<size_t>(light.bone)];
+            }
+            out.push_back({.position = glm::vec3(modelMatrix * bone * glm::vec4(light.position, 1.0f)),
+                           .color = color});
+        }
+    }
 }
 
 CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(

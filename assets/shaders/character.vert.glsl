@@ -19,6 +19,7 @@ layout(push_constant) uniform Push {
     mat4 model;
     vec4 interiorAmbient;  // read by character.frag
     vec4 interiorDirect;   // read by character.frag
+    uvec4 localLights;     // read by character.frag
 } push;
 
 #include "character_material.glsli"

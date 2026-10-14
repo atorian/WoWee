@@ -24,11 +24,11 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;
     vec4 playerWake;
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
+
+#include "local_lights.glsli"
 
 layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayOrigin;      // xyz = camera position
@@ -154,19 +154,19 @@ void main() {
         light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);
     }
 
-    // Torches, braziers and lava: the same set, falloff and intensity the
-    // surfaces are lit by, so the halo is where the pool of light is.
+    // The models' own lights: the same lights and falloff the surfaces are
+    // lit by, so the halo is where the pool of light is. Air has no normal,
+    // so no N.L. Past forty yards a light gives under a fiftieth and is
+    // skipped.
     vec3 local = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        vec3 toLight = localLightPosRadius[i].xyz - p;
-        float radius = localLightPosRadius[i].w;
+    for (uint i = 0u; i < uint(localLightMeta.x); ++i) {
+        vec3 toLight = localLightPosition(i) - p;
         float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float attenuation = 1.0 - sqrt(distSq) / radius;
-        local += localLightColorIntensity[i].rgb *
-                 (localLightColorIntensity[i].w * attenuation * attenuation);
+        if (distSq > 40.0 * 40.0) continue;
+        float dist = max(sqrt(distSq), 1e-3);
+        local += localLightColor(i) / (0.7 * dist + 0.03 * dist * dist);
     }
-    light += local * vol.lighting.y;
+    light += min(local, vec3(1.0)) * vol.lighting.y;
 
     vec4 result = vec4(light * density, density);
 

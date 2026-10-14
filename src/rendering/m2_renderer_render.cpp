@@ -1561,7 +1561,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
                 e.uv2 = M2UVTransform{};
-                e.tintScale = 1.0f;
+                // The lights nearest the model's origin (local_lights.hpp).
+                inst.frameLocalLights = frameLights_ && !frameLights_->empty()
+                    ? pickLocalLights(*frameLights_, glm::vec3(inst.modelMatrix[3]), 0.0f)
+                    : kNoLocalLights;
+                e.localLights = inst.frameLocalLights;
                 e.fadeAlpha = p.fadeAlpha;
                 e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
@@ -1848,7 +1852,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.model = inst.modelMatrix;
                             e.uv = uv;
                             e.uv2 = uv2;
-                            e.tintScale = 1.0f;
+                            e.localLights = inst.frameLocalLights;
                             e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
@@ -2125,12 +2129,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 }
             }
 
-            // A fire's glow changes only as its own colour and texture weight
-            // tracks say, which the batch's tint and opacity already carry.
-            // It used to flicker on a clock of ours wherever the model's name
-            // read as a brazier, torch or lantern.
-            const float tintScale = 1.0f;
-
             // Write single instance entry to SSBO
             if (instanceDataCount_ >= MAX_INSTANCE_DATA) continue;
             uint32_t drawOffset = instanceDataCount_;
@@ -2138,7 +2136,9 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.model = instance.modelMatrix;
             e.uv = uv;
             e.uv2 = uv2;
-            e.tintScale = tintScale;
+            e.localLights = frameLights_ && !frameLights_->empty()
+                ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
+                : kNoLocalLights;
             e.fadeAlpha = instanceFadeAlpha * layerOpacity;
             if (skyMode_) {
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;

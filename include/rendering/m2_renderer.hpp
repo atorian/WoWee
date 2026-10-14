@@ -15,6 +15,7 @@
 #include "rendering/frames_in_flight.hpp"
 #include "rendering/game_object_animation.hpp"
 #include "rendering/m2_combiner.hpp"
+#include "rendering/local_lights.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -240,10 +241,9 @@ struct M2ModelGPU {
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
-    /// The kinds M2Renderer::gatherLocalLights can find a light in.
-    [[nodiscard]] bool canThrowLocalLight() const {
-        return isLanternLike || isTorch || isBrazierOrFire || isForge || isLavaModel;
-    }
+    /// The lights the model carries (M2 header `lights`).
+    std::vector<pipeline::M2Light> lights;
+    [[nodiscard]] bool canThrowLocalLight() const { return !lights.empty(); }
 };
 
 /**
@@ -287,8 +287,9 @@ struct M2ParticleQuad {
     uint32_t shape;            ///< M2ParticleShape
     uint32_t lit;              ///< 1: lit by the model's light (flag 0x1 clear, not Mod/Mod2x)
     InteriorLightGPU light;    ///< the model's interior light, as its batches take it
+    LocalLightSet localLights = kNoLocalLights; ///< the model's point lights (local_lights.glsli)
 };
-static_assert(sizeof(M2ParticleQuad) == 27 * sizeof(float), "M2ParticleQuad is read as packed 32-bit values");
+static_assert(sizeof(M2ParticleQuad) == 31 * sizeof(float), "M2ParticleQuad is read as packed 32-bit values");
 
 /**
  * Instance of an M2 model in the world
@@ -421,6 +422,8 @@ struct M2Instance {
     // in-flight dispatch draws immediately instead of waiting ~2 frames for its
     // first cull result.
     uint8_t lastCullVisible = 1;
+    /// The point lights picked for this instance this frame (local_lights.hpp).
+    LocalLightSet frameLocalLights = kNoLocalLights;
     // Consecutive frames this instance has been culled (capped at 3), used for
     // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
     // visible") so a freshly spawned instance skips the HiZ test rather than
@@ -592,11 +595,13 @@ public:
     /// have run this frame.
     void renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    /** Gather the nearest authored glow cards as inexpensive scene point lights. */
-    uint32_t gatherLocalLights(const glm::vec3& cameraPos,
-                               glm::vec4* outPosRadius,
-                               glm::vec4* outColorIntensity,
-                               uint32_t maxLights) const;
+    /// Append the point lights of the models animated this frame - those in
+    /// view, and those within ten yards of the camera - as the client lights
+    /// a scene with them (local_lights.hpp).
+    void gatherLocalLights(const glm::vec3& cameraPos, std::vector<LocalLight>& out) const;
+    /// The frame's point lights, which every draw picks its nearest from.
+    /// Owned by the Renderer, filled before anything draws.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -1017,16 +1022,17 @@ private:
         int32_t boneCount;         //  4 bytes @ offset 140 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 144 - pressed-on lift
         int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
-        float tintScale = 1.0f;    //  4 bytes @ offset 152 - a fire's flicker, per instance
+        float pad1 = 0.0f;         //  4 bytes @ offset 152
         float pad0 = 0.0f;         //  4 bytes @ offset 156
         InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
+        LocalLightSet localLights = kNoLocalLights; // 16 bytes @ offset 192 - local_lights.glsli
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 192 bytes a slot, so this costs 12 MB.
+    // buffers of 208 bytes a slot, so this costs 13 MB.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
@@ -1076,6 +1082,7 @@ private:
 
     // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
     HiZSystem* hizSystem_ = nullptr;
+    const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
     // RtScene instances this renderer owns, and per RtScene instance id the

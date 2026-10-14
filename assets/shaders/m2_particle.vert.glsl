@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;
     vec4 playerWake;
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
@@ -35,6 +33,7 @@ layout(location = 7) in uint aShape;   // M2ParticleShape
 layout(location = 8) in uint aLit;
 layout(location = 9) in vec4 aInteriorAmbient;
 layout(location = 10) in vec4 aInteriorDirect;
+layout(location = 11) in uvec4 aLocalLights;  // local_lights.glsli
 
 layout(location = 0) out vec4 vColor;
 layout(location = 1) out float vTile;
@@ -59,6 +58,8 @@ vec4 fogVolumeAt(vec3 worldPos) {
     return textureLod(uFogVolume, vec3(uv, slice - 0.5 / volumetricParams.w), 0.0);
 }
 
+#include "local_lights.glsli"
+
 // The light on a lit particle (CDiffuse_T1): every vertex has the normal
 // world +Z, so it is lit like a surface facing up, whichever way it faces.
 // The model's light - the sun, or the interior's where the model stands -
@@ -68,18 +69,8 @@ vec3 particleLight(vec3 worldPos) {
     const vec3 toSun = normalize(-interiorLightDir(aInteriorAmbient, lightDir.xyz));
     const vec3 sun = min(interiorDirect(aInteriorAmbient, aInteriorDirect, lightColor.rgb), vec3(1.0));
     vec3 light = clamp(dot(n, toSun), 0.0, 1.0) * sun +
-                 interiorAmbient(aInteriorAmbient, ambientColor.rgb);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        const vec3 toLight = localLightPosRadius[i].xyz - worldPos;
-        const float radius = localLightPosRadius[i].w;
-        const float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        const float dist = sqrt(distSq);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        light += localLightColorIntensity[i].rgb * localLightColorIntensity[i].w * attenuation *
-                 max(dot(n, toLight / max(dist, 0.001)), 0.0);
-    }
+                 interiorAmbient(aInteriorAmbient, ambientColor.rgb) +
+                 localLightDiffuse(worldPos, n, aLocalLights);
     return clamp(light, 0.0, 1.0);
 }
 

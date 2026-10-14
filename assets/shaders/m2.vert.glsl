@@ -48,12 +48,13 @@ struct InstanceData {
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
     int flags;
-    // A fire's flicker, which differs between instances of one model.
-    float tintScale;
+    float pad1;
     float pad0;
     // See interior_light.glsli.
     vec4 interiorAmbient;
     vec4 interiorDirect;
+    // The point lights that reach this instance (local_lights.glsli).
+    uvec4 localLights;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -77,7 +78,7 @@ layout(location = 7) flat out float vHighlight;
 layout(location = 8) out vec2 TexCoord2;
 layout(location = 9) flat out vec4 vInteriorAmbient;
 layout(location = 10) flat out vec4 vInteriorDirect;
-layout(location = 11) flat out float vTintScale;
+layout(location = 11) flat out uvec4 vLocalLights;
 
 #include "sphere_map.glsli"
 
@@ -328,7 +329,7 @@ void main() {
         TexCoord2 = uvTransform(instanceData[instIdx].uv2Row0, instanceData[instIdx].uv2Row1,
                                 push.texCoordSet2 == 1 ? aTexCoord2 : aTexCoord);
     }
-    vTintScale = instanceData[instIdx].tintScale;
+    vLocalLights = instanceData[instIdx].localLights;
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own

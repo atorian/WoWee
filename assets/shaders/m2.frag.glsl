@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     mat4 rtViewProj;
@@ -24,9 +22,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
 };
 
 #include "rt_lighting.glsli"
+#include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 #include "interior_light.glsli"
 
@@ -63,7 +64,7 @@ layout(location = 7) flat in float vHighlight;
 layout(location = 8) in vec2 TexCoord2;
 layout(location = 9) flat in vec4 vInteriorAmbient;
 layout(location = 10) flat in vec4 vInteriorDirect;
-layout(location = 11) flat in float vTintScale;
+layout(location = 11) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
 
@@ -76,35 +77,8 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
-float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
-    float shadow = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += texture(smap, vec3(coords.xy + vec2(x, y) * shadowTexel(), coords.z));
-        }
-    }
-    return shadow / 9.0;
-}
-
-vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
-    vec3 sum = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        vec3 toLight = localLightPosRadius[i].xyz - pos;
-        float radius = localLightPosRadius[i].w;
-        // Rejected on the squared distance, before the square root and the
-        // divide: most of the sixty-four are out of range of any one pixel,
-        // and this is what each of them costs.
-        float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float dist = sqrt(distSq);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        float wrappedDiffuse = 0.22 + 0.78 * max(dot(normal, toLight / max(dist, 0.001)), 0.0);
-        sum += albedo * localLightColorIntensity[i].rgb *
-               (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
-    }
-    return sum;
-}
+#include "local_lights.glsli"
+#include "shadow_receiver.glsli"
 
 // 4x4 Bayer dither matrix (normalized to 0..1)
 float bayerDither4x4(ivec2 p) {
@@ -187,7 +161,7 @@ void main() {
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
     // every fire in the world burns white. It is part of the vertex colour,
     // which what the stages add on top is not.
-    texColor.rgb *= vec3(tintR, tintG, tintB) * vTintScale;
+    texColor.rgb *= vec3(tintR, tintG, tintB);
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be
@@ -345,13 +319,13 @@ void main() {
             vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
             vec3 proj = lsPos.xyz / lsPos.w;
             proj.xy = proj.xy * 0.5 + 0.5;
+            vec2 receiverSlope = shadowReceiverSlope(proj);
             if (proj.x >= 0.0 && proj.x <= 1.0 &&
                 proj.y >= 0.0 && proj.y <= 1.0 &&
                 proj.z >= 0.0 && proj.z <= 1.0) {
-                float bias = max(0.0005 * (1.0 - abs(dot(shadowNormal, ldir))), 0.00005);
-                shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
+                shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+                shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
             }
-            shadow = mix(1.0, shadow, shadowParams.y);
         }
 
         // Leaf subsurface scattering (foliage only) - uses stable normal, no FragPos dependency
@@ -372,8 +346,17 @@ void main() {
         if (isFoliage) {
             ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
         }
-        result = ambientTerm * texColor.rgb
-               + shadow * (diff * sunColor * texColor.rgb + spec * sunColor)
+        // The units around the player, at full detail, as the terrain and
+        // the buildings take them: a model is ground too - a dock, a bridge,
+        // a rock. Indoors a model takes only these, kept below the player's
+        // head as the room around it does.
+        float unitShadow = localShadowAt(FragPos);
+        if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
+        shadow = min(shadow, unitShadow);
+        // The whole lit colour darkened alike, as the client does; the
+        // highlight is the sun's own and goes with it.
+        result = (ambientTerm + diff * sunColor) * texColor.rgb * shadowLightFactor(shadow)
+               + shadow * spec * sunColor
                + sss;
     }
 
@@ -387,7 +370,7 @@ void main() {
         result *= aoFactor;
     }
 
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
     // What the stages add on top of the lit colour - an Add combiner's second
     // stage, a reflection laid over - takes no light.
     result += stageAdd;

@@ -360,15 +360,17 @@ void CharacterPreview::createFBO() {
 
     // 3. Create descriptor pool for per-frame sets (2 UBO + 2 shadow + 2 fog volume)
     {
-        VkDescriptorPoolSize sizes[2]{};
+        VkDescriptorPoolSize sizes[3]{};
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         sizes[1].descriptorCount = MAX_FRAMES * 8;
+        sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[2].descriptorCount = MAX_FRAMES;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
-        ci.poolSizeCount = 2;
+        ci.poolSizeCount = 3;
         ci.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(device, &ci, nullptr, &previewDescPool_) != VK_SUCCESS) {
             LOG_ERROR("CharacterPreview: failed to create descriptor pool");
@@ -433,7 +435,20 @@ void CharacterPreview::createFBO() {
         rtImg.imageView = appRenderer->getNeutralRtLightingView();
         rtImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[9]{};
+        // Binding 9 is the world's point lights; a portrait has none, and its
+        // block says so.
+        VkDescriptorBufferInfo lightBuf{};
+        lightBuf.buffer = appRenderer->getNeutralLocalLightBuffer();
+        lightBuf.offset = 0;
+        lightBuf.range = VK_WHOLE_SIZE;
+
+        VkWriteDescriptorSet writes[10]{};
+        writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[9].dstSet = previewPerFrameSet_[i];
+        writes[9].dstBinding = 9;
+        writes[9].descriptorCount = 1;
+        writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[9].pBufferInfo = &lightBuf;
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = previewPerFrameSet_[i];
         writes[0].dstBinding = 0;
@@ -461,7 +476,7 @@ void CharacterPreview::createFBO() {
             writes[b].pImageInfo = &rtImg;
         }
 
-        vkUpdateDescriptorSets(device, 9, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture

@@ -4,6 +4,7 @@
 
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/local_lights.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -147,6 +148,8 @@ public:
                                 wowee::rendering::VkShaderModule& fragShader);
 
     void setWireframe(bool enabled) { wireframe = enabled; }
+    /// The frame's point lights, which every chunk picks its nearest from.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
     void setFrustumCulling(bool enabled) { frustumCullingEnabled = enabled; }
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
@@ -168,6 +171,7 @@ public:
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
 
 private:
+    const std::vector<LocalLight>* frameLights_ = nullptr;
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
     VkTexture* loadTexture(const std::string& path);
     VkTexture* createAlphaTexture(const std::vector<uint8_t>& alphaData);

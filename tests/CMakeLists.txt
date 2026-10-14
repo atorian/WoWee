@@ -1957,6 +1957,16 @@ wowee_add_test(test_game_object_animation
 wowee_add_test(test_m2_combiner
     SOURCES test_m2_combiner.cpp)
 
+# ── test_local_lights ───────────────────────────────────────
+# Which point lights reach a model, a WMO group or a terrain chunk.
+wowee_add_test(test_local_lights
+    SOURCES test_local_lights.cpp)
+
+# ── test_shadow_shading ─────────────────────────────────────
+# How a surface takes a shadow, by the client's receiving shaders.
+wowee_add_test(test_shadow_shading
+    SOURCES test_shadow_shading.cpp)
+
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
 wowee_add_test(test_m2_billboard_model

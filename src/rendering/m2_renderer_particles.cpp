@@ -672,6 +672,10 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         ParticleGroup* cachedGroup = nullptr;
         bool cachedRandomCell = false;
         bool cachedLit = false;
+        // A lit particle takes its model's lights (render spec, lit particles).
+        const LocalLightSet instLights = frameLights_ && !frameLights_->empty()
+            ? pickLocalLights(*frameLights_, glm::vec3(inst.modelMatrix[3]), 0.0f)
+            : kNoLocalLights;
 
         // How far this instance's particles actually reach, against how far
         // the model says it extends. A fire twice the height of the hut behind
@@ -824,6 +828,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 quad.cell = isHead ? headCell : tailCell;
                 quad.lit = cachedLit ? 1u : 0u;
                 quad.light = inst.interiorLight;
+                quad.localLights = instLights;
                 vbBase[vbWritten] = quad;
                 ++vbWritten;
                 ++particleRuns_.back().count;

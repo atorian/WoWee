@@ -3,6 +3,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/local_lights.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -287,7 +288,14 @@ public:
         preparedTexturesOnly_ = cache && preparedOnly;
     }
 
+    /// Append the point lights of the units animated this frame - those in
+    /// view, and those within 33 yards (local_lights.hpp).
+    void gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const;
+    /// The frame's point lights, which every unit picks its nearest from.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
+
 private:
+    const std::vector<LocalLight>* frameLights_ = nullptr;
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
     bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model

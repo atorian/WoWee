@@ -3,6 +3,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_batch_opacity.hpp"
+#include "rendering/m2_track_sampler.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "core/env_flag.hpp"
@@ -114,154 +115,52 @@ M2Renderer::~M2Renderer() {
     shutdown();
 }
 
-uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
-                                       glm::vec4* outPosRadius,
-                                       glm::vec4* outColorIntensity,
-                                       uint32_t maxLights) const {
-    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
-
-    struct Candidate {
-        float distSq;
-        glm::vec4 posRadius;
-        glm::vec4 colorIntensity;
-        bool flame = false;  // lamps/torches/braziers gutter; lava burns steady
-        // Fixture placement, used only to seed the flicker phase. The light's own
-        // position animates with the flame, which would re-roll the phase every frame.
-        glm::vec3 phaseSeed{0.0f};
-    };
-    std::vector<Candidate> candidates;
-
-    // Only the instances whose model can light anything. Asking every
-    // instance in the world, every frame, was a cache miss apiece for a
-    // handful of lamps.
+void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
+                                   std::vector<LocalLight>& out) const {
+    // The client's point lights are the M2Lights of the models it animated
+    // this frame - those that passed culling, and doodads within ten yards -
+    // and nothing else (local_lights.hpp). A lamp out of view lights nothing,
+    // even where what it would light is on screen.
+    constexpr float kNearDoodadSq = 10.0f * 10.0f;
     for (const size_t index : lightInstanceIndices_) {
         if (index >= instances.size()) continue;
-        const auto& instance = instances[index];
-        const M2ModelGPU* model = instance.cachedModel;
-        if (!model || !model->canThrowLocalLight()) continue;
+        const auto& inst = instances[index];
+        const M2ModelGPU* model = inst.cachedModel;
+        if (!model || model->lights.empty() || !inst.cachedIsValid) continue;
+        const glm::vec3 toCam = inst.position - cameraPos;
+        if (!inst.lastCullVisible && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
 
-        if (model->isLavaModel) {
-            const glm::vec3 worldPos = instance.cachedCullCenter;
-            const glm::vec3 delta = worldPos - cameraPos;
-            const float distSq = glm::dot(delta, delta);
-            if (distSq <= 300.0f * 300.0f) {
-                const float radius = std::clamp(instance.cachedVisualRadius * 0.8f,
-                                                10.0f, 35.0f);
-                candidates.push_back({.distSq = distSq, .posRadius = glm::vec4(worldPos, radius),
-                                      .colorIntensity = glm::vec4(1.0f, 0.28f, 0.035f, 1.75f),
-                                      .flame = false, .phaseSeed = instance.position});
-            }
-        }
-
-        bool hasBatchLight = false;
-        for (const auto& batch : model->batches) {
-            if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
-
-            glm::vec3 worldPos;
-            if (model->isGroundFire &&
-                !model->particleEmitters.empty()) {
-                worldPos = glm::vec3(std::numeric_limits<float>::max());
-                for (const auto& emitter : model->particleEmitters) {
-                    glm::mat4 boneXform(1.0f);
-                    if (emitter.bone < instance.boneMatrices.size()) {
-                        boneXform = instance.boneMatrices[emitter.bone];
-                    }
-                    const glm::vec3 emitterWorld = glm::vec3(
-                        instance.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
-                    if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
+        for (const auto& light : model->lights) {
+            if (light.type != 1) {
+                // A directional M2 light adds to every receiver's ambient and
+                // folds into the sun (render spec, M2 lights); not done here.
+                static std::unordered_set<std::string> saidDirectional;
+                if (saidDirectional.insert(model->name).second) {
+                    LOG_WARNING("M2 '", model->name, "' carries a directional light (type ",
+                                light.type, "); it is not applied - the model lights nothing with it");
                 }
-            } else {
-                worldPos = animatedBatchLightWorldCenter(instance, batch);
+                continue;
             }
-            const glm::vec3 delta = worldPos - cameraPos;
-            const float distSq = glm::dot(delta, delta);
-            // Keep tunnel/interior fixtures resident well before their lit
-            // surfaces enter view; the shader's radius still bounds the work.
-            if (distSq > 300.0f * 300.0f) continue;
-
-            const float radius = std::clamp(batch.glowSize * instance.scale * 8.0f,
-                                            5.0f, 12.0f);
-            glm::vec3 color(1.0f, 0.58f, 0.22f);
-            if (batch.glowTint == 1) color = glm::vec3(0.42f, 0.68f, 1.0f);
-            else if (batch.glowTint == 2) color = glm::vec3(1.0f, 0.24f, 0.14f);
-            candidates.push_back({.distSq = distSq, .posRadius = glm::vec4(worldPos, radius),
-                                  .colorIntensity = glm::vec4(color, 1.35f), .flame = true,
-                                  .phaseSeed = instance.position});
-            hasBatchLight = true;
-        }
-
-        // Candles, hearth fires, campfires, torches and forges express their
-        // flame purely as particle emitters, with no glow-card batch for the
-        // path above - so without this they lit nothing at all. One light at
-        // the emitter centroid; chandeliers with an authored glow batch stay
-        // represented by that batch rather than by five separate lights.
-        const bool openFlame = model->isBrazierOrFire || model->isTorch ||
-                               model->isGroundFire || model->isForge;
-        if (!hasBatchLight && (model->isLanternLike || openFlame) &&
-            !model->particleEmitters.empty()) {
-            glm::vec3 worldPos(0.0f);
-            uint32_t emitterCount = 0;
-            for (const auto& emitter : model->particleEmitters) {
-                glm::mat4 boneXform(1.0f);
-                if (emitter.bone < instance.boneMatrices.size()) {
-                    boneXform = instance.boneMatrices[emitter.bone];
-                }
-                worldPos += glm::vec3(instance.modelMatrix * boneXform *
-                                      glm::vec4(emitter.position, 1.0f));
-                emitterCount++;
+            const int seq = inst.currentSequenceIndex;
+            const float t = inst.animTime;
+            const float gt = inst.globalSequenceTime;
+            const auto& gsd = model->globalSequenceDurations;
+            // Visibility is a switch: the Dalaran lamp's is 0 until it opens.
+            if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
+            // Diffuse alone: a point light's ambient is never read. The
+            // model's alpha fades it with the model.
+            const glm::vec3 color =
+                m2_track::sampleVec3(light.diffuseColor, seq, t, gt, gsd, glm::vec3(1.0f)) *
+                m2_track::sampleFloat(light.diffuseIntensity, seq, t, gt, gsd, 1.0f) * inst.fade;
+            if (std::max({color.r, color.g, color.b}) <= 0.0f) continue;
+            glm::mat4 bone(1.0f);
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.boneMatrices.size()) {
+                bone = inst.boneMatrices[static_cast<size_t>(light.bone)];
             }
-            if (emitterCount > 0) {
-                worldPos /= static_cast<float>(emitterCount);
-                const glm::vec3 delta = worldPos - cameraPos;
-                const float distSq = glm::dot(delta, delta);
-                if (distSq <= 300.0f * 300.0f) {
-                    const bool chandelier =
-                        model->name.find("Chandelier") != std::string::npos ||
-                        model->name.find("chandelier") != std::string::npos;
-                    // A hearth or campfire throws light much further than a
-                    // candle, and burns oranger than a lamp wick.
-                    float radius    = chandelier ? 10.0f : 5.0f;
-                    float intensity = chandelier ? 1.25f : 0.85f;
-                    glm::vec3 color(1.0f, 0.58f, 0.22f);
-                    if (openFlame) {
-                        // Local lights are not shadowed, so this radius is the
-                        // distance the glow reaches straight through whatever
-                        // surrounds the fire. At 11 a hearth fire lit its entire
-                        // chimney from the inside out and the brickwork read as
-                        // though it were glowing. Keep the reach close to the
-                        // firebox and let the sprite and flames carry the rest.
-                        radius    = model->isTorch ? 3.0f : 3.5f;
-                        intensity = model->isTorch ? 0.95f : 1.05f;
-                        color     = glm::vec3(1.0f, 0.50f, 0.18f);
-                    }
-                    candidates.push_back({.distSq = distSq,
-                        .posRadius = glm::vec4(worldPos, radius),
-                        .colorIntensity = glm::vec4(color, intensity),
-                        .flame = true, .phaseSeed = instance.position});
-                }
-            }
+            out.push_back({.position = glm::vec3(inst.modelMatrix * bone * glm::vec4(light.position, 1.0f)),
+                           .color = color});
         }
     }
-
-    const uint32_t count = std::min<uint32_t>(maxLights,
-        static_cast<uint32_t>(candidates.size()));
-    if (count == 0) return 0;
-    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
-        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
-    // Guttering is applied to the light itself, not just the glow sprite: the
-    // pool of light a lamp throws on the ground and nearby walls is what the eye
-    // actually reads as firelight, so modulating the sprite alone was too subtle
-    // to notice.
-    const float flickerSeconds = lampFlickerClockSeconds();
-    for (uint32_t i = 0; i < count; ++i) {
-        outPosRadius[i] = candidates[i].posRadius;
-        outColorIntensity[i] = candidates[i].colorIntensity;
-        if (candidates[i].flame) {
-            outColorIntensity[i].w *= lampFlicker(candidates[i].phaseSeed,
-                                                  flickerSeconds, 0.82f, 0.12f, 0.06f);
-        }
-    }
-    return count;
 }
 
 /// The nine main-pass pipelines, built once at startup and again after a
@@ -450,6 +349,8 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
              .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, ambient)},
             {.location = 10, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
              .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, direct)},
+            {.location = 11, .binding = 0, .format = VK_FORMAT_R32G32B32A32_UINT,
+             .offset = offsetof(M2ParticleQuad, localLights)},
         };
         // The client's particle material: two-sided, and depth written only
         // by the unblended modes (Opaque, AlphaKey). Every blend mode has its
@@ -796,7 +697,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 192, "M2InstanceGPU must be 192 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 208, "M2InstanceGPU must be 208 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
@@ -1900,6 +1801,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.bones = model.bones;
     gpuModel.sequences = model.sequences;
     gpuModel.globalSequenceDurations = model.globalSequenceDurations;
+    gpuModel.lights = model.lights;
     gpuModel.hasAnimation = false;
     for (const auto& bone : model.bones) {
         if (bone.translation.hasData() || bone.rotation.hasData() || bone.scale.hasData()) {

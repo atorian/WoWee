@@ -23,6 +23,7 @@ layout(push_constant) uniform Push {
     /// with STORMWINDBANNER01 for a texture - so the batch that draws one is
     /// told where its bar is and moves the cloth below it here.
     vec4 cloth;
+    uvec4 localLights;  // local_lights.glsli
 } push;
 
 layout(location = 0) in vec3 aPos;
@@ -37,8 +38,10 @@ layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec4 VertColor;
 layout(location = 4) out vec3 Tangent;
 layout(location = 5) out vec3 Bitangent;
+layout(location = 6) flat out uvec4 vLocalLights;
 
 void main() {
+    vLocalLights = push.localLights;
     vec3 pos = aPos;
 
     // The same sway a banner doodad gets, in the building's own coordinates:
