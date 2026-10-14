@@ -113,10 +113,14 @@ PAD_TEXELS = 8
 # ---------------------------------------------------------------------------
 
 def find_blp_convert() -> Path:
-    for cand in (REPO_ROOT / "build/bin/blp_convert", REPO_ROOT / "build/blp_convert",
-                 REPO_ROOT / "blp_convert"):
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return cand
+    # .exe on Windows, where the dev tree is the one usually built.
+    suffixes = ("", ".exe") if os.name == "nt" else ("",)
+    for base in (REPO_ROOT / "build/bin/blp_convert", REPO_ROOT / "build-dev/bin/blp_convert",
+                 REPO_ROOT / "build/blp_convert", REPO_ROOT / "blp_convert"):
+        for suffix in suffixes:
+            cand = base.with_name(base.name + suffix)
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return cand
     sys.exit("blp_convert not found - build it: cmake --build build --target blp_convert")
 
 
@@ -270,26 +274,50 @@ def alpha_coverage(alpha: np.ndarray, cutoff: float) -> float:
 
 
 def restore_coverage(arr: np.ndarray, target: float, cutoff: float) -> np.ndarray:
-    """Scale alpha so the same fraction of the sheet survives the cutout.
+    """Move the cutout's edge so the same fraction of the sheet survives it.
 
     Any resampling of an alpha channel moves its coverage - a leaf sheet comes
-    back thinner or fatter than it was painted, and a canopy with it. Bisect a
-    multiplier the way mip generation ought to and rarely does.
+    back thinner or fatter than it was painted, and a canopy with it. The edge
+    is put back by picking the alpha the cutout ought to fall at and remapping
+    the channel so that value lands on the cutoff: linearly below it down to 0,
+    linearly above it up to 255. Transparent stays transparent and opaque stays
+    opaque; only the ramp between them moves.
+
+    This used to bisect one multiplier for the whole channel. A sheet whose
+    alpha is all 0 and 255 keeps its coverage under any multiplier from about
+    a half up, and the bisection settled at the bottom of that range - so the
+    opaque part of the sheet came back at three quarters. Dalaran's wagon roof
+    was written at 194 for 255, and once keyed materials were cut at 224/255
+    its canvas was cut away wherever it faced the camera. The remap cannot do
+    that: 255 is a fixed point of it, and when coverage already holds it
+    changes nothing at all.
     """
-    alpha = arr[..., 3].astype(np.float32)
     if target <= 0.0 or target >= 1.0:
         return arr
-    lo, hi = 0.25, 4.0
-    best = 1.0
-    for _ in range(16):
-        mid = 0.5 * (lo + hi)
-        if alpha_coverage(np.clip(alpha * mid, 0, 255), cutoff) < target:
-            lo = mid
-        else:
-            hi = mid
-        best = mid
+    alpha = arr[..., 3]
+    counts = np.bincount(alpha.ravel(), minlength=256)
+    # passing[v]: the fraction of the sheet at alpha v or above.
+    passing = counts[::-1].cumsum()[::-1] / alpha.size
+    cut = cutoff * 255.0
+    current = int(min(max(np.ceil(cut), 1), 255))   # the lowest alpha that passes now
+    # The threshold whose coverage is nearest the target; of equals, the one
+    # nearest the cutoff as it stands, so a sheet that is right is left alone.
+    candidates = np.arange(1, 256)
+    order = np.lexsort((np.abs(candidates - current), np.abs(passing[1:] - target)))
+    threshold = int(candidates[order[0]])
+    if passing[threshold] == passing[current]:
+        return arr
+
+    v = np.arange(256, dtype=np.float64)
+    # Strictly below the cutoff under the threshold, at or above it from there.
+    below = np.floor(v * cut / threshold)
+    if threshold < 255:
+        above = np.ceil(cut + (v - threshold) * (255.0 - cut) / (255.0 - threshold))
+    else:
+        above = np.full_like(v, 255.0)
+    lut = np.clip(np.where(v < threshold, below, above), 0, 255).astype(np.uint8)
     out = arr.copy()
-    out[..., 3] = np.clip(alpha * best, 0, 255).astype(np.uint8)
+    out[..., 3] = lut[alpha]
     return out
 
 
@@ -581,9 +609,15 @@ def do_repair(data_dir: Path, blp_convert: Path, cutoff: float, dry_run: bool) -
     where the backing is painted, it comes back from the source BLP beside the
     sidecar, resampled rather than imagined.
 
-    No upscaler runs either way. A sheet whose backing is junk keeps its base
-    byte for byte, not even requantised; one whose backing is artwork has only
-    its hidden texels replaced.
+    And the alpha of every level, base included, was written by a coverage
+    restore that scaled the whole channel down: opaque came back as low as 188.
+    So the base takes its alpha from the source again - resampled, with its
+    coverage held by the restore that leaves opaque opaque - and the chain
+    under it is rebuilt from that.
+
+    No upscaler runs either way. The colour of the base is the upscale's, and
+    one whose backing is artwork has its hidden texels replaced from the
+    source.
     """
     repaired = restored = skipped = failed = 0
     with tempfile.TemporaryDirectory(prefix="wowee_repair_") as tmp:
@@ -600,29 +634,34 @@ def do_repair(data_dir: Path, blp_convert: Path, cutoff: float, dry_run: bool) -
                     skipped += 1
                     continue
 
-                base = np.asarray(Image.open(path).convert("RGBA"), dtype=np.uint8)
+                base = np.asarray(Image.open(path).convert("RGBA"), dtype=np.uint8).copy()
                 if base.shape[0] != height or base.shape[1] != width:
                     skipped += 1
                     continue
-                if not (0 < alpha_coverage(base[..., 3], cutoff) < 1.0):
+
+                src = decode_blp(path.with_suffix(".blp"), blp_convert, tmp)
+                if src is None:
+                    # A sidecar with nothing beside it to take the alpha from:
+                    # a custom zone's own art. Said, not silently passed over.
+                    print(f"  {path.relative_to(data_dir)}: no source BLP beside it; left as it is")
+                    skipped += 1
+                    continue
+                coverage = alpha_coverage(src[..., 3], cutoff)
+                if not (0 < coverage < 1.0):
                     # No cutout to hold and no transparent texel to lose colour
                     # under. Whatever chain it has is as good as one built here.
                     skipped += 1
                     continue
 
-                src = decode_blp(path.with_suffix(".blp"), blp_convert, tmp)
-                painted = src is not None and backing_is_painted(src)
-                if painted:
+                alpha = Image.fromarray(src[..., 3], "L").resize((width, height), Image.LANCZOS)
+                base[..., 3] = np.asarray(alpha, dtype=np.uint8)
+                base = restore_coverage(base, coverage, cutoff)
+                if backing_is_painted(src):
                     base = restore_hidden_colour(base, src)
                     restored += 1
-                    levels = build_mip_chain(base, cutoff)
-                    out = dds_dxt5(levels)
                 else:
-                    levels = build_mip_chain(dilate_rgb(base), cutoff)
-                    rebuilt = dds_dxt5(levels)
-                    # Splice the original base back over the re-encoded one.
-                    base_bytes = max(1, (width + 3) // 4) * max(1, (height + 3) // 4) * 16
-                    out = rebuilt[:128] + raw[128:128 + base_bytes] + rebuilt[128 + base_bytes:]
+                    base = dilate_rgb(base)
+                out = dds_dxt5(build_mip_chain(base, cutoff))
                 if not dry_run:
                     path.write_bytes(out)
                 repaired += 1

@@ -32,8 +32,8 @@ except ImportError as exc:                   # pragma: no cover - environment
     print(f"skipped: {exc}")
     sys.exit(0)
 
-from upscale_textures import (backing_is_painted, build_mip_chain, halve_straight,
-                              restore_hidden_colour)
+from upscale_textures import (alpha_coverage, backing_is_painted, build_mip_chain,
+                              halve_straight, restore_coverage, restore_hidden_colour)
 
 BARK = (107, 84, 47)          # measured under the alpha of SilverPineTree01TrunkSkin
 CUTOFF = 0.5
@@ -86,6 +86,36 @@ def main() -> int:
                 f"mip {i} ({level.shape[1]}x{level.shape[0]}) went black under alpha: "
                 f"{under.round(1)}, luma {luma(under):.1f}")
 
+    # Holding coverage must not take opacity away. The restore used to scale
+    # the whole channel, and a sheet of 0 and 255 keeps its coverage under any
+    # factor from a half up: it settled low, and Dalaran's wagon roof came
+    # back at 194, under the 224 a keyed material is cut at.
+    for i, level in enumerate(levels):
+        # Down to the level where both halves still have a texel of their own.
+        if level.shape[1] >= 2 and level[..., 3].max() != 255:
+            failures.append(f"mip {i} lost its opaque texels: alpha tops out at "
+                            f"{level[..., 3].max()}")
+    soft = np.asarray(Image.fromarray(sheet()).resize((256, 256), Image.LANCZOS)).copy()
+    target = alpha_coverage(sheet()[..., 3], CUTOFF)
+    held = restore_coverage(soft, target, CUTOFF)
+    if held[..., 3].max() != 255 or held[..., 3].min() != 0:
+        failures.append(f"restore_coverage moved the ends of the alpha range: "
+                        f"{held[..., 3].min()}..{held[..., 3].max()}")
+    if abs(alpha_coverage(held[..., 3], CUTOFF) - target) > 1.0 / 256:
+        failures.append(f"restore_coverage held {alpha_coverage(held[..., 3], CUTOFF):.4f}, "
+                        f"not {target:.4f}")
+    # Too fat by a column of edge: it has to go under the cutout, opaque
+    # staying opaque. (Texels of one alpha cannot be split by any remap, so the
+    # extra column is a ramp value, as a resample leaves it.)
+    fat = sheet()
+    fat[:, 31, 3] = 200
+    thinned = restore_coverage(fat, target, CUTOFF)
+    if abs(alpha_coverage(thinned[..., 3], CUTOFF) - target) > 1e-6 or \
+            thinned[:, 32:, 3].min() != 255:
+        failures.append("restore_coverage could not thin a sheet without dimming it")
+    if not (restore_coverage(sheet(), target, CUTOFF) == sheet()).all():
+        failures.append("restore_coverage changed a sheet whose coverage already held")
+
     # A painted backing is artwork an opaque batch samples; a black one is the
     # compressor's junk behind a silhouette. Dilating the first destroys it,
     # and the client draws exactly the first kind opaque, so the two sides of
@@ -120,7 +150,7 @@ def main() -> int:
     if failures:
         return 1
     print(f"ok: colour holds under alpha across {len(levels)} mip levels, "
-          "backing classified, source restored")
+          "coverage held without dimming, backing classified, source restored")
     return 0
 
 
