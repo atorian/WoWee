@@ -4443,6 +4443,30 @@ void Application::update(float deltaTime) {
         worldLoader_->processPendingEntry();
     }
 
+    // WOWEE_MODEL_PROBE has no world, so nothing else moves its model: its
+    // animation plays and its particles fly here, WOWEE_PROBE_SECONDS (6 by
+    // default) of them over the frames before the screenshot, in steps of a
+    // thirtieth of a second. Without it a probed candle never lit: the frame
+    // was taken with one particle update behind it, at a delta of zero.
+    if (renderer && state != AppState::IN_GAME && std::getenv("WOWEE_MODEL_PROBE")) {
+        static const float probeSeconds = [] {
+            const char* s = std::getenv("WOWEE_PROBE_SECONDS");
+            return (s && *s) ? std::max(std::stof(s), 0.0f) : 6.0f;
+        }();
+        const float perFrame = probeSeconds / static_cast<float>(kScreenshotFrame);
+        const int steps = std::max(1, static_cast<int>(std::ceil(perFrame * 30.0f)));
+        const auto* camera = renderer->getCamera();
+        for (int i = 0; i < steps; ++i) {
+            const float dt = perFrame / static_cast<float>(steps);
+            renderer->getM2Renderer()->update(dt, camera->getPosition(),
+                                              camera->getProjectionMatrix() * camera->getViewMatrix());
+            // A model probed as a creature (WOWEE_PROBE_CHARACTER) moves, and
+            // its emitters follow, the way Renderer::update has them in game.
+            renderer->getCharacterRenderer()->update(dt, camera->getPosition());
+            if (auto* emitters = renderer->getCharacterEmitters()) emitters->update(dt);
+        }
+    }
+
     // Update renderer (camera, etc.) only when in-game
     updateCheckpoint = "renderer update";
     if (renderer && state == AppState::IN_GAME) {

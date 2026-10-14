@@ -28,11 +28,16 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="${WOWEE_BIN:-$root/build-dev/bin/wowee.exe}"
 out="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 scratch="$root/build-dev/scratch/probe"
-mkdir -p "$scratch/appdata" "$root/build-dev/tmp"
+mkdir -p "$scratch/appdata" "$scratch/config" "$root/build-dev/tmp"
 
 to_native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 
 export LOCALAPPDATA="$(to_native "$scratch/appdata")"
+# Its own settings, not the player's: those make the window fullscreen, and a
+# frame at desktop size costs four times what the default 1280x720 does. Its
+# own log too, so a probe beside a running client leaves that client's log be.
+export WOWEE_CONFIG_ROOT="$(to_native "$scratch/config")"
+export WOWEE_LOG_FILE="${WOWEE_LOG_FILE:-model_probe.log}"
 export TMP="$(to_native "$root/build-dev/tmp")" TEMP="$(to_native "$root/build-dev/tmp")"
 export WOWEE_SKY_BACKGROUND_PROBE=1
 export WOWEE_MODEL_PROBE="$1"
@@ -44,6 +49,6 @@ cd "$(dirname "$bin")"
 if [[ -f "$out" ]]; then
     echo "$out"
 else
-    echo "no frame written; see $scratch/last_run.log and $(dirname "$bin")/logs/wowee.log" >&2
+    echo "no frame written; see $scratch/last_run.log and $(dirname "$bin")/logs/$WOWEE_LOG_FILE" >&2
     exit 1
 fi
