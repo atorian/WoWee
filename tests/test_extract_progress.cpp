@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "tools/asset_extract/extractor.hpp"
+#include "test_support.hpp"
 
 namespace fs = std::filesystem;
 
@@ -26,14 +27,6 @@ namespace {
 /// Enough files that the reporter's own interval is crossed several times;
 /// it reports every 128, so this is a handful of updates plus the last one.
 constexpr int kFileCount = 400;
-
-fs::path makeScratch(const char* name) {
-    const fs::path dir = fs::temp_directory_path() / name;
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-    fs::create_directories(dir, ec);
-    return dir;
-}
 
 /// A real MPQ, built the way mpq_build builds one. Nothing here is a stand-in:
 /// the point is to drive the extractor's own threading, which is what decides
@@ -80,7 +73,7 @@ TEST_CASE("extraction reports progress as it goes", "[extract][progress]") {
     // the thing under test. The reading half runs everywhere else.
     SKIP("Ubuntu's StormLib build asserts when creating an archive");
 #endif
-    const fs::path root = makeScratch("wowee_extract_progress");
+    const fs::path root = wowee::test::scratchDir("wowee_extract_progress");
     const fs::path src = root / "src";
     std::error_code ec;
     fs::create_directories(src / "World" / "Maps", ec);

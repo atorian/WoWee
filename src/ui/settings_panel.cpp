@@ -1358,14 +1358,12 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (chars) chars->setNormalMapStrength(pendingNormalMapStrength);
     } else if (key == "parallax") {
         if (wmo) wmo->setPOMEnabled(pendingPOM);
-        if (chars) chars->setPOMEnabled(pendingPOM);
     } else if (key == "sharpstars") {
         if (renderer) renderer->setSharpStars(pendingSharpStars);
     } else if (key == "sunshafts") {
         if (renderer) renderer->setSunShaftsEnabled(pendingSunShafts);
     } else if (key == "parallaxquality") {
         if (wmo) wmo->setPOMQuality(pendingPOMQuality);
-        if (chars) chars->setPOMQuality(pendingPOMQuality);
     } else if (key == "upscaling") {
         // pendingFSR is the older flag for "FSR 1 is on" and is what the saved
         // settings still carry, so the mode and the flag are set together

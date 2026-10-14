@@ -2,6 +2,7 @@
 
 #include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
+#include "core/string_util.hpp"
 #include <algorithm>
 #include <cctype>
 #include <memory>
@@ -27,12 +28,7 @@ inline game::MessageChatData makeSystemMessage(const std::string& text) {
 }
 
 /** Trim leading/trailing whitespace from a string. */
-inline std::string trim(const std::string& s) {
-    size_t first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    size_t last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
+inline std::string trim(const std::string& s) { return core::trimAsciiSpace(s); }
 
 /** Convert string to lowercase (returns copy). */
 inline std::string toLower(std::string s) {

@@ -5,6 +5,7 @@
 #include "network/packet.hpp"
 #include "core/logger.hpp"
 #include "core/data_paths.hpp"
+#include "core/string_util.hpp"
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -32,19 +33,8 @@ AuthHandler::~AuthHandler() {
     disconnect();
 }
 
-namespace {
-std::string trimAuthHost(std::string s) {
-    auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    size_t b = 0;
-    while (b < s.size() && isSpace(static_cast<unsigned char>(s[b]))) ++b;
-    size_t e = s.size();
-    while (e > b && isSpace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return s.substr(b, e - b);
-}
-}  // namespace
-
 void AuthHandler::beginConnect(const std::string& host, uint16_t port) {
-    const std::string hostTrimmed = trimAuthHost(host);
+    const std::string hostTrimmed = core::trimAsciiSpace(host);
     LOG_INFO("Connecting to auth server: ", hostTrimmed, ":", port);
     realms.clear();
     socket = std::make_unique<network::TCPSocket>();

@@ -15,6 +15,8 @@
 #include <StormLib.h>
 #endif
 
+#include "test_support.hpp"
+
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -29,13 +31,7 @@ namespace {
 
 std::vector<uint8_t> bytes(const std::string& text) { return {text.begin(), text.end()}; }
 
-fs::path makeScratch(const char* name) {
-    const fs::path dir = fs::temp_directory_path() / name;
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-    fs::create_directories(dir, ec);
-    return dir;
-}
+using wowee::test::scratchDir;
 
 void writeFile(const fs::path& path, const std::vector<uint8_t>& data) {
     fs::create_directories(path.parent_path());
@@ -62,7 +58,7 @@ std::vector<uint8_t> dbc(uint32_t fields, const std::vector<std::vector<uint32_t
 
 /// An extracted data root: the files on disk under a manifest naming them.
 fs::path makeDataRoot(const char* name, const std::map<std::string, std::vector<uint8_t>>& files) {
-    const fs::path root = makeScratch(name);
+    const fs::path root = scratchDir(name);
     std::string entries;
     for (const auto& [key, data] : files) {
         std::string relative = key;
@@ -211,7 +207,7 @@ TEST_CASE("A later archive's copy of a file replaces an earlier one's", "[archiv
     // See test_extract_progress: Ubuntu's StormLib aborts writing an archive.
     SKIP("Ubuntu's StormLib build asserts when creating an archive");
 #endif
-    const fs::path root = makeScratch("wowee_archive_layer_mpq");
+    const fs::path root = scratchDir("wowee_archive_layer_mpq");
     const fs::path first = root / "new_creature_models.MPQ";
     const fs::path second = root / "hotfixes.MPQ";
     REQUIRE(packArchive(first, {{"Creature\\Bear\\Bear.m2", "first bear"},
@@ -241,7 +237,7 @@ TEST_CASE("A stack with an archive missing is not opened at all", "[archive_laye
 #ifdef __linux__
     SKIP("Ubuntu's StormLib build asserts when creating an archive");
 #endif
-    const fs::path root = makeScratch("wowee_archive_layer_missing");
+    const fs::path root = scratchDir("wowee_archive_layer_missing");
     const fs::path present = root / "present.MPQ";
     REQUIRE(packArchive(present, {{"a.txt", "a"}}));
     std::string error;

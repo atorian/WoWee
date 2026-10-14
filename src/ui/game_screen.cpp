@@ -544,8 +544,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 if (auto* cr = renderer->getCharacterRenderer()) {
                     cr->setNormalMappingEnabled(settingsPanel_.pendingNormalMapping);
                     cr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
-                    cr->setPOMEnabled(settingsPanel_.pendingPOM);
-                    cr->setPOMQuality(settingsPanel_.pendingPOMQuality);
                     // Both told before this is done with. The two renderers are
                     // built one after the other in the same function today, so
                     // the character one is never missing while the WMO one is

@@ -10,6 +10,7 @@
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include "core/open_url.hpp"
+#include "core/string_util.hpp"
 #include "core/version.hpp"
 #include "core/window.hpp"
 #include "rendering/renderer.hpp"
@@ -33,15 +34,6 @@
 #include <unordered_map>
 
 namespace wowee { namespace ui {
-
-static std::string trimAscii(std::string s) {
-    auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    size_t b = 0;
-    while (b < s.size() && isSpace(static_cast<unsigned char>(s[b]))) ++b;
-    size_t e = s.size();
-    while (e > b && isSpace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return s.substr(b, e - b);
-}
 
 static std::string hexEncode(const std::vector<uint8_t>& data) {
     std::ostringstream ss;
@@ -990,7 +982,7 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
     if (submit && !authenticating) {
         attemptAuth(authHandler);
     } else if (submit && waitingForSecurityCode) {
-        const std::string code = trimAscii(pinCode_.text());
+        const std::string code = core::trimAsciiSpace(pinCode_.text());
         if (!code.empty()) {
             authHandler.submitSecurityCode(code);
             pinCode_.clear();
@@ -1324,7 +1316,7 @@ void AuthScreen::finishConnect(auth::AuthHandler& authHandler) {
         // Save login info for next session
         saveLoginInfo(false);
 
-        const std::string pinStr = trimAscii(pinCode_.text());
+        const std::string pinStr = core::trimAsciiSpace(pinCode_.text());
 
         // Send authentication credentials
         if (useHash) {
@@ -1398,11 +1390,11 @@ void AuthScreen::loadLoginInfo() {
         std::istringstream ss(file);
         std::string line;
         while (std::getline(ss, line)) {
-            line = trimAscii(line);
+            line = core::trimAsciiSpace(line);
             if (line.empty() || line[0] == '#') continue;
             size_t eq = line.find('=');
             if (eq == std::string::npos) continue;
-            kv[trimAscii(line.substr(0, eq))] = trimAscii(line.substr(eq + 1));
+            kv[core::trimAsciiSpace(line.substr(0, eq))] = core::trimAsciiSpace(line.substr(eq + 1));
         }
 
         std::string host = kv["hostname"];
@@ -1443,16 +1435,16 @@ void AuthScreen::loadLoginInfo() {
     std::istringstream ss(file);
     std::string line;
     while (std::getline(ss, line)) {
-        line = trimAscii(line);
+        line = core::trimAsciiSpace(line);
         if (line.empty() || line[0] == '#') continue;
 
         if (line.front() == '[' && line.back() == ']') {
             flushServer();
             std::string inside = line.substr(1, line.size() - 2);
-            inside = trimAscii(inside);
+            inside = core::trimAsciiSpace(inside);
             const std::string prefix = "server ";
             if (inside.rfind(prefix, 0) == 0) {
-                std::string key = trimAscii(inside.substr(prefix.size()));
+                std::string key = core::trimAsciiSpace(inside.substr(prefix.size()));
                 // Parse host:port (split on last ':', allow [ipv6]:port).
                 std::string hostPart = key;
                 int portPart = 3724;
@@ -1482,8 +1474,8 @@ void AuthScreen::loadLoginInfo() {
 
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
-        std::string key = trimAscii(line.substr(0, eq));
-        std::string val = trimAscii(line.substr(eq + 1));
+        std::string key = core::trimAsciiSpace(line.substr(0, eq));
+        std::string val = core::trimAsciiSpace(line.substr(eq + 1));
 
         if (!inServer) {
             if (key == "active") activeKey = val;

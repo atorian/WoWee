@@ -67,6 +67,19 @@ inline uint32_t readU32(const std::vector<uint8_t>& bytes, size_t offset) {
            (static_cast<uint32_t>(bytes[offset + 3]) << 24);
 }
 
+/// An empty directory of that name under the temp directory, made fresh: what
+/// a previous run left there is removed first.
+///
+/// The temp directory is TMP/TEMP/TMPDIR, which a build on a full system drive
+/// points somewhere with room; nothing here names a drive.
+inline std::filesystem::path scratchDir(const char* name) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
 /// The .dbc for a table, found case-insensitively, or an empty path.
 ///
 /// The extracted archives do not agree about capitalisation - Spell.dbc,

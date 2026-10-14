@@ -20,7 +20,6 @@
 #include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_uv_transform.hpp"
-#include "rendering/pom_quality.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
 #include "rendering/m2_track_sampler.hpp"
@@ -3212,8 +3211,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     }
                 }
 
-                // POM quality → sample count
-                const int pomSamples = pomSamplesFor(pomQuality_);
                 const bool useAdvancedMaterials = !previewMainModel;
                 const bool usePreviewSimpleShader = previewMainModel;
 
@@ -3278,10 +3275,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // Character textures are layered/mirrored atlases, not coherent
                 // height fields. Parallax offsets cross face seams and reveal
                 // underlying armor through tabards, so keep POM out of the
-                // character path even when it is enabled for the world.
+                // character path even when it is enabled for the world. The
+                // scale and sample count stay zero: nothing reads them.
                 matData.enablePOM = 0;
-                matData.pomScale = 0.06f;
-                matData.pomMaxSamples = pomSamples;
                 matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
                 matData.normalMapStrength = normalMapStrength_;
                 matData.hairMaterial = hairMaterial ? 1 : 0;

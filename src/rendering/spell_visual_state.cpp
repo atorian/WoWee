@@ -47,7 +47,9 @@ float stepTowards(float value, float target, float step) {
 void SpellVisualSystem::loadStateKits() {
     if (stateKitsLoaded_) return;
     if (!cachedAssetManager_) cachedAssetManager_ = renderer_ ? renderer_->getAssetManager() : nullptr;
-    if (!cachedAssetManager_) return;  // assets not up yet; asked again next time
+    // Assets not up yet - no manager, or one whose archives are not mounted,
+    // where loadDBC answers nothing. Asked again next time.
+    if (!cachedAssetManager_ || !cachedAssetManager_->isInitialized()) return;
     stateKitsLoaded_ = true;
 
     auto* layout = pipeline::getActiveDBCLayout();

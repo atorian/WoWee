@@ -212,11 +212,6 @@ void EntityController::handleUpdateObject(network::Packet& packet) {
     enqueueUpdateObjectWork(std::move(data));
 }
 
-void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& guids) {
-    float costs[4] = {0, 0, 0, 0};
-    processOutOfRangeObjectsUntil(guids, 0, std::chrono::steady_clock::time_point::max(), costs);
-}
-
 size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_t>& guids, size_t next,
                                                        std::chrono::steady_clock::time_point deadline,
                                                        float costs[4]) {

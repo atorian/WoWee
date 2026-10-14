@@ -1393,7 +1393,7 @@ void GameHandler::setOrientation(float orientation) {
     movementHandler_->setOrientation(orientation);
 }
 
-// Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjects,
+// Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjectsUntil,
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
 // handleDestroyObject) moved to EntityController - see entity_controller.cpp
 

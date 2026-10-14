@@ -167,7 +167,6 @@ private:
     void handlePageTextQueryResponse(network::Packet& packet);
 
     // --- Entity lifecycle ---
-    void processOutOfRangeObjects(const std::vector<uint64_t>& guids);
     /// Removes out-of-range objects from `next` on until `deadline`, at least
     /// one per call; returns the index to resume from. Times what each kind
     /// costs into `costs` (creature, player, game object, other).

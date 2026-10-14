@@ -45,8 +45,9 @@ void SpellVisualSystem::loadSpellVisualDbc() {
     // Not an attempt. "Set early to prevent re-entry on failure" was the
     // intent, but there is no failure yet - only assets that have not
     // arrived. Latching here left spell visuals off for the session
-    // whenever this was reached first.
-    if (!cachedAssetManager_) return;
+    // whenever this was reached first. An asset manager that exists but has
+    // not mounted its archives yet is the same case: loadDBC answers nothing.
+    if (!cachedAssetManager_ || !cachedAssetManager_->isInitialized()) return;
     spellVisualDbcLoaded_ = true;  // a real attempt follows; do not repeat it
 
     auto* layout = pipeline::getActiveDBCLayout();
