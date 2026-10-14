@@ -8,7 +8,7 @@
 #include "game/packet_parsers.hpp"
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "core/logger.hpp"
 #include "core/cvar_store.hpp"
 #include "core/event_bus.hpp"

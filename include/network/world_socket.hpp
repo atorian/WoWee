@@ -1,6 +1,7 @@
 #pragma once
 
 #include "network/socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "network/net_platform.hpp"
 #include "network/async_connect.hpp"
@@ -34,7 +35,7 @@ namespace network {
  * - Packet bodies remain unencrypted
  * - Size field includes opcode bytes (payloadLen = size - 2)
  */
-class WorldSocket : public Socket {
+class WorldSocket : public Socket, public WorldConnection {
 public:
     WorldSocket();
     ~WorldSocket() override;
@@ -42,9 +43,9 @@ public:
     bool connect(const std::string& host, uint16_t port) override;
     /// Connects off the main thread; pollConnect() says when it is done and,
     /// on success, leaves the socket as connect() would - receive pump running.
-    void beginConnect(const std::string& host, uint16_t port, int timeoutSeconds = 10);
-    net::AsyncConnect::Status pollConnect();
-    [[nodiscard]] std::string connectError() const { return connectError_; }
+    void beginConnect(const std::string& host, uint16_t port, int timeoutSeconds = 10) override;
+    net::AsyncConnect::Status pollConnect() override;
+    [[nodiscard]] std::string connectError() const override { return connectError_; }
     void disconnect() override;
     [[nodiscard]] bool isConnected() const override;
 
@@ -67,7 +68,7 @@ public:
      *
      * @param callback Function to call when packet is received
      */
-    void setPacketCallback(std::function<void(const Packet&)> callback) {
+    void setPacketCallback(std::function<void(const Packet&)> callback) override {
         packetCallback = std::move(callback);
     }
 
@@ -78,9 +79,9 @@ public:
      * @param sessionKey 40-byte session key from auth server
      * @param build Client build number (determines cipher family)
      */
-    void initEncryption(const std::vector<uint8_t>& sessionKey, uint32_t build = 12340);
+    void initEncryption(const std::vector<uint8_t>& sessionKey, uint32_t build) override;
 
-    void tracePacketsFor(std::chrono::milliseconds duration, const std::string& reason);
+    void tracePacketsFor(std::chrono::milliseconds duration, const std::string& reason) override;
 
     /**
      * Check if header encryption is enabled

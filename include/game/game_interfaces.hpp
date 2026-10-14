@@ -11,7 +11,7 @@
 #include <array>
 #include <unordered_map>
 
-namespace wowee::network { class WorldSocket; }
+namespace wowee::network { class WorldConnection; }
 
 namespace wowee::game {
 
@@ -42,7 +42,7 @@ public:
     [[nodiscard]] virtual bool isConnected() const = 0;
     [[nodiscard]] virtual bool isInWorld() const = 0;
     [[nodiscard]] virtual WorldState getState() const = 0;
-    virtual network::WorldSocket* getSocket() = 0;
+    virtual network::WorldConnection* getSocket() = 0;
     [[nodiscard]] virtual const std::vector<uint8_t>& getSessionKey() const = 0;
 };
 

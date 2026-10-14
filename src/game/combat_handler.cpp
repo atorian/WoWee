@@ -9,7 +9,7 @@
 #include "game/opcode_table.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "core/cvar_store.hpp"
 #include "core/event_bus.hpp"
 #include "game/game_events.hpp"

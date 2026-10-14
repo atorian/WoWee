@@ -15,7 +15,7 @@
 #include "game/movement_handler.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include <algorithm>
 #include <bit>
 #include <set>

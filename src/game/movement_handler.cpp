@@ -5,7 +5,7 @@
 #include "game/spline_packet.hpp"
 #include "game/transport_manager.hpp"
 #include "game/entity.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/movement_limits.hpp"

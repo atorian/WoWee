@@ -5,6 +5,7 @@
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
 #include "core/renderer_transport_scene.hpp"
+#include "network/world_socket.hpp"
 #include "game/emote_table.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
@@ -460,6 +461,7 @@ bool Application::initialize() {
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
     gameServices_.cvars = &cvars_;
+    gameServices_.makeConnection = [] { return std::make_unique<network::WorldSocket>(); };
     movementCollision_ =std::make_unique<RendererMovementCollision>(*renderer);
     gameServices_.movementCollision = movementCollision_.get();
 

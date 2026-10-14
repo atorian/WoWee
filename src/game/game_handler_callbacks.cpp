@@ -24,7 +24,7 @@
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
 #include "core/coordinates.hpp"

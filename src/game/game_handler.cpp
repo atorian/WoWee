@@ -25,7 +25,7 @@
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
 #include "core/coordinates.hpp"
@@ -78,6 +78,9 @@ GameHandler::GameHandler(GameServices& services)
     }
     if (!services_.cvars) {
         throw std::invalid_argument("GameHandler needs GameServices::cvars");
+    }
+    if (!services_.makeConnection) {
+        throw std::invalid_argument("GameHandler needs GameServices::makeConnection");
     }
     LOG_DEBUG("GameHandler created");
 
@@ -169,8 +172,9 @@ bool GameHandler::connect(const std::string& host,
     this->clientSeed = generateClientSeed();
     LOG_DEBUG("Generated client seed: 0x", std::hex, clientSeed, std::dec);
 
-    // Create world socket
-    socket = std::make_unique<network::WorldSocket>();
+    // The connection the client hands over: TCP in the client, a recording
+    // stand-in in a test.
+    socket = services_.makeConnection();
 
     // Set up packet callback
     socket->setPacketCallback([this](const network::Packet& packet) {

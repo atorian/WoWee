@@ -1,10 +1,13 @@
 #pragma once
 #include <cstdint>
+#include <functional>
+#include <memory>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
 namespace core { class EventBus; class CVarStore; }
+namespace network { class WorldConnection; }
 
 namespace game {
 
@@ -27,6 +30,10 @@ struct GameServices {
     /// assistAttack, autoDismountFlying. Required, like `events`; the client
     /// owns the store and the interface writes the same one.
     const core::CVarStore* cvars = nullptr;
+    /// A new connection to a world server, one per login. Required: the
+    /// client makes a network::WorldSocket, a test one it can play packets
+    /// into and read what was sent from.
+    std::function<std::unique_ptr<network::WorldConnection>()> makeConnection;
     // The walls units moving themselves run into between their reports.
     const MovementCollision* movementCollision = nullptr;
     uint32_t gryphonDisplayId = 0;

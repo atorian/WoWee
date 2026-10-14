@@ -54,7 +54,7 @@ namespace wowee::game {
 }
 
 namespace wowee {
-namespace network { class WorldSocket; class Packet; }
+namespace network { class WorldConnection; class Packet; }
 namespace core { class EventBus; class CVarStore; }
 
 namespace game {
@@ -3356,8 +3356,8 @@ public:
     // ═══════════════════════════════════════════════════════════════════
 
     // ── Handler & Subsystem Accessors (unique_ptr → raw pointer) ─────
-    network::WorldSocket* getSocket() override { return socket.get(); }
-    const network::WorldSocket* getSocket() const { return socket.get(); }
+    network::WorldConnection* getSocket() override { return socket.get(); }
+    const network::WorldConnection* getSocket() const { return socket.get(); }
     ChatHandler* getChatHandler() { return chatHandler_.get(); }
     CombatHandler* getCombatHandler() { return combatHandler_.get(); }
     MovementHandler* getMovementHandler() { return movementHandler_.get(); }
@@ -4042,7 +4042,7 @@ private:
     std::unique_ptr<PacketParsers> packetParsers_;
 
     // Network
-    std::unique_ptr<network::WorldSocket> socket;
+    std::unique_ptr<network::WorldConnection> socket;
     std::deque<network::Packet> pendingIncomingPackets_;
 
     // State

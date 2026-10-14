@@ -8,7 +8,7 @@
 #include "game/quest_progress.hpp"
 #include "game/quest_text.hpp"
 #include "game/packet_parsers.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include "core/event_bus.hpp"

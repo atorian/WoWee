@@ -10,7 +10,7 @@
 #include "game/packet_parsers.hpp"
 #include "core/logger.hpp"
 #include "game/sell_count.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"

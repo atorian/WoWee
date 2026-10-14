@@ -4,7 +4,7 @@
 #include "game/warden_crypto.hpp"
 #include "game/warden_memory.hpp"
 #include "game/warden_module.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
 #include "game/expansion_profile.hpp"

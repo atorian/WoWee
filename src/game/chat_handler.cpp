@@ -9,7 +9,7 @@
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
-#include "network/world_socket.hpp"
+#include "network/world_connection.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include <algorithm>
