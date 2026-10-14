@@ -373,7 +373,9 @@ public:
     // Instance difficulty
     [[nodiscard]] uint32_t getInstanceDifficulty() const { return instanceDifficulty_; }
     [[nodiscard]] bool isInstanceHeroic() const { return instanceIsHeroic_; }
-    [[nodiscard]] bool isInInstance() const { return inInstance_; }
+    // Whether the player is in an instance is GameHandler::isInInstance, from
+    // Map.dbc. A difficulty packet arrives in the open world too, and the flag
+    // it used to set here was never read.
 
     // Minimap ping
     void sendMinimapPing(float wowX, float wowY);
@@ -521,6 +523,10 @@ public:
             if (r.teamId == teamId) return &r;
         return nullptr;
     }
+    /// Every roster rather than one, because the interface asks for a sort
+    /// without saying which team - it sorts what it is showing, and it only
+    /// ever shows one at a time. The same column twice reverses.
+    void sortArenaTeamRosters(const std::string& key);
 
 private:
     // ---- Packet handlers ----
@@ -674,7 +680,6 @@ private:
     std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
     uint32_t instanceDifficulty_ = 0;
     bool instanceIsHeroic_ = false;
-    bool inInstance_ = false;
 
     // Raid marks
     std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
@@ -686,6 +691,8 @@ private:
     // Arena
     std::vector<ArenaTeamStats>  arenaTeamStats_;
     std::vector<ArenaTeamRoster> arenaTeamRosters_;
+    std::string arenaSortKey_;
+    bool arenaSortAscending_ = true;
 
     // Battleground
     std::array<BgQueueSlot, 3> bgQueues_{};

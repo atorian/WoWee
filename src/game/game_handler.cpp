@@ -244,11 +244,7 @@ void GameHandler::resetDbcCaches() {
     areaTriggerDbcLoaded_ = false;
     areaTriggers_.clear();
     activeAreaTriggers_.clear();
-    talentCache_.clear();
-    talentTabCache_.clear();
-    // The copies that are actually read live in the sub-handlers - the getters
-    // beside these forward there. Clearing only the local ones left the
-    // previous expansion's talents and flight points live after a switch.
+    // The talent and taxi tables live in the sub-handlers, and only there.
     spellHandler_->resetTalentDbcCache();
     movementHandler_->resetTaxiDbcCache();
     // Clear the AssetManager DBC file cache so that expansion-specific DBCs
@@ -604,15 +600,6 @@ void GameHandler::updateTimers(float deltaTime) {
     // ever set, so the fallback never fired.
     inventoryHandler_->tickLootMoneyFallback(deltaTime);
 
-    for (auto it = recentLootMoneyAnnounceCooldowns_.begin(); it != recentLootMoneyAnnounceCooldowns_.end();) {
-        it->second -= deltaTime;
-        if (it->second <= 0.0f) {
-            it = recentLootMoneyAnnounceCooldowns_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
     // Auto-inspect throttling (fallback for player equipment visuals).
     if (inspectRateLimit_ > 0.0f) {
         inspectRateLimit_ = std::max(0.0f, inspectRateLimit_ - deltaTime);
@@ -788,7 +775,7 @@ void GameHandler::update(float deltaTime) {
                                       ? game::HEARTBEAT_INTERVAL_TAXI
                                       : (classicLikeStationaryCombatSync ? game::HEARTBEAT_INTERVAL_STATIONARY_COMBAT
                                                                          : (classicLikeCombatSync ? game::HEARTBEAT_INTERVAL_MOVING_COMBAT
-                                                                                                  : moveHeartbeatInterval_));
+                                                                                                  : movementHandler_->getMoveHeartbeatInterval()));
         if (movementHandler_->timeSinceLastMoveHeartbeatRef() >= heartbeatInterval) {
             sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
             movementHandler_->timeSinceLastMoveHeartbeatRef() = 0.0f;
@@ -3578,38 +3565,11 @@ void GameHandler::clearPetitionDialog() {
 }
 
 void GameHandler::sortArenaTeamRosters(const std::string& key) {
-    if (key.empty()) return;
-    // The same column twice reverses. A different one starts again in the
-    // direction that column reads best: a name from A, a number from the top.
-    if (key == arenaSortKey_) {
-        arenaSortAscending_ = !arenaSortAscending_;
-    } else {
-        arenaSortKey_ = key;
-        arenaSortAscending_ = (key == "name" || key == "class");
-    }
-    const bool asc = arenaSortAscending_;
+    socialHandler_->sortArenaTeamRosters(key);
+}
 
-    auto value = [&key](const ArenaTeamMember& m) -> uint64_t {
-        if (key == "class")        return m.classId;
-        if (key == "played")       return m.weekGames;
-        if (key == "won")          return m.weekWins;
-        if (key == "seasonplayed") return m.seasonGames;
-        if (key == "seasonwon")    return m.seasonWins;
-        if (key == "rating")       return m.personalRating;
-        return 0;
-    };
-
-    for (auto& roster : arenaTeamRosters_) {
-        std::stable_sort(roster.members.begin(), roster.members.end(),
-            [&](const ArenaTeamMember& a, const ArenaTeamMember& b) {
-                if (key == "name") {
-                    return asc ? (a.name < b.name) : (b.name < a.name);
-                }
-                const uint64_t va = value(a), vb = value(b);
-                if (va == vb) return a.name < b.name;   // steady under ties
-                return asc ? (va < vb) : (vb < va);
-            });
-    }
+const ArenaTeamRoster* GameHandler::getArenaTeamRoster(uint32_t teamId) const {
+    return socialHandler_->getArenaTeamRoster(teamId);
 }
 
 void GameHandler::requestItemRefundInfo(uint64_t itemGuid) {
@@ -3900,6 +3860,9 @@ const std::unordered_map<uint32_t, TalentEntry>& GameHandler::getAllTalents() co
 }
 const std::unordered_map<uint32_t, TalentTabEntry>& GameHandler::getAllTalentTabs() const {
     return spellHandler_->getAllTalentTabs();
+}
+float GameHandler::getGCDRemaining() const {
+    return spellHandler_->getGCDRemaining();
 }
 float GameHandler::getGCDTotal() const {
     return spellHandler_->getGCDTotal();

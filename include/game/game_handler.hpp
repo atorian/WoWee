@@ -1439,13 +1439,7 @@ public:
     float getTimeSpeed() const { return gameClock_.speed(); }
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
-    float getGCDRemaining() const {
-        if (gcdTotal_ <= 0.0f) return 0.0f;
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - gcdStartedAt_).count() / 1000.0f;
-        float rem = gcdTotal_ - elapsed;
-        return rem > 0.0f ? rem : 0.0f;
-    }
+    float getGCDRemaining() const;
     float getGCDTotal() const;
     bool isGCDActive() const { return getGCDRemaining() > 0.0f; }
 
@@ -1970,12 +1964,7 @@ public:
     /// ever shows one at a time.
     void sortArenaTeamRosters(const std::string& key);
 
-    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const {
-        for (const auto& r : arenaTeamRosters_) {
-            if (r.teamId == teamId) return &r;
-        }
-        return nullptr;
-    }
+    const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const;
 
     // ---- Loot ----
     void lootTarget(uint64_t guid);
@@ -2139,10 +2128,6 @@ public:
         if (shown) blobQuestIds_.insert(questId);
         else       blobQuestIds_.erase(questId);
     }
-    bool isQuestQueryPending(uint32_t questId) const {
-        return pendingQuestQueryIds_.count(questId) > 0;
-    }
-    void clearQuestQueryPending(uint32_t questId) { pendingQuestQueryIds_.erase(questId); }
     std::optional<uint32_t> getWorldState(uint32_t key) const {
         auto it = worldStates_.find(key);
         if (it == worldStates_.end()) return std::nullopt;
@@ -3406,6 +3391,7 @@ public:
     MovementHandler* getMovementHandler() { return movementHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     QuestHandler* getQuestHandler() { return questHandler_.get(); }
+    InventoryHandler* getInventoryHandler() { return inventoryHandler_.get(); }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3501,7 +3487,6 @@ public:
     auto& pendingAutoInspectRef() { return pendingAutoInspect_; }
     auto& pendingGameObjectLootRetriesRef() { return pendingGameObjectLootRetries_; }
     auto& tempEnchantTimersRef() { return tempEnchantTimers_; }
-    auto& localLootStateRef() { return localLootState_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
@@ -3560,7 +3545,6 @@ public:
 
     // ── Quests & Achievements ────────────────────────────────────────
     auto& completedQuestsRef() { return completedQuests_; }
-    auto& npcQuestStatusRef() { return npcQuestStatus_; }
     auto& achievementDatesRef() { return achievementDates_; }
     auto& achievementNameCacheRef() { return achievementNameCache_; }
     auto& earnedAchievementsRef() { return earnedAchievements_; }
@@ -3579,7 +3563,6 @@ public:
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
-    auto& inInstanceRef() { return inInstance_; }
     auto& worldStateMapIdRef() { return worldStateMapId_; }
     auto& worldStatesRef() { return worldStates_; }
     auto& worldStateZoneIdRef() { return worldStateZoneId_; }
@@ -3653,7 +3636,6 @@ public:
     auto& gmTicketTextRef() { return gmTicketText_; }
     auto& bookPagesRef() { return bookPages_; }
     auto& activeTotemSlotsRef() { return activeTotemSlots_; }
-    auto& unitAurasCacheRef() { return unitAurasCache_; }
     auto& lastInteractedGoGuidRef() { return lastInteractedGoGuid_; }
     auto& pendingGameObjectInteractGuidRef() { return pendingGameObjectInteractGuid_; }
 
@@ -4150,7 +4132,6 @@ private:
     uint32_t pingSequence = 0;               // Ping sequence number (increments)
     float timeSinceLastPing = 0.0f;          // Time since last ping sent (seconds)
     float pingInterval = 30.0f;              // Ping interval (30 seconds)
-    float moveHeartbeatInterval_ = 0.5f;
     uint32_t lastLatency = 0;                // Last measured latency (milliseconds)
     std::chrono::steady_clock::time_point pingTimestamp_;  // Time CMSG_PING was sent
     /// When the instance boot timer runs out. Unset while none is running.
@@ -4316,9 +4297,6 @@ private:
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
     uint64_t hookedFishingBobberGuid_ = 0;
 
-    // Talents (dual-spec support)
-    std::unordered_map<uint32_t, TalentEntry> talentCache_;      // talentId -> entry
-    std::unordered_map<uint32_t, TalentTabEntry> talentTabCache_; // tabId -> entry
 
     // ---- Area trigger detection ----
     bool areaTriggerDbcLoaded_ = false;
@@ -4336,7 +4314,6 @@ private:
     std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
     std::unordered_map<uint32_t, std::string> macroNames_;
     std::unordered_map<uint32_t, std::string> macroIcons_;
-    std::unordered_map<uint64_t, std::vector<AuraSlot>> unitAurasCache_; // per-unit aura cache
     uint64_t petGuid_ = 0;
     uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
     uint8_t  petCommand_ = 1;            // 0=stay,1=follow,2=attack,3=dismiss
@@ -4359,8 +4336,6 @@ private:
     std::vector<StabledPet> stabledPets_;
     void handleListStabledPets(network::Packet& packet);
 
-    // Instance difficulty
-    bool inInstance_ = false;
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
@@ -4371,9 +4346,6 @@ private:
     uint8_t  comboPoints_ = 0;
     uint64_t comboTarget_ = 0;
 
-    // Arena team stats (indexed by team slot, updated by SMSG_ARENA_TEAM_STATS)
-    // Arena team rosters (updated by SMSG_ARENA_TEAM_ROSTER)
-    std::vector<ArenaTeamRoster> arenaTeamRosters_;
 
     // Faction standings (factionId → absolute standing value)
     std::unordered_map<uint32_t, int32_t> factionStandings_;
@@ -4409,13 +4381,6 @@ private:
     bool autoFaceTarget_ = false;
     bool autoSelfCast_ = true;
 
-    // Group loot roll state
-    struct LocalLootState {
-        LootResponseData data;
-        bool moneyTaken = false;
-        bool itemAutoLootSent = false;
-    };
-    std::unordered_map<uint64_t, LocalLootState> localLootState_;
     std::vector<PendingLootRetry> pendingGameObjectLootRetries_;
     struct PendingLootOpen {
         uint64_t guid = 0;
@@ -4426,7 +4391,6 @@ private:
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo
     // to send CMSG_LOOT after a gather cast (mining/herbalism) completes.
     uint64_t lastInteractedGoGuid_ = 0;
-    std::unordered_map<uint64_t, float> recentLootMoneyAnnounceCooldowns_;
     uint64_t playerMoneyCopper_ = 0;
     std::optional<uint64_t> protocolMoneyCopper_; // A realm's authoritative extended balance.
     uint32_t playerHonorPoints_ = 0;
@@ -4465,14 +4429,11 @@ private:
     // the GameHandler selection copy this comment used to describe was dead -
     // written by setSelectedQuestLogIndex, read by nobody, while the getter went
     // to the QuestHandler - and has been removed.
-    std::unordered_set<uint32_t> pendingQuestQueryIds_;
     std::unordered_set<uint32_t> trackedQuestIds_;
     std::unordered_set<uint32_t> blobQuestIds_;
     bool pendingLoginQuestResync_ = false;
     float pendingLoginQuestResyncTimeout_ = 0.0f;
 
-    // Quest giver status per NPC
-    std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;
 
     // Faction hostility lookup (populated from FactionTemplate.dbc)
     std::unordered_map<uint32_t, bool> factionHostileMap_;
@@ -4481,10 +4442,6 @@ private:
 
     // Vehicle (WotLK): non-zero when player is seated in a vehicle
     uint32_t vehicleId_ = 0;
-    /// The column the arena rosters are sorted by, so clicking it again knows
-    /// to reverse rather than re-sort the same way.
-    std::string arenaSortKey_;
-    bool arenaSortAscending_ = true;
 
     uint32_t nextMovementTimestampMs();
     void updateClientTaxi(float deltaTime);
@@ -4690,10 +4647,6 @@ private:
     /// "fall back to the local clock".
     GameClock gameClock_;
     void handleLoginSetTimeSpeed(network::Packet& packet);
-
-    // ---- Global Cooldown (GCD) ----
-    float gcdTotal_ = 0.0f;
-    std::chrono::steady_clock::time_point gcdStartedAt_{};
 
     // ---- Weather state (SMSG_WEATHER) ----
     uint32_t weatherType_ = 0;       // 0=clear, 1=rain, 2=snow, 3=storm

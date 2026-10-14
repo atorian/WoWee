@@ -226,6 +226,18 @@ void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
 }
 
 void InventoryHandler::tickLootMoneyFallback(float deltaTime) {
+    // The cooldown that keeps one corpse's coin from being announced twice.
+    // GameHandler counted down a copy of its own that nothing set, so this one
+    // never ran out: a loot guid announced once stayed silent for the session.
+    for (auto it = recentLootMoneyAnnounceCooldowns_.begin(); it != recentLootMoneyAnnounceCooldowns_.end();) {
+        it->second -= deltaTime;
+        if (it->second <= 0.0f) {
+            it = recentLootMoneyAnnounceCooldowns_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     if (pendingLootMoneyNotifyTimer_ <= 0.0f) return;
     pendingLootMoneyNotifyTimer_ -= deltaTime;
     if (pendingLootMoneyNotifyTimer_ > 0.0f) return;

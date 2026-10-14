@@ -1016,6 +1016,13 @@ CHECKS = [
     ("forwarding_ref_check.py",
      r"^(\d+) member\(s\) edited through a reference nothing reads", 0,
      "members edited through a reference nothing reads"),
+    # A field left behind in GameHandler when it moved to a handler, or kept in
+    # two handlers. One side writes its copy and the other reads its own: the
+    # GCD sweep, the arena rosters, party auras and the loot money line were
+    # each broken that way at once, and nothing failed.
+    ("mirrored_state_check.py",
+     r"^(\d+) field\(s\) declared in more than one of them", 0,
+     "fields kept in two classes, written in one and read in the other"),
     # The first shape needed a fallback branch to read the stale copy, and the
     # handlers now always exist, so the branch is what is pinned: AGENTS.md
     # forbids it, and one coming back is a getter with two answers again.

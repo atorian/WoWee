@@ -252,6 +252,9 @@ public:
     /// three events go together.
     void announceQuestLogChanged(uint32_t questId);
 
+    /// Forget which quest queries are in flight, so a login asks again.
+    void clearPendingQuestQueries() { pendingQuestQueryIds_.clear(); }
+
     void clearQuestStateForCharacterSwitch() {
         questLog_.clear();
         pendingQuestQueryIds_.clear();

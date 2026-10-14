@@ -47,6 +47,14 @@ public:
     /// notify, looting money said nothing and played no coin.
     void tickLootMoneyFallback(float deltaTime);
 
+    /// Whether this corpse or chest was opened and still has items in it, by
+    /// what its last loot window held. Tab targeting asks, so a corpse left
+    /// with loot on it stays in the cycle after the fight.
+    [[nodiscard]] bool hasLootLeft(uint64_t guid) const {
+        auto it = localLootState_.find(guid);
+        return it != localLootState_.end() && !it->second.data.items.empty();
+    }
+
     // ---- Item text (books / readable items) ----
     bool isItemTextOpen() const { return itemTextOpen_; }
     const std::string& getItemText() const { return itemText_; }

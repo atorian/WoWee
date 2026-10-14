@@ -855,7 +855,9 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
 
         questHandler_->pendingQuestAcceptTimeoutsRef().clear();
         questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
-        pendingQuestQueryIds_.clear();
+        // QuestHandler's: this cleared a GameHandler copy nothing filled, so
+        // a quest whose query was in flight at logout was never asked again.
+        questHandler_->clearPendingQuestQueries();
         pendingLoginQuestResync_ = true;
         pendingLoginQuestResyncTimeout_ = 10.0f;
         completedQuests_.clear();

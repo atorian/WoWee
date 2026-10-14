@@ -1,6 +1,7 @@
 #include "game/combat_handler.hpp"
 #include "game/combat_text_filter.hpp"
 #include "game/game_handler.hpp"
+#include "game/inventory_handler.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -1614,9 +1615,10 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
         if (!unit) return false;
         if (unit->getHealth() == 0) {
             if (playerInCombat) return false;
-            auto lootIt = owner_.localLootStateRef().find(guid);
-            return lootIt != owner_.localLootStateRef().end() &&
-                   !lootIt->second.data.items.empty();
+            // InventoryHandler keeps the loot state. This asked GameHandler's
+            // copy, which nothing filled, so a looted-but-not-empty corpse was
+            // never a tab target.
+            return owner_.getInventoryHandler()->hasLootLeft(guid);
         }
         const bool hostileByFaction = unit->isHostile();
         const bool hostileByCombat = isAggressiveTowardPlayer(guid);

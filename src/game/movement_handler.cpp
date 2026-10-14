@@ -2231,7 +2231,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     }
 
     owner_.currentMapIdRef() = mapId;
-    owner_.inInstanceRef() = false;
     if (owner_.getSocket()) {
         owner_.getSocket()->tracePacketsFor(std::chrono::seconds(12), "new_world");
     }
@@ -2269,8 +2268,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     }
     owner_.otherPlayerVisibleItemEntriesRef().clear();
     owner_.otherPlayerVisibleDirtyRef().clear();
-    if (owner_.getSpellHandler()) owner_.getSpellHandler()->clearUnitCastStates();
-    owner_.unitAurasCacheRef().clear();
+    owner_.getSpellHandler()->clearUnitCaches();
     owner_.clearCombatText();
     owner_.getEntityManager().clear();
     owner_.clearHostileAttackers();

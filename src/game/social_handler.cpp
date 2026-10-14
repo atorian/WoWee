@@ -2419,8 +2419,11 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
                     if (a.spellId != 0) newAuras.push_back(a);
                 }
             }
+            // Into the cache the party frames read through getUnitAuras. This
+            // wrote GameHandler's copy of it, which nothing read, so a party
+            // member's auras from this packet were never shown.
             if (memberGuid != 0 && memberGuid != owner_.getPlayerGuid() && memberGuid != owner_.getTargetGuid()) {
-                owner_.unitAurasCacheRef()[memberGuid] = std::move(newAuras);
+                owner_.getSpellHandler()->mirrorAurasByGuid(memberGuid, newAuras);
             }
         }
     }
@@ -3648,7 +3651,6 @@ void SocialHandler::handleInstanceDifficulty(network::Packet& packet) {
     } else {
         instanceIsHeroic_ = (instanceDifficulty_ == 1);
     }
-    inInstance_ = true;
     if (instanceDifficulty_ != prevDifficulty) {
         const char* diffLabel = instanceDifficultyName(instanceDifficulty_);
         if (diffLabel) owner_.addSystemChatMessage(std::string("Dungeon difficulty set to ") + diffLabel + ".");
@@ -4469,6 +4471,41 @@ void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
     // would do it too, zero being true in Lua.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("ARENA_TEAM_ROSTER_UPDATE", {});
+    }
+}
+
+void SocialHandler::sortArenaTeamRosters(const std::string& key) {
+    if (key.empty()) return;
+    // The same column twice reverses. A different one starts again in the
+    // direction that column reads best: a name from A, a number from the top.
+    if (key == arenaSortKey_) {
+        arenaSortAscending_ = !arenaSortAscending_;
+    } else {
+        arenaSortKey_ = key;
+        arenaSortAscending_ = (key == "name" || key == "class");
+    }
+    const bool asc = arenaSortAscending_;
+
+    auto value = [&key](const ArenaTeamMember& m) -> uint64_t {
+        if (key == "class")        return m.classId;
+        if (key == "played")       return m.weekGames;
+        if (key == "won")          return m.weekWins;
+        if (key == "seasonplayed") return m.seasonGames;
+        if (key == "seasonwon")    return m.seasonWins;
+        if (key == "rating")       return m.personalRating;
+        return 0;
+    };
+
+    for (auto& roster : arenaTeamRosters_) {
+        std::stable_sort(roster.members.begin(), roster.members.end(),
+            [&](const ArenaTeamMember& a, const ArenaTeamMember& b) {
+                if (key == "name") {
+                    return asc ? (a.name < b.name) : (b.name < a.name);
+                }
+                const uint64_t va = value(a), vb = value(b);
+                if (va == vb) return a.name < b.name;   // steady under ties
+                return asc ? (va < vb) : (vb < va);
+            });
     }
 }
 
