@@ -1652,6 +1652,13 @@ void GameHandler::replyToLastWhisper(const std::string& message) {
     chatHandler_->replyToLastWhisper(message);
 }
 
+std::string GameHandler::getLastWhisperSender() const {
+    return chatHandler_->getLastWhisperSender();
+}
+
+bool GameHandler::isAfk() const { return chatHandler_->isAfk(); }
+bool GameHandler::isDnd() const { return chatHandler_->isDnd(); }
+
 void GameHandler::setGuildBankTabText(uint8_t tab, const std::string& text) {
     socialHandler_->setGuildBankTabText(tab, text);
 }

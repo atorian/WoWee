@@ -2790,6 +2790,22 @@ target_link_libraries(test_rt_build_budget PRIVATE catch2_main)
 add_test(NAME rt_build_budget COMMAND test_rt_build_budget)
 register_test_target(test_rt_build_budget)
 
+# ── The game, end to end ─────────────────────────────────────
+# GameHarness: the real game from wowee_game, talking WotLK to a server that
+# is the test - packets in, and what the game sent back, told the interface
+# and announced on the event bus out. No renderer, no sound, no interface, no
+# account. A test per domain follows a path all the way through, which is
+# where state one side writes and another reads from a different copy shows.
+add_library(wowee_game_harness STATIC game_harness.cpp)
+target_include_directories(wowee_game_harness PUBLIC ${TEST_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(wowee_game_harness SYSTEM PUBLIC ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
+wowee_test_link_glm(wowee_game_harness)
+
+wowee_add_test(test_chat_domain SOURCES test_chat_domain.cpp)
+target_link_libraries(test_chat_domain PRIVATE wowee_game_harness)
+
 # ── test_cvar_store ──────────────────────────────────────────
 # The CVars the game, the interface and the addons share: one name whatever
 # its case, and a value that survives the client closing.

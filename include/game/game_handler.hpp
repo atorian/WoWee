@@ -231,6 +231,10 @@ public:
      */
     WorldState getState() const override { return state; }
 
+    /// Packets received and not yet handled. update() handles them within a
+    /// time budget per frame, so a burst can take several frames.
+    size_t queuedIncomingPacketCount() const { return pendingIncomingPackets_.size(); }
+
     /**
      * Request character list from server
      * Must be called when state is READY or AUTHENTICATED
@@ -927,16 +931,9 @@ public:
     void toggleAfk(const std::string& message = "");
     void toggleDnd(const std::string& message = "");
     void replyToLastWhisper(const std::string& message);
-    std::string getLastWhisperSender() const {
-        if (!lastWhisperSender_.empty()) return lastWhisperSender_;
-        // Name may not have been cached when whisper arrived - resolve from GUID
-        if (lastWhisperSenderGuid_ != 0) {
-            const auto& cache = getPlayerNameCache();
-            auto it = cache.find(lastWhisperSenderGuid_);
-            if (it != cache.end()) return it->second;
-        }
-        return "";
-    }
+    std::string getLastWhisperSender() const;
+    bool isAfk() const;
+    bool isDnd() const;
 
     // Party/Raid management
     /// The info text on a guild bank tab. Tab is zero-based, as stored.
@@ -3419,10 +3416,6 @@ public:
     auto& serverPlayerLevelRef() { return serverPlayerLevel_; }
 
     // ── AFK / DND ────────────────────────────────────────────────────
-    auto& afkMessageRef() { return afkMessage_; }
-    auto& afkStatusRef() { return afkStatus_; }
-    auto& dndMessageRef() { return dndMessage_; }
-    auto& dndStatusRef() { return dndStatus_; }
 
     // ── Movement & Transport ─────────────────────────────────────────
     auto& followRenderPosRef() { return followRenderPos_; }
@@ -3529,8 +3522,6 @@ public:
     auto& ignoreListGuidsRef() { return ignoreListGuids_; }
     auto& lastContactListCountRef() { return lastContactListCount_; }
     auto& lastContactListMaskRef() { return lastContactListMask_; }
-    auto& lastWhisperSenderRef() { return lastWhisperSender_; }
-    auto& lastWhisperSenderGuidRef() { return lastWhisperSenderGuid_; }
     std::vector<MailMessage>& mailInboxRef();
 
     // ── World, Map & Zones ───────────────────────────────────────────
@@ -4146,13 +4137,6 @@ private:
     uint64_t followTargetGuid_ = 0;
     glm::vec3 followRenderPos_{0.0f};  // Render-space position of followed entity (updated each frame)
 
-    // ---- AFK/DND status ----
-    bool afkStatus_ = false;
-    bool dndStatus_ = false;
-    std::string afkMessage_;
-    std::string dndMessage_;
-    std::string lastWhisperSender_;
-    uint64_t lastWhisperSenderGuid_ = 0;
 
     // ---- Online item tracking ----
     std::unordered_map<uint64_t, OnlineItemInfo> onlineItems_;

@@ -86,6 +86,12 @@ public:
     void toggleAfk(const std::string& message);
     void toggleDnd(const std::string& message);
     void replyToLastWhisper(const std::string& message);
+    [[nodiscard]] bool isAfk() const { return afk_; }
+    [[nodiscard]] bool isDnd() const { return dnd_; }
+    /// Who /r answers: the last player to whisper, by the name the whisper
+    /// came with or, when it came with none, the one the name cache has for
+    /// that guid since.
+    [[nodiscard]] std::string getLastWhisperSender() const;
 
     // ---- Methods moved from GameHandler ----
     void submitGmTicket(const std::string& text);
@@ -110,6 +116,11 @@ public:
     ChatAutoJoin chatAutoJoin;
 
 private:
+    /// A line on the wire, with its local echo. sendChatMessage is the player
+    /// speaking - which also ends AFK - and calls this; an answer given for
+    /// the player, such as the AFK auto-reply, calls it directly.
+    void sendLine(ChatType type, const std::string& message, const std::string& target);
+
     /// A chat line waiting for a name: its sender's, or that of the player an
     /// NPC's line is written for. See deliverChatMessage.
     struct ChatAwaitingName {
@@ -174,9 +185,19 @@ private:
     std::string chatLogPath_;
     std::ofstream chatLogStream_;
 
+    // Away and do-not-disturb, with what the auto-reply says for each.
+    bool afk_ = false;
+    bool dnd_ = false;
+    std::string afkMessage_;
+    std::string dndMessage_;
     // Track senders we've already auto-replied to (AFK/DND) this session
     // to prevent infinite reply loops. Cleared when AFK/DND is toggled off.
     std::unordered_set<std::string> afkAutoRepliedSenders_;
+
+    // The last player to whisper, for /r. The guid as well as the name: a
+    // whisper can arrive before its sender's name does.
+    std::string lastWhisperSender_;
+    uint64_t lastWhisperSenderGuid_ = 0;
 };
 
 } // namespace game

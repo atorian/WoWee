@@ -2991,10 +2991,8 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             }
         }
 
-        // Backfill whisper reply target if the name arrived after the whisper.
-        if (owner_.lastWhisperSenderGuidRef() == data.guid && owner_.lastWhisperSenderRef().empty()) {
-            owner_.lastWhisperSenderRef() = data.name;
-        }
+        // The whisper reply target needs no backfill: ChatHandler keeps the
+        // whisperer's guid and finds the name in the cache this just filled.
 
         // Backfill mail inbox sender names
         for (auto& mail : owner_.mailInboxRef()) {

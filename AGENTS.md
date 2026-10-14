@@ -75,13 +75,14 @@ rendering/  -> pipeline/                                   (wowee_render: not ga
   `WOWEE_RENDER_CLIENT_SOURCES`) draws what it is handed and knows nothing of
   the game, the interface, the sound or the network.
   `tools/render_dependency_check.py` enforces it through `sweep_guard`.
-- **The game** (`src/game`) is the protocol and the state it builds. It does not
-  draw, play sounds or reach the `Application`: it publishes what happened on
-  the event bus and is handed what it must ask (`GameServices`: the emote
-  table, the movement collision; `TransportScene` for transport hulls).
-  `tools/game_dependency_check.py` counts what it still includes of the
-  presentation (the sound, the FrameXML handover, the addons' CVars); the
-  limit in `sweep_guard` only goes down.
+- **The game** (`src/game`, the `wowee_game` library) is the protocol and the
+  state it builds. It does not draw, play sounds or reach the `Application`:
+  it publishes what happened on the event bus and is handed what it must ask
+  (`GameServices`: the emote table, the movement collision, the CVar store,
+  the world connection; `TransportScene` for transport hulls). Which sound,
+  toast or voice line answers an event is the client's choice, not the
+  game's. `tools/game_dependency_check.py` holds its includes of the
+  presentation at zero.
 - **core/** is the client: it owns everything, subscribes to the game's events
   and turns them into pictures and sound (`SpellPresentation`, `PlayerView`,
   the `*CallbackHandler`s), and implements the game's query interfaces over
@@ -101,6 +102,20 @@ tools/scene_render.sh tools/scene_render/scenes/lamppost.json build-dev/scratch/
 A renderer edit rebuilds only the renderer and this; shader edits only need
 `ninja -C build-dev wowee_shaders`. Use it before reaching for the client, and
 keep it building: nothing in `wowee_render` may need the game to link.
+
+### Testing the game without the client
+
+`tests/game_harness.hpp` (`GameHarness`) runs the real `GameHandler` from
+`wowee_game` against a server that is the test - no renderer, sound,
+interface, server or account. `enterWorld()` logs a character in; `receive`
+plays a server packet, `pump()` runs frames until it is handled; `lastSent` /
+`sentOpcodes` read what the game sent back, `addonEvents(name)` what it told
+FrameXML, and `events()` is the bus to subscribe to.
+
+Write a domain's tests end to end, as `tests/test_chat_domain.cpp` does: a
+packet in, the state it builds, what the interface is told, and the command
+that reads that state back out. That is where a copy of the state that one
+side writes and the other reads shows up; a parser test cannot see it.
 
 ## Game layer architecture (`src/game`, `include/game`)
 

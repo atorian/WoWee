@@ -320,11 +320,15 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     // takes - moving clears it too - but it is the one that matters, because
     // it is the one where the player is visibly present and being answered
     // for by a machine.
-    if (owner_.afkStatusRef() &&
+    if (afk_ &&
         owner_.cvars().get("autoClearAFK", "1") != "0") {
         toggleAfk("");
     }
 
+    sendLine(type, message, target);
+}
+
+void ChatHandler::sendLine(ChatType type, const std::string& message, const std::string& target) {
     if (message.empty()) {
         LOG_WARNING("Cannot send empty chat message");
         return;
@@ -423,7 +427,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     // Skip server echo of our own messages (we already added a local echo)
     if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
         if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
-            owner_.lastWhisperSenderRef() = data.senderName;
+            lastWhisperSender_ = data.senderName;
         }
         return;
     }
@@ -709,18 +713,23 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // Always store GUID so getLastWhisperSender() can resolve the name
         // from the player name cache even if name wasn't available yet
         if (data.senderGuid != 0)
-            owner_.lastWhisperSenderGuidRef() = data.senderGuid;
+            lastWhisperSenderGuid_ = data.senderGuid;
         if (!data.senderName.empty())
-            owner_.lastWhisperSenderRef() = data.senderName;
+            lastWhisperSender_ = data.senderName;
 
         if (!data.senderName.empty()) {
-            // Only auto-reply once per sender per AFK/DND session to prevent loops
-            if (owner_.afkStatusRef() && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = owner_.afkMessageRef().empty() ? "Away from Keyboard" : owner_.afkMessageRef();
-                sendChatMessage(ChatType::WHISPER, "<AFK> " + reply, data.senderName);
-            } else if (owner_.dndStatusRef() && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = owner_.dndMessageRef().empty() ? "Do Not Disturb" : owner_.dndMessageRef();
-                sendChatMessage(ChatType::WHISPER, "<DND> " + reply, data.senderName);
+            // Only auto-reply once per sender per AFK/DND session to prevent loops.
+            //
+            // Sent as a line, not as the player speaking: sendChatMessage
+            // takes the player out of AFK (autoClearAFK), so the first answer
+            // given for them ended the absence it was announcing and the next
+            // whisperer was answered by nobody.
+            if (afk_ && afkAutoRepliedSenders_.insert(data.senderName).second) {
+                std::string reply = afkMessage_.empty() ? "Away from Keyboard" : afkMessage_;
+                sendLine(ChatType::WHISPER, "<AFK> " + reply, data.senderName);
+            } else if (dnd_ && afkAutoRepliedSenders_.insert(data.senderName).second) {
+                std::string reply = dndMessage_.empty() ? "Do Not Disturb" : dndMessage_;
+                sendLine(ChatType::WHISPER, "<DND> " + reply, data.senderName);
             }
         }
     }
@@ -1299,51 +1308,51 @@ void ChatHandler::addSystemChatMessage(const std::string& message) {
 }
 
 void ChatHandler::toggleAfk(const std::string& message) {
-    owner_.afkStatusRef() = !owner_.afkStatusRef();
-    owner_.afkMessageRef() = message;
+    afk_ = !afk_;
+    afkMessage_ = message;
 
-    if (owner_.afkStatusRef()) {
+    if (afk_) {
         if (message.empty()) {
             addSystemChatMessage("You are now AFK.");
         } else {
             addSystemChatMessage("You are now AFK: " + message);
         }
         // If DND was active, turn it off
-        if (owner_.dndStatusRef()) {
-            owner_.dndStatusRef() = false;
-            owner_.dndMessageRef().clear();
+        if (dnd_) {
+            dnd_ = false;
+            dndMessage_.clear();
         }
     } else {
         addSystemChatMessage("You are no longer AFK.");
-        owner_.afkMessageRef().clear();
+        afkMessage_.clear();
         afkAutoRepliedSenders_.clear();
     }
 
-    LOG_INFO("AFK status: ", owner_.afkStatusRef(), ", message: ", message);
+    LOG_INFO("AFK status: ", afk_, ", message: ", message);
 }
 
 void ChatHandler::toggleDnd(const std::string& message) {
-    owner_.dndStatusRef() = !owner_.dndStatusRef();
-    owner_.dndMessageRef() = message;
+    dnd_ = !dnd_;
+    dndMessage_ = message;
 
-    if (owner_.dndStatusRef()) {
+    if (dnd_) {
         if (message.empty()) {
             addSystemChatMessage("You are now DND (Do Not Disturb).");
         } else {
             addSystemChatMessage("You are now DND: " + message);
         }
         // If AFK was active, turn it off
-        if (owner_.afkStatusRef()) {
-            owner_.afkStatusRef() = false;
-            owner_.afkMessageRef().clear();
+        if (afk_) {
+            afk_ = false;
+            afkMessage_.clear();
         }
     } else {
         addSystemChatMessage("You are no longer DND.");
-        owner_.dndMessageRef().clear();
+        dndMessage_.clear();
         afkAutoRepliedSenders_.clear();
     }
 
-    LOG_INFO("DND status: ", owner_.dndStatusRef(), ", message: ", message);
+    LOG_INFO("DND status: ", dnd_, ", message: ", message);
 }
 
 void ChatHandler::replyToLastWhisper(const std::string& message) {
@@ -1352,7 +1361,10 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
         return;
     }
 
-    if (owner_.lastWhisperSenderRef().empty()) {
+    // The same answer the interface is given: a whisper whose name arrived
+    // later is still answerable by its guid.
+    const std::string target = getLastWhisperSender();
+    if (target.empty()) {
         addSystemChatMessage("No one has whispered you yet.");
         return;
     }
@@ -1363,8 +1375,17 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
     }
 
     // Send whisper using the standard message chat function
-    sendChatMessage(ChatType::WHISPER, message, owner_.lastWhisperSenderRef());
-    LOG_INFO("Replied to ", owner_.lastWhisperSenderRef(), ": ", message);
+    sendChatMessage(ChatType::WHISPER, message, target);
+    LOG_INFO("Replied to ", target, ": ", message);
+}
+
+std::string ChatHandler::getLastWhisperSender() const {
+    if (!lastWhisperSender_.empty()) return lastWhisperSender_;
+    if (lastWhisperSenderGuid_ != 0) {
+        const auto& cache = owner_.getPlayerNameCache();
+        if (auto it = cache.find(lastWhisperSenderGuid_); it != cache.end()) return it->second;
+    }
+    return {};
 }
 
 // ============================================================
