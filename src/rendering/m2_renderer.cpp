@@ -1336,6 +1336,8 @@ void M2ModelGPU::CollisionMesh::build() {
         bmin = glm::min(bmin, v);
         bmax = glm::max(bmax, v);
     }
+    boundMin = bmin;
+    boundMax = bmax;
 
     gridOrigin = glm::vec2(bmin.x, bmin.y);
     gridCellsX = std::max(1, std::min(32, static_cast<int>(std::ceil((bmax.x - bmin.x) / CELL_SIZE))));
@@ -1685,15 +1687,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     gpuModel.isInvisibleTrap             = cls.isInvisibleTrap;
-    gpuModel.collisionSteppedFountain    = cls.collisionSteppedFountain;
-    gpuModel.collisionSteppedLowPlatform = cls.collisionSteppedLowPlatform;
-    gpuModel.collisionBridge             = cls.collisionBridge;
-    gpuModel.collisionPlanter            = cls.collisionPlanter;
-    gpuModel.collisionStatue             = cls.collisionStatue;
-    gpuModel.collisionTreeTrunk          = cls.collisionTreeTrunk;
-    gpuModel.collisionNarrowVerticalProp = cls.collisionNarrowVerticalProp;
-    gpuModel.collisionSmallSolidProp     = cls.collisionSmallSolidProp;
-    gpuModel.collisionNoBlock            = cls.collisionNoBlock;
     gpuModel.isGroundDetail              = cls.isGroundDetail;
     gpuModel.isFoliageLike               = cls.isFoliageLike;
     gpuModel.disableAnimation            = cls.disableAnimation;

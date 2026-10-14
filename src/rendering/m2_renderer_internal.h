@@ -117,72 +117,17 @@ inline float computeGroundDetailDownOffset(const M2ModelGPU& model, float scale)
     return pivotComp + terrainSink;
 }
 
-inline void getTightCollisionBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {
-    glm::vec3 center = (model.boundMin + model.boundMax) * 0.5f;
-    glm::vec3 half = (model.boundMax - model.boundMin) * 0.5f;
-
-    if (model.collisionTreeTrunk) {
-        float modelHoriz = std::max(model.boundMax.x - model.boundMin.x,
-                                    model.boundMax.y - model.boundMin.y);
-        float trunkHalf = std::clamp(modelHoriz * 0.05f, 0.5f, 5.0f);
-        half.x = trunkHalf;
-        half.y = trunkHalf;
-        half.z = std::min(trunkHalf * 2.5f, 3.5f);
-        center.z = model.boundMin.z + half.z;
-    } else if (model.collisionNarrowVerticalProp) {
-        half.x *= 0.30f;
-        half.y *= 0.30f;
-        half.z *= 0.96f;
-    } else if (model.collisionSmallSolidProp) {
-        half.x *= 1.00f;
-        half.y *= 1.00f;
-        half.z *= 1.00f;
-    } else if (model.collisionSteppedLowPlatform) {
-        half.x *= 0.98f;
-        half.y *= 0.98f;
-        half.z *= 0.52f;
+/// The model-space box an instance is filed under for collision queries: its
+/// collision mesh's, or for a model without one - which collides with
+/// nothing - its visual bounds.
+inline void collisionLocalBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {
+    if (model.collision.valid()) {
+        outMin = model.collision.boundMin;
+        outMax = model.collision.boundMax;
     } else {
-        half.x *= 0.66f;
-        half.y *= 0.66f;
-        half.z *= 0.76f;
+        outMin = model.boundMin;
+        outMax = model.boundMax;
     }
-
-    outMin = center - half;
-    outMax = center + half;
-}
-
-inline float getEffectiveCollisionTopLocal(const M2ModelGPU& model,
-                                           const glm::vec3& localPos,
-                                           const glm::vec3& localMin,
-                                           const glm::vec3& localMax) {
-    if (!model.collisionSteppedFountain && !model.collisionSteppedLowPlatform) {
-        return localMax.z;
-    }
-
-    glm::vec2 center((localMin.x + localMax.x) * 0.5f, (localMin.y + localMax.y) * 0.5f);
-    glm::vec2 half((localMax.x - localMin.x) * 0.5f, (localMax.y - localMin.y) * 0.5f);
-    if (half.x < 1e-4f || half.y < 1e-4f) {
-        return localMax.z;
-    }
-
-    float nx = (localPos.x - center.x) / half.x;
-    float ny = (localPos.y - center.y) / half.y;
-    float r = std::sqrt(nx * nx + ny * ny);
-
-    float h = localMax.z - localMin.z;
-    if (model.collisionSteppedFountain) {
-        if (r > 0.85f) return localMin.z + h * 0.18f;
-        if (r > 0.65f) return localMin.z + h * 0.36f;
-        if (r > 0.45f) return localMin.z + h * 0.54f;
-        if (r > 0.28f) return localMin.z + h * 0.70f;
-        if (r > 0.14f) return localMin.z + h * 0.84f;
-        return localMin.z + h * 0.96f;
-    }
-
-    float edge = std::max(std::abs(nx), std::abs(ny));
-    if (edge > 0.92f) return localMin.z + h * 0.06f;
-    if (edge > 0.72f) return localMin.z + h * 0.30f;
-    return localMin.z + h * 0.62f;
 }
 
 inline bool segmentIntersectsAABB(const glm::vec3& from, const glm::vec3& to,

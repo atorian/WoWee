@@ -60,17 +60,6 @@ enum class AmbientEmitterType : uint8_t {
  * Pure data - no Vulkan, GPU, or asset-manager dependencies.
  */
 struct M2ClassificationResult {
-    // --- Collision shape selectors ---
-    bool collisionNoBlock            = false; ///< Foliage/soft-trees/rugs: no blocking
-    bool collisionBridge             = false; ///< Walk-on-top bridge/plank/walkway
-    bool collisionPlanter            = false; ///< Low stepped planter/curb
-    bool collisionSteppedFountain    = false; ///< Stepped fountain base
-    bool collisionSteppedLowPlatform = false; ///< Low stepped platform (curb/planter/bridge)
-    bool collisionStatue             = false; ///< Statue/monument/sculpture
-    bool collisionSmallSolidProp     = false; ///< Blockable solid prop (crate/chest/barrel)
-    bool collisionNarrowVerticalProp = false; ///< Narrow tall prop (lamp/post/pole)
-    bool collisionTreeTrunk          = false; ///< Tree trunk cylinder
-
     // --- Rendering / effect classification ---
     bool isFoliageLike      = false; ///< Foliage or tree (wind sway, disabled animation)
     bool isSmallFoliage     = false; ///< Small bush/grass/plant (skip during taxi/flight)

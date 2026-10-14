@@ -205,3 +205,21 @@ TEST_CASE("Dalaran's lamp carries a light that comes on with its Opened state",
     REQUIRE_FALSE(light.attenuationEnd.sequences.empty());
     CHECK(light.attenuationEnd.sequences[0].floatValues.front() == Catch::Approx(8.80f).margin(0.01f));
 }
+
+TEST_CASE("a doodad collides by its own collision mesh, which bushes do not carry",
+          "[m2][collision][asset]") {
+    // Collision comes from the model's collision triangles and nothing else,
+    // as in the client. These are the data that decide it: a bush and the
+    // Rut'theran portal arch carry none, a tree and a fence do.
+    const auto trisOf = [](const char* path) -> long {
+        const auto data = wowee::test::readFile(std::string("Data/expansions/wotlk/") + path);
+        if (data.empty()) return -1;
+        return static_cast<long>(wowee::pipeline::M2Loader::load(data).collisionIndices.size() / 3);
+    };
+    const long bush = trisOf("world/azeroth/elwynn/passivedoodads/bush/elwynnbush01.m2");
+    if (bush < 0) { SUCCEED("optional WotLK assets are not extracted"); return; }
+    CHECK(bush == 0);
+    CHECK(trisOf("world/generic/nightelf/passive doodads/teleporttree/teleporttree.m2") == 0);
+    CHECK(trisOf("world/azeroth/elwynn/passivedoodads/trees/elwynntreecanopy01.m2") > 0);
+    CHECK(trisOf("world/azeroth/elwynn/passivedoodads/elwynnfences/elwynnwoodfence01.m2") > 0);
+}

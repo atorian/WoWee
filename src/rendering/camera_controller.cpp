@@ -2114,7 +2114,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     const float boomReach = cameraBoomReach(currentDistance, userTargetDistance);
     float boomHit = boomReach;
     if (wmoRenderer) boomHit = std::min(boomHit, wmoRenderer->raycastBoundingBoxes(pivot, camDir, boomReach));
-    if (m2Renderer) boomHit = std::min(boomHit, m2Renderer->raycastBoundingBoxes(pivot, camDir, boomReach));
+    if (m2Renderer) boomHit = std::min(boomHit, m2Renderer->raycastCollision(pivot, camDir, boomReach));
     if (terrainManager && !cachedInsideInteriorWMO) {
         boomHit = std::min(boomHit, raymarchTerrainCameraLimit(pivot, camDir, boomReach));
     }
@@ -2145,7 +2145,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             const glm::vec3 dir = along / length;
             float hit = length;
             if (wmoRenderer) hit = std::min(hit, wmoRenderer->raycastBoundingBoxes(from, dir, length));
-            if (m2Renderer) hit = std::min(hit, m2Renderer->raycastBoundingBoxes(from, dir, length));
+            if (m2Renderer) hit = std::min(hit, m2Renderer->raycastCollision(from, dir, length));
             if (hit < length) clear = std::min(clear, std::max(hit - kCameraBoomPad, 0.0f) / length);
         }
         if (clear < 1.0f) {

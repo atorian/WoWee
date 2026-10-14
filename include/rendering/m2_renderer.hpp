@@ -141,15 +141,6 @@ struct M2ModelGPU {
     glm::vec3 boundMin;
     glm::vec3 boundMax;
     float boundRadius = 0.0f;
-    bool collisionSteppedFountain = false;
-    bool collisionSteppedLowPlatform = false;
-    bool collisionPlanter = false;
-    bool collisionBridge = false;
-    bool collisionSmallSolidProp = false;
-    bool collisionNarrowVerticalProp = false;
-    bool collisionTreeTrunk = false;
-    bool collisionNoBlock = false;
-    bool collisionStatue = false;
     bool isSmallFoliage = false;    // Small foliage (bushes, grass, plants) - skip during taxi
     bool isInvisibleTrap = false;   // Invisible trap objects (don't render, no collision)
     bool isGroundDetail = false;    // Ground clutter/detail doodads (special fallback render path)
@@ -167,6 +158,9 @@ struct M2ModelGPU {
         std::vector<glm::vec3> vertices;
         std::vector<uint16_t> indices;
         uint32_t triCount = 0;
+        /// The box around the vertices, in model space.
+        glm::vec3 boundMin{0.0f};
+        glm::vec3 boundMax{0.0f};
 
         struct TriBounds { float minZ, maxZ; };
         std::vector<TriBounds> triBounds;
@@ -748,7 +742,9 @@ public:
     /// a floor that should have come from a lift deck and did not left no
     /// trace at all beyond "m2=-99999".
     void debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const;
-    [[nodiscard]] float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
+    /// How far along a ray the first doodad collision triangle lies, up to
+    /// maxDistance: the camera's doodad collision.
+    [[nodiscard]] float raycastCollision(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
 
     void resetQueryStats();

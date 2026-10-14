@@ -86,10 +86,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("%s  version %u  flags 0x%x  combos %zu  bones %zu  emitters %zu  ribbons %zu\n",
+    std::printf("%s  version %u  flags 0x%x  combos %zu  bones %zu  emitters %zu  ribbons %zu"
+                "  collision tris %zu\n",
                 model.name.c_str(), model.version, model.globalFlags,
                 model.textureCombinerCombos.size(), model.bones.size(),
-                model.particleEmitters.size(), model.ribbonEmitters.size());
+                model.particleEmitters.size(), model.ribbonEmitters.size(),
+                model.collisionIndices.size() / 3);
     std::printf("textures:\n");
     for (size_t i = 0; i < model.textures.size(); ++i) {
         const auto& t = model.textures[i];
