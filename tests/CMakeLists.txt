@@ -2802,30 +2802,38 @@ wowee_test_link_glm(test_m2_cull_grid)
 add_test(NAME m2_cull_grid COMMAND test_m2_cull_grid)
 register_test_target(test_m2_cull_grid)
 
-# ── The protocol from its library, never a copy ──────────────
-# Keep this last, after every test is declared. A test that names one of
-# wowee_protocol's sources has that source taken out of its own list and links
+# ── The libraries' sources from their libraries, never a copy ─
+# Keep this last, after every test is declared. A test that names a source one
+# of these libraries builds has that source taken out of its own list and links
 # the library instead. Each test used to compile what it needed itself: the
 # packet layer was built 21 times over, about a third of a full build's work,
 # and a new test copying its neighbour's list would bring that back.
-set(_wowee_protocol_paths "")
-foreach(_source IN LISTS WOWEE_PROTOCOL_SOURCES)
-    list(APPEND _wowee_protocol_paths ${CMAKE_SOURCE_DIR}/${_source})
-endforeach()
+set(_wowee_test_libraries
+    wowee_net      WOWEE_NET_SOURCES
+    wowee_protocol WOWEE_PROTOCOL_SOURCES
+    wowee_base     WOWEE_BASE_SOURCES
+)
 get_property(_wowee_test_targets GLOBAL PROPERTY WOWEE_ALL_TEST_TARGETS)
-foreach(_test IN LISTS _wowee_test_targets)
-    get_target_property(_test_sources ${_test} SOURCES)
-    set(_own_sources "")
-    set(_needs_protocol FALSE)
-    foreach(_source IN LISTS _test_sources)
-        if(_source IN_LIST _wowee_protocol_paths)
-            set(_needs_protocol TRUE)
-        else()
-            list(APPEND _own_sources ${_source})
+while(_wowee_test_libraries)
+    list(POP_FRONT _wowee_test_libraries _library _sources_var)
+    set(_library_paths "")
+    foreach(_source IN LISTS ${_sources_var})
+        list(APPEND _library_paths ${CMAKE_SOURCE_DIR}/${_source})
+    endforeach()
+    foreach(_test IN LISTS _wowee_test_targets)
+        get_target_property(_test_sources ${_test} SOURCES)
+        set(_own_sources "")
+        set(_needs_library FALSE)
+        foreach(_source IN LISTS _test_sources)
+            if(_source IN_LIST _library_paths)
+                set(_needs_library TRUE)
+            else()
+                list(APPEND _own_sources ${_source})
+            endif()
+        endforeach()
+        if(_needs_library)
+            set_property(TARGET ${_test} PROPERTY SOURCES ${_own_sources})
+            target_link_libraries(${_test} PRIVATE ${_library})
         endif()
     endforeach()
-    if(_needs_protocol)
-        set_property(TARGET ${_test} PROPERTY SOURCES ${_own_sources})
-        target_link_libraries(${_test} PRIVATE wowee_protocol)
-    endif()
-endforeach()
+endwhile()

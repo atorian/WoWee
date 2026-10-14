@@ -1163,6 +1163,9 @@ set(WOWEE_SOURCES
 set(WOWEE_BASE_SOURCES
     src/core/logger.cpp
     src/core/memory_monitor.cpp
+    src/core/app_clock.cpp
+    src/core/config_paths.cpp
+    src/math/spline.cpp
 )
 set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_PIPELINE_SOURCES INCLUDE REGEX "^src/pipeline/")
@@ -1203,6 +1206,16 @@ set(WOWEE_PROTOCOL_SOURCES
     src/game/packet_parsers_tbc.cpp
 )
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_PROTOCOL_SOURCES})
+# wowee_net: the connections the wire travels over. The TCP socket, the world
+# socket's framing and header encryption, and the one HTTPS GET the client
+# makes. On wowee_protocol, which it frames; nothing above it.
+set(WOWEE_NET_SOURCES
+    src/network/socket.cpp
+    src/network/tcp_socket.cpp
+    src/network/world_socket.cpp
+    src/core/https_get.cpp
+)
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_NET_SOURCES})
 
 set(WOWEE_HEADERS
     include/core/application.hpp
@@ -1646,12 +1659,22 @@ target_precompile_headers(wowee_protocol PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
 
+add_library(wowee_net STATIC ${WOWEE_NET_SOURCES})
+target_link_libraries(wowee_net PUBLIC wowee_protocol wowee_base OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+if(WIN32)
+    target_link_libraries(wowee_net PUBLIC ws2_32)
+endif()
+target_precompile_headers(wowee_net PRIVATE
+    ${WOWEE_PCH_STD}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol
+    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net
                           PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_protocol wowee_base)
+target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
 
 # Compiler warnings.
 #
@@ -1785,7 +1808,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol)
+foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
