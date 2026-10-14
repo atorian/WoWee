@@ -37,6 +37,16 @@ import sys
 TOOLS = pathlib.Path(__file__).resolve().parent
 ROOT = TOOLS.parent
 
+# The tree is UTF-8, and the sweeps read it with read_text() and open() and no
+# encoding - nearly three hundred of them. That is UTF-8 on Linux and the ANSI
+# code page on Windows, where cp1251 cannot decode a box-drawing character and
+# the sweep dies, or reads mojibake under errors="ignore" and reports nothing.
+# UTF-8 mode makes the default UTF-8 everywhere (it is Python 3.15's default),
+# for this process and, through PYTHONUTF8, every sweep it starts.
+if not sys.flags.utf8_mode:
+    os.environ["PYTHONUTF8"] = "1"
+    sys.exit(subprocess.run([sys.executable, "-X", "utf8", *sys.argv]).returncode)
+
 # tool, pattern capturing the count, ceiling, what the count means
 CHECKS = [
     # The settings screens are generated from one schema; saving them is not.
@@ -1006,17 +1016,21 @@ CHECKS = [
     ("forwarding_ref_check.py",
      r"^(\d+) member\(s\) edited through a reference nothing reads", 0,
      "members edited through a reference nothing reads"),
+    # The first shape needed a fallback branch to read the stale copy, and the
+    # handlers now always exist, so the branch is what is pinned: AGENTS.md
+    # forbids it, and one coming back is a getter with two answers again.
     ("forwarding_ref_check.py",
-     r"^(\d+) member\(s\) written locally and read through a sub-handler", 0,
-     "members written locally while every reader forwards"),
+     r"^(\d+) fallback branch\(es\) on a handler that always exists", 0,
+     "fallback branches on a handler that always exists"),
     # A function whose last caller moved away compiles, links and passes every
     # test. 102 members and six free functions had, across the GameHandler
-    # decomposition and the FrameXML transition; what is left at two is a pair
-    # the scan cannot see through, a call on a continuation line and a
-    # multi-line qualified one. The .w* format headers are counted separately
-    # because an unused accessor there is API rather than dead weight.
+    # decomposition and the FrameXML transition. The last two the scan could
+    # not see through - a call on a continuation line and a multi-line
+    # qualified one - it now reads. The .w* format headers are counted
+    # separately because an unused accessor there is API rather than dead
+    # weight.
     ("dead_symbol_check.py",
-     r"^(\d+) of those outside the \.w\* format headers", 2,
+     r"^(\d+) of those outside the \.w\* format headers", 0,
      "declared functions with no caller"),
     # `return 8` hands back the top eight of the stack, so a pop between the
     # values a binding built and its return slides the window down onto

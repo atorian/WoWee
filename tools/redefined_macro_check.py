@@ -75,7 +75,7 @@ def main():
                 previous = lines[i - 1] if i else ""
                 if re.match(r"\s*#\s*ifndef\s+%s\s*$" % name, previous):
                     continue
-                unguarded.append((str(path.relative_to(ROOT)), i + 1, name))
+                unguarded.append((path.relative_to(ROOT).as_posix(), i + 1, name))
 
     print(f"{len(macros)} macro(s) the build defines for every file: "
           f"{', '.join(sorted(macros))}\n")

@@ -28,9 +28,6 @@ WHAT IT CANNOT SEE, AND WHY IT REPORTS RATHER THAN JUDGES
   * Anything reached through a function pointer or a dispatch table.
   * Constructors, destructors and operators, which are skipped outright.
 
-It also misses a call split across lines, where the name sits on a
-continuation with no statement keyword in front of it.
-
 **The counted surface is src/, include/, tests/ and tools/ - and tools/ holds
 516 more C++ files than anyone remembers, including the whole standalone world
 editor.** A grep scoped to src/ and include/ says "dead" about functions the
@@ -72,9 +69,16 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # parse as declarations too, which discards their call sites the same way.
 STATEMENT_START = re.compile(r"^\s*(?:return|else|do|case|co_return|throw)\b")
 
+# A return type: words, scopes, pointers, references - and commas only inside
+# template brackets, as in `std::array<int32_t, 5>&`. A bare comma means the
+# line is an argument list's continuation: `    taxiFlight_, isFootstep();`
+# read as a declaration whose type was `taxiFlight_,`, and its one caller was
+# discarded as the declaration.
+RETURN_TYPE = r"\w(?:[\w:\s\*&]|<[^;(){}]*>)*?[\s\*&>]"
+
 DECL = re.compile(
     r"^\s{2,}(?:virtual\s+|static\s+|inline\s+|explicit\s+|\[\[nodiscard\]\]\s+)*"
-    r"(?:const\s+)?\w[\w:<>,\s\*&]*?[\s\*&](\w+)\s*\([^;{]*\)\s*(?:const\s*)?"
+    r"(?:const\s+)?" + RETURN_TYPE + r"(\w+)\s*\([^;{]*\)\s*(?:const\s*)?"
     r"(?:noexcept\s*)?(?:override\s*)?(?:=\s*0\s*)?;\s*$")
 
 # `void Class::name(` at the start of a line: the out-of-line definition.
@@ -83,7 +87,11 @@ DECL = re.compile(
 # line looks the same - `audio::AudioEngine::instance().setMasterVolume(x);`
 # reads as a definition of `instance` - so discarding the whole line loses
 # every other name on it, and setMasterVolume looked dead with three callers.
-DEFN = re.compile(r"^[\w:<>,\s\*&]*\b\w+::(\w+)\s*\(")
+#
+# At column 0, too: a definition sits at namespace scope, a call inside a body.
+# `        ui::setTypedInputProbe(` with its argument on the next line is a call
+# and was read as the definition of the function it calls.
+DEFN = re.compile(r"^(?!\s)[\w:<>,\s\*&]*\b\w+::(\w+)\s*\(")
 
 # A free function at namespace scope, declared or defined inline in a header:
 # `bool waterCellRendered(...);` or `inline void foo(...) {`. These are the
@@ -92,7 +100,7 @@ DEFN = re.compile(r"^[\w:<>,\s\*&]*\b\w+::(\w+)\s*\(")
 # get its first.
 FREE_DECL = re.compile(
     r"^(?:inline\s+|static\s+|constexpr\s+|\[\[nodiscard\]\]\s+)*"
-    r"(?:const\s+)?\w[\w:<>,\s\*&]*?[\s\*&](\w+)\s*\([^;{]*\)\s*(?:const\s*)?"
+    r"(?:const\s+)?" + RETURN_TYPE + r"(\w+)\s*\([^;{]*\)\s*(?:const\s*)?"
     r"(?:noexcept\s*)?[;{]\s*$")
 
 # A free function's *definition* head. Unlike a member, it carries no
@@ -135,7 +143,7 @@ def declared_members():
             # rough stand-in. Member functions here are lowerCamelCase.
             if name[0].isupper():
                 continue
-            out[name].add(str(path.relative_to(ROOT)))
+            out[name].add(path.relative_to(ROOT).as_posix())
     return out
 
 

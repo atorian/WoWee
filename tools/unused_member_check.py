@@ -88,9 +88,20 @@ def main():
     #
     # When no matching .cpp exists the scope falls back to everything, which
     # under-reports rather than inventing a finding.
+    #
+    # A file name is only a convention, though. SpellVisualSystem's state
+    # visuals live in spell_visual_state.cpp, and every member they use read
+    # as never read. So a class's files are also the ones that define its
+    # methods - `SpellVisualSystem::loadStateKits(` - whatever they are called.
     by_stem = {}
     for path in corpus:
         by_stem.setdefault(path.stem, []).append(path)
+    defines = {}
+    for path, text in corpus.items():
+        if path.suffix in (".cpp", ".mm"):
+            for cls in set(re.findall(r"\b(\w+)::~?\w+\s*\(", text)):
+                defines.setdefault(cls, set()).add(path)
+    CLASS_DECL = re.compile(r"^\s*(?:class|struct)\s+(?:\w+\s+)?(\w+)\b[^;{]*\{", re.M)
 
     def scope_for(header):
         stem = header.stem
@@ -98,6 +109,8 @@ def main():
         for other_stem, paths in by_stem.items():
             if other_stem == stem or other_stem.startswith(stem + "_"):
                 own.update(p for p in paths if p.suffix in (".cpp", ".mm"))
+        for cls in CLASS_DECL.findall(corpus[header]):
+            own.update(defines.get(cls, ()))
         return own if len(own) > 1 else None
 
     def is_write_only(name, path, decl_line, scope):
@@ -203,7 +216,7 @@ def main():
             if not is_write_only(name, header, decl_line, scope):
                 continue
             line = text.count("\n", 0, m.start()) + 1
-            entry = (str(header.relative_to(ROOT)), line, name)
+            entry = (header.relative_to(ROOT).as_posix(), line, name)
             # The debt count stays on the trailing-underscore convention it
             # was built for: its read/write analysis works off an index keyed
             # that way, and widening it there would report every local that

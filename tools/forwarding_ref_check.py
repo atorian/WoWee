@@ -24,15 +24,20 @@ mail from a player whose name had not yet resolved kept a blank sender.
 
 WHAT IT DOES
 
-Pairs the members handed out by a writable Ref() accessor against the members
-that appear only as the fallback branch of a forwarding accessor. A member in
-both sets has a reader and a writer looking at different objects.
+The handlers now always exist, so the fallback branch is gone and with it the
+first way to read the wrong copy. What is left to look for:
+
+  * a fallback branch coming back - `xHandler_ ? ... : ...` or
+    `if (xHandler_)` on a handler that is never null (AGENTS.md forbids them);
+  * a member handed out by a writable Ref() whose getter forwards, and which
+    nothing in GameHandler reads, so an edit through the reference is lost;
+  * a writer that changes a member whose getter forwards.
 
 WHAT IT CANNOT SEE
 
-Forwarding written in some other shape than the two below, and the same split
-in a class other than GameHandler. It also cannot tell a deliberate local
-cache from a mistake, which is why it reports rather than judges.
+Forwarding written in some other shape than `return xHandler_->name(`, and the
+same split in a class other than GameHandler. It also cannot tell a deliberate
+local cache from a mistake, which is why it reports rather than judges.
 """
 import pathlib
 import re
@@ -45,10 +50,12 @@ SOURCES = sorted((ROOT / "src/game").glob("game_handler*.cpp"))
 # `auto& xRef() { return x_; }` - a writable reference to this class's member.
 WRITABLE_REF = re.compile(r"(\w+Ref)\(\)\s*(?:const\s*)?\{\s*return (\w+_?);")
 
-# The two shapes the forwarding is written in.
-FORWARD_TERNARY = re.compile(r"(\w+Handler_) \? \1->\w+\([^\)]*\) : (\w+_?)\b")
-FORWARD_EARLY_RETURN = re.compile(
-    r"if \((\w+Handler_)\) return \1->\w+\([^\)]*\);\s*\n\s*return (\w+_?);")
+# A branch on whether a handler exists. They always do; the branch is either
+# dead or the fallback to a stale copy this sweep was written about.
+FALLBACK = re.compile(r"\b\w+Handler_\s*\?|\bif\s*\(\s*!?\s*\w+Handler_\s*\)")
+
+# The getter a member is read through, as a forward: `return xHandler_->getX(`.
+FORWARD = re.compile(r"\breturn\s+\w+Handler_->(\w+)\(")
 
 
 def main():
@@ -62,12 +69,21 @@ def main():
         refs.setdefault(match.group(2), []).append(match.group(1))
 
     source = "".join(p.read_text(errors="ignore") for p in SOURCES)
-    fallback = set()
-    for pattern in (FORWARD_TERNARY, FORWARD_EARLY_RETURN):
-        for match in pattern.finditer(source):
-            fallback.add(match.group(2))
+    fallbacks = []
+    for path in [HEADER, *SOURCES]:
+        for n, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+            if FALLBACK.search(re.sub(r"//.*", "", line)):
+                fallbacks.append(f"{path.relative_to(ROOT).as_posix()}:{n}: {line.strip()}")
 
-    if not refs or not fallback:
+    # The getters, inline in the header or defined in the sources, whose body
+    # is a forward. Both are how a member's value is read.
+    forwarded_getters = set(re.findall(
+        r"\bGameHandler::(\w+)\([^)]*\)[^{;]*\{\s*return\s+\w+Handler_->", source))
+    forwarded_getters |= set(re.findall(
+        r"\b(\w+)\([^)]*\)\s*(?:const\s*)?\{\s*return\s+\w+Handler_->", header))
+    forwarding = set(FORWARD.findall(header + source))
+
+    if not refs or not forwarded_getters:
         print("Recognised no accessors at all. The zero below means the scan broke.")
         return 1
 
@@ -83,25 +99,22 @@ def main():
     # which GameHandler's own sources never read. Something edits it through
     # the reference and nothing can ever see the edit. movement_handler cleared
     # the gossip points of interest that way, and the markers stayed on the map.
-    forwarding = set(re.findall(r"if \(\w+Handler_\) return \w+Handler_->(\w+)\(", source))
-    forwarding |= set(re.findall(r"return \w+Handler_ \? \w+Handler_->(\w+)\(", source))
     unread = []
     for member in sorted(refs):
         stem = member.rstrip("_")
         getter = "get" + stem[:1].upper() + stem[1:]
-        if getter not in forwarding:
+        if getter not in forwarded_getters and getter not in forwarding:
             continue
         if re.search(r"[^\w.>]" + re.escape(member) + r"\b(?!\s*=[^=])", source):
             continue
         unread.append((member, getter))
 
-    diverging = sorted(set(refs) & fallback)
     print(f"{len(refs)} member(s) handed out by a writable Ref()")
-    print(f"{len(fallback)} member(s) reached only as a forwarding fallback\n")
-    print(f"{len(diverging)} member(s) written locally and read through a sub-handler:")
-    for name in diverging:
-        print(f"  {name}  via {', '.join(refs[name])}")
-    if not diverging:
+    print(f"{len(forwarded_getters)} getter(s) that forward to a sub-handler\n")
+    print(f"{len(fallbacks)} fallback branch(es) on a handler that always exists:")
+    for line in fallbacks:
+        print(f"  {line}")
+    if not fallbacks:
         print("  (none)")
 
     # A third shape: a *writer* that touches a member whose getter forwards,
@@ -114,8 +127,6 @@ def main():
     # beside them forward to SpellHandler and MovementHandler - so a switch left
     # the previous expansion's talents and flight points live, and the comment
     # above the call said the opposite.
-    forwarded_getters = set(re.findall(
-        r"\bGameHandler::(\w+)\([^)]*\)[^{]*\{\s*(?:if \()?\w+Handler_\s*\)?\s*(?:\?|return)\s*\w+Handler_->", source))
     stale_writers = []
     for m in re.finditer(r"\bGameHandler::(\w+)\([^)]*\)[^{;]*\{(?:\.\w+\s*=\s*)?", source):
         depth, j, started = 0, m.end() - 1, False

@@ -284,8 +284,18 @@ else()
     endif()
 endif()
 
-# Opcode registry generation/validation
-find_package(Python3 COMPONENTS Interpreter QUIET)
+# Opcode registry generation/validation, and the sweeps ctest runs.
+#
+# 3.12 because the sweeps use its f-strings (a backslash inside the braces),
+# which an older interpreter cannot even parse. Asking for the version also
+# keeps CMake from settling on an old python.exe that happens to be on PATH
+# first: on Windows that was a 3.9 install, and sweep_guard failed under ctest
+# while passing by hand under MSYS2's.
+find_package(Python3 3.12 COMPONENTS Interpreter QUIET)
+if(NOT Python3_Interpreter_FOUND)
+    message(WARNING "No Python 3.12 or newer found: the sweep_guard test and the "
+                    "opcode registry targets are not defined")
+endif()
 if(Python3_Interpreter_FOUND)
     add_custom_target(opcodes-generate
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_opcode_registry.py
