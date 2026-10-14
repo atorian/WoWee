@@ -29,12 +29,14 @@ AnimationCallbackHandler::AnimationCallbackHandler(
     rendering::Renderer& renderer,
     PlayerView& playerView,
     game::GameHandler& gameHandler,
-    AppearanceComposer& appearanceComposer)
+    AppearanceComposer& appearanceComposer,
+    audio::AudioCoordinator* audioCoordinator)
     : entitySpawner_(entitySpawner)
     , renderer_(renderer)
     , playerView_(playerView)
     , gameHandler_(gameHandler)
     , appearanceComposer_(appearanceComposer)
+    , audioCoordinator_(audioCoordinator)
 {
 }
 
@@ -501,8 +503,8 @@ void AnimationCallbackHandler::setupCallbacks() {
                 // for the whole aura; potions get their single swig sound here.
                 if (restChannel == game::spellclass::RestChannelKind::POTION ||
                     restChannel == game::spellclass::RestChannelKind::ALCOHOL) {
-                    if (auto* audio = gameHandler_.services().audioCoordinator) {
-                        if (auto* ui = audio->getUiSoundManager()) {
+                    if (audioCoordinator_) {
+                        if (auto* ui = audioCoordinator_->getUiSoundManager()) {
                             ui->playDrinking();
                         }
                     }

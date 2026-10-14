@@ -33,8 +33,6 @@
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "core/cvar_store.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/player_voice_manager.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
@@ -507,15 +505,13 @@ const Character* GameHandler::getActiveCharacter() const {
     }
     return nullptr;
 }
-void GameHandler::playErrorSpeech(audio::PlayerErrorSpeech type) {
-    auto* ac = services_.audioCoordinator;
-    if (!ac) return;
-    auto* voice = ac->getPlayerVoiceManager();
-    if (!voice) return;
-    const Character* ch = getActiveCharacter();
-    if (!ch) return;
-    voice->playError(type, static_cast<uint8_t>(ch->race),
-                     static_cast<uint8_t>(toServerGender(ch->gender)));
+void GameHandler::addUIError(const std::string& msg) {
+    eventBus().publish(events::UiErrorRaised{.message = msg});
+    fireAddonEvent("UI_ERROR_MESSAGE", {msg});
+}
+
+void GameHandler::addScriptError(const std::string& msg) {
+    eventBus().publish(events::UiErrorRaised{.message = msg, .scriptError = true});
 }
 
 void GameHandler::handleCharLoginFailed(network::Packet& packet) {

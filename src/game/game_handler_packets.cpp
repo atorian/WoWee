@@ -31,8 +31,6 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
@@ -997,7 +995,7 @@ void GameHandler::registerCoreOpcodes() {
         ping.age  = 0.0f;
         minimapPings_.push_back(ping);
         if (senderGuid != playerGuid) {
-                            withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playMinimapPing(); });
+            eventBus().publish(events::MinimapPinged{senderGuid, ping.wowX, ping.wowY});
         }
         // The ping is drawn by this client from minimapPings_ and was never
         // announced, so a handed-over minimap heard the sound and showed
@@ -1196,8 +1194,7 @@ void GameHandler::registerCoreOpcodes() {
                     gameObjectCustomAnimCallback_(guid, kFishingBobberBiteAnimation);
                 addUIError("A fish is on your line! Right-click to reel it in.");
                 addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
-                withSoundManager(&audio::AudioCoordinator::getUiSoundManager,
-                                 [](auto* sfx) { sfx->playFishingBite(); });
+                eventBus().publish(events::FishingBite{guid});
                 LOG_WARNING("Fishing bite ready: guid=0x", std::hex, guid, std::dec,
                             " serverAnimProgress=", animId);
             }

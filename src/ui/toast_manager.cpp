@@ -82,22 +82,22 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
         pvpHonorCallbackSet_ = true;
     }
 
-    // Item loot toast callback
-    if (!itemLootCallbackSet_) {
-        gameHandler.setItemLootCallback([this](uint32_t itemId, uint32_t count,
-                                               uint32_t quality, const std::string& name) {
+    // Item loot toasts
+    if (!itemReceivedSub_) {
+        itemReceivedSub_ = gameHandler.eventBus().subscribe<game::events::ItemReceived>(
+            [this](const game::events::ItemReceived& e) {
             for (auto& t : itemLootToasts_) {
-                if (t.itemId == itemId) {
-                    t.count += count;
+                if (t.itemId == e.itemId) {
+                    t.count += e.count;
                     t.age = 0.0f;
                     return;
                 }
             }
             if (itemLootToasts_.size() >= 5)
                 itemLootToasts_.erase(itemLootToasts_.begin());
-            itemLootToasts_.push_back({.itemId = itemId, .count = count, .quality = quality, .name = name, .age = 0.0f});
+            itemLootToasts_.push_back({.itemId = e.itemId, .count = e.count, .quality = e.quality,
+                                       .name = e.name, .age = 0.0f});
         });
-        itemLootCallbackSet_ = true;
     }
 
     // Ghost-state callback to flash "You have been resurrected!" on revival
@@ -119,13 +119,13 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
         repChangeCallbackSet_ = true;
     }
 
-    // Quest completion toast callback
-    if (!questCompleteCallbackSet_) {
-        gameHandler.setQuestCompleteCallback([this](uint32_t id, const std::string& title) {
-            questCompleteToasts_.push_back({.questId = id, .title = title, .age = 0.0f});
+    // Quest completion toasts
+    if (!questCompletedSub_) {
+        questCompletedSub_ = gameHandler.eventBus().subscribe<game::events::QuestCompleted>(
+            [this](const game::events::QuestCompleted& e) {
+            questCompleteToasts_.push_back({.questId = e.questId, .title = e.title, .age = 0.0f});
             if (questCompleteToasts_.size() > 3) questCompleteToasts_.erase(questCompleteToasts_.begin());
         });
-        questCompleteCallbackSet_ = true;
     }
 }
 

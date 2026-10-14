@@ -56,7 +56,6 @@ namespace wowee::game {
 namespace wowee {
 namespace network { class WorldSocket; class Packet; }
 namespace core { class EventBus; class CVarStore; }
-namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
 
@@ -2506,9 +2505,6 @@ public:
     /// "[<it>] " when they differ, so a number there is printed verbatim.
     const std::string& getLanguageName(uint32_t languageId) const;
 
-    // Achievement earned callback - fires when SMSG_ACHIEVEMENT_EARNED is received
-    using AchievementEarnedCallback = std::function<void(uint32_t achievementId, const std::string& name)>;
-    void setAchievementEarnedCallback(AchievementEarnedCallback cb) { achievementEarnedCallback_ = std::move(cb); }
     const std::unordered_set<uint32_t>& getEarnedAchievements() const { return earnedAchievements_; }
 
     // Title system - earned title bits and the currently displayed title
@@ -2805,13 +2801,10 @@ public:
     using PlayPositionalSoundCallback = std::function<void(uint32_t soundId, uint64_t sourceGuid)>;
     void setPlayPositionalSoundCallback(PlayPositionalSoundCallback cb) { playPositionalSoundCallback_ = std::move(cb); }
 
-    // UI error frame: prominent on-screen error messages (spell can't be cast, etc.)
-    using UIErrorCallback = std::function<void(const std::string& msg)>;
-    void setUIErrorCallback(UIErrorCallback cb) { uiErrorCallback_ = std::move(cb); }
-    void addUIError(const std::string& msg) {
-        if (uiErrorCallback_) uiErrorCallback_(msg);
-        fireAddonEvent("UI_ERROR_MESSAGE", {msg});
-    }
+    /// A line for the error frame (spell can't be cast, etc.): UI_ERROR_MESSAGE
+    /// for the interface, which draws it, and UiErrorRaised for the client,
+    /// which sounds it.
+    void addUIError(const std::string& msg);
     /// A script that failed, shown on screen without telling any script about it.
     ///
     /// Deliberately not addUIError. That fires UI_ERROR_MESSAGE, which is a Lua
@@ -2824,22 +2817,10 @@ public:
     /// UI_ERROR_MESSAGE is also the wrong event for this: it carries the game's
     /// own refusals - out of range, not enough mana - and the real client
     /// reports script errors somewhere else entirely.
-    void addScriptError(const std::string& msg) {
-        if (uiErrorCallback_) uiErrorCallback_(msg);
-    }
+    void addScriptError(const std::string& msg);
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
         if (addonEventCallback_) addonEventCallback_(event, args);
     }
-    // Convenience: invoke a callback with a sound manager obtained from the renderer.
-    template<typename ManagerGetter, typename Callback>
-    void withSoundManager(ManagerGetter getter, Callback cb) {
-        if (auto* ac = services_.audioCoordinator) {
-            if (auto* mgr = (ac->*getter)()) cb(mgr);
-        }
-    }
-    // Play the player character's spoken error response ("Not enough mana", ...)
-    // using the active character's race/gender. Gated by the Character Speech setting.
-    void playErrorSpeech(audio::PlayerErrorSpeech type);
 
     // Reputation change toast: factionName, delta, new standing
     using RepChangeCallback = std::function<void(const std::string& factionName, int32_t delta, int32_t standing)>;
@@ -2849,17 +2830,9 @@ public:
     using PvpHonorCallback = std::function<void(uint32_t honorAmount, uint64_t victimGuid, uint32_t victimRank)>;
     void setPvpHonorCallback(PvpHonorCallback cb) { pvpHonorCallback_ = std::move(cb); }
 
-    // Item looted / received callback (SMSG_ITEM_PUSH_RESULT when showInChat is set)
-    using ItemLootCallback = std::function<void(uint32_t itemId, uint32_t count, uint32_t quality, const std::string& name)>;
-    void setItemLootCallback(ItemLootCallback cb) { itemLootCallback_ = std::move(cb); }
-
     // Loot window open/close callback (for loot kneel animation)
     using LootWindowCallback = std::function<void(bool open)>;
     void setLootWindowCallback(LootWindowCallback cb) { lootWindowCallback_ = std::move(cb); }
-
-    // Quest turn-in completion callback
-    using QuestCompleteCallback = std::function<void(uint32_t questId, const std::string& questTitle)>;
-    void setQuestCompleteCallback(QuestCompleteCallback cb) { questCompleteCallback_ = std::move(cb); }
 
     // Mount state
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
@@ -3644,7 +3617,6 @@ public:
     auto& tabCycleStaleRef() { return tabCycleStale; }
 
     // ── UI & Event Callbacks ─────────────────────────────────────────
-    auto& achievementEarnedCallbackRef() { return achievementEarnedCallback_; }
     auto& addonEventCallbackRef() { return addonEventCallback_; }
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
@@ -3661,7 +3633,6 @@ public:
     auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
     auto& hearthstonePreloadCallbackRef() { return hearthstonePreloadCallback_; }
     auto& hitReactionCallbackRef() { return hitReactionCallback_; }
-    auto& itemLootCallbackRef() { return itemLootCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
     auto& lootWindowCallbackRef() { return lootWindowCallback_; }
     auto& meleeSwingCallbackRef() { return meleeSwingCallback_; }
@@ -3686,7 +3657,6 @@ public:
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
     auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
-    auto& questCompleteCallbackRef() { return questCompleteCallback_; }
     auto& questProgressCallbackRef() { return questProgressCallback_; }
     auto& repChangeCallbackRef() { return repChangeCallback_; }
     auto& spellCastAnimCallbackRef() { return spellCastAnimCallback_; }
@@ -4717,7 +4687,6 @@ private:
     mutable std::unordered_map<uint32_t, std::string> languageNames_;
     mutable bool languageNamesLoaded_ = false;
     OtherPlayerMountCallback otherPlayerMountCallback_;
-    AchievementEarnedCallback achievementEarnedCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
     QuestProgressCallback questProgressCallback_;
     MountCallback mountCallback_;
@@ -4793,7 +4762,6 @@ private:
     PlayPositionalSoundCallback playPositionalSoundCallback_;
 
     // ---- UI error frame callback ----
-    UIErrorCallback uiErrorCallback_;
 
     // ---- Reputation change callback ----
     RepChangeCallback repChangeCallback_;
@@ -4803,13 +4771,11 @@ private:
     PvpHonorCallback pvpHonorCallback_;
 
     // ---- Item loot callback ----
-    ItemLootCallback itemLootCallback_;
 
     // ---- Loot window callback ----
     LootWindowCallback lootWindowCallback_;
 
     // ---- Quest completion callback ----
-    QuestCompleteCallback questCompleteCallback_;
 
     // ---- GM Ticket state (SMSG_GMTICKET_GETTICKET / SMSG_GMTICKET_SYSTEMSTATUS) ----
     bool        gmTicketActive_    = false;  ///< True when an open ticket exists on the server

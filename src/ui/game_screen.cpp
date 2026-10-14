@@ -337,22 +337,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         appearanceCallbackSet_ = true;
     }
 
-    // Set up UI error frame callback (once)
-    if (!uiErrorCallbackSet_) {
-        gameHandler.setUIErrorCallback([this](const std::string& msg) {
-            // The sound first, and outside the gate. It belongs to no
-            // element - the error is the same error whoever draws the text -
-            // and it sat after the return, so handing the errors over would
-            // have taken the sound with them.
-            if (auto* ac = services_.audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
-            }
-            // UIErrorsFrame draws the text now. The sound above is still
-            // ours: FrameXML plays none for these, so it would go silent.
-            (void)msg;
-        });
-        uiErrorCallbackSet_ = true;
-    }
+    // The error line: UIErrorsFrame draws the text from UI_ERROR_MESSAGE, and
+    // the client sounds it from UiErrorRaised (AudioCallbackHandler).
 
     // No flash callback here. The red overlay on a failed cast belonged to
     // this client's own action bar; FrameXML draws the bars and flashes its

@@ -8,6 +8,7 @@
 namespace wowee {
 
 namespace rendering { class Renderer; }
+namespace audio { class AudioCoordinator; }
 namespace game { class GameHandler; }
 namespace core { class AppearanceComposer; class EntitySpawner; }
 
@@ -24,7 +25,8 @@ public:
                              rendering::Renderer& renderer,
                              PlayerView& playerView,
                              game::GameHandler& gameHandler,
-                             AppearanceComposer& appearanceComposer);
+                             AppearanceComposer& appearanceComposer,
+                             audio::AudioCoordinator* audioCoordinator);
 
     void setupCallbacks();
 
@@ -44,6 +46,8 @@ private:
     PlayerView& playerView_;
     game::GameHandler& gameHandler_;
     AppearanceComposer& appearanceComposer_;
+    /// The sound, for a potion's swig. Absent in a client built without it.
+    audio::AudioCoordinator* audioCoordinator_;
     std::vector<EventBus::Subscription> subscriptions_;
 
     // Charge rush state (moved from Application)

@@ -130,7 +130,7 @@ private:
     };
     static constexpr float ITEM_LOOT_TOAST_DURATION = 3.0f;
     std::vector<ItemLootToastEntry> itemLootToasts_;
-    bool itemLootCallbackSet_ = false;
+    core::EventBus::Subscription itemReceivedSub_;
     void renderItemLootToasts();
 
     // ---- Reputation change toast ----
@@ -152,7 +152,7 @@ private:
         float age = 0.0f;
     };
     std::vector<QuestCompleteToastEntry> questCompleteToasts_;
-    bool questCompleteCallbackSet_ = false;
+    core::EventBus::Subscription questCompletedSub_;
     static constexpr float kQuestCompleteToastLifetime = 4.0f;
     void renderQuestCompleteToasts(float deltaTime);
 

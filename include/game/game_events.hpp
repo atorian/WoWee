@@ -1,6 +1,9 @@
 #pragma once
 
+#include "game/refusal.hpp"
+
 #include <cstdint>
+#include <string>
 #include <vector>
 
 /// What the game tells the rest of the client has happened, delivered through
@@ -99,6 +102,111 @@ struct PlayerCastFailed {
 struct PlayerLevelUp {
     uint32_t oldLevel = 0;
     uint32_t newLevel = 0;
+};
+
+/// A line for the player's error frame: a refusal ("Not enough mana"), or a
+/// script that failed (`scriptError`), which is not a Lua event.
+struct UiErrorRaised {
+    std::string message;
+    bool scriptError = false;
+};
+
+/// The game refused something the player asked for, for a reason the
+/// character says aloud.
+struct PlayerRefused {
+    Refusal reason = Refusal::CantUseItem;
+};
+
+/// Money the player looted, in copper. Once per loot.
+struct LootMoneyReceived {
+    uint64_t lootGuid = 0;
+    uint32_t copper = 0;
+};
+
+/// An item arrived in the player's bags - looted, a reward, pushed by the
+/// server - with what it is, once its name is known.
+struct ItemReceived {
+    uint32_t itemId = 0;
+    uint32_t count = 0;
+    uint32_t quality = 0;
+    std::string name;
+};
+
+/// The player sold an item to a vendor.
+struct ItemSold {
+    uint64_t itemGuid = 0;
+};
+
+/// The player bought an item from a vendor, new or back from the buyback list.
+struct ItemBought {
+    uint32_t itemId = 0;
+    uint32_t count = 0;
+};
+
+/// Unread mail arrived, where there was none.
+struct MailArrived {};
+
+/// The player accepted a quest into the log.
+struct QuestAccepted {
+    uint32_t questId = 0;
+};
+
+/// The player turned a quest in, and it left the log.
+struct QuestCompleted {
+    uint32_t questId = 0;
+    std::string title;
+};
+
+/// The player learned a spell from a trainer.
+struct TrainerSpellLearned {
+    uint32_t spellId = 0;
+};
+
+/// The player earned an achievement.
+struct AchievementEarned {
+    uint32_t achievementId = 0;
+    std::string name;
+};
+
+/// Someone challenged the player to a duel.
+struct DuelRequested {
+    uint64_t challengerGuid = 0;
+    std::string challengerName;
+};
+
+/// Someone invited the player to a group.
+struct GroupInviteReceived {
+    std::string inviterName;
+};
+
+/// Another player pinged the minimap, at a point in WoW coordinates.
+struct MinimapPinged {
+    uint64_t senderGuid = 0;
+    float wowX = 0.0f;
+    float wowY = 0.0f;
+};
+
+/// A fish took the player's lure.
+struct FishingBite {
+    uint64_t bobberGuid = 0;
+};
+
+/// The player became a unit's top threat, while threat warnings with sound
+/// are wanted.
+struct ThreatWarningRaised {
+    uint64_t unitGuid = 0;
+};
+
+/// A melee swing went in: landed, missed, or was dodged or parried.
+struct MeleeSwingResolved {
+    uint64_t attackerGuid = 0;
+    uint64_t victimGuid = 0;
+    bool attackerIsPlayer = false;
+    bool victimIsPlayer = false;
+    bool missed = false;
+    /// Dodged or parried: the swing went through the air, and nothing was hit.
+    bool avoided = false;
+    bool critical = false;
 };
 
 } // namespace wowee::game::events

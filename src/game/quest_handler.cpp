@@ -11,8 +11,8 @@
 #include "network/world_socket.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -743,15 +743,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             }
             for (auto it = questLog_.begin(); it != questLog_.end(); ++it) {
                 if (it->questId == questId) {
-                    // Fire toast callback before erasing
-                    if (owner_.questCompleteCallbackRef()) {
-                        owner_.questCompleteCallbackRef()(questId, it->title);
-                    }
-                    // Play quest-complete sound
-                    if (auto* ac = owner_.services().audioCoordinator) {
-                        if (auto* sfx = ac->getUiSoundManager())
-                            sfx->playQuestComplete();
-                    }
+                    // Before erasing, while the title is still here.
+                    owner_.eventBus().publish(events::QuestCompleted{questId, it->title});
                     questLog_.erase(it);
                     owner_.setQuestTracked(questId, false);
                     LOG_INFO("  Removed quest ", questId, " from quest log");
@@ -1526,10 +1519,9 @@ void QuestHandler::acceptQuest() {
     if (static_cast<int>(questLog_.size()) >= maxSlots) {
         const std::string msg = "Your quest log is full (" + std::to_string(maxSlots) +
                                 " quests). Abandon a quest to make room.";
+        // The error line sounds itself; this played it twice.
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator)
-            if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
         return;
     }
 
@@ -1550,11 +1542,7 @@ void QuestHandler::acceptQuest() {
     // "show all when nothing tracked" fallback still applies to those.
     owner_.setQuestTracked(questId, true);
 
-    // Play quest-accept sound
-    if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* sfx = ac->getUiSoundManager())
-            sfx->playQuestActivate();
-    }
+    owner_.eventBus().publish(events::QuestAccepted{questId});
 
     dismissQuestDetails();
 

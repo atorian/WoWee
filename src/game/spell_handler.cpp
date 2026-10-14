@@ -17,9 +17,6 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/cvar_store.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
-#include "audio/player_voice_manager.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -226,47 +223,45 @@ std::string gatherCastFailureMessage(GameHandler& owner, uint64_t goGuid,
     return fallback;
 }
 
-// Map a (WotLK-normalized) SpellCastResult to a character speech response.
-// Results without a matching voice line return nullopt.
-std::optional<audio::PlayerErrorSpeech> errorSpeechForCastResult(
-        uint32_t spellId, uint8_t result, int powerType) {
-    using audio::PlayerErrorSpeech;
+// The reason a (WotLK-normalized) SpellCastResult refuses the cast, for the
+// refusals the character says aloud. Others return nullopt.
+std::optional<Refusal> refusalForCastResult(uint32_t spellId, uint8_t result, int powerType) {
     // Fishing has no unit target: the server validates a randomly sampled water
-    // point in front of the caster. The generic "no target" voice line is both
-    // misleading and contradicted by the on-screen fishing-specific guidance.
+    // point in front of the caster. "No target" is both misleading and
+    // contradicted by the on-screen fishing-specific guidance.
     if (spellclass::isFishingCast(spellId) && (result == 11 || result == 60 || result == 156 || result == 178))
         return std::nullopt;
     switch (result) {
         case 11:  // Bad implicit targets
         case 178: // No valid targets
-            return PlayerErrorSpeech::GENERIC_NO_TARGET;
+            return Refusal::NoTarget;
         case 12:  // Invalid target
-            return PlayerErrorSpeech::INVALID_ATTACK_TARGET;
+            return Refusal::InvalidAttackTarget;
         case 25:  // Chest in use
-            return PlayerErrorSpeech::CHEST_IN_USE;
+            return Refusal::ChestInUse;
         case 45:  // Item not ready
-            return PlayerErrorSpeech::ITEM_COOLDOWN;
+            return Refusal::ItemCooldown;
         case 52:  // Need ammo
         case 53:  // Need ammo pouch
         case 54:  // Need exotic ammo
         case 75:  // No ammo
-            return PlayerErrorSpeech::NO_AMMO;
+            return Refusal::NoAmmo;
         case 67:  // Not ready
             // Ranged weapon attacks are abilities, not conventional spells. If the
-            // server rejects one (weapon/ammo/attack state), use the generic "I can't
-            // do that yet" response instead of "That spell isn't ready yet."
+            // server rejects one (weapon/ammo/attack state), it is the ability
+            // that is not ready rather than a spell.
             return spellclass::isRangedWeaponAutoAttack(spellId)
-                ? PlayerErrorSpeech::ABILITY_COOLDOWN
-                : PlayerErrorSpeech::SPELL_COOLDOWN;
+                ? Refusal::AbilityCooldown
+                : Refusal::SpellCooldown;
         case 85:  // Not enough power
             switch (powerType) {
-                case 1:  return PlayerErrorSpeech::NO_RAGE;
-                case 3:  return PlayerErrorSpeech::NO_ENERGY;
-                case 2: case 6: return std::nullopt; // no focus/runic power voice lines
-                default: return PlayerErrorSpeech::NO_MANA;
+                case 1:  return Refusal::NoRage;
+                case 3:  return Refusal::NoEnergy;
+                case 2: case 6: return std::nullopt; // focus and runic power: nothing said
+                default: return Refusal::NoMana;
             }
         case 97:  // Out of range
-            return PlayerErrorSpeech::OUT_OF_RANGE;
+            return Refusal::OutOfRange;
         default:
             return std::nullopt;
     }
@@ -1755,8 +1750,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     // Suppressed for gather casts, whose failures are routine and already
     // rephrased, and for the rejections that repeat with the keypress.
     if (!gatherCast && !routine) {
-        if (auto speech = errorSpeechForCastResult(data.spellId, data.result, powerType))
-            owner_.playErrorSpeech(*speech);
+        if (auto refusal = refusalForCastResult(data.spellId, data.result, powerType))
+            owner_.eventBus().publish(events::PlayerRefused{*refusal});
     }
 
     if (owner_.addonEventCallbackRef()) {
@@ -2533,13 +2528,7 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 
         owner_.earnedAchievementsRef().insert(achievementId);
         owner_.achievementDatesRef()[achievementId] = earnDate;
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playAchievementAlert();
-        }
-        if (owner_.achievementEarnedCallbackRef()) {
-            owner_.achievementEarnedCallbackRef()(achievementId, achName);
-        }
+        owner_.eventBus().publish(events::AchievementEarned{achievementId, achName});
         // Inside the branch, not after it. ACHIEVEMENT_EARNED is what raises
         // FrameXML's badge, and it is about the player who is reading it -
         // somebody else's is CHAT_MSG_ACHIEVEMENT, which the server sends

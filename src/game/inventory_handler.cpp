@@ -16,13 +16,13 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/cvar_store.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
-#include "audio/player_voice_manager.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
+#include <optional>
 #include <sstream>
 
 namespace wowee {
@@ -216,12 +216,7 @@ void InventoryHandler::announceLootMoney(uint64_t lootGuid, uint32_t amount) {
         it->second.moneyTaken = true;
     }
     owner_.addSystemChatMessage("Looted: " + formatCopperAmount(amount));
-    if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* sfx = ac->getUiSoundManager()) {
-            if (amount >= 10000) sfx->playLootCoinLarge();
-            else sfx->playLootCoinSmall();
-        }
-    }
+    owner_.eventBus().publish(events::LootMoneyReceived{lootGuid, amount});
     if (lootGuid != 0) recentLootMoneyAnnounceCooldowns_[lootGuid] = 1.5f;
 }
 
@@ -490,10 +485,6 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         std::string msg = "Received item: " + link;
         if (count > 1) msg += " x" + std::to_string(count);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playLootItem();
-        }
         if (owner_.addonEventCallbackRef()) {
             fireBagUpdates();
             // ITEM_PUSH(bagSlot, icon), which is what the bag button's flash
@@ -506,8 +497,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     {std::to_string(bagButtonId),
                      owner_.getItemIconPath(info->displayInfoId)});
         }
-        if (owner_.itemLootCallbackRef())
-            owner_.itemLootCallbackRef()(itemId, count, quality, itemName);
+        owner_.eventBus().publish(events::ItemReceived{itemId, count, quality, itemName});
     };
 
     // ---- Open container ----
@@ -536,10 +526,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     LOG_WARNING("Successful sale had no pending buyback entry: itemGuid=0x",
                                 std::hex, itemGuid, std::dec);
                 }
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playDropOnGround();
-                }
+                owner_.eventBus().publish(events::ItemSold{itemGuid});
                 if (owner_.addonEventCallbackRef()) {
                     fireBagUpdates();
                     owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
@@ -564,12 +551,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     "Unknown error", "Only empty bag"
                 };
                 const char* msg = (result < 7) ? sellErrors[result] : "Unknown sell error";
+                // The error line sounds itself (UiErrorRaised); this played
+                // the same sound a second time on top of it.
                 owner_.addUIError(std::string("Sell failed: ") + msg);
                 owner_.addSystemChatMessage(std::string("Sell failed: ") + msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playError();
-                }
                 LOG_WARNING("SMSG_SELL_ITEM error: ", (int)result, " (", msg,
                             ") itemGuid=0x", std::hex, itemGuid,
                             " vendorGuid=0x", vendorGuid, std::dec);
@@ -604,7 +589,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             }
             owner_.addUIError(levelBuf);
             owner_.addSystemChatMessage(levelBuf);
-            owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_EQUIP_LEVEL);
+            owner_.eventBus().publish(events::PlayerRefused{Refusal::CantEquipLevel});
             return;
         }
 
@@ -709,32 +694,31 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (error == 50 && currentLoot_.lootGuid != 0) {
             msg = "Cannot loot item: Inventory is full.";
         }
+        // The error line sounds itself (UiErrorRaised); this played the same
+        // sound a second time on top of it.
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
-        if (auto* ac = owner_.services().audioCoordinator) {
-            if (auto* sfx = ac->getUiSoundManager())
-                sfx->playError();
-        }
 
-        // Character speech response for errors with a matching voice line
-        using audio::PlayerErrorSpeech;
+        // The reasons the character says aloud.
+        std::optional<Refusal> refusal;
         switch (error) {
-            case 4:  owner_.playErrorSpeech(PlayerErrorSpeech::BAG_FULL); break;
-            case 7:  owner_.playErrorSpeech(PlayerErrorSpeech::AMMO_ONLY); break;
-            case 8:  owner_.playErrorSpeech(PlayerErrorSpeech::CANT_USE_ITEM); break;
+            case 4:  refusal = Refusal::BagFull; break;
+            case 7:  refusal = Refusal::AmmoOnly; break;
+            case 8:  refusal = Refusal::CantUseItem; break;
             case 10:
-            case 11: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_EQUIP_EVER); break;
-            case 17: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_MAX_COUNT); break;
-            case 20: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_EQUIPPABLE); break;
-            case 24: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_DROP_SOULBOUND); break;
-            case 25: owner_.playErrorSpeech(PlayerErrorSpeech::OUT_OF_RANGE); break;
-            case 29: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_ENOUGH_MONEY); break;
-            case 30: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_A_BAG); break;
-            case 36: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_LOCKED); break;
+            case 11: refusal = Refusal::CantEquipEver; break;
+            case 17: refusal = Refusal::ItemMaxCount; break;
+            case 20: refusal = Refusal::NotEquippable; break;
+            case 24: refusal = Refusal::CantDropSoulbound; break;
+            case 25: refusal = Refusal::OutOfRange; break;
+            case 29: refusal = Refusal::NotEnoughMoney; break;
+            case 30: refusal = Refusal::NotABag; break;
+            case 36: refusal = Refusal::ItemLocked; break;
             case 50:
-            case 51: owner_.playErrorSpeech(PlayerErrorSpeech::INVENTORY_FULL); break;
+            case 51: refusal = Refusal::InventoryFull; break;
             default: break;
         }
+        if (refusal) owner_.eventBus().publish(events::PlayerRefused{*refusal});
     };
 
     table[Opcode::SMSG_BUY_FAILED] = [this](network::Packet& packet) {
@@ -783,16 +767,13 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 case 6: msg = "You can't carry any more items."; break;
                 default: break;
             }
+            // The error line sounds itself; this played it twice.
             owner_.addUIError(msg);
             owner_.addSystemChatMessage(msg);
-            if (auto* ac = owner_.services().audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager())
-                    sfx->playError();
-            }
             if (errCode == 2)
-                owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
+                owner_.eventBus().publish(events::PlayerRefused{Refusal::NotEnoughMoney});
             else if (errCode == 6)
-                owner_.playErrorSpeech(audio::PlayerErrorSpeech::INVENTORY_FULL);
+                owner_.eventBus().publish(events::PlayerRefused{Refusal::InventoryFull});
         }
     };
 
@@ -829,8 +810,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     [this](const BuybackItem& item) {
                         return item.wireSlot == pendingBuybackWireSlot_;
                     });
+                uint32_t boughtItemId = 0;
                 if (bought != buybackItems_.end()) {
                     const auto& entry = *bought;
+                    boughtItemId = entry.item.itemId;
                     std::string label = entry.item.name.empty()
                         ? "item #" + std::to_string(entry.item.itemId) : entry.item.name;
                     owner_.addSystemChatMessage("Bought back: " +
@@ -840,10 +823,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 }
                 pendingBuybackSlot_ = -1;
                 pendingBuybackWireSlot_ = 0;
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playPickupBag();
-                }
+                owner_.eventBus().publish(events::ItemBought{boughtItemId, itemCount});
                 if (owner_.addonEventCallbackRef()) {
                     owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
                     fireBagUpdates();
@@ -861,10 +841,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 std::string msg = "Purchased: " + buildItemLink(pendingBuyItemId_, buyQuality, itemLabel);
                 if (itemCount > 1) msg += " x" + std::to_string(itemCount);
                 owner_.addSystemChatMessage(msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager())
-                        sfx->playPickupBag();
-                }
+                owner_.eventBus().publish(events::ItemBought{pendingBuyItemId_, itemCount});
             }
             pendingBuyItemId_   = 0;
             pendingBuyItemSlot_ = 0;
@@ -3384,8 +3361,7 @@ void InventoryHandler::setHasNewMail(bool value) {
     // periodic next-mail-time poll doesn't repeat the notification while mail sits unread.
     if (value && !hasNewMail_) {
         owner_.addSystemChatMessage("You have new mail.");
-        if (auto* ac = owner_.services().audioCoordinator)
-            if (auto* sfx = ac->getUiSoundManager()) sfx->playMailReceived();
+        owner_.eventBus().publish(events::MailArrived{});
     }
     hasNewMail_ = value;
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_PENDING_MAIL", {});
@@ -4593,10 +4569,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 std::string msg = "Received item: " + link;
                 if (it->count > 1) msg += " x" + std::to_string(it->count);
                 owner_.addSystemChatMessage(msg);
-                if (auto* ac = owner_.services().audioCoordinator) {
-                    if (auto* sfx = ac->getUiSoundManager()) sfx->playLootItem();
-                }
-                if (owner_.itemLootCallbackRef()) owner_.itemLootCallbackRef()(data.entry, it->count, data.quality, itemName);
+                owner_.eventBus().publish(events::ItemReceived{data.entry, it->count, data.quality, itemName});
                 // ...and the event, which this path had never fired. An item
                 // whose name was not cached when it arrived is exactly the
                 // first one of its kind the player picks up, so the interface
@@ -5848,8 +5821,7 @@ void InventoryHandler::handleTrainerBuySucceeded(network::Packet& packet) {
         owner_.addSystemChatMessage("You have learned " + name + ".");
     else
         owner_.addSystemChatMessage("Spell learned.");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playQuestActivate();
+    owner_.eventBus().publish(events::TrainerSpellLearned{spellId});
     owner_.fireAddonEvent("TRAINER_UPDATE", {});
     owner_.fireAddonEvent("SPELLS_CHANGED", {});
 }
@@ -5871,14 +5843,11 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
     if (errorCode == 1) msg += " (not enough money)";
     else if (errorCode == 2) msg += " (requirements not met)";
     else msg += " (requirements not met)";
+    // The error line sounds itself; this played it twice.
     owner_.addUIError(msg);
     owner_.addSystemChatMessage(msg);
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
-    if (errorCode == 1)
-        owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
-    else
-        owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_LEARN_SPELL);
+    owner_.eventBus().publish(events::PlayerRefused{
+        errorCode == 1 ? Refusal::NotEnoughMoney : Refusal::CantLearnSpell});
 }
 
 // ============================================================

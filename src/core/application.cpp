@@ -456,7 +456,6 @@ bool Application::initialize() {
         animation->setEmoteTable(emoteTable_.get());
     }
     gameServices_.emotes = emoteTable_.get();
-    gameServices_.audioCoordinator = audioCoordinator_.get();
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
@@ -5873,7 +5872,8 @@ void Application::setupUICallbacks() {
 
     // ── Animation: death, respawn, swing, hit, spell, emote, charge, etc. ──
     animationCallbacks_ = std::make_unique<AnimationCallbackHandler>(
-        *entitySpawner_, *renderer, *playerView_, *gameHandler, *appearanceComposer_);
+        *entitySpawner_, *renderer, *playerView_, *gameHandler, *appearanceComposer_,
+        audioCoordinator_.get());
     animationCallbacks_->setupCallbacks();
 
     spellPresentation_ = std::make_unique<SpellPresentation>(

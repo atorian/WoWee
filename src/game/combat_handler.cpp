@@ -10,12 +10,9 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "network/world_socket.hpp"
-#include "audio/ui_sound_manager.hpp"
 #include "core/cvar_store.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/combat_sound_manager.hpp"
-#include "audio/activity_sound_manager.hpp"
-#include "audio/npc_voice_manager.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -207,9 +204,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 else        playerTopThreatOn_.erase(unitGuid);
                 if (topNow && threatWarningWanted() &&
                     owner_.cvars().get("threatPlaySounds", "0") != "0") {
-                    if (auto* ac = owner_.services().audioCoordinator) {
-                        if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
-                    }
+                    owner_.eventBus().publish(events::ThreatWarningRaised{unitGuid});
                 }
             }
 
@@ -671,48 +666,23 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     if (!isPlayerAttacker && owner_.npcSwingCallbackRef()) {
         owner_.npcSwingCallbackRef()(data.attackerGuid);
     }
-    if (!isPlayerAttacker) {
-        auto entity = owner_.getEntityManager().getEntity(data.attackerGuid);
-        auto* audioCoordinator = owner_.services().audioCoordinator;
-        auto* voiceManager = audioCoordinator ? audioCoordinator->getNpcVoiceManager() : nullptr;
-        if (entity && entity->getType() == ObjectType::UNIT && voiceManager) {
-            auto unit = std::static_pointer_cast<Unit>(entity);
-            const glm::vec3 canonical(unit->getLatestX(), unit->getLatestY(), unit->getLatestZ());
-            voiceManager->playCombatAttack(
-                data.attackerGuid, unit->getDisplayId(), core::coords::canonicalToRender(canonical));
-        }
-    }
 
     if (isPlayerTarget && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
         autoTargetAttacker(data.attackerGuid);
     }
 
-    // Play combat sounds via CombatSoundManager + character vocalizations
-    if (auto* ac = owner_.services().audioCoordinator) {
-        if (auto* csm = ac->getCombatSoundManager()) {
-            auto weaponSize = audio::CombatSoundManager::WeaponSize::MEDIUM;
-            if (data.isMiss()) {
-                csm->playWeaponMiss(false);
-            } else if (data.victimState == 1 || data.victimState == 2) {
-                // Dodge/parry - swing whoosh but no impact
-                csm->playWeaponSwing(weaponSize, false);
-            } else {
-                // Hit - swing + flesh impact
-                csm->playWeaponSwing(weaponSize, data.isCrit());
-                csm->playImpact(weaponSize, audio::CombatSoundManager::ImpactType::FLESH, data.isCrit());
-            }
-        }
-        // Character vocalizations
-        if (auto* asm_ = ac->getActivitySoundManager()) {
-            if (isPlayerAttacker && !data.isMiss() && data.victimState != 1 && data.victimState != 2) {
-                asm_->playAttackGrunt();
-            }
-            if (isPlayerTarget && !data.isMiss() && data.victimState != 1 && data.victimState != 2) {
-                asm_->playWound(data.isCrit());
-            }
-        }
-    }
+    // The swing's sound, the grunt and the wound, and an attacking creature's
+    // battle cry, are the client's to play from this.
+    owner_.eventBus().publish(events::MeleeSwingResolved{
+        .attackerGuid = data.attackerGuid,
+        .victimGuid = data.targetGuid,
+        .attackerIsPlayer = isPlayerAttacker,
+        .victimIsPlayer = isPlayerTarget,
+        .missed = data.isMiss(),
+        .avoided = data.victimState == 1 || data.victimState == 2,   // dodge, parry
+        .critical = data.isCrit(),
+    });
 
     if (data.isMiss()) {
         addCombatText(CombatTextEntry::MISS, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);

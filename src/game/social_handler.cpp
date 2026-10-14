@@ -11,8 +11,8 @@
 #include "network/world_socket.hpp"
 #include "core/logger.hpp"
 #include "core/cvar_store.hpp"
-#include "audio/audio_coordinator.hpp"
-#include "audio/ui_sound_manager.hpp"
+#include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -1845,8 +1845,7 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
     }
     pendingDuelRequest_ = true;
     owner_.addSystemChatMessage(duelChallengerName_ + " challenges you to a duel!");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playTargetSelect();
+    owner_.eventBus().publish(events::DuelRequested{duelChallengerGuid_, duelChallengerName_});
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_REQUESTED", {duelChallengerName_});
 }
 
@@ -2235,8 +2234,7 @@ void SocialHandler::handleGroupInvite(network::Packet& packet) {
     pendingInviterName = data.inviterName;
     owner_.addSystemChatMessage(data.inviterName + " has invited you to a group.");
     owner_.addUIError(data.inviterName + " has invited you to join a group.");
-    if (auto* ac = owner_.services().audioCoordinator)
-        if (auto* sfx = ac->getUiSoundManager()) sfx->playQuestActivate();
+    owner_.eventBus().publish(events::GroupInviteReceived{data.inviterName});
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("PARTY_INVITE_REQUEST", {data.inviterName});
 }

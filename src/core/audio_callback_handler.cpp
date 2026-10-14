@@ -12,6 +12,12 @@
 #include "audio/music_manager.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/ui_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
+#include "audio/npc_voice_manager.hpp"
+#include "audio/combat_sound_manager.hpp"
+#include "audio/activity_sound_manager.hpp"
+#include "game/character.hpp"
+#include "game/entity.hpp"
 #include "ui/ui_manager.hpp"
 
 namespace wowee { namespace core {
@@ -30,6 +36,147 @@ AudioCallbackHandler::AudioCallbackHandler(
     , uiManager_(uiManager)
     , gameHandler_(gameHandler)
 {
+}
+
+template <class Play>
+void AudioCallbackHandler::playUi(Play&& play) const {
+    if (!audioCoordinator_) return;
+    if (auto* sfx = audioCoordinator_->getUiSoundManager()) play(*sfx);
+}
+
+namespace {
+
+/// The line the character says for a refusal. Every reason the game gives has
+/// one; the mapping is here because which line answers is the client's choice.
+audio::PlayerErrorSpeech speechFor(game::Refusal reason) {
+    using game::Refusal;
+    using audio::PlayerErrorSpeech;
+    switch (reason) {
+        case Refusal::NoMana:              return PlayerErrorSpeech::NO_MANA;
+        case Refusal::NoRage:              return PlayerErrorSpeech::NO_RAGE;
+        case Refusal::NoEnergy:            return PlayerErrorSpeech::NO_ENERGY;
+        case Refusal::OutOfRange:          return PlayerErrorSpeech::OUT_OF_RANGE;
+        case Refusal::NoTarget:            return PlayerErrorSpeech::GENERIC_NO_TARGET;
+        case Refusal::InvalidAttackTarget: return PlayerErrorSpeech::INVALID_ATTACK_TARGET;
+        case Refusal::SpellCooldown:       return PlayerErrorSpeech::SPELL_COOLDOWN;
+        case Refusal::AbilityCooldown:     return PlayerErrorSpeech::ABILITY_COOLDOWN;
+        case Refusal::ItemCooldown:        return PlayerErrorSpeech::ITEM_COOLDOWN;
+        case Refusal::NoAmmo:              return PlayerErrorSpeech::NO_AMMO;
+        case Refusal::AmmoOnly:            return PlayerErrorSpeech::AMMO_ONLY;
+        case Refusal::ChestInUse:          return PlayerErrorSpeech::CHEST_IN_USE;
+        case Refusal::InventoryFull:       return PlayerErrorSpeech::INVENTORY_FULL;
+        case Refusal::BagFull:             return PlayerErrorSpeech::BAG_FULL;
+        case Refusal::ItemMaxCount:        return PlayerErrorSpeech::ITEM_MAX_COUNT;
+        case Refusal::NotABag:             return PlayerErrorSpeech::NOT_A_BAG;
+        case Refusal::CantUseItem:         return PlayerErrorSpeech::CANT_USE_ITEM;
+        case Refusal::ItemLocked:          return PlayerErrorSpeech::ITEM_LOCKED;
+        case Refusal::NotEquippable:       return PlayerErrorSpeech::NOT_EQUIPPABLE;
+        case Refusal::CantEquipLevel:      return PlayerErrorSpeech::CANT_EQUIP_LEVEL;
+        case Refusal::CantEquipEver:       return PlayerErrorSpeech::CANT_EQUIP_EVER;
+        case Refusal::CantDropSoulbound:   return PlayerErrorSpeech::CANT_DROP_SOULBOUND;
+        case Refusal::NotEnoughMoney:      return PlayerErrorSpeech::NOT_ENOUGH_MONEY;
+        case Refusal::CantLearnSpell:      return PlayerErrorSpeech::CANT_LEARN_SPELL;
+    }
+    return PlayerErrorSpeech::CANT_USE_ITEM;
+}
+
+} // namespace
+
+void AudioCallbackHandler::subscribeGameSounds() {
+    namespace ev = game::events;
+    auto& bus = gameHandler_.eventBus();
+
+    // The error line's sound. It belongs to no element - the error is the same
+    // error whoever draws the text - and FrameXML plays none for these.
+    subscriptions_.push_back(bus.subscribe<ev::UiErrorRaised>([this](const ev::UiErrorRaised&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playError(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::ThreatWarningRaised>([this](const ev::ThreatWarningRaised&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playError(); });
+    }));
+
+    // The character answering a refusal aloud, in its own race's and sex's voice.
+    subscriptions_.push_back(bus.subscribe<ev::PlayerRefused>([this](const ev::PlayerRefused& e) {
+        if (!audioCoordinator_) return;
+        auto* voice = audioCoordinator_->getPlayerVoiceManager();
+        const game::Character* ch = gameHandler_.getActiveCharacter();
+        if (!voice || !ch) return;
+        voice->playError(speechFor(e.reason), static_cast<uint8_t>(ch->race),
+                         static_cast<uint8_t>(game::toServerGender(ch->gender)));
+    }));
+
+    subscriptions_.push_back(bus.subscribe<ev::LootMoneyReceived>([this](const ev::LootMoneyReceived& e) {
+        playUi([&](audio::UiSoundManager& sfx) {
+            if (e.copper >= 10000) sfx.playLootCoinLarge();
+            else sfx.playLootCoinSmall();
+        });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::ItemReceived>([this](const ev::ItemReceived&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playLootItem(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::ItemSold>([this](const ev::ItemSold&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playDropOnGround(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::ItemBought>([this](const ev::ItemBought&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playPickupBag(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::MailArrived>([this](const ev::MailArrived&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playMailReceived(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::QuestAccepted>([this](const ev::QuestAccepted&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::QuestCompleted>([this](const ev::QuestCompleted&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playQuestComplete(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::TrainerSpellLearned>([this](const ev::TrainerSpellLearned&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::DuelRequested>([this](const ev::DuelRequested&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playTargetSelect(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::GroupInviteReceived>([this](const ev::GroupInviteReceived&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playQuestActivate(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::MinimapPinged>([this](const ev::MinimapPinged&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playMinimapPing(); });
+    }));
+    subscriptions_.push_back(bus.subscribe<ev::FishingBite>([this](const ev::FishingBite&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playFishingBite(); });
+    }));
+
+    // A melee swing: the weapon, the player's grunt and wound, and an
+    // attacking creature's battle cry where it stands.
+    subscriptions_.push_back(bus.subscribe<ev::MeleeSwingResolved>([this](const ev::MeleeSwingResolved& e) {
+        if (!audioCoordinator_) return;
+        const bool landed = !e.missed && !e.avoided;
+        if (!e.attackerIsPlayer) {
+            auto* voice = audioCoordinator_->getNpcVoiceManager();
+            auto entity = gameHandler_.getEntityManager().getEntity(e.attackerGuid);
+            if (voice && entity && entity->getType() == game::ObjectType::UNIT) {
+                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                const glm::vec3 canonical(unit->getLatestX(), unit->getLatestY(), unit->getLatestZ());
+                voice->playCombatAttack(e.attackerGuid, unit->getDisplayId(),
+                                        core::coords::canonicalToRender(canonical));
+            }
+        }
+        if (auto* csm = audioCoordinator_->getCombatSoundManager()) {
+            const auto weaponSize = audio::CombatSoundManager::WeaponSize::MEDIUM;
+            if (e.missed) {
+                csm->playWeaponMiss(false);
+            } else if (e.avoided) {
+                // Dodged or parried: the whoosh, and nothing hit.
+                csm->playWeaponSwing(weaponSize, false);
+            } else {
+                csm->playWeaponSwing(weaponSize, e.critical);
+                csm->playImpact(weaponSize, audio::CombatSoundManager::ImpactType::FLESH, e.critical);
+            }
+        }
+        if (auto* vocal = audioCoordinator_->getActivitySoundManager()) {
+            if (e.attackerIsPlayer && landed) vocal->playAttackGrunt();
+            if (e.victimIsPlayer && landed) vocal->playWound(e.critical);
+        }
+    }));
 }
 
 std::optional<std::string> AudioCallbackHandler::resolveSoundEntryPath(uint32_t soundId) const {
@@ -65,13 +212,16 @@ void AudioCallbackHandler::setupCallbacks() {
         }
     }));
 
-    // Achievement earned callback - show toast banner
-    gameHandler_.setAchievementEarnedCallback([this](uint32_t /*achievementId*/,
-                                                    const std::string& /*name*/) {
+    // An achievement: its alert and the toast banner.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::AchievementEarned>(
+        [this](const game::events::AchievementEarned&) {
+        playUi([](audio::UiSoundManager& sfx) { sfx.playAchievementAlert(); });
         if (uiManager_) {
             uiManager_->getGameScreen().toastManager().playAchievementEarned();
         }
-    });
+    }));
+
+    subscribeGameSounds();
 
     // Server-triggered music callback (SMSG_PLAY_MUSIC)
     // Resolves soundId → SoundEntries.dbc → MPQ path → MusicManager.

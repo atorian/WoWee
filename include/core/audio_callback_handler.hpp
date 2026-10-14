@@ -10,7 +10,7 @@ namespace wowee {
 
 namespace rendering { class Renderer; }
 namespace game { class GameHandler; }
-namespace audio { class AudioCoordinator; }
+namespace audio { class AudioCoordinator; class UiSoundManager; }
 namespace pipeline { class AssetManager; }
 namespace ui { class UIManager; }
 
@@ -33,6 +33,14 @@ public:
 private:
     /// Resolve SoundEntries.dbc → file path for a given soundId (eliminates 3x copy-paste)
     [[nodiscard]] std::optional<std::string> resolveSoundEntryPath(uint32_t soundId) const;
+
+    /// The sounds of what the game announces: loot, quests, mail, combat,
+    /// refusals spoken aloud, the error line. The game says what happened;
+    /// which sound answers it is decided here.
+    void subscribeGameSounds();
+    /// Run `play` on the interface's sound manager, when there is one.
+    template <class Play>
+    void playUi(Play&& play) const;
 
     pipeline::AssetManager& assetManager_;
     audio::AudioCoordinator* audioCoordinator_;

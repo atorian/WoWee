@@ -3,7 +3,6 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace audio { class AudioCoordinator; }
 namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
 namespace core { class EventBus; class CVarStore; }
 
@@ -13,11 +12,10 @@ namespace game {
 // Owned by Application, passed by reference to GameHandler at construction.
 // Replaces hidden Application::getInstance() singleton access.
 //
-// Nothing here draws: the game says what happened on `events`, and the
-// client's presentation (core/) shows it. See AGENTS.md, "Layers".
+// Nothing here draws or sounds: the game says what happened on `events`, and
+// the client's presentation (core/) shows and plays it. See AGENTS.md,
+// "Layers".
 struct GameServices {
-    /// Still played directly by the game's handlers; moving to events.
-    audio::AudioCoordinator* audioCoordinator = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
     ExpansionRegistry* expansionRegistry = nullptr;
     /// What the emotes are. Required, like `events`.

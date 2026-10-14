@@ -195,11 +195,11 @@ CHECKS = [
      "client includes in the renderer library"),
     # The game says what happened and is handed what it asks; it does not
     # drive the client's presentation. Held where it stood when the check was
-    # written, and only lowered from here (AGENTS.md, "Layers"). 30 to 24 when
-    # the CVar store moved to base and the game stopped asking the addons; 19
-    # when it stopped asking FrameXML which windows it drew.
+    # written, and lowered to zero (AGENTS.md, "Layers"): the CVar store moved
+    # to base, the game stopped asking FrameXML which windows it drew, and the
+    # sounds it played became events the client answers.
     ("game_dependency_check.py",
-     r"^(\d+) includes of the client's presentation from the game", 19,
+     r"^(\d+) includes of the client's presentation from the game", 0,
      "presentation includes in the game layer"),
     ("redefined_macro_check.py",
      r"^(\d+) redefined without an #ifndef", 0,
