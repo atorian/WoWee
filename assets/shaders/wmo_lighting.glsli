@@ -1,9 +1,0 @@
-// Preserve authored MOCV lighting on sky-visible portal groups, but remove
-// the direct-light share where a dynamic caster blocks it. Closed rooms do
-// not call this: their baked roof shade must not receive outdoor shadow again.
-vec3 wmoBakedExteriorShadow(vec3 baked, vec3 ambient, vec3 diffuse,
-                            float nDotL, float shadow) {
-    vec3 direct = diffuse * max(nDotL, 0.0f);
-    vec3 blocked = direct * (1.0f - clamp(shadow, 0.0f, 1.0f));
-    return baked * (vec3(1.0f) - blocked / max(ambient + direct, vec3(0.0001f)));
-}

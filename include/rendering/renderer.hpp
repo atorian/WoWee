@@ -194,6 +194,9 @@ public:
     VkImageView getNeutralFogVolumeView() const;
     /// What a per-frame set allocated elsewhere binds at 3 and 4.
     VkImageView getNeutralRtLightingView() const;
+    /// What a per-frame set allocated elsewhere binds at 9: a buffer for one
+    /// point light, for a set whose block says there are none.
+    VkBuffer getNeutralLocalLightBuffer() const { return neutralLightBuffer_.buffer; }
     /// The geometry the ray traced lighting sees; renderers register with it.
     RtScene* getRtScene() const { return rtScene_.get(); }
     VkRenderPass getShadowRenderPass() const { return shadowRenderPass; }
@@ -319,6 +322,9 @@ private:
     std::unique_ptr<CorpseBones> corpseBones_;
     std::unique_ptr<ChargeEffect> chargeEffect;
     std::unique_ptr<CharacterRenderer> characterRenderer;
+    /// The frame's point lights, gathered before anything draws and read by every
+    /// renderer's draws (local_lights.hpp).
+    std::vector<LocalLight> frameLocalLights_;
     /// The particle and ribbon emitters of what characterRenderer draws, run
     /// by m2Renderer. Holds both; goes before either does.
     std::unique_ptr<CharacterEmitters> characterEmitters_;
@@ -366,7 +372,10 @@ private:
     VmaAllocation shadowDepthAlloc[2] = {};
     VkImageView shadowDepthView[2] = {};
     VkSampler shadowSampler = VK_NULL_HANDLE;
-    static constexpr uint32_t CONTACT_MAP_SIZE = 1024;
+    // The units' map around the player, as the client's at its highest
+    // setting: 40 yards a side at 2048 texels, two centimetres each.
+    static constexpr uint32_t CONTACT_MAP_SIZE = 2048;
+    static constexpr float CONTACT_MAP_HALF_EXTENT = 20.0f;
     AllocatedImage contactShadowImages_[2]{};
     VkFramebuffer contactShadowFramebuffer_[2]{};
     VkImageLayout contactShadowLayout_[2]{};
@@ -503,6 +512,24 @@ private:
     void* reflPerFrameUBOMapped = nullptr;
     VkDescriptorSet reflPerFrameDescSet[MAX_FRAMES] = {};
 
+    // The frame's point lights at set 0 binding 9 (local_lights.glsli): a
+    // buffer per frame slot, grown when a frame has more lights than it
+    // holds, and an empty one for per-frame sets allocated elsewhere.
+    struct LightBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        size_t capacity = 0;  ///< in lights
+    };
+    static constexpr size_t kInitialLocalLightCapacity = 256;
+    LightBuffer localLightBuffers_[MAX_FRAMES];
+    LightBuffer neutralLightBuffer_;
+    bool createLightBuffer(LightBuffer& out, size_t lights);
+    /// Point the slot's world, sky capture and reflection sets at its buffer.
+    void writeLightBinding(uint32_t slot);
+    /// Copy frameLocalLights_ into the slot's buffer, growing it if needed.
+    void uploadLocalLights(uint32_t slot);
+
     bool createPerFrameResources();
     void destroyPerFrameResources();
     void updatePerFrameUBO();
@@ -519,7 +546,13 @@ private:
     static constexpr uint32_t SEC_M2        = 5;  // M2 + particles + glow (worker 3)
     static constexpr uint32_t SEC_POST      = 6;  // water + weather + effects (worker 4)
     static constexpr uint32_t SEC_IMGUI     = 7;  // ImGui (main thread, non-FSR only)
-    static constexpr uint32_t NUM_SECONDARIES = 8;
+    // Faded characters (worker 2, after SEC_CHARS), queued after SEC_M2 so the
+    // effects inside them show through; unused when they go after the water.
+    static constexpr uint32_t SEC_CHARS_FADED = 8;
+    static constexpr uint32_t NUM_SECONDARIES = 9;
+    /// Faded characters are drawn in the after-water pass, after the blended
+    /// M2s and particles there, rather than in the scene pass after SEC_M2.
+    [[nodiscard]] bool fadedCharactersAfterWater() const;
     static constexpr uint32_t NUM_WORKERS = 5;
 
     // Per-worker command pools (thread-safe: one pool per thread)

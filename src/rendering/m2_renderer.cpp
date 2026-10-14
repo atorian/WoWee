@@ -2,6 +2,8 @@
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_material.hpp"
+#include "rendering/m2_batch_opacity.hpp"
+#include "rendering/m2_track_sampler.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "core/env_flag.hpp"
@@ -113,154 +115,52 @@ M2Renderer::~M2Renderer() {
     shutdown();
 }
 
-uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
-                                       glm::vec4* outPosRadius,
-                                       glm::vec4* outColorIntensity,
-                                       uint32_t maxLights) const {
-    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
-
-    struct Candidate {
-        float distSq;
-        glm::vec4 posRadius;
-        glm::vec4 colorIntensity;
-        bool flame = false;  // lamps/torches/braziers gutter; lava burns steady
-        // Fixture placement, used only to seed the flicker phase. The light's own
-        // position animates with the flame, which would re-roll the phase every frame.
-        glm::vec3 phaseSeed{0.0f};
-    };
-    std::vector<Candidate> candidates;
-
-    // Only the instances whose model can light anything. Asking every
-    // instance in the world, every frame, was a cache miss apiece for a
-    // handful of lamps.
+void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
+                                   std::vector<LocalLight>& out) const {
+    // The client's point lights are the M2Lights of the models it animated
+    // this frame - those that passed culling, and doodads within ten yards -
+    // and nothing else (local_lights.hpp). A lamp out of view lights nothing,
+    // even where what it would light is on screen.
+    constexpr float kNearDoodadSq = 10.0f * 10.0f;
     for (const size_t index : lightInstanceIndices_) {
         if (index >= instances.size()) continue;
-        const auto& instance = instances[index];
-        const M2ModelGPU* model = instance.cachedModel;
-        if (!model || !model->canThrowLocalLight()) continue;
+        const auto& inst = instances[index];
+        const M2ModelGPU* model = inst.cachedModel;
+        if (!model || model->lights.empty() || !inst.cachedIsValid) continue;
+        const glm::vec3 toCam = inst.position - cameraPos;
+        if (!inst.lastCullVisible && glm::dot(toCam, toCam) > kNearDoodadSq) continue;
 
-        if (model->isLavaModel) {
-            const glm::vec3 worldPos = instance.cachedCullCenter;
-            const glm::vec3 delta = worldPos - cameraPos;
-            const float distSq = glm::dot(delta, delta);
-            if (distSq <= 300.0f * 300.0f) {
-                const float radius = std::clamp(instance.cachedVisualRadius * 0.8f,
-                                                10.0f, 35.0f);
-                candidates.push_back({.distSq = distSq, .posRadius = glm::vec4(worldPos, radius),
-                                      .colorIntensity = glm::vec4(1.0f, 0.28f, 0.035f, 1.75f),
-                                      .flame = false, .phaseSeed = instance.position});
-            }
-        }
-
-        bool hasBatchLight = false;
-        for (const auto& batch : model->batches) {
-            if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
-
-            glm::vec3 worldPos;
-            if (model->isGroundFire &&
-                !model->particleEmitters.empty()) {
-                worldPos = glm::vec3(std::numeric_limits<float>::max());
-                for (const auto& emitter : model->particleEmitters) {
-                    glm::mat4 boneXform(1.0f);
-                    if (emitter.bone < instance.boneMatrices.size()) {
-                        boneXform = instance.boneMatrices[emitter.bone];
-                    }
-                    const glm::vec3 emitterWorld = glm::vec3(
-                        instance.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
-                    if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
+        for (const auto& light : model->lights) {
+            if (light.type != 1) {
+                // A directional M2 light adds to every receiver's ambient and
+                // folds into the sun (render spec, M2 lights); not done here.
+                static std::unordered_set<std::string> saidDirectional;
+                if (saidDirectional.insert(model->name).second) {
+                    LOG_WARNING("M2 '", model->name, "' carries a directional light (type ",
+                                light.type, "); it is not applied - the model lights nothing with it");
                 }
-            } else {
-                worldPos = animatedBatchLightWorldCenter(instance, batch);
+                continue;
             }
-            const glm::vec3 delta = worldPos - cameraPos;
-            const float distSq = glm::dot(delta, delta);
-            // Keep tunnel/interior fixtures resident well before their lit
-            // surfaces enter view; the shader's radius still bounds the work.
-            if (distSq > 300.0f * 300.0f) continue;
-
-            const float radius = std::clamp(batch.glowSize * instance.scale * 8.0f,
-                                            5.0f, 12.0f);
-            glm::vec3 color(1.0f, 0.58f, 0.22f);
-            if (batch.glowTint == 1) color = glm::vec3(0.42f, 0.68f, 1.0f);
-            else if (batch.glowTint == 2) color = glm::vec3(1.0f, 0.24f, 0.14f);
-            candidates.push_back({.distSq = distSq, .posRadius = glm::vec4(worldPos, radius),
-                                  .colorIntensity = glm::vec4(color, 1.35f), .flame = true,
-                                  .phaseSeed = instance.position});
-            hasBatchLight = true;
-        }
-
-        // Candles, hearth fires, campfires, torches and forges express their
-        // flame purely as particle emitters, with no glow-card batch for the
-        // path above - so without this they lit nothing at all. One light at
-        // the emitter centroid; chandeliers with an authored glow batch stay
-        // represented by that batch rather than by five separate lights.
-        const bool openFlame = model->isBrazierOrFire || model->isTorch ||
-                               model->isGroundFire || model->isForge;
-        if (!hasBatchLight && (model->isLanternLike || openFlame) &&
-            !model->particleEmitters.empty()) {
-            glm::vec3 worldPos(0.0f);
-            uint32_t emitterCount = 0;
-            for (const auto& emitter : model->particleEmitters) {
-                glm::mat4 boneXform(1.0f);
-                if (emitter.bone < instance.boneMatrices.size()) {
-                    boneXform = instance.boneMatrices[emitter.bone];
-                }
-                worldPos += glm::vec3(instance.modelMatrix * boneXform *
-                                      glm::vec4(emitter.position, 1.0f));
-                emitterCount++;
+            const int seq = inst.currentSequenceIndex;
+            const float t = inst.animTime;
+            const float gt = inst.globalSequenceTime;
+            const auto& gsd = model->globalSequenceDurations;
+            // Visibility is a switch: the Dalaran lamp's is 0 until it opens.
+            if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
+            // Diffuse alone: a point light's ambient is never read. The
+            // model's alpha fades it with the model.
+            const glm::vec3 color =
+                m2_track::sampleVec3(light.diffuseColor, seq, t, gt, gsd, glm::vec3(1.0f)) *
+                m2_track::sampleFloat(light.diffuseIntensity, seq, t, gt, gsd, 1.0f) * inst.fade;
+            if (std::max({color.r, color.g, color.b}) <= 0.0f) continue;
+            glm::mat4 bone(1.0f);
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.boneMatrices.size()) {
+                bone = inst.boneMatrices[static_cast<size_t>(light.bone)];
             }
-            if (emitterCount > 0) {
-                worldPos /= static_cast<float>(emitterCount);
-                const glm::vec3 delta = worldPos - cameraPos;
-                const float distSq = glm::dot(delta, delta);
-                if (distSq <= 300.0f * 300.0f) {
-                    const bool chandelier =
-                        model->name.find("Chandelier") != std::string::npos ||
-                        model->name.find("chandelier") != std::string::npos;
-                    // A hearth or campfire throws light much further than a
-                    // candle, and burns oranger than a lamp wick.
-                    float radius    = chandelier ? 10.0f : 5.0f;
-                    float intensity = chandelier ? 1.25f : 0.85f;
-                    glm::vec3 color(1.0f, 0.58f, 0.22f);
-                    if (openFlame) {
-                        // Local lights are not shadowed, so this radius is the
-                        // distance the glow reaches straight through whatever
-                        // surrounds the fire. At 11 a hearth fire lit its entire
-                        // chimney from the inside out and the brickwork read as
-                        // though it were glowing. Keep the reach close to the
-                        // firebox and let the sprite and flames carry the rest.
-                        radius    = model->isTorch ? 3.0f : 3.5f;
-                        intensity = model->isTorch ? 0.95f : 1.05f;
-                        color     = glm::vec3(1.0f, 0.50f, 0.18f);
-                    }
-                    candidates.push_back({.distSq = distSq,
-                        .posRadius = glm::vec4(worldPos, radius),
-                        .colorIntensity = glm::vec4(color, intensity),
-                        .flame = true, .phaseSeed = instance.position});
-                }
-            }
+            out.push_back({.position = glm::vec3(inst.modelMatrix * bone * glm::vec4(light.position, 1.0f)),
+                           .color = color});
         }
     }
-
-    const uint32_t count = std::min<uint32_t>(maxLights,
-        static_cast<uint32_t>(candidates.size()));
-    if (count == 0) return 0;
-    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
-        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
-    // Guttering is applied to the light itself, not just the glow sprite: the
-    // pool of light a lamp throws on the ground and nearby walls is what the eye
-    // actually reads as firelight, so modulating the sprite alone was too subtle
-    // to notice.
-    const float flickerSeconds = lampFlickerClockSeconds();
-    for (uint32_t i = 0; i < count; ++i) {
-        outPosRadius[i] = candidates[i].posRadius;
-        outColorIntensity[i] = candidates[i].colorIntensity;
-        if (candidates[i].flame) {
-            outColorIntensity[i].w *= lampFlicker(candidates[i].phaseSeed,
-                                                  flickerSeconds, 0.82f, 0.12f, 0.06f);
-        }
-    }
-    return count;
 }
 
 /// The nine main-pass pipelines, built once at startup and again after a
@@ -386,14 +286,11 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     VkDevice device = vkCtx_->getDevice();
     rendering::VkShaderModule m2Vert, m2Frag;
     rendering::VkShaderModule particleVert, particleFrag;
-    rendering::VkShaderModule smokeVert, smokeFrag;
     rendering::VkShaderModule ribVert, ribFrag;
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
     (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
     (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
     (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
-    (void)smokeVert.loadFromFile(device, "assets/shaders/m2_smoke.vert.spv");
-    (void)smokeFrag.loadFromFile(device, "assets/shaders/m2_smoke.frag.spv");
     (void)ribVert.loadFromFile(device, "assets/shaders/m2_ribbon.vert.spv");
     (void)ribFrag.loadFromFile(device, "assets/shaders/m2_ribbon.frag.spv");
     if (!m2Vert.isValid() || !m2Frag.isValid()) return false;
@@ -429,26 +326,44 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     out.modulate = buildM2Pipeline(m2ModulateBlendState(false));
     out.modulate2x = buildM2Pipeline(m2ModulateBlendState(true));
 
-    // Particles: pos3 + color4 + size1 + tile1
+    // Particles: a quad per instance (an M2ParticleQuad), its four
+    // corners made by the vertex shader. They were points, which can only be
+    // a square of so many pixels: no tail could be stretched along a flight,
+    // and the size had to be guessed from the distance.
     if (particleVert.isValid() && particleFrag.isValid()) {
         VkVertexInputBindingDescription pBind{};
         pBind.binding = 0;
-        pBind.stride = 9 * sizeof(float);
-        pBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        pBind.stride = sizeof(M2ParticleQuad);
+        pBind.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
         std::vector<VkVertexInputAttributeDescription> pAttrs = {
-            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},                    // position
-            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 3 * sizeof(float)}, // color
-            {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 7 * sizeof(float)},          // size
-            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 8 * sizeof(float)},          // tile
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, position)},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(M2ParticleQuad, color)},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(M2ParticleQuad, halfSize)},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(M2ParticleQuad, cell)},
+            {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, axisA)},
+            {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, axisB)},
+            {.location = 6, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(M2ParticleQuad, spin)},
+            {.location = 7, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = offsetof(M2ParticleQuad, shape)},
+            {.location = 8, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = offsetof(M2ParticleQuad, lit)},
+            {.location = 9, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+             .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, ambient)},
+            {.location = 10, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+             .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, direct)},
+            {.location = 11, .binding = 0, .format = VK_FORMAT_R32G32B32A32_UINT,
+             .offset = offsetof(M2ParticleQuad, localLights)},
         };
-        auto buildParticlePipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
+        // The client's particle material: two-sided, and depth written only
+        // by the unblended modes (Opaque, AlphaKey). Every blend mode has its
+        // own state; Add, NoAlphaAdd, Mod and Mod2x used to share two.
+        auto buildParticlePipeline = [&](VkPipelineColorBlendAttachmentState blend,
+                                         bool depthWrite) -> VkPipeline {
             return PipelineBuilder()
                 .setShaders(particleVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                             particleFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
                 .setVertexInput({pBind}, pAttrs)
-                .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
                 .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-                .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+                .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS_OR_EQUAL)
                 .setColorBlendAttachment(blend)
                 .setMultisample(samples)
                 .setLayout(particlePipelineLayout_)
@@ -456,35 +371,23 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
                 .setDynamicStates(viewportAndScissorDynamic())
                 .build(device, vkCtx_->getPipelineCache());
         };
-        out.particle = buildParticlePipeline(PipelineBuilder::blendAlpha());
-        out.particleAdditive = buildParticlePipeline(PipelineBuilder::blendAdditive());
-    }
-
-    // Smoke: pos3 + lifeRatio1 + size1 + isSpark1
-    if (smokeVert.isValid() && smokeFrag.isValid()) {
-        VkVertexInputBindingDescription sBind{};
-        sBind.binding = 0;
-        sBind.stride = 6 * sizeof(float);
-        sBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-        std::vector<VkVertexInputAttributeDescription> sAttrs = {
-            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},           // position
-            {.location = 1, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float)}, // lifeRatio
-            {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 4 * sizeof(float)}, // size
-            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 5 * sizeof(float)}, // isSpark
+        auto particlePipe = [&](M2BlendPipeline p) -> VkPipeline& {
+            return out.particle[static_cast<size_t>(p)];
         };
-        out.smoke = PipelineBuilder()
-            .setShaders(smokeVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        smokeFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-            .setVertexInput({sBind}, sAttrs)
-            .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-            .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-            .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-            .setMultisample(samples)
-            .setLayout(smokePipelineLayout_)
-            .setRenderPass(pass)
-            .setDynamicStates(viewportAndScissorDynamic())
-            .build(device, vkCtx_->getPipelineCache());
+        particlePipe(M2BlendPipeline::Opaque) =
+            buildParticlePipeline(PipelineBuilder::blendDisabled(), true);
+        particlePipe(M2BlendPipeline::AlphaTest) =
+            buildParticlePipeline(PipelineBuilder::blendDisabled(), true);
+        particlePipe(M2BlendPipeline::Alpha) =
+            buildParticlePipeline(PipelineBuilder::blendAlpha(), false);
+        particlePipe(M2BlendPipeline::NoAlphaAdd) =
+            buildParticlePipeline(m2NoAlphaAddBlendState(), false);
+        particlePipe(M2BlendPipeline::AlphaAdd) =
+            buildParticlePipeline(PipelineBuilder::blendAdditive(), false);
+        particlePipe(M2BlendPipeline::Modulate) =
+            buildParticlePipeline(m2ModulateBlendState(false), false);
+        particlePipe(M2BlendPipeline::Modulate2x) =
+            buildParticlePipeline(m2ModulateBlendState(true), false);
     }
 
     // Ribbons: pos(3) + color(3) + alpha(1) + uv(2) = 9 floats = 36 bytes
@@ -520,7 +423,6 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
 
     m2Vert.destroy(); m2Frag.destroy();
     particleVert.destroy(); particleFrag.destroy();
-    smokeVert.destroy(); smokeFrag.destroy();
     ribVert.destroy(); ribFrag.destroy();
     return out.alpha != VK_NULL_HANDLE;
 }
@@ -529,11 +431,54 @@ void M2Renderer::destroyBlendedPipelines(BlendedPipelines& pipes) {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     for (VkPipeline* p : {&pipes.alpha, &pipes.noAlphaAdd, &pipes.additive, &pipes.modulate,
-                          &pipes.modulate2x, &pipes.particle, &pipes.particleAdditive,
-                          &pipes.smoke, &pipes.ribbon, &pipes.ribbonAdditive}) {
+                          &pipes.modulate2x, &pipes.ribbon, &pipes.ribbonAdditive}) {
         if (*p) vkDestroyPipeline(device, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
+    for (VkPipeline& p : pipes.particle) {
+        if (p) vkDestroyPipeline(device, p, nullptr);
+        p = VK_NULL_HANDLE;
+    }
+}
+
+bool M2Renderer::createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize size, const char* what) {
+    VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.size = size;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+    aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
+        VmaAllocationInfo allocInfo{};
+        const VkResult result = vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &vb.buffer[f],
+                                                &vb.alloc[f], &allocInfo);
+        if (result != VK_SUCCESS || !allocInfo.pMappedData) {
+            LOG_ERROR("M2Renderer: could not create the ", what, " vertex buffer (", size,
+                      " bytes, frame ", f, ", VkResult ", static_cast<int>(result),
+                      ") - those are not drawn");
+            destroyFrameVertexBuffer(vb);
+            return false;
+        }
+        vb.mapped[f] = allocInfo.pMappedData;
+    }
+    return true;
+}
+
+void M2Renderer::destroyFrameVertexBuffer(FrameVertexBuffer& vb) {
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
+        if (vb.buffer[f]) vmaDestroyBuffer(vkCtx_->getAllocator(), vb.buffer[f], vb.alloc[f]);
+        vb.buffer[f] = VK_NULL_HANDLE;
+        vb.alloc[f] = VK_NULL_HANDLE;
+        vb.mapped[f] = nullptr;
+    }
+}
+
+::VkBuffer M2Renderer::frameBuffer(const FrameVertexBuffer& vb) const {
+    return vb.buffer[vkCtx_->getCurrentFrame()];
+}
+
+void* M2Renderer::frameMapped(const FrameVertexBuffer& vb) const {
+    return vb.mapped[vkCtx_->getCurrentFrame()];
 }
 
 void M2Renderer::setAfterWaterPass(VkRenderPass pass, VkSampleCountFlagBits samples) {
@@ -752,7 +697,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     {
-        static_assert(sizeof(M2InstanceGPU) == 192, "M2InstanceGPU must be 192 bytes (std430)");
+        static_assert(sizeof(M2InstanceGPU) == 208, "M2InstanceGPU must be 208 bytes (std430)");
         const VkDeviceSize instBufSize = MAX_INSTANCE_DATA * sizeof(M2InstanceGPU);
 
         // Descriptor pool for 2 sets (double-buffered)
@@ -986,14 +931,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // --- Pipeline layouts ---
 
     // Main M2 pipeline layout: set 0 = perFrame, set 1 = material, set 2 = bones, set 3 = instances
-    // Push constant: int texCoordSet + int isFoliage + int instanceDataOffset
-    //              + float swayRefHeight + float swayAmp + float plantHeight (24 bytes)
+    // Push constant: M2PushConstants, m2.vert's Push block
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_, instanceSetLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushRange.offset = 0;
-        pushRange.size = 24;
+        pushRange.size = kM2PushConstantBytes;
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 4;
@@ -1004,13 +948,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     }
 
     // Particle pipeline layout: set 0 = perFrame, set 1 = particleTex
-    // Push constant: vec2 tileCount + int alphaKey (12 bytes)
+    // Push constant: M2ParticlePush (m2_renderer_internal.h)
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, particleTexLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pushRange.offset = 0;
-        pushRange.size = 12; // vec2 + int
+        pushRange.size = sizeof(M2ParticlePush);
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 2;
@@ -1020,57 +964,14 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         vkCreatePipelineLayout(device, &ci, nullptr, &particlePipelineLayout_);
     }
 
-    // Smoke pipeline layout: set 0 = perFrame
-    // Push constant: float screenHeight (4 bytes)
-    {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout};
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        pushRange.offset = 0;
-        pushRange.size = 4;
-
-        VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        ci.setLayoutCount = 1;
-        ci.pSetLayouts = setLayouts;
-        ci.pushConstantRangeCount = 1;
-        ci.pPushConstantRanges = &pushRange;
-        vkCreatePipelineLayout(device, &ci, nullptr, &smokePipelineLayout_);
-    }
-
     perFrameLayout_ = perFrameLayout;
     if (!buildMainPassPipelines(perFrameLayout)) return false;
 
-    // --- Create dynamic particle buffers (mapped for CPU writes) ---
-    {
-        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-        VmaAllocationInfo allocInfo{};
-
-        // Smoke particle buffer
-        bci.size = MAX_SMOKE_PARTICLES * 6 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &smokeVB_, &smokeVBAlloc_, &allocInfo);
-        smokeVBMapped_ = allocInfo.pMappedData;
-
-        // M2 particle buffer
-        bci.size = MAX_M2_PARTICLE_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &m2ParticleVB_, &m2ParticleVBAlloc_, &allocInfo);
-        m2ParticleVBMapped_ = allocInfo.pMappedData;
-
-        // Dedicated glow sprite buffer (separate from particle VB to avoid data race)
-        bci.size = MAX_GLOW_SPRITES * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &glowVB_, &glowVBAlloc_, &allocInfo);
-        glowVBMapped_ = allocInfo.pMappedData;
-
-        // Ribbon vertex buffer - triangle strip: pos(3)+color(3)+alpha(1)+uv(2)=9 floats/vert
-        bci.size = MAX_RIBBON_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &ribbonVB_, &ribbonVBAlloc_, &allocInfo);
-        ribbonVBMapped_ = allocInfo.pMappedData;
-    }
+    // --- Dynamic particle buffers, mapped for CPU writes, one per frame ---
+    // Ribbons: a triangle strip of pos(3)+color(3)+alpha(1)+uv(2).
+    createFrameVertexBuffer(m2ParticleVB_, MAX_M2_PARTICLE_QUADS * sizeof(M2ParticleQuad), "particle");
+    createFrameVertexBuffer(glowVB_, MAX_GLOW_SPRITES * sizeof(M2ParticleQuad), "glow sprite");
+    createFrameVertexBuffer(ribbonVB_, MAX_RIBBON_VERTS * 9 * sizeof(float), "ribbon");
 
     // --- Create white fallback texture ---
     {
@@ -1197,11 +1098,9 @@ void M2Renderer::shutdown() {
     glowTexture_.reset();
 
     // Clean up particle/ribbon buffers
-    destroy(alloc, smokeVB_, smokeVBAlloc_);
-    destroy(alloc, m2ParticleVB_, m2ParticleVBAlloc_);
-    destroy(alloc, glowVB_, glowVBAlloc_);
-    destroy(alloc, ribbonVB_, ribbonVBAlloc_);
-    smokeParticles.clear();
+    destroyFrameVertexBuffer(m2ParticleVB_);
+    destroyFrameVertexBuffer(glowVB_);
+    destroyFrameVertexBuffer(ribbonVB_);
 
     // Destroy pipelines
     auto destroyPipeline = [&](VkPipeline& p) { if (p) { vkDestroyPipeline(device, p, nullptr); p = VK_NULL_HANDLE; } };
@@ -1213,7 +1112,6 @@ void M2Renderer::shutdown() {
 
     destroy(device, pipelineLayout_);
     destroy(device, particlePipelineLayout_);
-    destroy(device, smokePipelineLayout_);
     destroy(device, ribbonPipelineLayout_);
 
     // Destroy descriptor pools and layouts
@@ -1339,6 +1237,8 @@ void M2ModelGPU::CollisionMesh::build() {
         bmin = glm::min(bmin, v);
         bmax = glm::max(bmax, v);
     }
+    boundMin = bmin;
+    boundMax = bmax;
 
     gridOrigin = glm::vec2(bmin.x, bmin.y);
     gridCellsX = std::max(1, std::min(32, static_cast<int>(std::ceil((bmax.x - bmin.x) / CELL_SIZE))));
@@ -1435,29 +1335,6 @@ bool M2Renderer::hasModel(uint32_t modelId) const {
     return models.find(modelId) != models.end();
 }
 
-namespace {
-
-// Which batches of a forge are the fire, as opposed to the stone and iron it is
-// built from. classifyBatchTexture already recognises flame and glow cards; the
-// forge adds coals, lava and the reflect textures Blizzard uses for hot metal,
-// none of which carry a flame token in their name.
-bool isForgeFireTexture(const std::string& texKeyLower,
-                        const M2BatchTexClassification& tcls) {
-    if (tcls.hasFlameToken || tcls.likelyFlame || tcls.hasGlowToken
-        || tcls.hasGlowCardToken) {
-        return true;
-    }
-    static constexpr std::string_view kEmberTokens[] = {
-        "cinder", "coal", "ember", "lava", "magma", "reflect", "smoke",
-    };
-    for (auto tok : kEmberTokens) {
-        if (texKeyLower.find(tok) != std::string::npos) return true;
-    }
-    return false;
-}
-
-} // namespace
-
 VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
                                                  uint8_t texFlags) const {
     VkDescriptorImageInfo info = texture.descriptorInfo();
@@ -1467,29 +1344,18 @@ VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
     return info;
 }
 
-void M2Renderer::applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
-                                        const std::string& textureKeyLower) const {
+void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const {
+    // What the texture is, measured from the image. Nothing about how a batch
+    // is drawn comes from its texture's file name: the client never keys out
+    // black. A forge's or a bonfire's batches with an opaque material are its
+    // coals, logs, rocks and lava surfaces - ELWYNNCAMPFIREROCK02,
+    // DALARAN_FORGECOALS, LAVA.30 - and their flames are particle emitters
+    // (OrcBonFire draws FlameLickSmall and LavaLump2 from its two emitters,
+    // not from a batch). Keying "fire" textures cut holes in the rocks.
     auto pit = texturePropsByPtr_.find(batch.texture);
     if (pit == texturePropsByPtr_.end()) return;
     batch.hasAlpha = pit->second.hasAlpha;
     batch.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-    batch.colorKeyBlack = pit->second.colorKeyBlack;
-    // Forge fire is drawn on cards with a black backing that has to be keyed
-    // out, and some of them use effect textures carrying none of the
-    // flame/glow tokens the hint looks for - coals, lava lumps,
-    // ARMORREFLECT/ORBREFLECT. Keying the whole model instead made the masonry
-    // and ironwork translucent, since a forge is mostly those.
-    // And a bonfire's, which is the same thing at a different scale: OrcBonFire
-    // draws its flame on cards textured with LavaLump2 and FlameLickSmall over
-    // a black backing, with the material marked opaque. Drawn as the material
-    // asks, the black backing is a solid rectangle around the flame - which is
-    // the hard-edged slab standing over Grom'gol. The wood and ash batches
-    // carry neither an ember nor a flame token, so they stay solid.
-    if ((model.isForge || model.isBrazierOrFire) &&
-        isForgeFireTexture(textureKeyLower, classifyBatchTexture(textureKeyLower))) {
-        batch.colorKeyBlack = true;
-        batch.forgeFireCard = true;
-    }
 }
 
 void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
@@ -1551,7 +1417,7 @@ void M2Renderer::retryPendingBatchTextures() {
         // refers to its descriptor set or material buffer.
         const M2ModelGPU& model = it->second;
         batch->texture = tex;
-        applyBatchTextureProps(model, *batch, batch->pendingTextureKey);
+        applyBatchTextureProps(*batch);
         writeBatchMaterial(model, *batch);
         writeBatchDescriptors(*batch);
         batch->batchOpacity = batch->loadedOpacity;
@@ -1569,8 +1435,6 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     in.blendMode = static_cast<uint8_t>(batch.blendMode);
     in.hasAlpha = batch.hasAlpha;
     in.alphaIsSilhouette = batch.alphaIsSilhouette;
-    in.colorKeyBlack = batch.colorKeyBlack;
-    in.flameCard = batch.forgeFireCard;
     in.spellEffect = model.isSpellEffect;
     in.groundDetail = model.isGroundDetail;
     in.foliageLike = model.isFoliageLike;
@@ -1580,19 +1444,14 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     M2MaterialUBO mat{};
     mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
     mat.alphaTest = batch.drawState.alphaTest;
-    mat.colorKeyBlack =
-        m2BatchWantsColorKey(in.blendMode, batch.colorKeyBlack) ? 1 : 0;
-    mat.colorKeyThreshold = batch.drawState.colorKeyThreshold;
     mat.tintR = batch.tint.r;
     mat.tintG = batch.tint.g;
     mat.tintB = batch.tint.b;
     mat.unlit = (batch.materialFlags & 0x01) && !batch.drawState.litOverride ? 1 : 0;
     mat.blendMode = batch.blendMode;
-    mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
-    mat.fireCard = batch.forgeFireCard ? 1 : 0;
+    mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
-    mat.secondTexCoordSet = batch.secondTexCoordSet;
-    mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
+    mat.cullBackFaces = !skyMode_ &&
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
@@ -1729,15 +1588,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     gpuModel.isInvisibleTrap             = cls.isInvisibleTrap;
-    gpuModel.collisionSteppedFountain    = cls.collisionSteppedFountain;
-    gpuModel.collisionSteppedLowPlatform = cls.collisionSteppedLowPlatform;
-    gpuModel.collisionBridge             = cls.collisionBridge;
-    gpuModel.collisionPlanter            = cls.collisionPlanter;
-    gpuModel.collisionStatue             = cls.collisionStatue;
-    gpuModel.collisionTreeTrunk          = cls.collisionTreeTrunk;
-    gpuModel.collisionNarrowVerticalProp = cls.collisionNarrowVerticalProp;
-    gpuModel.collisionSmallSolidProp     = cls.collisionSmallSolidProp;
-    gpuModel.collisionNoBlock            = cls.collisionNoBlock;
     gpuModel.isGroundDetail              = cls.isGroundDetail;
     gpuModel.isFoliageLike               = cls.isFoliageLike;
     gpuModel.disableAnimation            = cls.disableAnimation;
@@ -1851,14 +1701,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
     gpuModel.isFireflyEffect             = cls.isFireflyEffect;
     gpuModel.isSmallFoliage              = cls.isSmallFoliage;
-    gpuModel.isSmoke                     = cls.isSmoke;
     gpuModel.isSpellEffect               = cls.isSpellEffect;
     gpuModel.isLavaModel                 = cls.isLavaModel;
-    gpuModel.isInstancePortal            = cls.isInstancePortal;
     gpuModel.isWaterVegetation           = cls.isWaterVegetation;
     gpuModel.isElvenLike                 = cls.isElvenLike;
     gpuModel.isLanternLike               = cls.isLanternLike;
-    gpuModel.isKoboldFlame               = cls.isKoboldFlame;
     gpuModel.isWaterfall                 = cls.isWaterfall;
     gpuModel.isBrazierOrFire             = cls.isBrazierOrFire;
     gpuModel.isGroundFire                = cls.isGroundFire;
@@ -1897,7 +1744,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
     gpuModel.isSkyBird                   = flightPathDoodad;
     gpuModel.isLightBeam                 = cls.isLightBeam;
-    gpuModel.isVolumetricBeam            = cls.isVolumetricBeam;
     // WOWEE_M2_CENSUS=1: every model that loads, once, with what it is made
     // of and what the classifier made of it.
     //
@@ -1920,12 +1766,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     " fire=", cls.isBrazierOrFire ? 1 : 0,
                     " torch=", cls.isTorch ? 1 : 0,
                     " spellFx=", cls.isSpellEffect ? 1 : 0);
-    }
-    if (cls.isVolumetricBeam) {
-        // Said once per model, because "the beams look the same" has no way
-        // of telling a softening that did nothing from one that never ran.
-        LOG_INFO("Volumetric beam: '", gpuModel.name,
-                 "' will be softened and hazed");
     }
     gpuModel.isTransportDoodad           = cls.isTransportDoodad;
     gpuModel.isBoat                      = cls.isBoat;
@@ -1961,6 +1801,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.bones = model.bones;
     gpuModel.sequences = model.sequences;
     gpuModel.globalSequenceDurations = model.globalSequenceDurations;
+    gpuModel.lights = model.lights;
     gpuModel.hasAnimation = false;
     for (const auto& bone : model.bones) {
         if (bone.translation.hasData() || bone.rotation.hasData() || bone.scale.hasData()) {
@@ -2144,15 +1985,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Copy texture transform data for UV animation
     gpuModel.textureTransforms = model.textureTransforms;
     gpuModel.textureTransformLookup = model.textureTransformLookup;
-    if (skyMode_) {
-        gpuModel.skyColorAlphaTracks = model.colorAlphaTracks;
-        gpuModel.skyTextureWeightTracks = model.textureWeightTracks;
-    }
+    gpuModel.colorAlphaTracks = model.colorAlphaTracks;
+    gpuModel.textureWeightTracks = model.textureWeightTracks;
     gpuModel.hasTextureAnimation = false;
 
     // Build per-batch GPU entries
     if (!model.batches.empty()) {
-        bool beamBatchSeen = false;
         for (const auto& batch : model.batches) {
             // A submesh that reaches past the model's own indices is not drawn.
             //
@@ -2233,53 +2071,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
             bgpu.texture = tex;
-            // The searchlight's cone.
-            //
-            // It took a texture dump to find: the beam is a batch of
-            // HordeZepAnimation drawn additively with particles\gradient64b,
-            // a generic gradient shared by all sorts of effects. Nothing in
-            // the model's name, the batch's name or the material says light,
-            // which is why looking for spotlights, light shafts, additive
-            // materials and blended WMO geometry all missed it.
-            //
-            // Scoped to the model, because that gradient on its own would
-            // catch half the spell effects in the game. glow.blp beside it is
-            // the lens at the emitter - already a small bright card, and
-            // hidden behind the cone, so it is left alone.
-            {
-                const bool zepModel =
-                    gpuModel.name.find("ZepAnimation") != std::string::npos ||
-                    gpuModel.name.find("zepanimation") != std::string::npos;
-                bgpu.volumetricBeam =
-                    zepModel &&
-                    batchTexKeyLower.find("gradient64b") != std::string::npos;
-                // A swept beam wants its sweep to come back the way it went -
-                // but only the beam. Walk this batch's own indices into the
-                // model's vertices and mark every bone they are weighted to,
-                // so the reversal reaches the light and not the propeller
-                // turning beside it on the same timeline.
-                if (bgpu.volumetricBeam) {
-                    gpuModel.pingPongAnim = true;
-                    beamBatchSeen = true;
-                    if (gpuModel.pingPongBones.size() < model.bones.size()) {
-                        gpuModel.pingPongBones.assign(model.bones.size(), 0);
-                    }
-                    for (uint32_t i = batch.indexStart;
-                         i < batch.indexStart + batch.indexCount && i < model.indices.size();
-                         ++i) {
-                        const uint16_t vi = model.indices[i];
-                        if (vi >= model.vertices.size()) continue;
-                        const auto& v = model.vertices[vi];
-                        for (int b = 0; b < 4; ++b) {
-                            if (v.boneWeights[b] == 0) continue;
-                            const uint8_t bi = v.boneIndices[b];
-                            if (bi < gpuModel.pingPongBones.size()) {
-                                gpuModel.pingPongBones[bi] = 1;
-                            }
-                        }
-                    }
-                }
-            }
             const auto tcls = classifyBatchTexture(batchTexKeyLower);
             bgpu.starLayer = tcls.starPointLayer;
             const bool modelLanternFamily = gpuModel.isLanternLike;
@@ -2313,25 +2104,40 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                                     (bgpu.lanternGlowHint && flameCard);
             bgpu.glowTint = tcls.glowTint;
             if (tex != nullptr && tex != whiteTexture_.get()) {
-                applyBatchTextureProps(gpuModel, bgpu, batchTexKeyLower);
+                applyBatchTextureProps(bgpu);
             }
-            bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
-            // These layers multiply the first texture by a second RGB/alpha
-            // mask. Both aurora strands and fountain foam need this stage.
-            if (m2UsesSecondTextureMask(batch.shader, batch.textureCount, bgpu.blendMode,
-                                        m2TextureCoordSet(model.textureCoordLookup,
-                                                          static_cast<uint16_t>(batch.textureUnit + 1)))) {
-                const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
-                if (second < model.textureLookup.size()) {
-                    const uint16_t mask = model.textureLookup[second];
-                    if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
-                        bgpu.secondTexture = allTextures[mask];
-                    if (mask < model.textures.size())
-                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[mask].flags & 0x3);
+            // How its stages combine and where their coordinates come from,
+            // as the client works it out at skin load. The second stage was
+            // used for one case only - shader 0, two textures, a blended
+            // layer, as an RGBA mask - so armour lost its sphere-mapped shine
+            // and two-texture flames their doubling, about 5,500 batches.
+            {
+                const auto coordAt = [&](size_t i) -> int16_t {
+                    return i < model.textureCoordLookup.size() ? model.textureCoordLookup[i] : 0;
+                };
+                const M2BatchShading shading = m2BatchShading(
+                    model.globalFlags, model.textureCombinerCombos, batch.shader, batch.textureCount,
+                    bgpu.blendMode, coordAt(batch.textureUnit), coordAt(static_cast<size_t>(batch.textureUnit) + 1));
+                bgpu.combiner = shading.combiner;
+                bgpu.textureUnit = m2StageCoordsPush(shading.coords0);
+                bgpu.secondTexCoords = m2StageCoordsPush(shading.coords1);
+                bgpu.shaderDrawn = shading.drawn;
+                if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
+                    const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
+                    const uint16_t tex = second < model.textureLookup.size() ? model.textureLookup[second] : UINT16_MAX;
+                    if (tex < allTextures.size() && tex < textureLoadFailed.size() && !textureLoadFailed[tex]) {
+                        bgpu.secondTexture = allTextures[tex];
+                    } else {
+                        // Drawn with its second stage white: the first alone.
+                        static std::unordered_set<std::string> saidMissing;
+                        if (saidMissing.insert(model.name).second) {
+                            LOG_WARNING("M2 '", model.name, "' batch ", gpuModel.batches.size(),
+                                        ": its second texture (lookup ", second, ") is not loaded; drawn without it");
+                        }
+                    }
+                    if (tex < model.textures.size())
+                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[tex].flags & 0x3);
                 }
-                const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
-                if (coord < model.textureCoordLookup.size())
-                    bgpu.secondTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
             }
 
             // Hide the batch if its texture failed to load, and remember what it
@@ -2366,33 +2172,36 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
 
-            // Apply at-rest transparency and color alpha from the M2 animation tracks.
-            // These provide per-batch opacity for ghosts, ethereal effects, fading doodads, etc.
-            // Skip zero values: some animated tracks start at 0 and animate up, and baking
-            // that first keyframe would make the entire batch permanently invisible.
+            // The batch's colour alpha and texture weight: ghosts, ethereal
+            // effects, fading doodads, a spell's emitter mesh. One that never
+            // changes is applied here, a zero included - that layer is not
+            // drawn. One that animates is sampled on each instance's clock
+            // when drawn; taking any one of its keys here left it at that
+            // value for good, and an emitter mesh meant to show for a moment
+            // stood there solid. The sky reads its own on the day clock.
             {
-                float animAlpha = 1.0f;
                 if (batch.colorIndex < model.colorRGB.size()) {
                     // The batch's authored colour. A glow card is painted
                     // white and coloured here, so without it every fire in the
                     // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
                     bgpu.tint = model.colorRGB[batch.colorIndex];
                 }
-                if (!skyMode_ && batch.colorIndex < model.colorAlphas.size()) {
-                    float ca = model.colorAlphas[batch.colorIndex];
-                    if (ca > 0.001f) animAlpha *= ca;
-                }
+                float atRest = 1.0f;
                 if (!skyMode_) {
-                    const float weight = m2TextureWeightOpacity(model.textureWeights,
-                        model.textureWeightLookup, batch.transparencyIndex);
-                    if (weight > 0.001f) animAlpha *= weight;
+                    const M2BatchOpacity opacity = m2BatchOpacity(
+                        gpuModel.colorAlphaTracks, bgpu.colorTrackIndex,
+                        gpuModel.textureWeightTracks, bgpu.weightTrackIndex);
+                    bgpu.animatedOpacity = opacity.animated;
+                    atRest = opacity.atRest;
                 }
-                bgpu.loadedOpacity = animAlpha;
-                bgpu.batchOpacity = hiddenForTexture ? 0.0f : animAlpha;
+                bgpu.blendedByOpacity = bgpu.animatedOpacity || atRest < kM2BatchOpaqueOpacity;
+                if (bgpu.blendedByOpacity) gpuModel.hasTransparentBatches = true;
+                bgpu.loadedOpacity = atRest;
+                bgpu.batchOpacity = hiddenForTexture ? 0.0f : atRest;
             }
 
             // Compute batch center and radius for glow sprite positioning
-            if ((bgpu.blendMode >= 3 || bgpu.colorKeyBlack || bgpu.glowCardLike) && batch.indexCount > 0) {
+            if ((bgpu.blendMode >= 3 || bgpu.glowCardLike) && batch.indexCount > 0) {
                 glm::vec3 sum(0.0f);
                 uint32_t counted = 0;
                 std::unordered_map<uint16_t, glm::vec4> boneAnchorSums;
@@ -2499,7 +2308,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                              m2BatchNeedsAlphaTest(bgpu.blendMode, bgpu.hasAlpha) ? 1 : 0,
                              " hasAlpha=", bgpu.hasAlpha ? "Y" : "N",
                              " alphaIsSilhouette=", bgpu.alphaIsSilhouette ? "Y" : "N",
-                             " colorKey=", bgpu.colorKeyBlack ? "Y" : "N",
                              " glowCardLike=", bgpu.glowCardLike ? "Y" : "N",
                              " preserveGlowMesh=", bgpu.preserveGlowMesh ? "Y" : "N",
                              " opacity=", bgpu.batchOpacity,
@@ -2513,7 +2321,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 LOG_DEBUG("M2 GLOW DIAG '", model.name, "' batch ", gpuModel.batches.size(),
                           ": blend=", bgpu.blendMode, " matFlags=0x",
                           std::hex, bgpu.materialFlags, std::dec,
-                          " colorKey=", bgpu.colorKeyBlack ? "Y" : "N",
                           " hasAlpha=", bgpu.hasAlpha ? "Y" : "N",
                           " unlit=", (bgpu.materialFlags & 0x01) ? "Y" : "N",
                           " lanternHint=", bgpu.lanternGlowHint ? "Y" : "N",
@@ -2523,50 +2330,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             }
             gpuModel.batches.push_back(bgpu);
         }
-        if (beamBatchSeen) {
-            // A bone's world transform is its parent's times its own, so a
-            // beam bone on the reversing clock still snaps at the loop if the
-            // arm it hangs off is on the looping one. Four of the zeppelin's
-            // 125 bones carry the searchlight and none of them is the mast
-            // that swings it. Carry the flag up every ancestor chain.
-            const std::size_t boneCount = gpuModel.pingPongBones.size();
-            for (std::size_t i = 0; i < boneCount; ++i) {
-                if (!gpuModel.pingPongBones[i]) continue;
-                int32_t parent = (i < model.bones.size())
-                    ? model.bones[i].parentBone : -1;
-                // Bounded by the bone count: a malformed parent cycle would
-                // otherwise spin here forever.
-                for (std::size_t guard = 0; parent >= 0 && guard < boneCount; ++guard) {
-                    const std::size_t p = static_cast<std::size_t>(parent);
-                    if (p >= boneCount || p >= model.bones.size()) break;
-                    gpuModel.pingPongBones[p] = 1;
-                    parent = model.bones[p].parentBone;
-                }
-            }
-            // How many bones the reversal actually reaches. An empty set
-            // means every bone reads the looping clock and the sweep snaps
-            // back exactly as it did before - which is what happened when
-            // the ping-pong was moved off animTime onto its own clock.
-            std::size_t marked = 0;
-            for (uint8_t b : gpuModel.pingPongBones) marked += b ? 1 : 0;
-            LOG_INFO("Beam sweep: '", gpuModel.name, "' reverses ", marked,
-                     " of ", gpuModel.pingPongBones.size(), " bones");
-        }
-    } else {
-        // Fallback: single batch covering all indices with first texture
-        M2ModelGPU::BatchGPU bgpu;
-        bgpu.indexStart = 0;
-        bgpu.indexCount = gpuModel.indexCount;
-        bgpu.texture = allTextures.empty() ? whiteTexture_.get() : allTextures[0];
-        if (bgpu.texture != nullptr && bgpu.texture != whiteTexture_.get()) {
-            auto pit = texturePropsByPtr_.find(bgpu.texture);
-            if (pit != texturePropsByPtr_.end()) {
-                bgpu.hasAlpha = pit->second.hasAlpha;
-                bgpu.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-                bgpu.colorKeyBlack = pit->second.colorKeyBlack;
-            }
-        }
-        gpuModel.batches.push_back(bgpu);
+    } else if (gpuModel.indexCount > 0) {
+        // The client draws batches and nothing else, so a skin with geometry
+        // and no batches draws nothing - an invisible stalker's does exactly
+        // that. It used to be drawn whole with the first texture.
+        LOG_INFO("M2 '", model.name, "' has ", gpuModel.indexCount,
+                 " indices and no batches: it draws nothing but its emitters");
     }
 
     gpuModel.materialDrawOrder = m2MaterialDrawOrder(gpuModel.batches);
@@ -2618,7 +2387,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 LOG_INFO("skyM2 batch ", &bgpu - gpuModel.batches.data(),
                          ": blend=", static_cast<int>(bgpu.blendMode),
                          " alphaTest=", mat.alphaTest,
-                         " colorKey=", mat.colorKeyBlack,
                          " hasAlpha=", bgpu.hasAlpha ? 1 : 0,
                          " unlit=", mat.unlit,
                          " glowCardLike=", bgpu.glowCardLike ? 1 : 0,
@@ -2687,7 +2455,7 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     // What the renderer never draws, what is too small and numerous to be
     // worth its triangles (ground clutter), and what moves: an animated model
     // would cast its bind pose, not the pose on screen.
-    if (gpuModel.isInvisibleTrap || gpuModel.isSmoke || gpuModel.isSpellEffect ||
+    if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect ||
         gpuModel.isGroundDetail || gpuModel.isSkyBird || gpuModel.isLightBeam) {
         return;
     }
@@ -2697,8 +2465,11 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     src.positions.reserve(model.vertices.size());
     for (const auto& v : model.vertices) src.positions.push_back(v.position);
     for (const auto& batch : gpuModel.batches) {
-        if (batch.submeshLevel != 0 || !m2BatchCastsShadow(batch.blendMode,
-            batch.batchOpacity, batch.glowCardLike, batch.starLayer)) {
+        // A layer that fades in and out is drawn blended, and blended layers
+        // cast no shadow.
+        if (batch.submeshLevel != 0 || batch.blendedByOpacity || !batch.shaderDrawn ||
+            !m2BatchCastsShadow(batch.blendMode, batch.batchOpacity,
+                                batch.glowCardLike, batch.starLayer)) {
             continue;
         }
         glm::vec3 albedo = batch.tint;

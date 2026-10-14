@@ -3127,12 +3127,8 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
             }
         }
 
-        // The model was spawned from the display id before this response arrived,
-        // so anything keyed off the game object's type has to be revisited now.
-        if (owner_.gameObjectInfoCallbackRef()) owner_.gameObjectInfoCallbackRef()(data.entry);
-
-        // ...including a sign somebody clicked while this was in flight. The
-        // click was kept rather than dropped, so it is answered now.
+        // A sign somebody clicked while this was in flight: the click was
+        // kept rather than dropped, so it is answered now.
         if (!pendingPageTextGuids_.empty()) {
             std::vector<uint64_t> ready;
             for (uint64_t waiting : pendingPageTextGuids_) {

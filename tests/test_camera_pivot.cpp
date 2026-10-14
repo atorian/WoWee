@@ -168,9 +168,7 @@ TEST_CASE("looking up puts the camera near the ground, and lifts it") {
           == Catch::Approx(0.0f).margin(0.001f));
 }
 
-TEST_CASE("outdoor WMO camera distance is not capped like an interior", "[camera][zoom]") {
-    CHECK(CameraController::zoomDistanceLimit(1.0f, false) == 22.0f);
-    CHECK(CameraController::zoomDistanceLimit(1.0f, true) == 6.0f);
-    CHECK_THAT(CameraController::zoomDistanceLimit(50.0f / 22.0f, false), WithinAbs(50.0f, 0.001f));
-    CHECK(CameraController::zoomDistanceLimit(50.0f / 22.0f, true) == 6.0f);
+TEST_CASE("camera distance is limited alike indoors and out", "[camera][zoom]") {
+    CHECK(CameraController::zoomDistanceLimit(1.0f) == 22.0f);
+    CHECK_THAT(CameraController::zoomDistanceLimit(50.0f / 22.0f), WithinAbs(50.0f, 0.001f));
 }

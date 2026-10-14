@@ -613,8 +613,8 @@ bool Application::initialize() {
             renderer->getM2Renderer()->restartInstanceAnimation(fountain);
             renderer->getCamera()->setPosition(glm::vec3(5780.0f, 405.0f, 663.0f));
             renderer->getCamera()->setRotation(0.0f, 3.0f);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
             LOG_INFO("Fountain GPU probe: real Dalaran_Fountain_01 uploaded, batches=", model.batches.size());
         }
 
@@ -642,10 +642,109 @@ bool Application::initialize() {
             renderer->getCharacterPosition() = glm::vec3(5775.0f, 291.0f, 650.0f);
             renderer->getCamera()->setPosition(glm::vec3(5775.0f, 288.0f, 660.0f));
             renderer->getCamera()->setRotation(90.0f, 0.0f);
-            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getPosition(),
-                renderer->getCamera()->getViewProjectionMatrix());
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
             LOG_INFO("Glass/lamp GPU probe: real Dalaran city groups=", city.nGroups,
                      " lamp batches=", lamp.batches.size());
+        }
+
+        // Offline look at one model, without a realm: how a material renders is
+        // checked in seconds instead of a login and a walk.
+        //
+        //   WOWEE_SKY_BACKGROUND_PROBE=1 WOWEE_MODEL_PROBE=<path.m2|path.wmo>
+        //   WOWEE_PROBE_CAMERA="dx,dy,dz,yaw,pitch"   (optional)
+        //   WOWEE_SCREENSHOT=<file.png>               (writes it and quits)
+        //
+        // The model goes through the real loaders and renderers at the sky
+        // probe's origin, under Dalaran's noon light. The camera is placed
+        // relative to the model's bounding-box centre, yaw 0 looking along +X
+        // and 90 along +Y; by default it stands off along -X to see the whole.
+        if (const char* probePath = std::getenv("WOWEE_MODEL_PROBE");
+            probePath && *probePath && renderer && assetManager) {
+            if (!std::getenv("WOWEE_SKY_BACKGROUND_PROBE")) {
+                LOG_ERROR("WOWEE_MODEL_PROBE needs WOWEE_SKY_BACKGROUND_PROBE for its renderers");
+                return false;
+            }
+            const std::string path = probePath;
+            const glm::vec3 origin(5818.0f, 405.0f, 650.0f);
+            glm::vec3 boundMin(0.0f), boundMax(0.0f);
+            std::string lower = path;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0) {
+                auto wmo = pipeline::WMOLoader::load(assetManager->readFile(path));
+                for (uint32_t group = 0; group < wmo.nGroups; ++group) {
+                    const auto candidates = pipeline::wmoGroupCandidates(path, group);
+                    if (!pipeline::WMOLoader::loadGroup(assetManager->readFile(candidates.front()), wmo, group)) {
+                        LOG_ERROR("Model probe: cannot load group ", group, " of ", path);
+                        return false;
+                    }
+                }
+                if (!renderer->getWMORenderer()->loadModel(wmo, 0xFFFF0301)) return false;
+                renderer->getWMORenderer()->createInstance(0xFFFF0301, origin);
+                boundMin = wmo.boundingBoxMin;
+                boundMax = wmo.boundingBoxMax;
+                LOG_INFO("Model probe: ", path, " groups=", wmo.nGroups, " materials=", wmo.materials.size());
+            } else {
+                auto model = pipeline::M2Loader::load(assetManager->readFile(path));
+                model.name = path;
+                if (!pipeline::M2Loader::loadSkin(assetManager->readFile(pipeline::skinPathForM2(path)), model)) {
+                    LOG_ERROR("Model probe: cannot load the skin of ", path);
+                    return false;
+                }
+                // WOWEE_PROBE_CHARACTER=1 draws it the way a creature or a
+                // mount is drawn in game - through CharacterRenderer, with its
+                // emitters in M2Renderer - rather than as a doodad. Skins a
+                // creature display fills in are not filled here.
+                if (core::envFlagEnabled("WOWEE_PROBE_CHARACTER", false)) {
+                    auto* characters = renderer->getCharacterRenderer();
+                    if (!characters->loadModel(model, 0xFFFF0301)) return false;
+                    const uint32_t instance = characters->createInstance(0xFFFF0301, origin);
+                    // WOWEE_PROBE_ANIM=<animation id> plays that one instead
+                    // of the first sequence: a mount walks (4) or runs (5).
+                    if (const char* anim = std::getenv("WOWEE_PROBE_ANIM"); anim && *anim) {
+                        const auto animId = static_cast<uint32_t>(std::stoul(anim));
+                        if (!characters->hasAnimation(instance, animId)) {
+                            LOG_ERROR("Model probe: ", path, " has no animation ", animId);
+                            return false;
+                        }
+                        characters->playAnimation(instance, animId, true);
+                    }
+                } else {
+                    if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
+                    renderer->getM2Renderer()->createInstance(0xFFFF0301, origin);
+                }
+                // From the vertices: the header's box is not always filled in,
+                // and a doodad is often modelled well away from its origin.
+                if (!model.vertices.empty()) {
+                    boundMin = boundMax = model.vertices.front().position;
+                    for (const auto& v : model.vertices) {
+                        boundMin = glm::min(boundMin, v.position);
+                        boundMax = glm::max(boundMax, v.position);
+                    }
+                }
+                LOG_INFO("Model probe: ", path, " batches=", model.batches.size());
+            }
+            const glm::vec3 centre = origin + (boundMin + boundMax) * 0.5f;
+            const float reach = std::max(glm::length(boundMax - boundMin), 1.0f);
+            glm::vec3 offset(-reach, 0.0f, 0.0f);
+            float yaw = 0.0f, pitch = 0.0f;
+            if (const char* cam = std::getenv("WOWEE_PROBE_CAMERA"); cam && *cam) {
+                float v[5] = {offset.x, offset.y, offset.z, yaw, pitch};
+                std::stringstream in(cam);
+                std::string field;
+                for (int i = 0; i < 5 && std::getline(in, field, ','); ++i) v[i] = std::stof(field);
+                offset = glm::vec3(v[0], v[1], v[2]);
+                yaw = v[3];
+                pitch = v[4];
+            }
+            // The follow camera would put itself back behind a character; the
+            // probe's camera stays where it is put.
+            if (auto* controller = playerView_->getCameraController()) controller->setEnabled(false);
+            renderer->getCharacterPosition() = centre + offset;
+            renderer->getCamera()->setPosition(centre + offset);
+            renderer->getCamera()->setRotation(yaw, pitch);
+            renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
+                renderer->getCamera()->getProjectionMatrix());
         }
 
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
@@ -4545,6 +4644,30 @@ void Application::update(float deltaTime) {
     // Process any pending world entry request via WorldLoader
     if (worldLoader_ && state != AppState::DISCONNECTED) {
         worldLoader_->processPendingEntry();
+    }
+
+    // WOWEE_MODEL_PROBE has no world, so nothing else moves its model: its
+    // animation plays and its particles fly here, WOWEE_PROBE_SECONDS (6 by
+    // default) of them over the frames before the screenshot, in steps of a
+    // thirtieth of a second. Without it a probed candle never lit: the frame
+    // was taken with one particle update behind it, at a delta of zero.
+    if (renderer && state != AppState::IN_GAME && std::getenv("WOWEE_MODEL_PROBE")) {
+        static const float probeSeconds = [] {
+            const char* s = std::getenv("WOWEE_PROBE_SECONDS");
+            return (s && *s) ? std::max(std::stof(s), 0.0f) : 6.0f;
+        }();
+        const float perFrame = probeSeconds / static_cast<float>(kScreenshotFrame);
+        const int steps = std::max(1, static_cast<int>(std::ceil(perFrame * 30.0f)));
+        const auto* camera = renderer->getCamera();
+        for (int i = 0; i < steps; ++i) {
+            const float dt = perFrame / static_cast<float>(steps);
+            renderer->getM2Renderer()->update(dt, camera->getViewMatrix(),
+                                              camera->getProjectionMatrix());
+            // A model probed as a creature (WOWEE_PROBE_CHARACTER) moves, and
+            // its emitters follow, the way Renderer::update has them in game.
+            renderer->getCharacterRenderer()->update(dt, camera->getPosition());
+            if (auto* emitters = renderer->getCharacterEmitters()) emitters->update(dt);
+        }
     }
 
     // Update renderer (camera, etc.) only when in-game

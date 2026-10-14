@@ -17,6 +17,7 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/pom_quality.hpp"
@@ -68,8 +69,10 @@ namespace {
 struct CharacterPushConstants {
     glm::mat4 model;
     InteriorLightGPU interiorLight;
+    /// The point lights that reach the unit (local_lights.glsli).
+    LocalLightSet localLights = kNoLocalLights;
 };
-static_assert(sizeof(CharacterPushConstants) == 96, "matches Push in character.vert/frag");
+static_assert(sizeof(CharacterPushConstants) == 112, "matches Push in character.vert/frag");
 
 // How far an instance moves before the WMO is asked again where it stands.
 constexpr float kInteriorLightRequeryDistance = 0.5f;
@@ -250,14 +253,23 @@ static float evalBatchTextureWeight(const pipeline::M2Model& model,
                                  model.globalSequenceDurations, 1.0f);
 }
 
+// A batch's stages and combiner, from the model's flags and combos and the
+// batch's shader id, as the M2 pass takes them.
+static M2BatchShading characterBatchShading(const pipeline::M2Model& model,
+                                            const pipeline::M2Batch& batch, uint16_t blendMode) {
+    const auto coordAt = [&](size_t i) -> int16_t {
+        return i < model.textureCoordLookup.size() ? model.textureCoordLookup[i] : 0;
+    };
+    return m2BatchShading(model.globalFlags, model.textureCombinerCombos, batch.shader,
+                          batch.textureCount, blendMode, coordAt(batch.textureUnit),
+                          coordAt(static_cast<size_t>(batch.textureUnit) + 1));
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
     int32_t alphaTest;
-    int32_t colorKeyBlack;
     int32_t unlit;
-    float emissiveBoost;
-    float emissiveTintR, emissiveTintG, emissiveTintB;
     float specularIntensity;
     int32_t enableNormalMap;
     int32_t enablePOM;
@@ -270,22 +282,28 @@ struct CharMaterialUBO {
     float modulateNeutral;
     int32_t texCoordSet;
     int32_t twoSided;
+    int32_t padding0 = 0;  ///< std140 starts uvRow0 on 16 bytes
 
     M2UVTransform uvTransform;
     /// What an aura multiplies the lit colour by (w is padding).
     glm::vec4 stateTint{1.0f};
-    /// The first texture is multiplied by binding 3, read on this UV set.
+    /// The second stage at binding 3, its UV source (m2StageCoordsPush) and
+    /// how the stages combine (M2Combiner).
     int32_t hasSecondTexture = 0;
-    int32_t secondTexCoordSet = 0;
-    int32_t padding[2] = {};
+    int32_t texCoordSet2 = 0;
+    int32_t combiner = static_cast<int32_t>(M2Combiner::Mod);
+    int32_t padding = 0;
     /// The batch's authored M2 colour, multiplied into the texture (w is padding).
     glm::vec4 batchColor{1.0f};
+    /// The second stage's own texture animation.
+    M2UVTransform uvTransform2;
 };
-static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
-static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
-static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 128, "after stateTint");
-static_assert(offsetof(CharMaterialUBO, batchColor) == 144, "std140 aligns a vec4 to 16");
-static_assert(sizeof(CharMaterialUBO) == 160, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, uvTransform) == 64, "std140 aligns uvRow0 to 16");
+static_assert(offsetof(CharMaterialUBO, stateTint) == 96, "after the two uv rows");
+static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 112, "after stateTint");
+static_assert(offsetof(CharMaterialUBO, batchColor) == 128, "std140 aligns a vec4 to 16");
+static_assert(offsetof(CharMaterialUBO, uvTransform2) == 144, "after batchColor");
+static_assert(sizeof(CharMaterialUBO) == 176, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -316,6 +334,16 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
                                                VkSampleCountFlagBits samples,
                                                wowee::rendering::VkShaderModule& charVert,
                                                wowee::rendering::VkShaderModule& charFrag) {
+    scenePipes_ = buildPipelineSet(device, mainPass, samples, charVert, charFrag);
+    if (fadedPass_ != VK_NULL_HANDLE) {
+        fadedPassPipes_ = buildPipelineSet(device, fadedPass_, fadedPassSamples_, charVert, charFrag);
+    }
+}
+
+/// Every blend mode's pipeline for one render pass.
+CharacterRenderer::PipelineSet CharacterRenderer::buildPipelineSet(
+        VkDevice device, VkRenderPass mainPass, VkSampleCountFlagBits samples,
+        wowee::rendering::VkShaderModule& charVert, wowee::rendering::VkShaderModule& charFrag) {
     // --- Vertex input ---
     // CharVertexGPU: vec3 pos(12) + uint8[4] boneWeights(4) + uint8[4] boneIndices(4) +
     //               vec3 normal(12) + vec2 texCoords(8) + vec4 tangent(16) +
@@ -366,18 +394,54 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
             .build(device, vkCtx_->getPipelineCache());
     };
 
-    opaquePipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true);
-    alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
-    alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
-    additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
-    modulatePipeline_ = buildCharPipeline(m2ModulateBlendState(false), false);
-    modulate2xPipeline_ = buildCharPipeline(m2ModulateBlendState(true), false);
-    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
+    PipelineSet set;
+    set.opaque = buildCharPipeline(PipelineBuilder::blendDisabled(), true);
+    set.alphaTest = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
+    set.alpha = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
+    set.additive = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    set.modulate = buildCharPipeline(m2ModulateBlendState(false), false);
+    set.modulate2x = buildCharPipeline(m2ModulateBlendState(true), false);
+    set.translucent = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
     VkPipelineColorBlendAttachmentState depthOnly = PipelineBuilder::blendDisabled();
     depthOnly.colorWriteMask = 0;
-    fadeDepthPipeline_ = buildCharPipeline(depthOnly, true);
-    fadeColorPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false, false,
-                                           VK_COMPARE_OP_LESS_OR_EQUAL);
+    set.fadeDepth = buildCharPipeline(depthOnly, true);
+    set.fadeColor = buildCharPipeline(PipelineBuilder::blendAlpha(), false, false,
+                                      VK_COMPARE_OP_LESS_OR_EQUAL);
+    return set;
+}
+
+void CharacterRenderer::destroyPipelineSet(VkDevice device, PipelineSet& set) {
+    for (VkPipeline* p : {&set.opaque, &set.alphaTest, &set.alpha, &set.additive, &set.modulate,
+                          &set.modulate2x, &set.translucent, &set.fadeDepth, &set.fadeColor}) {
+        destroy(device, *p);
+    }
+}
+
+void CharacterRenderer::setFadedPass(VkRenderPass pass, VkSampleCountFlagBits samples) {
+    if (pass == fadedPass_ && samples == fadedPassSamples_) return;
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    destroyPipelineSet(device, fadedPassPipes_);
+    fadedPass_ = pass;
+    fadedPassSamples_ = samples;
+    if (pass == VK_NULL_HANDLE) return;
+    rendering::VkShaderModule charVert, charFrag;
+    if (!charVert.loadFromFile(device, "assets/shaders/character.vert.spv") ||
+        !charFrag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        LOG_ERROR("CharacterRenderer::setFadedPass: missing shaders; faded characters "
+                  "are drawn in the scene pass, under the effects inside them");
+        fadedPass_ = VK_NULL_HANDLE;
+        return;
+    }
+    fadedPassPipes_ = buildPipelineSet(device, pass, samples, charVert, charFrag);
+    charVert.destroy();
+    charFrag.destroy();
+    if (!fadedPassPipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::setFadedPass: pipelines failed to build; faded "
+                  "characters are drawn in the scene pass, under the effects inside them");
+        destroyPipelineSet(device, fadedPassPipes_);
+        fadedPass_ = VK_NULL_HANDLE;
+    }
 }
 
 bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
@@ -604,18 +668,9 @@ void CharacterRenderer::shutdown() {
     instances.clear();
 
     // Destroy pipelines
-    auto destroyPipeline = [&](VkPipeline& p) {
-        destroy(device, p);
-    };
-    destroyPipeline(opaquePipeline_);
-    destroyPipeline(alphaTestPipeline_);
-    destroyPipeline(alphaPipeline_);
-    destroyPipeline(additivePipeline_);
-    destroyPipeline(modulatePipeline_);
-    destroyPipeline(modulate2xPipeline_);
-    destroyPipeline(translucentPipeline_);
-    destroyPipeline(fadeDepthPipeline_);
-    destroyPipeline(fadeColorPipeline_);
+    destroyPipelineSet(device, scenePipes_);
+    destroyPipelineSet(device, fadedPassPipes_);
+    fadedPass_ = VK_NULL_HANDLE;
 
     destroy(device, pipelineLayout_);
 
@@ -874,10 +929,6 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
 
     std::string key = normalizeTexturePathKey(path);
     const uint64_t lookupSerial = ++textureLookupSerial_;
-    // The same question the M2 renderer asks, through the same answer. This
-    // carried four of its eleven tokens and searched the whole path, so which
-    // textures were colour-keyed depended on which renderer had loaded them.
-    const bool colorKeyBlackHint = assetNameLooksLikeFlame(key);
 
     // Check cache
     auto it = textureCache.find(key);
@@ -960,7 +1011,6 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
     e.approxBytes = approxBytes;
     e.lastUse = ++textureCacheCounter_;
     e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = colorKeyBlackHint;
 
     // Launch normal map generation on background thread - CPU work is pure compute,
     // only the GPU upload (in processPendingNormalMaps) needs the main thread (~1-2ms).
@@ -969,7 +1019,7 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
         blpImage.width, blpImage.height);
 
     textureCacheBytes_ += e.approxBytes;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = colorKeyBlackHint};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     textureCache[key] = std::move(e);
     failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
@@ -1759,8 +1809,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     e.approxBytes = approxTextureBytesWithMips(width, height);
     e.lastUse = ++textureCacheCounter_;
     e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = false;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     // No derived normal map for a composited body, and this is why: the
     // derivation reads luminance as height, which holds for stone and bark and
     // does not hold for skin. Every freckle, every painted shadow under a
@@ -1840,8 +1889,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     entry.approxBytes = approxTextureBytesWithMips(width, height);
     entry.lastUse = ++textureCacheCounter_;
     entry.hasAlpha = hasAlpha;
-    entry.colorKeyBlack = false;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     // Skin again, with armour composited onto it. Same reason as above.
     // Checked before emplacing: see the note in compositeTexture. Testing
     // ins.second afterwards is too late -- by then the texture has been moved
@@ -1985,16 +2033,6 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
             return ba.materialLayer < bb.materialLayer;
         });
 
-    {
-        std::string lowerName = gpuModel.data.name;
-        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        gpuModel.isKoboldFlame =
-            (lowerName.find("kobold") != std::string::npos) &&
-            ((lowerName.find("candle") != std::string::npos) ||
-             (lowerName.find("torch") != std::string::npos) ||
-             (lowerName.find("mine") != std::string::npos));
-    }
 
     models[id] = std::move(gpuModel);
 
@@ -2631,7 +2669,7 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 // --- Rendering ---
 
 void CharacterRenderer::prepareRender(uint32_t frameIndex) {
-    if (instances.empty() || !opaquePipeline_) return;
+    if (instances.empty() || !scenePipes_.opaque) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
@@ -2698,8 +2736,13 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     }
 }
 
-void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (instances.empty() || !opaquePipeline_) {
+void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                               Part part) {
+    // Faded instances asked for on their own are drawn in fadedPass_ when
+    // there is one, and in the scene pass after the blended world when not.
+    const PipelineSet& pipes =
+        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
+    if (instances.empty() || !pipes.opaque) {
         return;
     }
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
@@ -2708,8 +2751,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // 4.0 covers Tauren, mounted characters, and most creature models.
     constexpr float kDefaultCharacterCullRadius = 4.0f;
     const glm::vec3 camPos = camera.getPosition();
-    const float frameTimeSeconds = std::chrono::duration<float>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     // Extract frustum planes for per-instance visibility testing
     Frustum frustum;
@@ -2814,19 +2855,19 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
         switch (p) {
-            case CharacterBlendPipeline::Opaque: return opaquePipeline_;
-            case CharacterBlendPipeline::AlphaTest: return alphaTestPipeline_;
-            case CharacterBlendPipeline::Alpha: return alphaPipeline_;
-            case CharacterBlendPipeline::Translucent: return translucentPipeline_;
-            case CharacterBlendPipeline::Additive: return additivePipeline_;
-            case CharacterBlendPipeline::Modulate: return modulatePipeline_;
-            case CharacterBlendPipeline::Modulate2x: return modulate2xPipeline_;
+            case CharacterBlendPipeline::Opaque: return pipes.opaque;
+            case CharacterBlendPipeline::AlphaTest: return pipes.alphaTest;
+            case CharacterBlendPipeline::Alpha: return pipes.alpha;
+            case CharacterBlendPipeline::Translucent: return pipes.translucent;
+            case CharacterBlendPipeline::Additive: return pipes.additive;
+            case CharacterBlendPipeline::Modulate: return pipes.modulate;
+            case CharacterBlendPipeline::Modulate2x: return pipes.modulate2x;
         }
-        return alphaPipeline_;
+        return pipes.alpha;
     };
 
     // Start with opaque pipeline
-    VkPipeline currentPipeline = opaquePipeline_;
+    VkPipeline currentPipeline = pipes.opaque;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
     for (auto& pair : instances) {
@@ -2865,14 +2906,24 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // Skip fully transparent instances. An aura's opacity caps the
         // instance's own rather than multiplying it, so a stealthed unit
         // that also carries the stealth state kit is not drawn twice as faint.
-        const float drawOpacity = std::min(instance.opacity, instance.stateAlpha);
+        // The camera's closeness fades it on top of that: the player with the
+        // camera pressed against them.
+        const float drawOpacity = std::min(instance.opacity, instance.stateAlpha) * instance.cameraFade;
         if (drawOpacity <= 0.0f) continue;
+        // A faded body goes with the faded ones, after the blended world.
+        const bool fadedInstance = drawOpacity < 0.999f;
+        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
 
         // Set model matrix (use override for weapon instances)
+        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                                      : getModelMatrix(instance);
+        // The lights nearest the unit's origin, as the client picks them for
+        // any model.
         const CharacterPushConstants push{
-            .model = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                     : getModelMatrix(instance),
+            .model = modelMatrix,
             .interiorLight = instance.interiorLight,
+            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
+                                        : kNoLocalLights,
         };
         vkCmdPushConstants(cmd, pipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -2903,6 +2954,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
+        // A model with no batches draws nothing, as in the client: an
+        // invisible stalker's skin is exactly that. It used to be drawn
+        // whole with its first texture.
         if (!gpuModel.data.batches.empty()) {
             bool applyGeosetFilter = !instance.activeGeosets.empty();
             if (applyGeosetFilter) {
@@ -2958,11 +3012,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             // A faded body goes through the batches twice: first its solid
             // parts into depth alone (stage 0), then everything with those
-            // parts coloured only where that depth is (fadeDepthPipeline_).
+            // parts coloured only where that depth is (PipelineSet::fadeDepth).
             // Drawn in one go, each surface blended over the ones the model
             // happened to draw before it - a Shadowform drake's far legs over
             // its near ones, its layers stacked nearly black.
-            const bool fadeDepthStage = drawOpacity < 0.999f && !instance.isEffectModel;
+            const bool fadeDepthStage = drawOpacity < 0.999f;
             for (int stage = fadeDepthStage ? 0 : 1; stage < 2; ++stage) {
             for (int pass = 0; pass < 2; pass++) {
             for (size_t bi : sortedBatchIndices) {
@@ -3066,6 +3120,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
                     materialFlags = gpuModel.data.materials[batch.materialIndex].flags;
                 }
+                const M2BatchShading shading = characterBatchShading(gpuModel.data, batch, blendMode);
+                // Shader 0x8000: the client builds no effect for it and draws nothing.
+                if (!shading.drawn) continue;
 
                 const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
@@ -3076,14 +3133,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const bool hairMaterial = !instance.isSceneModel &&
                                           (hairTexture ||
                                            (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
-
-                // Attached weapon models can include additive FX/card batches that
-                // appear as detached flat quads for some swords. Keep core geometry
-                // and drop FX-style passes for weapon attachments. Enchant visuals
-                // are entirely such batches, so they must survive this cull.
-                if (instance.hasOverrideModelMatrix && !instance.isEffectModel && blendMode >= 3) {
-                    continue;
-                }
 
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
                 if (texPtr == whiteTexture_.get() && !instance.isSceneModel) {
@@ -3121,12 +3170,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 // Determine material properties
                 bool alphaCutout = false;
-                bool colorKeyBlack = false;
                 if (texPtr != nullptr && texPtr != whiteTexture_.get()) {
                     auto pit = texturePropsByPtr_.find(texPtr);
                     if (pit != texturePropsByPtr_.end()) {
                         alphaCutout = pit->second.hasAlpha;
-                        colorKeyBlack = pit->second.colorKeyBlack;
                     }
                 }
                 // A scene means what its materials say. Stormwind's walls are DXT5 with
@@ -3136,42 +3183,22 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // material (blendMode 1) cuts out here.
                 const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
                     blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
-                const bool unlit = characterBatchUnlit(blendMode, materialFlags,
-                                                       instance.isEffectModel);
+                const bool unlit = characterBatchUnlit(blendMode, materialFlags);
                 const CharacterBlendPipeline blendPipeline = characterBlendPipeline({
                     .blendMode = blendMode,
                     .materialFlags = materialFlags,
-                    .effectModel = instance.isEffectModel,
                     .hairMaterial = hairMaterial,
                     .opacity = drawOpacity * batchColorAlpha,
                 });
-                const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
-                                      blendPipeline == CharacterBlendPipeline::Modulate2x;
                 const bool fadedSolid = fadeDepthStage &&
                                         blendPipeline == CharacterBlendPipeline::Translucent;
                 if (stage == 0 && !fadedSolid) continue;
-                VkPipeline desiredPipeline = stage == 0 ? fadeDepthPipeline_
-                                           : fadedSolid ? fadeColorPipeline_
+                VkPipeline desiredPipeline = stage == 0 ? pipes.fadeDepth
+                                           : fadedSolid ? pipes.fadeColor
                                                         : pipelineFor(blendPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
-                }
-
-                float emissiveBoost = 1.0f;
-                glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
-                const bool koboldCandleFlame = colorKeyBlack && gpuModel.isKoboldFlame;
-                if (unlit && koboldCandleFlame) {
-                    float phase = static_cast<float>(batch.submeshId) * 0.31f;
-                    float f1 = std::sin(frameTimeSeconds * 7.9f + phase);
-                    float f2 = std::sin(frameTimeSeconds * 12.7f + phase * 1.73f);
-                    float f3 = std::sin(frameTimeSeconds * 4.3f + phase * 2.11f);
-                    float flicker = 0.90f + 0.10f * f1 + 0.06f * f2 + 0.04f * f3;
-                    flicker = std::clamp(flicker, 0.72f, 1.12f);
-                    // The texture plus a warm light on top of it: the shader
-                    // multiplies by tint * boost.
-                    const float warmth = (blendMode >= 3) ? (2.4f * flicker) : (1.5f * flicker);
-                    emissiveTint = glm::vec3(1.0f) + glm::vec3(1.28f, 1.04f, 0.82f) * warmth;
                 }
 
                 // Resolve normal/height map for this texture
@@ -3199,58 +3226,45 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (batch.colorIndex < gpuModel.data.colorRGB.size())
                     matData.batchColor = glm::vec4(gpuModel.data.colorRGB[batch.colorIndex], 1.0f);
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
-                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
-                                              !instance.isEffectModel) ? 1 : 0;
-                // A Mod layer's black darkens; keying it out would drop exactly that.
-                matData.colorKeyBlack = (colorKeyBlack && !modulate) ? 1 : 0;
+                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
                 matData.modulateNeutral =
                     blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
                     : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
-                matData.texCoordSet = m2TextureCoordSet(
-                    gpuModel.data.textureCoordLookup,
-                    static_cast<uint16_t>(batch.textureUnit + resolved.comboOffset));
-                const size_t animLookup = batch.textureAnimIndex == 0xFFFF
-                    ? size_t{0xFFFF}
-                    : size_t{batch.textureAnimIndex} + resolved.comboOffset;
-                if (const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
-                                                          gpuModel.data.textureTransforms,
-                                                          animLookup)) {
-                    matData.uvTransform = m2SampleUVTransform(
-                        *tt, instance.currentSequenceIndex, instance.animationTime,
-                        instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
-                }
-                // A second stage that shapes the first: a fire hawk's flame
-                // wings are the flame texture cut to feathers by its border
-                // mask, and drawn from the flame alone were bare streaks.
+                // Where each stage's coordinates come from and how the stages
+                // combine, as the client works it out at skin load. One
+                // texture used to be picked among the stages, which lost
+                // armour its sphere-mapped shine and a flame its doubling.
+                matData.combiner = static_cast<int32_t>(shading.combiner);
+                matData.texCoordSet = m2StageCoordsPush(shading.coords0);
+                matData.texCoordSet2 = m2StageCoordsPush(shading.coords1);
+                const auto stageUVTransform = [&](uint32_t stage) {
+                    const size_t animLookup = batch.textureAnimIndex == 0xFFFF
+                        ? size_t{0xFFFF} : size_t{batch.textureAnimIndex} + stage;
+                    const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
+                                                          gpuModel.data.textureTransforms, animLookup);
+                    return tt ? m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                                                    instance.animationTime, instance.globalSequenceTime,
+                                                    gpuModel.data.globalSequenceDurations)
+                              : M2UVTransform{};
+                };
+                matData.uvTransform = stageUVTransform(0);
                 VkTexture* secondTex = nullptr;
                 uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
-                const int8_t secondCoordSet = m2TextureCoordSet(
-                    gpuModel.data.textureCoordLookup, static_cast<uint16_t>(batch.textureUnit + 1));
-                if (resolved.comboOffset == 0 &&
-                    m2UsesSecondTextureMask(batch.shader, batch.textureCount, blendMode, secondCoordSet)) {
-                    const size_t lookupPos = size_t{batch.textureIndex} + 1;
-                    const uint16_t slot = lookupPos < gpuModel.data.textureLookup.size()
-                        ? gpuModel.data.textureLookup[lookupPos] : uint16_t{0xFFFF};
-                    if (slot < gpuModel.textureIds.size()) {
-                        secondTex = gpuModel.textureIds[slot];
-                        if (auto o = instance.textureSlotOverrides.find(slot);
-                            o != instance.textureSlotOverrides.end() && o->second) {
-                            secondTex = o->second;
-                        }
-                        if (slot < gpuModel.data.textures.size())
-                            secondWrapFlags = static_cast<uint8_t>(gpuModel.data.textures[slot].flags & 0x3);
-                    }
-                    if (secondTex && secondTex->isValid() && secondTex != whiteTexture_.get()) {
+                if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
+                    matData.uvTransform2 = stageUVTransform(1);
+                    const BatchTexture second = resolveBatchTexture(instance, gpuModel, batch, 1);
+                    secondWrapFlags = second.wrapFlags;
+                    if (second.texture && second.texture->isValid() && second.texture != whiteTexture_.get()) {
+                        secondTex = second.texture;
                         matData.hasSecondTexture = 1;
-                        matData.secondTexCoordSet = secondCoordSet == 1 ? 1 : 0;
                     } else {
-                        secondTex = nullptr;
+                        // Drawn with the second stage white: the first alone.
                         static std::unordered_set<uint64_t> loggedMissingSecond;
-                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | slot).second) {
+                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | bi).second) {
                             LOG_WARNING("Character model '", gpuModel.data.name, "' batch ", bi,
-                                        ": its second texture (slot ", slot,
-                                        ") is not loaded; drawn without the mask that shapes it");
+                                        ": its second texture (lookup ", size_t{batch.textureIndex} + 1,
+                                        ") is not loaded; drawn with the first stage alone");
                         }
                     }
                 }
@@ -3259,10 +3273,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // inside through any gap, and lit with the normal turned round
                 // that inside is a dark wedge where the client draws nothing.
                 matData.twoSided = (materialFlags & 0x04) ? 1 : 0;
-                matData.emissiveBoost = emissiveBoost;
-                matData.emissiveTintR = emissiveTint.r;
-                matData.emissiveTintG = emissiveTint.g;
-                matData.emissiveTintB = emissiveTint.b;
                 matData.specularIntensity = 0.5f;
                 matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
                 // Character textures are layered/mirrored atlases, not coherent
@@ -3366,70 +3376,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             }
             } // end pass loop
             } // end stage loop
-        } else {
-            // Draw entire model with first texture
-            VkTexture* texPtr = !gpuModel.textureIds.empty() ? gpuModel.textureIds[0] : whiteTexture_.get();
-            if (!texPtr || !texPtr->isValid()) texPtr = whiteTexture_.get();
-
-            // POM quality → sample count
-            const int pomSamples2 = pomSamplesFor(pomQuality_);
-
-            // Whole-model fallback inherits whatever pipeline was bound last;
-            // pick it explicitly so instance fades blend here too.
-            VkPipeline fallbackPipeline = (drawOpacity < 0.999f)
-                ? translucentPipeline_ : opaquePipeline_;
-            if (fallbackPipeline != currentPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
-                currentPipeline = fallbackPipeline;
-            }
-
-            CharMaterialUBO matData{};
-            matData.opacity = drawOpacity;
-            matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
-            matData.alphaTest = 0;
-            matData.ignoreTextureAlpha = 1;
-            matData.colorKeyBlack = 0;
-            matData.unlit = 0;
-            matData.twoSided = 1;  // no batch, so no material to say otherwise
-            matData.emissiveBoost = 1.0f;
-            matData.emissiveTintR = 1.0f;
-            matData.emissiveTintG = 1.0f;
-            matData.emissiveTintB = 1.0f;
-            matData.specularIntensity = 0.5f;
-            const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
-                                          !instance.hasOverrideModelMatrix;
-            const bool useAdvancedMaterials = !previewMainModel;
-            const bool usePreviewSimpleShader = previewMainModel;
-            matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
-            matData.enablePOM = (useAdvancedMaterials && pomEnabled_) ? 1 : 0;
-            matData.pomScale = 0.06f;
-            matData.pomMaxSamples = pomSamples2;
-            matData.heightMapVariance = 0.0f;
-            matData.normalMapStrength = normalMapStrength_;
-            matData.hairMaterial = 0;
-            if (usePreviewSimpleShader) {
-                matData.enableNormalMap = 0;
-                matData.enablePOM = kPreviewSimpleTextureMode;
-            }
-
-            // Sub-allocate material UBO from ring buffer
-            uint32_t matOffset2 = materialRingOffset_[frameSlot];
-            if (matOffset2 + uboStride > ringCapacityBytes) continue; // ring exhausted
-            memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset2, &matData, sizeof(CharMaterialUBO));
-            materialRingOffset_[frameSlot] = matOffset2 + uboStride;
-
-            const uint8_t wrapFlags = !gpuModel.data.textures.empty()
-                ? static_cast<uint8_t>(gpuModel.data.textures[0].flags & 0x3)
-                : BatchTexture::kRepeatBoth;
-            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, wrapFlags,
-                                                                   flatNormalTexture_.get());
-            if (!materialSet) continue;
-
-            const uint32_t dynamicOffset = matOffset2;
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelineLayout_, 1, 1, &materialSet, 1, &dynamicOffset);
-
-            vkCmdDrawIndexed(cmd, gpuModel.indexCount, 1, 0, 0, 0);
         }
     }
 }
@@ -3441,7 +3387,6 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     // ShadowCharParams UBO (matches character_shadow.frag.glsl set=1 binding=1)
     struct ShadowCharParams {
         int32_t alphaTest = 0;
-        int32_t colorKeyBlack = 0;
     };
 
     // The same set the other three shadow passes bind - a sampler and a small
@@ -3466,7 +3411,6 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         if (paramsInfo.pMappedData) {
             ShadowCharParams p{};
             p.alphaTest = 1;
-            p.colorKeyBlack = 0;
             std::memcpy(paramsInfo.pMappedData, &p, sizeof(p));
         }
     }
@@ -3700,6 +3644,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
             }
             if (blendMode >= 2) continue; // skip transparent
+            if (!characterBatchShading(gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
             if (applyGeosetFilter &&
                 inst.activeGeosets.find(batch.submeshId) == inst.activeGeosets.end()) continue;
             if (!applyGeosetFilter) {
@@ -3782,75 +3727,86 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
     return set;
 }
 
-CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
-        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b) const {
-            // A skin batch can reference multiple textures (b.textureCount) starting at b.textureIndex.
-            // We currently bind only a single texture, so pick the most appropriate one.
-            if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
-            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return {.texture = whiteTexture_.get()};
-
-            uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
-            comboCount = std::min<uint32_t>(comboCount, 8u);
-
-            BatchTexture first{.texture = whiteTexture_.get()};
-            bool hasFirst = false;
-            BatchTexture firstNonWhite{.texture = whiteTexture_.get()};
-            bool hasFirstNonWhite = false;
-
-            for (uint32_t i = 0; i < comboCount; i++) {
-                uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + i;
-                if (lookupPos >= gm.data.textureLookup.size()) break;
-                uint16_t texSlot = gm.data.textureLookup[lookupPos];
-                if (texSlot >= gm.textureIds.size()) continue;
-
-                VkTexture* texPtr = gm.textureIds[texSlot];
-                uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
-                const uint8_t wrapFlags = texSlot < gm.data.textures.size()
-                    ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
-                    : BatchTexture::kRepeatBoth;
-                // Apply texture slot overrides.
-                // For type-1 (skin) overrides, only apply to skin-group batches
-                // to prevent the skin composite from bleeding onto cloak/hair.
-                {
-                    auto itO = inst.textureSlotOverrides.find(texSlot);
-                    if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
-                        if (texType == 1) {
-                            // Only apply skin override to skin groups
-                            uint16_t grp = b.submeshId / 100;
-                            bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                                grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
-                                                grp == 20);
-                            if (isSkinGroup) texPtr = itO->second;
-                        } else {
-                            texPtr = itO->second;
-                        }
-                    }
+void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const {
+    // A unit's lights count while the client animates it: in view, or within
+    // 33 yards (local_lights.hpp). A will-o'-the-wisp or a torch-bearer lights
+    // what is around it as a lamp post does.
+    constexpr float kNearUnitSq = 33.0f * 33.0f;
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getProjectionMatrix() * camera.getViewMatrix());
+    const glm::vec3 camPos = camera.getPosition();
+    for (const auto& [id, inst] : instances) {
+        if (!inst.visible) continue;
+        const auto mit = models.find(inst.modelId);
+        if (mit == models.end() || mit->second.data.lights.empty()) continue;
+        const pipeline::M2Model& model = mit->second.data;
+        const glm::mat4 modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
+                                                                  : getModelMatrix(inst);
+        const glm::vec3 origin(modelMatrix[3]);
+        const glm::vec3 toCam = origin - camPos;
+        if (glm::dot(toCam, toCam) > kNearUnitSq && !frustum.intersectsSphere(origin, 4.0f)) continue;
+        const float alpha = std::min(inst.opacity, inst.stateAlpha);
+        for (const auto& light : model.lights) {
+            if (light.type != 1) {
+                static std::unordered_set<std::string> saidDirectional;
+                if (saidDirectional.insert(model.name).second) {
+                    LOG_WARNING("Model '", model.name, "' carries a directional light (type ",
+                                light.type, "); it is not applied - the unit lights nothing with it");
                 }
-
-                if (!hasFirst) {
-                    first = {.texture = texPtr, .wrapFlags = wrapFlags,
-                             .comboOffset = static_cast<uint16_t>(i)};
-                    hasFirst = true;
-                }
-
-                if (texPtr == nullptr || texPtr == whiteTexture_.get()) continue;
-
-                // Prefer the hair texture slot (type 6) whenever present in the combo.
-                if (texType == 6) {
-                    return {.texture = texPtr, .wrapFlags = wrapFlags,
-                            .comboOffset = static_cast<uint16_t>(i)};
-                }
-
-                if (!hasFirstNonWhite) {
-                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags,
-                                     .comboOffset = static_cast<uint16_t>(i)};
-                    hasFirstNonWhite = true;
-                }
+                continue;
             }
+            const int seq = inst.currentSequenceIndex;
+            const float t = inst.animationTime;
+            const float gt = inst.globalSequenceTime;
+            const auto& gsd = model.globalSequenceDurations;
+            if (m2_track::sampleFloat(light.visibility, seq, t, gt, gsd, 1.0f) < 0.5f) continue;
+            const glm::vec3 color =
+                m2_track::sampleVec3(light.diffuseColor, seq, t, gt, gsd, glm::vec3(1.0f)) *
+                m2_track::sampleFloat(light.diffuseIntensity, seq, t, gt, gsd, 1.0f) * alpha;
+            if (std::max({color.r, color.g, color.b}) <= 0.0f) continue;
+            glm::mat4 bone(1.0f);
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.boneMatrices.size()) {
+                bone = inst.boneMatrices[static_cast<size_t>(light.bone)];
+            }
+            out.push_back({.position = glm::vec3(modelMatrix * bone * glm::vec4(light.position, 1.0f)),
+                           .color = color});
+        }
+    }
+}
 
-            if (hasFirstNonWhite) return firstNonWhite;
-            if (hasFirst && first.texture != nullptr) return first;
-            return {.texture = whiteTexture_.get()};
+CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
+        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b,
+        uint32_t stage) const {
+    // The stage's own texture, as the client takes it: textures[lookup[index +
+    // stage]]. With one texture bound, this used to pick among the stages - a
+    // hair slot first, else the first that was not white - which dropped the
+    // other stage; the stages are combined now (m2BatchShading).
+    if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
+    const uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + stage;
+    if (lookupPos >= gm.data.textureLookup.size()) return {.texture = whiteTexture_.get()};
+    const uint16_t texSlot = gm.data.textureLookup[lookupPos];
+    if (texSlot >= gm.textureIds.size()) return {.texture = whiteTexture_.get()};
+
+    VkTexture* texPtr = gm.textureIds[texSlot];
+    const uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
+    const uint8_t wrapFlags = texSlot < gm.data.textures.size()
+        ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
+        : BatchTexture::kRepeatBoth;
+    // Texture slot overrides. A type-1 (skin) override only reaches skin-group
+    // batches, so the skin composite does not bleed onto cloak or hair.
+    auto itO = inst.textureSlotOverrides.find(texSlot);
+    if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
+        if (texType == 1) {
+            const uint16_t grp = b.submeshId / 100;
+            const bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
+                                      grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
+                                      grp == 20);
+            if (isSkinGroup) texPtr = itO->second;
+        } else {
+            texPtr = itO->second;
+        }
+    }
+    return {.texture = texPtr ? texPtr : whiteTexture_.get(), .wrapFlags = wrapFlags};
 }
 
 glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) const {
@@ -4012,6 +3968,27 @@ void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec
     }
 }
 
+void CharacterRenderer::setInstanceCameraFade(uint32_t instanceId, float alpha) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    const float clamped = std::clamp(alpha, 0.0f, 1.0f);
+    if (it->second.cameraFade == clamped) return;
+    auto apply = [&](CharacterInstance& inst) { inst.cameraFade = clamped; };
+    apply(it->second);
+    for (const auto& attachment : it->second.weaponAttachments) {
+        auto weaponIt = instances.find(attachment.weaponInstanceId);
+        if (weaponIt != instances.end()) apply(weaponIt->second);
+        for (const auto& effect : attachment.effects) {
+            auto effectIt = instances.find(effect.effectInstanceId);
+            if (effectIt != instances.end()) apply(effectIt->second);
+        }
+    }
+    for (const uint32_t companionId : it->second.lookCompanions) {
+        auto companionIt = instances.find(companionId);
+        if (companionIt != instances.end()) apply(companionIt->second);
+    }
+}
+
 void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companionId) {
     auto it = instances.find(instanceId);
     if (it == instances.end() || companionId == instanceId || !instances.count(companionId)) return;
@@ -4023,6 +4000,7 @@ void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companion
     auto& companion = instances.at(companionId);
     companion.stateTint = it->second.stateTint;
     companion.stateAlpha = it->second.stateAlpha;
+    companion.cameraFade = it->second.cameraFade;
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
@@ -4332,6 +4310,7 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
         weapIt->second.opacity = charInstance.opacity;
         weapIt->second.stateTint = charInstance.stateTint;
         weapIt->second.stateAlpha = charInstance.stateAlpha;
+        weapIt->second.cameraFade = charInstance.cameraFade;
     }
 
     // Store attachment on parent character instance
@@ -4431,6 +4410,24 @@ bool CharacterRenderer::getInstancePosition(uint32_t instanceId, glm::vec3& outP
     auto it = instances.find(instanceId);
     if (it == instances.end()) return false;
     outPos = it->second.position;
+    return true;
+}
+
+bool CharacterRenderer::getInstanceModelMatrix(uint32_t instanceId, glm::mat4& outMatrix) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    const auto& instance = it->second;
+    outMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                : getModelMatrix(instance);
+    return true;
+}
+
+bool CharacterRenderer::getInstanceDrawnOpacity(uint32_t instanceId, float& outOpacity) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    // The same as the body is drawn with in render().
+    outOpacity = std::clamp(std::min(it->second.opacity, it->second.stateAlpha) * it->second.cameraFade,
+                            0.0f, 1.0f);
     return true;
 }
 
@@ -4542,6 +4539,7 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     fxIt->second.opacity = charIt->second.opacity;
     fxIt->second.stateTint = charIt->second.stateTint;
     fxIt->second.stateAlpha = charIt->second.stateAlpha;
+    fxIt->second.cameraFade = charIt->second.cameraFade;
 
     WeaponEffectAttachment fx;
     fx.effectModelId = effectModelId;
@@ -4632,15 +4630,8 @@ void CharacterRenderer::recreatePipelines() {
     VkDevice device = vkCtx_->getDevice();
 
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layout)
-    destroy(device, opaquePipeline_);
-    destroy(device, alphaTestPipeline_);
-    destroy(device, alphaPipeline_);
-    destroy(device, additivePipeline_);
-    destroy(device, modulatePipeline_);
-    destroy(device, modulate2xPipeline_);
-    destroy(device, translucentPipeline_);
-    destroy(device, fadeDepthPipeline_);
-    destroy(device, fadeColorPipeline_);
+    destroyPipelineSet(device, scenePipes_);
+    destroyPipelineSet(device, fadedPassPipes_);
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
@@ -4662,16 +4653,19 @@ void CharacterRenderer::recreatePipelines() {
     charVert.destroy();
     charFrag.destroy();
 
-    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
-        !modulatePipeline_ || !modulate2xPipeline_ || !translucentPipeline_ ||
-        !fadeDepthPipeline_ || !fadeColorPipeline_) {
-        LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
-                  " alphaTest=", (void*)alphaTestPipeline_,
-                  " alpha=", (void*)alphaPipeline_,
-                  " additive=", (void*)additivePipeline_,
-                  " modulate=", (void*)modulatePipeline_,
-                  " modulate2x=", (void*)modulate2xPipeline_,
+    if (!scenePipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)scenePipes_.opaque,
+                  " alphaTest=", (void*)scenePipes_.alphaTest,
+                  " alpha=", (void*)scenePipes_.alpha,
+                  " additive=", (void*)scenePipes_.additive,
+                  " modulate=", (void*)scenePipes_.modulate,
+                  " modulate2x=", (void*)scenePipes_.modulate2x,
                   " renderPass=", (void*)mainPass, " samples=", static_cast<int>(samples));
+    } else if (fadedPass_ != VK_NULL_HANDLE && !fadedPassPipes_.complete()) {
+        LOG_ERROR("CharacterRenderer::recreatePipelines: the faded pass's pipelines failed; "
+                  "faded characters are drawn in the scene pass, under the effects inside them");
+        destroyPipelineSet(device, fadedPassPipes_);
+        fadedPass_ = VK_NULL_HANDLE;
     } else {
         LOG_INFO("CharacterRenderer: pipelines recreated successfully (samples=",
                  static_cast<int>(samples), ")");

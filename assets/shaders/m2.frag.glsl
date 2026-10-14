@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     mat4 rtViewProj;
@@ -24,9 +22,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
 };
 
 #include "rt_lighting.glsli"
+#include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 #include "interior_light.glsli"
 
@@ -36,8 +37,6 @@ layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 layout(set = 1, binding = 2) uniform M2Material {
     int hasTexture;
     int alphaTest;
-    int colorKeyBlack;
-    float colorKeyThreshold;
     int unlit;
     int blendMode;
     int cullBackFaces;
@@ -46,10 +45,8 @@ layout(set = 1, binding = 2) uniform M2Material {
     float tintR;
     float tintG;
     float tintB;
-    int volumetricBeam;
-    int fireCard;
+    int combiner;           // M2Combiner
     int hasSecondTexture;
-    int secondTexCoordSet;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -64,10 +61,10 @@ layout(location = 4) in float ModelHeight;
 layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
-layout(location = 8) in vec4 MaskUVs;
+layout(location = 8) in vec2 TexCoord2;
 layout(location = 9) flat in vec4 vInteriorAmbient;
 layout(location = 10) flat in vec4 vInteriorDirect;
-layout(location = 11) flat in float vTintScale;
+layout(location = 11) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
 
@@ -80,35 +77,8 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
-float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
-    float shadow = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += texture(smap, vec3(coords.xy + vec2(x, y) * shadowTexel(), coords.z));
-        }
-    }
-    return shadow / 9.0;
-}
-
-vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
-    vec3 sum = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        vec3 toLight = localLightPosRadius[i].xyz - pos;
-        float radius = localLightPosRadius[i].w;
-        // Rejected on the squared distance, before the square root and the
-        // divide: most of the sixty-four are out of range of any one pixel,
-        // and this is what each of them costs.
-        float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float dist = sqrt(distSq);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        float wrappedDiffuse = 0.22 + 0.78 * max(dot(normal, toLight / max(dist, 0.001)), 0.0);
-        sum += albedo * localLightColorIntensity[i].rgb *
-               (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
-    }
-    return sum;
-}
+#include "local_lights.glsli"
+#include "shadow_receiver.glsli"
 
 // 4x4 Bayer dither matrix (normalized to 0..1)
 float bayerDither4x4(ivec2 p) {
@@ -120,27 +90,6 @@ float bayerDither4x4(ivec2 p) {
         15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0
     );
     return m[idx];
-}
-
-/// Value noise on a world position, for the haze inside a light beam.
-///
-/// Trilinear between eight hashed lattice corners with a smoothstep fade, so
-/// it is continuous and has no visible grid. Sampled in world space by the
-/// caller, which is what keeps the mist still while the beam sweeps over it.
-float beamHash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
-    p += dot(p, p.yxz + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float beamHaze(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(mix(beamHash(i + vec3(0, 0, 0)), beamHash(i + vec3(1, 0, 0)), f.x),
-                   mix(beamHash(i + vec3(0, 1, 0)), beamHash(i + vec3(1, 1, 0)), f.x), f.y),
-               mix(mix(beamHash(i + vec3(0, 0, 1)), beamHash(i + vec3(1, 0, 1)), f.x),
-                   mix(beamHash(i + vec3(0, 1, 1)), beamHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
 }
 
 // The air between the camera and this point, out of the fog volume: rgb is
@@ -196,19 +145,23 @@ vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
 }
 
+#include "m2_combiner.glsli"
+
 void main() {
     if (cullBackFaces != 0 && !gl_FrontFacing) discard;
-    vec4 texColor = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
-    // Mask RGBA before lighting or alpha handling; the authored UV1 mask
-    // bounds the foam even while its UV0 water texture scrolls.
-    if (hasSecondTexture != 0) {
-        vec2 maskUV = secondTexCoordSet == 1 ? MaskUVs.zw : MaskUVs.xy;
-        texColor *= texture(uSecondTexture, maskUV);
-    }
+    // The stages as the client combines them: armour doubled by its
+    // sphere-mapped shine, a flame shaped by its mask, a layer with light
+    // of its own added on top of the lit one.
+    vec4 t0 = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
+    vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+    vec3 stageAdd;
+    vec4 texColor = combineStages(combiner, t0, t1, stageAdd);
+    texColor.a = clamp(texColor.a, 0.0, 1.0);
     // The batch's authored colour. A glow card is painted white and coloured
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
-    // every fire in the world burns white.
-    texColor.rgb *= vec3(tintR, tintG, tintB) * vTintScale;
+    // every fire in the world burns white. It is part of the vertex colour,
+    // which what the stages add on top is not.
+    texColor.rgb *= vec3(tintR, tintG, tintB);
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be
@@ -235,7 +188,7 @@ void main() {
         // Behind all the air there is, as the procedural sky is. An
         // additive layer only loses what the air hides of it; the air's own
         // light is already in the layer it is added to.
-        vec3 skyColor = texColor.rgb;
+        vec3 skyColor = texColor.rgb + stageAdd;
         if (volumetricParams.x > 0.5) {
             vec4 clip = projection * view * vec4(FragPos, 1.0);
             vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
@@ -297,10 +250,6 @@ void main() {
         float aGrad = fwidth(texColor.a);
         texColor.a = clamp((texColor.a - alphaCutoff) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
         if (texColor.a < 1.0 / 255.0) discard;
-    }
-    if (colorKeyBlack != 0) {
-        float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
-        if (lum < colorKeyThreshold) discard;
     }
     if (blendMode == 1 && texColor.a < 0.004) discard;
 
@@ -370,13 +319,13 @@ void main() {
             vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
             vec3 proj = lsPos.xyz / lsPos.w;
             proj.xy = proj.xy * 0.5 + 0.5;
+            vec2 receiverSlope = shadowReceiverSlope(proj);
             if (proj.x >= 0.0 && proj.x <= 1.0 &&
                 proj.y >= 0.0 && proj.y <= 1.0 &&
                 proj.z >= 0.0 && proj.z <= 1.0) {
-                float bias = max(0.0005 * (1.0 - abs(dot(shadowNormal, ldir))), 0.00005);
-                shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
+                shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+                shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
             }
-            shadow = mix(1.0, shadow, shadowParams.y);
         }
 
         // Leaf subsurface scattering (foliage only) - uses stable normal, no FragPos dependency
@@ -397,8 +346,17 @@ void main() {
         if (isFoliage) {
             ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
         }
-        result = ambientTerm * texColor.rgb
-               + shadow * (diff * sunColor * texColor.rgb + spec * sunColor)
+        // The units around the player, at full detail, as the terrain and
+        // the buildings take them: a model is ground too - a dock, a bridge,
+        // a rock. Indoors a model takes only these, kept below the player's
+        // head as the room around it does.
+        float unitShadow = localShadowAt(FragPos);
+        if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
+        shadow = min(shadow, unitShadow);
+        // The whole lit colour darkened alike, as the client does; the
+        // highlight is the sun's own and goes with it.
+        result = (ambientTerm + diff * sunColor) * texColor.rgb * shadowLightFactor(shadow)
+               + shadow * spec * sunColor
                + sss;
     }
 
@@ -412,7 +370,10 @@ void main() {
         result *= aoFactor;
     }
 
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
+    // What the stages add on top of the lit colour - an Add combiner's second
+    // stage, a reflection laid over - takes no light.
+    result += stageAdd;
 
     float dist = length(viewPos.xyz - FragPos);
     if (blendMode == 5 || blendMode == 6) {
@@ -440,13 +401,6 @@ void main() {
     }
 
     float outAlpha = texColor.a * vFadeAlpha;
-    // Cutout materials output the sharpened coverage alpha computed above -
-    // alpha-to-coverage turns it into per-sample coverage for smooth edges.
-    // Color-key-only materials have no meaningful texture alpha; keep them
-    // opaque after the discard.
-    if (colorKeyBlack != 0 && alphaTest == 0) {
-        outAlpha = vFadeAlpha;
-    }
     // The distance fade, for a batch drawn with no blending to fade through.
     // Sixteen ordered steps against the fragment's own screen position: a tree
     // at the edge of the draw distance thins out rather than switching off,
@@ -465,114 +419,6 @@ void main() {
     if (vHighlight > 0.0) {
         float lift = clamp(vHighlight, 0.0, 1.0);
         result = result * (1.0 + 0.6 * lift) + vec3(0.22, 0.19, 0.10) * lift;
-    }
-
-    // A shaft of light has no edge, and it is full of the air it lights.
-    //
-    // A searchlight, a god ray and a window shaft are all drawn as geometry -
-    // a card or a flattened cone - and the geometry ends somewhere. Where it
-    // ends the light stops dead, so the zeppelin's searchlight over Tirisfal
-    // came to a straight bright line across the sky with the polygon's corner
-    // plainly visible.
-    //
-    // Four attenuations soften it: the card's border, the cone's silhouette,
-    // haze through the volume, and distance from the emitter. All four are
-    // needed because no one of them reaches every beam - see each below.
-    //
-    // Applied to the whole model rather than only to batches whose blend mode
-    // reads additive. That guard was here to spare the lamp housing and is
-    // what kept the effect off the thing it was written for: the searchlight's
-    // batches carry a raw blend mode of 0 or 1 and are turned additive later,
-    // by the pass that draws them.
-    if (volumetricBeam != 0) {
-        vec2 fromEdge = min(TexCoord, vec2(1.0) - TexCoord);
-        float border = min(fromEdge.x, fromEdge.y);
-        float t = fogParams.z;
-        vec3 drift = vec3(0.02, 0.013, -0.007) * t;
-
-        // The edge, eaten into by the same air.
-        //
-        // A smooth falloff still reads as an edge, because it is the same
-        // width the whole way along and perfectly straight. Real light gives
-        // out against whatever is floating in front of it, so the boundary
-        // wanders. This pushes the falloff in and out with a finer octave of
-        // the same world-anchored field the haze uses - finer, so the edge
-        // frays rather than scallops, and world-anchored for the same reason
-        // as the haze: the fraying belongs to the air, so it must not travel
-        // with the beam.
-        float edgeNoise = beamHaze((FragPos + drift * 2.0) * 0.62) * 0.6
-                        + beamHaze((FragPos - drift * 1.3) * 1.6) * 0.4;
-        float wobble = (edgeNoise - 0.5) * 0.30;
-
-        float cardFade = smoothstep(0.0, 0.38, border + wobble * 0.55);
-
-        vec3 toEye = normalize(viewPos.xyz - FragPos);
-        float facing = abs(dot(normalize(Normal), toEye));
-        float coneFade = mix(1.0, smoothstep(0.0, 0.62, facing + wobble), 0.8);
-
-        // Three octaves of value noise on the world position: mist the beam
-        // sweeps through, not a texture painted on the blade.
-        //
-        // Sampled in world space, and barely drifting. At a third of a yard a
-        // second the drift and the sweep could not be told apart and the haze
-        // read as surface detail; what is wanted here is standing air, so the
-        // field is very nearly fixed and what moves is the beam. Coarse, too -
-        // a cell is about ten yards, the scale of a bank of mist, where three
-        // cells to a yard looked like noise on a surface.
-        float haze = beamHaze((FragPos + drift) * 0.17) * 0.55
-                   + beamHaze((FragPos - drift * 0.6) * 0.44) * 0.30
-                   + beamHaze((FragPos + drift * 1.7) * 1.05) * 0.15;
-        // Taken hard enough to punch holes, and never quite to nothing.
-        //
-        // A beam is several additive cards laid over each other and their
-        // contributions sum, so the core is saturated white: dimming a layer
-        // to a fifth still adds to white through the middle, which is why a
-        // 0.55-to-1.15 multiply showed nothing at all. The troughs have to go
-        // nearly black before the core breaks up - but not to zero, or the
-        // beam flickers inside its own haze rather than swirling.
-        haze = mix(0.26, 1.35, smoothstep(0.22, 0.78, haze));
-
-        // And a fade along the beam's own length, which does not care how the
-        // mesh was built or how its UVs run.
-        //
-        // The card fade above needs the UVs to reach 0 and 1 at the card's
-        // border to find it, and the zeppelin's upper beam does not: its
-        // triangle keeps a crisp outline while the lower beam softens. The
-        // cone fade cannot help there either, because a flat card turned
-        // toward the eye has no silhouette to catch. Distance from the
-        // emitter is the one handle every beam has, whatever its geometry -
-        // and a searchlight genuinely does give out as it reaches.
-        float reach = length(FragPos - InstanceOrigin);
-        float lengthFade = 1.0 - smoothstep(10.0, 52.0, reach) * 0.45;
-
-        // Four attenuations multiplied together take a beam to nothing long
-        // before any one of them looks wrong: at 0.7 each the product is a
-        // quarter, and the searchlight all but disappeared. Each is gentler
-        // now, and the whole is lifted so the middle of the beam comes back
-        // to roughly the brightness it had while the edges still go.
-        float beamFade = cardFade * coneFade * haze * lengthFade * 2.3;
-        outAlpha *= beamFade;
-        // Additive beams carry their brightness in the colour rather than the
-        // alpha, so fading one means dimming it.
-        if (blendMode >= 3) result *= beamFade;
-    }
-
-    // A flame stops before its card does.
-    //
-    // The bonfire's fire is drawn on cards whose material says opaque, so the
-    // black backing around the flame came out as a rectangle - a hard-edged
-    // slab with a straight top. Keying the black out and adding rather than
-    // covering deals with the backing; this deals with the edge, which is
-    // still an edge wherever the texture is bright right up to it.
-    //
-    // ModelHeight is how far up its own model this fragment sits, so the fade
-    // lands in the same place whatever size the fire is placed at.
-    if (fireCard != 0) {
-        float tipFade = 1.0 - smoothstep(0.55, 0.98, ModelHeight);
-        outAlpha *= tipFade;
-        // An additive card carries its brightness in the colour, so fading one
-        // means dimming it.
-        if (blendMode >= 3) result *= tipFade;
     }
 
     // NoAlphaAdd is drawn ONE, ONE: neither the texture's alpha nor the alpha

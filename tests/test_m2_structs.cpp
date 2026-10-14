@@ -49,18 +49,6 @@ TEST_CASE("Hanging lantern light pools project from suspension to animated tip",
     CHECK(pool.z == Catch::Approx(1.0f));
 }
 
-TEST_CASE("Foliage asset paths never block player movement", "[m2][collision]") {
-    const auto grass = wowee::rendering::classifyM2Model(
-        "World\\NoDXT\\Detail\\ElwynnGrass01.m2",
-        glm::vec3(-1.0f), glm::vec3(1.0f), 100, 0);
-    REQUIRE(grass.collisionNoBlock);
-
-    const auto herb = wowee::rendering::classifyM2Model(
-        "World\\SkillActivated\\TradeskillNodes\\Bush_Magebloom01.m2",
-        glm::vec3(-1.0f), glm::vec3(1.0f), 100, 0);
-    REQUIRE(herb.collisionNoBlock);
-}
-
 TEST_CASE("Lighthouse beams are classified for distant bone updates", "[m2][animation]") {
     const auto beam = wowee::rendering::classifyM2Model(
         "World\\Generic\\Human\\Passive Doodads\\Stormwind\\Stormwind_LighthouseBeam_01.m2",

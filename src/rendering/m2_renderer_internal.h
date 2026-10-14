@@ -4,9 +4,12 @@
 
 #include "rendering/collision_geometry.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/m2_billboard.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/profiler.hpp"
+#include "core/logger.hpp"
+#include <mutex>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -94,10 +97,17 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 }
 
 // ---- Constants ----
-inline const auto kLavaAnimStart = std::chrono::steady_clock::now();
-inline constexpr uint32_t kParticleFlagRandomized = 0x40;
-inline constexpr uint32_t kParticleFlagTiled = 0x80;
-inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
+/// The size of m2.vert's Push block (M2PushConstants in m2_renderer_render.cpp).
+inline constexpr uint32_t kM2PushConstantBytes = 28;
+
+/// m2_particle.frag's push constants.
+struct M2ParticlePush {
+    float tileX = 1.0f, tileY = 1.0f;
+    /// m2AlphaRef of the blend pipeline: a pixel below it is discarded.
+    float alphaRef = 0.0f;
+    /// M2FogMode: None for an unfogged emitter (flag 0x8).
+    int32_t fogMode = 0;
+};
 
 // ---- Geometry / collision helpers ----
 
@@ -107,72 +117,17 @@ inline float computeGroundDetailDownOffset(const M2ModelGPU& model, float scale)
     return pivotComp + terrainSink;
 }
 
-inline void getTightCollisionBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {
-    glm::vec3 center = (model.boundMin + model.boundMax) * 0.5f;
-    glm::vec3 half = (model.boundMax - model.boundMin) * 0.5f;
-
-    if (model.collisionTreeTrunk) {
-        float modelHoriz = std::max(model.boundMax.x - model.boundMin.x,
-                                    model.boundMax.y - model.boundMin.y);
-        float trunkHalf = std::clamp(modelHoriz * 0.05f, 0.5f, 5.0f);
-        half.x = trunkHalf;
-        half.y = trunkHalf;
-        half.z = std::min(trunkHalf * 2.5f, 3.5f);
-        center.z = model.boundMin.z + half.z;
-    } else if (model.collisionNarrowVerticalProp) {
-        half.x *= 0.30f;
-        half.y *= 0.30f;
-        half.z *= 0.96f;
-    } else if (model.collisionSmallSolidProp) {
-        half.x *= 1.00f;
-        half.y *= 1.00f;
-        half.z *= 1.00f;
-    } else if (model.collisionSteppedLowPlatform) {
-        half.x *= 0.98f;
-        half.y *= 0.98f;
-        half.z *= 0.52f;
+/// The model-space box an instance is filed under for collision queries: its
+/// collision mesh's, or for a model without one - which collides with
+/// nothing - its visual bounds.
+inline void collisionLocalBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {
+    if (model.collision.valid()) {
+        outMin = model.collision.boundMin;
+        outMax = model.collision.boundMax;
     } else {
-        half.x *= 0.66f;
-        half.y *= 0.66f;
-        half.z *= 0.76f;
+        outMin = model.boundMin;
+        outMax = model.boundMax;
     }
-
-    outMin = center - half;
-    outMax = center + half;
-}
-
-inline float getEffectiveCollisionTopLocal(const M2ModelGPU& model,
-                                           const glm::vec3& localPos,
-                                           const glm::vec3& localMin,
-                                           const glm::vec3& localMax) {
-    if (!model.collisionSteppedFountain && !model.collisionSteppedLowPlatform) {
-        return localMax.z;
-    }
-
-    glm::vec2 center((localMin.x + localMax.x) * 0.5f, (localMin.y + localMax.y) * 0.5f);
-    glm::vec2 half((localMax.x - localMin.x) * 0.5f, (localMax.y - localMin.y) * 0.5f);
-    if (half.x < 1e-4f || half.y < 1e-4f) {
-        return localMax.z;
-    }
-
-    float nx = (localPos.x - center.x) / half.x;
-    float ny = (localPos.y - center.y) / half.y;
-    float r = std::sqrt(nx * nx + ny * ny);
-
-    float h = localMax.z - localMin.z;
-    if (model.collisionSteppedFountain) {
-        if (r > 0.85f) return localMin.z + h * 0.18f;
-        if (r > 0.65f) return localMin.z + h * 0.36f;
-        if (r > 0.45f) return localMin.z + h * 0.54f;
-        if (r > 0.28f) return localMin.z + h * 0.70f;
-        if (r > 0.14f) return localMin.z + h * 0.84f;
-        return localMin.z + h * 0.96f;
-    }
-
-    float edge = std::max(std::abs(nx), std::abs(ny));
-    if (edge > 0.92f) return localMin.z + h * 0.06f;
-    if (edge > 0.72f) return localMin.z + h * 0.30f;
-    return localMin.z + h * 0.62f;
 }
 
 inline bool segmentIntersectsAABB(const glm::vec3& from, const glm::vec3& to,
@@ -266,40 +221,25 @@ inline glm::vec3 closestPointOnTriangle(const glm::vec3& p,
 // Defined in m2_renderer_instance.cpp (inline thread_local causes LLD linker
 // errors on Windows ARM64, so the definitions live in the single TU that uses them).
 
-/// M2 bone flags this renderer acts on.
-///
-/// A bone marked spherical billboard carries geometry that must always face
-/// the camera: glow cards, flame sprites, the halo on a lamp. The flag was
-/// loaded and never read, so those cards rendered at whatever angle the artist
-/// left them at and cut through the model they belong to. Orgrimmar's bonfire
-/// keeps its glow on bone 0, flagged 0x8.
-constexpr uint32_t kM2BoneSphericalBillboard = 0x8;
-
 /// Bone transforms for one instance.
 ///
-/// `cameraPosWorld` is what a billboard bone turns toward; pass nullptr and
-/// those bones keep their authored orientation.
+/// `view` is the camera's view matrix, which billboard bones turn against;
+/// pass nullptr and those bones keep their authored orientation.
 inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
-                                const glm::vec3* cameraPosWorld = nullptr) {
+                                const glm::mat4* view = nullptr) {
     ZoneScopedN("M2::computeBoneMatrices");
     size_t numBones = std::min(model.bones.size(), size_t(kMaxBonesPerInstance));
     if (numBones == 0) return;
     instance.boneMatrices.resize(numBones);
     const auto& gsd = model.globalSequenceDurations;
+    // Model space to view space and back, for billboard bones; worked out at
+    // the first one.
+    bool haveViewModel = false;
+    glm::mat4 viewModel(1.0f), invViewModel(1.0f);
 
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
-        // Two clocks on one skeleton.
-        //
-        // A searchlight sweeps out and back, and wrapping its sequence threw
-        // the beam across its arc in one frame. Reversing the instance's whole
-        // timeline fixed that and turned the zeppelin's propeller backwards
-        // with it, because both are posed from the same animation. The bones
-        // the beam is skinned to - and only those - read the reversing clock.
-        const float boneTime =
-            (i < model.pingPongBones.size() && model.pingPongBones[i])
-                ? instance.animTimeAlt
-                : instance.animTime;
+        const float boneTime = instance.animTime;
         glm::vec3 trans = m2_track::sampleVec3(
             bone.translation, instance.currentSequenceIndex, boneTime,
             instance.globalSequenceTime, gsd, glm::vec3(0.0f));
@@ -314,46 +254,51 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
         if (scl.y < 0.001f) scl.y = 1.0f;
         if (scl.z < 0.001f) scl.z = 1.0f;
 
+        const glm::mat4 rotScale = glm::scale(glm::toMat4(rot), scl);
         glm::mat4 local = glm::translate(glm::mat4(1.0f), bone.pivot);
         local = glm::translate(local, trans);
-        if (cameraPosWorld && (bone.flags & kM2BoneSphericalBillboard) != 0) {
-            // Turn the bone to face the camera instead of using its authored
-            // rotation. Everything is done in model space, so the instance's
-            // own rotation and scale still apply on top.
-            //
-            // M2 model space is X forward, Y left, Z up, and a card is
-            // authored in the plane facing +X, so that axis is the one aimed
-            // at the viewer.
-            const glm::vec3 camModel =
-                glm::vec3(instance.invModelMatrix * glm::vec4(*cameraPosWorld, 1.0f));
-            glm::vec3 toCamera = camModel - bone.pivot;
-            const float len2 = glm::dot(toCamera, toCamera);
-            if (len2 > 1e-8f) {
-                toCamera *= glm::inversesqrt(len2);
-                // Up is model +Z unless the view is nearly along it, where the
-                // cross product collapses and the card would spin.
-                glm::vec3 up(0.0f, 0.0f, 1.0f);
-                if (std::abs(toCamera.z) > 0.999f) up = glm::vec3(0.0f, 1.0f, 0.0f);
-                const glm::vec3 right = glm::normalize(glm::cross(up, toCamera));
-                const glm::vec3 trueUp = glm::cross(toCamera, right);
-                glm::mat4 face(1.0f);
-                face[0] = glm::vec4(toCamera, 0.0f);
-                face[1] = glm::vec4(right, 0.0f);
-                face[2] = glm::vec4(trueUp, 0.0f);
-                local *= face;
-            } else {
-                local *= glm::toMat4(rot);
-            }
-        } else {
-            local *= glm::toMat4(rot);
-        }
-        local = glm::scale(local, scl);
+        local *= rotScale;
         local = glm::translate(local, -bone.pivot);
 
         if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones) {
             instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * local;
         } else {
             instance.boneMatrices[i] = local;
+        }
+
+        // A billboard bone is rebuilt in view space, after its whole parent
+        // chain, and brought back into model space; its children follow it.
+        // A shield stays upright and turns about its Z axis to the view.
+        // Diagnostic: WOWEE_M2_NO_BILLBOARD=1 leaves every billboard bone as
+        // authored, which tells a billboard fault from anything else.
+        static const bool kNoBillboard = std::getenv("WOWEE_M2_NO_BILLBOARD") != nullptr;
+        if (view && !kNoBillboard && (bone.flags & kM2BoneBillboardMask) != 0) {
+            if (!haveViewModel) {
+                viewModel = *view * instance.modelMatrix;
+                invViewModel = glm::inverse(viewModel);
+                haveViewModel = true;
+            }
+            const glm::mat4 boneView = viewModel * instance.boneMatrices[i];
+            const glm::mat4 billboarded = m2BillboardBone(bone.flags, boneView, glm::mat3(rotScale), bone.pivot);
+            instance.boneMatrices[i] = invViewModel * billboarded;
+            // Diagnostic: WOWEE_M2_BILLBOARD_DIAG=1 says, about once a second
+            // per spell effect model, that its billboard bones are turned and
+            // which way they ended up facing in view space.
+            static const bool kBillboardDiag = std::getenv("WOWEE_M2_BILLBOARD_DIAG") != nullptr;
+            if (kBillboardDiag && model.isSpellEffect) {
+                static std::mutex diagMutex;
+                static std::unordered_map<std::string, std::chrono::steady_clock::time_point> saidAt;
+                const auto now = std::chrono::steady_clock::now();
+                std::lock_guard<std::mutex> lock(diagMutex);
+                auto& last = saidAt[model.name];
+                if (now - last > std::chrono::seconds(1)) {
+                    last = now;
+                    const glm::vec3 x0(boneView[0]), x1(billboarded[0]);
+                    LOG_WARNING("Billboard: '", model.name, "' instance ", instance.id, " bone ", i,
+                                " flags 0x", std::hex, bone.flags, std::dec, " X in view (",
+                                x0.x, ", ", x0.y, ", ", x0.z, ") -> (", x1.x, ", ", x1.y, ", ", x1.z, ")");
+                }
+            }
         }
     }
     instance.bonesDirty[0] = instance.bonesDirty[1] = true;

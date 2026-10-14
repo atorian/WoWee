@@ -23,6 +23,7 @@ layout(push_constant) uniform Push {
     float swayRefHeight;     // Model height the sway normalises against (model space)
     float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
     float plantHeight;       // The model's own height (model space), for the player brush
+    int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
@@ -47,12 +48,13 @@ struct InstanceData {
     float highlight;
     // Bit 0: a boat afloat, which rides the water. Also in what was padding.
     int flags;
-    // A fire's flicker, which differs between instances of one model.
-    float tintScale;
+    float pad1;
     float pad0;
     // See interior_light.glsli.
     vec4 interiorAmbient;
     vec4 interiorDirect;
+    // The point lights that reach this instance (local_lights.glsli).
+    uvec4 localLights;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -73,10 +75,10 @@ layout(location = 4) out float ModelHeight;
 layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
 layout(location = 7) flat out float vHighlight;
-layout(location = 8) out vec4 MaskUVs;
+layout(location = 8) out vec2 TexCoord2;
 layout(location = 9) flat out vec4 vInteriorAmbient;
 layout(location = 10) flat out vec4 vInteriorDirect;
-layout(location = 11) flat out float vTintScale;
+layout(location = 11) flat out uvec4 vLocalLights;
 
 #include "sphere_map.glsli"
 
@@ -304,21 +306,30 @@ void main() {
     FragPos = worldPos.xyz;
     Normal = mat3(model) * norm.xyz;
 
-    vec2 uv = push.texCoordSet == 1 ? aTexCoord2 : aTexCoord;
+    // Authored reflection maps use eye-space sphere coordinates. Ordinary
+    // atlas UVs expose the entire map as bright stripes on polished meshes.
+    vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
+    vec3 eyeNormal = normalize(mat3(view) * Normal);
+    // A sphere-mapped stage takes no UV animation (render spec 6.1).
     if (push.texCoordSet == -1) {
-        // Authored reflection maps use eye-space sphere coordinates. Ordinary
-        // atlas UVs expose the entire map as bright stripes on polished meshes.
-        vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
-        vec3 eyeNormal = normalize(mat3(view) * Normal);
-        uv = sphereMapUV(eyePosition, eyeNormal);
+        TexCoord = sphereMapUV(eyePosition, eyeNormal);
+    } else {
+        TexCoord = uvTransform(instanceData[instIdx].uvRow0, instanceData[instIdx].uvRow1,
+                               push.texCoordSet == 1 ? aTexCoord2 : aTexCoord);
     }
-    TexCoord = uvTransform(instanceData[instIdx].uvRow0, instanceData[instIdx].uvRow1, uv);
-    // The mask stage has its own animation. Both UV sets are carried, and the
-    // fragment shader picks the one the material names.
-    vec4 m0 = instanceData[instIdx].uv2Row0;
-    vec4 m1 = instanceData[instIdx].uv2Row1;
-    MaskUVs = vec4(uvTransform(m0, m1, aTexCoord), uvTransform(m0, m1, aTexCoord2));
-    vTintScale = instanceData[instIdx].tintScale;
+    // The second stage, from its own source as the client's vertex shader
+    // gives it: the second UV set or the sphere map, through the stage's own
+    // UV animation - or, behind a sphere-mapped first stage, the first UV set
+    // with no animation at all (Diffuse_Env_T2).
+    if (push.texCoordSet2 == -1) {
+        TexCoord2 = sphereMapUV(eyePosition, eyeNormal);
+    } else if (push.texCoordSet2 == 2) {
+        TexCoord2 = aTexCoord;
+    } else {
+        TexCoord2 = uvTransform(instanceData[instIdx].uv2Row0, instanceData[instIdx].uv2Row1,
+                                push.texCoordSet2 == 1 ? aTexCoord2 : aTexCoord);
+    }
+    vLocalLights = instanceData[instIdx].localLights;
 
     InstanceOrigin = model[3].xyz;
     // How far up the plant this vertex is, as a fraction of the plant's own

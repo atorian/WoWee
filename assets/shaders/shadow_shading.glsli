@@ -1,0 +1,28 @@
+// How a surface takes a shadow, as WoW 3.3.5a does it (WoW.exe 12340, the
+// receiving pixel shaders terrain2_pcf, mapobj*, combiners_*). Plain
+// functions of their arguments, so the tests include this file as C++.
+
+// Light left on a surface in full shadow: the client multiplies the lit
+// colour by 0.7 + 0.3 * shadow. A shadow is never a lack of sunlight there; it
+// darkens by the same amount under a dim sun as under a bright one, which is
+// what keeps a unit's shadow visible in Dalaran's evening light.
+float shadowLightFactor(float shadow) {
+    return 0.7f + 0.3f * shadow;
+}
+
+// A map fades out toward its edge: whole within 70% of its half extent, gone
+// at 99%. ndc is the receiver's position in the map, -1..1.
+float shadowMapEdgeFade(vec2 ndc) {
+    return clamp(3.4137931f - 3.4482758f * max(abs(ndc.x), abs(ndc.y)), 0.0f, 1.0f);
+}
+
+// Not taken from the client: its model and building shaders also lift the
+// shadow off a face edge-on to the light, by saturate(|1.2 - |N.L||^4) from
+// the vertex normal. That guards its map against a face shadowing itself, and
+// it is measured against the client's steepened shadow direction
+// (z' = max(5z, -1.2)), under which flat ground always meets the rays at 50
+// degrees or more. Against the true sun used here it would lift most of the
+// shadow off every floor at evening, and on a model whose normals are
+// smoothed into its sides - Elwynn's small dock - off the floor by day. The
+// receiver-plane comparison (shadow_receiver.glsli) keeps a face from
+// shadowing itself by its actual geometry instead.

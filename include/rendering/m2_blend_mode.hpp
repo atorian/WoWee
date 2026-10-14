@@ -19,6 +19,7 @@
 /// texel passed the test and the flame rendered as a flat opaque grey disc
 /// sitting behind the logs.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace wowee::rendering {
@@ -44,17 +45,37 @@ enum class M2BlendPipeline : uint8_t {
     Modulate,
     Modulate2x,
 };
+inline constexpr size_t kM2BlendPipelineCount = static_cast<size_t>(M2BlendPipeline::Modulate2x) + 1;
 
-/// The blend mode a batch is drawn with.
-///
-/// Spell visuals and flame cards are effect overlays painted on black, so
-/// their opaque and alpha-keyed layers are drawn additively, scaled by alpha
-/// like mode 4. Every other mode is drawn as authored. Mod (5) used to be
-/// turned additive here as well, and Mod only darkens: dark smoke, shadow and
-/// void effects glowed instead.
-inline uint8_t m2DrawBlendMode(uint8_t blendMode, bool effectOverlay) {
-    if (effectOverlay && blendMode <= M2_BLEND_ALPHA_KEY) return M2_BLEND_ADD_ALPHA;
-    return blendMode;
+/// What fog turns a pixel into, by blend mode (WoW.exe 0xa45390): the fog's
+/// colour where the pixel replaces what is behind it, and for the others the
+/// colour that leaves what is behind unchanged - black added, white
+/// multiplied, grey doubled.
+enum class M2FogMode : int32_t {
+    None = 0,
+    FogColor = 1,
+    Black = 2,
+    White = 3,
+    Grey = 4,
+};
+inline M2FogMode m2FogMode(M2BlendPipeline pipeline) {
+    switch (pipeline) {
+        case M2BlendPipeline::NoAlphaAdd:
+        case M2BlendPipeline::AlphaAdd: return M2FogMode::Black;
+        case M2BlendPipeline::Modulate: return M2FogMode::White;
+        case M2BlendPipeline::Modulate2x: return M2FogMode::Grey;
+        default: return M2FogMode::FogColor;
+    }
+}
+
+/// The alpha below which the client discards a pixel (WoW.exe 0x81fb10): none
+/// for Opaque, 224/255 for AlphaKey, 1/255 for every blended mode.
+inline float m2AlphaRef(M2BlendPipeline pipeline) {
+    switch (pipeline) {
+        case M2BlendPipeline::Opaque: return 0.0f;
+        case M2BlendPipeline::AlphaTest: return 224.0f / 255.0f;
+        default: return 1.0f / 255.0f;
+    }
 }
 
 /// The pipeline a drawn blend mode maps to. Mode 3 is NoAlphaAdd and must not
@@ -113,26 +134,17 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
     return blendMode >= M2_BLEND_ALPHA && !hasAlpha;
 }
 
-/// Should this batch have its black keyed out?
-///
-/// The key discards every texel darker than a threshold, and exists so a card
-/// authored with a black backing can be drawn opaquely without the backing
-/// showing. An additive batch has no such problem - black adds nothing - and
-/// the key actively destroys it: a glow card is a radial gradient from black
-/// to white, so discarding everything below the threshold turns a soft falloff
-/// into a hard-edged disc. Orgrimmar's bonfires used a threshold of 0.7 on
-/// exactly such a card.
-inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed) {
-    return textureIsKeyed && !m2BlendIsAdditive(blendMode) && !m2BlendIsModulate(blendMode);
-}
-
 /// What a doodad batch's material and its model's classification say.
+///
+/// Nothing here keys out black. The client has no colour key: a batch is cut
+/// by its texture's alpha against the AlphaRef of its blend mode, and black is
+/// invisible only where the blend adds it. Keying black on textures whose
+/// names spelled fire cut holes in the dark parts of campfire rocks, forge
+/// coals and bonfire logs, all of which the client draws solid.
 struct M2BatchMaterialInputs {
     uint8_t blendMode = M2_BLEND_OPAQUE;
     bool hasAlpha = false;
     bool alphaIsSilhouette = false;
-    bool colorKeyBlack = false;
-    bool flameCard = false;      ///< a forge's or hearth's flame card
     bool spellEffect = false;
     bool groundDetail = false;
     bool foliageLike = false;
@@ -150,12 +162,17 @@ struct M2BatchDrawState {
     /// alpha key - cut at 224/255, where a WotLK client cuts GxBlend_AlphaKey.
     int32_t alphaTest = 0;
     bool litOverride = false;     ///< ground clutter is lit whatever its material says
-    float colorKeyThreshold = 0.08f;
 };
 
 inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
     M2BatchDrawState s;
-    const bool effectOverlay = in.spellEffect || in.flameCard;
+    // Every batch draws with its own material's blend mode, a spell
+    // effect's included. Spell effects had their opaque and alpha-keyed
+    // layers drawn additively, as though painted on black; 286 of the 1514
+    // models under Spells\ have such layers, and they are solid: Battle
+    // Stance's spiked mace, the arcane missile's rock core, Aegis's shell.
+    // The client draws them opaque, and blended by their alpha while that
+    // fades (BatchGPU::blendedByOpacity).
 
     // A batch the artist marked opaque is not asking for any of this. Blend
     // mode 0 means the alpha channel goes unread, and M2 textures are
@@ -185,18 +202,12 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
                                (!opaqueByMaterial || in.alphaIsSilhouette);
 
     // Only the opaque pass cuts out, and it draws opaque and alpha-keyed
-    // batches alone. The fire burning in a hearth is an effect overlay on a
-    // black background, the same shape as a spell visual; drawn opaque it
-    // fills the forge opening with a black rectangle instead of flame. That is
-    // true of the flame cards only - treating the whole model this way turned
-    // the masonry and ironwork additive, which is to say translucent.
-    s.forceCutout = in.blendMode <= M2_BLEND_ALPHA_KEY && !effectOverlay &&
+    // batches alone.
+    s.forceCutout = in.blendMode <= M2_BLEND_ALPHA_KEY &&
                     (in.groundDetail || foliageCutout ||
-                     m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ||
-                     in.colorKeyBlack);
+                     m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha));
 
-    s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY)
-                                    : m2DrawBlendMode(in.blendMode, effectOverlay);
+    s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY) : in.blendMode;
     // A material the artist keyed (blend mode 1) is cut where the original
     // client cuts it: 224/255, not a half. Dalaran's inn windows are the case
     // that showed it - dalaran_inn_window.m2 keys DAL_WINDOWCUTOUT, whose holes
@@ -208,12 +219,6 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
         s.litOverride = in.groundDetail;
     } else {
         s.alphaTest = m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ? 1 : 0;
-    }
-    // A keyed additive or modulated card has a soft black backing to lose,
-    // so it keys harder. Effect overlays never did.
-    if (!effectOverlay && !s.forceCutout &&
-        (in.blendMode == M2_BLEND_ADD_ALPHA || in.blendMode == M2_BLEND_MODULATE)) {
-        s.colorKeyThreshold = 0.7f;
     }
     return s;
 }
@@ -243,7 +248,6 @@ enum class CharacterBlendPipeline : uint8_t {
 struct CharacterBatchBlendInputs {
     uint16_t blendMode = M2_BLEND_OPAQUE;
     uint16_t materialFlags = 0;
-    bool effectModel = false;   ///< an enchant visual
     bool hairMaterial = false;
     float opacity = 1.0f;       ///< instance fade times the batch's animated alpha
 };
@@ -255,11 +259,10 @@ struct CharacterBatchBlendInputs {
 /// above it, and Mod fell through to the alpha blend, which painted the
 /// texture over the surface instead of tinting it.
 inline CharacterBlendPipeline characterBlendPipeline(const CharacterBatchBlendInputs& in) {
-    // Enchant visuals are glow cards drawn on black. Their materials declare
-    // Mod/alpha blending, which would composite that black background as an
-    // opaque quad - force additive so only the light adds.
-    if (in.effectModel) return CharacterBlendPipeline::Additive;
-
+    // An enchant visual draws by its materials like any other model. Its
+    // glows are blend mode 4 already; the rest are solid - Rockbiter's
+    // stones, the skulls of skullballs.m2 - and were forced additive.
+    //
     // Decided before the fade below. An additive card fades by adding less
     // light, and a modulated one by multiplying by something nearer its
     // identity, both in the shader - so a partial alpha is no reason to divert
@@ -304,11 +307,10 @@ inline CharacterBlendPipeline characterBlendPipeline(const CharacterBatchBlendIn
 }
 
 /// Whether a character batch ignores scene lighting. Additive layers emit
-/// their own light and enchant glows must not be tinted by the scene. Mod and
-/// Mod2x follow their material's unlit flag, as they do on doodads; they were
-/// forced unlit along with every other mode above 2.
-inline bool characterBatchUnlit(uint16_t blendMode, uint16_t materialFlags, bool effectModel) {
-    if (effectModel || (materialFlags & 0x01) != 0) return true;
+/// their own light. Mod and Mod2x follow their material's unlit flag, as they
+/// do on doodads; they were forced unlit along with every other mode above 2.
+inline bool characterBatchUnlit(uint16_t blendMode, uint16_t materialFlags) {
+    if ((materialFlags & 0x01) != 0) return true;
     return blendMode >= M2_BLEND_ADD && blendMode != M2_BLEND_MODULATE &&
            blendMode != M2_BLEND_MODULATE2X;
 }

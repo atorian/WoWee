@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <type_traits>
 
 namespace wowee {
 namespace pipeline {
@@ -422,6 +423,27 @@ struct M2CameraDiskVanilla {
 static_assert(sizeof(M2CameraDisk) == 100, "M2CameraDisk must match the WotLK on-disk layout");
 static_assert(sizeof(M2CameraDiskVanilla) == 124, "M2CameraDiskVanilla must match the vanilla on-disk layout");
 
+// M2 light (on-disk): type, bone, position, then seven tracks - ambient colour
+// and intensity, diffuse colour and intensity, attenuation start and end,
+// visibility. 156 bytes in WotLK (20-byte tracks), 212 before it (28-byte).
+template <typename Track>
+struct M2LightDiskT {
+    uint16_t type;
+    int16_t bone;
+    float position[3];
+    Track ambientColor;
+    Track ambientIntensity;
+    Track diffuseColor;
+    Track diffuseIntensity;
+    Track attenuationStart;
+    Track attenuationEnd;
+    Track visibility;
+};
+using M2LightDisk = M2LightDiskT<M2TrackDisk>;
+using M2LightDiskVanilla = M2LightDiskT<M2TrackDiskVanilla>;
+static_assert(sizeof(M2LightDisk) == 156, "M2LightDisk must match the WotLK on-disk layout");
+static_assert(sizeof(M2LightDiskVanilla) == 212, "M2LightDiskVanilla must match the vanilla on-disk layout");
+
 template<typename T>
 T readValue(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset + sizeof(T) > data.size()) {
@@ -443,6 +465,7 @@ constexpr uint32_t kMaxM2Animations   = 65536;
 constexpr uint32_t kMaxM2UVAnims      = 16384;
 constexpr uint32_t kMaxM2Attachments  = 4096;
 constexpr uint32_t kMaxM2Cameras      = 64;
+constexpr uint32_t kMaxM2Lights       = 256;
 
 inline uint32_t capCount(uint32_t value, uint32_t maxValue, const char* what) {
     if (value > maxValue) {
@@ -652,6 +675,7 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
     size_t keySize;
     if (type == TrackType::FLOAT) keySize = sizeof(float);
     else if (type == TrackType::FIXED16) keySize = sizeof(int16_t);
+    else if (type == TrackType::BYTE_BOOL) keySize = sizeof(uint8_t);
     else if (type == TrackType::VEC3) keySize = sizeof(float) * 3;
     else keySize = compressedQuat ? sizeof(int16_t) * 4 : sizeof(float) * 4;
     if (disk.ofsKeys + disk.nKeys * keySize > data.size()) return;
@@ -686,6 +710,10 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
         for (int16_t v : raw) {
             allFloatKeys.push_back(std::clamp(static_cast<float>(v) / 32767.0f, 0.0f, 1.0f));
         }
+    } else if (type == TrackType::BYTE_BOOL) {
+        auto raw = readArray<uint8_t>(data, disk.ofsKeys, disk.nKeys);
+        allFloatKeys.reserve(raw.size());
+        for (uint8_t v : raw) allFloatKeys.push_back(v ? 1.0f : 0.0f);
     } else if (type == TrackType::VEC3) {
         allVec3Keys = readArray<Vec3Disk>(data, disk.ofsKeys, disk.nKeys);
     } else if (compressedQuat) {
@@ -715,7 +743,7 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
         uint32_t keyEnd = std::min(end, disk.nKeys);
         uint32_t keyCount = keyEnd - start;
 
-        if (type == TrackType::FLOAT || type == TrackType::FIXED16) {
+        if (type == TrackType::FLOAT || type == TrackType::FIXED16 || type == TrackType::BYTE_BOOL) {
             track.sequences[i].floatValues.assign(
                 allFloatKeys.begin() + start, allFloatKeys.begin() + start + keyCount);
         } else if (type == TrackType::VEC3) {
@@ -760,7 +788,8 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
 // FBlocks are like M2Track but WITHOUT the interpolationType/globalSequence prefix.
 void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
                  M2FBlock& fb, int valueType) {
-    // valueType: 0 = color (C3Vector, 3 floats in 0-255 range), 1 = alpha (uint16), 2 = scale (float pair)
+    // valueType: 0 = color (C3Vector, 3 floats in 0-255 range), 1 = alpha (int16), 2 = scale (float pair),
+    // 3 = atlas cell (uint16)
     if (offset + sizeof(FBlockDisk) > data.size()) return;
 
     FBlockDisk disk = readValue<FBlockDisk>(data, offset);
@@ -771,12 +800,12 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
     // FBlock timestamps are uint16 (not sub-arrays), stored directly
     if (disk.ofsTimestamps + disk.nTimestamps * sizeof(uint16_t) > data.size()) return;
 
-    auto rawTs = readArray<uint16_t>(data, disk.ofsTimestamps, disk.nTimestamps);
-    uint16_t maxTs = 1;
-    for (auto t : rawTs) { if (t > maxTs) maxTs = t; }
-    fb.timestamps.reserve(rawTs.size());
-    for (auto t : rawTs) {
-        fb.timestamps.push_back(static_cast<float>(t) / static_cast<float>(maxTs));
+    // Fractions of the particle's life: int16 over 32767. They were divided
+    // by the largest instead, which stretched a block whose last key comes
+    // before the end of life over all of it.
+    fb.timestamps.reserve(disk.nTimestamps);
+    for (auto t : readArray<int16_t>(data, disk.ofsTimestamps, disk.nTimestamps)) {
+        fb.timestamps.push_back(static_cast<float>(t) / 32767.0f);
     }
 
     uint32_t nKeys = disk.nKeys;
@@ -793,20 +822,21 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
             fb.vec3Values.emplace_back(r / 255.0f, g / 255.0f, b / 255.0f);
         }
     } else if (valueType == 1) {
-        // Alpha: uint16 per key
-        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
-        auto rawAlpha = readArray<uint16_t>(data, ofsKeys, nKeys);
+        // Alpha: int16 per key, over 32767
+        if (ofsKeys + nKeys * sizeof(int16_t) > data.size()) return;
         fb.floatValues.reserve(nKeys);
-        for (auto a : rawAlpha) {
+        for (auto a : readArray<int16_t>(data, ofsKeys, nKeys)) {
             fb.floatValues.push_back(static_cast<float>(a) / 32767.0f);
         }
     } else if (valueType == 2) {
-        // Scale: float pair {x, y} per key, store x
-        if (ofsKeys + nKeys * 8 > data.size()) return;
-        fb.floatValues.reserve(nKeys);
-        for (uint32_t i = 0; i < nKeys; i++) {
-            float x = readValue<float>(data, ofsKeys + i * 8);
-            fb.floatValues.push_back(x);
+        // Scale: half the width and half the height per key
+        if (ofsKeys + nKeys * sizeof(glm::vec2) > data.size()) return;
+        fb.vec2Values = readArray<glm::vec2>(data, ofsKeys, nKeys);
+    } else if (valueType == 3) {
+        // Atlas cell: uint16 per key
+        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
+        for (auto cell : readArray<uint16_t>(data, ofsKeys, nKeys)) {
+            fb.floatValues.push_back(static_cast<float>(cell));
         }
     }
 }
@@ -841,6 +871,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
     }
 
     uint32_t ofsViews = 0;
+    // Where the header proper ends: textureCombinerCombos follows it in a
+    // model with flag 0x08.
+    size_t headerEnd = sizeof(M2Header);
 
     if (header.version < 264) {
         // Vanilla M2: read remaining header fields using cursor, skipping extra fields
@@ -929,6 +962,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         header.ofsRibbonEmitters = r32();
         header.nParticleEmitters = r32();
         header.ofsParticleEmitters = r32();
+        headerEnd = c;
 
         core::Logger::getInstance().debug("Vanilla M2 (version ", header.version,
             "): nVerts=", header.nVertices, " nViews=", header.nViews,
@@ -953,6 +987,19 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
 
     model.version = header.version;
     model.globalFlags = header.globalFlags;
+
+    // Flag 0x08: the stage ops of every batch's shader id, looked up through
+    // this table (see m2BatchShading).
+    if (header.globalFlags & 0x08) {
+        const uint32_t count = readValue<uint32_t>(m2Data, static_cast<uint32_t>(headerEnd));
+        const uint32_t offset = readValue<uint32_t>(m2Data, static_cast<uint32_t>(headerEnd + 4));
+        model.textureCombinerCombos = readArray<uint16_t>(m2Data, offset, count);
+        if (count > 0 && model.textureCombinerCombos.size() != count) {
+            core::Logger::getInstance().warning(
+                "M2 '", model.name, "': textureCombinerCombos (", count, " at ", offset,
+                ") lies outside the file; its batches combine their stages as Mod");
+        }
+    }
 
     // M2 binary layout splits three ways, not two. TBC (v260-263) shares the
     // extended header / 68-byte sequences / 48-byte attachments / 504-byte
@@ -1479,6 +1526,49 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         core::Logger::getInstance().debug("  Cameras: ", model.cameras.size());
     }
 
+    // Lights the model carries, with every track.
+    if (header.nLights > 0 && header.ofsLights > 0) {
+        const uint32_t lightCount = capCount(header.nLights, kMaxM2Lights, "nLights");
+        const bool wotlk = header.version >= 264;
+        const size_t stride = wotlk ? sizeof(M2LightDisk) : sizeof(M2LightDiskVanilla);
+        if (static_cast<size_t>(header.ofsLights) + stride * lightCount > m2Data.size()) {
+            core::Logger::getInstance().warning(
+                "M2 '", model.name, "': its ", lightCount, " lights at ", header.ofsLights,
+                " run past the end of the file (", m2Data.size(), " bytes); drawn lighting nothing");
+        } else {
+            std::vector<uint32_t> seqFlags;
+            seqFlags.reserve(model.sequences.size());
+            for (const auto& seq : model.sequences) seqFlags.push_back(seq.flags);
+            model.lights.reserve(lightCount);
+            const auto take = [&](const auto& disk) {
+                M2Light light;
+                light.type = disk.type;
+                light.bone = disk.bone;
+                light.position = glm::vec3(disk.position[0], disk.position[1], disk.position[2]);
+                const auto track = [&](const auto& td, M2AnimationTrack& out, TrackType type) {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(td)>, M2TrackDisk>)
+                        parseAnimTrack(m2Data, td, out, type, seqFlags);
+                    else
+                        parseAnimTrackVanilla(m2Data, td, out, type);
+                };
+                track(disk.ambientColor, light.ambientColor, TrackType::VEC3);
+                track(disk.ambientIntensity, light.ambientIntensity, TrackType::FLOAT);
+                track(disk.diffuseColor, light.diffuseColor, TrackType::VEC3);
+                track(disk.diffuseIntensity, light.diffuseIntensity, TrackType::FLOAT);
+                track(disk.attenuationStart, light.attenuationStart, TrackType::FLOAT);
+                track(disk.attenuationEnd, light.attenuationEnd, TrackType::FLOAT);
+                track(disk.visibility, light.visibility, TrackType::BYTE_BOOL);
+                model.lights.push_back(std::move(light));
+            };
+            for (uint32_t i = 0; i < lightCount; ++i) {
+                const uint32_t at = header.ofsLights + i * static_cast<uint32_t>(stride);
+                if (wotlk) take(readValue<M2LightDisk>(m2Data, at));
+                else take(readValue<M2LightDiskVanilla>(m2Data, at));
+            }
+        }
+        core::Logger::getInstance().debug("  Lights: ", model.lights.size());
+    }
+
     // Parse particle emitters - struct size differs between versions:
     //   WotLK (version >= 264): M2ParticleOld = 0x1DC (476) bytes, M2TrackDisk (20 bytes), FBlocks
     //   Vanilla (version < 264): 0x1F8 (504) bytes, M2TrackDiskVanilla (28 bytes), static lifecycle arrays
@@ -1578,11 +1668,11 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 // Synthesize scale FBlock from static float values
                 {
                     em.particleScale.timestamps = {0.0f, midpoint, 1.0f};
-                    em.particleScale.floatValues.resize(3);
+                    em.particleScale.vec2Values.resize(3);
                     for (int s = 0; s < 3; s++) {
                         float scale = readValue<float>(m2Data, base + 0x15C + s * 4);
                         if (scale < 0.001f || scale > 100.0f) scale = 1.0f;
-                        em.particleScale.floatValues[s] = scale;
+                        em.particleScale.vec2Values[s] = glm::vec2(scale);
                     }
                 }
             } else {
@@ -1608,11 +1698,31 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
-                // After the scale variation, the two cell tracks and the tail
-                // and twinkle settings: tailLength 0x15C, twinkle 0x160-0x16C,
-                // burstMultiplier 0x170, then drag.
-                if (base + 0x174 + sizeof(float) <= m2Data.size())
-                    em.drag = readValue<float>(m2Data, base + 0x174);
+                em.scaleVary = readValue<glm::vec2>(m2Data, base + 0x134);
+                parseFBlock(m2Data, base + 0x13C, em.headCellTrack, 3);
+                parseFBlock(m2Data, base + 0x14C, em.tailCellTrack, 3);
+                // The variations between the tracks: lifespan's after its
+                // track (0xAC), the rate's after its (0xC4).
+                em.lifespanVary = readValue<float>(m2Data, base + 0xAC);
+                em.emissionRateVary = readValue<float>(m2Data, base + 0xC4);
+                em.tailLength = readValue<float>(m2Data, base + 0x15C);
+                em.twinkleSpeed = readValue<float>(m2Data, base + 0x160);
+                em.twinklePercent = readValue<float>(m2Data, base + 0x164);
+                em.twinkleScaleMin = readValue<float>(m2Data, base + 0x168);
+                em.twinkleScaleMax = readValue<float>(m2Data, base + 0x16C);
+                em.drag = readValue<float>(m2Data, base + 0x174);
+                em.baseSpin = readValue<float>(m2Data, base + 0x178);
+                em.baseSpinVary = readValue<float>(m2Data, base + 0x17C);
+                em.spin = readValue<float>(m2Data, base + 0x180);
+                em.spinVary = readValue<float>(m2Data, base + 0x184);
+                em.wind = readValue<glm::vec3>(m2Data, base + 0x1A0);
+                em.windTime = readValue<float>(m2Data, base + 0x1AC);
+                // Heads with flag 0x20000, tails with 0x40000, both with both,
+                // and nothing with neither. The client never reads the
+                // headOrTail byte (0x2D); a Dalaran sconce's candle flame is a
+                // tail emitter with that byte at 0.
+                em.drawsHead = (em.flags & kM2EmitterHead) != 0;
+                em.drawsTail = (em.flags & kM2EmitterTail) != 0;
             }
 
             model.particleEmitters.push_back(std::move(em));

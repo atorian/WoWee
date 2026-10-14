@@ -1,0 +1,49 @@
+// Sampling the sun's shadow map without lifting a shadow off the feet that
+// cast it.
+//
+// A receiver is compared, at each PCF tap, against its own plane's depth at
+// that tap - its depth slope across the map from the screen derivatives - so
+// a flat floor needs no depth bias to keep from shadowing itself. What is
+// left is the half texel a receiver can sit from the centre the caster's
+// depth was stored at, and a hand's breadth in yards.
+//
+// It replaces a bias of 0.0005 of the map's whole depth range. The range is
+// 6.5 times the shadow distance, so at the largest distance that was 1.6
+// yards along the light at a low sun: a gnome's shadow began past where it
+// ended.
+//
+// Needs lightSpaceMatrix and shadowTexel() declared before it is included.
+
+// How far the receiver's depth runs per unit of map uv, from its screen
+// derivatives. Call in uniform control flow, before any test on the result.
+vec2 shadowReceiverSlope(vec3 proj) {
+    vec3 dx = dFdx(proj);
+    vec3 dy = dFdy(proj);
+    float det = dx.x * dy.y - dx.y * dy.x;
+    if (abs(det) < 1e-14) return vec2(0.0);
+    vec2 slope = vec2(dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z) / det;
+    // Near grazing the plane runs away; past this it is not lit enough to
+    // matter, and an unbounded slope would push the taps off the map.
+    return clamp(slope, vec2(-64.0), vec2(64.0));
+}
+
+// Map depth per yard along the light: the length of the light space
+// matrix's depth row.
+float shadowDepthPerYard() {
+    return length(vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2], lightSpaceMatrix[2][2]));
+}
+
+// 3x3 PCF with each tap compared at the receiver's own plane.
+float sampleShadowReceiverPlane(sampler2DShadow smap, vec3 proj, vec2 slope) {
+    float texel = shadowTexel();
+    float bias = 0.5 * texel * (abs(slope.x) + abs(slope.y)) + 0.03 * shadowDepthPerYard();
+    float shadow = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(x, y) * texel;
+            float depth = proj.z + dot(slope, offset) - bias;
+            shadow += texture(smap, vec3(proj.xy + offset, depth));
+        }
+    }
+    return shadow / 9.0;
+}

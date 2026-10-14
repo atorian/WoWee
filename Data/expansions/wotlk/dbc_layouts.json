@@ -321,6 +321,8 @@
   "SpellVisualEffectName": {
     "FilePath": 2,
     "ID": 0,
+    "MaxAllowedScale": 6,
+    "MinAllowedScale": 5,
     "Scale": 4
   },
   "SpellVisualKit": {
@@ -332,13 +334,17 @@
     "CharParamZero0": 21,
     "CharProc0": 17,
     "ChestEffect": 4,
+    "Flags": 37,
     "HeadEffect": 3,
     "ID": 0,
     "LeftHandEffect": 6,
+    "LeftWeaponEffect": 9,
     "RightHandEffect": 7,
+    "RightWeaponEffect": 10,
     "SpecialEffect0": 11,
     "SpecialEffect1": 12,
-    "SpecialEffect2": 13
+    "SpecialEffect2": 13,
+    "WorldEffect": 14
   },
   "Talent": {
     "Column": 3,

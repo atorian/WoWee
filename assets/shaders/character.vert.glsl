@@ -19,6 +19,7 @@ layout(push_constant) uniform Push {
     mat4 model;
     vec4 interiorAmbient;  // read by character.frag
     vec4 interiorDirect;   // read by character.frag
+    uvec4 localLights;     // read by character.frag
 } push;
 
 #include "character_material.glsli"
@@ -40,7 +41,7 @@ layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
-layout(location = 5) out vec2 MaskUV;
+layout(location = 5) out vec2 TexCoord2;
 // A faded body is drawn into depth by one pipeline and coloured where that
 // depth is by another (LESS_OR_EQUAL); both must compute the same depth.
 invariant gl_Position;
@@ -77,18 +78,27 @@ void main() {
     mat3 modelMat3 = mat3(push.model);
     FragPos = worldPos.xyz;
     Normal = modelMat3 * skinnedNorm;
-    vec2 uv = texCoordSet == 1 ? aTexCoord2 : aTexCoord;
+    // Env-mapped armour and metal sample eye-space sphere coordinates, not
+    // the atlas UV, as doodads do in m2.vert. A sphere-mapped stage takes no
+    // UV animation (render spec 6.1).
+    vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
+    vec3 eyeNormal = safeNormalize(mat3(view) * Normal, vec3(0.0, 0.0, 1.0));
     if (texCoordSet == -1) {
-        // Env-mapped armour and metal sample eye-space sphere coordinates,
-        // not the atlas UV, as doodads do in m2.vert.
-        vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
-        vec3 eyeNormal = safeNormalize(mat3(view) * Normal, vec3(0.0, 0.0, 1.0));
-        uv = sphereMapUV(eyePosition, eyeNormal);
+        TexCoord = sphereMapUV(eyePosition, eyeNormal);
+    } else {
+        vec2 uv = texCoordSet == 1 ? aTexCoord2 : aTexCoord;
+        TexCoord = vec2(dot(uvRow0.xy, uv) + uvRow0.z, dot(uvRow1.xy, uv) + uvRow1.z);
     }
-    TexCoord = vec2(dot(uvRow0.xy, uv) + uvRow0.z, dot(uvRow1.xy, uv) + uvRow1.z);
-    // The mask moves with the first stage, as the M2 pass draws it.
-    vec2 maskUV = secondTexCoordSet == 1 ? aTexCoord2 : aTexCoord;
-    MaskUV = vec2(dot(uvRow0.xy, maskUV) + uvRow0.z, dot(uvRow1.xy, maskUV) + uvRow1.z);
+    // The second stage, from its own source through its own animation - or,
+    // behind a sphere-mapped first stage, UV0 as it is (Diffuse_Env_T2).
+    if (texCoordSet2 == -1) {
+        TexCoord2 = sphereMapUV(eyePosition, eyeNormal);
+    } else if (texCoordSet2 == 2) {
+        TexCoord2 = aTexCoord;
+    } else {
+        vec2 uv2 = texCoordSet2 == 1 ? aTexCoord2 : aTexCoord;
+        TexCoord2 = vec2(dot(uv2Row0.xy, uv2) + uv2Row0.z, dot(uv2Row1.xy, uv2) + uv2Row1.z);
+    }
 
     // Gram-Schmidt re-orthogonalize tangent w.r.t. normal
     vec3 N = safeNormalize(Normal, vec3(0.0, 0.0, 1.0));

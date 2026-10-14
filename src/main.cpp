@@ -21,6 +21,11 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef _WIN32
+#include <windows.h>
+#include <cstdio>
+#include <ctime>
+#endif
 
 // backtrace(3) and friends live in libSystem on macOS and in glibc on Linux, so
 // the useful crash report - faulting address, symbolized frames, a copy in the
@@ -94,6 +99,80 @@ static void crashHandler(int sig) {
     releaseMouseGrab();
     std::signal(sig, SIG_DFL);
     std::raise(sig);
+}
+#endif
+
+#ifdef _WIN32
+// A crash on Windows, from any thread.
+//
+// signal(SIGSEGV) only ever saw the main thread's faults, and only to raise
+// them again. One on a worker - the M2 animation, the particle and command
+// recording threads - went to Windows Error Reporting, and with that off the
+// process simply vanished: the log stopped at "ENTERING WORLD" with nothing
+// after it. This says what happened and where, as module+offset frames that
+// addr2line turns into source lines (the build carries -g), on stderr and in
+// logs/crash-<time>.log. Nothing here allocates: the heap may be the thing
+// that broke.
+static void writeCrashFrame(HANDLE out, FILE* file, const char* text) {
+    DWORD written = 0;
+    if (out != INVALID_HANDLE_VALUE) WriteFile(out, text, static_cast<DWORD>(strlen(text)), &written, nullptr);
+    if (file) fputs(text, file);
+}
+
+static void describeAddress(void* address, char* buffer, size_t size) {
+    HMODULE module = nullptr;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(address), &module) && module) {
+        GetModuleFileNameA(module, path, MAX_PATH);
+        const char* name = strrchr(path, '\\');
+        snprintf(buffer, size, "%p  %s+0x%llx\n", address, name ? name + 1 : path,
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
+                                                 reinterpret_cast<uintptr_t>(module)));
+    } else {
+        snprintf(buffer, size, "%p  ?\n", address);
+    }
+}
+
+static LONG WINAPI windowsCrashFilter(EXCEPTION_POINTERS* info) {
+    releaseMouseGrab();
+    char line[512];
+    char fileName[64];
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &now);
+    std::strftime(fileName, sizeof(fileName), "logs/crash-%Y%m%d-%H%M%S.log", &local);
+    FILE* file = std::fopen(fileName, "w");
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+
+    const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
+    snprintf(line, sizeof(line), "\n=== CRASH: exception 0x%08lx at thread %lu ===\n",
+             record ? record->ExceptionCode : 0ul, GetCurrentThreadId());
+    writeCrashFrame(err, file, line);
+    if (record && record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
+        snprintf(line, sizeof(line), "%s of address 0x%llx\n",
+                 record->ExceptionInformation[0] == 0 ? "read" :
+                 record->ExceptionInformation[0] == 1 ? "write" : "execute",
+                 static_cast<unsigned long long>(record->ExceptionInformation[1]));
+        writeCrashFrame(err, file, line);
+    }
+    if (record) {
+        writeCrashFrame(err, file, "faulting instruction: ");
+        describeAddress(record->ExceptionAddress, line, sizeof(line));
+        writeCrashFrame(err, file, line);
+    }
+    // The stack as it stands in this filter: below the dispatcher's frames
+    // are the faulting ones.
+    void* frames[64];
+    const USHORT count = RtlCaptureStackBackTrace(0, 64, frames, nullptr);
+    writeCrashFrame(err, file, "stack:\n");
+    for (USHORT i = 0; i < count; ++i) {
+        describeAddress(frames[i], line, sizeof(line));
+        writeCrashFrame(err, file, line);
+    }
+    if (file) std::fclose(file);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
 
@@ -178,6 +257,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     std::signal(SIGFPE,  crashHandler);
     std::signal(SIGTERM, crashHandler);
     std::signal(SIGINT,  crashHandler);
+#endif
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(windowsCrashFilter);
 #endif
     // Change working directory so relative asset paths resolve from any launch
     // location. A signed macOS bundle keeps data in Contents/Resources because

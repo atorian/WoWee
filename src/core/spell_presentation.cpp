@@ -66,11 +66,9 @@ SpellPresentation::SpellPresentation(EventBus& events, game::GameHandler& game,
         if (!visuals_ || e.visualId == 0) return;
         glm::vec3 pos;
         if (!unitPosition(e.unitGuid, pos)) return;
-        if (e.impactKit) {
-            visuals_->playSpellVisual(e.visualId, pos, /*useImpactKit=*/true);
-        } else {
-            visuals_->playSpellVisual(e.visualId, pos, /*useImpactKit=*/false, unitInstance(e.unitGuid));
-        }
+        // On the unit, so that it rides the unit's attachments: an impact
+        // landing on a running player runs with them.
+        visuals_->playSpellVisual(e.visualId, pos, e.impactKit, unitInstance(e.unitGuid));
     }));
     // The character's own effects, loaded in the background rather than in the
     // frame each spell is first cast.
@@ -232,7 +230,9 @@ void SpellPresentation::playImpactVisual(uint32_t spellId, uint64_t target) {
     }
     glm::vec3 targetPos;
     if (!unitPosition(target, targetPos)) return;
-    visuals_->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true);
+    // On the target, so that it rides the target's attachments: a buff
+    // landing on a running player runs with them.
+    visuals_->playSpellVisual(visualId, targetPos, /*useImpactKit=*/true, unitInstance(target));
 }
 
 void SpellPresentation::launchRangedProjectile(uint32_t spellId, uint64_t target) {

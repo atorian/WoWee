@@ -113,13 +113,12 @@ TEST_CASE("plants keep swaying when a structural word comes first",
     }
 }
 
-// isFoliageLike also drives collision and animation, so a false positive did
-// more than add wind: it made ruins walk-through and froze their animation.
-TEST_CASE("a ruin misread as foliage would also lose its collision",
+// isFoliageLike also drives animation, so a false positive did
+// more than add wind: it froze a ruin's animation.
+TEST_CASE("a ruin misread as foliage would also lose its animation",
           "[m2][classifier][foliage]") {
     const auto ruin = classify("StranglethornRuins07", 9.0f, 7.0f);
     CHECK_FALSE(ruin.isFoliageLike);
-    CHECK_FALSE(ruin.collisionNoBlock);
     CHECK_FALSE(ruin.disableAnimation);
 
     const auto tree = classify("DustwallowTree04", 9.0f, 7.0f);
@@ -166,120 +165,27 @@ TEST_CASE("only an actual forge is treated as forge fire", "[m2][classifier][for
 
 TEST_CASE("Blizzard's own misspellings are foliage too", "[m2][classifier]") {
     // WETLANDSSHURB09.M2 is a real path - "shurb", not "shrub" - and it is the
-    // only spelling those models have. Reported as grass with cobwebs on it
-    // that the player could not walk through.
-    //
-    // The correct spelling stays covered beside it, because adding the typo is
-    // the kind of change that invites someone to "fix" the list later.
+    // only spelling those models have.
     for (const char* path : {
              "WORLD\\KHAZMODAN\\WETLANDS\\PASSIVEDOODADS\\BUSHES\\WETLANDSSHURB09.M2",
              "WORLD\\AZEROTH\\ELWYNN\\PASSIVEDOODADS\\BUSHES\\ELWYNNSHRUB01.M2"}) {
-        const auto cls = classify(path);
         INFO(path);
-        CHECK(cls.collisionNoBlock);
+        CHECK(classify(path).isFoliageLike);
     }
 }
 
-// The Rut'theran Village portal to Darnassus is TeleportTree.m2 - an archway
-// you walk through, whose name ends in "tree". The file ships no collision
-// geometry at all (nBoundingTriangles = 0), so the real client lets you walk
-// straight in; our trunk-cylinder rule instead planted a solid block dead
-// centre in the arch and the portal became unreachable without /unstuck.
-//
-// The bounds here are the model's real ones (~45 wide, ~45 tall), which is what
-// put it over the trunk rule's horiz > 6 && vert > 4 threshold in the first
-// place.
-TEST_CASE("a teleport arch is a doorway, not a tree", "[m2][classifier][collision]") {
-    const auto portal = classify("TeleportTree", 45.0f, 45.0f);
-    CHECK_FALSE(portal.collisionTreeTrunk);
-    CHECK(portal.collisionNoBlock);
-
-    SECTION("the full path form resolves the same way") {
-        const auto viaPath = classify("WORLD\\GENERIC\\NIGHTELF\\PASSIVE DOODADS"
-                                      "\\TELEPORTTREE\\TELEPORTTREE.M2", 45.0f, 45.0f);
-        CHECK_FALSE(viaPath.collisionTreeTrunk);
-        CHECK(viaPath.collisionNoBlock);
+// AuraPurple.m2, the glow inside the Rut'theran portal's arch: its VFX
+// identity is only in the directory, and tokens are matched on the basename.
+TEST_CASE("models under PARTICLEEMITTERS are VFX", "[m2][classifier]") {
+    for (const char* p : {
+             "WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\AURAPURPLE.M2",
+             "WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\ASHENVALEWISPS.M2",
+             "world/generic/passivedoodads/particleemitters/auragreen.m2"}) {
+        INFO(p);
+        CHECK(classify(p, 1.96f, 3.08f).isSpellEffect);
     }
-
-    SECTION("the rest of the family is walk-through too") {
-        for (const char* n : {"BG_Teleporter_Alliance_01", "UL_TeleportationPad",
-                              "SC_TeleportPad2", "BE_Teleporter_01",
-                              "G_GoblinTeleporter"}) {
-            INFO(n);
-            CHECK(classify(n, 8.0f, 8.0f).collisionNoBlock);
-        }
-    }
-
-    SECTION("an ordinary tree of the same size keeps its trunk") {
-        const auto tree = classify("KalidarTree07", 45.0f, 45.0f);
-        CHECK(tree.collisionTreeTrunk);
-        CHECK_FALSE(tree.collisionNoBlock);
-    }
-}
-
-// A conifer is tall and narrow, and the trunk rule used to demand six yards of
-// spread as well as four of height. Every pine failed the width half, fell
-// through to softTree, and had its collision turned off outright - a full-sized
-// forest that could be walked through.
-TEST_CASE("a tall tree has a trunk however narrow it is", "[m2][classifier][collision]") {
-    SECTION("a pine twenty yards tall and four across is solid") {
-        const auto pine = classify("TirisfalPineTree02", 4.0f, 20.0f);
-        CHECK(pine.collisionTreeTrunk);
-        CHECK_FALSE(pine.collisionNoBlock);
-    }
-
-    SECTION("a standing trunk on its own is solid too") {
-        const auto trunk = classify("AshenvaleTreeTrunk01", 3.0f, 12.0f);
-        CHECK(trunk.collisionTreeTrunk);
-        CHECK_FALSE(trunk.collisionNoBlock);
-    }
-
-    SECTION("a stump and a fallen log keep their exemption") {
-        CHECK_FALSE(classify("ElwynnTreeStump01", 3.0f, 12.0f).collisionTreeTrunk);
-        CHECK_FALSE(classify("ElwynnTreeLog01", 3.0f, 12.0f).collisionTreeTrunk);
-    }
-
-    SECTION("a sapling short enough to push past stays walkable") {
-        const auto sapling = classify("ElwynnTree01", 2.0f, 3.0f);
-        CHECK_FALSE(sapling.collisionTreeTrunk);
-        CHECK(sapling.collisionNoBlock);
-    }
-}
-
-// The second invisible wall at that same portal. AuraPurple.m2 is the glow
-// inside the arch; its VFX identity is only in the DIRECTORY, and tokens are
-// matched on the basename, so "particleemitter" in kEffectTokens never fired.
-// Its real unscaled bounds (1.96 x 1.96 x 3.08) land inside genericSolid's
-// window, so it became a solid prop - and the doodad is placed at scale 10.69,
-// making a ~21 x 21 x 33 unit block of solid nothing over the portal.
-TEST_CASE("models under PARTICLEEMITTERS are VFX, not props",
-          "[m2][classifier][collision]") {
-    const auto bareName = classify("AuraPurple", 1.96f, 3.08f);
-    CHECK(bareName.collisionSmallSolidProp);  // the name alone cannot tell
-
-    const auto aura = classify("WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS"
-                               "\\AURAPURPLE.M2", 1.96f, 3.08f);
-    CHECK(aura.isSpellEffect);
-    CHECK(aura.collisionNoBlock);
-
-    SECTION("the whole directory, whichever separator the path uses") {
-        for (const char* p : {
-                 "WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\AURABLUETALL.M2",
-                 "WORLD\\GENERIC\\PASSIVEDOODADS\\PARTICLEEMITTERS\\ASHENVALEWISPS.M2",
-                 "world/generic/passivedoodads/particleemitters/auragreen.m2"}) {
-            INFO(p);
-            const auto cls = classify(p, 1.96f, 3.08f);
-            CHECK(cls.isSpellEffect);
-            CHECK(cls.collisionNoBlock);
-        }
-    }
-
-    SECTION("a real prop of the same size elsewhere still blocks") {
-        const auto crate = classify("WORLD\\GENERIC\\HUMAN\\PASSIVE DOODADS"
-                                    "\\CRATES\\CRATE01.M2", 1.96f, 3.08f);
-        CHECK_FALSE(crate.isSpellEffect);
-        CHECK_FALSE(crate.collisionNoBlock);
-    }
+    CHECK_FALSE(classify("WORLD\\GENERIC\\HUMAN\\PASSIVE DOODADS\\CRATES\\CRATE01.M2",
+                         1.96f, 3.08f).isSpellEffect);
 }
 
 TEST_CASE("a small tree with leaf emitters is a tree, not an effect",
@@ -369,9 +275,7 @@ TEST_CASE("hanging cloth is picked out by name", "[m2][classifier][cloth]") {
 // saplings, trunk and all, with no canopy to justify it.
 //
 // The classifier already separates the wooden parts of a tree from the leafy
-// ones: hardTreePart is trunk, stump and log, and it is what the collision
-// rules use to decide that these are things you step over rather than walk
-// around. The same set is what must not bend.
+// ones: hardTreePart is trunk, stump and log. That set is what must not bend.
 TEST_CASE("the wooden parts of a tree do not sway", "[m2][classifier][foliage]") {
     SECTION("stumps, logs and bare trunks") {
         for (const char* n : {"ElwynnTreeStump01", "elwynntreestump02",

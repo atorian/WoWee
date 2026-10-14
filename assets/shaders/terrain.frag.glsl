@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     mat4 rtViewProj;
@@ -55,6 +53,7 @@ layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec2 LayerUV;
+layout(location = 4) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
 
@@ -67,35 +66,8 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
-float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
-    float shadow = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += texture(smap, vec3(coords.xy + vec2(x, y) * shadowTexel(), coords.z));
-        }
-    }
-    return shadow / 9.0;
-}
-
-vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
-    vec3 sum = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        vec3 toLight = localLightPosRadius[i].xyz - pos;
-        float radius = localLightPosRadius[i].w;
-        // Rejected on the squared distance, before the square root and the
-        // divide: most of the sixty-four are out of range of any one pixel,
-        // and this is what each of them costs.
-        float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float dist = sqrt(distSq);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        float wrappedDiffuse = 0.22 + 0.78 * max(dot(normal, toLight / max(dist, 0.001)), 0.0);
-        sum += albedo * localLightColorIntensity[i].rgb *
-               (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
-    }
-    return sum;
-}
+#include "local_lights.glsli"
+#include "shadow_receiver.glsli"
 
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
@@ -235,10 +207,10 @@ void main() {
         vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
         vec3 proj = lsPos.xyz / lsPos.w;
         proj.xy = proj.xy * 0.5 + 0.5;
+        vec2 receiverSlope = shadowReceiverSlope(proj);
         if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
-            float bias = max(0.0005 * (1.0 - abs(dot(shadowNormal, ldir))), 0.00005);
-            shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
-            shadow = mix(1.0, shadow, shadowParams.y);
+            shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+            shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
         }
     }
 
@@ -246,10 +218,12 @@ void main() {
     shadow = rtShadow(rt, shadow);
     ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
 
-    vec2 localShadow = localShadowAt(FragPos);
-    shadow = min(shadow, localShadow.x);
-    vec3 result = ambient * localShadow.y + shadow * diffuse;
-    result += localLightContribution(FragPos, norm, finalColor.rgb);
+    // The units' map and the sun's, the darker of the two, as the client
+    // takes the dynamic map and the ground's baked one. Ground has no
+    // edge-on fade in the client; it darkens the whole lit colour.
+    shadow = min(shadow, localShadowAt(FragPos));
+    vec3 result = (ambient + diffuse) * shadowLightFactor(shadow);
+    result += localLightContribution(FragPos, norm, finalColor.rgb, vLocalLights);
 
     result = applyFog(result, FragPos, fragDist);
 

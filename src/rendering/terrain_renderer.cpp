@@ -933,6 +933,7 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     push.model = glm::mat4(1.0f);
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(GPUPushConstants), &push);
+    LocalLightSet pushedLights = push.localLights;
 
     Frustum frustum;
     if (frustumCullingEnabled) {
@@ -978,6 +979,17 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &chunk.materialSet, 0, nullptr);
+
+        // The lights nearest the chunk (local_lights.hpp).
+        const LocalLightSet chunkLights = frameLights_ && !frameLights_->empty()
+            ? pickLocalLights(*frameLights_, chunk.boundingSphereCenter,
+                              chunk.boundingSphereRadius)
+            : kNoLocalLights;
+        if (chunkLights != pushedLights) {
+            pushedLights = chunkLights;
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                               offsetof(GPUPushConstants, localLights), sizeof(LocalLightSet), &pushedLights);
+        }
 
         if (useMegaBuffers && chunk.megaBaseVertex >= 0) {
             // Rebound if a fallback chunk bound its own buffers since. The mega

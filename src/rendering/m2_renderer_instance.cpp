@@ -101,7 +101,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     // at addInstance and stays valid as long as the instance exists.
     if (inst.cachedModel) {
         glm::vec3 localMin, localMax;
-        getTightCollisionBounds(*inst.cachedModel, localMin, localMax);
+        collisionLocalBounds(*inst.cachedModel, localMin, localMax);
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
@@ -137,6 +137,7 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     auto& inst = instances[idxIt->second];
     inst.animSpeed = frozen ? 0.0f : 1.0f;
     inst.holdAtEnd = false;
+    inst.nextAnimation.reset();
     if (frozen) {
         inst.animTime = 0.0f;  // Reset to bind pose
     }
@@ -147,17 +148,7 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
     inst.animTime = 0.0f;
-    inst.animTimeAlt = 0.0f;
-    inst.animDir = 1.0f;
-    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
-}
-
-std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return std::nullopt;
-    const auto& inst = instances[idxIt->second];
-    if (!inst.cachedModel || inst.cachedModel->sequences.size() != 1) return std::nullopt;
-    return inst.cachedModel->sequences[0].id;
+    if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -173,6 +164,7 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.animDuration = static_cast<float>(seqs[i].duration);
         inst.playingVariation = false;   // not a variation: it does not go back
         inst.holdAtEnd = true;
+        inst.nextAnimation.reset();
         if (skipToEnd) {
             inst.animTime = inst.animDuration;
             inst.animSpeed = 0.0f;
@@ -181,6 +173,60 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
             inst.animSpeed = 1.0f;
         }
         return;
+    }
+}
+
+namespace {
+
+// Put one planned animation on an instance. False when the model lacks it.
+bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
+    const auto& seqs = inst.cachedModel->sequences;
+    for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
+        if (seqs[i].id != play.animationId) continue;
+        inst.currentSequenceIndex = i;
+        inst.animDuration = static_cast<float>(seqs[i].duration);
+        inst.playingVariation = false;
+        // A sequence flagged 0x01 plays once and stops at its end even when
+        // it is the resting one (WoW.exe 0x832260).
+        constexpr uint32_t kM2SequencePlaysOnce = 0x01;
+        inst.holdAtEnd = play.end != M2AnimationPlay::End::Loop ||
+                         (seqs[i].flags & kM2SequencePlaysOnce) != 0;
+        const float start = play.reversed ? inst.animDuration : 0.0f;
+        const float end = play.reversed ? 0.0f : inst.animDuration;
+        if (play.frozen || play.startAtEnd) {
+            inst.animTime = play.frozen ? start : end;
+            inst.animSpeed = 0.0f;
+            inst.holdAtEnd = true;
+        } else {
+            inst.animTime = start;
+            inst.animSpeed = play.reversed ? -1.0f : 1.0f;
+        }
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPlay& now,
+                                       const std::optional<M2AnimationPlay>& next) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel) return false;
+    if (!startPlannedAnimation(inst, now)) return false;
+    inst.nextAnimation = now.end == M2AnimationPlay::End::Next ? next : std::nullopt;
+    return true;
+}
+
+void M2Renderer::advanceToNextAnimation(M2Instance& inst) {
+    const M2AnimationPlay next = *inst.nextAnimation;
+    inst.nextAnimation.reset();
+    if (!startPlannedAnimation(inst, next)) {
+        LOG_WARNING("M2: '", inst.cachedModel->name, "' has no animation ", next.animationId,
+                    " to go on to; holding where it is");
+        inst.animSpeed = 0.0f;
+        inst.holdAtEnd = true;
     }
 }
 
@@ -200,6 +246,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
             inst.holdAtEnd = false;
+            inst.nextAnimation.reset();
             return;
         }
     }
@@ -290,7 +337,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     // Update bounds via the cached model pointer
     if (inst.cachedModel) {
         glm::vec3 localMin, localMax;
-        getTightCollisionBounds(*inst.cachedModel, localMin, localMax);
+        collisionLocalBounds(*inst.cachedModel, localMin, localMax);
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
         inst.recomputeCachedCullFactors();
     }
@@ -340,18 +387,14 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 }
 
 void M2Renderer::rebuildInstanceIndexLists() {
-    // Rebuild the lightweight auxiliary index vectors (smoke, portal, etc.)
+    // Rebuild the lightweight auxiliary index vectors (animated, particle, light).
     // These are small vectors of indices that are rebuilt cheaply.
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
     for (size_t i = 0; i < instances.size(); i++) {
         auto& ri = instances[i];
-        if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
-        if (ri.cachedIsInstancePortal) portalInstanceIndices_.push_back(i);
         if (ri.cachedHasEmitters) particleInstanceIndices_.push_back(i);
         if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
             animatedInstanceIndices_.push_back(i);
@@ -384,6 +427,47 @@ void M2Renderer::setInteriorLight(uint32_t instanceId, const std::optional<Inter
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
     instances[idxIt->second].interiorLight = packInteriorLight(light);
+}
+
+void M2Renderer::finishInstance(uint32_t instanceId) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    if (inst.finishing) return;
+    inst.finishing = true;
+    // Its particles have at most their longest life left to run.
+    float longestLife = 0.0f;
+    if (inst.cachedModel) {
+        for (const auto& em : inst.cachedModel->particleEmitters) {
+            longestLife = std::max(longestLife,
+                interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
+                            inst.currentSequenceIndex, inst.cachedModel->globalSequenceDurations));
+        }
+    }
+    finishingInstances_.push_back({.instanceId = instanceId,
+                                   .deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(static_cast<int64_t>(longestLife * 1000.0f) + 100)});
+}
+
+void M2Renderer::reapFinishedInstances() {
+    if (finishingInstances_.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<uint32_t> done;
+    std::erase_if(finishingInstances_, [&](const FinishingInstance& f) {
+        auto idxIt = instanceIndexById.find(f.instanceId);
+        if (idxIt == instanceIndexById.end()) return true;  // removed meanwhile
+        const auto& inst = instances[idxIt->second];
+        const bool ribbonsLeft = std::any_of(inst.ribbons.begin(), inst.ribbons.end(),
+                                             [](const auto& r) { return !r.edges.empty(); });
+        // Gone when nothing it emitted is left - or when its particles have
+        // had their whole life, though it was out of sight and not updated.
+        if ((inst.particles.empty() && !ribbonsLeft) || now >= f.deadline) {
+            done.push_back(f.instanceId);
+            return true;
+        }
+        return false;
+    });
+    if (!done.empty()) removeInstances(done);
 }
 
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
@@ -546,14 +630,10 @@ void M2Renderer::clear() {
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
-    smokeParticles.clear();
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
-    smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
     // character/map.  Without this, the old session's textures fill the cache
@@ -581,14 +661,10 @@ void M2Renderer::clearInstances() {
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
-    smokeParticles.clear();
-    smokeEmitAccum = 0.0f;
 }
 
 void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
@@ -606,8 +682,6 @@ void M2Renderer::rebuildSpatialIndex() {
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     instanceIndexById.reserve(instances.size());
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
@@ -630,12 +704,6 @@ void M2Renderer::rebuildSpatialIndex() {
             instanceDedupMap_[dk] = inst.id;
         }
 
-        if (inst.cachedIsSmoke) {
-            smokeInstanceIndices_.push_back(i);
-        }
-        if (inst.cachedIsInstancePortal) {
-            portalInstanceIndices_.push_back(i);
-        }
         if (inst.cachedHasEmitters) {
             particleInstanceIndices_.push_back(i);
         }
@@ -874,16 +942,6 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         return whiteTexture_.get();
     }
 
-    // The black key discards every pixel darker than the threshold, so a
-    // texture it is applied to wrongly loses its dark areas.
-    //
-    // Both the list and what it is matched against now live in
-    // assetNameLooksLikeFlame. This asked the whole path, which is what made
-    // Outland's sky flicker: HellFireSkyNebula01 has "fire" in it, so every
-    // layer of the Hellfire sky was keyed as a flame and lost whichever of its
-    // dark pixels fell under the threshold that frame.
-    const bool colorKeyBlackHint = assetNameLooksLikeFlame(key);
-
     // Check pre-decoded BLP cache first (populated by background worker threads)
     pipeline::BLPImage blp;
     if (predecodedBLPCache_) {
@@ -970,9 +1028,13 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     textureCache[key] = std::move(e);
     failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
+    // No black key from the texture's name. Every texture whose file name
+    // held "lamp", "fire", "glow", "candle" and the like had its dark pixels
+    // discarded on opaque and alpha-blended layers - 975 batches, the
+    // client keying none of them: Dalaran's lamp glass lost its leading and
+    // showed the dark inside of the lamp through the holes.
     texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha,
-                                  .alphaIsSilhouette = alphaIsSilhouette,
-                                  .colorKeyBlack = colorKeyBlackHint};
+                                  .alphaIsSilhouette = alphaIsSilhouette};
     LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
 
     return texPtr;
@@ -1009,10 +1071,8 @@ void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) con
         const M2ModelGPU* model = instance.cachedModel;
         const bool authored = model && model->collision.valid();
         if (!rejected && model) {
-            if ((model->collisionNoBlock && !authored) || model->isInvisibleTrap ||
-                model->isSpellEffect) {
-                rejected = "classified as non-blocking";
-            }
+            if (!authored) rejected = "no collision mesh";
+            else if (model->isInvisibleTrap || model->isSpellEffect) rejected = "an effect or a trap";
         }
         if (++reported > 12) { LOG_WARNING("  ... and more"); break; }
         LOG_WARNING("  '", model ? model->name : std::string("?"),
@@ -1109,25 +1169,17 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
         if (instance.scale <= 0.001f) continue;
 
         const M2ModelGPU& model = *instance.cachedModel;
-        // A model that ships collision geometry blocks, whatever its name
-        // suggests. collisionNoBlock is a guess from the name and the unscaled
-        // bounds, and it is only there to stop collision being *invented* for
-        // something soft - it has no business discarding what the artist
-        // authored.
-        //
-        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
-        // collision triangles and is 2.87 wide unscaled, so it failed the
-        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
-        // through. Every bush and rug beside it ships zero collision triangles,
-        // so they stay soft on their own evidence and need no rule at all.
-        const bool authoredCollision = model.collision.valid();
-        if ((model.collisionNoBlock && !authoredCollision) ||
-            model.isInvisibleTrap || model.isSpellEffect) continue;
+        // A doodad is stood on by its collision mesh and by nothing else, as
+        // in the client: a model that ships none - a bush, a sign, grass - is
+        // not there to collide with. The floor used to fall back to the top
+        // of a box shrunk from the model's bounds by rules keyed on its name
+        // (bridge, planter, statue, fountain), which put floors on top of
+        // things the client walks through.
+        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision) continue;
 
-        // --- Mesh-based floor: vertical ray vs collision triangles ---
-        // A successful authored-mesh hit wins; AABB remains the fallback on a miss.
-        if (model.collision.valid()) {
+        // Vertical ray against the collision triangles.
+        {
             // Cast world-down through the instance transform. Using local -Z
             // only works for yaw-only placements; pitched flat models (notably
             // Exodarplatform01, placed as the Azuremyst flight-master ramp)
@@ -1198,62 +1250,7 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                     bestFloor = bestWorldHitZ;
                     bestNormalZ = bestHitNormalZ;
                 }
-                // A successful authored-mesh hit is more accurate than the
-                // model AABB top, especially for pitched ramps where the AABB
-                // projection is not a world-vertical intersection.
-                continue;
             }
-            // Fall through to AABB floor - both contribute, highest wins
-        }
-
-        float zMargin = model.collisionBridge ? 25.0f : 2.0f;
-        if (glX < instance.worldBoundsMin.x || glX > instance.worldBoundsMax.x ||
-            glY < instance.worldBoundsMin.y || glY > instance.worldBoundsMax.y ||
-            glZ < instance.worldBoundsMin.z - zMargin || glZ > instance.worldBoundsMax.z + zMargin) {
-            continue;
-        }
-        glm::vec3 localMin, localMax;
-        getTightCollisionBounds(model, localMin, localMax);
-
-        glm::vec3 localPos = glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
-
-        // Must be within doodad footprint in local XY.
-        // Stepped low platforms get a small pad so walk-up snapping catches edges.
-        float footprintPad = 0.0f;
-        if (model.collisionSteppedLowPlatform) {
-            footprintPad = model.collisionPlanter ? 0.22f : 0.16f;
-            if (model.collisionBridge) {
-                footprintPad = 0.35f;
-            }
-        }
-        if (localPos.x < localMin.x - footprintPad || localPos.x > localMax.x + footprintPad ||
-            localPos.y < localMin.y - footprintPad || localPos.y > localMax.y + footprintPad) {
-            continue;
-        }
-
-        // Construct "top" point at queried XY in local space, then transform back.
-        float localTopZ = getEffectiveCollisionTopLocal(model, localPos, localMin, localMax);
-        glm::vec3 localTop(localPos.x, localPos.y, localTopZ);
-        glm::vec3 worldTop = glm::vec3(instance.modelMatrix * glm::vec4(localTop, 1.0f));
-
-        // Reachability filter: allow a bit more climb for stepped low platforms.
-        float maxStepUp = 1.0f;
-        if (model.collisionStatue) {
-            maxStepUp = 2.5f;
-        } else if (model.collisionSmallSolidProp) {
-            maxStepUp = 2.0f;
-        } else if (model.collisionSteppedFountain) {
-            maxStepUp = 2.5f;
-        } else if (model.collisionSteppedLowPlatform) {
-            maxStepUp = model.collisionPlanter ? 3.0f : 2.4f;
-            if (model.collisionBridge) {
-                maxStepUp = 25.0f;
-            }
-        }
-        if (worldTop.z > glZ + maxStepUp) continue;
-
-        if (!bestFloor || worldTop.z > *bestFloor) {
-            bestFloor = worldTop.z;
         }
     }
 
@@ -1294,25 +1291,15 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
         if (!instance.cachedModel) continue;
 
         const M2ModelGPU& model = *instance.cachedModel;
-        // A model that ships collision geometry blocks, whatever its name
-        // suggests. collisionNoBlock is a guess from the name and the unscaled
-        // bounds, and it is only there to stop collision being *invented* for
-        // something soft - it has no business discarding what the artist
-        // authored.
-        //
-        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
-        // collision triangles and is 2.87 wide unscaled, so it failed the
-        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
-        // through. Every bush and rug beside it ships zero collision triangles,
-        // so they stay soft on their own evidence and need no rule at all.
-        const bool authoredCollision = model.collision.valid();
-        if ((model.collisionNoBlock && !authoredCollision) ||
-            model.isInvisibleTrap || model.isSpellEffect) continue;
+        // Only a collision mesh blocks, as in the client. A model without one
+        // used to be stopped by a box made from its bounds and shaped by its
+        // name - a tree's trunk, a crate, a narrow post.
+        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision || instance.skipWallCollision) continue;
         if (instance.scale <= 0.001f) continue;
 
-        // --- Mesh-based wall collision: closest-point push ---
-        if (model.collision.valid()) {
+        // Closest-point push against the collision triangles.
+        {
             glm::vec3 localFrom = glm::vec3(instance.invModelMatrix * glm::vec4(from, 1.0f));
             glm::vec3 localPos  = glm::vec3(instance.invModelMatrix * glm::vec4(adjustedPos, 1.0f));
             float localRadius = playerRadius / instance.scale;
@@ -1388,243 +1375,73 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 collided = true;
                 // Which doodad is in the way, once per model.
                 //
-                // A model that blocks and should not is reported as "I am
-                // stuck on this bush", and the one thing needed to fix it -
-                // the model's name - is the one thing nobody can see. The
-                // classifier decides collision from that name, so without it
-                // the only way forward is guessing tokens, which is how the
-                // folder-token regression happened.
+                // A model that blocks unexpectedly is reported as "I am
+                // stuck on this", and the model's name is the one thing
+                // needed to look at its collision mesh.
                 //
                 // Once per distinct model, not per frame: walking into
                 // something touches it every frame for as long as you lean on
                 // it.
                 static std::set<std::string> saidBlocked;
                 if (!model.name.empty() && saidBlocked.insert(model.name).second) {
-                    LOG_WARNING("Collision: blocked by '", model.name,
-                                "' - if this should be walked through, that is "
-                                "the name the classifier needs");
+                    LOG_INFO("Collision: blocked by '", model.name,
+                             "' (its collision mesh)");
                 }
             }
-            continue;
         }
-
-        glm::vec3 localFrom = glm::vec3(instance.invModelMatrix * glm::vec4(from, 1.0f));
-        glm::vec3 localPos = glm::vec3(instance.invModelMatrix * glm::vec4(adjustedPos, 1.0f));
-        float radiusScale = model.collisionNarrowVerticalProp ? 0.45f : 1.0f;
-        float localRadius = (playerRadius * radiusScale) / instance.scale;
-
-        glm::vec3 rawMin, rawMax;
-        getTightCollisionBounds(model, rawMin, rawMax);
-        glm::vec3 localMin = rawMin - glm::vec3(localRadius);
-        glm::vec3 localMax = rawMax + glm::vec3(localRadius);
-        float effectiveTop = getEffectiveCollisionTopLocal(model, localPos, rawMin, rawMax) + localRadius;
-        glm::vec2 localCenter((localMin.x + localMax.x) * 0.5f, (localMin.y + localMax.y) * 0.5f);
-        float fromR = glm::length(glm::vec2(localFrom.x, localFrom.y) - localCenter);
-        float toR = glm::length(glm::vec2(localPos.x, localPos.y) - localCenter);
-
-        // Feet-based vertical overlap test: ignore objects fully above/below us.
-        constexpr float PLAYER_HEIGHT = 2.0f;
-        if (localPos.z + PLAYER_HEIGHT < localMin.z || localPos.z > effectiveTop) {
-            continue;
-        }
-
-        bool fromInsideXY =
-            (localFrom.x >= localMin.x && localFrom.x <= localMax.x &&
-             localFrom.y >= localMin.y && localFrom.y <= localMax.y);
-        bool fromInsideZ = (localFrom.z + PLAYER_HEIGHT >= localMin.z && localFrom.z <= effectiveTop);
-        bool escapingOverlap = (fromInsideXY && fromInsideZ && (toR > fromR + 1e-4f));
-        bool allowEscapeRelax = escapingOverlap && !model.collisionSmallSolidProp;
-
-        // Swept hard clamp for taller blockers only.
-        // Low/stepable objects should be climbable and not "shove" the player off.
-        float maxStepUp = 1.20f;
-        if (model.collisionStatue) {
-            maxStepUp = 2.5f;
-        } else if (model.collisionSmallSolidProp) {
-            // Keep box/crate-class props hard-solid to prevent phase-through.
-            maxStepUp = 0.75f;
-        } else if (model.collisionSteppedFountain) {
-            maxStepUp = 2.5f;
-        } else if (model.collisionSteppedLowPlatform) {
-            maxStepUp = model.collisionPlanter ? 2.8f : 2.4f;
-            if (model.collisionBridge) {
-                maxStepUp = 25.0f;
-            }
-        }
-        bool stepableLowObject = (effectiveTop <= localFrom.z + maxStepUp);
-        bool climbingAttempt = (localPos.z > localFrom.z + 0.18f);
-        bool nearTop = (localFrom.z >= effectiveTop - 0.30f);
-        float climbAllowance = model.collisionPlanter ? 0.95f : 0.60f;
-        if (model.collisionSteppedLowPlatform && !model.collisionPlanter) {
-            // Let low curb/planter blocks be stepable without sticky side shoves.
-            climbAllowance = 1.00f;
-        }
-        if (model.collisionBridge) {
-            climbAllowance = 3.0f;
-        }
-        if (model.collisionSmallSolidProp) {
-            climbAllowance = 1.05f;
-        }
-        bool climbingTowardTop = climbingAttempt && (localFrom.z + climbAllowance >= effectiveTop);
-        bool forceHardLateral =
-            model.collisionSmallSolidProp &&
-            !nearTop && !climbingTowardTop;
-        if ((!stepableLowObject || forceHardLateral) && !allowEscapeRelax) {
-            float tEnter = 0.0f;
-            glm::vec3 sweepMax = localMax;
-            sweepMax.z = std::min(sweepMax.z, effectiveTop);
-            if (segmentIntersectsAABB(localFrom, localPos, localMin, sweepMax, tEnter)) {
-                float tSafe = std::clamp(tEnter - 0.03f, 0.0f, 1.0f);
-                glm::vec3 localSafe = localFrom + (localPos - localFrom) * tSafe;
-                glm::vec3 worldSafe = glm::vec3(instance.modelMatrix * glm::vec4(localSafe, 1.0f));
-                adjustedPos.x = worldSafe.x;
-                adjustedPos.y = worldSafe.y;
-                collided = true;
-                // The other way a doodad blocks, and the one that was missing.
-                //
-                // The first of these lines went inside the branch for models
-                // that carry a collision mesh. A model without one is stopped
-                // by its bounding box here instead, so the doodads reported as
-                // wrongly solid - grass among them - were exactly the ones the
-                // diagnostic could not see.
-                static std::set<std::string> saidBoxBlocked;
-                if (!model.name.empty() && saidBoxBlocked.insert(model.name).second) {
-                    LOG_WARNING("Collision: blocked by '", model.name,
-                                "' (bounding box, no collision mesh) - if this "
-                                "should be walked through, that is the name the "
-                                "classifier needs");
-                }
-                continue;
-            }
-        }
-
-        if (localPos.x < localMin.x || localPos.x > localMax.x ||
-            localPos.y < localMin.y || localPos.y > localMax.y) {
-            continue;
-        }
-
-        float pushLeft  = localPos.x - localMin.x;
-        float pushRight = localMax.x - localPos.x;
-        float pushBack  = localPos.y - localMin.y;
-        float pushFront = localMax.y - localPos.y;
-
-        float minPush = std::min({pushLeft, pushRight, pushBack, pushFront});
-        if (allowEscapeRelax) {
-            continue;
-        }
-        if (stepableLowObject && localFrom.z >= effectiveTop - 0.35f) {
-            // Already on/near top surface: don't apply lateral push that ejects
-            // the player from the object (carpets, platforms, etc).
-            continue;
-        }
-        // Gentle fallback push for overlapping cases.
-        float pushAmount;
-        if (model.collisionNarrowVerticalProp) {
-            pushAmount = std::clamp(minPush * 0.10f, 0.001f, 0.010f);
-        } else if (model.collisionSteppedLowPlatform) {
-            if (model.collisionPlanter && stepableLowObject) {
-                pushAmount = std::clamp(minPush * 0.06f, 0.001f, 0.006f);
-            } else {
-            pushAmount = std::clamp(minPush * 0.12f, 0.003f, 0.012f);
-            }
-        } else if (stepableLowObject) {
-            pushAmount = std::clamp(minPush * 0.12f, 0.002f, 0.015f);
-        } else {
-            pushAmount = std::clamp(minPush * 0.28f, 0.010f, 0.045f);
-        }
-        glm::vec3 localPush(0.0f);
-        if (minPush == pushLeft) {
-            localPush.x = -pushAmount;
-        } else if (minPush == pushRight) {
-            localPush.x = pushAmount;
-        } else if (minPush == pushBack) {
-            localPush.y = -pushAmount;
-        } else {
-            localPush.y = pushAmount;
-        }
-
-        glm::vec3 worldPush = glm::vec3(instance.modelMatrix * glm::vec4(localPush, 0.0f));
-        adjustedPos.x += worldPush.x;
-        adjustedPos.y += worldPush.y;
-        collided = true;
     }
 
     return collided;
 }
 
-float M2Renderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const {
+float M2Renderer::raycastCollision(const glm::vec3& origin, const glm::vec3& direction,
+                                   float maxDistance) const {
+    // The client's world line test with doodad collision (flag 0x1, render
+    // spec 6c): the segment against each doodad's collision triangles. It
+    // used to be against each doodad's bounding box, so the camera stopped at
+    // the box around a tree's crown or a bush that has nothing to collide
+    // with, and skipped doodads under about 0.75 yd outright.
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     float closestHit = maxDistance;
 
-    glm::vec3 rayEnd = origin + direction * maxDistance;
-    glm::vec3 queryMin = glm::min(origin, rayEnd) - glm::vec3(1.0f);
-    glm::vec3 queryMax = glm::max(origin, rayEnd) + glm::vec3(1.0f);
+    const glm::vec3 rayEnd = origin + direction * maxDistance;
+    const glm::vec3 queryMin = glm::min(origin, rayEnd) - glm::vec3(1.0f);
+    const glm::vec3 queryMax = glm::max(origin, rayEnd) + glm::vec3(1.0f);
     gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
 
     for (size_t idx : tl_m2_candidateScratch) {
         const auto& instance = instances[idx];
-        if (collisionFocus.excludes(instance.worldBoundsMin,
-                                    instance.worldBoundsMax)) {
-            continue;
-        }
-
-        // Cheap world-space broad-phase.
-        float tEnter = 0.0f;
-        glm::vec3 worldMin = instance.worldBoundsMin - glm::vec3(0.35f);
-        glm::vec3 worldMax = instance.worldBoundsMax + glm::vec3(0.35f);
-        if (!segmentIntersectsAABB(origin, origin + direction * maxDistance, worldMin, worldMax, tEnter)) {
-            continue;
-        }
-
-        if (!instance.cachedModel) continue;
-
+        if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) continue;
+        if (!instance.cachedModel || instance.scale <= 0.001f) continue;
         const M2ModelGPU& model = *instance.cachedModel;
-        // A model that ships collision geometry blocks, whatever its name
-        // suggests. collisionNoBlock is a guess from the name and the unscaled
-        // bounds, and it is only there to stop collision being *invented* for
-        // something soft - it has no business discarding what the artist
-        // authored.
-        //
-        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
-        // collision triangles and is 2.87 wide unscaled, so it failed the
-        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
-        // through. Every bush and rug beside it ships zero collision triangles,
-        // so they stay soft on their own evidence and need no rule at all.
-        const bool authoredCollision = model.collision.valid();
-        if ((model.collisionNoBlock && !authoredCollision) ||
-            model.isInvisibleTrap || model.isSpellEffect) continue;
-        glm::vec3 localMin, localMax;
-        getTightCollisionBounds(model, localMin, localMax);
-        // Skip tiny doodads for camera occlusion; they cause jitter and false hits.
-        glm::vec3 extents = (localMax - localMin) * instance.scale;
-        if (glm::dot(extents, extents) < 0.5625f) continue;
+        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
 
-        glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(origin, 1.0f));
-        glm::vec3 localDir = glm::normalize(glm::vec3(instance.invModelMatrix * glm::vec4(direction, 0.0f)));
-        if (!std::isfinite(localDir.x) || !std::isfinite(localDir.y) || !std::isfinite(localDir.z)) {
+        float tEnter = 0.0f;
+        if (!segmentIntersectsAABB(origin, origin + direction * closestHit,
+                                   instance.worldBoundsMin, instance.worldBoundsMax, tEnter)) {
             continue;
         }
 
-        // Local-space AABB slab intersection.
-        glm::vec3 invDir = 1.0f / localDir;
-        glm::vec3 tMin = (localMin - localOrigin) * invDir;
-        glm::vec3 tMax = (localMax - localOrigin) * invDir;
-        glm::vec3 t1 = glm::min(tMin, tMax);
-        glm::vec3 t2 = glm::max(tMin, tMax);
+        // In model space; the segment's parameter is the same in both.
+        const glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(origin, 1.0f));
+        const glm::vec3 localEnd = glm::vec3(
+            instance.invModelMatrix * glm::vec4(origin + direction * closestHit, 1.0f));
+        const glm::vec3 localVector = localEnd - localOrigin;
+        const float localLength = glm::length(localVector);
+        if (localLength <= 1e-5f) continue;
+        const glm::vec3 localDir = localVector / localLength;
 
-        float tNear = std::max({t1.x, t1.y, t1.z});
-        float tFar = std::min({t2.x, t2.y, t2.z});
-        if (tNear > tFar || tFar <= 0.0f) continue;
-
-        float tHit = tNear > 0.0f ? tNear : tFar;
-        glm::vec3 localHit = localOrigin + localDir * tHit;
-        glm::vec3 worldHit = glm::vec3(instance.modelMatrix * glm::vec4(localHit, 1.0f));
-        float worldDist = glm::length(worldHit - origin);
-        if (worldDist > 0.0f && worldDist < closestHit) {
-            closestHit = worldDist;
+        const auto& verts = model.collision.vertices;
+        const auto& indices = model.collision.indices;
+        float nearest = localLength;
+        for (uint32_t ti = 0; ti < model.collision.triCount; ++ti) {
+            const float t = rayTriangleIntersect(localOrigin, localDir, verts[indices[ti * 3]],
+                                                 verts[indices[ti * 3 + 1]],
+                                                 verts[indices[ti * 3 + 2]]);
+            if (t >= 0.0f && t < nearest) nearest = t;
         }
+        closestHit *= nearest / localLength;
     }
-
     return closestHit;
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/camera.hpp"
+#include "rendering/camera_boom.hpp"
 #include "core/input.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -42,11 +43,10 @@ public:
         maxDistanceFactor_ = std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
     }
     [[nodiscard]] float maxDistanceFactor() const { return maxDistanceFactor_; }
-    /// Outdoor WMO groups (city platforms, courtyards) keep the outdoor limit.
-    static float zoomDistanceLimit(float factor, bool interior) {
-        const float outdoor = MAX_DISTANCE_NORMAL *
-            std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
-        return interior ? std::min(outdoor, MAX_DISTANCE_INTERIOR) : outdoor;
+    /// The same indoors and out: the client has no indoor limit, and the
+    /// boom keeps the camera off the walls of a room.
+    static float zoomDistanceLimit(float factor) {
+        return MAX_DISTANCE_NORMAL * std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
     }
     [[nodiscard]] bool isExtendedZoom() const { return extendedZoom_; }
     void setEnabled(bool enabled) { this->enabled = enabled; }
@@ -176,12 +176,6 @@ public:
     void setBarberShopView(bool on) {
         if (on == barberView_) return;
         barberView_ = on;
-        // Whatever the collision sweep had taken off the zoom goes with it.
-        // This view sets its own distance and restores the player's on the way
-        // out, and a debt carried across either edge is given back on top of a
-        // number it was never taken from.
-        collisionZoomDebt_ = 0.0f;
-        collisionClearSeconds_ = 0.0f;
         if (on) {
             savedBarberYaw_ = yaw;
             savedBarberPitch_ = pitch;
@@ -460,26 +454,7 @@ public:
     static constexpr float kMaxDistanceFactorLimit =
         MAX_DISTANCE_EXTENDED / MAX_DISTANCE_NORMAL;
 private:
-    /// Max zoom indoors.
-    ///
-    /// Twelve still reached the walls of an ordinary room, so the collision
-    /// sweep pulled the camera in and let it back out with every step and every
-    /// turn - and that in-and-out is the motion that makes people ill. Eight
-    /// sat inside most rooms but still met the walls of a corridor, which is
-    /// most of what an interior is: Undercity is corridors, and so are the inns
-    /// and barracks a player spends time in.
-    ///
-    /// A camera that never reaches a wall is never pushed off one, so the only
-    /// way to stop the sweep firing is to keep the camera inside the room. Six
-    /// clears the corridors. It is closer than the game's own default and that
-    /// is the trade: the alternative is a view that swims.
-    ///
-    /// Chosen rather than computed, because the room's own clearance is what
-    /// the sweep already measures and feeding that back would let a doorway set
-    /// the cap for the hall beyond it.
-    static constexpr float MAX_DISTANCE_INTERIOR = 6.0f;
     bool extendedZoom_ = false;
-    static constexpr float ZOOM_SMOOTH_SPEED = 15.0f;  // How fast zoom eases
     static constexpr float CAM_SMOOTH_SPEED_DEFAULT = 30.0f;
     float camSmoothSpeed_ = CAM_SMOOTH_SPEED_DEFAULT;  // User-configurable camera smoothing (higher = tighter)
     // When true the camera keeps its exponential lerp even while actively
@@ -591,19 +566,12 @@ private:
     static constexpr float MAX_PITCH = 88.0f;       // Look almost straight up (WoW standard)
     glm::vec3* followTarget = nullptr;
     glm::vec3 smoothedCamPos = glm::vec3(0.0f);     // For smooth camera movement
-    float smoothedCollisionDist_ = -1.0f;           // Asymmetrically-smoothed WMO collision limit (-1 = uninitialised)
-    /// The ground's own limit, smoothed before it is combined with the built
-    /// geometry's. A hillside's marched height moves a little with every step
-    /// the player takes, and passing that straight through is a shudder.
-    float smoothedTerrainDist_ = -1.0f;
+    /// The camera's way back out to the chosen distance after a collision.
+    CameraBoomEase boomEase_;
     /// How far the camera is currently being lifted clear of, or dropped
     /// below, the water surface. Eased both ways so crossing the water's
     /// edge does not jump the view.
     float waterNudgeZ_ = 0.0f;
-    // Degrees of yaw the camera is currently stepping around an obstruction by,
-    // so it clears a pillar or a doorframe instead of riding up the player's
-    // neck. Smoothed; zero whenever nothing is in the way.
-    float cameraDeflectDeg_ = 0.0f;
 
     // Gravity / grounding
     float verticalVelocity = 0.0f;
@@ -626,15 +594,6 @@ private:
     // Cached isInsideWMO result (throttled to avoid per-frame cost)
     bool cachedInsideWMO = false;
     bool cachedInsideInteriorWMO = false;
-    /// The zoom the player chose outdoors, kept while the indoor limit holds
-    /// them closer and given back on the way out - a limit that quietly keeps
-    /// their zoom is a setting changed behind their back.
-    float outdoorTargetDistance_ = 0.0f;
-    bool indoorZoomHeld_ = false;
-    /// How much of the zoom the collision sweep has taken, and how long
-    /// nothing has been in the way. See the pull in updateOrbitCamera.
-    float collisionZoomDebt_ = 0.0f;
-    float collisionClearSeconds_ = 0.0f;
     int insideStateCheckCounter_ = 0;
     glm::vec3 lastInsideStateCheckPos_ = glm::vec3(0.0f);
     int insideWMOCheckCounter = 0;

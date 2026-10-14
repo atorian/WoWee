@@ -182,21 +182,6 @@ bool assetNameHasWordToken(const std::string& path, std::string_view token) {
     return false;
 }
 
-bool assetNameLooksLikeFlame(const std::string& path) {
-    // The tokens both renderers were matching, merged. Character textures used
-    // to be excluded by hand because Item/TextureComponents/LegLowerTexture
-    // spells "glow" - that exclusion is gone because the directory is gone
-    // from the question: assetTokenName reads the file name alone.
-    static constexpr std::string_view kFlameTokens[] = {
-        "candle", "flame", "fire", "torch", "lamp", "lantern",
-        "glow", "flare", "brazier", "campfire", "bonfire",
-    };
-    for (std::string_view token : kFlameTokens) {
-        if (assetNameHasWordToken(path, token)) return true;
-    }
-    return false;
-}
-
 M2ClassificationResult classifyM2Model(
     const std::string& name,
     const glm::vec3&   boundsMin,
@@ -220,8 +205,6 @@ M2ClassificationResult classifyM2Model(
     const glm::vec3 dims = boundsMax - boundsMin;
     const float horiz    = std::max(dims.x, dims.y);
     const float vert     = std::max(0.0f, dims.z);
-    const bool lowWide   = (horiz > 1.4f && vert > 0.2f && vert < horiz * 0.70f);
-    const bool lowPlat   = (horiz > 1.8f && vert > 0.2f && vert < 1.8f);
 
     // ---------------------------------------------------------------
     // Simple single-token flags
@@ -243,12 +226,11 @@ M2ClassificationResult classifyM2Model(
     // glow begins.
     const bool particleEmitterVfx = has(fullPath, "\\particleemitters\\")
                                  || has(fullPath, "/particleemitters/");
-    r.isSmoke         = has(n, "smoke");
     r.isLavaModel     = has(n, "forgelava") || has(n, "lavapot") || has(n, "lavaflow")
                     || has(n, "lavapool");
 
-    r.isInstancePortal  = has(n, "instanceportal") || has(n, "instancenewportal")
-                        || has(n, "portalfx")       || has(n, "spellportal");
+    const bool instancePortal = has(n, "instanceportal") || has(n, "instancenewportal")
+                              || has(n, "portalfx")       || has(n, "spellportal");
 
     r.isWaterVegetation = has(n, "cattail") || has(n, "reed")     || has(n, "bulrush")
                         || has(n, "seaweed") || has(n, "kelp")    || has(n, "lilypad")
@@ -270,7 +252,7 @@ M2ClassificationResult classifyM2Model(
                        has(n, "sconce")  || has(n, "candle") ||
                        has(n, "candelabra") || has(n, "chandelier"))
                       && !volumetricLightBeam;
-    r.isKoboldFlame = has(n, "kobold")
+    const bool koboldFlame = has(n, "kobold")
                     && (has(n, "candle") || has(n, "torch") || has(n, "mine"));
 
     // Fire / brazier / torch model detection (for ambient emitter + rendering)
@@ -310,7 +292,7 @@ M2ClassificationResult classifyM2Model(
         }
         return true;
     }();
-    const bool torchName   = has(n, "torch") && !r.isKoboldFlame && !unlitVariant;
+    const bool torchName   = has(n, "torch") && !koboldFlame && !unlitVariant;
     r.isBrazierOrFire = fireName || brazierName;
     // TaurenLampPost is the small ground-level path fire used around Camp
     // Narache, despite its misleading model name. Its decorative halo must
@@ -319,42 +301,11 @@ M2ClassificationResult classifyM2Model(
     r.isTorch         = torchName;
     r.isForge         = forgeName;
 
-    // ---------------------------------------------------------------
-    // Collision: shape categories (mirrors original logic ordering)
-    // ---------------------------------------------------------------
-    const bool isPlanter      = has(n, "planter");
-    const bool likelyCurb     = isPlanter || has(n, "curb")  || has(n, "base")
-                                           || has(n, "ring")  || has(n, "well");
-    const bool knownSwPlanter = has(n, "stormwindplanter")
-                              || has(n, "stormwindwindowplanter");
-    const bool bridgeName     = has(n, "bridge") || has(n, "plank") || has(n, "walkway");
-    const bool statueName     = has(n, "statue") || has(n, "monument") || has(n, "sculpture");
-    const bool sittable       = has(n, "chair")  || has(n, "bench") || has(n, "stool")
-                                                 || has(n, "seat")  || has(n, "throne");
-    const bool smallSolid     = (statueName && !sittable)
-                              || has(n, "crate") || has(n, "box")
-                              || has(n, "chest") || has(n, "barrel")
-                              || has(n, "anvil") || has(n, "mailbox")
-                              || has(n, "cauldron") || has(n, "cannon")
-                              || has(n, "wagon") || has(n, "cart")
-                              || has(n, "table") || has(n, "desk");
-    const bool chestName      = has(n, "chest");
-
-    r.collisionSteppedFountain    = has(n, "fountain");
-    r.collisionSteppedLowPlatform = !r.collisionSteppedFountain
-                                  && (knownSwPlanter || bridgeName
-                                      || (likelyCurb && (lowPlat || lowWide)));
-    r.collisionBridge             = bridgeName;
-    r.collisionPlanter            = isPlanter;
-    r.collisionStatue             = statueName;
-
-    const bool narrowVertName  = has(n, "lamp")    || has(n, "lantern")
-                               || has(n, "post")    || has(n, "pole");
-    const bool narrowVertShape = (horiz > 0.12f && horiz < 2.0f
-                               && vert  > 2.2f  && vert  > horiz * 1.8f);
-    r.collisionNarrowVerticalProp = !r.collisionSteppedFountain
-                                  && !r.collisionSteppedLowPlatform
-                                  && (narrowVertName || narrowVertShape);
+    // Collision is the model's own collision mesh and nothing else (see
+    // M2Renderer::getFloorHeight). These two names still matter elsewhere:
+    // a planter is not a plant, and a chest's lid holds still.
+    const bool isPlanter = has(n, "planter");
+    const bool chestName = has(n, "chest");
 
     // ---------------------------------------------------------------
     // Foliage token table (sorted alphabetically)
@@ -450,82 +401,6 @@ M2ClassificationResult classifyM2Model(
                             && !furnitureName;
     const bool hardTreePart = has(n, "trunk") || has(n, "stump") || has(n, "log");
 
-    // A teleport structure is a doorway, not an object: you walk into or onto
-    // it. TeleportTree.m2 - the Rut'theran Village portal to Darnassus - is the
-    // case that proved it. The file carries no collision geometry at all
-    // (nBoundingTriangles = 0, zeroed bounding box), so the real client lets you
-    // walk straight through the arch. But the name ends in "tree", so treeLike
-    // fired and the trunk-cylinder rule planted a solid block dead centre in the
-    // archway - an invisible wall over the portal, only passable with /unstuck.
-    //
-    // The token-ranking mechanism cannot express this: outranks() needs the
-    // structure token to appear LATER in the name, and here "teleport" comes
-    // first. So this is checked ahead of the tree rules and wins outright.
-    // It covers the whole family - arches, pads and PvP/goblin teleporters -
-    // none of which is ever an obstacle.
-    const bool teleportStructure = has(n, "teleport");
-
-    // A standing trunk is the solid part of a tree by definition. A stump or a
-    // fallen log is a low prop you step over or onto, which the small-solid
-    // rules below already describe, so those two keep their exemption.
-    const bool standingTrunk = has(n, "trunk");
-    const bool lowTreePart   = has(n, "stump") || has(n, "log");
-
-    // Trees big enough to have a visible trunk → solid cylinder collision.
-    //
-    // Height decides this, not the width of the canopy. Requiring six yards of
-    // spread meant a conifer - twenty yards tall and four across - failed the
-    // test, fell through to softTree and had its collision turned off outright:
-    // a full-sized pine forest that could be walked through. Anything past
-    // about eight yards has a trunk whatever its spread, and the width rule is
-    // kept for the shorter, broader trees it was written for.
-    const bool bigEnoughForTrunk = vert > 4.0f && (horiz > 6.0f || vert > 8.0f);
-    const bool treeWithTrunk = (treeLike || standingTrunk) && !lowTreePart && !foliageName
-                             && !teleportStructure
-                             && bigEnoughForTrunk;
-    const bool softTree      = treeLike && !hardTreePart && !treeWithTrunk;
-
-    r.collisionTreeTrunk = treeWithTrunk;
-
-    const bool genericSolid     = (horiz > 0.6f && horiz < 6.0f
-                                && vert  > 0.30f && vert  < 4.0f
-                                && vert  > horiz * 0.16f) || statueName;
-    const bool curbLikeName     = has(n, "curb")   || has(n, "planter")
-                                || has(n, "ring")   || has(n, "well")  || has(n, "base");
-    const bool lowPlatLikeShape = lowWide || lowPlat;
-
-    r.collisionSmallSolidProp = !r.collisionSteppedFountain
-                              && !r.collisionSteppedLowPlatform
-                              && !r.collisionNarrowVerticalProp
-                              && !r.collisionTreeTrunk
-                              && !curbLikeName
-                              && !lowPlatLikeShape
-                              && (smallSolid
-                                  || (genericSolid && !foliageName && !softTree));
-
-    const bool carpetOrRug    = has(n, "carpet") || has(n, "rug");
-    const bool forceSolidCurb = r.collisionSteppedLowPlatform || knownSwPlanter
-                              || likelyCurb || r.collisionPlanter;
-    r.collisionNoBlock        = (foliageName || softTree || carpetOrRug) && !forceSolidCurb;
-    // Walk into the arch, walk onto the pad - never around either. Set after the
-    // curb override so nothing can put the block back.
-    if (teleportStructure) r.collisionNoBlock = true;
-    // isSpellEffect already excludes VFX from every collision path; say it
-    // outright too, so a future path that reads only this flag agrees.
-    if (particleEmitterVfx) r.collisionNoBlock = true;
-    // Ground-clutter detail cards are always non-blocking.
-    if (r.isGroundDetail) r.collisionNoBlock = true;
-    // Small doodads that aren't explicitly solid should not block movement.
-    // In WoW, only named solid objects (crates, barrels, anvils, etc.) and
-    // large structural doodads have collision - small decorative models are
-    // always walkthrough regardless of their name.
-    if (!r.collisionNoBlock && !smallSolid && !forceSolidCurb
-        && !r.collisionSteppedFountain && !r.collisionTreeTrunk
-        && !r.collisionNarrowVerticalProp && !r.collisionStatue
-        && horiz < 2.0f && vert < 2.0f) {
-        r.collisionNoBlock = true;
-    }
-
     // ---------------------------------------------------------------
     // Ambient creatures: fireflies, dragonflies, moths, butterflies
     // ---------------------------------------------------------------
@@ -551,17 +426,6 @@ M2ClassificationResult classifyM2Model(
     // therefore freezes the whole lighthouse beam in its bind pose.
     r.isLightBeam = has(n, "lighthousebeam") || has(n, "lightbeam")
                  || has(n, "lightray");
-    // Light drawn as geometry, which wants a soft edge. Named tokens rather
-    // than a bare "beam": burnedbeam and catapultbeam are timber, and a
-    // structural beam faded out at its silhouette would go see-through.
-    r.isVolumetricBeam = has(n, "spotlight")   || has(n, "lighthousebeam")
-                      || has(n, "lightbeam")   || has(n, "lightray")
-                      || has(n, "lightshaft")  || has(n, "godray")
-                      || has(n, "sunray");
-    // Not maintenancelight: that is the zeppelin's deck lanterns, which are
-    // lamps in glass and not cones of light. They were added here while
-    // hunting for the searchlight and the debug colour showed them lighting
-    // up instead of it.
     // A rowboat, a canoe, a swamp punt: the craft left moored in a canal or on
     // a lake. A wreck lies where it sank, a sign and a boathouse are buildings,
     // a battleground gate is named for the boat it guards, and a vehicle is a
@@ -649,7 +513,7 @@ M2ClassificationResult classifyM2Model(
     r.isSpellEffect = hasAny(n, kEffectTokens) || steamVfx || particleEmitterVfx
                     || particleDominated;
     // Instance portals are spell effects too.
-    if (r.isInstancePortal) r.isSpellEffect = true;
+    if (instancePortal) r.isSpellEffect = true;
 
     // ---------------------------------------------------------------
     // Ambient emitter type (for sound system integration)
@@ -662,7 +526,7 @@ M2ClassificationResult classifyM2Model(
         r.ambientEmitterType = AmbientEmitterType::Torch;
     } else if (forgeName) {
         r.ambientEmitterType = AmbientEmitterType::Forge;
-    } else if (r.collisionSteppedFountain) {
+    } else if (has(n, "fountain")) {
         r.ambientEmitterType = AmbientEmitterType::Fountain;
     } else if (r.isWaterfall) {
         r.ambientEmitterType = AmbientEmitterType::Waterfall;
@@ -674,22 +538,6 @@ M2ClassificationResult classifyM2Model(
 // ---------------------------------------------------------------------------
 // classifyBatchTexture
 // ---------------------------------------------------------------------------
-
-bool isHelperCreatureModel(const std::string& lowerPath) {
-    static constexpr auto kHelperModels = std::to_array<std::string_view>({
-        "invisibleman",
-        "invisiblestalker",
-        "invisible_stalker",
-    });
-    for (auto token : kHelperModels) {
-        if (lowerPath.find(token) != std::string::npos) return true;
-    }
-    // The measuring boxes: world\scale\1000x1000, 200yardradiusdisc and the
-    // rest. Matched by directory, because their names are only numbers and a
-    // token like "100x100" would be a poor thing to look for anywhere else.
-    return lowerPath.find("world\\scale\\") != std::string::npos ||
-           lowerPath.find("world/scale/") != std::string::npos;
-}
 
 M2BatchTexClassification classifyBatchTexture(const std::string& lowerTexKey)
 {

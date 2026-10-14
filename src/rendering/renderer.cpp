@@ -303,7 +303,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[9]{};
+    VkDescriptorSetLayoutBinding bindings[10]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -363,7 +363,14 @@ bool Renderer::createPerFrameResources() {
     bindings[8] = bindings[3];
     bindings[8].binding = 8;
     bindings[8].pImmutableSamplers = &contactShadowSampler_;
-    layoutInfo.bindingCount = 9;
+    // The frame's point lights (local_lights.glsli), read by surfaces and
+    // by the fog volume.
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                             VK_SHADER_STAGE_COMPUTE_BIT;
+    layoutInfo.bindingCount = 10;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -372,16 +379,18 @@ bool Renderer::createPerFrameResources() {
     }
 
     // --- Create descriptor pool for UBO + image sampler (normal frames + reflection) ---
-    VkDescriptorPoolSize poolSizes[2]{};
+    VkDescriptorPoolSize poolSizes[3]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 8;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizes[2].descriptorCount = MAX_FRAMES * 3;  // the point lights
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = MAX_FRAMES * 3; // world, capture and reflection sets
-    poolInfo.poolSizeCount = 2;
+    poolInfo.poolSizeCount = 3;
     poolInfo.pPoolSizes = poolSizes;
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sceneDescriptorPool) != VK_SUCCESS) {
@@ -603,6 +612,14 @@ bool Renderer::createPerFrameResources() {
         }
     }
 
+    // The point lights: a buffer per frame slot, grown as a frame needs, and
+    // an empty one for sets allocated elsewhere.
+    if (!createLightBuffer(neutralLightBuffer_, 1)) return false;
+    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+        if (!createLightBuffer(localLightBuffers_[i], kInitialLocalLightCapacity)) return false;
+        writeLightBinding(i);
+    }
+
     // The compute side. Not fatal: without it the fog simply stays off, and
     // applyPendingQuality says so when it is asked for.
     if (!volumetricFog_->createPipelines(perFrameSetLayout, shadowDepthView)) {
@@ -613,6 +630,84 @@ bool Renderer::createPerFrameResources() {
     return true;
 }
 
+bool Renderer::createLightBuffer(LightBuffer& out, size_t lights) {
+    // Two vec4 per light (local_lights.glsli).
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = std::max<size_t>(lights, 1) * 2 * sizeof(glm::vec4);
+    bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo mapInfo{};
+    if (vmaCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo, &out.buffer, &out.alloc,
+                        &mapInfo) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create the point light buffer for ", lights,
+                  " lights - surfaces are lit by none of them");
+        out = {};
+        return false;
+    }
+    out.mapped = mapInfo.pMappedData;
+    out.capacity = std::max<size_t>(lights, 1);
+    std::memset(out.mapped, 0, static_cast<size_t>(bufInfo.size));
+    return true;
+}
+
+void Renderer::writeLightBinding(uint32_t slot) {
+    VkDescriptorBufferInfo info{};
+    info.buffer = localLightBuffers_[slot].buffer;
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet writes[3]{};
+    uint32_t count = 0;
+    // The world's set, the sky capture's and the reflection's: the same
+    // lights in all three.
+    for (VkDescriptorSet set : {perFrameDescSets[slot], skyPerFrameDescSets[slot], reflPerFrameDescSet[slot]}) {
+        if (set == VK_NULL_HANDLE) continue;
+        VkWriteDescriptorSet& w = writes[count++];
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = set;
+        w.dstBinding = 9;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &info;
+    }
+    vkUpdateDescriptorSets(vkCtx->getDevice(), count, writes, 0, nullptr);
+}
+
+void Renderer::uploadLocalLights(uint32_t slot) {
+    LightBuffer& buf = localLightBuffers_[slot];
+    const size_t count = std::min<size_t>(frameLocalLights_.size(), kMaxAddressableLocalLights);
+    if (frameLocalLights_.size() > kMaxAddressableLocalLights) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOG_WARNING("Local lights: ", frameLocalLights_.size(), " in one frame; only the first ",
+                        kMaxAddressableLocalLights, " can be indexed and the rest light nothing");
+        }
+    }
+    if (count > buf.capacity) {
+        // This slot's frame has finished on the GPU (beginFrame waited for
+        // it) and nothing has been recorded with its sets yet this frame, so
+        // the buffer can be replaced and the sets pointed at the new one.
+        const size_t grown = std::max(count, buf.capacity * 2);
+        destroy(vkCtx->getAllocator(), buf.buffer, buf.alloc);
+        buf = {};
+        if (!createLightBuffer(buf, grown)) {
+            frameLocalLights_.clear();
+            currentFrameData.localLightMeta.x = 0;
+            return;
+        }
+        writeLightBinding(slot);
+    }
+    auto* dst = static_cast<glm::vec4*>(buf.mapped);
+    for (size_t i = 0; i < count; ++i) {
+        dst[2 * i] = glm::vec4(frameLocalLights_[i].position, 1.0f);
+        dst[2 * i + 1] = glm::vec4(frameLocalLights_[i].color, 1.0f);
+    }
+    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(count), 0, 0, 0);
+}
+
 void Renderer::destroyPerFrameResources() {
     if (!vkCtx) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
@@ -620,7 +715,11 @@ void Renderer::destroyPerFrameResources() {
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         destroy(vkCtx->getAllocator(), perFrameUBOs[i], perFrameUBOAllocs[i]);
+        destroy(vkCtx->getAllocator(), localLightBuffers_[i].buffer, localLightBuffers_[i].alloc);
+        localLightBuffers_[i] = {};
     }
+    destroy(vkCtx->getAllocator(), neutralLightBuffer_.buffer, neutralLightBuffer_.alloc);
+    neutralLightBuffer_ = {};
     if (reflPerFrameUBO) {
         vmaDestroyBuffer(vkCtx->getAllocator(), reflPerFrameUBO, reflPerFrameUBOAlloc);
         reflPerFrameUBO = VK_NULL_HANDLE;
@@ -711,8 +810,9 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.contactSpaceMatrix = glm::mat4(0.0f);
     currentFrameData.contactParams = glm::vec4(0.0f);
     if (shadowCenterInitialized && contactShadowImages_[0].image) {
-        // Resolve nearby caster detail along the same rays as the solar map.
-        // This map removes direct light; shade retains only faint grounding.
+        // The units' map, as the client keeps it: 40 yards a side around the
+        // player (WoW.exe 12340 sets its half extent to 20 yards), along the
+        // same rays as the sun map.
         glm::vec3 rays = glm::vec3(currentFrameData.lightDir);
         const float lengthSq = glm::dot(rays, rays);
         rays = lengthSq > 1e-6f ? rays * glm::inversesqrt(lengthSq)
@@ -721,19 +821,23 @@ void Renderer::updatePerFrameUBO() {
         if (rays.z > -0.15f) rays = glm::normalize(glm::vec3(rays.x, rays.y, -0.15f));
         const glm::vec3 up = std::abs(rays.z) > 0.99f
             ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(0.0f, 0.0f, 1.0f);
-        glm::mat4 projection = glm::ortho(-16.0f, 16.0f, -16.0f, 16.0f, 0.1f, 128.0f);
+        glm::mat4 projection = glm::ortho(-CONTACT_MAP_HALF_EXTENT, CONTACT_MAP_HALF_EXTENT,
+                                          -CONTACT_MAP_HALF_EXTENT, CONTACT_MAP_HALF_EXTENT,
+                                          0.1f, 128.0f);
         projection[1][1] *= -1.0f;
         currentFrameData.contactSpaceMatrix = projection * glm::lookAt(
             characterPosition - rays * 64.0f, characterPosition, up);
         static const bool contactEnabled = std::getenv("WOWEE_DISABLE_CONTACT_SHADOWS") == nullptr;
         currentFrameData.contactParams = glm::vec4(contactEnabled ? 1.0f : 0.0f,
-                                                  1.0f / CONTACT_MAP_SIZE, 127.9f, 0.06f);
+                                                  1.0f / CONTACT_MAP_SIZE, 127.9f, 0.0f);
     }
-    // Scale shadow bias proportionally to ortho extent to avoid acne at close range / gaps at far range
-    float shadowBias = glm::clamp(0.8f * (shadowDistance_ / 300.0f), 0.0f, 1.0f);
     // z carries one texel of the shadow map. The shaders used to hold that as
     // a constant for 4096, and the map is 512 to 4096 by the quality level.
-    currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowBias,
+    //
+    // y was a shadow strength that grew with the shadow distance - a third of
+    // a shadow at 100 yards, all of it from 375. A shadow is whole at every
+    // distance; how dark it is is the client's fixed 30% (shadow_shading.glsli).
+    currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, 0.0f,
                                               1.0f / static_cast<float>(SHADOW_MAP_SIZE),
                                               2.0f * shadowDistance_ / static_cast<float>(SHADOW_MAP_SIZE));
 
@@ -746,23 +850,19 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.volumetricParams = volumetricThisFrame_ ? volumetricFog_->frameParams()
                                                              : glm::vec4(0.0f);
 
-    for (uint32_t i = 0; i < MAX_LOCAL_LIGHTS; ++i) {
-        currentFrameData.localLightPosRadius[i] = glm::vec4(0.0f);
-        currentFrameData.localLightColorIntensity[i] = glm::vec4(0.0f);
-    }
-    uint32_t localLightCount = wmoRenderer
-        ? wmoRenderer->gatherLavaLights(camera->getPosition(),
-              currentFrameData.localLightPosRadius,
-              currentFrameData.localLightColorIntensity,
-              MAX_LOCAL_LIGHTS)
-        : 0;
-    if (m2Renderer && localLightCount < MAX_LOCAL_LIGHTS) {
-        localLightCount += m2Renderer->gatherLocalLights(camera->getPosition(),
-            currentFrameData.localLightPosRadius + localLightCount,
-            currentFrameData.localLightColorIntensity + localLightCount,
-            MAX_LOCAL_LIGHTS - localLightCount);
-    }
-    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount), 0, 0, 0);
+    // The frame's point lights: the M2Lights of the models and units animated
+    // this frame, as the client lights a scene (local_lights.hpp). Each draw
+    // then picks its nearest few from this list by index; the list itself has
+    // no cap, and its buffer grows with it.
+    frameLocalLights_.clear();
+    if (m2Renderer) m2Renderer->gatherLocalLights(camera->getPosition(), frameLocalLights_);
+    if (characterRenderer) characterRenderer->gatherLocalLights(*camera, frameLocalLights_);
+    uploadLocalLights(vkCtx->getCurrentFrame());
+    const uint32_t localLightCount = static_cast<uint32_t>(currentFrameData.localLightMeta.x);
+    if (m2Renderer) m2Renderer->setFrameLocalLights(&frameLocalLights_);
+    if (characterRenderer) characterRenderer->setFrameLocalLights(&frameLocalLights_);
+    if (wmoRenderer) wmoRenderer->setFrameLocalLights(&frameLocalLights_);
+    if (terrainRenderer) terrainRenderer->setFrameLocalLights(&frameLocalLights_);
 
     if (rtLighting_) {
         const RtLighting::ConsumerData rt = rtLighting_->consumerData();
@@ -771,21 +871,15 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.rtParams = rt.params;
     }
 
-    // What the local lights are actually doing, throttled to a line every few
-    // seconds. These are gathered around the camera rather than the player, so
-    // which ones are in the set changes as the view is orbited - and they are
-    // the warm ones: braziers, torches, forges, lava. A warm cast that moves
-    // with the camera and nothing else would look exactly like this, so it is
-    // worth being able to read the count rather than reason about it.
+    // What the local lights are doing, a line every few seconds: how many
+    // models in and around the view carry a lit light.
     {
         static double lastLightLog = 0.0;
         if (localLightCount > 0 && (globalTime - lastLightLog) > 3.0) {
             lastLightLog = globalTime;
-            const glm::vec4& c0 = currentFrameData.localLightColorIntensity[0];
-            const glm::vec4& p0 = currentFrameData.localLightPosRadius[0];
-            LOG_INFO("localLights: count=", localLightCount, " of ", MAX_LOCAL_LIGHTS,
-                     " first rgb=(", c0.r, ",", c0.g, ",", c0.b, ") intensity=", c0.w,
-                     " radius=", p0.w);
+            const glm::vec3& c0 = frameLocalLights_[0].color;
+            LOG_INFO("localLights: count=", localLightCount,
+                     " first rgb=(", c0.r, ",", c0.g, ",", c0.b, ")");
         }
     }
 
@@ -1451,7 +1545,7 @@ void Renderer::beginFrame() {
     if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
             skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
-            skyboxModelRenderer_->update(0.016f, camera->getPosition(), camera->getViewProjectionMatrix());
+            skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
         float coverage = 0.0f;
@@ -2056,8 +2150,8 @@ void Renderer::update(float deltaTime) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
             ? lightingManager->getVisualTimeOfDayHours()
             : (skybox ? skybox->getTimeOfDay() : 12.0f));
-        skyboxModelRenderer_->update(deltaTime, camera->getPosition(),
-            camera->getProjectionMatrix() * camera->getViewMatrix());
+        skyboxModelRenderer_->update(deltaTime, camera->getViewMatrix(),
+                                     camera->getProjectionMatrix());
     }
 
     // Update weather particles
@@ -2130,11 +2224,11 @@ void Renderer::update(float deltaTime) {
     bool m2AnimLaunched = false;
     if (m2Renderer && camera) {
         float m2DeltaTime = deltaTime;
-        glm::vec3 m2CamPos = camera->getPosition();
-        glm::mat4 m2ViewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
+        glm::mat4 m2View = camera->getViewMatrix();
+        glm::mat4 m2Projection = camera->getProjectionMatrix();
         m2AnimFuture = core::ThreadPool::frameWorkers().submit(
-            [this, m2DeltaTime, m2CamPos, m2ViewProj]() {
-                m2Renderer->update(m2DeltaTime, m2CamPos, m2ViewProj);
+            [this, m2DeltaTime, m2View, m2Projection]() {
+                m2Renderer->update(m2DeltaTime, m2View, m2Projection);
             });
         m2AnimLaunched = true;
     }
@@ -2887,8 +2981,6 @@ void Renderer::renderWorld() {
                 // Blended things go after the water when it has a pass of its
                 // own; see M2Renderer::renderAfterWater.
                 const bool blendedHere = !m2Renderer->drawsBlendedAfterWater();
-                if (blendedHere) m2Renderer->renderSmokeParticles(cmd, perFrameSet);
-                const auto tSmoke = std::chrono::steady_clock::now();
                 if (blendedHere) m2Renderer->renderM2Particles(cmd, perFrameSet);
                 const auto tParts = std::chrono::steady_clock::now();
                 if (blendedHere) m2Renderer->renderM2Ribbons(cmd, perFrameSet);
@@ -2913,8 +3005,7 @@ void Renderer::renderWorld() {
                         };
                         LOG_WARNING("  m2 worker: begin ", ms(t0, tBegin),
                                     "ms, models ", ms(tBegin, tModels),
-                                    "ms, smoke ", ms(tModels, tSmoke),
-                                    "ms, particles ", ms(tSmoke, tParts),
+                                    "ms, particles ", ms(tModels, tParts),
                                     "ms, ribbons ", ms(tParts, tParticles),
                                     "ms, endCommandBuffer ", ms(tParticles, tEnd), "ms");
                     }
@@ -2958,14 +3049,25 @@ void Renderer::renderWorld() {
 
         // Character recording is independent after prepareRender() and no
         // longer shares the selection-circle overlay command buffer.
+        // The faded ones go in a buffer of their own, queued after the M2s, or
+        // after the water in its pass: drawn here they would hide the effects
+        // inside them. Recorded by the same worker, one after the other.
         charFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_CHARS);
             setSecondaryViewportScissor(cmd);
             if (characterRenderer && camera && !skipChars) {
-                characterRenderer->render(cmd, perFrameSet, *camera);
+                characterRenderer->render(cmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
             }
             vkEndCommandBuffer(cmd);
+            if (!fadedCharactersAfterWater()) {
+                VkCommandBuffer faded = beginSecondary(SEC_CHARS_FADED);
+                setSecondaryViewportScissor(faded);
+                if (characterRenderer && camera && !skipChars) {
+                    characterRenderer->render(faded, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+                }
+                vkEndCommandBuffer(faded);
+            }
             return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
         });
@@ -3062,8 +3164,8 @@ void Renderer::renderWorld() {
         }
 
         // --- Execute all secondary buffers in correct draw order ---
-        VkCommandBuffer validCmds[8];
-        const char* validLabels[8];
+        VkCommandBuffer validCmds[NUM_SECONDARIES];
+        const char* validLabels[NUM_SECONDARIES];
         uint32_t numCmds = 0;
         // Terrain first, then the sky. Every sky layer sits on the far plane
         // and depth-tests against what is already there, so drawing it after
@@ -3086,6 +3188,8 @@ void Renderer::renderWorld() {
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
         if (m2Renderer && camera && !skipM2)
             queue(secondaryCmds_[SEC_M2][frameIdx], "m2");
+        if (!fadedCharactersAfterWater())
+            queue(secondaryCmds_[SEC_CHARS_FADED][frameIdx], "faded characters");
         queue(secondaryCmds_[SEC_POST][frameIdx], "water/effects");
 
         // One at a time, with a mark after each.
@@ -3164,7 +3268,7 @@ void Renderer::renderWorld() {
 
         if (characterRenderer && camera && !skipChars) {
             characterRenderer->prepareRender(frameIdx);
-            characterRenderer->render(currentCmd, perFrameSet, *camera);
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "characters");
         }
 
@@ -3173,13 +3277,19 @@ void Renderer::renderWorld() {
             auto m2Start = std::chrono::steady_clock::now();
             m2Renderer->render(currentCmd, perFrameSet, *camera);
             if (!m2Renderer->drawsBlendedAfterWater()) {
-                m2Renderer->renderSmokeParticles(currentCmd, perFrameSet);
                 m2Renderer->renderM2Particles(currentCmd, perFrameSet);
                 m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
             }
             if (vkCtx) vkCtx->gpuMark(currentCmd, "m2");
             lastM2RenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - m2Start).count();
+        }
+
+        // Faded characters over the blended world, unless they go after the
+        // water with it.
+        if (characterRenderer && camera && !skipChars && !fadedCharactersAfterWater()) {
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+            if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
         if (waterRenderer && camera && !waterDrawsInContinuePass()) {
@@ -3275,6 +3385,12 @@ void Renderer::renderWorld() {
         // a waterfall's foam was faint and shifted over the pool and at full
         // strength only where it hung past the edge.
         if (m2Renderer && !skipM2) m2Renderer->renderAfterWater(currentCmd, perFrameSet);
+        // Faded characters over what was just drawn. A Shadowform priest's
+        // fire rises from the feet through the body; with the body drawn
+        // first, its depth hid every part of the fire inside or behind it.
+        if (characterRenderer && !skipChars && fadedCharactersAfterWater()) {
+            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+        }
 
         // Spray belongs on top of the surface it is thrown off. Recorded in the
         // scene pass it went under the water instead, which the sheet then hid -
@@ -3500,6 +3616,11 @@ void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
                         surface_->getWidth(), surface_->getHeight(),
                         glm::radians(characterYaw), true);
     }
+}
+
+bool Renderer::fadedCharactersAfterWater() const {
+    return characterRenderer && characterRenderer->fadedPass() != VK_NULL_HANDLE &&
+           waterDrawsInContinuePass();
 }
 
 bool Renderer::waterDrawsInContinuePass() const {
@@ -3982,11 +4103,14 @@ void Renderer::refreshSwimEffectsPass() {
     const bool sprayMoved = swimEffects && swimEffectsDrawWithWater_ != sprayWasWithWater;
     const bool minimapMoved = minimap && minimapDrawsWithWater_ != minimapWasWithWater;
     const bool blendedMoved = m2Renderer && m2Renderer->afterWaterPass() != blendedAfterWaterPass_;
-    if (!sprayMoved && !minimapMoved && !blendedMoved) return;
+    // Faded characters go wherever the blended world goes, after it.
+    const bool fadedMoved = characterRenderer && characterRenderer->fadedPass() != blendedAfterWaterPass_;
+    if (!sprayMoved && !minimapMoved && !blendedMoved && !fadedMoved) return;
     vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
     if (blendedMoved) m2Renderer->setAfterWaterPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
+    if (fadedMoved) characterRenderer->setFadedPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
 }
 
 // ========================= Multithreaded Secondary Command Buffers =========================
@@ -4028,6 +4152,13 @@ bool Renderer::createSecondaryCommandResources() {
         for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
             if (vkAllocateCommandBuffers(device, &allocInfo, &secondaryCmds_[workerSecondaries[w]][f]) != VK_SUCCESS) {
                 LOG_ERROR("Failed to allocate worker secondary buffer w=", w, " f=", f);
+                return false;
+            }
+            // The faded characters are recorded by the characters' worker,
+            // after its own buffer, so they come from its pool.
+            if (workerSecondaries[w] == SEC_CHARS &&
+                vkAllocateCommandBuffers(device, &allocInfo, &secondaryCmds_[SEC_CHARS_FADED][f]) != VK_SUCCESS) {
+                LOG_ERROR("Failed to allocate the faded characters' secondary buffer f=", f);
                 return false;
             }
         }
@@ -4308,7 +4439,11 @@ void Renderer::renderShadowMap(bool contact) {
     vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
     // Phase 7/8: render shadow casters
-    const float shadowCullRadius = contact ? 24.0f : shadowDistance_ * 1.35f;
+    // The units' map takes whatever reaches into its square: out to its
+    // corners, and a few yards past them for a caster standing outside whose
+    // body leans in.
+    const float shadowCullRadius = contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
+                                           : shadowDistance_ * 1.35f;
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {

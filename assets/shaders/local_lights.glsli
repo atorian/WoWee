@@ -1,0 +1,35 @@
+// The frame's point lights (local_lights.hpp), at set 0 binding 9: two vec4
+// per light, xyz position then rgb colour. localLightMeta.x in the per-frame
+// block is how many there are.
+layout(set = 0, binding = 9) readonly buffer LocalLightBuffer {
+    vec4 localLightData[];
+};
+
+vec3 localLightPosition(uint i) { return localLightData[2u * i].xyz; }
+vec3 localLightColor(uint i) { return localLightData[2u * i + 1u].rgb; }
+
+// The light one point light gives a surface, as the client lights by it:
+// N.L over 1 / (0.7 d + 0.03 d^2).
+vec3 localLightAt(uint i, vec3 pos, vec3 normal) {
+    vec3 toLight = localLightPosition(i) - pos;
+    float dist = max(length(toLight), 1e-3);
+    float ndl = max(dot(normal, toLight / dist), 0.0);
+    return localLightColor(i) * (ndl / (0.7 * dist + 0.03 * dist * dist));
+}
+
+// The lights that reach one receiver: up to eight 16-bit indices packed two
+// to a word, nearest first, 0xFFFF for none. The sum is clamped as the
+// client clamps its lighting term.
+vec3 localLightDiffuse(vec3 pos, vec3 normal, uvec4 lightSet) {
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < 8; ++k) {
+        uint i = (lightSet[k >> 1] >> (16u * uint(k & 1))) & 0xFFFFu;
+        if (i == 0xFFFFu) break;
+        sum += localLightAt(i, pos, normal);
+    }
+    return min(sum, vec3(1.0));
+}
+
+vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo, uvec4 lightSet) {
+    return albedo * localLightDiffuse(pos, normal, lightSet);
+}

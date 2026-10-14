@@ -12,9 +12,14 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_uv_transform.hpp"
+#include "rendering/frames_in_flight.hpp"
+#include "rendering/game_object_animation.hpp"
+#include "rendering/m2_combiner.hpp"
+#include "rendering/local_lights.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <unordered_map>
@@ -57,11 +62,16 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
-        VkTexture* secondTexture = nullptr; // second stage of an RGBA-masked layer
-        uint8_t secondTexFlags = 0;         // M2Texture.flags of the mask's slot
+        VkTexture* secondTexture = nullptr; // the second stage, where the combiner reads one
+        uint8_t secondTexFlags = 0;         // M2Texture.flags of the second stage's slot
         uint16_t colorTrackIndex = UINT16_MAX;
         uint16_t weightTrackIndex = UINT16_MAX;
-        uint8_t secondTexCoordSet = 0;
+        /// How the stages combine (m2BatchShading), and where the second
+        /// stage's coordinates come from, as m2.vert's texCoordSet2 reads it.
+        M2Combiner combiner = M2Combiner::Mod;
+        int8_t secondTexCoords = 1;
+        /// False for shader 0x8000, which the client does not draw.
+        bool shaderDrawn = true;
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
         ::VkBuffer materialUBO = VK_NULL_HANDLE;
         VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
@@ -71,7 +81,6 @@ struct M2ModelGPU {
         bool hasAlpha = false;
         /// The alpha is a real silhouette, not an atlas leftover.
         bool alphaIsSilhouette = false;
-        bool colorKeyBlack = false;
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
@@ -84,23 +93,22 @@ struct M2ModelGPU {
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
         bool preserveGlowMesh = false; // Keep emissive glass/fixture mesh below its glow sprite
-        // Forge fire card: the flame/coals/glow batches of a forge, as opposed
-        // to the masonry and ironwork the rest of the model is made of.
-        bool forgeFireCard = false;
         // A sky model's star-point layer. Suppressed when the client draws its
         // own stars instead: the authored layer is a 256x256 compressed texture
         // magnified across the whole dome, which is soft at any resolution and
         // softer at a high one.
         bool starLayer = false;
-        /// A cone of light drawn as geometry, picked out by its texture.
-        ///
-        /// Per batch rather than per model, because the model that carries the
-        /// zeppelin's searchlight also carries its fins, its engine, a bike
-        /// and a goblin pedlar - flagging the whole of HordeZepAnimation
-        /// would have softened all of them and cut haze holes in the crew.
-        bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
+        /// The colour alpha or texture weight changes over the model's life,
+        /// so batchOpacity holds only the texture gate and the rest is sampled
+        /// per instance (m2SampleBatchOpacity).
+        bool animatedOpacity = false;
+        /// Drawn in the blended pass because of its alpha, whatever its blend
+        /// mode: the alpha animates, or is fixed below kM2BatchOpaqueOpacity.
+        /// The client blends such a layer, and in that pass each instance can
+        /// be faded or left out on its own.
+        bool blendedByOpacity = false;
         /// The texture this batch is hidden waiting for, when its first load
         /// failed. Empty once it has it. A hidden batch is never bound, so its
         /// descriptor and material can be rewritten when a retry succeeds.
@@ -134,15 +142,6 @@ struct M2ModelGPU {
     glm::vec3 boundMin;
     glm::vec3 boundMax;
     float boundRadius = 0.0f;
-    bool collisionSteppedFountain = false;
-    bool collisionSteppedLowPlatform = false;
-    bool collisionPlanter = false;
-    bool collisionBridge = false;
-    bool collisionSmallSolidProp = false;
-    bool collisionNarrowVerticalProp = false;
-    bool collisionTreeTrunk = false;
-    bool collisionNoBlock = false;
-    bool collisionStatue = false;
     bool isSmallFoliage = false;    // Small foliage (bushes, grass, plants) - skip during taxi
     bool isInvisibleTrap = false;   // Invisible trap objects (don't render, no collision)
     bool isGroundDetail = false;    // Ground clutter/detail doodads (special fallback render path)
@@ -160,6 +159,9 @@ struct M2ModelGPU {
         std::vector<glm::vec3> vertices;
         std::vector<uint16_t> indices;
         uint32_t triCount = 0;
+        /// The box around the vertices, in model space.
+        glm::vec3 boundMin{0.0f};
+        glm::vec3 boundMax{0.0f};
 
         struct TriBounds { float minZ, maxZ; };
         std::vector<TriBounds> triBounds;
@@ -193,9 +195,7 @@ struct M2ModelGPU {
     std::vector<uint32_t> globalSequenceDurations;  // Loop durations for global sequence tracks
     bool hasAnimation = false;  // True if any bone has keyframes
     uint32_t rtMesh = ~0u;      // RtScene mesh, or ~0u when it does not cast
-    bool isSmoke = false;       // True for smoke models (UV scroll animation)
     bool isSpellEffect = false;  // True for spell effect models (skip particle dampeners)
-    bool isInstancePortal = false; // Instance portal model (spin + glow)
     bool disableAnimation = false; // Keep foliage/tree doodads visually stable
     bool shadowWindFoliage = false; // Apply wind sway in shadow pass for foliage/tree cards
     bool isHangingCloth = false;    // Banner/flag/tapestry: sways from the end it is held by
@@ -203,30 +203,13 @@ struct M2ModelGPU {
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
     bool isElvenLike = false;       // Model name matches elf/elven/quel (precomputed)
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
-    bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
-    bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
+    bool isLavaModel = false;       // Model name names lava: throws a local light
     bool isSkyBird = false;         // Flying bird/bat doodad - hide until animation range
     bool isLightBeam = false;       // Lighthouse/light-ray beam - distant bones must keep updating
-    bool isVolumetricBeam = false;  // Light drawn as geometry; softened at its silhouette
-    /// Play the sequence forward, then backward, rather than looping it.
-    ///
-    /// A searchlight sweeps one way and then the other. Wrapping its timeline
-    /// at the end of the sequence throws the beam back to where it started in
-    /// a single frame, which reads as a jump - the light is at one side of the
-    /// arc and then, without crossing the middle, at the other. Reversing
-    /// instead is what the sweep actually is.
-    bool pingPongAnim = false;
-    /// Which bones the reversing clock applies to, one byte per bone.
-    ///
-    /// The searchlight shares HordeZepAnimation with the zeppelin's fins and
-    /// propeller, and reversing the whole timeline turned the propeller
-    /// backwards for half of every cycle. Only the bones the beam is actually
-    /// skinned to run backward; everything else keeps looping forward.
-    std::vector<uint8_t> pingPongBones;
     bool isTransportDoodad = false; // Animated ship sail/paddle child
     bool isBoat = false;            // Small boat; bobs if it turns out to be afloat
     bool hasTextureAnimation = false; // True if any batch has UV animation
-    bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
+    bool hasTransparentBatches = false; // True if any batch is drawn in the blended pass (blendMode >= 2 or blendedByOpacity)
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
 
     // Particle emitter data (kept from M2Model)
@@ -250,15 +233,17 @@ struct M2ModelGPU {
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;
     std::vector<uint16_t> textureTransformLookup;
-    std::vector<pipeline::M2AnimationTrack> skyColorAlphaTracks;
-    std::vector<pipeline::M2AnimationTrack> skyTextureWeightTracks;
+    // Batch transparency tracks, indexed by BatchGPU::colorTrackIndex and
+    // weightTrackIndex: sampled per instance for a batch whose transparency
+    // animates (BatchGPU::animatedOpacity), and by the sky on its day clock.
+    std::vector<pipeline::M2AnimationTrack> colorAlphaTracks;
+    std::vector<pipeline::M2AnimationTrack> textureWeightTracks;
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
-    /// The kinds M2Renderer::gatherLocalLights can find a light in.
-    [[nodiscard]] bool canThrowLocalLight() const {
-        return isLanternLike || isTorch || isBrazierOrFire || isForge || isLavaModel;
-    }
+    /// The lights the model carries (M2 header `lights`).
+    std::vector<pipeline::M2Light> lights;
+    [[nodiscard]] bool canThrowLocalLight() const { return !lights.empty(); }
 };
 
 /**
@@ -270,8 +255,41 @@ struct M2Particle {
     float life;        // current age in seconds
     float maxLife;     // total lifespan
     int emitterIndex;  // which emitter spawned this
-    float tileIndex = 0.0f; // texture atlas tile index
+    float tileIndex = 0.0f; // atlas cell picked at spawn (flag 0x10000)
+    /// Its own size factor from the emitter's scale variation.
+    glm::vec2 sizeFactor{1.0f};
+    /// Its draws in [-1, 1] for the spin's base angle and rate, and the spin
+    /// direction (flag 0x200 makes it random).
+    float spinRandBase = 0.0f;
+    float spinRandRate = 0.0f;
+    float spinSign = 1.0f;
+    /// Its own offset into the twinkle table.
+    uint32_t twinkleOffset = 0;
 };
+
+/// How a particle quad is laid out (render spec, section 4.5).
+enum class M2ParticleShape : uint32_t {
+    Billboard = 0,      ///< facing the camera, turned by its spin
+    Tail = 1,           ///< from the head back along axisA, the tail vector
+    AlongVelocity = 2,  ///< facing the camera, stretched along axisA, -velocity (flag 0x4)
+    Plane = 3,          ///< in the plane of axisA and axisB (flag 0x1000)
+};
+
+/// One particle quad as m2_particle.vert reads it, an instance per quad.
+struct M2ParticleQuad {
+    glm::vec3 position;        ///< the particle (its head), world
+    glm::vec4 color;           ///< colour and alpha, straight
+    glm::vec2 halfSize;        ///< half its width and height, world units
+    float cell;                ///< atlas cell
+    glm::vec3 axisA;           ///< per shape: tail vector, -velocity, or the plane's x axis (world)
+    glm::vec3 axisB;           ///< the plane's y axis (world); unused by the other shapes
+    float spin;                ///< radians, counter-clockwise, for a billboard
+    uint32_t shape;            ///< M2ParticleShape
+    uint32_t lit;              ///< 1: lit by the model's light (flag 0x1 clear, not Mod/Mod2x)
+    InteriorLightGPU light;    ///< the model's interior light, as its batches take it
+    LocalLightSet localLights = kNoLocalLights; ///< the model's point lights (local_lights.glsli)
+};
+static_assert(sizeof(M2ParticleQuad) == 31 * sizeof(float), "M2ParticleQuad is read as packed 32-bit values");
 
 /**
  * Instance of an M2 model in the world
@@ -310,6 +328,13 @@ struct M2Instance {
     /// back to the idle sequence, which for a door is the closed pose - so an
     /// open door swung open and shut itself, over and over.
     bool holdAtEnd = false;
+    /// Played when the current one-shot ends: a GameObject's Opened after
+    /// its Open. A negative animSpeed plays the current one backwards, and
+    /// then it ends at its start.
+    std::optional<M2AnimationPlay> nextAnimation;
+    /// Ended by finishInstance: its mesh is not drawn and its emitters stop,
+    /// while the particles it made fly out their lives.
+    bool finishing = false;
 
     /// Lit while the player is pressing on this instance: 0 none, 1 full.
     ///
@@ -324,7 +349,14 @@ struct M2Instance {
 
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
+    /// Per emitter, the most particles it may hold (m2EmitterPool): grown to
+    /// what it has needed, never shrunk, as the client keeps it.
+    std::vector<uint32_t> emitterPools;
     std::vector<M2Particle> particles;
+    /// How far its live particles are from cachedCullCenter, at most, as of
+    /// the last update: with the model's own radius, the sphere they are seen
+    /// in. A mage portal's swirl and a tail of smoke leave the model's bounds.
+    float particleReach = 0.0f;
 
     // Ribbon emitter state, kept the way the original client's CRibbonEmitter
     // keeps it. An edge is two world-space vertices laid across the emitter's
@@ -358,11 +390,9 @@ struct M2Instance {
     // Cached model flags (set at creation to avoid per-frame hash lookups)
     bool cachedHasAnimation = false;
     bool cachedDisableAnimation = false;
-    bool cachedIsSmoke = false;
     bool cachedHasEmitters = false;  // M2ModelGPU::hasEmitters
     bool cachedIsGroundDetail = false;
     bool cachedIsInvisibleTrap = false;
-    bool cachedIsInstancePortal = false;
     bool cachedIsSkyBird = false;
     bool cachedIsLightBeam = false;
     bool cachedIsTransportDoodad = false;
@@ -383,14 +413,7 @@ struct M2Instance {
     // bound radius), populated by recomputeCachedCullFactors(). The per-frame SSBO
     // upload just multiplies by the smoothed render distance and packs the rest.
     float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
-    /// +1 playing forward, -1 playing back. See M2ModelGPU::pingPongAnim.
-    float animDir = 1.0f;
-    /// The reversing clock, for the bones named in pingPongBones. The ordinary
-    /// animTime beside it keeps looping, so the same model can sweep a beam
-    /// back and forth while its propeller turns one way.
-    float animTimeAlt = 0.0f;
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
-    float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
     // Result of the most recent GPU cull dispatch that actually covered this
@@ -399,6 +422,8 @@ struct M2Instance {
     // in-flight dispatch draws immediately instead of waiting ~2 frames for its
     // first cull result.
     uint8_t lastCullVisible = 1;
+    /// The point lights picked for this instance this frame (local_lights.hpp).
+    LocalLightSet frameLocalLights = kNoLocalLights;
     // Consecutive frames this instance has been culled (capped at 3), used for
     // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
     // visible") so a freshly spawned instance skips the HiZ test rather than
@@ -436,25 +461,11 @@ struct M2Instance {
     void updateModelMatrix();
 };
 
-/**
- * A single smoke particle emitted from a chimney or similar M2 model
- */
-struct SmokeParticle {
-    glm::vec3 position;
-    glm::vec3 velocity;
-    float life = 0.0f;
-    float maxLife = 3.0f;
-    float size = 1.0f;
-    float isSpark = 0.0f;  // 0 = smoke, 1 = ember/spark
-    uint32_t instanceId = 0;
-};
 
 // M2 material UBO - matches M2Material in m2.frag.glsl (set 1, binding 2)
 struct M2MaterialUBO {
     int32_t hasTexture;
     int32_t alphaTest;
-    int32_t colorKeyBlack;
-    float colorKeyThreshold;
     int32_t unlit;
     int32_t blendMode;
     int32_t cullBackFaces; // authored single-sided transparent material
@@ -466,15 +477,10 @@ struct M2MaterialUBO {
     float tintR;
     float tintG;
     float tintB;
-    /// Light drawn as geometry - a searchlight cone, a god ray, a shaft
-    /// through a window. The fragment shader fades it out where the surface
-    /// turns away from the eye, so the mesh's silhouette stops being an edge.
-    int32_t volumetricBeam;
-    /// A flame card. Fades out over the top of its own model, so the card's
-    /// upper edge is not where the fire stops.
-    int32_t fireCard;
+    /// M2Combiner: how the stages and the lit colour meet.
+    int32_t combiner;
+    /// The second stage is bound; without it the combiner reads it as white.
     int32_t hasSecondTexture;
-    int32_t secondTexCoordSet;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
@@ -559,7 +565,9 @@ public:
     uint32_t createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
                                        const glm::vec3& position);
 
-    void update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4& viewProjection);
+    /// Animate, emit and cull for this frame's camera: its view (which
+    /// billboard bones turn against) and projection.
+    void update(float deltaTime, const glm::mat4& view, const glm::mat4& projection);
 
     /**
      * Render all visible instances (Vulkan)
@@ -573,7 +581,7 @@ public:
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
 
     /// Draw blended things - transparent batches, glow sprites, particles,
-    /// smoke and ribbons - in the water's pass, after the water, instead of in
+    /// and ribbons - in the water's pass, after the water, instead of in
     /// the scene pass under it. `pass` is that pass, or null while the water is
     /// drawn in the scene pass. Rebuilds pipelines: call between frames, with
     /// nothing in flight using the old ones.
@@ -587,11 +595,13 @@ public:
     /// have run this frame.
     void renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    /** Gather the nearest authored glow cards as inexpensive scene point lights. */
-    uint32_t gatherLocalLights(const glm::vec3& cameraPos,
-                               glm::vec4* outPosRadius,
-                               glm::vec4* outColorIntensity,
-                               uint32_t maxLights) const;
+    /// Append the point lights of the models animated this frame - those in
+    /// view, and those within ten yards of the camera - as the client lights
+    /// a scene with them (local_lights.hpp).
+    void gatherLocalLights(const glm::vec3& cameraPos, std::vector<LocalLight>& out) const;
+    /// The frame's point lights, which every draw picks its nearest from.
+    /// Owned by the Renderer, filled before anything draws.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -630,11 +640,6 @@ public:
     void renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /**
-     * Render smoke particles from chimneys etc.
-     */
-    void renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-
-    /**
      * Render M2 ribbon emitters (spell trails / wing effects)
      */
     void renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
@@ -658,6 +663,10 @@ public:
     /// the moment it opens, not to the moment it is first seen.
     void setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
                                   bool skipToEnd);
+    /// Play an animation as a plan says - forwards or back, held, looped,
+    /// or followed by another. False when the model has no such sequence.
+    bool playInstanceAnimation(uint32_t instanceId, const M2AnimationPlay& now,
+                               const std::optional<M2AnimationPlay>& next = std::nullopt);
 
     /// Light an instance while it is being pressed on. 0 clears it.
     void setInstanceHighlight(uint32_t instanceId, float amount);
@@ -692,12 +701,6 @@ public:
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
                                                 float glX, float glY, float glZ) const;
 
-    /// The id of an instance's only animation, where it has exactly one.
-    ///
-    /// A door with no OPEN or CLOSE sequence of its own carries one animation
-    /// and that animation is the opening. Undercity's lift doors are the case:
-    /// one bone, one sequence, id 0, 3333ms.
-    [[nodiscard]] std::optional<uint32_t> soleSequenceId(uint32_t instanceId) const;
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
@@ -707,6 +710,10 @@ public:
     }
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
+    /// End an effect as the client does (CEffect::Finish, WoW.exe 0x6f87c0):
+    /// its mesh goes at once, its emitters stop, and the particles and ribbons
+    /// it has already made fly out their lives; then it is removed.
+    void finishInstance(uint32_t instanceId);
     /// Mark an instance as a server game object so the adaptive doodad render
     /// distance can't cull it while the server still considers it visible.
     void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
@@ -740,7 +747,9 @@ public:
     /// a floor that should have come from a lift deck and did not left no
     /// trace at all beyond "m2=-99999".
     void debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const;
-    [[nodiscard]] float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
+    /// How far along a ray the first doodad collision triangle lies, up to
+    /// maxDistance: the camera's doodad collision.
+    [[nodiscard]] float raycastCollision(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
 
     void resetQueryStats();
@@ -773,8 +782,7 @@ public:
     /// from that batch's own wrap flags.
     VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
     /// Take what the loaded texture says about itself onto the batch.
-    void applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
-                                const std::string& textureKeyLower) const;
+    void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const;
     /// Point a batch's descriptor set at its texture.
     void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
     /// Ask again for textures that failed to load, and show the batches that
@@ -909,7 +917,7 @@ private:
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
-    /// Everything drawn blended: the transparent batches, particles, smoke and
+    /// Everything drawn blended: the transparent batches, particles and
     /// ribbons. They exist twice. One set is for the scene pass. The other is
     /// for the pass the water is drawn in, when the water leaves the scene
     /// pass: blended things drawn before the water had the water's sheet
@@ -921,9 +929,9 @@ private:
         VkPipeline additive = VK_NULL_HANDLE;         // blend mode 4 and up past 6
         VkPipeline modulate = VK_NULL_HANDLE;         // blend mode 5
         VkPipeline modulate2x = VK_NULL_HANDLE;       // blend mode 6
-        VkPipeline particle = VK_NULL_HANDLE;         // M2 emitter particles
-        VkPipeline particleAdditive = VK_NULL_HANDLE; // additive particles, glow sprites
-        VkPipeline smoke = VK_NULL_HANDLE;            // chimney smoke
+        /// M2 emitter particles, one per blend pipeline (m2BlendPipeline of
+        /// the emitter's blend mode). AlphaAdd also draws the glow sprites.
+        std::array<VkPipeline, kM2BlendPipelineCount> particle{};
         VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
         VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
     };
@@ -944,7 +952,6 @@ private:
     /// Pass 2: the transparent batches and the glow sprites, after the opaque
     /// pass has culled, sorted and gathered them.
     void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-    float lavaAnimSeconds_ = 0.0f;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -959,7 +966,6 @@ private:
 
     // Particle pipelines
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
-    VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
 
     // Ribbon pipelines (additive + alpha-blend)
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
@@ -1016,16 +1022,17 @@ private:
         int32_t boneCount;         //  4 bytes @ offset 140 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 144 - pressed-on lift
         int32_t flags = {};        //  4 bytes @ offset 148 - bit 0: afloat (bobs on the water)
-        float tintScale = 1.0f;    //  4 bytes @ offset 152 - a fire's flicker, per instance
+        float pad1 = 0.0f;         //  4 bytes @ offset 152
         float pad0 = 0.0f;         //  4 bytes @ offset 156
         InteriorLightGPU interiorLight; // 32 bytes @ offset 160 - M2Instance::interiorLight
+        LocalLightSet localLights = kNoLocalLights; // 16 bytes @ offset 192 - local_lights.glsli
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
     // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
     // grass was already losing whole models for a frame at a time - which reads
     // as clutter blinking rather than as anything being over budget. Two
-    // buffers of 192 bytes a slot, so this costs 12 MB.
+    // buffers of 208 bytes a slot, so this costs 13 MB.
     static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
@@ -1041,7 +1048,7 @@ private:
     struct CullInstanceGPU {        // matches CullInstance in m2_cull.comp.glsl (32 bytes, std430)
         glm::vec4 sphere;           // xyz = world position, w = padded radius
         float effectiveMaxDistSq;   // adaptive distance cull threshold
-        uint32_t flags;             // bit 0 = valid, bit 1 = smoke, bit 2 = invisibleTrap
+        uint32_t flags;             // bit 0 = valid, bit 1 unused, bit 2 = invisibleTrap, bit 3 = previously visible
         float _pad[2] = {};
     };
     struct CullUniformsGPU {        // matches CullUniforms in m2_cull_hiz.comp.glsl (std140)
@@ -1075,6 +1082,7 @@ private:
 
     // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
     HiZSystem* hizSystem_ = nullptr;
+    const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
     // RtScene instances this renderer owns, and per RtScene instance id the
@@ -1110,22 +1118,27 @@ private:
     // edges across its ten trails - 1300 vertices - when they run at the
     // rate and lifetime it asks for.
     static constexpr size_t MAX_RIBBON_VERTS = 65536;
-    ::VkBuffer ribbonVB_ = VK_NULL_HANDLE;
-    VmaAllocation ribbonVBAlloc_ = VK_NULL_HANDLE;
-    void* ribbonVBMapped_ = nullptr;
 
-    // Dynamic particle buffers
-    ::VkBuffer smokeVB_ = VK_NULL_HANDLE;
-    VmaAllocation smokeVBAlloc_ = VK_NULL_HANDLE;
-    void* smokeVBMapped_ = nullptr;
-    ::VkBuffer m2ParticleVB_ = VK_NULL_HANDLE;
-    VmaAllocation m2ParticleVBAlloc_ = VK_NULL_HANDLE;
-    void* m2ParticleVBMapped_ = nullptr;
-    // Dedicated glow sprite vertex buffer (separate from particle VB to avoid data race)
+    /// A vertex buffer the CPU fills every frame, one per frame in flight.
+    /// There was one of each: while the GPU still drew the last frame's
+    /// particles, this frame's were written over them, so particles showed a
+    /// frame ahead of where they were, flashed white or vanished for a frame
+    /// whenever the two overlapped.
+    struct FrameVertexBuffer {
+        std::array<::VkBuffer, MAX_FRAMES_IN_FLIGHT> buffer{};
+        std::array<VmaAllocation, MAX_FRAMES_IN_FLIGHT> alloc{};
+        std::array<void*, MAX_FRAMES_IN_FLIGHT> mapped{};
+    };
+    bool createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize size, const char* what);
+    void destroyFrameVertexBuffer(FrameVertexBuffer& vb);
+    /// This frame's copy: its buffer and where it is mapped.
+    ::VkBuffer frameBuffer(const FrameVertexBuffer& vb) const;
+    void* frameMapped(const FrameVertexBuffer& vb) const;
+
+    FrameVertexBuffer ribbonVB_;
+    FrameVertexBuffer m2ParticleVB_;
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
-    ::VkBuffer glowVB_ = VK_NULL_HANDLE;
-    VmaAllocation glowVBAlloc_ = VK_NULL_HANDLE;
-    void* glowVBMapped_ = nullptr;
+    FrameVertexBuffer glowVB_;
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
     // Grace period for model cleanup: track when a model first became instanceless.
@@ -1199,7 +1212,6 @@ private:
     struct TextureProperties {
         bool hasAlpha = false;
         bool alphaIsSilhouette = false;
-        bool colorKeyBlack = false;
     };
     std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
     size_t textureCacheBytes_ = 0;
@@ -1232,7 +1244,7 @@ private:
     CollisionFocus collisionFocus;
 
     void rebuildSpatialIndex();
-    /// The smoke, portal, animated, particle and light index lists, from the
+    /// The animated, particle and light index lists, from the
     /// instances as they now stand - after a removal has moved some of them.
     void rebuildInstanceIndexLists();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
@@ -1320,9 +1332,11 @@ private:
         uint8_t blendType;
         uint16_t tilesX;
         uint16_t tilesY;
+        bool fogged;
         bool operator==(const ParticleGroupKey& other) const {
             return texture == other.texture &&
                    blendType == other.blendType &&
+                   fogged == other.fogged &&
                    tilesX == other.tilesX &&
                    tilesY == other.tilesY;
         }
@@ -1331,7 +1345,7 @@ private:
         size_t operator()(const ParticleGroupKey& key) const {
             size_t h1 = std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(key.texture));
             size_t h2 = std::hash<uint32_t>{}((static_cast<uint32_t>(key.tilesX) << 16) | key.tilesY);
-            size_t h3 = std::hash<uint8_t>{}(key.blendType);
+            size_t h3 = std::hash<uint32_t>{}(key.blendType | (key.fogged ? 0x100u : 0u));
             return h1 ^ (h2 * 0x9e3779b9u) ^ (h3 * 0x85ebca6bu);
         }
     };
@@ -1340,6 +1354,7 @@ private:
         uint8_t blendType;
         uint16_t tilesX;
         uint16_t tilesY;
+        bool fogged = true;
         VkDescriptorSet preAllocSet = VK_NULL_HANDLE;
     };
     std::unordered_map<ParticleGroupKey, ParticleGroup, ParticleGroupKeyHash> particleGroups_;
@@ -1361,9 +1376,12 @@ private:
         uint32_t count = 0;
     };
     std::vector<ParticleRun> particleRuns_;
-    /// Vertices the particle buffer holds. Not MAX_M2_PARTICLES, which is the
-    /// cap on one instance's particles: this has to hold a whole frame's.
-    static constexpr size_t MAX_M2_PARTICLE_VERTS = 32768;
+    /// Quads the particle buffer holds: a whole frame's, a particle that is
+    /// both head and tail taking two. The client has no frame budget at all -
+    /// each emitter draws at most m2EmitterDrawCap - so this is sized for the
+    /// busiest place in view rather than as a limit; filling it is reported.
+    /// 32768 filled in Dalaran before particles were culled to the view.
+    static constexpr size_t MAX_M2_PARTICLE_QUADS = 131072;
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame
@@ -1376,17 +1394,11 @@ private:
     std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
     std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
 
-    // Smoke particle system
-    std::vector<SmokeParticle> smokeParticles;
-    std::vector<size_t> smokeInstanceIndices_;  // Indices into instances[] for smoke emitters
-    std::vector<size_t> portalInstanceIndices_; // Indices into instances[] for spinning portals
-    static constexpr int MAX_SMOKE_PARTICLES = 1000;
-    float smokeEmitAccum = 0.0f;
-    std::mt19937 smokeRng{42};
-
-    // M2 particle emitter system
-    static constexpr size_t MAX_M2_PARTICLES = 4000;
+    // M2 particle emitter system. Each emitter holds as many particles as its
+    // pool allows (m2EmitterPool), with no cap per instance.
     std::mt19937 particleRng_{123};
+    /// Particles drawn per emitter of the instance being written; scratch.
+    std::vector<uint32_t> drawnPerEmitter_;
     bool skyMode_ = false;
     float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
@@ -1406,6 +1418,10 @@ private:
 
     // Cached camera state from update() for frustum-culling bones
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
+    glm::mat4 cachedView_ = glm::mat4(1.0f);
+    /// The camera update() last saw, for the particle draw to cull by: only
+    /// what is in view goes into the particle buffer.
+    glm::mat4 cachedViewProjection_{1.0f};
     float cachedMaxRenderDistSq_ = 0.0f;
     float smoothedRenderDist_ = 1000.0f;  // Smoothed render distance to prevent flickering
     /// The distance as asked for, kept so the scale can be rebuilt when the
@@ -1432,8 +1448,20 @@ private:
                       float globalTime, int seqIdx,
                       const std::vector<uint32_t>& globalSeqDurations);
     float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
+    glm::vec2 interpFBlockVec2(const pipeline::M2FBlock& fb, float lifeRatio);
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
+    float interpFBlockCell(const pipeline::M2FBlock& fb, float lifeRatio, uint32_t cellCount);
     void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
+    /// A one-shot ended: start the animation queued after it.
+    void advanceToNextAnimation(M2Instance& inst);
+    /// Effects ended with finishInstance, removed once nothing they made is
+    /// left, or at the deadline their longest particle life sets.
+    struct FinishingInstance {
+        uint32_t instanceId = 0;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::vector<FinishingInstance> finishingInstances_;
+    void reapFinishedInstances();
     void updateParticles(M2Instance& inst, float dt);
     /// Ages the instance's ribbon edges and, when `emit`, lays new ones.
     void updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt, bool emit = true);

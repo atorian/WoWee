@@ -858,31 +858,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             if (mb.hasTexture) anyTextured = true;
             createMergedBatchMaterial(modelData, groupRes, mb);
 
-            if (mb.isLava) {
-                for (const auto& draw : mb.draws) {
-                    glm::vec3 lavaMin(std::numeric_limits<float>::max());
-                    glm::vec3 lavaMax(std::numeric_limits<float>::lowest());
-                    bool foundVertex = false;
-                    const uint32_t indexEnd = std::min<uint32_t>(
-                        draw.firstIndex + draw.indexCount,
-                        static_cast<uint32_t>(groupRes.collisionIndices.size()));
-                    for (uint32_t ii = draw.firstIndex; ii < indexEnd; ++ii) {
-                        const uint16_t vertexIndex = groupRes.collisionIndices[ii];
-                        if (vertexIndex >= groupRes.collisionVertices.size()) continue;
-                        const glm::vec3& vertex = groupRes.collisionVertices[vertexIndex];
-                        lavaMin = glm::min(lavaMin, vertex);
-                        lavaMax = glm::max(lavaMax, vertex);
-                        foundVertex = true;
-                    }
-                    if (foundVertex) {
-                        const glm::vec3 center = (lavaMin + lavaMax) * 0.5f;
-                        const float radius = std::clamp(
-                            glm::length(lavaMax - lavaMin) * 0.35f, 8.0f, 28.0f);
-                        groupRes.lavaLights.emplace_back(center, radius);
-                    }
-                }
-            }
-
             if (mb.pendingTextureIndex != UINT32_MAX) {
                 modelData.pendingTextureBatches.emplace_back(
                     static_cast<uint32_t>(mergeGroupIndex - 1),
@@ -1807,6 +1782,19 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+            // The lights nearest the group's bounding sphere
+            // (local_lights.hpp).
+            if (frameLights_ && !frameLights_->empty()) {
+                const glm::vec3 center = glm::vec3(instance.modelMatrix * glm::vec4(
+                    (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f));
+                const float radius = 0.5f * glm::length(group.boundingBoxMax - group.boundingBoxMin) *
+                                     instance.scale;
+                const LocalLightSet groupLights = pickLocalLights(*frameLights_, center, radius);
+                vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                                   offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet),
+                                   &groupLights);
+            }
 
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
@@ -4304,46 +4292,6 @@ bool WMORenderer::withinWorldBounds(const WMOInstance& instance,
            glY >= instance.worldBoundsMin.y && glY <= instance.worldBoundsMax.y &&
            glZ >= instance.worldBoundsMin.z - zMarginDown &&
            glZ <= instance.worldBoundsMax.z + zMarginUp;
-}
-
-uint32_t WMORenderer::gatherLavaLights(const glm::vec3& cameraPos,
-                                       glm::vec4* outPosRadius,
-                                       glm::vec4* outColorIntensity,
-                                       uint32_t maxLights) const {
-    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
-
-    struct Candidate {
-        float distSq;
-        glm::vec4 posRadius;
-    };
-    std::vector<Candidate> candidates;
-    for (const auto& instance : instances) {
-        auto modelIt = loadedModels.find(instance.modelId);
-        if (modelIt == loadedModels.end()) continue;
-        for (const auto& group : modelIt->second.groups) {
-            for (const glm::vec4& localLight : group.lavaLights) {
-                const glm::vec3 worldPos = glm::vec3(
-                    instance.modelMatrix * glm::vec4(glm::vec3(localLight), 1.0f));
-                const glm::vec3 delta = worldPos - cameraPos;
-                const float distSq = glm::dot(delta, delta);
-                if (distSq > 300.0f * 300.0f) continue;
-                const float worldRadius = std::clamp(localLight.w * instance.scale,
-                                                     8.0f, 35.0f);
-                candidates.push_back({.distSq = distSq, .posRadius = glm::vec4(worldPos, worldRadius)});
-            }
-        }
-    }
-
-    const uint32_t count = std::min<uint32_t>(maxLights,
-        static_cast<uint32_t>(candidates.size()));
-    if (count == 0) return 0;
-    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
-        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
-    for (uint32_t i = 0; i < count; ++i) {
-        outPosRadius[i] = candidates[i].posRadius;
-        outColorIntensity[i] = glm::vec4(1.0f, 0.28f, 0.035f, 1.75f);
-    }
-    return count;
 }
 
 /// Whether a point is inside any of a WMO's groups.

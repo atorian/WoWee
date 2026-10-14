@@ -1,9 +1,11 @@
 #pragma once
 
 #include "pipeline/blp_loader.hpp"
+#include "rendering/spell_visual_kit.hpp"
 
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -84,14 +86,28 @@ public:
     void syncStateVisuals(const std::vector<UnitStateVisuals>& units);
 
 private:
-    // Spell visual effects - transient M2 instances spawned by SMSG_PLAY_SPELL_VISUAL/IMPACT
-    struct SpellVisualInstance {
-        uint32_t instanceId;
-        float elapsed;
-        float duration;  // per-instance lifetime in seconds (from M2 anim or default)
-        bool isPrecast;  // true for precast effects (removed on cancel/interrupt)
-        uint32_t attachmentId;  // character attachment point to track (0=none/static)
-        uint32_t attachInstanceId;  // CharacterRenderer instance the attachment belongs to
+    enum class KitKind : uint8_t { Precast, Cast, Impact };
+    /// Where a kit is played: on a unit (its CharacterRenderer instance), or
+    /// at a point for the World column and for a unit not drawn as a character.
+    struct KitPlacement {
+        glm::vec3 worldPosition{0.0f};
+        uint32_t unitInstanceId = 0;
+    };
+    /// One effect model of a kit, playing.
+    struct ActiveEffect {
+        uint32_t instanceId = 0;
+        uint32_t kitId = 0;
+        size_t effectIndex = 0;   // into kits_[kitId].effects
+        KitPlacement at;
+        glm::mat4 lastTransform{1.0f};
+        float elapsed = 0.0f;
+        float lifetime = 0.0f;    // seconds until it finishes
+        bool isPrecast = false;   // ended early when the cast is cancelled
+    };
+    /// A one-shot whose model has no Stand to speak of still shows this long.
+    static constexpr float kOneShotFallbackSeconds = 1.0f;
+    struct VisualKits {
+        uint32_t precast = 0, cast = 0, impact = 0;
     };
 
     struct PhysicalProjectile {
@@ -124,15 +140,24 @@ private:
         uint32_t modelId = 0;
         std::future<PreparedModel> future;
     };
+    /// One kit effect waiting for its model to load.
     struct DeferredPlay {
-        enum class Kind { Precast, Cast, Impact } kind = Kind::Cast;
-        uint32_t visualId = 0;
-        glm::vec3 position{0.0f};
+        KitKind kind = KitKind::Cast;
+        uint32_t kitId = 0;
+        size_t effectIndex = 0;
+        KitPlacement at;
         uint32_t castTimeMs = 0;
-        uint32_t attachInstanceId = 0;
         uint32_t modelId = 0;
         float age = 0.0f;
     };
+    uint32_t kitFor(uint32_t visualId, KitKind kind);
+    void playKit(uint32_t kitId, KitKind kind, const KitPlacement& at, uint32_t castTimeMs);
+    void playKitEffect(uint32_t kitId, size_t effectIndex, KitKind kind, const KitPlacement& at,
+                       uint32_t castTimeMs);
+    /// Where a kit effect is drawn now: its attachment's whole matrix on the
+    /// unit (or the unit's own where its model lacks the point) at the
+    /// effect's scale, or its point in the world. False when the unit is gone.
+    bool kitEffectTransform(const KitPlacement& at, const SpellKitEffect& effect, glm::mat4& out) const;
     /// The model id for this path, assigned on first use; 0 when the pool is
     /// used up.
     uint32_t modelIdFor(const std::string& path);
@@ -151,45 +176,34 @@ private:
     Renderer* renderer_ = nullptr;
     pipeline::AssetManager* cachedAssetManager_ = nullptr;
 
-    std::vector<SpellVisualInstance> activeSpellVisuals_;
+    std::vector<ActiveEffect> activeEffects_;
     std::vector<PhysicalProjectile> physicalProjectiles_;
-    std::unordered_map<uint32_t, std::string> spellVisualPrecastPath_; // visualId → precast M2 path
-    std::unordered_map<uint32_t, std::string> spellVisualCastPath_;   // visualId → cast M2 path
-    std::unordered_map<uint32_t, std::string> spellVisualImpactPath_; // visualId → impact M2 path
+    std::unordered_map<uint32_t, SpellVisualKit> kits_;       // kitId → the effects it plays
+    std::unordered_map<uint32_t, VisualKits> visualKits_;     // visualId → its three kits
     std::unordered_map<std::string, uint32_t> spellVisualModelIds_;   // M2 path → M2Renderer modelId
     std::unordered_set<uint32_t> spellVisualFailedModels_;           // modelIds that failed to load (negative cache)
     uint32_t nextSpellVisualModelId_ = 999000; // Reserved range 999000-999799
     uint32_t nextProjectileModelId_ = 998000;  // Reserved range 998000-998999
     std::unordered_map<std::string, uint32_t> projectileModelIds_;
     bool spellVisualDbcLoaded_ = false;
-    static constexpr float SPELL_VISUAL_MAX_DURATION = 5.0f;
-    static constexpr float SPELL_VISUAL_DEFAULT_DURATION = 2.0f;
-
-    // Determine character attachment point from model path keywords
-    static uint32_t classifyAttachmentId(const std::string& modelPath);
-
-    // Apply height offset based on model path keywords (Hand → hands, Chest → chest, Base → ground)
-    static glm::vec3 applyEffectHeightOffset(const glm::vec3& basePos, const std::string& modelPath);
 
     // ---- Aura state visuals (spell_visual_state.cpp) ----
-    /// Where on the unit a kit's effect hangs: SpellVisualKit's effect columns.
-    enum class KitSlot : uint8_t { Head, Chest, Base, LeftHand, RightHand, Breath, Special };
     struct StateKit {
-        struct Effect {
-            std::string path;
-            KitSlot slot = KitSlot::Base;
-            float scale = 1.0f;  // SpellVisualEffectName.Scale
-        };
-        std::vector<Effect> effects;
+        std::vector<SpellKitEffect> effects;
         glm::vec3 tint{1.0f};    // CharProc 1 (Color); white when it has none
         float alpha = 1.0f;      // CharProc 14 (UpdateAlphaEffectAlpha)
+        /// Kit flag 0x20: its models loop their Stand. Otherwise they play
+        /// Stand once and then their Hold, over and over, if they have one.
+        bool loopStand = false;
     };
     struct StateEffect {
         uint32_t visualId = 0;
         size_t effectIndex = 0;     // into StateKit::effects
         uint32_t modelId = 0;
         uint32_t instanceId = 0;    // M2 instance; 0 while the model loads
-        glm::vec3 lastPosition{0.0f};
+        glm::vec3 worldPosition{0.0f};  // where a World-column effect stays
+        glm::mat4 lastTransform{1.0f};
+        float lastAlpha = 1.0f;     // the unit's own alpha, which the effect shares
     };
     struct UnitState {
         uint32_t instanceId = 0;
@@ -204,7 +218,6 @@ private:
     void updateStateVisuals(float deltaTime);
     /// Takes every state visual down and gives the bodies their own look back.
     void resetStateVisuals();
-    bool stateEffectPosition(uint32_t charInstanceId, KitSlot slot, glm::vec3& out);
     std::unordered_map<uint32_t, StateKit> stateKits_;  // visualId -> its StateKit
     bool stateKitsLoaded_ = false;
     std::unordered_map<uint64_t, UnitState> unitStates_;  // by unit guid

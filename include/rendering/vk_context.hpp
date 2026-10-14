@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rendering/frames_in_flight.hpp"
 #include "rendering/vk_utils.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -15,8 +16,6 @@
 
 namespace wowee {
 namespace rendering {
-
-static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 struct FrameData {
     VkCommandPool commandPool = VK_NULL_HANDLE;

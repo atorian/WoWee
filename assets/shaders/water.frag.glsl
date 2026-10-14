@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     mat4 rtViewProj;

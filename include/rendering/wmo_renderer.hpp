@@ -2,6 +2,7 @@
 
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
@@ -296,6 +297,8 @@ public:
      * Enable/disable portal-based visibility culling
      */
     void setPortalCulling(bool enabled) { portalCulling = enabled; }
+    /// The frame's point lights, which every group picks its nearest from.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
     bool isPortalCullingEnabled() const { return portalCulling; }
 
     /**
@@ -411,12 +414,6 @@ public:
     /// interior group does.
     [[nodiscard]] std::optional<InteriorLight> interiorLightAt(float glX, float glY, float glZ) const;
 
-    /** Gather local orange point lights derived from visible lava materials. */
-    uint32_t gatherLavaLights(const glm::vec3& cameraPos,
-                              glm::vec4* outPosRadius,
-                              glm::vec4* outColorIntensity,
-                              uint32_t maxLights) const;
-
     /**
      * Raycast against WMO bounding boxes for camera collision
      * @param origin Ray origin (e.g., character head position)
@@ -471,6 +468,7 @@ public:
     void setDeferNormalMaps(bool defer) { deferNormalMaps_ = defer; }
 
 private:
+    const std::vector<LocalLight>* frameLights_ = nullptr;
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     struct WMOMaterialUBO {
         int32_t hasTexture;        // 0
@@ -558,8 +556,6 @@ private:
             std::vector<DrawRange> draws;
         };
         std::vector<MergedBatch> mergedBatches;
-        // Local-space center/radius for each authored lava draw range.
-        std::vector<glm::vec4> lavaLights;
 
         // Collision geometry (positions only, for floor raycasting)
         std::vector<glm::vec3> collisionVertices;

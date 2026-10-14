@@ -44,15 +44,6 @@ bool assetNameHasToken(const std::string& path, std::string_view token);
 /// `firebeam` still matches `fire`.
 bool assetNameHasWordToken(const std::string& path, std::string_view token);
 
-/// True when the asset's file name names something that burns, and whose dark
-/// pixels are therefore background rather than picture.
-///
-/// One list, because there were two: eleven tokens in M2Renderer::loadTexture
-/// and four in CharacterRenderer::loadTexture, both spelled as a search of the
-/// whole path. Which textures got a colour key depended on which renderer had
-/// asked for them.
-bool assetNameLooksLikeFlame(const std::string& path);
-
 /// Ambient sound emitter type for doodad models (fire, water, etc.).
 enum class AmbientEmitterType : uint8_t {
     None           = 0,
@@ -69,31 +60,17 @@ enum class AmbientEmitterType : uint8_t {
  * Pure data - no Vulkan, GPU, or asset-manager dependencies.
  */
 struct M2ClassificationResult {
-    // --- Collision shape selectors ---
-    bool collisionNoBlock            = false; ///< Foliage/soft-trees/rugs: no blocking
-    bool collisionBridge             = false; ///< Walk-on-top bridge/plank/walkway
-    bool collisionPlanter            = false; ///< Low stepped planter/curb
-    bool collisionSteppedFountain    = false; ///< Stepped fountain base
-    bool collisionSteppedLowPlatform = false; ///< Low stepped platform (curb/planter/bridge)
-    bool collisionStatue             = false; ///< Statue/monument/sculpture
-    bool collisionSmallSolidProp     = false; ///< Blockable solid prop (crate/chest/barrel)
-    bool collisionNarrowVerticalProp = false; ///< Narrow tall prop (lamp/post/pole)
-    bool collisionTreeTrunk          = false; ///< Tree trunk cylinder
-
     // --- Rendering / effect classification ---
     bool isFoliageLike      = false; ///< Foliage or tree (wind sway, disabled animation)
     bool isSmallFoliage     = false; ///< Small bush/grass/plant (skip during taxi/flight)
     bool isSpellEffect      = false; ///< Spell effect / particle-dominated visual
-    bool isLavaModel        = false; ///< Lava surface (UV scroll animation)
-    bool isInstancePortal   = false; ///< Instance portal (additive, spin, no collision)
+    bool isLavaModel        = false; ///< Lava surface (throws a local light)
     bool isWaterVegetation  = false; ///< Aquatic vegetation (cattails, kelp, reeds, etc.)
     bool isFireflyEffect    = false; ///< Ambient creature (exempt from particle dampeners)
     bool isElvenLike        = false; ///< Night elf / Blood elf themed model
     bool isLanternLike      = false; ///< Lantern/lamp/light model
-    bool isKoboldFlame      = false; ///< Kobold candle/torch model
     bool isGroundDetail     = false; ///< Ground-clutter detail doodad (always non-blocking)
     bool isInvisibleTrap    = false; ///< Event-object invisible trap (no render, no collision)
-    bool isSmoke            = false; ///< Smoke model (UV scroll animation)
     bool isWaterfall        = false; ///< Waterfall model (ambient sound + splash particles)
     bool isBrazierOrFire    = false; ///< Brazier / campfire / bonfire model
     bool isGroundFire       = false; ///< Ground fire whose halo follows its lowest flame emitter
@@ -101,11 +78,6 @@ struct M2ClassificationResult {
     bool isForge            = false; ///< Smithy forge - a contained fire that lights its surroundings
     bool isSkyBird          = false; ///< Flying bird/bat doodad (hide until animation range)
     bool isLightBeam        = false; ///< Distant rotating lighthouse/light-ray beam
-    /// A cone or shaft of light drawn as geometry: a searchlight, a god ray,
-    /// a shaft through a window. Its silhouette is a polygon edge and reads
-    /// as one unless it is faded out where the surface turns away from the
-    /// eye, which is where a real beam thins to nothing.
-    bool isVolumetricBeam   = false;
     bool isTransportDoodad  = false; ///< Ship sail/paddle child whose motion must remain visible
     bool isBoat             = false; ///< A small boat, which rides the water if it is left on some
 
@@ -175,19 +147,6 @@ M2BatchTexClassification classifyBatchTexture(const std::string& lowerTexKey);
 // ---------------------------------------------------------------------------
 // Lightweight ambient emitter classification (name-only, no geometry needed)
 // ---------------------------------------------------------------------------
-
-/// Whether a creature model is one of the deliberately invisible helpers that
-/// scripts hang their effects on - triggers, bunnies, and the plain measuring
-/// boxes under World\\Scale.
-///
-/// Only invisiblestalker was recognised, and the list was written out twice in
-/// the spawner, so invisibleman and the scale boxes rendered as solid objects
-/// standing in the world. UNIT_FLAG_NOT_SELECTABLE covers the same creatures
-/// from the other side, for their nameplates and for clicking; this is what
-/// keeps the model from being drawn in the first place.
-///
-/// @param lowerPath Lowercased, backslash-normalised model path
-bool isHelperCreatureModel(const std::string& lowerPath);
 
 /**
  * Classify an M2 model path for ambient sound emitter type.

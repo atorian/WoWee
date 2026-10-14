@@ -13,8 +13,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
-    vec4 localLightPosRadius[64];
-    vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     mat4 rtViewProj;
@@ -31,7 +29,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "rt_lighting.glsli"
 #include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
-#include "wmo_lighting.glsli"
 
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
@@ -70,6 +67,7 @@ layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec4 VertColor;
 layout(location = 4) in vec3 Tangent;
 layout(location = 5) in vec3 Bitangent;
+layout(location = 6) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
 
@@ -82,36 +80,8 @@ float shadowTexel() {
     return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
 }
 
-float sampleShadowPCF(sampler2DShadow smap, vec3 coords) {
-    float shadow = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            shadow += texture(smap, vec3(coords.xy + vec2(x, y) * shadowTexel(), coords.z));
-        }
-    }
-    return shadow / 9.0;
-}
-
-vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
-    vec3 sum = vec3(0.0);
-    for (int i = 0; i < min(localLightMeta.x, 64); ++i) {
-        vec3 toLight = localLightPosRadius[i].xyz - pos;
-        float radius = localLightPosRadius[i].w;
-        // Rejected on the squared distance, before the square root and the
-        // divide: most of the sixty-four are out of range of any one pixel,
-        // and this is what each of them costs.
-        float distSq = dot(toLight, toLight);
-        if (radius <= 0.0 || distSq >= radius * radius) continue;
-        float dist = sqrt(distSq);
-        vec3 lightVector = toLight / max(dist, 0.001);
-        float attenuation = 1.0 - dist / radius;
-        attenuation *= attenuation;
-        float wrappedDiffuse = 0.22 + 0.78 * max(dot(normal, lightVector), 0.0);
-        sum += albedo * localLightColorIntensity[i].rgb *
-               (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
-    }
-    return sum;
-}
+#include "local_lights.glsli"
+#include "shadow_receiver.glsli"
 
 // LOD factor from screen-space UV derivatives
 float computeLodFactor() {
@@ -283,9 +253,11 @@ void main() {
 
     // Interior MOCV already contains the building's baked light and shade.
     // Its roof blocks the outdoor sun; multiplying the baked term by that
-    // shadow darkened the entire room a second time.
+    // shadow darkened the entire room a second time. A room still takes the
+    // shadows of the units in it.
+    const bool sunReaches = isInterior == 0 || receivesExteriorShadows != 0;
     float shadow = 1.0;
-    if ((isInterior == 0 || receivesExteriorShadows != 0) && shadowParams.x > 0.5) {
+    if (sunReaches && shadowParams.x > 0.5) {
         vec3 ldir = normalize(-lightDir.xyz);
         // Texture relief changes lighting, not the caster geometry. Offsetting
         // along its perturbed normal can push the lookup into the surface.
@@ -295,19 +267,19 @@ void main() {
         vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
         vec3 proj = lsPos.xyz / lsPos.w;
         proj.xy = proj.xy * 0.5 + 0.5;
+        vec2 receiverSlope = shadowReceiverSlope(proj);
         if (proj.x >= 0.0 && proj.x <= 1.0 &&
             proj.y >= 0.0 && proj.y <= 1.0 &&
             proj.z >= 0.0 && proj.z <= 1.0) {
-            float bias = max(0.0005 * (1.0 - abs(dot(shadowNormal, ldir))), 0.00005);
-            shadow = sampleShadowPCF(uShadowMap, vec3(proj.xy, proj.z - bias));
+            shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+            shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
         }
-        shadow = mix(1.0, shadow, shadowParams.y);
     }
     RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
-    vec2 localShadow = localShadowAt(FragPos);
-    if (isInterior == 0 || receivesExteriorShadows != 0)
-        shadow = min(shadow, localShadow.x);
+    float unitShadow = localShadowAt(FragPos);
+    if (isInterior != 0) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
+    shadow = min(shadow, unitShadow);
 
     if (emissive == 1) {
         // Authored luminous glass must remain bright in direct sun and shadow.
@@ -336,7 +308,7 @@ void main() {
         // seeping through it as if a fire burned in the tower.
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
-        vec3 lit = texColor.rgb * (ambientColor.rgb + lightColor.rgb * diff * shadow);
+        vec3 lit = texColor.rgb * (ambientColor.rgb + lightColor.rgb * diff) * shadowLightFactor(shadow);
 
         // Three detuned sines: a slow breathing sway, a quicker wobble, and a
         // faint fast jitter. Their periods share no common multiple over any
@@ -379,14 +351,11 @@ void main() {
         vec3 interiorLight = hasVertexColors != 0
             ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
             : vec3(1.0);  // Neutral modulation when no baked colors exist.
-        result = texColor.rgb * interiorLight;
-        if (receivesExteriorShadows != 0) {
-            result = wmoBakedExteriorShadow(result, rtAmbient(rt, ambientColor.rgb),
-                lightColor.rgb, dot(norm, normalize(-lightDir.xyz)), shadow);
-        }
+        // The baked light is multiplied by the shadow, as the client does it.
+        result = texColor.rgb * interiorLight * shadowLightFactor(shadow);
     } else if (unlit != 0) {
         // Outdoor unlit surface - still receives directional shadows
-        result = texColor.rgb * shadow;
+        result = texColor.rgb * shadowLightFactor(shadow);
     } else {
         vec3 ldir = normalize(-lightDir.xyz);
         float diff = max(dot(norm, ldir), 0.0);
@@ -396,7 +365,7 @@ void main() {
         float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
 
         result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
-               + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb);
+               + diff * lightColor.rgb * texColor.rgb;
 
         // An exterior group's vertex colour is light baked into it - a lamp's
         // pool on a wall - and it adds to the sun, as it does in the client.
@@ -410,13 +379,13 @@ void main() {
         // At half: a handful of Icecrown exteriors ship them pure white, and
         // added at full those would double in brightness.
         if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
+        // All of it darkened alike by a shadow; the highlight is the sun's
+        // own and goes with it.
+        result = result * shadowLightFactor(shadow) + shadow * spec * lightColor.rgb;
     }
 
-    if (isWindow == 0 && isLava == 0 && emissive == 0)
-        result *= localShadow.y;
-
     if (isWindow == 0 && isLava == 0)
-        result += localLightContribution(FragPos, norm, texColor.rgb);
+        result += localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
 
     float dist = length(viewPos.xyz - FragPos);
 

@@ -18,9 +18,9 @@
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/logger.hpp"
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
-#include <span>
 #include <unordered_set>
 
 namespace wowee {
@@ -66,64 +66,30 @@ void SpellVisualSystem::loadStateKits() {
 
     auto svDbc  = cachedAssetManager_->loadDBC("SpellVisual.dbc");
     auto kitDbc = cachedAssetManager_->loadDBC("SpellVisualKit.dbc");
-    auto fxDbc  = cachedAssetManager_->loadDBC("SpellVisualEffectName.dbc");
-    if (!svDbc || !svDbc->isLoaded() || !kitDbc || !kitDbc->isLoaded() ||
-        !fxDbc || !fxDbc->isLoaded()) {
+    if (!svDbc || !svDbc->isLoaded() || !kitDbc || !kitDbc->isLoaded()) {
         LOG_WARNING("SpellVisual: state kits not loaded - a spell visual DBC is missing");
         return;
     }
-
-    // SpellVisualEffectName: id -> model and its scale.
-    struct EffectName { std::string path; float scale = 1.0f; };
-    std::unordered_map<uint32_t, EffectName> effectNames;
-    {
-        const uint32_t pathField  = fxLayout->tryField("FilePath");
-        const uint32_t scaleField = fxLayout->tryField("Scale");
-        const uint32_t fc = fxDbc->getFieldCount();
-        if (pathField >= fc) return;
-        for (uint32_t i = 0; i < fxDbc->getRecordCount(); ++i) {
-            const uint32_t id = fxDbc->getUInt32(i, 0);
-            std::string path = fxDbc->getString(i, pathField);
-            if (!id || path.empty()) continue;
-            float scale = scaleField < fc ? fxDbc->getFloat(i, scaleField) : 1.0f;
-            if (!std::isfinite(scale) || scale <= 0.0f) scale = 1.0f;
-            effectNames[id] = {.path = pipeline::modelPathToM2(path),
-                               .scale = std::clamp(scale, 0.05f, 20.0f)};
-        }
-    }
+    // The kits' effect models, read once for every kind of kit.
+    if (!spellVisualDbcLoaded_) loadSpellVisualDbc();
 
     // SpellVisualKit: id -> what the kit hangs on the unit and does to it.
-    struct SlotField { const char* name; KitSlot slot; };
-    static constexpr SlotField kSlotFields[] = {
-        {.name = "HeadEffect",      .slot = KitSlot::Head},
-        {.name = "ChestEffect",     .slot = KitSlot::Chest},
-        {.name = "BaseEffect",      .slot = KitSlot::Base},
-        {.name = "LeftHandEffect",  .slot = KitSlot::LeftHand},
-        {.name = "RightHandEffect", .slot = KitSlot::RightHand},
-        {.name = "BreathEffect",    .slot = KitSlot::Breath},
-        {.name = "SpecialEffect0",  .slot = KitSlot::Special},
-        {.name = "SpecialEffect1",  .slot = KitSlot::Special},
-        {.name = "SpecialEffect2",  .slot = KitSlot::Special},
-    };
     const uint32_t kitFc = kitDbc->getFieldCount();
     const uint32_t procField  = kitLayout->tryField("CharProc0");
     const uint32_t paramZero  = kitLayout->tryField("CharParamZero0");
     const bool hasProcs = procField != kNoField && paramZero != kNoField &&
                           procField + 4 <= kitFc && paramZero + 4 <= kitFc;
+    const uint32_t flagsField = kitLayout->field("Flags");
 
     std::unordered_map<uint32_t, StateKit> kits;
     for (uint32_t i = 0; i < kitDbc->getRecordCount(); ++i) {
         const uint32_t kitId = kitDbc->getUInt32(i, 0);
         if (!kitId) continue;
         StateKit kit;
-        for (const auto& sf : kSlotFields) {
-            const uint32_t field = kitLayout->tryField(sf.name);
-            if (field >= kitFc) continue;
-            const uint32_t effectId = kitDbc->getUInt32(i, field);
-            const auto it = effectNames.find(effectId);
-            if (it == effectNames.end()) continue;
-            kit.effects.push_back({.path = it->second.path, .slot = sf.slot, .scale = it->second.scale});
-        }
+        if (const auto effectsIt = kits_.find(kitId); effectsIt != kits_.end())
+            kit.effects = effectsIt->second.effects;
+        constexpr uint32_t kKitLoopsStand = 0x20;
+        kit.loopStand = flagsField < kitFc && (kitDbc->getUInt32(i, flagsField) & kKitLoopsStand) != 0;
         if (hasProcs) {
             for (uint32_t p = 0; p < 4; ++p) {
                 const uint32_t type = kitDbc->getUInt32(i, procField + p);
@@ -207,7 +173,8 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
             ++it;
             continue;
         }
-        if (it->instanceId != 0 && m2Renderer_) m2Renderer_->removeInstance(it->instanceId);
+        // As the client ends it: the mesh goes at once, its particles fly out.
+        if (it->instanceId != 0 && m2Renderer_) m2Renderer_->finishInstance(it->instanceId);
         it = state.effects.erase(it);
     }
     glm::vec3 tint(1.0f);
@@ -220,7 +187,7 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
         alpha = std::min(alpha, kit.alpha);
         if (std::binary_search(state.visualIds.begin(), state.visualIds.end(), visualId)) continue;
         for (size_t e = 0; e < kit.effects.size(); ++e) {
-            const uint32_t modelId = modelIdFor(kit.effects[e].path);
+            const uint32_t modelId = modelIdFor(kit.effects[e].modelPath);
             if (modelId == 0) continue;
             // Instanced in update, once the model is resident.
             state.effects.push_back({.visualId = visualId, .effectIndex = e, .modelId = modelId});
@@ -234,46 +201,10 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
 void SpellVisualSystem::removeStateEffects(UnitState& state) {
     if (m2Renderer_) {
         for (const auto& effect : state.effects) {
-            if (effect.instanceId != 0) m2Renderer_->removeInstance(effect.instanceId);
+            if (effect.instanceId != 0) m2Renderer_->finishInstance(effect.instanceId);
         }
     }
     state.effects.clear();
-}
-
-bool SpellVisualSystem::stateEffectPosition(uint32_t charInstanceId, KitSlot slot, glm::vec3& out) {
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    if (!charRenderer) return false;
-    glm::vec3 feet;
-    if (!charRenderer->getInstancePosition(charInstanceId, feet)) return false;
-
-    // M2 attachment ids, in the order the client's own would be tried.
-    static constexpr uint32_t kHead[]  = {11};      // Helm
-    static constexpr uint32_t kChest[] = {15};      // ChestBloodFront
-    static constexpr uint32_t kLeft[]  = {21, 2};   // SpellLeftHand, HandLeft
-    static constexpr uint32_t kRight[] = {22, 1};   // SpellRightHand, HandRight
-    static constexpr uint32_t kBreath[] = {17};     // Breath
-    std::span<const uint32_t> attachments;
-    float heightFraction = 0.0f;  // where on the body, when the model has no attachment
-    switch (slot) {
-        case KitSlot::Base:
-        case KitSlot::Special:   out = feet; return true;
-        case KitSlot::Head:      attachments = kHead;   heightFraction = 0.92f; break;
-        case KitSlot::Chest:     attachments = kChest;  heightFraction = 0.62f; break;
-        case KitSlot::LeftHand:  attachments = kLeft;   heightFraction = 0.45f; break;
-        case KitSlot::RightHand: attachments = kRight;  heightFraction = 0.45f; break;
-        case KitSlot::Breath:    attachments = kBreath; heightFraction = 0.85f; break;
-    }
-    for (const uint32_t attachmentId : attachments) {
-        glm::mat4 transform;
-        if (charRenderer->getAttachmentTransform(charInstanceId, attachmentId, transform)) {
-            out = glm::vec3(transform[3]);
-            return true;
-        }
-    }
-    float height = 2.0f;
-    charRenderer->getInstanceHeight(charInstanceId, height);
-    out = feet + glm::vec3(0.0f, 0.0f, height * heightFraction);
-    return true;
 }
 
 void SpellVisualSystem::updateStateVisuals(float deltaTime) {
@@ -286,20 +217,64 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
         for (auto& effect : state.effects) {
             const auto kitIt = stateKits_.find(effect.visualId);
             if (kitIt == stateKits_.end() || effect.effectIndex >= kitIt->second.effects.size()) continue;
-            const StateKit::Effect& kitEffect = kitIt->second.effects[effect.effectIndex];
-            glm::vec3 position;
-            if (!stateEffectPosition(state.instanceId, kitEffect.slot, position)) continue;
+            const SpellKitEffect& kitEffect = kitIt->second.effects[effect.effectIndex];
+            // Hung on the unit - the attachment's whole matrix, so it turns
+            // and sways with the body. A World-column effect stays where the
+            // unit stood when it appeared.
+            if (effect.instanceId == 0 && charRenderer) {
+                glm::mat4 unitMatrix;
+                if (charRenderer->getInstanceModelMatrix(state.instanceId, unitMatrix))
+                    effect.worldPosition = glm::vec3(unitMatrix[3]);
+            }
+            glm::mat4 transform;
+            if (!kitEffectTransform({.worldPosition = effect.worldPosition, .unitInstanceId = state.instanceId},
+                                    kitEffect, transform)) {
+                continue;
+            }
             if (effect.instanceId == 0) {
                 if (spellVisualFailedModels_.count(effect.modelId)) continue;
-                if (!ensureModel(kitEffect.path, effect.modelId)) continue;  // still loading
-                effect.instanceId = m2Renderer_->createInstance(effect.modelId, position,
-                                                                glm::vec3(0.0f), kitEffect.scale);
-                effect.lastPosition = position;
-            } else if (position != effect.lastPosition) {
-                // Only when the unit moved: a move refiles the instance in
-                // the culling grids, and most units stand still.
-                m2Renderer_->setInstancePosition(effect.instanceId, position);
-                effect.lastPosition = position;
+                if (!ensureModel(kitEffect.modelPath, effect.modelId)) continue;  // still loading
+                // Created where it belongs and then given the whole matrix;
+                // a child instance takes no part in placement dedup.
+                effect.instanceId = m2Renderer_->createInstance(effect.modelId, glm::vec3(transform[3]),
+                                                                glm::vec3(0.0f), 1.0f,
+                                                                /*allowPositionDedup=*/false);
+                if (effect.instanceId == 0) {
+                    LOG_WARNING("SpellVisual: aura effect '", kitEffect.modelPath, "' (visual ",
+                                effect.visualId, ") could not be placed on its unit; not drawn");
+                    spellVisualFailedModels_.insert(effect.modelId);
+                    continue;
+                }
+                m2Renderer_->setInstanceTransform(effect.instanceId, transform);
+                effect.lastTransform = transform;
+                // As the client plays an aura's model (render spec 6b): its
+                // Stand once, then its Hold over and over for as long as the
+                // aura lasts - or the Stand on a loop where the kit says so
+                // (flag 0x20) or the model has no Hold. Mana Shield appears
+                // in its Stand and pulses gently in its Hold; looping the
+                // Stand, it appeared again and again.
+                constexpr uint32_t kHold = 158;
+                using End = M2AnimationPlay::End;
+                if (!kitIt->second.loopStand && m2Renderer_->hasAnimation(effect.instanceId, kHold)) {
+                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Next},
+                                                       M2AnimationPlay{.animationId = kHold, .end = End::Loop});
+                } else {
+                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Loop});
+                }
+            } else if (transform != effect.lastTransform) {
+                // Only when the attachment moved: a move refiles the instance
+                // in the culling grids.
+                m2Renderer_->setInstanceTransform(effect.instanceId, transform);
+                effect.lastTransform = transform;
+            }
+            // The effect is as see-through as the body it hangs on (WoW.exe
+            // 0x82f27f): it fades in and out with its unit, a stealthed one
+            // or a ghost.
+            float unitAlpha = 1.0f;
+            if (charRenderer) charRenderer->getInstanceDrawnOpacity(state.instanceId, unitAlpha);
+            if (unitAlpha != effect.lastAlpha) {
+                m2Renderer_->setInstanceFade(effect.instanceId, unitAlpha);
+                effect.lastAlpha = unitAlpha;
             }
         }
 

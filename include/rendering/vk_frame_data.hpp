@@ -2,13 +2,13 @@
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include "rendering/local_lights.hpp"
 #include <atomic>
 #include <chrono>
 
 namespace wowee {
 namespace rendering {
 
-static constexpr uint32_t MAX_LOCAL_LIGHTS = 64;
 
 // Must match the PerFrame UBO layout in all shaders (std140 alignment)
 struct GPUPerFrameData {
@@ -21,16 +21,14 @@ struct GPUPerFrameData {
     glm::vec4 viewPos;        // xyz = camera pos, w = unused
     glm::vec4 fogColor;       // xyz = color, w = unused
     glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = water ripple strength
-    glm::vec4 shadowParams;   // x = enabled(0/1), y = strength, z = one shadow-map texel, w = unused
+    glm::vec4 shadowParams;   // x = enabled(0/1), y = unused, z = one shadow-map texel, w = one texel in yards
     // The player, for effects that react to where they are standing: water
     // ripples and the foliage the player brushes past. playerWake trails the
     // player by a fixed time constant, so clutter the player has already walked
     // through springs back over that interval instead of snapping upright.
     glm::vec4 playerPos;      // xyz = player world position, w = horizontal speed (yd/s)
     glm::vec4 playerWake;     // xyz = trailing player position, w = unused
-    glm::vec4 localLightPosRadius[MAX_LOCAL_LIGHTS];       // xyz = position, w = radius
-    glm::vec4 localLightColorIntensity[MAX_LOCAL_LIGHTS];  // rgb = color, w = intensity
-    glm::ivec4 localLightMeta;                             // x = active light count
+    glm::ivec4 localLightMeta;  // x = how many point lights the buffer at binding 9 holds
     // The fog volume at set 0 binding 2, and how to find a depth in it:
     // x = on (0/1), y = near edge of the first slice in yards,
     // z = 1 / ln(far / near), w = slice count. Off in the reflection pass and
@@ -49,14 +47,17 @@ struct GPUPerFrameData {
     glm::vec4 fogSkyMiddle{0.0f}; // w = actual sky capture valid
     glm::vec4 fogSkyBand1{0.0f}; // w = common horizontal geometry limit
     glm::vec4 fogSkyBand2{0.0f};
-    // Local geometry occlusion remains visible in ambient light.
+    // The units' shadow map around the player at set 0 binding 8
+    // (contact_shadows.glsli), as the client's 40-yard map.
     glm::mat4 contactSpaceMatrix{0.0f};
-    glm::vec4 contactParams{0.0f}; // enabled, texel UV size, depth span, soft ambient strength
+    glm::vec4 contactParams{0.0f}; // enabled, texel UV size, depth span in yards, unused
 };
 
 // Push constants for the model matrix (most common case)
 struct GPUPushConstants {
     glm::mat4 model;
+    /// The point lights that reach the chunk being drawn (local_lights.glsli).
+    LocalLightSet localLights = kNoLocalLights;
 };
 
 /// The WMO's own, which carries where a batch of cloth hangs beside the model
@@ -64,6 +65,8 @@ struct GPUPushConstants {
 struct WMOPushConstants {
     glm::mat4 model;
     glm::vec4 cloth{0.0f};
+    /// The point lights that reach the group being drawn (local_lights.glsli).
+    LocalLightSet localLights = kNoLocalLights;
 };
 
 // Push constants for shadow rendering passes.

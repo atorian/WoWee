@@ -3,6 +3,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/local_lights.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -92,10 +93,22 @@ public:
 
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     void prepareRender(uint32_t frameIndex);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    /// Which instances a render call draws. A faded one - an aura's
+    /// translucent body, a ghost, a fade-in - writes depth, so whatever is
+    /// drawn after it inside or behind it is hidden: Shadowform's fire,
+    /// which rises from the feet through the body, was gone. Faded ones are
+    /// drawn after the blended world instead, laid over it as the client does.
+    enum class Part { All, Solid, Faded };
+    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                Part part = Part::All);
+    /// The pass faded instances are drawn in when it is not the scene's - the
+    /// one after the water that blended M2s and particles go to - or null.
+    /// Rebuilds pipelines: call between frames, with nothing in flight.
+    void setFadedPass(VkRenderPass pass, VkSampleCountFlagBits samples);
+    [[nodiscard]] VkRenderPass fadedPass() const { return fadedPass_; }
     void recreatePipelines();
-    /// The five main-pass pipelines, which initialize() and
-    /// recreatePipelines() both need and each used to describe.
+    /// The main-pass pipelines, which initialize() and recreatePipelines()
+    /// both need and each used to describe.
     void buildMainPassPipelines(VkDevice device, VkRenderPass mainPass,
                                 VkSampleCountFlagBits samples,
                                 wowee::rendering::VkShaderModule& charVert,
@@ -119,6 +132,11 @@ public:
         const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
+    /// How far the camera's closeness fades the instance - the player, with
+    /// the camera pressed against them - multiplied on top of everything
+    /// else that makes it see-through. Carried to its weapons and their
+    /// enchants and to its look companions (a rider's mount).
+    void setInstanceCameraFade(uint32_t instanceId, float alpha);
     /// The look an aura gives a unit, from its SpellVisualKit's character
     /// procs: the lit colour is multiplied by `tint`, and the unit is drawn
     /// no more opaque than `alpha`. White and 1 take it off. Carried to the
@@ -165,6 +183,12 @@ public:
     bool getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId, float& outZ) const;
     bool getInstanceFootZ(uint32_t instanceId, float& outFootZ) const;
     bool getInstancePosition(uint32_t instanceId, glm::vec3& outPos) const;
+    /// Where the instance stands, which way it faces and how large it is: the
+    /// matrix its model is drawn with, the feet at its origin.
+    bool getInstanceModelMatrix(uint32_t instanceId, glm::mat4& outMatrix) const;
+    /// How opaque the instance is drawn: the lower of its fade and its aura
+    /// look's alpha. What is hung on it fades with it.
+    bool getInstanceDrawnOpacity(uint32_t instanceId, float& outOpacity) const;
 
     /** Debug: Log all available animations for an instance */
     void dumpAnimations(uint32_t instanceId) const;
@@ -264,7 +288,14 @@ public:
         preparedTexturesOnly_ = cache && preparedOnly;
     }
 
+    /// Append the point lights of the units animated this frame - those in
+    /// view, and those within 33 yards (local_lights.hpp).
+    void gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const;
+    /// The frame's point lights, which every unit picks its nearest from.
+    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
+
 private:
+    const std::vector<LocalLight>* frameLights_ = nullptr;
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
     bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
@@ -296,7 +327,6 @@ private:
         std::vector<size_t> sortedBatchIndices;
 
         // Pre-classified at load time to avoid per-batch string ops in render loop
-        bool isKoboldFlame = false;
         bool isSkyBird = false;
 
         /// Particle or ribbon emitters, which CharacterEmitters runs.
@@ -355,6 +385,8 @@ private:
         // fades, stealth and ghosts write; the two meet at draw time.
         glm::vec3 stateTint{1.0f};
         float stateAlpha = 1.0f;
+        /// setInstanceCameraFade: multiplied on top of the two above.
+        float cameraFade = 1.0f;
         // Instances drawn in this one's aura look (addLookCompanion). Ids are
         // never reused, so one removed since is simply not found.
         std::vector<uint32_t> lookCompanions;
@@ -446,23 +478,37 @@ private:
     VkSampleCountFlagBits msaaSamplesOverride_ = VK_SAMPLE_COUNT_1_BIT;
     pipeline::AssetManager* assetManager = nullptr;
 
-    // Vulkan pipelines (one per blend mode)
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
-    VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
-    VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
-    VkPipeline additivePipeline_ = VK_NULL_HANDLE;
-    VkPipeline modulatePipeline_ = VK_NULL_HANDLE;      // blend mode 5
-    VkPipeline modulate2xPipeline_ = VK_NULL_HANDLE;    // blend mode 6
-    // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
-    // write kept on, so the faded model still self-occludes instead of showing
-    // backfaces and under-armor skin through the body.
-    VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
-    // A faded body (Shadowform, a ghost, a fade-in) in two steps: its solid
-    // parts into depth alone, then colour only where that depth is, so it is
-    // one even layer - the near legs hiding the far ones - not a stack of
-    // every surface in the model's own drawing order.
-    VkPipeline fadeDepthPipeline_ = VK_NULL_HANDLE;
-    VkPipeline fadeColorPipeline_ = VK_NULL_HANDLE;
+    // Vulkan pipelines, one per blend mode, for one render pass.
+    struct PipelineSet {
+        VkPipeline opaque = VK_NULL_HANDLE;
+        VkPipeline alphaTest = VK_NULL_HANDLE;
+        VkPipeline alpha = VK_NULL_HANDLE;
+        VkPipeline additive = VK_NULL_HANDLE;
+        VkPipeline modulate = VK_NULL_HANDLE;      // blend mode 5
+        VkPipeline modulate2x = VK_NULL_HANDLE;    // blend mode 6
+        // Whole-instance fades (ghost form, spawn fade-in): alpha blend with
+        // depth write kept on, so the faded model still self-occludes instead
+        // of showing backfaces and under-armor skin through the body.
+        VkPipeline translucent = VK_NULL_HANDLE;
+        // A faded body (Shadowform, a ghost, a fade-in) in two steps: its
+        // solid parts into depth alone, then colour only where that depth is,
+        // so it is one even layer - the near legs hiding the far ones - not a
+        // stack of every surface in the model's own drawing order.
+        VkPipeline fadeDepth = VK_NULL_HANDLE;
+        VkPipeline fadeColor = VK_NULL_HANDLE;
+        [[nodiscard]] bool complete() const {
+            return opaque && alphaTest && alpha && additive && modulate && modulate2x &&
+                   translucent && fadeDepth && fadeColor;
+        }
+    };
+    PipelineSet buildPipelineSet(VkDevice device, VkRenderPass pass, VkSampleCountFlagBits samples,
+                                 wowee::rendering::VkShaderModule& charVert,
+                                 wowee::rendering::VkShaderModule& charFrag);
+    void destroyPipelineSet(VkDevice device, PipelineSet& set);
+    PipelineSet scenePipes_;          // the scene pass
+    PipelineSet fadedPassPipes_;      // fadedPass_, when there is one
+    VkRenderPass fadedPass_ = VK_NULL_HANDLE;
+    VkSampleCountFlagBits fadedPassSamples_ = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts
@@ -515,7 +561,6 @@ private:
         size_t approxBytes = 0;
         uint64_t lastUse = 0;
         bool hasAlpha = false;
-        bool colorKeyBlack = false;
         bool normalMapPending = false;  // deferred normal map generation
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
@@ -526,7 +571,6 @@ private:
     std::unordered_map<VkTexture*, NormalMapInfo> normalMapByTexPtr_;
     struct TextureProperties {
         bool hasAlpha = false;
-        bool colorKeyBlack = false;
     };
     std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
     std::unordered_map<std::string, VkTexture*> compositeCache_;  // key → texture for reuse
@@ -605,16 +649,15 @@ private:
         static constexpr uint8_t kRepeatBoth = 0x3;
         VkTexture* texture = nullptr;
         uint8_t wrapFlags = kRepeatBoth;
-        /// Which of the batch's combo textures this is. Its UV set and texture
-        /// animation sit at the same offset in their own combo tables.
-        uint16_t comboOffset = 0;
     };
 
-    /// Which texture a batch draws with. Shared by the main pass and the shadow
-    /// pass, which needs it to cut a silhouette rather than a rectangle.
+    /// The texture of one of a batch's stages, its slot override applied.
+    /// Shared by the main pass and the shadow pass, which needs stage 0 to
+    /// cut a silhouette rather than a rectangle.
     [[nodiscard]] BatchTexture resolveBatchTexture(const CharacterInstance& inst,
                                                    const M2ModelGPU& gm,
-                                                   const pipeline::M2Batch& b) const;
+                                                   const pipeline::M2Batch& b,
+                                                   uint32_t stage = 0) const;
 
     /// Per-batch texture sets for alpha-keyed shadow casters, one pool per
     /// frame in flight and reset at the top of each frame's shadow pass. Same
