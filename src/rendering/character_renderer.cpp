@@ -2908,9 +2908,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // camera pressed against them.
         const float drawOpacity = std::min(instance.opacity, instance.stateAlpha) * instance.cameraFade;
         if (drawOpacity <= 0.0f) continue;
-        // A faded body goes with the faded ones, after the blended world; an
-        // enchant glow is drawn additively and covers nothing either way.
-        const bool fadedInstance = drawOpacity < 0.999f && !instance.isEffectModel;
+        // A faded body goes with the faded ones, after the blended world.
+        const bool fadedInstance = drawOpacity < 0.999f;
         if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
 
         // Set model matrix (use override for weapon instances)
@@ -3007,7 +3006,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Drawn in one go, each surface blended over the ones the model
             // happened to draw before it - a Shadowform drake's far legs over
             // its near ones, its layers stacked nearly black.
-            const bool fadeDepthStage = drawOpacity < 0.999f && !instance.isEffectModel;
+            const bool fadeDepthStage = drawOpacity < 0.999f;
             for (int stage = fadeDepthStage ? 0 : 1; stage < 2; ++stage) {
             for (int pass = 0; pass < 2; pass++) {
             for (size_t bi : sortedBatchIndices) {
@@ -3125,14 +3124,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                           (hairTexture ||
                                            (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
 
-                // Attached weapon models can include additive FX/card batches that
-                // appear as detached flat quads for some swords. Keep core geometry
-                // and drop FX-style passes for weapon attachments. Enchant visuals
-                // are entirely such batches, so they must survive this cull.
-                if (instance.hasOverrideModelMatrix && !instance.isEffectModel && blendMode >= 3) {
-                    continue;
-                }
-
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
                 if (texPtr == whiteTexture_.get() && !instance.isSceneModel) {
                     uint16_t group = batchGroup;
@@ -3182,12 +3173,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // material (blendMode 1) cuts out here.
                 const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
                     blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
-                const bool unlit = characterBatchUnlit(blendMode, materialFlags,
-                                                       instance.isEffectModel);
+                const bool unlit = characterBatchUnlit(blendMode, materialFlags);
                 const CharacterBlendPipeline blendPipeline = characterBlendPipeline({
                     .blendMode = blendMode,
                     .materialFlags = materialFlags,
-                    .effectModel = instance.isEffectModel,
                     .hairMaterial = hairMaterial,
                     .opacity = drawOpacity * batchColorAlpha,
                 });
@@ -3227,8 +3216,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (batch.colorIndex < gpuModel.data.colorRGB.size())
                     matData.batchColor = glm::vec4(gpuModel.data.colorRGB[batch.colorIndex], 1.0f);
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
-                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
-                                              !instance.isEffectModel) ? 1 : 0;
+                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
                 matData.modulateNeutral =
                     blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f

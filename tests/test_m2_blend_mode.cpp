@@ -121,45 +121,42 @@ TEST_CASE("a fading character's solid parts keep writing depth, its cards do not
           CharacterBlendPipeline::Alpha);
 }
 
-TEST_CASE("an enchant's layers are added whatever blend their materials declare",
-          "[m2][character]") {
-    for (uint16_t mode : {0, 2, 5, 6}) {
-        INFO("blend mode " << mode);
-        CHECK(characterBlendPipeline({.blendMode = mode, .effectModel = true}) ==
-              CharacterBlendPipeline::Additive);
-    }
+TEST_CASE("an enchant's layers draw as their materials say", "[m2][character]") {
+    // Rockbiter's stones are opaque; its glow cards are blend mode 4.
+    CHECK(characterBlendPipeline({.blendMode = 0}) == CharacterBlendPipeline::Opaque);
+    CHECK(characterBlendPipeline({.blendMode = 4}) == CharacterBlendPipeline::Additive);
+    CHECK(characterBlendPipeline({.blendMode = 5}) == CharacterBlendPipeline::Modulate);
 }
 
 TEST_CASE("a character's Mod layers are lit unless their material says unlit",
           "[m2][character]") {
-    CHECK_FALSE(characterBatchUnlit(5, 0, false));
-    CHECK_FALSE(characterBatchUnlit(6, 0, false));
-    CHECK(characterBatchUnlit(5, 0x01, false));
+    CHECK_FALSE(characterBatchUnlit(5, 0));
+    CHECK_FALSE(characterBatchUnlit(6, 0));
+    CHECK(characterBatchUnlit(5, 0x01));
     // Additive layers emit their own light.
-    CHECK(characterBatchUnlit(4, 0, false));
-    CHECK_FALSE(characterBatchUnlit(0, 0, false));
+    CHECK(characterBatchUnlit(4, 0));
+    CHECK_FALSE(characterBatchUnlit(0, 0));
 }
 
 using wowee::rendering::M2BatchMaterialInputs;
 using wowee::rendering::M2BlendPipeline;
 using wowee::rendering::m2BatchDrawState;
 using wowee::rendering::m2BlendPipeline;
-using wowee::rendering::m2DrawBlendMode;
-
-TEST_CASE("a spell effect's Mod layer darkens rather than glows", "[m2]") {
-    // Mod is dst * src and only darkens. Spell effects had it remapped to
-    // additive along with their opaque layers, so smoke and void effects lit
-    // up instead.
-    CHECK(m2BlendPipeline(m2DrawBlendMode(5, true)) == M2BlendPipeline::Modulate);
-    CHECK(m2BlendPipeline(m2DrawBlendMode(6, true)) == M2BlendPipeline::Modulate2x);
-}
-
-TEST_CASE("a spell effect's opaque and keyed layers are still added", "[m2]") {
-    // They are painted on black; drawn opaque the black would show.
-    CHECK(m2BlendPipeline(m2DrawBlendMode(0, true)) == M2BlendPipeline::AlphaAdd);
-    CHECK(m2BlendPipeline(m2DrawBlendMode(1, true)) == M2BlendPipeline::AlphaAdd);
-    // Outside an effect they draw as authored.
-    CHECK(m2BlendPipeline(m2DrawBlendMode(0, false)) == M2BlendPipeline::Opaque);
+TEST_CASE("a spell effect's layers draw as their materials say", "[m2]") {
+    // Battle Stance's mace is opaque and the arcane missile's core too; the
+    // client does not add them like glow cards. Mod still darkens.
+    for (uint8_t mode = 0; mode <= 6; ++mode) {
+        INFO("blend mode " << int(mode));
+        M2BatchMaterialInputs in;
+        in.blendMode = mode;
+        in.hasAlpha = true;
+        in.spellEffect = true;
+        const auto s = m2BatchDrawState(in);
+        CHECK(s.drawBlendMode == mode);
+    }
+    M2BatchMaterialInputs opaque;
+    opaque.spellEffect = true;
+    CHECK(m2BlendPipeline(m2BatchDrawState(opaque).drawBlendMode) == M2BlendPipeline::Opaque);
 }
 
 TEST_CASE("NoAlphaAdd does not share Add's alpha-scaled pipeline", "[m2]") {
@@ -167,8 +164,6 @@ TEST_CASE("NoAlphaAdd does not share Add's alpha-scaled pipeline", "[m2]") {
     // with an empty alpha channel vanished on the SRC_ALPHA pipeline.
     CHECK(m2BlendPipeline(3) == M2BlendPipeline::NoAlphaAdd);
     CHECK(m2BlendPipeline(4) == M2BlendPipeline::AlphaAdd);
-    // Including inside a spell effect.
-    CHECK(m2BlendPipeline(m2DrawBlendMode(3, true)) == M2BlendPipeline::NoAlphaAdd);
 }
 
 TEST_CASE("an opaque batch of a fire is drawn opaque", "[m2]") {

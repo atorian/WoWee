@@ -78,18 +78,6 @@ inline float m2AlphaRef(M2BlendPipeline pipeline) {
     }
 }
 
-/// The blend mode a batch is drawn with.
-///
-/// Spell visuals are effect overlays painted on black, so
-/// their opaque and alpha-keyed layers are drawn additively, scaled by alpha
-/// like mode 4. Every other mode is drawn as authored. Mod (5) used to be
-/// turned additive here as well, and Mod only darkens: dark smoke, shadow and
-/// void effects glowed instead.
-inline uint8_t m2DrawBlendMode(uint8_t blendMode, bool effectOverlay) {
-    if (effectOverlay && blendMode <= M2_BLEND_ALPHA_KEY) return M2_BLEND_ADD_ALPHA;
-    return blendMode;
-}
-
 /// The pipeline a drawn blend mode maps to. Mode 3 is NoAlphaAdd and must not
 /// share mode 4's SRC_ALPHA factor: a mode 3 texture with a zero or partial
 /// alpha channel disappeared or dimmed. Modes past 6 are drawn additively.
@@ -178,7 +166,13 @@ struct M2BatchDrawState {
 
 inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
     M2BatchDrawState s;
-    const bool effectOverlay = in.spellEffect;
+    // Every batch draws with its own material's blend mode, a spell
+    // effect's included. Spell effects had their opaque and alpha-keyed
+    // layers drawn additively, as though painted on black; 286 of the 1514
+    // models under Spells\ have such layers, and they are solid: Battle
+    // Stance's spiked mace, the arcane missile's rock core, Aegis's shell.
+    // The client draws them opaque, and blended by their alpha while that
+    // fades (BatchGPU::blendedByOpacity).
 
     // A batch the artist marked opaque is not asking for any of this. Blend
     // mode 0 means the alpha channel goes unread, and M2 textures are
@@ -209,12 +203,11 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
 
     // Only the opaque pass cuts out, and it draws opaque and alpha-keyed
     // batches alone.
-    s.forceCutout = in.blendMode <= M2_BLEND_ALPHA_KEY && !effectOverlay &&
+    s.forceCutout = in.blendMode <= M2_BLEND_ALPHA_KEY &&
                     (in.groundDetail || foliageCutout ||
                      m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha));
 
-    s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY)
-                                    : m2DrawBlendMode(in.blendMode, effectOverlay);
+    s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY) : in.blendMode;
     // A material the artist keyed (blend mode 1) is cut where the original
     // client cuts it: 224/255, not a half. Dalaran's inn windows are the case
     // that showed it - dalaran_inn_window.m2 keys DAL_WINDOWCUTOUT, whose holes
@@ -255,7 +248,6 @@ enum class CharacterBlendPipeline : uint8_t {
 struct CharacterBatchBlendInputs {
     uint16_t blendMode = M2_BLEND_OPAQUE;
     uint16_t materialFlags = 0;
-    bool effectModel = false;   ///< an enchant visual
     bool hairMaterial = false;
     float opacity = 1.0f;       ///< instance fade times the batch's animated alpha
 };
@@ -267,11 +259,10 @@ struct CharacterBatchBlendInputs {
 /// above it, and Mod fell through to the alpha blend, which painted the
 /// texture over the surface instead of tinting it.
 inline CharacterBlendPipeline characterBlendPipeline(const CharacterBatchBlendInputs& in) {
-    // Enchant visuals are glow cards drawn on black. Their materials declare
-    // Mod/alpha blending, which would composite that black background as an
-    // opaque quad - force additive so only the light adds.
-    if (in.effectModel) return CharacterBlendPipeline::Additive;
-
+    // An enchant visual draws by its materials like any other model. Its
+    // glows are blend mode 4 already; the rest are solid - Rockbiter's
+    // stones, the skulls of skullballs.m2 - and were forced additive.
+    //
     // Decided before the fade below. An additive card fades by adding less
     // light, and a modulated one by multiplying by something nearer its
     // identity, both in the shader - so a partial alpha is no reason to divert
@@ -316,11 +307,10 @@ inline CharacterBlendPipeline characterBlendPipeline(const CharacterBatchBlendIn
 }
 
 /// Whether a character batch ignores scene lighting. Additive layers emit
-/// their own light and enchant glows must not be tinted by the scene. Mod and
-/// Mod2x follow their material's unlit flag, as they do on doodads; they were
-/// forced unlit along with every other mode above 2.
-inline bool characterBatchUnlit(uint16_t blendMode, uint16_t materialFlags, bool effectModel) {
-    if (effectModel || (materialFlags & 0x01) != 0) return true;
+/// their own light. Mod and Mod2x follow their material's unlit flag, as they
+/// do on doodads; they were forced unlit along with every other mode above 2.
+inline bool characterBatchUnlit(uint16_t blendMode, uint16_t materialFlags) {
+    if ((materialFlags & 0x01) != 0) return true;
     return blendMode >= M2_BLEND_ADD && blendMode != M2_BLEND_MODULATE &&
            blendMode != M2_BLEND_MODULATE2X;
 }

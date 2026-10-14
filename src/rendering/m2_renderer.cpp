@@ -1549,7 +1549,7 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
     mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
-    mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
+    mat.cullBackFaces = !skyMode_ &&
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;

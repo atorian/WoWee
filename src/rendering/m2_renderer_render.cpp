@@ -1307,7 +1307,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             const bool faded = instance.fade < 0.999f;
             if (!faded) out.opaque.push_back(visible);
             if (faded || (instance.cachedModel &&
-                (instance.cachedModel->hasTransparentBatches || instance.cachedModel->isSpellEffect))) {
+                instance.cachedModel->hasTransparentBatches)) {
                 out.transparent.push_back(visible);
             }
         }
@@ -1815,7 +1815,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // sprites are generated before the mesh moves to pass 2, and
                     // so is a layer the client blends for its alpha, to be
                     // faded or left out per instance there.
-                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
+                    const bool rawTransparent = (batch.blendMode >= 2) ||
                                                 batch.blendedByOpacity;
                     if (rawTransparent) continue;
 
@@ -2007,7 +2007,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             currentModelValid = false;
             currentModel = instance.cachedModel;
             if (!currentModel) continue;
-            if (!currentModel->hasTransparentBatches && !currentModel->isSpellEffect) continue;
+            if (!currentModel->hasTransparentBatches) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
             currentModelValid = true;
             VkDeviceSize vbOff = 0;
@@ -2053,7 +2053,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             // client blends for their alpha - or, for a faded instance, every
             // batch, since the opaque pass left it out.
             {
-                const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
+                const bool rawTransparent = (batch.blendMode >= 2) ||
                                             batch.blendedByOpacity || instanceFaded;
                 if (!rawTransparent) continue;
             }
