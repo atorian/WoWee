@@ -5,7 +5,7 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 namespace audio { class AudioCoordinator; }
 namespace game { class ExpansionRegistry; class EmoteTable; class MovementCollision; }
-namespace core { class EventBus; }
+namespace core { class EventBus; class CVarStore; }
 
 namespace game {
 
@@ -25,6 +25,10 @@ struct GameServices {
     /// Where the game announces what happened. Required: GameHandler
     /// refuses to be built without one.
     core::EventBus* events = nullptr;
+    /// The CVars the game's own behaviour follows - autoClearAFK,
+    /// assistAttack, autoDismountFlying. Required, like `events`; the client
+    /// owns the store and the interface writes the same one.
+    const core::CVarStore* cvars = nullptr;
     // The walls units moving themselves run into between their reports.
     const MovementCollision* movementCollision = nullptr;
     uint32_t gryphonDisplayId = 0;

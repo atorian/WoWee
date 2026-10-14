@@ -1165,6 +1165,7 @@ set(WOWEE_BASE_SOURCES
     src/core/memory_monitor.cpp
     src/core/app_clock.cpp
     src/core/config_paths.cpp
+    src/core/cvar_store.cpp
     src/math/spline.cpp
 )
 set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})

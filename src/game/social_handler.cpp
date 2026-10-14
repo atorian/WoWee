@@ -10,7 +10,7 @@
 #include "game/opcode_table.hpp"
 #include "network/world_socket.hpp"
 #include "core/logger.hpp"
-#include "addons/lua_api_registrations.hpp"
+#include "core/cvar_store.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -2691,12 +2691,12 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             // suppressed - the roster's idea of who is online is not the
             // player's idea of what is worth reading.
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true) &&
-                addons::storedCVarValue("guildMemberNotify", "1") != "0")
+                owner_.cvars().get("guildMemberNotify", "1") != "0")
                 msg = "|Hplayer:" + data.strings[0] + "|h[" + data.strings[0] + "]|h has come online.";
             break;
         case GuildEvent::SIGNED_OFF:
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false) &&
-                addons::storedCVarValue("guildMemberNotify", "1") != "0")
+                owner_.cvars().get("guildMemberNotify", "1") != "0")
                 msg = data.strings[0] + " has gone offline.";
             break;
         // The bank's half of the event list. The server broadcasts these to

@@ -3,7 +3,11 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #pragma once
 
+#include <string>
+
 struct lua_State;
+
+namespace wowee::core { class CVarStore; }
 
 namespace wowee::addons {
 
@@ -27,12 +31,16 @@ void applyStoredCVarSideEffects(lua_State* L);
 /// and the sound did not change until something else called SetCVar.
 void applySoundCVarSideEffects(lua_State* L);
 
-/// One CVar's saved value, read straight from the file.
+/// The client's CVar store, which every CVar binding here reads and writes.
+/// Handed over once, as the client starts and before anything reads a CVar.
+void useCVarStore(core::CVarStore& store);
+
+/// One CVar's saved value.
 ///
 /// For the settings that have to be known before the Lua state exists - the
 /// shadow map's size is chosen when the per-frame resources are built, which
-/// is long before the interface loads. Returns the fallback when the file has
-/// no such key, so a fresh install gets the default rather than nothing.
+/// is long before the interface loads. Returns the fallback when nothing set
+/// it, so a fresh install gets the default rather than nothing.
 std::string storedCVarValue(const std::string& key, const std::string& fallback);
 
 /// Tell the CVar store that a setting it drives has been changed elsewhere.

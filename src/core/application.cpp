@@ -298,6 +298,11 @@ Application::~Application() {
 bool Application::initialize() {
     LOG_INFO("Initializing Wowee Native Client");
 
+    // Before anything reads a CVar: the renderer's shadow size is one, and the
+    // interface's panels read theirs as they are built.
+    cvars_.load();
+    addons::useCVarStore(cvars_);
+
     // Initialize memory monitoring for dynamic cache sizing
     core::MemoryMonitor::getInstance().initialize();
 
@@ -371,7 +376,7 @@ bool Application::initialize() {
         constexpr const char* kDefaultShadowLevel = "2";   // 2048, 32 MB the pair
 #endif
         renderer->setShadowQualityLevel(
-            std::atoi(addons::storedCVarValue("extShadowQuality", kDefaultShadowLevel).c_str()));
+            std::atoi(cvars_.get("extShadowQuality", kDefaultShadowLevel).c_str()));
     }
     if (!renderer->initialize(window.get())) {
         LOG_FATAL("Failed to initialize renderer");
@@ -455,7 +460,8 @@ bool Application::initialize() {
     gameServices_.assetManager = assetManager.get();
     gameServices_.expansionRegistry = expansionRegistry_.get();
     gameServices_.events = &eventBus_;
-    movementCollision_ = std::make_unique<RendererMovementCollision>(*renderer);
+    gameServices_.cvars = &cvars_;
+    movementCollision_ =std::make_unique<RendererMovementCollision>(*renderer);
     gameServices_.movementCollision = movementCollision_.get();
 
     // Create game handler with explicit service dependencies
@@ -1735,7 +1741,7 @@ void Application::run() {
                 const bool focused = SDL_GetKeyboardFocus() != nullptr ||
                                      event.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
                 const bool playInBackground =
-                    addons::storedCVarValue("Sound_EnableSoundWhenGameIsInBG", "0") != "0";
+                    cvars_.get("Sound_EnableSoundWhenGameIsInBG", "0") != "0";
                 audio::AudioEngine::instance().setSuspended(!focused && !playInBackground);
             }
 

@@ -2790,6 +2790,14 @@ target_link_libraries(test_rt_build_budget PRIVATE catch2_main)
 add_test(NAME rt_build_budget COMMAND test_rt_build_budget)
 register_test_target(test_rt_build_budget)
 
+# ── test_cvar_store ──────────────────────────────────────────
+# The CVars the game, the interface and the addons share: one name whatever
+# its case, and a value that survives the client closing.
+wowee_add_test(test_cvar_store
+    SOURCES test_cvar_store.cpp
+            ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/core/cvar_store.cpp)
+
 # ── test_m2_cull_grid ────────────────────────────────────────
 # The M2 view and shadow passes reject whole columns of the world before
 # testing instances; a column must never be rejected while an instance in it

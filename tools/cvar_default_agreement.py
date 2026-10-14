@@ -8,8 +8,9 @@ The two sides are:
 
   * `GetCVar` in `src/addons/lua_system_api.cpp`, which is what the interface
     asks. Its fallbacks are what a checkbox ticks itself from.
-  * `storedCVarValue(name, default)`, which is what the client reads where the
-    setting is actually used - twenty-nine of them, in the combat text, the
+  * `storedCVarValue(name, default)` and `cvars().get(name, default)` /
+    `cvars_.get(...)` on the store itself, which is what the client and the
+    game read where the setting is actually used - in the combat text, the
     nameplates, the chat filters, the shadow quality and the rest.
 
 Neither is wrong to exist. The interface needs an answer before anything is
@@ -45,7 +46,10 @@ FALLBACK = re.compile(
     r'((?:n == "[a-z0-9_]+"\s*(?:\|\|\s*)?)+)\)?\s*(?:\{\s*)?lua_pushstring\(L,\s*"([^"]*)"\)',
     re.IGNORECASE | re.DOTALL)
 NAME = re.compile(r'n == "([a-z0-9_]+)"', re.IGNORECASE)
-DIRECT = re.compile(r'storedCVarValue\(\s*"([A-Za-z0-9_]+)"\s*,\s*(?:\.\w+\s*=\s*)?"([^"]*)"')
+# Both spellings of a read at the point of use: the addons layer's free
+# function, and the store itself as the game and the client hold it.
+DIRECT = re.compile(r'(?:storedCVarValue|\bcvars_?\(?\)?\s*(?:\.|->)\s*get)'
+                    r'\(\s*"([A-Za-z0-9_]+)"\s*,\s*(?:\.\w+\s*=\s*)?"([^"]*)"')
 
 
 def main():

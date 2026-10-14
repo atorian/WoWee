@@ -16,7 +16,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "addons/lua_api_registrations.hpp"
+#include "core/cvar_store.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/player_voice_manager.hpp"
@@ -565,7 +565,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
                 constexpr long kToggleGuardMs = 500;
                 if (autoAttackToggledAt_.time_since_epoch().count() != 0 &&
                     since < kToggleGuardMs &&
-                    addons::storedCVarValue("secureAbilityToggle", "0") != "0") {
+                    owner_.cvars().get("secureAbilityToggle", "0") != "0") {
                     return;
                 }
                 owner_.stopAutoAttack();
@@ -637,7 +637,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
             // sensible one, since the alternative is falling - but with the
             // setting on this dismounts and lets the cast go, which is what
             // the option is for and what the real client does with it.
-            if (addons::storedCVarValue("autoDismountFlying", "0") == "0") {
+            if (owner_.cvars().get("autoDismountFlying", "0") == "0") {
                 owner_.addUIError("You can't do that while flying.");
                 return;
             }
@@ -1022,7 +1022,7 @@ void SpellHandler::startCraftQueue(uint32_t spellId, int count) {
     // cast does fire, so refusing to queue it here would leave crafting the one
     // thing still blocked in the air.
     if (owner_.isMounted() && owner_.isPlayerFlying() &&
-        addons::storedCVarValue("autoDismountFlying", "0") == "0") {
+        owner_.cvars().get("autoDismountFlying", "0") == "0") {
         owner_.addUIError("You can't do that while flying.");
         return;
     }

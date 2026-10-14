@@ -76,6 +76,9 @@ GameHandler::GameHandler(GameServices& services)
     if (!services_.emotes) {
         throw std::invalid_argument("GameHandler needs GameServices::emotes");
     }
+    if (!services_.cvars) {
+        throw std::invalid_argument("GameHandler needs GameServices::cvars");
+    }
     LOG_DEBUG("GameHandler created");
 
     setActiveOpcodeTable(&opcodeTable_);

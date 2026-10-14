@@ -11,6 +11,8 @@
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
+#include "core/cvar_store.hpp"
+#include "core/config_paths.hpp"
 #include "game/game_services.hpp"
 #include "game/reported_movement.hpp"
 #include "pipeline/asset_inventory.hpp"
@@ -296,6 +298,9 @@ private:
 
     static Application* instance;
 
+    /// The CVars, for the game, the interface and the addons alike. Loaded
+    /// first thing in initialize: the renderer reads one before it is built.
+    core::CVarStore cvars_{core::getConfigRoot() + "/cvars.cfg"};
     /// What the game announces, for anything in the client to hear. Declared
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;

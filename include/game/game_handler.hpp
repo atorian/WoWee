@@ -55,7 +55,7 @@ namespace wowee::game {
 
 namespace wowee {
 namespace network { class WorldSocket; class Packet; }
-namespace core { class EventBus; }
+namespace core { class EventBus; class CVarStore; }
 namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
@@ -177,6 +177,8 @@ public:
     core::EventBus& eventBus() const { return *services_.events; }
     /// The emotes' commands, text and animations.
     const EmoteTable& emotes() const { return *services_.emotes; }
+    /// The CVars, as the player and the interface last set them.
+    const core::CVarStore& cvars() const { return *services_.cvars; }
 
     /** Access the active opcode table (wire ↔ logical mapping). */
     const OpcodeTable& getOpcodeTable() const { return opcodeTable_; }

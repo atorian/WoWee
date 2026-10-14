@@ -32,7 +32,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "addons/lua_api_registrations.hpp"
+#include "core/cvar_store.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/player_voice_manager.hpp"
@@ -2771,7 +2771,7 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     // Auto Dismount in Flight off - the default - it is refused, and the
     // player stays up.
     if (isMounted() && !isTaxiMountActive() && isPlayerFlying() &&
-        addons::storedCVarValue("autoDismountFlying", "0") == "0") {
+        cvars().get("autoDismountFlying", "0") == "0") {
         addUIError("You can't do that while flying.");
         return;
     }

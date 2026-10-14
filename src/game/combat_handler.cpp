@@ -11,7 +11,7 @@
 #include "core/logger.hpp"
 #include "network/world_socket.hpp"
 #include "audio/ui_sound_manager.hpp"
-#include "addons/lua_api_registrations.hpp"
+#include "core/cvar_store.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -36,7 +36,7 @@ CombatHandler::CombatHandler(GameHandler& owner)
 /// picture disagreeing about when a warning is wanted.
 bool CombatHandler::threatWarningWanted() const {
     int setting = 3;
-    const std::string stored = addons::storedCVarValue("threatWarning", "3");
+    const std::string stored = owner_.cvars().get("threatWarning", "3");
     try { setting = std::stoi(stored); } catch (const std::exception&) {}
     switch (setting) {
         case 1:  return owner_.isInInstance();
@@ -207,7 +207,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
                 if (topNow) playerTopThreatOn_.insert(unitGuid);
                 else        playerTopThreatOn_.erase(unitGuid);
                 if (topNow && threatWarningWanted() &&
-                    addons::storedCVarValue("threatPlaySounds", "0") != "0") {
+                    owner_.cvars().get("threatPlaySounds", "0") != "0") {
                     if (auto* ac = owner_.services().audioCoordinator) {
                         if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
                     }
@@ -285,7 +285,7 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // Only when the friend has a target of their own, and only when that
     // target is hostile: assisting somebody who is fighting nothing, or who
     // has a friendly unit selected, would turn one refusal into another.
-    if (addons::storedCVarValue("assistAttack", "0") != "0") {
+    if (owner_.cvars().get("assistAttack", "0") != "0") {
         auto entity = owner_.getEntityManager().getEntity(targetGuid);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
             if (!unit->isHostile() && !isAggressiveTowardPlayer(targetGuid)) {
@@ -333,7 +333,7 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // right-clicked from a flying mount dropped the player out of the sky.
     if (owner_.isMounted()) {
         if (owner_.isPlayerFlying() && !owner_.isTaxiMountActive() &&
-            addons::storedCVarValue("autoDismountFlying", "0") == "0") {
+            owner_.cvars().get("autoDismountFlying", "0") == "0") {
             owner_.addUIError("You can't do that while flying.");
             return;
         }
@@ -404,7 +404,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // store; only the lookup is here.
     const auto rule = combatTextFilterFor(type, isPlayerSource, srcGuid, dstGuid,
                                           owner_.getPetGuid(), owner_.getTargetGuid());
-    if (rule.cvar && addons::storedCVarValue(rule.cvar, rule.fallback) == "0") return;
+    if (rule.cvar && owner_.cvars().get(rule.cvar, rule.fallback) == "0") return;
 
     CombatTextEntry entry;
     entry.type = type;
@@ -1358,7 +1358,7 @@ void CombatHandler::setTarget(uint64_t guid) {
     // swung at: re-selecting the same unit is not a change, and stopping an
     // attack nobody started would send a cancel for nothing.
     if (guid != owner_.getTargetGuid() && autoAttacking_ &&
-        addons::storedCVarValue("stopAutoAttackOnTargetChange", "0") != "0") {
+        owner_.cvars().get("stopAutoAttackOnTargetChange", "0") != "0") {
         stopAutoAttack();
     }
 
