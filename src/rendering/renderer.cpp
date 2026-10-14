@@ -4442,11 +4442,14 @@ glm::mat4 Renderer::computeLightSpaceMatrix() {
     if (sunDir.z > 0.0f) {
         sunDir = -sunDir;
     }
-    // Keep a minimum downward component so the frustum doesn't collapse at grazing angles.
-    if (sunDir.z > -0.15f) {
-        sunDir.z = -0.15f;
-        sunDir = glm::normalize(sunDir);
-    }
+    // Steepened as the client steepens it (render spec 5.2): z' = max(5z, -1.2),
+    // renormalised. Shadows fall steeply however low the sun is, and the light
+    // the surfaces are shaded by keeps the true direction. Taken as it was, a
+    // late-afternoon sun 13 degrees up laid every hill's shadow across the
+    // valley beside it - Camp Narache went flat from about 16:00 and the units
+    // in it lost their shadows into the terrain's.
+    sunDir.z = std::max(5.0f * sunDir.z, -1.2f);
+    sunDir = glm::normalize(sunDir);
 
     // LightingManager already smooths the directional light every frame. Keep
     // that continuous direction for the shadow projection as well. Quantizing
