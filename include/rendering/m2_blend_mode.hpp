@@ -19,6 +19,7 @@
 /// texel passed the test and the flame rendered as a flat opaque grey disc
 /// sitting behind the logs.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace wowee::rendering {
@@ -44,6 +45,38 @@ enum class M2BlendPipeline : uint8_t {
     Modulate,
     Modulate2x,
 };
+inline constexpr size_t kM2BlendPipelineCount = static_cast<size_t>(M2BlendPipeline::Modulate2x) + 1;
+
+/// What fog turns a pixel into, by blend mode (WoW.exe 0xa45390): the fog's
+/// colour where the pixel replaces what is behind it, and for the others the
+/// colour that leaves what is behind unchanged - black added, white
+/// multiplied, grey doubled.
+enum class M2FogMode : int32_t {
+    None = 0,
+    FogColor = 1,
+    Black = 2,
+    White = 3,
+    Grey = 4,
+};
+inline M2FogMode m2FogMode(M2BlendPipeline pipeline) {
+    switch (pipeline) {
+        case M2BlendPipeline::NoAlphaAdd:
+        case M2BlendPipeline::AlphaAdd: return M2FogMode::Black;
+        case M2BlendPipeline::Modulate: return M2FogMode::White;
+        case M2BlendPipeline::Modulate2x: return M2FogMode::Grey;
+        default: return M2FogMode::FogColor;
+    }
+}
+
+/// The alpha below which the client discards a pixel (WoW.exe 0x81fb10): none
+/// for Opaque, 224/255 for AlphaKey, 1/255 for every blended mode.
+inline float m2AlphaRef(M2BlendPipeline pipeline) {
+    switch (pipeline) {
+        case M2BlendPipeline::Opaque: return 0.0f;
+        case M2BlendPipeline::AlphaTest: return 224.0f / 255.0f;
+        default: return 1.0f / 255.0f;
+    }
+}
 
 /// The blend mode a batch is drawn with.
 ///

@@ -95,8 +95,14 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 
 // ---- Constants ----
 inline const auto kLavaAnimStart = std::chrono::steady_clock::now();
-inline constexpr uint32_t kParticleFlagRandomized = 0x40;
-inline constexpr uint32_t kParticleFlagTiled = 0x80;
+/// m2_particle.frag's push constants.
+struct M2ParticlePush {
+    float tileX = 1.0f, tileY = 1.0f;
+    /// m2AlphaRef of the blend pipeline: a pixel below it is discarded.
+    float alphaRef = 0.0f;
+    /// M2FogMode: None for an unfogged emitter (flag 0x8).
+    int32_t fogMode = 0;
+};
 inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
 
 // ---- Geometry / collision helpers ----

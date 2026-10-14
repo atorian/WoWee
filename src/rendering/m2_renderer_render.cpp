@@ -6,6 +6,7 @@
 #include "rendering/m2_sway.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
+#include "rendering/m2_particle_emission.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
@@ -724,6 +725,28 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
 
+    // WOWEE_M2_PARTICLE_DIAG=<part of a model path>: every two seconds, for
+    // each instance of a matching model, whether its particles are being
+    // flown and where they are. A model that shows its particles in the
+    // model probe and none in the world is told apart here: skipped for
+    // distance, emitting nothing, or emitting somewhere else.
+    static const std::string kParticleDiag = [] {
+        const char* v = std::getenv("WOWEE_M2_PARTICLE_DIAG");
+        std::string s = v ? v : "";
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    }();
+    static float particleDiagClock = 0.0f;
+    bool particleDiagNow = false;
+    if (!kParticleDiag.empty()) {
+        particleDiagClock += deltaTime;
+        if (particleDiagClock >= 2.0f) {
+            particleDiagClock = 0.0f;
+            particleDiagNow = true;
+        }
+    }
+
     // Particle update (sequential - uses RNG, not thread-safe)
     // Only iterate instances that have particle emitters (pre-built list).
     for (size_t idx : particleInstanceIndices_) {
@@ -732,12 +755,60 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // Distance cull: only update particles within visible range
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
+        if (particleDiagNow && instance.cachedModel) {
+            std::string name = instance.cachedModel->name;
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.find(kParticleDiag) != std::string::npos) {
+                glm::vec3 offset(0.0f);
+                if (!instance.particles.empty()) offset = instance.particles.front().position - instance.position;
+                LOG_WARNING("M2 PARTICLES '", instance.cachedModel->name, "' instance ", instance.id,
+                            " gameObject=", instance.isGameObject ? 1 : 0,
+                            " dist=", std::sqrt(distSq), " max=", std::sqrt(cachedMaxRenderDistSq_),
+                            " emitters=", instance.cachedModel->particleEmitters.size(),
+                            " live=", instance.particles.size(),
+                            " first at (", offset.x, ", ", offset.y, ", ", offset.z, ") from the instance",
+                            " bones=", instance.boneMatrices.size(),
+                            " seq=", instance.currentSequenceIndex, " animTime=", instance.animTime,
+                            " scale=", instance.scale,
+                            distSq > cachedMaxRenderDistSq_ ? "  SKIPPED: beyond render distance" : "");
+            }
+        }
         if (distSq > cachedMaxRenderDistSq_) continue;
         if (!instance.cachedModel) continue;
-        emitParticles(instance, *instance.cachedModel, deltaTime);
-        updateParticles(instance, deltaTime);
-        if (!instance.cachedModel->ribbonEmitters.empty()) {
-            updateRibbons(instance, *instance.cachedModel, deltaTime);
+        // Out of view, a model is not animated and its particles freeze, as
+        // in the client (SetAnimating, 0x823f10) - unless it is near: within
+        // 33.3 yards for an entity (a game object, or a spell effect on a
+        // unit; 0x793450), within 10 for a doodad (0x7987a0). The sphere
+        // takes in how far its particles have gone.
+        const bool entity = instance.isGameObject || instance.cachedModel->isSpellEffect;
+        const float animateUnseenWithinSq = entity ? 1111.1f : 100.0f;
+        constexpr float kParticleSizeMargin = 2.0f;
+        const float viewRadius = std::max(instance.cachedPaddedRadius, instance.particleReach) +
+                                 kParticleSizeMargin;
+        if (distSq > animateUnseenWithinSq &&
+            !updateFrustum.intersectsSphere(instance.cachedCullCenter, viewRadius)) {
+            continue;
+        }
+        // A long frame in steps of at most 0.1 s, and no more than the
+        // longest lifespan's worth of them (0x97acb0).
+        const M2ModelGPU& model = *instance.cachedModel;
+        float longestLife = 0.0f;
+        for (const auto& em : model.particleEmitters) {
+            longestLife = std::max(longestLife,
+                interpFloat(em.lifespan, instance.animTime, instance.globalSequenceTime,
+                            instance.currentSequenceIndex, model.globalSequenceDurations) +
+                em.lifespanVary);
+        }
+        float remaining = longestLife > 0.0f ? std::min(deltaTime, longestLife) : deltaTime;
+        while (remaining > 0.0f) {
+            const float step = std::min(remaining, kM2ParticleMaxStep);
+            remaining -= step;
+            emitParticles(instance, model, step);
+            updateParticles(instance, step);
+        }
+        if (!model.ribbonEmitters.empty()) {
+            updateRibbons(instance, model, deltaTime);
         }
     }
 
@@ -2227,37 +2298,49 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     }
 
     // Render glow sprites as billboarded additive point lights
-    if (!glowSprites_.empty() && blended().particleAdditive && glowVB_ && glowTexDescSet_) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blended().particleAdditive);
+    const VkPipeline glowPipeline =
+        blended().particle[static_cast<size_t>(M2BlendPipeline::AlphaAdd)];
+    const ::VkBuffer glowBuffer = frameBuffer(glowVB_);
+    if (!glowSprites_.empty() && glowPipeline && glowBuffer && glowTexDescSet_) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, glowPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 particlePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 particlePipelineLayout_, 1, 1, &glowTexDescSet_, 0, nullptr);
 
-        // Push constants for particle: tileCount(vec2) + alphaKey(int)
-        struct { float tileX, tileY; int alphaKey; } particlePush = {.tileX = 1.0f, .tileY = 1.0f, .alphaKey = 0};
+        const M2ParticlePush particlePush{
+            .alphaRef = m2AlphaRef(M2BlendPipeline::AlphaAdd),
+            .fogMode = static_cast<int32_t>(m2FogMode(M2BlendPipeline::AlphaAdd)),
+        };
         vkCmdPushConstants(cmd, particlePipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(particlePush), &particlePush);
 
-        // Write glow vertex data directly to mapped buffer (no temp vector)
+        // Glow sizes were tuned on screen-space point sprites, 500 pixels per
+        // unit of size at a distance of one, judged in a 2560x1440 window
+        // under the 45 degree camera. A quad half this many world units wide
+        // per unit of size looks the same there; at other window sizes the
+        // halo now keeps its size in the world instead of on the screen.
+        constexpr float kGlowHalfWidthPerSize = 0.15f;
+
+        // Write glow quads directly to mapped buffer (no temp vector)
         size_t uploadCount = std::min(glowSprites_.size(), MAX_GLOW_SPRITES);
-        float* dst = static_cast<float*>(glowVBMapped_);
+        auto* dst = static_cast<M2ParticleQuad*>(frameMapped(glowVB_));
         for (size_t gi = 0; gi < uploadCount; gi++) {
             const auto& gs = glowSprites_[gi];
-            *dst++ = gs.worldPos.x;
-            *dst++ = gs.worldPos.y;
-            *dst++ = gs.worldPos.z;
-            *dst++ = gs.color.r;
-            *dst++ = gs.color.g;
-            *dst++ = gs.color.b;
-            *dst++ = gs.color.a;
-            *dst++ = gs.size;
-            *dst++ = 0.0f;
+            // Alpha squared: the alphas were tuned while the particle shader
+            // applied alpha twice, and the shader now applies it once.
+            dst[gi] = M2ParticleQuad{
+                .position = gs.worldPos,
+                .color = glm::vec4(glm::vec3(gs.color), gs.color.a * gs.color.a),
+                .halfSize = glm::vec2(gs.size * kGlowHalfWidthPerSize),
+                .cell = 0.0f,
+                .shape = static_cast<uint32_t>(M2ParticleShape::Billboard),
+            };
         }
 
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(uploadCount), 1, 0, 0);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &glowBuffer, &offset);
+        vkCmdDraw(cmd, 4, static_cast<uint32_t>(uploadCount), 0, 0);
     }
 }
 

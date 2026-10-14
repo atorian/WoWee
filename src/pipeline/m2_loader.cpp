@@ -760,7 +760,8 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
 // FBlocks are like M2Track but WITHOUT the interpolationType/globalSequence prefix.
 void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
                  M2FBlock& fb, int valueType) {
-    // valueType: 0 = color (C3Vector, 3 floats in 0-255 range), 1 = alpha (uint16), 2 = scale (float pair)
+    // valueType: 0 = color (C3Vector, 3 floats in 0-255 range), 1 = alpha (int16), 2 = scale (float pair),
+    // 3 = atlas cell (uint16)
     if (offset + sizeof(FBlockDisk) > data.size()) return;
 
     FBlockDisk disk = readValue<FBlockDisk>(data, offset);
@@ -771,12 +772,12 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
     // FBlock timestamps are uint16 (not sub-arrays), stored directly
     if (disk.ofsTimestamps + disk.nTimestamps * sizeof(uint16_t) > data.size()) return;
 
-    auto rawTs = readArray<uint16_t>(data, disk.ofsTimestamps, disk.nTimestamps);
-    uint16_t maxTs = 1;
-    for (auto t : rawTs) { if (t > maxTs) maxTs = t; }
-    fb.timestamps.reserve(rawTs.size());
-    for (auto t : rawTs) {
-        fb.timestamps.push_back(static_cast<float>(t) / static_cast<float>(maxTs));
+    // Fractions of the particle's life: int16 over 32767. They were divided
+    // by the largest instead, which stretched a block whose last key comes
+    // before the end of life over all of it.
+    fb.timestamps.reserve(disk.nTimestamps);
+    for (auto t : readArray<int16_t>(data, disk.ofsTimestamps, disk.nTimestamps)) {
+        fb.timestamps.push_back(static_cast<float>(t) / 32767.0f);
     }
 
     uint32_t nKeys = disk.nKeys;
@@ -793,20 +794,21 @@ void parseFBlock(const std::vector<uint8_t>& data, uint32_t offset,
             fb.vec3Values.emplace_back(r / 255.0f, g / 255.0f, b / 255.0f);
         }
     } else if (valueType == 1) {
-        // Alpha: uint16 per key
-        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
-        auto rawAlpha = readArray<uint16_t>(data, ofsKeys, nKeys);
+        // Alpha: int16 per key, over 32767
+        if (ofsKeys + nKeys * sizeof(int16_t) > data.size()) return;
         fb.floatValues.reserve(nKeys);
-        for (auto a : rawAlpha) {
+        for (auto a : readArray<int16_t>(data, ofsKeys, nKeys)) {
             fb.floatValues.push_back(static_cast<float>(a) / 32767.0f);
         }
     } else if (valueType == 2) {
-        // Scale: float pair {x, y} per key, store x
-        if (ofsKeys + nKeys * 8 > data.size()) return;
-        fb.floatValues.reserve(nKeys);
-        for (uint32_t i = 0; i < nKeys; i++) {
-            float x = readValue<float>(data, ofsKeys + i * 8);
-            fb.floatValues.push_back(x);
+        // Scale: half the width and half the height per key
+        if (ofsKeys + nKeys * sizeof(glm::vec2) > data.size()) return;
+        fb.vec2Values = readArray<glm::vec2>(data, ofsKeys, nKeys);
+    } else if (valueType == 3) {
+        // Atlas cell: uint16 per key
+        if (ofsKeys + nKeys * sizeof(uint16_t) > data.size()) return;
+        for (auto cell : readArray<uint16_t>(data, ofsKeys, nKeys)) {
+            fb.floatValues.push_back(static_cast<float>(cell));
         }
     }
 }
@@ -1578,11 +1580,11 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 // Synthesize scale FBlock from static float values
                 {
                     em.particleScale.timestamps = {0.0f, midpoint, 1.0f};
-                    em.particleScale.floatValues.resize(3);
+                    em.particleScale.vec2Values.resize(3);
                     for (int s = 0; s < 3; s++) {
                         float scale = readValue<float>(m2Data, base + 0x15C + s * 4);
                         if (scale < 0.001f || scale > 100.0f) scale = 1.0f;
-                        em.particleScale.floatValues[s] = scale;
+                        em.particleScale.vec2Values[s] = glm::vec2(scale);
                     }
                 }
             } else {
@@ -1608,11 +1610,31 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 parseFBlock(m2Data, base + 0x104, em.particleColor, 0);
                 parseFBlock(m2Data, base + 0x114, em.particleAlpha, 1);
                 parseFBlock(m2Data, base + 0x124, em.particleScale, 2);
-                // After the scale variation, the two cell tracks and the tail
-                // and twinkle settings: tailLength 0x15C, twinkle 0x160-0x16C,
-                // burstMultiplier 0x170, then drag.
-                if (base + 0x174 + sizeof(float) <= m2Data.size())
-                    em.drag = readValue<float>(m2Data, base + 0x174);
+                em.scaleVary = readValue<glm::vec2>(m2Data, base + 0x134);
+                parseFBlock(m2Data, base + 0x13C, em.headCellTrack, 3);
+                parseFBlock(m2Data, base + 0x14C, em.tailCellTrack, 3);
+                // The variations between the tracks: lifespan's after its
+                // track (0xAC), the rate's after its (0xC4).
+                em.lifespanVary = readValue<float>(m2Data, base + 0xAC);
+                em.emissionRateVary = readValue<float>(m2Data, base + 0xC4);
+                em.tailLength = readValue<float>(m2Data, base + 0x15C);
+                em.twinkleSpeed = readValue<float>(m2Data, base + 0x160);
+                em.twinklePercent = readValue<float>(m2Data, base + 0x164);
+                em.twinkleScaleMin = readValue<float>(m2Data, base + 0x168);
+                em.twinkleScaleMax = readValue<float>(m2Data, base + 0x16C);
+                em.drag = readValue<float>(m2Data, base + 0x174);
+                em.baseSpin = readValue<float>(m2Data, base + 0x178);
+                em.baseSpinVary = readValue<float>(m2Data, base + 0x17C);
+                em.spin = readValue<float>(m2Data, base + 0x180);
+                em.spinVary = readValue<float>(m2Data, base + 0x184);
+                em.wind = readValue<glm::vec3>(m2Data, base + 0x1A0);
+                em.windTime = readValue<float>(m2Data, base + 0x1AC);
+                // Heads with flag 0x20000, tails with 0x40000, both with both,
+                // and nothing with neither. The client never reads the
+                // headOrTail byte (0x2D); a Dalaran sconce's candle flame is a
+                // tail emitter with that byte at 0.
+                em.drawsHead = (em.flags & kM2EmitterHead) != 0;
+                em.drawsTail = (em.flags & kM2EmitterTail) != 0;
             }
 
             model.particleEmitters.push_back(std::move(em));

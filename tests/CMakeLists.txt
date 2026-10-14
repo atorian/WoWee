@@ -1945,9 +1945,9 @@ wowee_add_test(test_terrain_slope_limit
     SOURCES test_terrain_slope_limit.cpp)
 
 # ── test_particle_density_floor ─────────────────────────────
-# Particle density against the floor that holds a flame together. Applying
-# the setting after the floor instead of before it takes every candle in the
-# world out at the lowest setting.
+# M2 particle emission, flight and layout against the 3.3.5a client's own
+# arithmetic: pools, rate and distance LOD, FBlocks, spawn geometry, the
+# emitter's quarter turn, gravity, drag and wind, size and spin.
 wowee_add_test(test_particle_density_floor
     SOURCES test_particle_density_floor.cpp)
 

@@ -429,26 +429,42 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     out.modulate = buildM2Pipeline(m2ModulateBlendState(false));
     out.modulate2x = buildM2Pipeline(m2ModulateBlendState(true));
 
-    // Particles: pos3 + color4 + size1 + tile1
+    // Particles: a quad per instance (an M2ParticleQuad), its four
+    // corners made by the vertex shader. They were points, which can only be
+    // a square of so many pixels: no tail could be stretched along a flight,
+    // and the size had to be guessed from the distance.
     if (particleVert.isValid() && particleFrag.isValid()) {
         VkVertexInputBindingDescription pBind{};
         pBind.binding = 0;
-        pBind.stride = 9 * sizeof(float);
-        pBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        pBind.stride = sizeof(M2ParticleQuad);
+        pBind.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
         std::vector<VkVertexInputAttributeDescription> pAttrs = {
-            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},                    // position
-            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 3 * sizeof(float)}, // color
-            {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 7 * sizeof(float)},          // size
-            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 8 * sizeof(float)},          // tile
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, position)},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(M2ParticleQuad, color)},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(M2ParticleQuad, halfSize)},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(M2ParticleQuad, cell)},
+            {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, axisA)},
+            {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(M2ParticleQuad, axisB)},
+            {.location = 6, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(M2ParticleQuad, spin)},
+            {.location = 7, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = offsetof(M2ParticleQuad, shape)},
+            {.location = 8, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = offsetof(M2ParticleQuad, lit)},
+            {.location = 9, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+             .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, ambient)},
+            {.location = 10, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+             .offset = offsetof(M2ParticleQuad, light) + offsetof(InteriorLightGPU, direct)},
         };
-        auto buildParticlePipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
+        // The client's particle material: two-sided, and depth written only
+        // by the unblended modes (Opaque, AlphaKey). Every blend mode has its
+        // own state; Add, NoAlphaAdd, Mod and Mod2x used to share two.
+        auto buildParticlePipeline = [&](VkPipelineColorBlendAttachmentState blend,
+                                         bool depthWrite) -> VkPipeline {
             return PipelineBuilder()
                 .setShaders(particleVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                             particleFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
                 .setVertexInput({pBind}, pAttrs)
-                .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
                 .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-                .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+                .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS_OR_EQUAL)
                 .setColorBlendAttachment(blend)
                 .setMultisample(samples)
                 .setLayout(particlePipelineLayout_)
@@ -456,8 +472,23 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
                 .setDynamicStates(viewportAndScissorDynamic())
                 .build(device, vkCtx_->getPipelineCache());
         };
-        out.particle = buildParticlePipeline(PipelineBuilder::blendAlpha());
-        out.particleAdditive = buildParticlePipeline(PipelineBuilder::blendAdditive());
+        auto particlePipe = [&](M2BlendPipeline p) -> VkPipeline& {
+            return out.particle[static_cast<size_t>(p)];
+        };
+        particlePipe(M2BlendPipeline::Opaque) =
+            buildParticlePipeline(PipelineBuilder::blendDisabled(), true);
+        particlePipe(M2BlendPipeline::AlphaTest) =
+            buildParticlePipeline(PipelineBuilder::blendDisabled(), true);
+        particlePipe(M2BlendPipeline::Alpha) =
+            buildParticlePipeline(PipelineBuilder::blendAlpha(), false);
+        particlePipe(M2BlendPipeline::NoAlphaAdd) =
+            buildParticlePipeline(m2NoAlphaAddBlendState(), false);
+        particlePipe(M2BlendPipeline::AlphaAdd) =
+            buildParticlePipeline(PipelineBuilder::blendAdditive(), false);
+        particlePipe(M2BlendPipeline::Modulate) =
+            buildParticlePipeline(m2ModulateBlendState(false), false);
+        particlePipe(M2BlendPipeline::Modulate2x) =
+            buildParticlePipeline(m2ModulateBlendState(true), false);
     }
 
     // Smoke: pos3 + lifeRatio1 + size1 + isSpark1
@@ -529,11 +560,54 @@ void M2Renderer::destroyBlendedPipelines(BlendedPipelines& pipes) {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     for (VkPipeline* p : {&pipes.alpha, &pipes.noAlphaAdd, &pipes.additive, &pipes.modulate,
-                          &pipes.modulate2x, &pipes.particle, &pipes.particleAdditive,
-                          &pipes.smoke, &pipes.ribbon, &pipes.ribbonAdditive}) {
+                          &pipes.modulate2x, &pipes.smoke, &pipes.ribbon, &pipes.ribbonAdditive}) {
         if (*p) vkDestroyPipeline(device, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
+    for (VkPipeline& p : pipes.particle) {
+        if (p) vkDestroyPipeline(device, p, nullptr);
+        p = VK_NULL_HANDLE;
+    }
+}
+
+bool M2Renderer::createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize size, const char* what) {
+    VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.size = size;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+    aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
+        VmaAllocationInfo allocInfo{};
+        const VkResult result = vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &vb.buffer[f],
+                                                &vb.alloc[f], &allocInfo);
+        if (result != VK_SUCCESS || !allocInfo.pMappedData) {
+            LOG_ERROR("M2Renderer: could not create the ", what, " vertex buffer (", size,
+                      " bytes, frame ", f, ", VkResult ", static_cast<int>(result),
+                      ") - those are not drawn");
+            destroyFrameVertexBuffer(vb);
+            return false;
+        }
+        vb.mapped[f] = allocInfo.pMappedData;
+    }
+    return true;
+}
+
+void M2Renderer::destroyFrameVertexBuffer(FrameVertexBuffer& vb) {
+    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
+        if (vb.buffer[f]) vmaDestroyBuffer(vkCtx_->getAllocator(), vb.buffer[f], vb.alloc[f]);
+        vb.buffer[f] = VK_NULL_HANDLE;
+        vb.alloc[f] = VK_NULL_HANDLE;
+        vb.mapped[f] = nullptr;
+    }
+}
+
+::VkBuffer M2Renderer::frameBuffer(const FrameVertexBuffer& vb) const {
+    return vb.buffer[vkCtx_->getCurrentFrame()];
+}
+
+void* M2Renderer::frameMapped(const FrameVertexBuffer& vb) const {
+    return vb.mapped[vkCtx_->getCurrentFrame()];
 }
 
 void M2Renderer::setAfterWaterPass(VkRenderPass pass, VkSampleCountFlagBits samples) {
@@ -1004,13 +1078,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     }
 
     // Particle pipeline layout: set 0 = perFrame, set 1 = particleTex
-    // Push constant: vec2 tileCount + int alphaKey (12 bytes)
+    // Push constant: M2ParticlePush (m2_renderer_internal.h)
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, particleTexLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pushRange.offset = 0;
-        pushRange.size = 12; // vec2 + int
+        pushRange.size = sizeof(M2ParticlePush);
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 2;
@@ -1040,37 +1114,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     perFrameLayout_ = perFrameLayout;
     if (!buildMainPassPipelines(perFrameLayout)) return false;
 
-    // --- Create dynamic particle buffers (mapped for CPU writes) ---
-    {
-        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-        VmaAllocationInfo allocInfo{};
-
-        // Smoke particle buffer
-        bci.size = MAX_SMOKE_PARTICLES * 6 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &smokeVB_, &smokeVBAlloc_, &allocInfo);
-        smokeVBMapped_ = allocInfo.pMappedData;
-
-        // M2 particle buffer
-        bci.size = MAX_M2_PARTICLE_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &m2ParticleVB_, &m2ParticleVBAlloc_, &allocInfo);
-        m2ParticleVBMapped_ = allocInfo.pMappedData;
-
-        // Dedicated glow sprite buffer (separate from particle VB to avoid data race)
-        bci.size = MAX_GLOW_SPRITES * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &glowVB_, &glowVBAlloc_, &allocInfo);
-        glowVBMapped_ = allocInfo.pMappedData;
-
-        // Ribbon vertex buffer - triangle strip: pos(3)+color(3)+alpha(1)+uv(2)=9 floats/vert
-        bci.size = MAX_RIBBON_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &ribbonVB_, &ribbonVBAlloc_, &allocInfo);
-        ribbonVBMapped_ = allocInfo.pMappedData;
-    }
+    // --- Dynamic particle buffers, mapped for CPU writes, one per frame ---
+    // Smoke: pos(3)+lifeRatio(1)+size(1)+isSpark(1). Ribbons: a triangle
+    // strip of pos(3)+color(3)+alpha(1)+uv(2).
+    createFrameVertexBuffer(smokeVB_, MAX_SMOKE_PARTICLES * 6 * sizeof(float), "smoke");
+    createFrameVertexBuffer(m2ParticleVB_, MAX_M2_PARTICLE_QUADS * sizeof(M2ParticleQuad), "particle");
+    createFrameVertexBuffer(glowVB_, MAX_GLOW_SPRITES * sizeof(M2ParticleQuad), "glow sprite");
+    createFrameVertexBuffer(ribbonVB_, MAX_RIBBON_VERTS * 9 * sizeof(float), "ribbon");
 
     // --- Create white fallback texture ---
     {
@@ -1197,10 +1247,10 @@ void M2Renderer::shutdown() {
     glowTexture_.reset();
 
     // Clean up particle/ribbon buffers
-    destroy(alloc, smokeVB_, smokeVBAlloc_);
-    destroy(alloc, m2ParticleVB_, m2ParticleVBAlloc_);
-    destroy(alloc, glowVB_, glowVBAlloc_);
-    destroy(alloc, ribbonVB_, ribbonVBAlloc_);
+    destroyFrameVertexBuffer(smokeVB_);
+    destroyFrameVertexBuffer(m2ParticleVB_);
+    destroyFrameVertexBuffer(glowVB_);
+    destroyFrameVertexBuffer(ribbonVB_);
     smokeParticles.clear();
 
     // Destroy pipelines

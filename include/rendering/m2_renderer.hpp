@@ -12,9 +12,11 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_uv_transform.hpp"
+#include "rendering/frames_in_flight.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <unordered_map>
@@ -270,8 +272,40 @@ struct M2Particle {
     float life;        // current age in seconds
     float maxLife;     // total lifespan
     int emitterIndex;  // which emitter spawned this
-    float tileIndex = 0.0f; // texture atlas tile index
+    float tileIndex = 0.0f; // atlas cell picked at spawn (flag 0x10000)
+    /// Its own size factor from the emitter's scale variation.
+    glm::vec2 sizeFactor{1.0f};
+    /// Its draws in [-1, 1] for the spin's base angle and rate, and the spin
+    /// direction (flag 0x200 makes it random).
+    float spinRandBase = 0.0f;
+    float spinRandRate = 0.0f;
+    float spinSign = 1.0f;
+    /// Its own offset into the twinkle table.
+    uint32_t twinkleOffset = 0;
 };
+
+/// How a particle quad is laid out (render spec, section 4.5).
+enum class M2ParticleShape : uint32_t {
+    Billboard = 0,      ///< facing the camera, turned by its spin
+    Tail = 1,           ///< from the head back along axisA, the tail vector
+    AlongVelocity = 2,  ///< facing the camera, stretched along axisA, -velocity (flag 0x4)
+    Plane = 3,          ///< in the plane of axisA and axisB (flag 0x1000)
+};
+
+/// One particle quad as m2_particle.vert reads it, an instance per quad.
+struct M2ParticleQuad {
+    glm::vec3 position;        ///< the particle (its head), world
+    glm::vec4 color;           ///< colour and alpha, straight
+    glm::vec2 halfSize;        ///< half its width and height, world units
+    float cell;                ///< atlas cell
+    glm::vec3 axisA;           ///< per shape: tail vector, -velocity, or the plane's x axis (world)
+    glm::vec3 axisB;           ///< the plane's y axis (world); unused by the other shapes
+    float spin;                ///< radians, counter-clockwise, for a billboard
+    uint32_t shape;            ///< M2ParticleShape
+    uint32_t lit;              ///< 1: lit by the model's light (flag 0x1 clear, not Mod/Mod2x)
+    InteriorLightGPU light;    ///< the model's interior light, as its batches take it
+};
+static_assert(sizeof(M2ParticleQuad) == 27 * sizeof(float), "M2ParticleQuad is read as packed 32-bit values");
 
 /**
  * Instance of an M2 model in the world
@@ -324,6 +358,9 @@ struct M2Instance {
 
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
+    /// Per emitter, the most particles it may hold (m2EmitterPool): grown to
+    /// what it has needed, never shrunk, as the client keeps it.
+    std::vector<uint32_t> emitterPools;
     std::vector<M2Particle> particles;
     /// How far its live particles are from cachedCullCenter, at most, as of
     /// the last update: with the model's own radius, the sphere they are seen
@@ -925,8 +962,9 @@ private:
         VkPipeline additive = VK_NULL_HANDLE;         // blend mode 4 and up past 6
         VkPipeline modulate = VK_NULL_HANDLE;         // blend mode 5
         VkPipeline modulate2x = VK_NULL_HANDLE;       // blend mode 6
-        VkPipeline particle = VK_NULL_HANDLE;         // M2 emitter particles
-        VkPipeline particleAdditive = VK_NULL_HANDLE; // additive particles, glow sprites
+        /// M2 emitter particles, one per blend pipeline (m2BlendPipeline of
+        /// the emitter's blend mode). AlphaAdd also draws the glow sprites.
+        std::array<VkPipeline, kM2BlendPipelineCount> particle{};
         VkPipeline smoke = VK_NULL_HANDLE;            // chimney smoke
         VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
         VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
@@ -1114,22 +1152,28 @@ private:
     // edges across its ten trails - 1300 vertices - when they run at the
     // rate and lifetime it asks for.
     static constexpr size_t MAX_RIBBON_VERTS = 65536;
-    ::VkBuffer ribbonVB_ = VK_NULL_HANDLE;
-    VmaAllocation ribbonVBAlloc_ = VK_NULL_HANDLE;
-    void* ribbonVBMapped_ = nullptr;
 
-    // Dynamic particle buffers
-    ::VkBuffer smokeVB_ = VK_NULL_HANDLE;
-    VmaAllocation smokeVBAlloc_ = VK_NULL_HANDLE;
-    void* smokeVBMapped_ = nullptr;
-    ::VkBuffer m2ParticleVB_ = VK_NULL_HANDLE;
-    VmaAllocation m2ParticleVBAlloc_ = VK_NULL_HANDLE;
-    void* m2ParticleVBMapped_ = nullptr;
-    // Dedicated glow sprite vertex buffer (separate from particle VB to avoid data race)
+    /// A vertex buffer the CPU fills every frame, one per frame in flight.
+    /// There was one of each: while the GPU still drew the last frame's
+    /// particles, this frame's were written over them, so particles showed a
+    /// frame ahead of where they were, flashed white or vanished for a frame
+    /// whenever the two overlapped.
+    struct FrameVertexBuffer {
+        std::array<::VkBuffer, MAX_FRAMES_IN_FLIGHT> buffer{};
+        std::array<VmaAllocation, MAX_FRAMES_IN_FLIGHT> alloc{};
+        std::array<void*, MAX_FRAMES_IN_FLIGHT> mapped{};
+    };
+    bool createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize size, const char* what);
+    void destroyFrameVertexBuffer(FrameVertexBuffer& vb);
+    /// This frame's copy: its buffer and where it is mapped.
+    ::VkBuffer frameBuffer(const FrameVertexBuffer& vb) const;
+    void* frameMapped(const FrameVertexBuffer& vb) const;
+
+    FrameVertexBuffer ribbonVB_;
+    FrameVertexBuffer smokeVB_;
+    FrameVertexBuffer m2ParticleVB_;
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
-    ::VkBuffer glowVB_ = VK_NULL_HANDLE;
-    VmaAllocation glowVBAlloc_ = VK_NULL_HANDLE;
-    void* glowVBMapped_ = nullptr;
+    FrameVertexBuffer glowVB_;
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
     // Grace period for model cleanup: track when a model first became instanceless.
@@ -1324,9 +1368,11 @@ private:
         uint8_t blendType;
         uint16_t tilesX;
         uint16_t tilesY;
+        bool fogged;
         bool operator==(const ParticleGroupKey& other) const {
             return texture == other.texture &&
                    blendType == other.blendType &&
+                   fogged == other.fogged &&
                    tilesX == other.tilesX &&
                    tilesY == other.tilesY;
         }
@@ -1335,7 +1381,7 @@ private:
         size_t operator()(const ParticleGroupKey& key) const {
             size_t h1 = std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(key.texture));
             size_t h2 = std::hash<uint32_t>{}((static_cast<uint32_t>(key.tilesX) << 16) | key.tilesY);
-            size_t h3 = std::hash<uint8_t>{}(key.blendType);
+            size_t h3 = std::hash<uint32_t>{}(key.blendType | (key.fogged ? 0x100u : 0u));
             return h1 ^ (h2 * 0x9e3779b9u) ^ (h3 * 0x85ebca6bu);
         }
     };
@@ -1344,6 +1390,7 @@ private:
         uint8_t blendType;
         uint16_t tilesX;
         uint16_t tilesY;
+        bool fogged = true;
         VkDescriptorSet preAllocSet = VK_NULL_HANDLE;
     };
     std::unordered_map<ParticleGroupKey, ParticleGroup, ParticleGroupKeyHash> particleGroups_;
@@ -1365,9 +1412,12 @@ private:
         uint32_t count = 0;
     };
     std::vector<ParticleRun> particleRuns_;
-    /// Vertices the particle buffer holds. Not MAX_M2_PARTICLES, which is the
-    /// cap on one instance's particles: this has to hold a whole frame's.
-    static constexpr size_t MAX_M2_PARTICLE_VERTS = 32768;
+    /// Quads the particle buffer holds: a whole frame's, a particle that is
+    /// both head and tail taking two. The client has no frame budget at all -
+    /// each emitter draws at most m2EmitterDrawCap - so this is sized for the
+    /// busiest place in view rather than as a limit; filling it is reported.
+    /// 32768 filled in Dalaran before particles were culled to the view.
+    static constexpr size_t MAX_M2_PARTICLE_QUADS = 131072;
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame
@@ -1388,9 +1438,11 @@ private:
     float smokeEmitAccum = 0.0f;
     std::mt19937 smokeRng{42};
 
-    // M2 particle emitter system
-    static constexpr size_t MAX_M2_PARTICLES = 4000;
+    // M2 particle emitter system. Each emitter holds as many particles as its
+    // pool allows (m2EmitterPool), with no cap per instance.
     std::mt19937 particleRng_{123};
+    /// Particles drawn per emitter of the instance being written; scratch.
+    std::vector<uint32_t> drawnPerEmitter_;
     bool skyMode_ = false;
     float skyTimeOfDayHours_ = 12.0f;
     std::function<std::optional<float>(float, float, float)> waterHeightAt_;
@@ -1439,7 +1491,9 @@ private:
                       float globalTime, int seqIdx,
                       const std::vector<uint32_t>& globalSeqDurations);
     float interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio);
+    glm::vec2 interpFBlockVec2(const pipeline::M2FBlock& fb, float lifeRatio);
     glm::vec3 interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeRatio);
+    float interpFBlockCell(const pipeline::M2FBlock& fb, float lifeRatio, uint32_t cellCount);
     void emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt);
     void updateParticles(M2Instance& inst, float dt);
     /// Ages the instance's ribbon edges and, when `emit`, lays new ones.

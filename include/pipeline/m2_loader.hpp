@@ -148,10 +148,40 @@ struct M2Camera {
 
 // FBlock: particle lifetime curve (color/alpha/scale over particle life)
 struct M2FBlock {
-    std::vector<float> timestamps;      // Normalized 0..1
-    std::vector<float> floatValues;     // For alpha/scale
+    std::vector<float> timestamps;      // Fractions of the particle's life
+    std::vector<float> floatValues;     // For alpha and atlas cells
+    std::vector<glm::vec2> vec2Values;  // For scale: half width, half height
     std::vector<glm::vec3> vec3Values;  // For color RGB
 };
+
+/// Emitter flags (M2Particle +0x04) the renderer acts on; the rest are in
+/// docs/wow-client-render-spec.md, section 4.5.
+constexpr uint32_t kM2EmitterUnlit = 0x1;
+/// A head stretched along its projected flight.
+constexpr uint32_t kM2EmitterAlongVelocity = 0x4;
+constexpr uint32_t kM2EmitterUnfogged = 0x8;
+/// Particles live in the emitter's space and move with it.
+constexpr uint32_t kM2EmitterModelSpace = 0x10;
+/// Particle size times the emitter bone's world scale.
+constexpr uint32_t kM2EmitterBoneScale = 0x20;
+/// Sphere emitters: particles leave along +Z, not out from the centre.
+constexpr uint32_t kM2EmitterSphereUp = 0x100;
+/// Spin direction random per particle.
+constexpr uint32_t kM2EmitterRandomSpin = 0x200;
+/// A tail is no longer than the particle is old: a newborn has none.
+constexpr uint32_t kM2EmitterClampTailToAge = 0x400;
+/// Heads lie flat in the XY plane (the world's, or the emitter's with 0x10)
+/// instead of facing the camera.
+constexpr uint32_t kM2EmitterPlane = 0x1000;
+constexpr uint32_t kM2EmitterHead = 0x20000;
+constexpr uint32_t kM2EmitterTail = 0x40000;
+/// scaleVary's x and y vary independently.
+constexpr uint32_t kM2EmitterIndependentScaleVary = 0x80000;
+
+/// Emitter flag 0x10000: with more than one atlas cell, each particle takes a
+/// random one when it spawns (WoW.exe 0x979f8e) instead of following the cell
+/// tracks.
+constexpr uint32_t kM2EmitterRandomCell = 0x10000;
 
 /// Emitter flag 0x10000000 (WotLK): the emitter blends up to three textures,
 /// and its texture field packs their indices five bits each.
@@ -182,7 +212,11 @@ struct M2ParticleEmitter {
     M2AnimationTrack horizontalRange;
     M2AnimationTrack gravity;
     M2AnimationTrack lifespan;
+    /// Each particle's life varies by up to this either way (WotLK 0xAC).
+    float lifespanVary = 0.0f;
     M2AnimationTrack emissionRate;
+    /// The rate varies by up to this either way, drawn once a frame (0xC4).
+    float emissionRateVary = 0.0f;
     M2AnimationTrack emissionAreaLength;
     M2AnimationTrack emissionAreaWidth;
     /// Above zero, particles leave away from (0, 0, zSource) in the emitter's
@@ -190,9 +224,38 @@ struct M2ParticleEmitter {
     M2AnimationTrack zSource;
     /// How fast a particle slows, per second (WotLK; zero before it).
     float drag = 0.0f;
+    /// Seconds of flight a tail particle trails behind it: the quad runs from
+    /// the particle back along its velocity times this.
+    float tailLength = 0.0f;
+    /// Whether a particle is drawn as a head (a billboard at its position), a
+    /// tail (a quad stretched back along its flight), or both.
+    bool drawsHead = true;
+    bool drawsTail = false;
     M2FBlock particleColor;   // vec3 RGB at 3 timestamps
     M2FBlock particleAlpha;   // float (from uint16/32767) at 3 timestamps
-    M2FBlock particleScale;   // float (x component of vec2) at 3 timestamps
+    M2FBlock particleScale;   // half width and height (vec2Values)
+    /// Each particle's size factor varies by up to this, fixed for its life.
+    glm::vec2 scaleVary{0.0f};
+    /// Twinkle: the particle's slot in a table of 128 random fractions moves
+    /// on at this many a second; it shows only while its slot is at or below
+    /// the percentage, and its size is scaled from min to max by the slot.
+    float twinkleSpeed = 0.0f;
+    float twinklePercent = 1.0f;
+    float twinkleScaleMin = 1.0f;
+    float twinkleScaleMax = 1.0f;
+    /// Spin, radians: a base angle and a rate, each give or take its variation.
+    float baseSpin = 0.0f;
+    float baseSpinVary = 0.0f;
+    float spin = 0.0f;
+    float spinVary = 0.0f;
+    /// Wind added to a particle's velocity, per second, while it is younger
+    /// than windTime.
+    glm::vec3 wind{0.0f};
+    float windTime = 0.0f;
+    /// The atlas cell a head and a tail show over the particle's life (0x13C,
+    /// 0x14C), unless flag kM2EmitterRandomCell picks one at spawn.
+    M2FBlock headCellTrack;
+    M2FBlock tailCellTrack;
     bool enabled = true;
 };
 
