@@ -319,6 +319,9 @@ struct M2Model {
     std::vector<M2TextureTransform> textureTransforms;
     std::vector<uint16_t> textureTransformLookup;
     std::vector<int16_t> textureCoordLookup;
+    /// Flag 0x08 only: each batch's stage ops, from its shader id onwards
+    /// (m2BatchShading in rendering/m2_combiner.hpp).
+    std::vector<uint16_t> textureCombinerCombos;
 
     // Texture weights (per-batch opacity, from M2Track<fixed16>)
     // Each entry is the "at-rest" opacity value (0=transparent, 1=opaque).

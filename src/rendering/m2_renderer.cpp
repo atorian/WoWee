@@ -1061,14 +1061,13 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // --- Pipeline layouts ---
 
     // Main M2 pipeline layout: set 0 = perFrame, set 1 = material, set 2 = bones, set 3 = instances
-    // Push constant: int texCoordSet + int isFoliage + int instanceDataOffset
-    //              + float swayRefHeight + float swayAmp + float plantHeight (24 bytes)
+    // Push constant: M2PushConstants, m2.vert's Push block
     {
         VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_, instanceSetLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushRange.offset = 0;
-        pushRange.size = 24;
+        pushRange.size = kM2PushConstantBytes;
 
         VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 4;
@@ -1640,8 +1639,8 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     mat.blendMode = batch.blendMode;
     mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
     mat.fireCard = batch.forgeFireCard ? 1 : 0;
+    mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
-    mat.secondTexCoordSet = batch.secondTexCoordSet;
     mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
@@ -2363,23 +2362,38 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             if (tex != nullptr && tex != whiteTexture_.get()) {
                 applyBatchTextureProps(gpuModel, bgpu, batchTexKeyLower);
             }
-            bgpu.textureUnit = m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit);
-            // These layers multiply the first texture by a second RGB/alpha
-            // mask. Both aurora strands and fountain foam need this stage.
-            if (m2UsesSecondTextureMask(batch.shader, batch.textureCount, bgpu.blendMode,
-                                        m2TextureCoordSet(model.textureCoordLookup,
-                                                          static_cast<uint16_t>(batch.textureUnit + 1)))) {
-                const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
-                if (second < model.textureLookup.size()) {
-                    const uint16_t mask = model.textureLookup[second];
-                    if (mask < allTextures.size() && mask < textureLoadFailed.size() && !textureLoadFailed[mask])
-                        bgpu.secondTexture = allTextures[mask];
-                    if (mask < model.textures.size())
-                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[mask].flags & 0x3);
+            // How its stages combine and where their coordinates come from,
+            // as the client works it out at skin load. The second stage was
+            // used for one case only - shader 0, two textures, a blended
+            // layer, as an RGBA mask - so armour lost its sphere-mapped shine
+            // and two-texture flames their doubling, about 5,500 batches.
+            {
+                const auto coordAt = [&](size_t i) -> int16_t {
+                    return i < model.textureCoordLookup.size() ? model.textureCoordLookup[i] : 0;
+                };
+                const M2BatchShading shading = m2BatchShading(
+                    model.globalFlags, model.textureCombinerCombos, batch.shader, batch.textureCount,
+                    bgpu.blendMode, coordAt(batch.textureUnit), coordAt(static_cast<size_t>(batch.textureUnit) + 1));
+                bgpu.combiner = shading.combiner;
+                bgpu.textureUnit = m2StageCoordsPush(shading.coords0);
+                bgpu.secondTexCoords = m2StageCoordsPush(shading.coords1);
+                bgpu.shaderDrawn = shading.drawn;
+                if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
+                    const size_t second = static_cast<size_t>(batch.textureIndex) + 1;
+                    const uint16_t tex = second < model.textureLookup.size() ? model.textureLookup[second] : UINT16_MAX;
+                    if (tex < allTextures.size() && tex < textureLoadFailed.size() && !textureLoadFailed[tex]) {
+                        bgpu.secondTexture = allTextures[tex];
+                    } else {
+                        // Drawn with its second stage white: the first alone.
+                        static std::unordered_set<std::string> saidMissing;
+                        if (saidMissing.insert(model.name).second) {
+                            LOG_WARNING("M2 '", model.name, "' batch ", gpuModel.batches.size(),
+                                        ": its second texture (lookup ", second, ") is not loaded; drawn without it");
+                        }
+                    }
+                    if (tex < model.textures.size())
+                        bgpu.secondTexFlags = static_cast<uint8_t>(model.textures[tex].flags & 0x3);
                 }
-                const size_t coord = static_cast<size_t>(batch.textureUnit) + 1;
-                if (coord < model.textureCoordLookup.size())
-                    bgpu.secondTexCoordSet = model.textureCoordLookup[coord] == 1 ? 1 : 0;
             }
 
             // Hide the batch if its texture failed to load, and remember what it
@@ -2749,7 +2763,7 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     for (const auto& batch : gpuModel.batches) {
         // A layer that fades in and out is drawn blended, and blended layers
         // cast no shadow.
-        if (batch.submeshLevel != 0 || batch.blendedByOpacity ||
+        if (batch.submeshLevel != 0 || batch.blendedByOpacity || !batch.shaderDrawn ||
             !m2BatchCastsShadow(batch.blendMode, batch.batchOpacity,
                                 batch.glowCardLike, batch.starLayer)) {
             continue;

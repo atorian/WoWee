@@ -17,6 +17,7 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/pom_quality.hpp"
@@ -250,6 +251,18 @@ static float evalBatchTextureWeight(const pipeline::M2Model& model,
                                  model.globalSequenceDurations, 1.0f);
 }
 
+// A batch's stages and combiner, from the model's flags and combos and the
+// batch's shader id, as the M2 pass takes them.
+static M2BatchShading characterBatchShading(const pipeline::M2Model& model,
+                                            const pipeline::M2Batch& batch, uint16_t blendMode) {
+    const auto coordAt = [&](size_t i) -> int16_t {
+        return i < model.textureCoordLookup.size() ? model.textureCoordLookup[i] : 0;
+    };
+    return m2BatchShading(model.globalFlags, model.textureCombinerCombos, batch.shader,
+                          batch.textureCount, blendMode, coordAt(batch.textureUnit),
+                          coordAt(static_cast<size_t>(batch.textureUnit) + 1));
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
@@ -274,18 +287,23 @@ struct CharMaterialUBO {
     M2UVTransform uvTransform;
     /// What an aura multiplies the lit colour by (w is padding).
     glm::vec4 stateTint{1.0f};
-    /// The first texture is multiplied by binding 3, read on this UV set.
+    /// The second stage at binding 3, its UV source (m2StageCoordsPush) and
+    /// how the stages combine (M2Combiner).
     int32_t hasSecondTexture = 0;
-    int32_t secondTexCoordSet = 0;
-    int32_t padding[2] = {};
+    int32_t texCoordSet2 = 0;
+    int32_t combiner = static_cast<int32_t>(M2Combiner::Mod);
+    int32_t padding = 0;
     /// The batch's authored M2 colour, multiplied into the texture (w is padding).
     glm::vec4 batchColor{1.0f};
+    /// The second stage's own texture animation.
+    M2UVTransform uvTransform2;
 };
 static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
 static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
 static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 128, "after stateTint");
 static_assert(offsetof(CharMaterialUBO, batchColor) == 144, "std140 aligns a vec4 to 16");
-static_assert(sizeof(CharMaterialUBO) == 160, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, uvTransform2) == 160, "after batchColor");
+static_assert(sizeof(CharMaterialUBO) == 192, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -3114,6 +3132,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
                     materialFlags = gpuModel.data.materials[batch.materialIndex].flags;
                 }
+                const M2BatchShading shading = characterBatchShading(gpuModel.data, batch, blendMode);
+                // Shader 0x8000: the client builds no effect for it and draws nothing.
+                if (!shading.drawn) continue;
 
                 const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
@@ -3255,50 +3276,40 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.modulateNeutral =
                     blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
                     : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
-                matData.texCoordSet = m2TextureCoordSet(
-                    gpuModel.data.textureCoordLookup,
-                    static_cast<uint16_t>(batch.textureUnit + resolved.comboOffset));
-                const size_t animLookup = batch.textureAnimIndex == 0xFFFF
-                    ? size_t{0xFFFF}
-                    : size_t{batch.textureAnimIndex} + resolved.comboOffset;
-                if (const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
-                                                          gpuModel.data.textureTransforms,
-                                                          animLookup)) {
-                    matData.uvTransform = m2SampleUVTransform(
-                        *tt, instance.currentSequenceIndex, instance.animationTime,
-                        instance.globalSequenceTime, gpuModel.data.globalSequenceDurations);
-                }
-                // A second stage that shapes the first: a fire hawk's flame
-                // wings are the flame texture cut to feathers by its border
-                // mask, and drawn from the flame alone were bare streaks.
+                // Where each stage's coordinates come from and how the stages
+                // combine, as the client works it out at skin load. One
+                // texture used to be picked among the stages, which lost
+                // armour its sphere-mapped shine and a flame its doubling.
+                matData.combiner = static_cast<int32_t>(shading.combiner);
+                matData.texCoordSet = m2StageCoordsPush(shading.coords0);
+                matData.texCoordSet2 = m2StageCoordsPush(shading.coords1);
+                const auto stageUVTransform = [&](uint32_t stage) {
+                    const size_t animLookup = batch.textureAnimIndex == 0xFFFF
+                        ? size_t{0xFFFF} : size_t{batch.textureAnimIndex} + stage;
+                    const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
+                                                          gpuModel.data.textureTransforms, animLookup);
+                    return tt ? m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                                                    instance.animationTime, instance.globalSequenceTime,
+                                                    gpuModel.data.globalSequenceDurations)
+                              : M2UVTransform{};
+                };
+                matData.uvTransform = stageUVTransform(0);
                 VkTexture* secondTex = nullptr;
                 uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
-                const int8_t secondCoordSet = m2TextureCoordSet(
-                    gpuModel.data.textureCoordLookup, static_cast<uint16_t>(batch.textureUnit + 1));
-                if (resolved.comboOffset == 0 &&
-                    m2UsesSecondTextureMask(batch.shader, batch.textureCount, blendMode, secondCoordSet)) {
-                    const size_t lookupPos = size_t{batch.textureIndex} + 1;
-                    const uint16_t slot = lookupPos < gpuModel.data.textureLookup.size()
-                        ? gpuModel.data.textureLookup[lookupPos] : uint16_t{0xFFFF};
-                    if (slot < gpuModel.textureIds.size()) {
-                        secondTex = gpuModel.textureIds[slot];
-                        if (auto o = instance.textureSlotOverrides.find(slot);
-                            o != instance.textureSlotOverrides.end() && o->second) {
-                            secondTex = o->second;
-                        }
-                        if (slot < gpuModel.data.textures.size())
-                            secondWrapFlags = static_cast<uint8_t>(gpuModel.data.textures[slot].flags & 0x3);
-                    }
-                    if (secondTex && secondTex->isValid() && secondTex != whiteTexture_.get()) {
+                if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
+                    matData.uvTransform2 = stageUVTransform(1);
+                    const BatchTexture second = resolveBatchTexture(instance, gpuModel, batch, 1);
+                    secondWrapFlags = second.wrapFlags;
+                    if (second.texture && second.texture->isValid() && second.texture != whiteTexture_.get()) {
+                        secondTex = second.texture;
                         matData.hasSecondTexture = 1;
-                        matData.secondTexCoordSet = secondCoordSet == 1 ? 1 : 0;
                     } else {
-                        secondTex = nullptr;
+                        // Drawn with the second stage white: the first alone.
                         static std::unordered_set<uint64_t> loggedMissingSecond;
-                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | slot).second) {
+                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | bi).second) {
                             LOG_WARNING("Character model '", gpuModel.data.name, "' batch ", bi,
-                                        ": its second texture (slot ", slot,
-                                        ") is not loaded; drawn without the mask that shapes it");
+                                        ": its second texture (lookup ", size_t{batch.textureIndex} + 1,
+                                        ") is not loaded; drawn with the first stage alone");
                         }
                     }
                 }
@@ -3748,6 +3759,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 blendMode = gpuModel.data.materials[batch.materialIndex].blendMode;
             }
             if (blendMode >= 2) continue; // skip transparent
+            if (!characterBatchShading(gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
             if (applyGeosetFilter &&
                 inst.activeGeosets.find(batch.submeshId) == inst.activeGeosets.end()) continue;
             if (!applyGeosetFilter) {
@@ -3831,74 +3843,38 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
 }
 
 CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
-        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b) const {
-            // A skin batch can reference multiple textures (b.textureCount) starting at b.textureIndex.
-            // We currently bind only a single texture, so pick the most appropriate one.
-            if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
-            if (gm.data.textureLookup.empty() || gm.textureIds.empty()) return {.texture = whiteTexture_.get()};
+        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b,
+        uint32_t stage) const {
+    // The stage's own texture, as the client takes it: textures[lookup[index +
+    // stage]]. With one texture bound, this used to pick among the stages - a
+    // hair slot first, else the first that was not white - which dropped the
+    // other stage; the stages are combined now (m2BatchShading).
+    if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
+    const uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + stage;
+    if (lookupPos >= gm.data.textureLookup.size()) return {.texture = whiteTexture_.get()};
+    const uint16_t texSlot = gm.data.textureLookup[lookupPos];
+    if (texSlot >= gm.textureIds.size()) return {.texture = whiteTexture_.get()};
 
-            uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
-            comboCount = std::min<uint32_t>(comboCount, 8u);
-
-            BatchTexture first{.texture = whiteTexture_.get()};
-            bool hasFirst = false;
-            BatchTexture firstNonWhite{.texture = whiteTexture_.get()};
-            bool hasFirstNonWhite = false;
-
-            for (uint32_t i = 0; i < comboCount; i++) {
-                uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + i;
-                if (lookupPos >= gm.data.textureLookup.size()) break;
-                uint16_t texSlot = gm.data.textureLookup[lookupPos];
-                if (texSlot >= gm.textureIds.size()) continue;
-
-                VkTexture* texPtr = gm.textureIds[texSlot];
-                uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
-                const uint8_t wrapFlags = texSlot < gm.data.textures.size()
-                    ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
-                    : BatchTexture::kRepeatBoth;
-                // Apply texture slot overrides.
-                // For type-1 (skin) overrides, only apply to skin-group batches
-                // to prevent the skin composite from bleeding onto cloak/hair.
-                {
-                    auto itO = inst.textureSlotOverrides.find(texSlot);
-                    if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
-                        if (texType == 1) {
-                            // Only apply skin override to skin groups
-                            uint16_t grp = b.submeshId / 100;
-                            bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                                grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
-                                                grp == 20);
-                            if (isSkinGroup) texPtr = itO->second;
-                        } else {
-                            texPtr = itO->second;
-                        }
-                    }
-                }
-
-                if (!hasFirst) {
-                    first = {.texture = texPtr, .wrapFlags = wrapFlags,
-                             .comboOffset = static_cast<uint16_t>(i)};
-                    hasFirst = true;
-                }
-
-                if (texPtr == nullptr || texPtr == whiteTexture_.get()) continue;
-
-                // Prefer the hair texture slot (type 6) whenever present in the combo.
-                if (texType == 6) {
-                    return {.texture = texPtr, .wrapFlags = wrapFlags,
-                            .comboOffset = static_cast<uint16_t>(i)};
-                }
-
-                if (!hasFirstNonWhite) {
-                    firstNonWhite = {.texture = texPtr, .wrapFlags = wrapFlags,
-                                     .comboOffset = static_cast<uint16_t>(i)};
-                    hasFirstNonWhite = true;
-                }
-            }
-
-            if (hasFirstNonWhite) return firstNonWhite;
-            if (hasFirst && first.texture != nullptr) return first;
-            return {.texture = whiteTexture_.get()};
+    VkTexture* texPtr = gm.textureIds[texSlot];
+    const uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
+    const uint8_t wrapFlags = texSlot < gm.data.textures.size()
+        ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
+        : BatchTexture::kRepeatBoth;
+    // Texture slot overrides. A type-1 (skin) override only reaches skin-group
+    // batches, so the skin composite does not bleed onto cloak or hair.
+    auto itO = inst.textureSlotOverrides.find(texSlot);
+    if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
+        if (texType == 1) {
+            const uint16_t grp = b.submeshId / 100;
+            const bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
+                                      grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
+                                      grp == 20);
+            if (isSkinGroup) texPtr = itO->second;
+        } else {
+            texPtr = itO->second;
+        }
+    }
+    return {.texture = texPtr ? texPtr : whiteTexture_.get(), .wrapFlags = wrapFlags};
 }
 
 glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) const {

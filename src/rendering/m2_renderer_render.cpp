@@ -1128,7 +1128,9 @@ struct M2PushConstants {
     float swayRefHeight;        // Model-space height the wind normalises against
     float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
     float plantHeight;          // The model's own height, for the player brush
+    int32_t texCoordSet2;       // the second stage's: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
 };
+static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
 
 // Where in its draw distance a doodad starts to fade out.
 constexpr float kFadeStartFraction = 0.75f;
@@ -1775,6 +1777,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         skipped = "WOWEE_M2_ONLY_BATCH";
                     }
                     else if (batch.indexCount == 0) skipped = "no indices";
+                    else if (!batch.shaderDrawn) skipped = "shader 0x8000";
                     else if (!model.isGroundDetail && batch.submeshLevel != lod)
                         skipped = "submeshLevel is not this LOD";
                     else if (batch.batchOpacity <= kM2BatchHiddenOpacity) skipped = "opacity is zero";
@@ -2009,6 +2012,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Push constants + instanced draw
                     M2PushConstants pc;
                     pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
+                    pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
                     fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
@@ -2151,7 +2155,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 
         for (const size_t batchIndex : model.materialDrawOrder) {
             const auto& batch = model.batches[batchIndex];
-            if (batch.indexCount == 0) continue;
+            if (batch.indexCount == 0 || !batch.shaderDrawn) continue;
             if (!model.isGroundDetail && batch.submeshLevel != targetLOD) continue;
             if (!skyBatchAllowed(skyMode_, static_cast<std::size_t>(&batch - model.batches.data()))) continue;
 
@@ -2318,6 +2322,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             // Push constants + single-instance draw
             M2PushConstants pc;
             pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
+            pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
             fillSway(pc, model, skyMode_);
             pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
@@ -2670,7 +2675,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             for (const auto& batch : model.batches) {
                 // A layer that fades in and out is drawn blended, and blended
                 // layers cast no shadow.
-                if (batch.submeshLevel > 0 || batch.blendedByOpacity ||
+                if (batch.submeshLevel > 0 || batch.blendedByOpacity || !batch.shaderDrawn ||
                     !m2BatchCastsShadow(batch.blendMode, batch.batchOpacity,
                                         batch.glowCardLike, batch.starLayer)) continue;
                 const bool alphaCutout = batch.blendMode == 1;

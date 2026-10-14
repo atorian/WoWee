@@ -37,14 +37,20 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // What an aura multiplies the lit colour by: Shadowform's purple, a
     // ghost's blue (SpellVisualKit character procs). White without one.
     vec4 stateTint;
-    // A second texture the first is multiplied by (m2UsesSecondTextureMask in
-    // m2_material.hpp): the feathers that shape a fire hawk's flames. Read at
-    // set 1 binding 3, on this UV set (0 or 1).
+    // The batch's second stage, at set 1 binding 3, and how the two stages
+    // combine (M2Combiner in m2_combiner.hpp; combineStages in
+    // m2_combiner.glsli). Its UV: 0 or 1 for a vertex set animated by uv2Row*,
+    // -1 for the sphere map, 2 for UV0 as it is.
     int hasSecondTexture;
-    int secondTexCoordSet;
+    int texCoordSet2;
+    int combiner;
+    int materialPad0;
     // The batch's authored M2 colour, multiplied into the texture (w is
     // padding). A glow card is painted white and coloured here: the riding
     // phoenix's wing glows carry red, magenta and violet, and drew white
     // without it.
     vec4 batchColor;
+    // The second stage's own texture animation.
+    vec4 uv2Row0;
+    vec4 uv2Row1;
 };

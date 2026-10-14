@@ -1961,6 +1961,11 @@ wowee_add_test(test_camera_boom
 wowee_add_test(test_game_object_animation
     SOURCES test_game_object_animation.cpp)
 
+# ── test_m2_combiner ────────────────────────────────────────
+# How an M2 batch combines its textures, by the client's rules.
+wowee_add_test(test_m2_combiner
+    SOURCES test_m2_combiner.cpp)
+
 # ── test_m2_billboard_model ─────────────────────────────────
 # Mana Shield's card through the renderer's own bone update.
 wowee_add_test(test_m2_billboard_model

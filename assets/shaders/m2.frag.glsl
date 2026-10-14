@@ -48,8 +48,8 @@ layout(set = 1, binding = 2) uniform M2Material {
     float tintB;
     int volumetricBeam;
     int fireCard;
+    int combiner;           // M2Combiner
     int hasSecondTexture;
-    int secondTexCoordSet;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -64,7 +64,7 @@ layout(location = 4) in float ModelHeight;
 layout(location = 5) in float vFadeAlpha;
 layout(location = 6) flat in int vSkyMode;
 layout(location = 7) flat in float vHighlight;
-layout(location = 8) in vec4 MaskUVs;
+layout(location = 8) in vec2 TexCoord2;
 layout(location = 9) flat in vec4 vInteriorAmbient;
 layout(location = 10) flat in vec4 vInteriorDirect;
 layout(location = 11) flat in float vTintScale;
@@ -196,18 +196,22 @@ vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
 }
 
+#include "m2_combiner.glsli"
+
 void main() {
     if (cullBackFaces != 0 && !gl_FrontFacing) discard;
-    vec4 texColor = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
-    // Mask RGBA before lighting or alpha handling; the authored UV1 mask
-    // bounds the foam even while its UV0 water texture scrolls.
-    if (hasSecondTexture != 0) {
-        vec2 maskUV = secondTexCoordSet == 1 ? MaskUVs.zw : MaskUVs.xy;
-        texColor *= texture(uSecondTexture, maskUV);
-    }
+    // The stages as the client combines them: armour doubled by its
+    // sphere-mapped shine, a flame shaped by its mask, a layer with light
+    // of its own added on top of the lit one.
+    vec4 t0 = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
+    vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+    vec3 stageAdd;
+    vec4 texColor = combineStages(combiner, t0, t1, stageAdd);
+    texColor.a = clamp(texColor.a, 0.0, 1.0);
     // The batch's authored colour. A glow card is painted white and coloured
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
-    // every fire in the world burns white.
+    // every fire in the world burns white. It is part of the vertex colour,
+    // which what the stages add on top is not.
     texColor.rgb *= vec3(tintR, tintG, tintB) * vTintScale;
 
     // Original client sky M2s carry their authored colour and alpha, and are
@@ -235,7 +239,7 @@ void main() {
         // Behind all the air there is, as the procedural sky is. An
         // additive layer only loses what the air hides of it; the air's own
         // light is already in the layer it is added to.
-        vec3 skyColor = texColor.rgb;
+        vec3 skyColor = texColor.rgb + stageAdd;
         if (volumetricParams.x > 0.5) {
             vec4 clip = projection * view * vec4(FragPos, 1.0);
             vec4 air = fogVolumeSky(clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5);
@@ -413,6 +417,9 @@ void main() {
     }
 
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    // What the stages add on top of the lit colour - an Add combiner's second
+    // stage, a reflection laid over - takes no light.
+    result += stageAdd;
 
     float dist = length(viewPos.xyz - FragPos);
     if (blendMode == 5 || blendMode == 6) {

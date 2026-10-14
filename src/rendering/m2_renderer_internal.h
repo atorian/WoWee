@@ -98,6 +98,9 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 
 // ---- Constants ----
 inline const auto kLavaAnimStart = std::chrono::steady_clock::now();
+/// The size of m2.vert's Push block (M2PushConstants in m2_renderer_render.cpp).
+inline constexpr uint32_t kM2PushConstantBytes = 28;
+
 /// m2_particle.frag's push constants.
 struct M2ParticlePush {
     float tileX = 1.0f, tileY = 1.0f;

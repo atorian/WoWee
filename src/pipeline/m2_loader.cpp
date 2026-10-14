@@ -843,6 +843,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
     }
 
     uint32_t ofsViews = 0;
+    // Where the header proper ends: textureCombinerCombos follows it in a
+    // model with flag 0x08.
+    size_t headerEnd = sizeof(M2Header);
 
     if (header.version < 264) {
         // Vanilla M2: read remaining header fields using cursor, skipping extra fields
@@ -931,6 +934,7 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         header.ofsRibbonEmitters = r32();
         header.nParticleEmitters = r32();
         header.ofsParticleEmitters = r32();
+        headerEnd = c;
 
         core::Logger::getInstance().debug("Vanilla M2 (version ", header.version,
             "): nVerts=", header.nVertices, " nViews=", header.nViews,
@@ -955,6 +959,19 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
 
     model.version = header.version;
     model.globalFlags = header.globalFlags;
+
+    // Flag 0x08: the stage ops of every batch's shader id, looked up through
+    // this table (see m2BatchShading).
+    if (header.globalFlags & 0x08) {
+        const uint32_t count = readValue<uint32_t>(m2Data, static_cast<uint32_t>(headerEnd));
+        const uint32_t offset = readValue<uint32_t>(m2Data, static_cast<uint32_t>(headerEnd + 4));
+        model.textureCombinerCombos = readArray<uint16_t>(m2Data, offset, count);
+        if (count > 0 && model.textureCombinerCombos.size() != count) {
+            core::Logger::getInstance().warning(
+                "M2 '", model.name, "': textureCombinerCombos (", count, " at ", offset,
+                ") lies outside the file; its batches combine their stages as Mod");
+        }
+    }
 
     // M2 binary layout splits three ways, not two. TBC (v260-263) shares the
     // extended header / 68-byte sequences / 48-byte attachments / 504-byte

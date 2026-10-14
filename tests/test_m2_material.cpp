@@ -3,17 +3,20 @@
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_combiner.hpp"
 
 using namespace wowee::rendering;
 
-TEST_CASE("texture coordinate combos preserve environment mapping", "[m2][material]") {
-    const std::vector<int16_t> coords{0, -1, 1};
-    CHECK(m2TextureCoordSet(coords, 0) == 0);
-    CHECK(m2TextureCoordSet(coords, 1) == -1);
-    CHECK(m2TextureCoordSet(coords, 2) == 1);
-    CHECK(m2TextureCoordSet(coords, UINT16_MAX) == 0);
-    CHECK(m2TextureCoordSet({}, 0) == 0);
+namespace {
+M2BatchShading shadingOf(const wowee::pipeline::M2Model& model, const wowee::pipeline::M2Batch& batch) {
+    const auto coordAt = [&](size_t i) -> int16_t {
+        return i < model.textureCoordLookup.size() ? model.textureCoordLookup[i] : 0;
+    };
+    return m2BatchShading(model.globalFlags, model.textureCombinerCombos, batch.shader,
+                          batch.textureCount, model.materials[batch.materialIndex].blendMode,
+                          coordAt(batch.textureUnit), coordAt(batch.textureUnit + 1u));
 }
+} // namespace
 
 TEST_CASE("modulation uses destination RGB and keeps its alpha", "[m2][material]") {
     for (bool twice : {false, true}) {
@@ -73,7 +76,7 @@ TEST_CASE("Dalaran sculpture has four reflection layers using Mod2x", "[m2][mate
         const auto& batch = model.batches[index];
         REQUIRE(batch.materialIndex < model.materials.size());
         CHECK(model.materials[batch.materialIndex].blendMode == M2_BLEND_MODULATE2X);
-        CHECK(m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit) == -1);
+        CHECK(shadingOf(model, batch).coords0 == M2StageCoords::Environment);
         CHECK_FALSE(m2BatchNeedsAlphaTest(M2_BLEND_MODULATE2X, false));
         CHECK_FALSE(m2BatchWantsColorKey(M2_BLEND_MODULATE2X, true));
         REQUIRE(batch.textureIndex < model.textureLookup.size());
@@ -107,21 +110,6 @@ TEST_CASE("transparency combos resolve reordered and invisible tracks", "[m2][ma
     CHECK(m2TextureWeightOpacity({}, lookup, 0) == 1.0f);
 }
 
-TEST_CASE("a second texture shapes blended two-stage layers only", "[m2][material]") {
-    // A fire hawk's flame wings: alpha-blended flame, shaped by a feather mask on UV0.
-    CHECK(m2UsesSecondTextureMask(0, 2, 2, 0));
-    // Fountain foam: alpha-add, its border mask on UV1.
-    CHECK(m2UsesSecondTextureMask(0, 2, 4, 1));
-    // An opaque or alpha-keyed body under a second stage is not masked by it.
-    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 0, 0));
-    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 1, 0));
-    // A sphere-mapped second stage is a reflection, not a mask.
-    CHECK_FALSE(m2UsesSecondTextureMask(0, 2, 2, -1));
-    // One stage, or another combiner, has nothing to multiply.
-    CHECK_FALSE(m2UsesSecondTextureMask(0, 1, 2, 0));
-    CHECK_FALSE(m2UsesSecondTextureMask(1, 2, 2, 0));
-}
-
 TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m2][material][asset]") {
     for (const auto name : {"dalaran_fountain_01", "dalaran_fountain_02"}) {
         const std::string path = std::string("Data/expansions/wotlk/world/expansion02/doodads/dalaran/") + name;
@@ -133,8 +121,10 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
         for (const auto& batch : model.batches) {
             REQUIRE(batch.materialIndex < model.materials.size());
             const auto mode = model.materials[batch.materialIndex].blendMode;
-            if (!m2UsesSecondTextureMask(batch.shader, batch.textureCount, mode,
-                    m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u))) continue;
+            const auto shading = shadingOf(model, batch);
+            // A blended layer whose second stage, on UV1, is combined into it.
+            if (mode < 2 || shading.stages != 2 || !m2CombinerUsesSecondStage(shading.combiner) ||
+                shading.coords1 != M2StageCoords::Uv1) continue;
             ++masks;
             REQUIRE(batch.textureIndex + 1u < model.textureLookup.size());
             const auto first = model.textureLookup[batch.textureIndex];
@@ -143,20 +133,19 @@ TEST_CASE("Dalaran fountains combine scrolling foam with a UV1 border mask", "[m
             REQUIRE(second < model.textures.size());
             CHECK(model.textures[first].filename.find("WATERFOAMLOOP2") != std::string::npos);
             CHECK(model.textures[second].filename.find("T_VFX_BORDER3") != std::string::npos);
-            CHECK(m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit) == 0);
-            CHECK(m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u) == 1);
+            CHECK(shading.coords0 == M2StageCoords::Uv0);
             REQUIRE(batch.textureAnimIndex + 1u < model.textureTransformLookup.size());
             CHECK(model.textureTransformLookup[batch.textureAnimIndex] != UINT16_MAX);
             CHECK(model.textureTransformLookup[batch.textureAnimIndex + 1u] == UINT16_MAX);
         }
         CHECK(masks == 1);
-        // Statue reflection stages have a different combiner; multiplying their
-        // RGBA as though they were foam masks would damage the opaque bronze.
+        // The opaque bronze takes no alpha from either stage: its first op is
+        // Opaque whatever the file's shader id says.
         for (const auto& batch : model.batches) {
-            if (batch.shader == 1)
-                CHECK_FALSE(m2UsesSecondTextureMask(batch.shader, batch.textureCount,
-                    model.materials[batch.materialIndex].blendMode,
-                    m2TextureCoordSet(model.textureCoordLookup, batch.textureUnit + 1u)));
+            if (model.materials[batch.materialIndex].blendMode != 0) continue;
+            const auto c = shadingOf(model, batch).combiner;
+            CHECK((c == M2Combiner::Opaque ||
+                   (c >= M2Combiner::OpaqueOpaque && c <= M2Combiner::OpaqueAddNA)));
         }
         if (model.batches.size() == 25) {
             const auto& crystal = model.materials[model.batches[8].materialIndex];

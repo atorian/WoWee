@@ -39,6 +39,7 @@ layout(push_constant) uniform Push {
 layout(set = 1, binding = 0) uniform sampler2D uTexture;
 
 #include "character_material.glsli"
+#include "m2_combiner.glsli"
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
 layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
@@ -52,7 +53,7 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
-layout(location = 5) in vec2 MaskUV;
+layout(location = 5) in vec2 TexCoord2;
 
 layout(location = 0) out vec4 outColor;
 
@@ -263,8 +264,10 @@ void main() {
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     if (enablePOM == PREVIEW_SIMPLE_TEXTURE_MODE) {
-        vec4 texColor = samplePreviewTexture(uTexture, TexCoord);
-        if (hasSecondTexture != 0) texColor *= texture(uSecondTexture, MaskUV);
+        vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+        vec3 stageAdd;
+        vec4 texColor = combineStages(combiner, samplePreviewTexture(uTexture, TexCoord), t1, stageAdd);
+        texColor.a = clamp(texColor.a, 0.0, 1.0);
         if (isMagentaKeyColor(texColor)) {
             discard;
         }
@@ -280,7 +283,7 @@ void main() {
             texColor.a *= ck;
             if (texColor.a < 0.01) discard;
         }
-        texColor.rgb *= batchColor.rgb;
+        texColor.rgb = texColor.rgb * batchColor.rgb + stageAdd;
         if (modulateNeutral > 0.0)
             texColor.rgb = mix(vec3(modulateNeutral), texColor.rgb, opacity);
         outColor = vec4(texColor.rgb, texColor.a * opacity);
@@ -326,10 +329,14 @@ void main() {
         finalUV = parallaxOcclusionMap(TexCoord, viewDirTS, lodFactor);
     }
 
-    vec4 texColor = textureGrad(uTexture, finalUV, uvDx, uvDy);
-    // The second stage shapes the first, colour and alpha alike, before
-    // anything reads either.
-    if (hasSecondTexture != 0) texColor *= texture(uSecondTexture, MaskUV);
+    // The stages as the client combines them, before anything reads colour or
+    // alpha: a fire hawk's flame cut to feathers by its mask, armour doubled
+    // by its sphere-mapped shine. What a stage adds on top of the lit colour
+    // comes back in stageAdd and is added after the lighting.
+    vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+    vec3 stageAdd;
+    vec4 texColor = combineStages(combiner, textureGrad(uTexture, finalUV, uvDx, uvDy), t1, stageAdd);
+    texColor.a = clamp(texColor.a, 0.0, 1.0);
     // Only explicit instance/animation opacity may fade an opaque surface.
     if (ignoreTextureAlpha != 0) texColor.a = 1.0;
     // Repair dark DXT fringes on alpha-cut character textures such as hair.
@@ -431,6 +438,7 @@ void main() {
     }
 
     if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb);
+    result += stageAdd;
     // Not on a Mod layer: it multiplies what is behind it, and tinting that
     // would colour the scene rather than the unit.
     if (modulateNeutral == 0.0) result *= stateTint.rgb;

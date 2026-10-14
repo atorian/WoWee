@@ -1,0 +1,37 @@
+// Shared by m2.frag and character.frag.
+//
+// The client's pixel combiners (M2Combiner in m2_combiner.hpp, in its order;
+// render spec 6.1), with v the lit vertex colour. The part of the colour that
+// v multiplies comes back as the rgb to be lit, with the combiner's alpha; a
+// part the stages add on top of the lit colour comes back in `unlit`. Decal
+// and Fade blend toward the vertex colour by its alpha, which is 1 for every
+// batch drawn opaque: they are taken at that.
+vec4 combineStages(int c, vec4 t0, vec4 t1, out vec3 unlit) {
+    unlit = vec3(0.0);
+    switch (c) {
+        case 0:  return vec4(t0.rgb, 1.0);                                   // Opaque
+        case 2:  return vec4(1.0);                                           // Decal: v
+        case 3:  unlit = t0.rgb; return vec4(1.0);                           // Add: t0 + v
+        case 4:  return vec4(2.0 * t0.rgb, 2.0 * t0.a);                      // Mod2x
+        case 5:  unlit = t0.rgb; return vec4(vec3(0.0), 1.0);                // Fade: t0
+        case 6:  return vec4(t0.rgb * t1.rgb, 1.0);                          // Opaque_Opaque
+        case 7:  return vec4(t0.rgb * t1.rgb, t1.a);                         // Opaque_Mod
+        case 8:  unlit = t1.rgb; return vec4(t0.rgb, 1.0);                   // Opaque_Add
+        case 9:  return vec4(2.0 * t0.rgb * t1.rgb, 2.0 * t1.a);             // Opaque_Mod2x
+        case 10: return vec4(2.0 * t0.rgb * t1.rgb, 1.0);                    // Opaque_Mod2xNA
+        case 11: unlit = t1.rgb; return vec4(t0.rgb, 1.0);                   // Opaque_AddNA
+        case 12: return vec4(t0.rgb * t1.rgb, t0.a);                         // Mod_Opaque
+        case 13: return t0 * t1;                                             // Mod_Mod
+        case 14: unlit = t1.rgb; return vec4(t0.rgb, min(t0.a + t1.a, 1.0)); // Mod_Add
+        case 15: return vec4(2.0 * t0.rgb * t1.rgb, 2.0 * t0.a * t1.a);      // Mod_Mod2x
+        case 16: return vec4(2.0 * t0.rgb * t1.rgb, t0.a);                   // Mod_Mod2xNA
+        case 17: unlit = t1.rgb; return vec4(t0.rgb, t0.a);                  // Mod_AddNA
+        case 18: unlit = t0.rgb * t1.rgb;                                    // Add_Mod: (v + t0) t1
+                 return vec4(t1.rgb, min((1.0 + t0.a) * t1.a, 1.0));
+        case 19: return vec4(4.0 * t0.rgb * t1.rgb, 4.0 * t0.a * t1.a);      // Mod2x_Mod2x
+        case 20: return vec4(mix(2.0 * t0.rgb * t1.rgb, t0.rgb, t0.a), 1.0); // Opaque_Mod2xNA_Alpha
+        case 21: unlit = t1.rgb * t1.a; return vec4(t0.rgb, 1.0);            // Opaque_AddAlpha
+        case 22: return vec4(t0.rgb + (1.0 - t0.a) * t1.rgb * t1.a, 1.0);    // Opaque_AddAlpha_Alpha
+        default: return t0;                                                  // Mod
+    }
+}

@@ -644,16 +644,15 @@ private:
         static constexpr uint8_t kRepeatBoth = 0x3;
         VkTexture* texture = nullptr;
         uint8_t wrapFlags = kRepeatBoth;
-        /// Which of the batch's combo textures this is. Its UV set and texture
-        /// animation sit at the same offset in their own combo tables.
-        uint16_t comboOffset = 0;
     };
 
-    /// Which texture a batch draws with. Shared by the main pass and the shadow
-    /// pass, which needs it to cut a silhouette rather than a rectangle.
+    /// The texture of one of a batch's stages, its slot override applied.
+    /// Shared by the main pass and the shadow pass, which needs stage 0 to
+    /// cut a silhouette rather than a rectangle.
     [[nodiscard]] BatchTexture resolveBatchTexture(const CharacterInstance& inst,
                                                    const M2ModelGPU& gm,
-                                                   const pipeline::M2Batch& b) const;
+                                                   const pipeline::M2Batch& b,
+                                                   uint32_t stage = 0) const;
 
     /// Per-batch texture sets for alpha-keyed shadow casters, one pool per
     /// frame in flight and reset at the top of each frame's shadow pass. Same

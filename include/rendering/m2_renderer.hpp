@@ -14,6 +14,7 @@
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/frames_in_flight.hpp"
 #include "rendering/game_object_animation.hpp"
+#include "rendering/m2_combiner.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -60,11 +61,16 @@ inline constexpr uint32_t kMaxBonesPerInstance = 512;
 struct M2ModelGPU {
     struct BatchGPU {
         VkTexture* texture = nullptr;  // from cache, NOT owned
-        VkTexture* secondTexture = nullptr; // second stage of an RGBA-masked layer
-        uint8_t secondTexFlags = 0;         // M2Texture.flags of the mask's slot
+        VkTexture* secondTexture = nullptr; // the second stage, where the combiner reads one
+        uint8_t secondTexFlags = 0;         // M2Texture.flags of the second stage's slot
         uint16_t colorTrackIndex = UINT16_MAX;
         uint16_t weightTrackIndex = UINT16_MAX;
-        uint8_t secondTexCoordSet = 0;
+        /// How the stages combine (m2BatchShading), and where the second
+        /// stage's coordinates come from, as m2.vert's texCoordSet2 reads it.
+        M2Combiner combiner = M2Combiner::Mod;
+        int8_t secondTexCoords = 1;
+        /// False for shader 0x8000, which the client does not draw.
+        bool shaderDrawn = true;
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
         ::VkBuffer materialUBO = VK_NULL_HANDLE;
         VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
@@ -534,8 +540,10 @@ struct M2MaterialUBO {
     /// A flame card. Fades out over the top of its own model, so the card's
     /// upper edge is not where the fire stops.
     int32_t fireCard;
+    /// M2Combiner: how the stages and the lit colour meet.
+    int32_t combiner;
+    /// The second stage is bound; without it the combiner reads it as white.
     int32_t hasSecondTexture;
-    int32_t secondTexCoordSet;
 };
 
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
