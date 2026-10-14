@@ -104,9 +104,8 @@ keep it building: nothing in `wowee_render` may need the game to link.
 
 ## Game layer architecture (`src/game`, `include/game`)
 
-`GameHandler` is being taken apart into domain handlers (branch
-`claude/game-handler-cleanup`, worktree `.claude/worktrees/game-handler-cleanup`).
-Write new code the way the target looks, not the way the old code does.
+`GameHandler` is being taken apart into domain handlers, on `master`. Write
+new code the way the target looks, not the way the old code does.
 
 ### Who owns what
 
