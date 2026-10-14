@@ -25,7 +25,6 @@ struct M2GlowCardBatch {
     uint8_t blendMode = 0;
     bool lanternGlowHint = false;
     bool glowCardLike = false;
-    bool colorKeyBlack = false;
     bool unlit = false;
     bool preserveGlowMesh = false;
 
@@ -35,7 +34,6 @@ struct M2GlowCardBatch {
     bool modelIsTorch = false;
     bool modelIsBrazierOrFire = false;
     bool modelIsSpellEffect = false;
-    bool modelIsKoboldFlame = false;
 };
 
 /// Small enough that a sprite can stand in for the mesh.
@@ -48,16 +46,13 @@ inline bool m2IsSmallCardLikeBatch(const M2GlowCardBatch& b) {
 
 /// Should a billboarded sprite be emitted for this batch?
 inline bool m2WantsGlowSprite(const M2GlowCardBatch& b) {
-    const bool koboldFlameCard = b.colorKeyBlack && b.modelIsKoboldFlame;
     const bool fixtureWithHint =
         (b.modelIsLanternLike || b.modelIsTorch || b.modelIsBrazierOrFire) &&
         b.lanternGlowHint;
-    return !koboldFlameCard &&
-           (b.modelIsElvenLike || fixtureWithHint) &&
+    return (b.modelIsElvenLike || fixtureWithHint) &&
            !b.modelIsSpellEffect &&
            m2IsSmallCardLikeBatch(b) &&
-           (b.lanternGlowHint || b.blendMode >= 3 ||
-            (b.colorKeyBlack && b.unlit && b.blendMode >= 1));
+           (b.lanternGlowHint || b.blendMode >= 3);
 }
 
 /// Once a sprite stands in for it, should the mesh itself be dropped?
@@ -68,7 +63,7 @@ inline bool m2WantsGlowSprite(const M2GlowCardBatch& b) {
 inline bool m2GlowSpriteReplacesMesh(const M2GlowCardBatch& b) {
     const bool cardLikeSkipMesh =
         !b.preserveGlowMesh &&
-        (b.glowCardLike || b.blendMode >= 3 || b.colorKeyBlack || b.unlit);
+        (b.glowCardLike || b.blendMode >= 3 || b.unlit);
     const bool lanternGlowCardSkip =
         (b.modelIsLanternLike || b.modelIsTorch || b.modelIsBrazierOrFire) &&
         b.lanternGlowHint && m2IsSmallCardLikeBatch(b) && cardLikeSkipMesh;

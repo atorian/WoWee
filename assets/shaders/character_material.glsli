@@ -4,14 +4,7 @@
 layout(set = 1, binding = 1) uniform CharMaterial {
     float opacity;
     int alphaTest;
-    int colorKeyBlack;
     int unlit;
-    float emissiveBoost;
-    // Keep these as scalar floats to match the C++ UBO packing. A std140 vec3
-    // would insert padding here and shift the following material flags.
-    float emissiveTintR;
-    float emissiveTintG;
-    float emissiveTintB;
     float specularIntensity;
     int enableNormalMap;
     int enablePOM;
@@ -30,6 +23,7 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // 1 when the M2 material carries flag 0x04. Without it the client culls
     // the back of the surface, and so does the fragment shader.
     int twoSided;
+    int materialPadUv;
     // The texture animation, as two rows of a 2x3 matrix (w is padding).
     // See m2_uv_transform.hpp.
     vec4 uvRow0;

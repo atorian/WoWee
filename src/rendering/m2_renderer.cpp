@@ -1485,29 +1485,6 @@ bool M2Renderer::hasModel(uint32_t modelId) const {
     return models.find(modelId) != models.end();
 }
 
-namespace {
-
-// Which batches of a forge are the fire, as opposed to the stone and iron it is
-// built from. classifyBatchTexture already recognises flame and glow cards; the
-// forge adds coals, lava and the reflect textures Blizzard uses for hot metal,
-// none of which carry a flame token in their name.
-bool isForgeFireTexture(const std::string& texKeyLower,
-                        const M2BatchTexClassification& tcls) {
-    if (tcls.hasFlameToken || tcls.likelyFlame || tcls.hasGlowToken
-        || tcls.hasGlowCardToken) {
-        return true;
-    }
-    static constexpr std::string_view kEmberTokens[] = {
-        "cinder", "coal", "ember", "lava", "magma", "reflect", "smoke",
-    };
-    for (auto tok : kEmberTokens) {
-        if (texKeyLower.find(tok) != std::string::npos) return true;
-    }
-    return false;
-}
-
-} // namespace
-
 VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
                                                  uint8_t texFlags) const {
     VkDescriptorImageInfo info = texture.descriptorInfo();
@@ -1517,28 +1494,18 @@ VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
     return info;
 }
 
-void M2Renderer::applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
-                                        const std::string& textureKeyLower) const {
+void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const {
+    // What the texture is, measured from the image. Nothing about how a batch
+    // is drawn comes from its texture's file name: the client never keys out
+    // black. A forge's or a bonfire's batches with an opaque material are its
+    // coals, logs, rocks and lava surfaces - ELWYNNCAMPFIREROCK02,
+    // DALARAN_FORGECOALS, LAVA.30 - and their flames are particle emitters
+    // (OrcBonFire draws FlameLickSmall and LavaLump2 from its two emitters,
+    // not from a batch). Keying "fire" textures cut holes in the rocks.
     auto pit = texturePropsByPtr_.find(batch.texture);
     if (pit == texturePropsByPtr_.end()) return;
     batch.hasAlpha = pit->second.hasAlpha;
     batch.alphaIsSilhouette = pit->second.alphaIsSilhouette;
-    // Forge fire is drawn on cards with a black backing that has to be keyed
-    // out, and some of them use effect textures carrying none of the
-    // flame/glow tokens the hint looks for - coals, lava lumps,
-    // ARMORREFLECT/ORBREFLECT. Keying the whole model instead made the masonry
-    // and ironwork translucent, since a forge is mostly those.
-    // And a bonfire's, which is the same thing at a different scale: OrcBonFire
-    // draws its flame on cards textured with LavaLump2 and FlameLickSmall over
-    // a black backing, with the material marked opaque. Drawn as the material
-    // asks, the black backing is a solid rectangle around the flame - which is
-    // the hard-edged slab standing over Grom'gol. The wood and ash batches
-    // carry neither an ember nor a flame token, so they stay solid.
-    if ((model.isForge || model.isBrazierOrFire) &&
-        isForgeFireTexture(textureKeyLower, classifyBatchTexture(textureKeyLower))) {
-        batch.colorKeyBlack = true;
-        batch.forgeFireCard = true;
-    }
 }
 
 void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
@@ -1600,7 +1567,7 @@ void M2Renderer::retryPendingBatchTextures() {
         // refers to its descriptor set or material buffer.
         const M2ModelGPU& model = it->second;
         batch->texture = tex;
-        applyBatchTextureProps(model, *batch, batch->pendingTextureKey);
+        applyBatchTextureProps(*batch);
         writeBatchMaterial(model, *batch);
         writeBatchDescriptors(*batch);
         batch->batchOpacity = batch->loadedOpacity;
@@ -1618,8 +1585,6 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     in.blendMode = static_cast<uint8_t>(batch.blendMode);
     in.hasAlpha = batch.hasAlpha;
     in.alphaIsSilhouette = batch.alphaIsSilhouette;
-    in.colorKeyBlack = batch.colorKeyBlack;
-    in.flameCard = batch.forgeFireCard;
     in.spellEffect = model.isSpellEffect;
     in.groundDetail = model.isGroundDetail;
     in.foliageLike = model.isFoliageLike;
@@ -1629,16 +1594,12 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     M2MaterialUBO mat{};
     mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
     mat.alphaTest = batch.drawState.alphaTest;
-    mat.colorKeyBlack =
-        m2BatchWantsColorKey(in.blendMode, batch.colorKeyBlack) ? 1 : 0;
-    mat.colorKeyThreshold = batch.drawState.colorKeyThreshold;
     mat.tintR = batch.tint.r;
     mat.tintG = batch.tint.g;
     mat.tintB = batch.tint.b;
     mat.unlit = (batch.materialFlags & 0x01) && !batch.drawState.litOverride ? 1 : 0;
     mat.blendMode = batch.blendMode;
     mat.volumetricBeam = (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
-    mat.fireCard = batch.forgeFireCard ? 1 : 0;
     mat.combiner = static_cast<int32_t>(batch.combiner);
     mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
     mat.cullBackFaces = !skyMode_ && !model.isSpellEffect &&
@@ -1907,7 +1868,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isWaterVegetation           = cls.isWaterVegetation;
     gpuModel.isElvenLike                 = cls.isElvenLike;
     gpuModel.isLanternLike               = cls.isLanternLike;
-    gpuModel.isKoboldFlame               = cls.isKoboldFlame;
     gpuModel.isWaterfall                 = cls.isWaterfall;
     gpuModel.isBrazierOrFire             = cls.isBrazierOrFire;
     gpuModel.isGroundFire                = cls.isGroundFire;
@@ -2360,7 +2320,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                                     (bgpu.lanternGlowHint && flameCard);
             bgpu.glowTint = tcls.glowTint;
             if (tex != nullptr && tex != whiteTexture_.get()) {
-                applyBatchTextureProps(gpuModel, bgpu, batchTexKeyLower);
+                applyBatchTextureProps(bgpu);
             }
             // How its stages combine and where their coordinates come from,
             // as the client works it out at skin load. The second stage was
@@ -2457,7 +2417,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             }
 
             // Compute batch center and radius for glow sprite positioning
-            if ((bgpu.blendMode >= 3 || bgpu.colorKeyBlack || bgpu.glowCardLike) && batch.indexCount > 0) {
+            if ((bgpu.blendMode >= 3 || bgpu.glowCardLike) && batch.indexCount > 0) {
                 glm::vec3 sum(0.0f);
                 uint32_t counted = 0;
                 std::unordered_map<uint16_t, glm::vec4> boneAnchorSums;
@@ -2564,7 +2524,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                              m2BatchNeedsAlphaTest(bgpu.blendMode, bgpu.hasAlpha) ? 1 : 0,
                              " hasAlpha=", bgpu.hasAlpha ? "Y" : "N",
                              " alphaIsSilhouette=", bgpu.alphaIsSilhouette ? "Y" : "N",
-                             " colorKey=", bgpu.colorKeyBlack ? "Y" : "N",
                              " glowCardLike=", bgpu.glowCardLike ? "Y" : "N",
                              " preserveGlowMesh=", bgpu.preserveGlowMesh ? "Y" : "N",
                              " opacity=", bgpu.batchOpacity,
@@ -2578,7 +2537,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 LOG_DEBUG("M2 GLOW DIAG '", model.name, "' batch ", gpuModel.batches.size(),
                           ": blend=", bgpu.blendMode, " matFlags=0x",
                           std::hex, bgpu.materialFlags, std::dec,
-                          " colorKey=", bgpu.colorKeyBlack ? "Y" : "N",
                           " hasAlpha=", bgpu.hasAlpha ? "Y" : "N",
                           " unlit=", (bgpu.materialFlags & 0x01) ? "Y" : "N",
                           " lanternHint=", bgpu.lanternGlowHint ? "Y" : "N",
@@ -2682,7 +2640,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 LOG_INFO("skyM2 batch ", &bgpu - gpuModel.batches.data(),
                          ": blend=", static_cast<int>(bgpu.blendMode),
                          " alphaTest=", mat.alphaTest,
-                         " colorKey=", mat.colorKeyBlack,
                          " hasAlpha=", bgpu.hasAlpha ? 1 : 0,
                          " unlit=", mat.unlit,
                          " glowCardLike=", bgpu.glowCardLike ? 1 : 0,

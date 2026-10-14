@@ -319,7 +319,6 @@ private:
         std::vector<size_t> sortedBatchIndices;
 
         // Pre-classified at load time to avoid per-batch string ops in render loop
-        bool isKoboldFlame = false;
         bool isSkyBird = false;
 
         /// Particle or ribbon emitters, which CharacterEmitters runs.
@@ -554,7 +553,6 @@ private:
         size_t approxBytes = 0;
         uint64_t lastUse = 0;
         bool hasAlpha = false;
-        bool colorKeyBlack = false;
         bool normalMapPending = false;  // deferred normal map generation
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
@@ -565,7 +563,6 @@ private:
     std::unordered_map<VkTexture*, NormalMapInfo> normalMapByTexPtr_;
     struct TextureProperties {
         bool hasAlpha = false;
-        bool colorKeyBlack = false;
     };
     std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
     std::unordered_map<std::string, VkTexture*> compositeCache_;  // key → texture for reuse

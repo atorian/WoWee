@@ -20,7 +20,6 @@
 #include "rendering/m2_blend_mode.hpp"
 
 using wowee::rendering::m2BatchNeedsAlphaTest;
-using wowee::rendering::m2BatchWantsColorKey;
 using wowee::rendering::m2BlendIsAdditive;
 
 TEST_CASE("the Orgrimmar bonfire's glow card is not alpha tested", "[m2]") {
@@ -75,32 +74,6 @@ TEST_CASE("modulate layers multiply RGB independently of atlas alpha", "[m2]") {
     CHECK_FALSE(m2BatchNeedsAlphaTest(6, true));
 }
 
-TEST_CASE("an additive card is not colour keyed", "[m2]") {
-    // The key discards every texel below a threshold so a card with a black
-    // backing can be drawn opaquely. Additive has no such problem, and the key
-    // ruins it: the transparent pass raised the threshold to 0.7 for blend
-    // mode 4, and a glow card is a radial gradient from black to white, so
-    // everything below the bright core was thrown away and the soft falloff
-    // became a hard-edged disc. That is what Orgrimmar's bonfires were.
-    CHECK_FALSE(m2BatchWantsColorKey(4, true));
-    CHECK_FALSE(m2BatchWantsColorKey(3, true));
-}
-
-TEST_CASE("opaque and alpha cards keep their key; modulation does not", "[m2]") {
-    // The key is how a black-backed card survives being drawn opaquely, which
-    // is still what happens for every non-additive mode.
-    CHECK(m2BatchWantsColorKey(0, true));
-    CHECK(m2BatchWantsColorKey(1, true));
-    CHECK(m2BatchWantsColorKey(2, true));
-    CHECK_FALSE(m2BatchWantsColorKey(5, true));
-    CHECK_FALSE(m2BatchWantsColorKey(6, true));
-
-    // And a texture nothing marked is never keyed, whatever it blends as.
-    for (uint8_t mode = 0; mode <= 6; ++mode) {
-        INFO("blend mode " << int(mode));
-        CHECK_FALSE(m2BatchWantsColorKey(mode, false));
-    }
-}
 
 TEST_CASE("opaque mount skin does not inherit atlas transparency", "[m2][mount]") {
     using wowee::rendering::characterBatchNeedsAlphaTest;
@@ -198,14 +171,15 @@ TEST_CASE("NoAlphaAdd does not share Add's alpha-scaled pipeline", "[m2]") {
     CHECK(m2BlendPipeline(m2DrawBlendMode(3, true)) == M2BlendPipeline::NoAlphaAdd);
 }
 
-TEST_CASE("a flame card's black-backed layer is added, not cut out", "[m2]") {
+TEST_CASE("an opaque batch of a fire is drawn opaque", "[m2]") {
+    // A campfire's rocks and a forge's coals: an opaque material, a texture
+    // with no alpha. The client draws them solid; nothing keys their black.
     M2BatchMaterialInputs in;
     in.blendMode = 0;
-    in.colorKeyBlack = true;
-    in.flameCard = true;
     const auto s = m2BatchDrawState(in);
     CHECK_FALSE(s.forceCutout);
-    CHECK(m2BlendPipeline(s.drawBlendMode) == M2BlendPipeline::AlphaAdd);
+    CHECK(s.alphaTest == 0);
+    CHECK(m2BlendPipeline(s.drawBlendMode) == M2BlendPipeline::Opaque);
 }
 
 TEST_CASE("an opaque foliage batch is cut out only where its alpha is a silhouette", "[m2]") {
@@ -246,13 +220,4 @@ TEST_CASE("ground clutter is cut out and lit", "[m2]") {
     CHECK(s.forceCutout);
     CHECK(s.alphaTest == 3);
     CHECK(s.litOverride);
-}
-
-TEST_CASE("a keyed Mod card keys hard, the same card in an effect does not", "[m2]") {
-    M2BatchMaterialInputs in;
-    in.blendMode = 5;
-    in.colorKeyBlack = true;
-    CHECK(m2BatchDrawState(in).colorKeyThreshold == 0.7f);
-    in.spellEffect = true;
-    CHECK(m2BatchDrawState(in).colorKeyThreshold == 0.08f);
 }

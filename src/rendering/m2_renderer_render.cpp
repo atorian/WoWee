@@ -1801,7 +1801,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     glowCard.blendMode = batch.blendMode;
                     glowCard.lanternGlowHint = batch.lanternGlowHint;
                     glowCard.glowCardLike = batch.glowCardLike;
-                    glowCard.colorKeyBlack = batch.colorKeyBlack;
                     glowCard.unlit = batchUnlit;
                     glowCard.preserveGlowMesh = batch.preserveGlowMesh;
                     glowCard.modelIsElvenLike = model.isElvenLike;
@@ -1809,7 +1808,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     glowCard.modelIsTorch = model.isTorch;
                     glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
                     glowCard.modelIsSpellEffect = model.isSpellEffect;
-                    glowCard.modelIsKoboldFlame = model.isKoboldFlame;
                     const bool shouldUseGlowSprite = m2WantsGlowSprite(glowCard);
                     if (shouldUseGlowSprite) {
                         // Generate glow sprites for each instance in the group
@@ -2204,7 +2202,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             glowCard.blendMode = batch.blendMode;
             glowCard.lanternGlowHint = batch.lanternGlowHint;
             glowCard.glowCardLike = batch.glowCardLike;
-            glowCard.colorKeyBlack = batch.colorKeyBlack;
             glowCard.unlit = batchUnlit;
             glowCard.preserveGlowMesh = batch.preserveGlowMesh;
             glowCard.modelIsElvenLike = model.isElvenLike;
@@ -2212,7 +2209,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             glowCard.modelIsTorch = model.isTorch;
             glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
             glowCard.modelIsSpellEffect = model.isSpellEffect;
-            glowCard.modelIsKoboldFlame = model.isKoboldFlame;
             if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
                 continue;
             }

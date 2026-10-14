@@ -2197,6 +2197,19 @@ set_target_properties(dbc_to_csv PROPERTIES
 )
 install(TARGETS dbc_to_csv RUNTIME DESTINATION bin)
 
+# ---- Tool: m2_dump (how an M2's batches are drawn) ----
+add_executable(m2_dump
+    tools/m2_dump/main.cpp
+)
+target_link_libraries(m2_dump PRIVATE wowee_pipeline Threads::Threads)
+target_include_directories(m2_dump PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern
+)
+set_target_properties(m2_dump PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ---- Tool: auth_probe (LOGON_CHALLENGE probe) ----
 add_executable(auth_probe
     tools/auth_probe/main.cpp

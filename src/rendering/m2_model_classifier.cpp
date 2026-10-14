@@ -182,21 +182,6 @@ bool assetNameHasWordToken(const std::string& path, std::string_view token) {
     return false;
 }
 
-bool assetNameLooksLikeFlame(const std::string& path) {
-    // The tokens both renderers were matching, merged. Character textures used
-    // to be excluded by hand because Item/TextureComponents/LegLowerTexture
-    // spells "glow" - that exclusion is gone because the directory is gone
-    // from the question: assetTokenName reads the file name alone.
-    static constexpr std::string_view kFlameTokens[] = {
-        "candle", "flame", "fire", "torch", "lamp", "lantern",
-        "glow", "flare", "brazier", "campfire", "bonfire",
-    };
-    for (std::string_view token : kFlameTokens) {
-        if (assetNameHasWordToken(path, token)) return true;
-    }
-    return false;
-}
-
 M2ClassificationResult classifyM2Model(
     const std::string& name,
     const glm::vec3&   boundsMin,
@@ -270,7 +255,7 @@ M2ClassificationResult classifyM2Model(
                        has(n, "sconce")  || has(n, "candle") ||
                        has(n, "candelabra") || has(n, "chandelier"))
                       && !volumetricLightBeam;
-    r.isKoboldFlame = has(n, "kobold")
+    const bool koboldFlame = has(n, "kobold")
                     && (has(n, "candle") || has(n, "torch") || has(n, "mine"));
 
     // Fire / brazier / torch model detection (for ambient emitter + rendering)
@@ -310,7 +295,7 @@ M2ClassificationResult classifyM2Model(
         }
         return true;
     }();
-    const bool torchName   = has(n, "torch") && !r.isKoboldFlame && !unlitVariant;
+    const bool torchName   = has(n, "torch") && !koboldFlame && !unlitVariant;
     r.isBrazierOrFire = fireName || brazierName;
     // TaurenLampPost is the small ground-level path fire used around Camp
     // Narache, despite its misleading model name. Its decorative halo must

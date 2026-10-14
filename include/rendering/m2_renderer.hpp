@@ -80,7 +80,6 @@ struct M2ModelGPU {
         bool hasAlpha = false;
         /// The alpha is a real silhouette, not an atlas leftover.
         bool alphaIsSilhouette = false;
-        bool colorKeyBlack = false;
         glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
@@ -93,9 +92,6 @@ struct M2ModelGPU {
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
         bool preserveGlowMesh = false; // Keep emissive glass/fixture mesh below its glow sprite
-        // Forge fire card: the flame/coals/glow batches of a forge, as opposed
-        // to the masonry and ironwork the rest of the model is made of.
-        bool forgeFireCard = false;
         // A sky model's star-point layer. Suppressed when the client draws its
         // own stars instead: the authored layer is a 256x256 compressed texture
         // magnified across the whole dome, which is soft at any resolution and
@@ -221,7 +217,6 @@ struct M2ModelGPU {
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
     bool isElvenLike = false;       // Model name matches elf/elven/quel (precomputed)
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
-    bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
     bool isSkyBird = false;         // Flying bird/bat doodad - hide until animation range
     bool isLightBeam = false;       // Lighthouse/light-ray beam - distant bones must keep updating
@@ -520,8 +515,6 @@ struct SmokeParticle {
 struct M2MaterialUBO {
     int32_t hasTexture;
     int32_t alphaTest;
-    int32_t colorKeyBlack;
-    float colorKeyThreshold;
     int32_t unlit;
     int32_t blendMode;
     int32_t cullBackFaces; // authored single-sided transparent material
@@ -537,9 +530,6 @@ struct M2MaterialUBO {
     /// through a window. The fragment shader fades it out where the surface
     /// turns away from the eye, so the mesh's silhouette stops being an edge.
     int32_t volumetricBeam;
-    /// A flame card. Fades out over the top of its own model, so the card's
-    /// upper edge is not where the fire stops.
-    int32_t fireCard;
     /// M2Combiner: how the stages and the lit colour meet.
     int32_t combiner;
     /// The second stage is bound; without it the combiner reads it as white.
@@ -846,8 +836,7 @@ public:
     /// from that batch's own wrap flags.
     VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
     /// Take what the loaded texture says about itself onto the batch.
-    void applyBatchTextureProps(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch,
-                                const std::string& textureKeyLower) const;
+    void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const;
     /// Point a batch's descriptor set at its texture.
     void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
     /// Ask again for textures that failed to load, and show the batches that

@@ -78,7 +78,6 @@ TEST_CASE("Dalaran sculpture has four reflection layers using Mod2x", "[m2][mate
         CHECK(model.materials[batch.materialIndex].blendMode == M2_BLEND_MODULATE2X);
         CHECK(shadingOf(model, batch).coords0 == M2StageCoords::Environment);
         CHECK_FALSE(m2BatchNeedsAlphaTest(M2_BLEND_MODULATE2X, false));
-        CHECK_FALSE(m2BatchWantsColorKey(M2_BLEND_MODULATE2X, true));
         REQUIRE(batch.textureIndex < model.textureLookup.size());
         const auto texture = model.textureLookup[batch.textureIndex];
         REQUIRE(texture < model.textures.size());

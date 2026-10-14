@@ -277,12 +277,6 @@ void main() {
         if (alphaTest != 0 && hairMaterial != 0) {
             texColor.a = 1.0;
         }
-        if (colorKeyBlack != 0) {
-            float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
-            float ck = smoothstep(0.12, 0.30, lum);
-            texColor.a *= ck;
-            if (texColor.a < 0.01) discard;
-        }
         texColor.rgb = texColor.rgb * batchColor.rgb + stageAdd;
         if (modulateNeutral > 0.0)
             texColor.rgb = mix(vec3(modulateNeutral), texColor.rgb, opacity);
@@ -307,7 +301,6 @@ void main() {
 
     bool usePOM = enablePOM != 0 &&
                   alphaTest == 0 &&
-                  colorKeyBlack == 0 &&
                   heightMapVariance > 0.001 &&
                   lodFactor < 0.99;
     bool useNormalMap = enableNormalMap != 0 &&
@@ -370,14 +363,7 @@ void main() {
         texColor.a = clamp((texColor.a - 0.5) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
         if (texColor.a < 1.0 / 255.0) discard;
     }
-    if (colorKeyBlack != 0) {
-        float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
-        float ck = smoothstep(0.12, 0.30, lum);
-        texColor.a *= ck;
-        if (texColor.a < 0.01) discard;
-    }
-    // The batch's authored colour, after the keys: they judge the texture,
-    // and a dark-red glow would key itself out.
+    // The batch's authored colour, after the alpha test: it judges the texture.
     texColor.rgb *= batchColor.rgb;
 
     // Compute normal (with normal mapping if enabled)
@@ -395,13 +381,8 @@ void main() {
     vec3 result;
 
     if (unlit != 0) {
-        // The texture as it is, as on doodads, unless a flame asks for more.
-        // This was texColor * (1 + tint * boost), which with the white, 1.0
-        // defaults every batch gets is twice the texture: every unlit layer
-        // of every creature drawn double bright. The riding phoenix's orange
-        // wings came out lemon yellow.
-        vec3 emissiveTint = vec3(emissiveTintR, emissiveTintG, emissiveTintB);
-        result = texColor.rgb * emissiveTint * emissiveBoost;
+        // The texture as it is, as on doodads.
+        result = texColor.rgb;
     } else {
         bool inside = insideInterior(push.interiorAmbient);
         vec3 ldir = normalize(-interiorLightDir(push.interiorAmbient, lightDir.xyz));

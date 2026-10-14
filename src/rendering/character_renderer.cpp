@@ -267,10 +267,7 @@ static M2BatchShading characterBatchShading(const pipeline::M2Model& model,
 struct CharMaterialUBO {
     float opacity;
     int32_t alphaTest;
-    int32_t colorKeyBlack;
     int32_t unlit;
-    float emissiveBoost;
-    float emissiveTintR, emissiveTintG, emissiveTintB;
     float specularIntensity;
     int32_t enableNormalMap;
     int32_t enablePOM;
@@ -283,6 +280,7 @@ struct CharMaterialUBO {
     float modulateNeutral;
     int32_t texCoordSet;
     int32_t twoSided;
+    int32_t padding0 = 0;  ///< std140 starts uvRow0 on 16 bytes
 
     M2UVTransform uvTransform;
     /// What an aura multiplies the lit colour by (w is padding).
@@ -298,12 +296,12 @@ struct CharMaterialUBO {
     /// The second stage's own texture animation.
     M2UVTransform uvTransform2;
 };
-static_assert(offsetof(CharMaterialUBO, uvTransform) == 80, "std140 aligns uvRow0 to 16");
-static_assert(offsetof(CharMaterialUBO, stateTint) == 112, "after the two uv rows");
-static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 128, "after stateTint");
-static_assert(offsetof(CharMaterialUBO, batchColor) == 144, "std140 aligns a vec4 to 16");
-static_assert(offsetof(CharMaterialUBO, uvTransform2) == 160, "after batchColor");
-static_assert(sizeof(CharMaterialUBO) == 192, "matches character_material.glsli");
+static_assert(offsetof(CharMaterialUBO, uvTransform) == 64, "std140 aligns uvRow0 to 16");
+static_assert(offsetof(CharMaterialUBO, stateTint) == 96, "after the two uv rows");
+static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 112, "after stateTint");
+static_assert(offsetof(CharMaterialUBO, batchColor) == 128, "std140 aligns a vec4 to 16");
+static_assert(offsetof(CharMaterialUBO, uvTransform2) == 144, "after batchColor");
+static_assert(sizeof(CharMaterialUBO) == 176, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -929,10 +927,6 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
 
     std::string key = normalizeTexturePathKey(path);
     const uint64_t lookupSerial = ++textureLookupSerial_;
-    // The same question the M2 renderer asks, through the same answer. This
-    // carried four of its eleven tokens and searched the whole path, so which
-    // textures were colour-keyed depended on which renderer had loaded them.
-    const bool colorKeyBlackHint = assetNameLooksLikeFlame(key);
 
     // Check cache
     auto it = textureCache.find(key);
@@ -1015,7 +1009,6 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
     e.approxBytes = approxBytes;
     e.lastUse = ++textureCacheCounter_;
     e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = colorKeyBlackHint;
 
     // Launch normal map generation on background thread - CPU work is pure compute,
     // only the GPU upload (in processPendingNormalMaps) needs the main thread (~1-2ms).
@@ -1024,7 +1017,7 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
         blpImage.width, blpImage.height);
 
     textureCacheBytes_ += e.approxBytes;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = colorKeyBlackHint};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     textureCache[key] = std::move(e);
     failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
@@ -1814,8 +1807,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     e.approxBytes = approxTextureBytesWithMips(width, height);
     e.lastUse = ++textureCacheCounter_;
     e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = false;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     // No derived normal map for a composited body, and this is why: the
     // derivation reads luminance as height, which holds for stone and bark and
     // does not hold for skin. Every freckle, every painted shadow under a
@@ -1895,8 +1887,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     entry.approxBytes = approxTextureBytesWithMips(width, height);
     entry.lastUse = ++textureCacheCounter_;
     entry.hasAlpha = hasAlpha;
-    entry.colorKeyBlack = false;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha, .colorKeyBlack = false};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     // Skin again, with armour composited onto it. Same reason as above.
     // Checked before emplacing: see the note in compositeTexture. Testing
     // ins.second afterwards is too late -- by then the texture has been moved
@@ -2040,16 +2031,6 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
             return ba.materialLayer < bb.materialLayer;
         });
 
-    {
-        std::string lowerName = gpuModel.data.name;
-        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        gpuModel.isKoboldFlame =
-            (lowerName.find("kobold") != std::string::npos) &&
-            ((lowerName.find("candle") != std::string::npos) ||
-             (lowerName.find("torch") != std::string::npos) ||
-             (lowerName.find("mine") != std::string::npos));
-    }
 
     models[id] = std::move(gpuModel);
 
@@ -2768,8 +2749,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // 4.0 covers Tauren, mounted characters, and most creature models.
     constexpr float kDefaultCharacterCullRadius = 4.0f;
     const glm::vec3 camPos = camera.getPosition();
-    const float frameTimeSeconds = std::chrono::duration<float>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     // Extract frustum planes for per-instance visibility testing
     Frustum frustum;
@@ -3190,12 +3169,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 // Determine material properties
                 bool alphaCutout = false;
-                bool colorKeyBlack = false;
                 if (texPtr != nullptr && texPtr != whiteTexture_.get()) {
                     auto pit = texturePropsByPtr_.find(texPtr);
                     if (pit != texturePropsByPtr_.end()) {
                         alphaCutout = pit->second.hasAlpha;
-                        colorKeyBlack = pit->second.colorKeyBlack;
                     }
                 }
                 // A scene means what its materials say. Stormwind's walls are DXT5 with
@@ -3214,8 +3191,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     .hairMaterial = hairMaterial,
                     .opacity = drawOpacity * batchColorAlpha,
                 });
-                const bool modulate = blendPipeline == CharacterBlendPipeline::Modulate ||
-                                      blendPipeline == CharacterBlendPipeline::Modulate2x;
                 const bool fadedSolid = fadeDepthStage &&
                                         blendPipeline == CharacterBlendPipeline::Translucent;
                 if (stage == 0 && !fadedSolid) continue;
@@ -3225,22 +3200,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
-                }
-
-                float emissiveBoost = 1.0f;
-                glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
-                const bool koboldCandleFlame = colorKeyBlack && gpuModel.isKoboldFlame;
-                if (unlit && koboldCandleFlame) {
-                    float phase = static_cast<float>(batch.submeshId) * 0.31f;
-                    float f1 = std::sin(frameTimeSeconds * 7.9f + phase);
-                    float f2 = std::sin(frameTimeSeconds * 12.7f + phase * 1.73f);
-                    float f3 = std::sin(frameTimeSeconds * 4.3f + phase * 2.11f);
-                    float flicker = 0.90f + 0.10f * f1 + 0.06f * f2 + 0.04f * f3;
-                    flicker = std::clamp(flicker, 0.72f, 1.12f);
-                    // The texture plus a warm light on top of it: the shader
-                    // multiplies by tint * boost.
-                    const float warmth = (blendMode >= 3) ? (2.4f * flicker) : (1.5f * flicker);
-                    emissiveTint = glm::vec3(1.0f) + glm::vec3(1.28f, 1.04f, 0.82f) * warmth;
                 }
 
                 // Resolve normal/height map for this texture
@@ -3270,8 +3229,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
                 matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial &&
                                               !instance.isEffectModel) ? 1 : 0;
-                // A Mod layer's black darkens; keying it out would drop exactly that.
-                matData.colorKeyBlack = (colorKeyBlack && !modulate) ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
                 matData.modulateNeutral =
                     blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
@@ -3318,10 +3275,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // inside through any gap, and lit with the normal turned round
                 // that inside is a dark wedge where the client draws nothing.
                 matData.twoSided = (materialFlags & 0x04) ? 1 : 0;
-                matData.emissiveBoost = emissiveBoost;
-                matData.emissiveTintR = emissiveTint.r;
-                matData.emissiveTintG = emissiveTint.g;
-                matData.emissiveTintB = emissiveTint.b;
                 matData.specularIntensity = 0.5f;
                 matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
                 // Character textures are layered/mirrored atlases, not coherent
@@ -3447,13 +3400,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
             matData.alphaTest = 0;
             matData.ignoreTextureAlpha = 1;
-            matData.colorKeyBlack = 0;
             matData.unlit = 0;
             matData.twoSided = 1;  // no batch, so no material to say otherwise
-            matData.emissiveBoost = 1.0f;
-            matData.emissiveTintR = 1.0f;
-            matData.emissiveTintG = 1.0f;
-            matData.emissiveTintB = 1.0f;
             matData.specularIntensity = 0.5f;
             const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
                                           !instance.hasOverrideModelMatrix;
@@ -3500,7 +3448,6 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     // ShadowCharParams UBO (matches character_shadow.frag.glsl set=1 binding=1)
     struct ShadowCharParams {
         int32_t alphaTest = 0;
-        int32_t colorKeyBlack = 0;
     };
 
     // The same set the other three shadow passes bind - a sampler and a small
@@ -3525,7 +3472,6 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         if (paramsInfo.pMappedData) {
             ShadowCharParams p{};
             p.alphaTest = 1;
-            p.colorKeyBlack = 0;
             std::memcpy(paramsInfo.pMappedData, &p, sizeof(p));
         }
     }

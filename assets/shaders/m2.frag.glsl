@@ -36,8 +36,6 @@ layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 layout(set = 1, binding = 2) uniform M2Material {
     int hasTexture;
     int alphaTest;
-    int colorKeyBlack;
-    float colorKeyThreshold;
     int unlit;
     int blendMode;
     int cullBackFaces;
@@ -47,7 +45,6 @@ layout(set = 1, binding = 2) uniform M2Material {
     float tintG;
     float tintB;
     int volumetricBeam;
-    int fireCard;
     int combiner;           // M2Combiner
     int hasSecondTexture;
 };
@@ -302,10 +299,6 @@ void main() {
         texColor.a = clamp((texColor.a - alphaCutoff) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
         if (texColor.a < 1.0 / 255.0) discard;
     }
-    if (colorKeyBlack != 0) {
-        float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
-        if (lum < colorKeyThreshold) discard;
-    }
     if (blendMode == 1 && texColor.a < 0.004) discard;
 
     // Per-instance color variation (foliage only).
@@ -447,13 +440,6 @@ void main() {
     }
 
     float outAlpha = texColor.a * vFadeAlpha;
-    // Cutout materials output the sharpened coverage alpha computed above -
-    // alpha-to-coverage turns it into per-sample coverage for smooth edges.
-    // Color-key-only materials have no meaningful texture alpha; keep them
-    // opaque after the discard.
-    if (colorKeyBlack != 0 && alphaTest == 0) {
-        outAlpha = vFadeAlpha;
-    }
     // The distance fade, for a batch drawn with no blending to fade through.
     // Sixteen ordered steps against the fragment's own screen position: a tree
     // at the edge of the draw distance thins out rather than switching off,
@@ -562,24 +548,6 @@ void main() {
         // Additive beams carry their brightness in the colour rather than the
         // alpha, so fading one means dimming it.
         if (blendMode >= 3) result *= beamFade;
-    }
-
-    // A flame stops before its card does.
-    //
-    // The bonfire's fire is drawn on cards whose material says opaque, so the
-    // black backing around the flame came out as a rectangle - a hard-edged
-    // slab with a straight top. Keying the black out and adding rather than
-    // covering deals with the backing; this deals with the edge, which is
-    // still an edge wherever the texture is bright right up to it.
-    //
-    // ModelHeight is how far up its own model this fragment sits, so the fade
-    // lands in the same place whatever size the fire is placed at.
-    if (fireCard != 0) {
-        float tipFade = 1.0 - smoothstep(0.55, 0.98, ModelHeight);
-        outAlpha *= tipFade;
-        // An additive card carries its brightness in the colour, so fading one
-        // means dimming it.
-        if (blendMode >= 3) result *= tipFade;
     }
 
     // NoAlphaAdd is drawn ONE, ONE: neither the texture's alpha nor the alpha

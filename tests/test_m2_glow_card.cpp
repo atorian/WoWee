@@ -86,14 +86,6 @@ TEST_CASE("a spell effect is never turned into a glow sprite", "[m2-glow]") {
     CHECK_FALSE(m2WantsGlowSprite(b));
 }
 
-TEST_CASE("a kobold's candle keeps its flame", "[m2-glow]") {
-    // The one model whose colour-keyed card must survive as a mesh.
-    auto b = lanternGlow();
-    b.colorKeyBlack = true;
-    b.modelIsKoboldFlame = true;
-    CHECK_FALSE(m2WantsGlowSprite(b));
-}
-
 TEST_CASE("an elf building's bloom is a sprite without any fixture",
           "[m2-glow]") {
     // isElvenLike stands in for the fixture test, so the hint is not required.
@@ -118,14 +110,13 @@ TEST_CASE("a batch that is not a card at all is left alone", "[m2-glow]") {
 
 TEST_CASE("the Orgrimmar bonfire's glow is too large for a sprite",
           "[m2-glow]") {
-    // Blend mode 4, colour keyed by its texture's name, unlit, on a model
-    // classified as a brazier. It is a whole bonfire rather than a lamp, so
-    // the sprite path does not claim it and the mesh is what draws.
+    // Blend mode 4, unlit, on a model classified as a brazier. It is a whole
+    // bonfire rather than a lamp, so the sprite path does not claim it and the
+    // mesh is what draws.
     M2GlowCardBatch b;
     b.glowSize = 9.0f;
     b.blendMode = 4;
     b.unlit = true;
-    b.colorKeyBlack = true;
     b.lanternGlowHint = true;
     b.modelIsBrazierOrFire = true;
     CHECK_FALSE(m2IsSmallCardLikeBatch(b));

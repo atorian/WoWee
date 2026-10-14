@@ -80,7 +80,7 @@ inline float m2AlphaRef(M2BlendPipeline pipeline) {
 
 /// The blend mode a batch is drawn with.
 ///
-/// Spell visuals and flame cards are effect overlays painted on black, so
+/// Spell visuals are effect overlays painted on black, so
 /// their opaque and alpha-keyed layers are drawn additively, scaled by alpha
 /// like mode 4. Every other mode is drawn as authored. Mod (5) used to be
 /// turned additive here as well, and Mod only darkens: dark smoke, shadow and
@@ -146,26 +146,17 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
     return blendMode >= M2_BLEND_ALPHA && !hasAlpha;
 }
 
-/// Should this batch have its black keyed out?
-///
-/// The key discards every texel darker than a threshold, and exists so a card
-/// authored with a black backing can be drawn opaquely without the backing
-/// showing. An additive batch has no such problem - black adds nothing - and
-/// the key actively destroys it: a glow card is a radial gradient from black
-/// to white, so discarding everything below the threshold turns a soft falloff
-/// into a hard-edged disc. Orgrimmar's bonfires used a threshold of 0.7 on
-/// exactly such a card.
-inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed) {
-    return textureIsKeyed && !m2BlendIsAdditive(blendMode) && !m2BlendIsModulate(blendMode);
-}
-
 /// What a doodad batch's material and its model's classification say.
+///
+/// Nothing here keys out black. The client has no colour key: a batch is cut
+/// by its texture's alpha against the AlphaRef of its blend mode, and black is
+/// invisible only where the blend adds it. Keying black on textures whose
+/// names spelled fire cut holes in the dark parts of campfire rocks, forge
+/// coals and bonfire logs, all of which the client draws solid.
 struct M2BatchMaterialInputs {
     uint8_t blendMode = M2_BLEND_OPAQUE;
     bool hasAlpha = false;
     bool alphaIsSilhouette = false;
-    bool colorKeyBlack = false;
-    bool flameCard = false;      ///< a forge's or hearth's flame card
     bool spellEffect = false;
     bool groundDetail = false;
     bool foliageLike = false;
@@ -183,12 +174,11 @@ struct M2BatchDrawState {
     /// alpha key - cut at 224/255, where a WotLK client cuts GxBlend_AlphaKey.
     int32_t alphaTest = 0;
     bool litOverride = false;     ///< ground clutter is lit whatever its material says
-    float colorKeyThreshold = 0.08f;
 };
 
 inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
     M2BatchDrawState s;
-    const bool effectOverlay = in.spellEffect || in.flameCard;
+    const bool effectOverlay = in.spellEffect;
 
     // A batch the artist marked opaque is not asking for any of this. Blend
     // mode 0 means the alpha channel goes unread, and M2 textures are
@@ -218,15 +208,10 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
                                (!opaqueByMaterial || in.alphaIsSilhouette);
 
     // Only the opaque pass cuts out, and it draws opaque and alpha-keyed
-    // batches alone. The fire burning in a hearth is an effect overlay on a
-    // black background, the same shape as a spell visual; drawn opaque it
-    // fills the forge opening with a black rectangle instead of flame. That is
-    // true of the flame cards only - treating the whole model this way turned
-    // the masonry and ironwork additive, which is to say translucent.
+    // batches alone.
     s.forceCutout = in.blendMode <= M2_BLEND_ALPHA_KEY && !effectOverlay &&
                     (in.groundDetail || foliageCutout ||
-                     m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ||
-                     in.colorKeyBlack);
+                     m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha));
 
     s.drawBlendMode = s.forceCutout ? static_cast<uint8_t>(M2_BLEND_ALPHA_KEY)
                                     : m2DrawBlendMode(in.blendMode, effectOverlay);
@@ -241,12 +226,6 @@ inline M2BatchDrawState m2BatchDrawState(const M2BatchMaterialInputs& in) {
         s.litOverride = in.groundDetail;
     } else {
         s.alphaTest = m2BatchNeedsAlphaTest(in.blendMode, in.hasAlpha) ? 1 : 0;
-    }
-    // A keyed additive or modulated card has a soft black backing to lose,
-    // so it keys harder. Effect overlays never did.
-    if (!effectOverlay && !s.forceCutout &&
-        (in.blendMode == M2_BLEND_ADD_ALPHA || in.blendMode == M2_BLEND_MODULATE)) {
-        s.colorKeyThreshold = 0.7f;
     }
     return s;
 }
