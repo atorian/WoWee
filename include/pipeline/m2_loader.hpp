@@ -146,6 +146,24 @@ struct M2Camera {
     glm::vec3 targetBase{0.0f};  // the point the camera looks at
 };
 
+// A light the model carries (M2 header `lights`): a lamp's flame, a brazier's
+// glow, a spell's flash. Every value but the type, bone and position is
+// animated, on the model's sequence clock or its global sequence.
+struct M2Light {
+    /// 0 directional, 1 point.
+    uint16_t type = 1;
+    /// The bone it rides on, or -1 for the model's origin.
+    int16_t bone = -1;
+    glm::vec3 position{0.0f};       ///< in the bone's space
+    M2AnimationTrack ambientColor;  ///< vec3
+    M2AnimationTrack ambientIntensity;
+    M2AnimationTrack diffuseColor;  ///< vec3
+    M2AnimationTrack diffuseIntensity;
+    M2AnimationTrack attenuationStart;
+    M2AnimationTrack attenuationEnd;
+    M2AnimationTrack visibility;    ///< 0 or 1, read into floatValues
+};
+
 // FBlock: particle lifetime curve (color/alpha/scale over particle life)
 struct M2FBlock {
     std::vector<float> timestamps;      // Fractions of the particle's life
@@ -357,6 +375,8 @@ struct M2Model {
 
     // Ribbon emitters
     std::vector<M2RibbonEmitter> ribbonEmitters;
+
+    std::vector<M2Light> lights;
 
     // Collision mesh (simplified geometry for physics)
     std::vector<glm::vec3> collisionVertices;

@@ -183,3 +183,25 @@ TEST_CASE("Dalaran lamp light volumes do not cast opaque shadows", "[m2][materia
     CHECK_FALSE(m2BatchCastsShadow(0, 1.0f, true, false));
     CHECK_FALSE(m2BatchCastsShadow(0, 1.0f, false, true));
 }
+
+TEST_CASE("Dalaran's lamp carries a light that comes on with its Opened state",
+          "[m2][light][asset]") {
+    const auto data = wowee::test::readFile(
+        "Data/expansions/wotlk/world/expansion02/doodads/dalaran/dalaran_lamppost01.m2");
+    if (data.empty()) { SUCCEED("optional WotLK lamp is not extracted"); return; }
+    const auto model = wowee::pipeline::M2Loader::load(data);
+    REQUIRE(model.lights.size() == 1);
+    const auto& light = model.lights[0];
+    CHECK(light.type == 1);
+    CHECK(light.bone == 2);
+    CHECK(light.position.z == Catch::Approx(8.27f).margin(0.01f));
+    // Sequences: 0 Stand, 1 Closed (147), 2 Opening (148), 3 Opened (149).
+    REQUIRE(model.sequences.size() == 4);
+    REQUIRE(model.sequences[3].id == 149);
+    REQUIRE(light.visibility.sequences.size() == 4);
+    CHECK(light.visibility.sequences[0].floatValues == std::vector<float>{0.0f});
+    CHECK(light.visibility.sequences[1].floatValues == std::vector<float>{0.0f});
+    CHECK(light.visibility.sequences[3].floatValues.front() == 1.0f);
+    REQUIRE_FALSE(light.attenuationEnd.sequences.empty());
+    CHECK(light.attenuationEnd.sequences[0].floatValues.front() == Catch::Approx(8.80f).margin(0.01f));
+}

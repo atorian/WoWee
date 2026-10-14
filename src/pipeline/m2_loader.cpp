@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <type_traits>
 
 namespace wowee {
 namespace pipeline {
@@ -422,6 +423,27 @@ struct M2CameraDiskVanilla {
 static_assert(sizeof(M2CameraDisk) == 100, "M2CameraDisk must match the WotLK on-disk layout");
 static_assert(sizeof(M2CameraDiskVanilla) == 124, "M2CameraDiskVanilla must match the vanilla on-disk layout");
 
+// M2 light (on-disk): type, bone, position, then seven tracks - ambient colour
+// and intensity, diffuse colour and intensity, attenuation start and end,
+// visibility. 156 bytes in WotLK (20-byte tracks), 212 before it (28-byte).
+template <typename Track>
+struct M2LightDiskT {
+    uint16_t type;
+    int16_t bone;
+    float position[3];
+    Track ambientColor;
+    Track ambientIntensity;
+    Track diffuseColor;
+    Track diffuseIntensity;
+    Track attenuationStart;
+    Track attenuationEnd;
+    Track visibility;
+};
+using M2LightDisk = M2LightDiskT<M2TrackDisk>;
+using M2LightDiskVanilla = M2LightDiskT<M2TrackDiskVanilla>;
+static_assert(sizeof(M2LightDisk) == 156, "M2LightDisk must match the WotLK on-disk layout");
+static_assert(sizeof(M2LightDiskVanilla) == 212, "M2LightDiskVanilla must match the vanilla on-disk layout");
+
 template<typename T>
 T readValue(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset + sizeof(T) > data.size()) {
@@ -443,6 +465,7 @@ constexpr uint32_t kMaxM2Animations   = 65536;
 constexpr uint32_t kMaxM2UVAnims      = 16384;
 constexpr uint32_t kMaxM2Attachments  = 4096;
 constexpr uint32_t kMaxM2Cameras      = 64;
+constexpr uint32_t kMaxM2Lights       = 256;
 
 inline uint32_t capCount(uint32_t value, uint32_t maxValue, const char* what) {
     if (value > maxValue) {
@@ -652,6 +675,7 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
     size_t keySize;
     if (type == TrackType::FLOAT) keySize = sizeof(float);
     else if (type == TrackType::FIXED16) keySize = sizeof(int16_t);
+    else if (type == TrackType::BYTE_BOOL) keySize = sizeof(uint8_t);
     else if (type == TrackType::VEC3) keySize = sizeof(float) * 3;
     else keySize = compressedQuat ? sizeof(int16_t) * 4 : sizeof(float) * 4;
     if (disk.ofsKeys + disk.nKeys * keySize > data.size()) return;
@@ -686,6 +710,10 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
         for (int16_t v : raw) {
             allFloatKeys.push_back(std::clamp(static_cast<float>(v) / 32767.0f, 0.0f, 1.0f));
         }
+    } else if (type == TrackType::BYTE_BOOL) {
+        auto raw = readArray<uint8_t>(data, disk.ofsKeys, disk.nKeys);
+        allFloatKeys.reserve(raw.size());
+        for (uint8_t v : raw) allFloatKeys.push_back(v ? 1.0f : 0.0f);
     } else if (type == TrackType::VEC3) {
         allVec3Keys = readArray<Vec3Disk>(data, disk.ofsKeys, disk.nKeys);
     } else if (compressedQuat) {
@@ -715,7 +743,7 @@ void parseAnimTrackVanilla(const std::vector<uint8_t>& data,
         uint32_t keyEnd = std::min(end, disk.nKeys);
         uint32_t keyCount = keyEnd - start;
 
-        if (type == TrackType::FLOAT || type == TrackType::FIXED16) {
+        if (type == TrackType::FLOAT || type == TrackType::FIXED16 || type == TrackType::BYTE_BOOL) {
             track.sequences[i].floatValues.assign(
                 allFloatKeys.begin() + start, allFloatKeys.begin() + start + keyCount);
         } else if (type == TrackType::VEC3) {
@@ -1496,6 +1524,49 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                 pushCamera(dc.type, dc.fov, dc.farClip, dc.nearClip, dc.positionBase, dc.targetBase);
         }
         core::Logger::getInstance().debug("  Cameras: ", model.cameras.size());
+    }
+
+    // Lights the model carries, with every track.
+    if (header.nLights > 0 && header.ofsLights > 0) {
+        const uint32_t lightCount = capCount(header.nLights, kMaxM2Lights, "nLights");
+        const bool wotlk = header.version >= 264;
+        const size_t stride = wotlk ? sizeof(M2LightDisk) : sizeof(M2LightDiskVanilla);
+        if (static_cast<size_t>(header.ofsLights) + stride * lightCount > m2Data.size()) {
+            core::Logger::getInstance().warning(
+                "M2 '", model.name, "': its ", lightCount, " lights at ", header.ofsLights,
+                " run past the end of the file (", m2Data.size(), " bytes); drawn lighting nothing");
+        } else {
+            std::vector<uint32_t> seqFlags;
+            seqFlags.reserve(model.sequences.size());
+            for (const auto& seq : model.sequences) seqFlags.push_back(seq.flags);
+            model.lights.reserve(lightCount);
+            const auto take = [&](const auto& disk) {
+                M2Light light;
+                light.type = disk.type;
+                light.bone = disk.bone;
+                light.position = glm::vec3(disk.position[0], disk.position[1], disk.position[2]);
+                const auto track = [&](const auto& td, M2AnimationTrack& out, TrackType type) {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(td)>, M2TrackDisk>)
+                        parseAnimTrack(m2Data, td, out, type, seqFlags);
+                    else
+                        parseAnimTrackVanilla(m2Data, td, out, type);
+                };
+                track(disk.ambientColor, light.ambientColor, TrackType::VEC3);
+                track(disk.ambientIntensity, light.ambientIntensity, TrackType::FLOAT);
+                track(disk.diffuseColor, light.diffuseColor, TrackType::VEC3);
+                track(disk.diffuseIntensity, light.diffuseIntensity, TrackType::FLOAT);
+                track(disk.attenuationStart, light.attenuationStart, TrackType::FLOAT);
+                track(disk.attenuationEnd, light.attenuationEnd, TrackType::FLOAT);
+                track(disk.visibility, light.visibility, TrackType::BYTE_BOOL);
+                model.lights.push_back(std::move(light));
+            };
+            for (uint32_t i = 0; i < lightCount; ++i) {
+                const uint32_t at = header.ofsLights + i * static_cast<uint32_t>(stride);
+                if (wotlk) take(readValue<M2LightDisk>(m2Data, at));
+                else take(readValue<M2LightDiskVanilla>(m2Data, at));
+            }
+        }
+        core::Logger::getInstance().debug("  Lights: ", model.lights.size());
     }
 
     // Parse particle emitters - struct size differs between versions:

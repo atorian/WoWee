@@ -138,6 +138,37 @@ int main(int argc, char** argv) {
                     b.textureCount > 1 ? textureAt(model, size_t{b.textureIndex} + 1).c_str() : "-",
                     rgb.c_str(), alpha, weight);
     }
+    // A track as its first key and how it moves: "0.80" for a constant,
+    // "0.80~3k gs1" for three keys on global sequence 1.
+    const auto trackStr = [](const pipeline::M2AnimationTrack& t, bool vec) {
+        for (const auto& s : t.sequences) {
+            if (vec ? s.vec3Values.empty() : s.floatValues.empty()) continue;
+            char buf[96];
+            if (vec) {
+                const auto v = s.vec3Values.front();
+                std::snprintf(buf, sizeof buf, "(%.2f,%.2f,%.2f)", v.x, v.y, v.z);
+            } else {
+                std::snprintf(buf, sizeof buf, "%.2f", s.floatValues.front());
+            }
+            std::string out = buf;
+            const size_t keys = vec ? s.vec3Values.size() : s.floatValues.size();
+            if (keys > 1) out += "~" + std::to_string(keys) + "k";
+            if (t.globalSequence >= 0) out += " gs" + std::to_string(t.globalSequence);
+            return out;
+        }
+        return std::string("-");
+    };
+    std::printf("lights: %zu\n", model.lights.size());
+    for (size_t i = 0; i < model.lights.size(); ++i) {
+        const auto& l = model.lights[i];
+        std::printf("  [%zu] type %u bone %d pos (%.2f,%.2f,%.2f)\n"
+                    "       ambient %s x %s  diffuse %s x %s  atten %s..%s  visible %s\n",
+                    i, l.type, l.bone, l.position.x, l.position.y, l.position.z,
+                    trackStr(l.ambientColor, true).c_str(), trackStr(l.ambientIntensity, false).c_str(),
+                    trackStr(l.diffuseColor, true).c_str(), trackStr(l.diffuseIntensity, false).c_str(),
+                    trackStr(l.attenuationStart, false).c_str(), trackStr(l.attenuationEnd, false).c_str(),
+                    trackStr(l.visibility, false).c_str());
+    }
     std::printf("billboard bones:");
     for (size_t i = 0; i < model.bones.size(); ++i)
         if (model.bones[i].flags & 0x78) std::printf(" %zu(0x%x)", i, model.bones[i].flags);
