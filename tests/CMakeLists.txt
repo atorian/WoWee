@@ -118,40 +118,16 @@ function(wowee_add_test target)
     register_test_target(${target})
 endfunction()
 
-# The packet layer, and what a test of it links.
-#
-# Sixteen tests named these thirteen sources and these five libraries one by
-# one - the parsers pull in the rest of the layer through their shared base, so
-# a test of any one packet needs all of it. Copying a neighbouring block to
-# make a new one is how the guild roster test came to name the character-list
-# test's sources, and it is the whole reason both of them are written out at
-# all.
-set(TEST_PACKET_SOURCES
-    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/character.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/expansion_profile.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/opcode_table.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_classic.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_tbc.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/world_packets.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/world_packets_economy.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/world_packets_entity.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/world_packets_social.cpp
-    ${CMAKE_SOURCE_DIR}/src/game/world_packets_world.cpp
-    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
-)
-
-# A test of the packet layer: its own source, the common set, the layer, and
-# the libraries the layer drags in.
+# A test of the packet layer: its own source, the common set, and the layer
+# from wowee_protocol. The parsers pull in the rest of the layer through their
+# shared base, so a test of any one packet needs all of it - linked, not
+# compiled again for every test as it was.
 function(wowee_add_packet_test target)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
-    add_executable(${target} ${target}.cpp ${TEST_COMMON_SOURCES}
-                             ${TEST_PACKET_SOURCES} ${ARG_SOURCES})
+    add_executable(${target} ${target}.cpp ${TEST_COMMON_SOURCES} ${ARG_SOURCES})
     target_include_directories(${target} PRIVATE ${TEST_INCLUDE_DIRS})
     target_include_directories(${target} SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-    target_link_libraries(${target} PRIVATE catch2_main SDL3::SDL3 ZLIB::ZLIB
-                                            OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(${target} PRIVATE catch2_main wowee_protocol SDL3::SDL3)
     wowee_test_link_glm(${target})
     if(TARGET Vulkan::Vulkan)
         target_link_libraries(${target} PRIVATE Vulkan::Vulkan)
@@ -2824,3 +2800,31 @@ target_include_directories(test_m2_cull_grid SYSTEM PRIVATE ${TEST_SYSTEM_INCLUD
 target_link_libraries(test_m2_cull_grid PRIVATE catch2_main)
 add_test(NAME m2_cull_grid COMMAND test_m2_cull_grid)
 register_test_target(test_m2_cull_grid)
+
+# ── The protocol from its library, never a copy ──────────────
+# Keep this last, after every test is declared. A test that names one of
+# wowee_protocol's sources has that source taken out of its own list and links
+# the library instead. Each test used to compile what it needed itself: the
+# packet layer was built 21 times over, about a third of a full build's work,
+# and a new test copying its neighbour's list would bring that back.
+set(_wowee_protocol_paths "")
+foreach(_source IN LISTS WOWEE_PROTOCOL_SOURCES)
+    list(APPEND _wowee_protocol_paths ${CMAKE_SOURCE_DIR}/${_source})
+endforeach()
+get_property(_wowee_test_targets GLOBAL PROPERTY WOWEE_ALL_TEST_TARGETS)
+foreach(_test IN LISTS _wowee_test_targets)
+    get_target_property(_test_sources ${_test} SOURCES)
+    set(_own_sources "")
+    set(_needs_protocol FALSE)
+    foreach(_source IN LISTS _test_sources)
+        if(_source IN_LIST _wowee_protocol_paths)
+            set(_needs_protocol TRUE)
+        else()
+            list(APPEND _own_sources ${_source})
+        endif()
+    endforeach()
+    if(_needs_protocol)
+        set_property(TARGET ${_test} PROPERTY SOURCES ${_own_sources})
+        target_link_libraries(${_test} PRIVATE wowee_protocol)
+    endif()
+endforeach()

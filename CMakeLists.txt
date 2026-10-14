@@ -1171,6 +1171,28 @@ list(FILTER WOWEE_RENDER_SOURCES INCLUDE REGEX "^src/rendering/")
 list(FILTER WOWEE_RENDER_SOURCES EXCLUDE REGEX "^src/rendering/(animation|world_map)/")
 list(REMOVE_ITEM WOWEE_RENDER_SOURCES ${WOWEE_RENDER_CLIENT_SOURCES})
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_RENDER_SOURCES})
+# wowee_protocol: the wire. Packets, their builders and parsers for each
+# expansion, the opcode and update-field tables, the movement splines in them,
+# the session crypto and the expansion profiles that choose between layouts.
+# Depends on wowee_base only. The packet tests link it: they each compiled
+# these fourteen files themselves, about a third of a full build's work.
+set(WOWEE_PROTOCOL_SOURCES
+    src/network/packet.cpp
+    src/auth/crypto.cpp
+    src/game/character.cpp
+    src/game/expansion_profile.cpp
+    src/game/opcode_table.cpp
+    src/game/update_field_table.cpp
+    src/game/spline_packet.cpp
+    src/game/world_packets.cpp
+    src/game/world_packets_economy.cpp
+    src/game/world_packets_entity.cpp
+    src/game/world_packets_social.cpp
+    src/game/world_packets_world.cpp
+    src/game/packet_parsers_classic.cpp
+    src/game/packet_parsers_tbc.cpp
+)
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_PROTOCOL_SOURCES})
 
 set(WOWEE_HEADERS
     include/core/application.hpp
@@ -1605,11 +1627,21 @@ if(TARGET wowee_shaders)
     add_dependencies(wowee_render wowee_shaders)
 endif()
 
+add_library(wowee_protocol STATIC ${WOWEE_PROTOCOL_SOURCES})
+target_link_libraries(wowee_protocol PUBLIC wowee_base OpenSSL::Crypto ZLIB::ZLIB)
+target_include_directories(wowee_protocol SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+target_precompile_headers(wowee_protocol PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_render PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol
+                          PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_base)
+target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_protocol wowee_base)
 
 # Compiler warnings.
 #
@@ -1743,7 +1775,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_base wowee_pipeline wowee_render)
+foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
@@ -2282,12 +2314,10 @@ add_executable(auth_probe
     tools/auth_probe/main.cpp
     src/auth/auth_packets.cpp
     src/auth/auth_opcodes.cpp
-    src/auth/crypto.cpp
-    src/network/packet.cpp
     src/network/socket.cpp
     src/network/tcp_socket.cpp
 )
-target_link_libraries(auth_probe PRIVATE wowee_base)
+target_link_libraries(auth_probe PRIVATE wowee_protocol wowee_base)
 target_include_directories(auth_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2303,15 +2333,13 @@ add_executable(auth_login_probe
     tools/auth_login_probe/main.cpp
     src/auth/auth_packets.cpp
     src/auth/auth_opcodes.cpp
-    src/auth/crypto.cpp
     src/auth/integrity.cpp
     src/auth/big_num.cpp
     src/auth/srp.cpp
-    src/network/packet.cpp
     src/network/socket.cpp
     src/network/tcp_socket.cpp
 )
-target_link_libraries(auth_login_probe PRIVATE wowee_base)
+target_link_libraries(auth_login_probe PRIVATE wowee_protocol wowee_base)
 target_include_directories(auth_login_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
