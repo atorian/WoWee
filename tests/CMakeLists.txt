@@ -2817,6 +2817,7 @@ register_test_target(test_m2_cull_grid)
 # packet layer was built 21 times over, about a third of a full build's work,
 # and a new test copying its neighbour's list would bring that back.
 set(_wowee_test_libraries
+    wowee_game     WOWEE_GAME_SOURCES
     wowee_net      WOWEE_NET_SOURCES
     wowee_protocol WOWEE_PROTOCOL_SOURCES
     wowee_base     WOWEE_BASE_SOURCES

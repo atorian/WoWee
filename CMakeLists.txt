@@ -1217,6 +1217,14 @@ set(WOWEE_NET_SOURCES
     src/core/https_get.cpp
 )
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_NET_SOURCES})
+# wowee_game: the game - the session, the domain handlers and the state they
+# build from the wire. It says what happened on the event bus and is handed
+# what it must ask (GameServices); it draws nothing and plays nothing, which
+# tools/game_dependency_check.py holds at zero. Tests link it to drive the game
+# with packets and no client.
+set(WOWEE_GAME_SOURCES ${WOWEE_SOURCES})
+list(FILTER WOWEE_GAME_SOURCES INCLUDE REGEX "^src/game/")
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_GAME_SOURCES})
 
 set(WOWEE_HEADERS
     include/core/application.hpp
@@ -1670,12 +1678,27 @@ target_precompile_headers(wowee_net PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
 
+add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
+target_link_libraries(wowee_game PUBLIC wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_precompile_headers(wowee_game PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+# Warden's module emulator. Optional: without it the game answers the checks
+# it can and says so for the rest.
+if(HAVE_UNICORN)
+    target_link_libraries(wowee_game PUBLIC ${UNICORN_LIBRARY})
+    target_include_directories(wowee_game PRIVATE ${UNICORN_INCLUDE_DIR})
+    target_compile_definitions(wowee_game PRIVATE HAVE_UNICORN)
+endif()
+
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net
+    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game
                           PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee PRIVATE wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
+target_link_libraries(wowee PRIVATE wowee_game wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
 
 # Compiler warnings.
 #
@@ -1809,7 +1832,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net)
+foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
