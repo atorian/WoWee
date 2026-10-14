@@ -1,7 +1,6 @@
 #include "pipeline/blp_loader.hpp"
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "stb_image.h"   // its code is wowee_pipeline's
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #if defined(__clang__)
 #pragma clang diagnostic push

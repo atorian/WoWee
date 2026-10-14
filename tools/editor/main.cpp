@@ -40,7 +40,7 @@
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include "stb_image_write.h"
-#include "stb_image.h"  // implementation in stb_image_impl.cpp
+#include "stb_image.h"  // implementation in wowee_pipeline (src/pipeline/stb_image_impl.cpp)
 
 // ─── Open-format consistency checks ─────────────────────────────
 // Both validators are called from the per-file CLI commands AND

@@ -757,6 +757,7 @@ set(WOWEE_SOURCES
     src/game/zone_manager.cpp
     src/game/emote_table.cpp
     src/game/inventory.cpp
+    src/game/protocol_tables.cpp
 
     # Audio
     src/audio/audio_engine.cpp
@@ -778,6 +779,7 @@ set(WOWEE_SOURCES
     src/pipeline/dds_loader.cpp
     src/pipeline/dbc_loader.cpp
     src/pipeline/asset_manager.cpp
+    src/pipeline/stb_image_impl.cpp
     src/pipeline/asset_inventory.cpp
     src/pipeline/asset_manifest.cpp
     src/pipeline/loose_file_reader.cpp
@@ -2048,7 +2050,6 @@ endif()
 # See tools/scene_render/main.cpp for the scene file.
 add_executable(scene_render
     tools/scene_render/main.cpp
-    tools/scene_render/stb_image_impl.cpp
 )
 target_link_libraries(scene_render PRIVATE wowee_render)
 target_precompile_headers(scene_render REUSE_FROM wowee_render)
@@ -2719,9 +2720,6 @@ add_executable(wowee_editor
 
     # Core
     src/core/window.cpp
-
-    # stb_image (needed by AssetManager for PNG overrides)
-    tools/editor/stb_image_impl.cpp
 
     ${WOWEE_MACOS_SOURCES}
 )

@@ -5,9 +5,6 @@
 // builds real archives and needs StormLib, as the client does.
 #include <catch_amalgamated.hpp>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-
 #include "pipeline/archive_layer.hpp"
 #include "pipeline/asset_manager.hpp"
 #ifdef WOWEE_HAVE_STORMLIB
