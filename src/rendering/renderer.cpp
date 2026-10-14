@@ -642,8 +642,7 @@ bool Renderer::createLightBuffer(LightBuffer& out, size_t lights) {
     VmaAllocationInfo mapInfo{};
     if (vmaCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo, &out.buffer, &out.alloc,
                         &mapInfo) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create the point light buffer for ", lights,
-                  " lights - surfaces are lit by none of them");
+        LOG_ERROR("Failed to create the point light buffer for ", lights, " lights");
         out = {};
         return false;
     }
@@ -686,26 +685,35 @@ void Renderer::uploadLocalLights(uint32_t slot) {
                         kMaxAddressableLocalLights, " can be indexed and the rest light nothing");
         }
     }
-    if (count > buf.capacity) {
+    if (count > buf.capacity && !buf.growFailed) {
         // This slot's frame has finished on the GPU (beginFrame waited for
         // it) and nothing has been recorded with its sets yet this frame, so
         // the buffer can be replaced and the sets pointed at the new one.
+        // The new one is made first: the sets keep pointing at the old buffer
+        // until there is something to point them at instead.
         const size_t grown = std::max(count, buf.capacity * 2);
-        destroy(vkCtx->getAllocator(), buf.buffer, buf.alloc);
-        buf = {};
-        if (!createLightBuffer(buf, grown)) {
-            frameLocalLights_.clear();
-            currentFrameData.localLightMeta.x = 0;
-            return;
+        LightBuffer bigger;
+        if (createLightBuffer(bigger, grown)) {
+            destroy(vkCtx->getAllocator(), buf.buffer, buf.alloc);
+            buf = bigger;
+            writeLightBinding(slot);
+        } else {
+            buf.growFailed = true;
+            LOG_WARNING("Local lights: frame slot ", slot, " cannot grow past ", buf.capacity,
+                        " lights; the first ", buf.capacity, " of each frame are drawn and the rest light nothing");
         }
-        writeLightBinding(slot);
     }
+    // Draws pick their lights from frameLocalLights_ by index and the shaders
+    // read those indices from the bound buffer unchecked, so the list is cut
+    // to what the buffer holds before any draw sees it.
+    const size_t uploaded = std::min(count, buf.capacity);
+    if (frameLocalLights_.size() > uploaded) frameLocalLights_.resize(uploaded);
     auto* dst = static_cast<glm::vec4*>(buf.mapped);
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < uploaded; ++i) {
         dst[2 * i] = glm::vec4(frameLocalLights_[i].position, 1.0f);
         dst[2 * i + 1] = glm::vec4(frameLocalLights_[i].color, 1.0f);
     }
-    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(count), 0, 0, 0);
+    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(uploaded), 0, 0, 0);
 }
 
 void Renderer::destroyPerFrameResources() {

@@ -520,6 +520,9 @@ private:
         VmaAllocation alloc = VK_NULL_HANDLE;
         void* mapped = nullptr;
         size_t capacity = 0;  ///< in lights
+        /// A larger buffer could not be made for this slot: it keeps the one it
+        /// has and is not asked to grow again.
+        bool growFailed = false;
     };
     static constexpr size_t kInitialLocalLightCapacity = 256;
     LightBuffer localLightBuffers_[MAX_FRAMES];
