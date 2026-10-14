@@ -207,9 +207,7 @@ struct M2ModelGPU {
     std::vector<uint32_t> globalSequenceDurations;  // Loop durations for global sequence tracks
     bool hasAnimation = false;  // True if any bone has keyframes
     uint32_t rtMesh = ~0u;      // RtScene mesh, or ~0u when it does not cast
-    bool isSmoke = false;       // True for smoke models (UV scroll animation)
     bool isSpellEffect = false;  // True for spell effect models (skip particle dampeners)
-    bool isInstancePortal = false; // Instance portal model (spin + glow)
     bool disableAnimation = false; // Keep foliage/tree doodads visually stable
     bool shadowWindFoliage = false; // Apply wind sway in shadow pass for foliage/tree cards
     bool isHangingCloth = false;    // Banner/flag/tapestry: sways from the end it is held by
@@ -217,7 +215,7 @@ struct M2ModelGPU {
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
     bool isElvenLike = false;       // Model name matches elf/elven/quel (precomputed)
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
-    bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
+    bool isLavaModel = false;       // Model name names lava: throws a local light
     bool isSkyBird = false;         // Flying bird/bat doodad - hide until animation range
     bool isLightBeam = false;       // Lighthouse/light-ray beam - distant bones must keep updating
     bool isVolumetricBeam = false;  // Light drawn as geometry; softened at its silhouette
@@ -420,11 +418,9 @@ struct M2Instance {
     // Cached model flags (set at creation to avoid per-frame hash lookups)
     bool cachedHasAnimation = false;
     bool cachedDisableAnimation = false;
-    bool cachedIsSmoke = false;
     bool cachedHasEmitters = false;  // M2ModelGPU::hasEmitters
     bool cachedIsGroundDetail = false;
     bool cachedIsInvisibleTrap = false;
-    bool cachedIsInstancePortal = false;
     bool cachedIsSkyBird = false;
     bool cachedIsLightBeam = false;
     bool cachedIsTransportDoodad = false;
@@ -452,7 +448,6 @@ struct M2Instance {
     /// back and forth while its propeller turns one way.
     float animTimeAlt = 0.0f;
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
-    float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
     // Result of the most recent GPU cull dispatch that actually covered this
@@ -498,18 +493,6 @@ struct M2Instance {
     void updateModelMatrix();
 };
 
-/**
- * A single smoke particle emitted from a chimney or similar M2 model
- */
-struct SmokeParticle {
-    glm::vec3 position;
-    glm::vec3 velocity;
-    float life = 0.0f;
-    float maxLife = 3.0f;
-    float size = 1.0f;
-    float isSpark = 0.0f;  // 0 = smoke, 1 = ember/spark
-    uint32_t instanceId = 0;
-};
 
 // M2 material UBO - matches M2Material in m2.frag.glsl (set 1, binding 2)
 struct M2MaterialUBO {
@@ -634,7 +617,7 @@ public:
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
 
     /// Draw blended things - transparent batches, glow sprites, particles,
-    /// smoke and ribbons - in the water's pass, after the water, instead of in
+    /// and ribbons - in the water's pass, after the water, instead of in
     /// the scene pass under it. `pass` is that pass, or null while the water is
     /// drawn in the scene pass. Rebuilds pipelines: call between frames, with
     /// nothing in flight using the old ones.
@@ -689,11 +672,6 @@ public:
      * Render M2 particle emitters (point sprites)
      */
     void renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-
-    /**
-     * Render smoke particles from chimneys etc.
-     */
-    void renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /**
      * Render M2 ribbon emitters (spell trails / wing effects)
@@ -971,7 +949,7 @@ private:
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
-    /// Everything drawn blended: the transparent batches, particles, smoke and
+    /// Everything drawn blended: the transparent batches, particles and
     /// ribbons. They exist twice. One set is for the scene pass. The other is
     /// for the pass the water is drawn in, when the water leaves the scene
     /// pass: blended things drawn before the water had the water's sheet
@@ -986,7 +964,6 @@ private:
         /// M2 emitter particles, one per blend pipeline (m2BlendPipeline of
         /// the emitter's blend mode). AlphaAdd also draws the glow sprites.
         std::array<VkPipeline, kM2BlendPipelineCount> particle{};
-        VkPipeline smoke = VK_NULL_HANDLE;            // chimney smoke
         VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
         VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
     };
@@ -1007,7 +984,6 @@ private:
     /// Pass 2: the transparent batches and the glow sprites, after the opaque
     /// pass has culled, sorted and gathered them.
     void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-    float lavaAnimSeconds_ = 0.0f;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -1022,7 +998,6 @@ private:
 
     // Particle pipelines
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
-    VkPipelineLayout smokePipelineLayout_ = VK_NULL_HANDLE;
 
     // Ribbon pipelines (additive + alpha-blend)
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
@@ -1104,7 +1079,7 @@ private:
     struct CullInstanceGPU {        // matches CullInstance in m2_cull.comp.glsl (32 bytes, std430)
         glm::vec4 sphere;           // xyz = world position, w = padded radius
         float effectiveMaxDistSq;   // adaptive distance cull threshold
-        uint32_t flags;             // bit 0 = valid, bit 1 = smoke, bit 2 = invisibleTrap
+        uint32_t flags;             // bit 0 = valid, bit 1 unused, bit 2 = invisibleTrap, bit 3 = previously visible
         float _pad[2] = {};
     };
     struct CullUniformsGPU {        // matches CullUniforms in m2_cull_hiz.comp.glsl (std140)
@@ -1191,7 +1166,6 @@ private:
     void* frameMapped(const FrameVertexBuffer& vb) const;
 
     FrameVertexBuffer ribbonVB_;
-    FrameVertexBuffer smokeVB_;
     FrameVertexBuffer m2ParticleVB_;
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
     FrameVertexBuffer glowVB_;
@@ -1300,7 +1274,7 @@ private:
     CollisionFocus collisionFocus;
 
     void rebuildSpatialIndex();
-    /// The smoke, portal, animated, particle and light index lists, from the
+    /// The animated, particle and light index lists, from the
     /// instances as they now stand - after a removal has moved some of them.
     void rebuildInstanceIndexLists();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
@@ -1449,14 +1423,6 @@ private:
     std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
     std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
     std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
-
-    // Smoke particle system
-    std::vector<SmokeParticle> smokeParticles;
-    std::vector<size_t> smokeInstanceIndices_;  // Indices into instances[] for smoke emitters
-    std::vector<size_t> portalInstanceIndices_; // Indices into instances[] for spinning portals
-    static constexpr int MAX_SMOKE_PARTICLES = 1000;
-    float smokeEmitAccum = 0.0f;
-    std::mt19937 smokeRng{42};
 
     // M2 particle emitter system. Each emitter holds as many particles as its
     // pool allows (m2EmitterPool), with no cap per instance.

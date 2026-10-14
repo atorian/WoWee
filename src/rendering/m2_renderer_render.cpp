@@ -156,12 +156,10 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // Cache model flags on instance to avoid per-frame hash lookups
     instance.cachedHasAnimation = mdlRef.hasAnimation;
     instance.cachedDisableAnimation = mdlRef.disableAnimation;
-    instance.cachedIsSmoke = mdlRef.isSmoke;
     instance.cachedHasEmitters = mdlRef.hasEmitters();
     instance.cachedBoundRadius = mdlRef.boundRadius;
     instance.cachedIsGroundDetail = mdlRef.isGroundDetail;
     instance.cachedIsInvisibleTrap = mdlRef.isInvisibleTrap;
-    instance.cachedIsInstancePortal = mdlRef.isInstancePortal;
     instance.cachedIsSkyBird = mdlRef.isSkyBird;
     instance.cachedIsLightBeam = mdlRef.isLightBeam;
     instance.cachedIsTransportDoodad = mdlRef.isTransportDoodad;
@@ -195,12 +193,6 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
     // Track special instances for fast-path iteration
-    if (mdlRef.isSmoke) {
-        smokeInstanceIndices_.push_back(idx);
-    }
-    if (mdlRef.isInstancePortal) {
-        portalInstanceIndices_.push_back(idx);
-    }
     if (mdlRef.hasEmitters()) {
         particleInstanceIndices_.push_back(idx);
     }
@@ -264,7 +256,6 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     const auto& mdl2 = models[modelId];
     instance.cachedHasAnimation = mdl2.hasAnimation;
     instance.cachedDisableAnimation = mdl2.disableAnimation;
-    instance.cachedIsSmoke = mdl2.isSmoke;
     instance.cachedHasEmitters = mdl2.hasEmitters();
     instance.cachedBoundRadius = mdl2.boundRadius;
     instance.cachedIsGroundDetail = mdl2.isGroundDetail;
@@ -306,9 +297,6 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     censusInstance(instance);
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
-    if (mdl2.isSmoke) {
-        smokeInstanceIndices_.push_back(idx);
-    }
     if (mdl2.hasEmitters()) {
         particleInstanceIndices_.push_back(idx);
     }
@@ -372,78 +360,6 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     // Build frustum for culling bones
     Frustum updateFrustum;
     updateFrustum.extractFromMatrix(viewProjection);
-
-    // --- Smoke particle spawning (only iterate tracked smoke instances) ---
-    std::uniform_real_distribution<float> distXY(rendering::SMOKE_OFFSET_XY_MIN, rendering::SMOKE_OFFSET_XY_MAX);
-    std::uniform_real_distribution<float> distVelXY(-0.3f, 0.3f);
-    std::uniform_real_distribution<float> distVelZ(rendering::SMOKE_VEL_Z_MIN, rendering::SMOKE_VEL_Z_MAX);
-    std::uniform_real_distribution<float> distLife(rendering::SMOKE_LIFETIME_MIN, rendering::SMOKE_LIFETIME_MAX);
-    std::uniform_real_distribution<float> distDrift(-0.2f, 0.2f);
-
-    smokeEmitAccum += deltaTime;
-    constexpr float emitInterval = kSmokeEmitInterval;  // 48 particles per second per emitter
-
-    if (smokeEmitAccum >= emitInterval &&
-        static_cast<int>(smokeParticles.size()) < MAX_SMOKE_PARTICLES) {
-        for (size_t si : smokeInstanceIndices_) {
-            if (si >= instances.size()) continue;
-            auto& instance = instances[si];
-
-            glm::vec3 emitWorld = glm::vec3(instance.modelMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-            bool spark = (smokeRng() % rendering::SPARK_PROBABILITY_DENOM == 0);
-
-            SmokeParticle p;
-            p.position = emitWorld + glm::vec3(distXY(smokeRng), distXY(smokeRng), 0.0f);
-            if (spark) {
-                p.velocity = glm::vec3(distVelXY(smokeRng) * 2.0f, distVelXY(smokeRng) * 2.0f, distVelZ(smokeRng) * 1.5f);
-                p.maxLife = rendering::SPARK_LIFE_BASE + static_cast<float>(smokeRng() % 100) / 100.0f * rendering::SPARK_LIFE_RANGE;
-                p.size = 0.5f;
-                p.isSpark = 1.0f;
-            } else {
-                p.velocity = glm::vec3(distVelXY(smokeRng), distVelXY(smokeRng), distVelZ(smokeRng));
-                p.maxLife = distLife(smokeRng);
-                p.size = 1.0f;
-                p.isSpark = 0.0f;
-            }
-            p.life = 0.0f;
-            p.instanceId = instance.id;
-            smokeParticles.push_back(p);
-            if (static_cast<int>(smokeParticles.size()) >= MAX_SMOKE_PARTICLES) break;
-        }
-        smokeEmitAccum = 0.0f;
-    }
-
-    // --- Update existing smoke particles (swap-and-pop for O(1) removal) ---
-    for (size_t i = 0; i < smokeParticles.size(); ) {
-        auto& p = smokeParticles[i];
-        p.life += deltaTime;
-        if (p.life >= p.maxLife) {
-            smokeParticles[i] = smokeParticles.back();
-            smokeParticles.pop_back();
-            continue;
-        }
-        p.position += p.velocity * deltaTime;
-        p.velocity.z *= rendering::SMOKE_Z_VEL_DAMPING;  // Slight deceleration
-        p.velocity.x += distDrift(smokeRng) * deltaTime;
-        p.velocity.y += distDrift(smokeRng) * deltaTime;
-        // Grow from 1.0 to 3.5 over lifetime
-        float t = p.life / p.maxLife;
-        p.size = rendering::SMOKE_SIZE_START + t * rendering::SMOKE_SIZE_GROWTH;
-        ++i;
-    }
-
-    // --- Spin instance portals ---
-    static constexpr float PORTAL_SPIN_SPEED = 1.2f; // radians/sec
-    static constexpr float kTwoPi = 6.2831853f;
-    for (size_t idx : portalInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        auto& inst = instances[idx];
-        inst.portalSpinAngle += PORTAL_SPIN_SPEED * deltaTime;
-        if (inst.portalSpinAngle > kTwoPi)
-            inst.portalSpinAngle -= kTwoPi;
-        inst.rotation.z = inst.portalSpinAngle;
-        inst.updateModelMatrix();
-    }
 
     // --- Normal M2 animation update ---
     // Advance animTime for ALL instances (needed for texture UV animation on static doodads).
@@ -1058,7 +974,6 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
             uint32_t flags = 0;
             if (inst.cachedIsValid)          flags |= 1u;
-            if (inst.cachedIsSmoke)           flags |= 2u;
             if (inst.cachedIsInvisibleTrap)   flags |= 4u;
             // Bit 3: previouslyVisible - the shader runs the HiZ occlusion test
             // ONLY when this bit is set (an object with no depth in last frame's
@@ -1200,9 +1115,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     glowSprites_.clear();
 
     lastDrawCallCount = 0;
-    lavaAnimSeconds_ = std::chrono::duration<float>(
-        std::chrono::steady_clock::now() - kLavaAnimStart).count();
-    const float lavaAnimSeconds = lavaAnimSeconds_;
 
     // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
@@ -1372,7 +1284,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
             } else {
-                if (!instance.cachedIsValid || instance.cachedIsSmoke || instance.cachedIsInvisibleTrap) continue;
+                if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 if (distSq > maxPossibleDistSq) continue;
@@ -1521,21 +1433,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
 
-    auto appendInstancePortalGlow = [&](const M2Instance& instance, float distSq) {
-        if (distSq >= 400.0f * 400.0f) return;
-        glm::vec3 center = glm::vec3(instance.modelMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-        GlowSprite core;
-        core.worldPos = center;
-        core.color = glm::vec4(0.35f, 0.55f, 1.0f, 1.25f);
-        core.size = instance.scale * 7.0f;
-        glowSprites_.push_back(core);
-
-        GlowSprite halo = core;
-        halo.color.a *= 0.35f;
-        halo.size *= 2.4f;
-        glowSprites_.push_back(halo);
-    };
-
     // Validate per-frame descriptor set before any Vulkan commands
     if (!perFrameSet) {
         LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE - skipping M2 render");
@@ -1605,15 +1502,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
             const M2ModelGPU& model = *instances[firstEntry.index].cachedModel;
             if (skipGroundDetail_ && model.isGroundDetail) {
-                visStart = groupEnd;
-                continue;
-            }
-            if (model.isInstancePortal) {
-                for (size_t vi = visStart; vi < groupEnd; vi++) {
-                    const auto& entry = sortedVisible_[vi];
-                    if (entry.index >= instances.size()) continue;
-                    appendInstancePortalGlow(instances[entry.index], entry.distSq);
-                }
                 visStart = groupEnd;
                 continue;
             }
@@ -1934,30 +1822,37 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Handle texture animation: if this batch has a per-instance UV
                     // transform, write a separate SSBO range with the right ones.
                     bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || model.isLavaModel || skyMode_ || batch.batchOpacity != 1.0f;
+                                           || skyMode_ || batch.batchOpacity != 1.0f;
                     uint32_t drawOffset = groupSSBOOffset;
                     if (hasBatchTexAnim && instanceDataCount_ + groupSize <= MAX_INSTANCE_DATA) {
                         drawOffset = instanceDataCount_;
                         // Hoist per-batch lookups: the transform pointer is fixed for
                         // every instance in this group; only the sampled transform
-                        // varies (per-instance animTime).
+                        // varies (per-instance animTime). The second stage animates
+                        // by the combo entry after the first.
                         const pipeline::M2TextureTransform* tt = nullptr;
+                        const pipeline::M2TextureTransform* tt2 = nullptr;
                         if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation) {
                             tt = m2TextureTransformAt(model.textureTransformLookup,
                                                       model.textureTransforms, batch.textureAnimIndex);
+                            if (batch.secondTexture) {
+                                tt2 = m2TextureTransformAt(model.textureTransformLookup, model.textureTransforms,
+                                                           static_cast<size_t>(batch.textureAnimIndex) + 1);
+                            }
                         }
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             const auto& p = pending[j];
                             auto& inst = instances[p.instanceIdx];
-                            M2UVTransform uv;
+                            M2UVTransform uv, uv2;
                             if (tt) {
                                 uv = m2SampleUVTransform(*tt, inst.currentSequenceIndex,
                                                          inst.animTime, inst.globalSequenceTime,
                                                          model.globalSequenceDurations);
                             }
-                            if (model.isLavaModel && m2UVTransformIsIdentity(uv)) {
-                                uv = m2UVTranslation(glm::vec2(lavaAnimSeconds * 0.03f,
-                                                               -lavaAnimSeconds * 0.08f));
+                            if (tt2) {
+                                uv2 = m2SampleUVTransform(*tt2, inst.currentSequenceIndex,
+                                                          inst.animTime, inst.globalSequenceTime,
+                                                          model.globalSequenceDurations);
                             }
                             // Rebuild the entry from CPU-side data rather than copying it
                             // out of the base entry. instSSBO lives in write-combined
@@ -1966,7 +1861,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             auto& e = instSSBO[instanceDataCount_];
                             e.model = inst.modelMatrix;
                             e.uv = uv;
-                            e.uv2 = M2UVTransform{};
+                            e.uv2 = uv2;
                             e.tintScale = 1.0f;
                             e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
@@ -2076,7 +1971,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
-    const float lavaAnimSeconds = lavaAnimSeconds_;
     const float fadeStartFraction = kFadeStartFraction;
 
     // The sets the opaque pass bound, again: this may be a different command
@@ -2113,7 +2007,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             currentModelValid = false;
             currentModel = instance.cachedModel;
             if (!currentModel) continue;
-            if (currentModel->isInstancePortal) continue;
             if (!currentModel->hasTransparentBatches && !currentModel->isSpellEffect) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
             currentModelValid = true;
@@ -2136,7 +2029,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         float instanceFadeAlpha = fadeAlpha * instance.fade;
         const bool instanceFaded = instance.fade < 0.999f;
         if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
-        if (model.isInstancePortal) instanceFadeAlpha *= 0.72f;
 
         bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
         if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;
@@ -2235,12 +2127,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                                              model.globalSequenceDurations);
                 }
             }
-            if (model.isLavaModel && m2UVTransformIsIdentity(uv)) {
-                uv = m2UVTranslation(glm::vec2(lavaAnimSeconds * 0.03f,
-                                               -lavaAnimSeconds * 0.08f));
-            }
-            // A masked layer's second stage animates by the combo entry after
-            // its first.
+            // The second stage animates by the combo entry after its first.
             M2UVTransform uv2;
             if (batch.secondTexture && texAnimRuns) {
                 if (const auto* tt = m2TextureTransformAt(model.textureTransformLookup,
@@ -2252,24 +2139,11 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 }
             }
 
-            // A fire's own glow breathes. The same clock and parameters as
-            // the lamp sprites and the local light they cast, so a brazier
-            // and the pool of light under it rise and fall together
-            // instead of beating against each other.
-            //
-            // Never for a sky. lampFlicker is keyed on the instance
-            // position and says a seed that drifts re-rolls its phase every
-            // frame and strobes; a sky dome's position IS the camera's,
-            // rewritten every frame, so it is the one instance that can
-            // never be a valid seed. The classifier no longer calls
-            // HellfireSkyBox a brazier, and this makes sure the next model
-            // that gets miscalled one cannot strobe the sky either.
-            float tintScale = 1.0f;
-            if (!skyMode_ && m2BlendIsAdditive(static_cast<uint8_t>(batch.blendMode)) &&
-                (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
-                tintScale = lampFlicker(instance.position, lampFlickerClockSeconds(),
-                                        0.82f, 0.12f, 0.06f);
-            }
+            // A fire's glow changes only as its own colour and texture weight
+            // tracks say, which the batch's tint and opacity already carry.
+            // It used to flicker on a clock of ours wherever the model's name
+            // read as a brazier, torch or lantern.
+            const float tintScale = 1.0f;
 
             // Write single instance entry to SSBO
             if (instanceDataCount_ >= MAX_INSTANCE_DATA) continue;
@@ -2389,7 +2263,6 @@ void M2Renderer::renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameS
     // creature's are posed by CharacterRenderer. Gated on render() having
     // run, a creature's wing trails went with every frame that had no doodad
     // in it.
-    renderSmokeParticles(cmd, perFrameSet);
     renderM2Particles(cmd, perFrameSet);
     renderM2Ribbons(cmd, perFrameSet);
     drawingAfterWater_ = false;
@@ -2591,7 +2464,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         shadowCasters_[0].clear();
         shadowCasters_[1].clear();
         auto castsHere = [&](const M2Instance& instance) {
-            if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+            if (!instance.cachedIsValid ||
                 instance.cachedIsInvisibleTrap || instance.finishing) return false;
             if (!instance.cachedModel) return false;
             return insideFootprint(instance, *instance.cachedModel);

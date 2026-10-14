@@ -97,7 +97,6 @@ inline glm::vec3 animatedBatchLightWorldCenter(const M2Instance& instance,
 }
 
 // ---- Constants ----
-inline const auto kLavaAnimStart = std::chrono::steady_clock::now();
 /// The size of m2.vert's Push block (M2PushConstants in m2_renderer_render.cpp).
 inline constexpr uint32_t kM2PushConstantBytes = 28;
 
@@ -109,7 +108,6 @@ struct M2ParticlePush {
     /// M2FogMode: None for an unfogged emitter (flag 0x8).
     int32_t fogMode = 0;
 };
-inline constexpr float kSmokeEmitInterval = 1.0f / 48.0f;
 
 // ---- Geometry / collision helpers ----
 

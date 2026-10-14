@@ -103,7 +103,6 @@ std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& 
 }
 
 void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt) {
-    if (gpu.isInstancePortal) return;
 
     const size_t emitterCount = gpu.particleEmitters.size();
     if (inst.emitterAccumulators.size() != emitterCount) {
@@ -347,7 +346,6 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
 // Ribbon emitter simulation
 // ---------------------------------------------------------------------------
 void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt, bool emit) {
-    if (gpu.isInstancePortal) return;
 
     const auto& emitters = gpu.ribbonEmitters;
     if (emitters.empty()) return;
@@ -492,7 +490,6 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     const auto addInstanceRibbons = [&](const M2Instance& inst) {
         if (!inst.cachedModel) return;
         const auto& gpu = *inst.cachedModel;
-        if (gpu.isInstancePortal) return;
         if (gpu.ribbonEmitters.empty()) return;
 
         for (size_t ri = 0; ri < gpu.ribbonEmitters.size(); ri++) {
@@ -653,13 +650,11 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // the update path above already uses it; this pass walked all 66211
     // instances instead, asking each whether its particle vector was empty.
     // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
-    // which is the critical path of renderWorld. The smoke pass beside this
-    // one does the same kind of work against a flat list and costs 0.003ms.
+    // which is the critical path of renderWorld.
     const auto addInstanceParticles = [&](const M2Instance& inst) {
         if (inst.particles.empty()) return;
         if (!inst.cachedModel) return;
         const auto& gpu = *inst.cachedModel;
-        if (gpu.isInstancePortal) return;
         // Each emitter draws at most m2EmitterDrawCap particles; the rest are
         // simulated and not drawn, as in the client.
         drawnPerEmitter_.assign(gpu.particleEmitters.size(), 0u);
@@ -959,37 +954,6 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         // whatever had been copied last.
         vkCmdDraw(cmd, 4, run.count, 0, run.first);
     }
-}
-
-void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    const ::VkBuffer smokeBuffer = frameBuffer(smokeVB_);
-    if (smokeParticles.empty() || !blended().smoke || !smokeBuffer) return;
-
-    // Build vertex data: pos(3) + lifeRatio(1) + size(1) + isSpark(1) per particle
-    size_t count = std::min(smokeParticles.size(), static_cast<size_t>(MAX_SMOKE_PARTICLES));
-    float* dst = static_cast<float*>(frameMapped(smokeVB_));
-    for (size_t i = 0; i < count; i++) {
-        const auto& p = smokeParticles[i];
-        *dst++ = p.position.x;
-        *dst++ = p.position.y;
-        *dst++ = p.position.z;
-        *dst++ = p.life / p.maxLife;
-        *dst++ = p.size;
-        *dst++ = p.isSpark;
-    }
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blended().smoke);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            smokePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
-
-    // Push constant: screenHeight
-    float screenHeight = static_cast<float>(vkCtx_->getSwapchainExtent().height);
-    vkCmdPushConstants(cmd, smokePipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                       sizeof(float), &screenHeight);
-
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &smokeBuffer, &offset);
-    vkCmdDraw(cmd, static_cast<uint32_t>(count), 1, 0, 0);
 }
 
 } // namespace rendering

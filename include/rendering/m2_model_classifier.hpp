@@ -75,15 +75,13 @@ struct M2ClassificationResult {
     bool isFoliageLike      = false; ///< Foliage or tree (wind sway, disabled animation)
     bool isSmallFoliage     = false; ///< Small bush/grass/plant (skip during taxi/flight)
     bool isSpellEffect      = false; ///< Spell effect / particle-dominated visual
-    bool isLavaModel        = false; ///< Lava surface (UV scroll animation)
-    bool isInstancePortal   = false; ///< Instance portal (additive, spin, no collision)
+    bool isLavaModel        = false; ///< Lava surface (throws a local light)
     bool isWaterVegetation  = false; ///< Aquatic vegetation (cattails, kelp, reeds, etc.)
     bool isFireflyEffect    = false; ///< Ambient creature (exempt from particle dampeners)
     bool isElvenLike        = false; ///< Night elf / Blood elf themed model
     bool isLanternLike      = false; ///< Lantern/lamp/light model
     bool isGroundDetail     = false; ///< Ground-clutter detail doodad (always non-blocking)
     bool isInvisibleTrap    = false; ///< Event-object invisible trap (no render, no collision)
-    bool isSmoke            = false; ///< Smoke model (UV scroll animation)
     bool isWaterfall        = false; ///< Waterfall model (ambient sound + splash particles)
     bool isBrazierOrFire    = false; ///< Brazier / campfire / bonfire model
     bool isGroundFire       = false; ///< Ground fire whose halo follows its lowest flame emitter

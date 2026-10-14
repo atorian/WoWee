@@ -389,18 +389,14 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 }
 
 void M2Renderer::rebuildInstanceIndexLists() {
-    // Rebuild the lightweight auxiliary index vectors (smoke, portal, etc.)
+    // Rebuild the lightweight auxiliary index vectors (animated, particle, light).
     // These are small vectors of indices that are rebuilt cheaply.
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
     for (size_t i = 0; i < instances.size(); i++) {
         auto& ri = instances[i];
-        if (ri.cachedIsSmoke) smokeInstanceIndices_.push_back(i);
-        if (ri.cachedIsInstancePortal) portalInstanceIndices_.push_back(i);
         if (ri.cachedHasEmitters) particleInstanceIndices_.push_back(i);
         if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
             animatedInstanceIndices_.push_back(i);
@@ -636,14 +632,10 @@ void M2Renderer::clear() {
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
-    smokeParticles.clear();
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
-    smokeEmitAccum = 0.0f;
 
     // Clear texture cache so stale textures don't block loads for the next
     // character/map.  Without this, the old session's textures fill the cache
@@ -671,14 +663,10 @@ void M2Renderer::clearInstances() {
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     lightInstanceIndices_.clear();
-    smokeParticles.clear();
-    smokeEmitAccum = 0.0f;
 }
 
 void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
@@ -696,8 +684,6 @@ void M2Renderer::rebuildSpatialIndex() {
     boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     instanceIndexById.reserve(instances.size());
-    smokeInstanceIndices_.clear();
-    portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
@@ -720,12 +706,6 @@ void M2Renderer::rebuildSpatialIndex() {
             instanceDedupMap_[dk] = inst.id;
         }
 
-        if (inst.cachedIsSmoke) {
-            smokeInstanceIndices_.push_back(i);
-        }
-        if (inst.cachedIsInstancePortal) {
-            portalInstanceIndices_.push_back(i);
-        }
         if (inst.cachedHasEmitters) {
             particleInstanceIndices_.push_back(i);
         }

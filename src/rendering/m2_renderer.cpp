@@ -387,14 +387,11 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     VkDevice device = vkCtx_->getDevice();
     rendering::VkShaderModule m2Vert, m2Frag;
     rendering::VkShaderModule particleVert, particleFrag;
-    rendering::VkShaderModule smokeVert, smokeFrag;
     rendering::VkShaderModule ribVert, ribFrag;
     (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
     (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
     (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
     (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
-    (void)smokeVert.loadFromFile(device, "assets/shaders/m2_smoke.vert.spv");
-    (void)smokeFrag.loadFromFile(device, "assets/shaders/m2_smoke.frag.spv");
     (void)ribVert.loadFromFile(device, "assets/shaders/m2_ribbon.vert.spv");
     (void)ribFrag.loadFromFile(device, "assets/shaders/m2_ribbon.frag.spv");
     if (!m2Vert.isValid() || !m2Frag.isValid()) return false;
@@ -492,33 +489,6 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
             buildParticlePipeline(m2ModulateBlendState(true), false);
     }
 
-    // Smoke: pos3 + lifeRatio1 + size1 + isSpark1
-    if (smokeVert.isValid() && smokeFrag.isValid()) {
-        VkVertexInputBindingDescription sBind{};
-        sBind.binding = 0;
-        sBind.stride = 6 * sizeof(float);
-        sBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-        std::vector<VkVertexInputAttributeDescription> sAttrs = {
-            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},           // position
-            {.location = 1, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 3 * sizeof(float)}, // lifeRatio
-            {.location = 2, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 4 * sizeof(float)}, // size
-            {.location = 3, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = 5 * sizeof(float)}, // isSpark
-        };
-        out.smoke = PipelineBuilder()
-            .setShaders(smokeVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        smokeFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-            .setVertexInput({sBind}, sAttrs)
-            .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-            .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-            .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-            .setMultisample(samples)
-            .setLayout(smokePipelineLayout_)
-            .setRenderPass(pass)
-            .setDynamicStates(viewportAndScissorDynamic())
-            .build(device, vkCtx_->getPipelineCache());
-    }
-
     // Ribbons: pos(3) + color(3) + alpha(1) + uv(2) = 9 floats = 36 bytes
     if (ribVert.isValid() && ribFrag.isValid() && ribbonPipelineLayout_ != VK_NULL_HANDLE) {
         VkVertexInputBindingDescription rBind{};
@@ -552,7 +522,6 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
 
     m2Vert.destroy(); m2Frag.destroy();
     particleVert.destroy(); particleFrag.destroy();
-    smokeVert.destroy(); smokeFrag.destroy();
     ribVert.destroy(); ribFrag.destroy();
     return out.alpha != VK_NULL_HANDLE;
 }
@@ -561,7 +530,7 @@ void M2Renderer::destroyBlendedPipelines(BlendedPipelines& pipes) {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     for (VkPipeline* p : {&pipes.alpha, &pipes.noAlphaAdd, &pipes.additive, &pipes.modulate,
-                          &pipes.modulate2x, &pipes.smoke, &pipes.ribbon, &pipes.ribbonAdditive}) {
+                          &pipes.modulate2x, &pipes.ribbon, &pipes.ribbonAdditive}) {
         if (*p) vkDestroyPipeline(device, *p, nullptr);
         *p = VK_NULL_HANDLE;
     }
@@ -1094,30 +1063,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         vkCreatePipelineLayout(device, &ci, nullptr, &particlePipelineLayout_);
     }
 
-    // Smoke pipeline layout: set 0 = perFrame
-    // Push constant: float screenHeight (4 bytes)
-    {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout};
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        pushRange.offset = 0;
-        pushRange.size = 4;
-
-        VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        ci.setLayoutCount = 1;
-        ci.pSetLayouts = setLayouts;
-        ci.pushConstantRangeCount = 1;
-        ci.pPushConstantRanges = &pushRange;
-        vkCreatePipelineLayout(device, &ci, nullptr, &smokePipelineLayout_);
-    }
-
     perFrameLayout_ = perFrameLayout;
     if (!buildMainPassPipelines(perFrameLayout)) return false;
 
     // --- Dynamic particle buffers, mapped for CPU writes, one per frame ---
-    // Smoke: pos(3)+lifeRatio(1)+size(1)+isSpark(1). Ribbons: a triangle
-    // strip of pos(3)+color(3)+alpha(1)+uv(2).
-    createFrameVertexBuffer(smokeVB_, MAX_SMOKE_PARTICLES * 6 * sizeof(float), "smoke");
+    // Ribbons: a triangle strip of pos(3)+color(3)+alpha(1)+uv(2).
     createFrameVertexBuffer(m2ParticleVB_, MAX_M2_PARTICLE_QUADS * sizeof(M2ParticleQuad), "particle");
     createFrameVertexBuffer(glowVB_, MAX_GLOW_SPRITES * sizeof(M2ParticleQuad), "glow sprite");
     createFrameVertexBuffer(ribbonVB_, MAX_RIBBON_VERTS * 9 * sizeof(float), "ribbon");
@@ -1247,11 +1197,9 @@ void M2Renderer::shutdown() {
     glowTexture_.reset();
 
     // Clean up particle/ribbon buffers
-    destroyFrameVertexBuffer(smokeVB_);
     destroyFrameVertexBuffer(m2ParticleVB_);
     destroyFrameVertexBuffer(glowVB_);
     destroyFrameVertexBuffer(ribbonVB_);
-    smokeParticles.clear();
 
     // Destroy pipelines
     auto destroyPipeline = [&](VkPipeline& p) { if (p) { vkDestroyPipeline(device, p, nullptr); p = VK_NULL_HANDLE; } };
@@ -1263,7 +1211,6 @@ void M2Renderer::shutdown() {
 
     destroy(device, pipelineLayout_);
     destroy(device, particlePipelineLayout_);
-    destroy(device, smokePipelineLayout_);
     destroy(device, ribbonPipelineLayout_);
 
     // Destroy descriptor pools and layouts
@@ -1861,10 +1808,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
     gpuModel.isFireflyEffect             = cls.isFireflyEffect;
     gpuModel.isSmallFoliage              = cls.isSmallFoliage;
-    gpuModel.isSmoke                     = cls.isSmoke;
     gpuModel.isSpellEffect               = cls.isSpellEffect;
     gpuModel.isLavaModel                 = cls.isLavaModel;
-    gpuModel.isInstancePortal            = cls.isInstancePortal;
     gpuModel.isWaterVegetation           = cls.isWaterVegetation;
     gpuModel.isElvenLike                 = cls.isElvenLike;
     gpuModel.isLanternLike               = cls.isLanternLike;
@@ -2708,7 +2653,7 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     // What the renderer never draws, what is too small and numerous to be
     // worth its triangles (ground clutter), and what moves: an animated model
     // would cast its bind pose, not the pose on screen.
-    if (gpuModel.isInvisibleTrap || gpuModel.isSmoke || gpuModel.isSpellEffect ||
+    if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect ||
         gpuModel.isGroundDetail || gpuModel.isSkyBird || gpuModel.isLightBeam) {
         return;
     }

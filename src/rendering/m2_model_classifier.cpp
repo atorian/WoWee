@@ -228,12 +228,11 @@ M2ClassificationResult classifyM2Model(
     // glow begins.
     const bool particleEmitterVfx = has(fullPath, "\\particleemitters\\")
                                  || has(fullPath, "/particleemitters/");
-    r.isSmoke         = has(n, "smoke");
     r.isLavaModel     = has(n, "forgelava") || has(n, "lavapot") || has(n, "lavaflow")
                     || has(n, "lavapool");
 
-    r.isInstancePortal  = has(n, "instanceportal") || has(n, "instancenewportal")
-                        || has(n, "portalfx")       || has(n, "spellportal");
+    const bool instancePortal = has(n, "instanceportal") || has(n, "instancenewportal")
+                              || has(n, "portalfx")       || has(n, "spellportal");
 
     r.isWaterVegetation = has(n, "cattail") || has(n, "reed")     || has(n, "bulrush")
                         || has(n, "seaweed") || has(n, "kelp")    || has(n, "lilypad")
@@ -634,7 +633,7 @@ M2ClassificationResult classifyM2Model(
     r.isSpellEffect = hasAny(n, kEffectTokens) || steamVfx || particleEmitterVfx
                     || particleDominated;
     // Instance portals are spell effects too.
-    if (r.isInstancePortal) r.isSpellEffect = true;
+    if (instancePortal) r.isSpellEffect = true;
 
     // ---------------------------------------------------------------
     // Ambient emitter type (for sound system integration)
