@@ -31,7 +31,6 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include <glm/gtx/quaternion.hpp>
@@ -1021,21 +1020,11 @@ void GameHandler::registerCoreOpcodes() {
             std::string areaName = getAreaName(areaId);
             // The zone name goes with it: the interface writes its own warning
             // from arg1 rather than reusing the chat line.
+            // chatframe.lua writes the warning from arg1. This client wrote a
+            // chat line and an error line of its own too while it drew its own
+            // chat; that window is gone, and the real client never puts this
+            // on the error line at all.
             if (addonEventCallback_) addonEventCallback_("ZONE_UNDER_ATTACK", {areaName});
-            // ...which is why this client only writes the line when nothing
-            // else will. chatframe.lua's own ZONE_UNDER_ATTACK branch calls
-            // AddMessage with ZONE_UNDER_ATTACK formatted from arg1, so with
-            // the interface in charge the player read every attack twice in
-            // chat and a third time on the error line - which the real client
-            // never puts it on at all. Booty Bay under sustained attack filled
-            // the window.
-            if (!ui::frameXmlOwns(ui::UiElement::Chat)) {
-                const std::string msg = areaName.empty()
-                    ? std::string("A zone is under attack!")
-                    : (areaName + " is under attack!");
-                addUIError(msg);
-                addSystemChatMessage(msg);
-            }
         }
     };
 
@@ -1454,16 +1443,10 @@ void GameHandler::registerCoreOpcodes() {
                         }
                     }
                     if (newLevel > oldLevel) {
-                        // Not when the interface writes it: chatframe.lua's
-                        // PLAYER_LEVEL_UP branch formats LEVEL_UP from arg1
-                        // and adds the health and mana gains under it, so this
-                        // line was a second, shorter copy above its own.
-                        if (!ui::frameXmlOwns(ui::UiElement::Chat)) {
-                            addSystemChatMessage("You have reached level " +
-                                                 std::to_string(newLevel) + "!");
-                        }
-                        withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playLevelUp(); });
-                        if (levelUpCallback_) levelUpCallback_(newLevel);
+                        // The sound, the ding banner, the glow and the client's
+                        // own chat line all answer this. FrameXML's chat writes
+                        // its line from PLAYER_LEVEL_UP below instead.
+                        eventBus().publish(events::PlayerLevelUp{oldLevel, newLevel});
                         // All nine, in the order the interface reads them:
                         // level, health, power, talent points, then the five
                         // stats. The chat frame tests the third against zero

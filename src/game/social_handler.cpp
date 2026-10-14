@@ -11,7 +11,6 @@
 #include "network/world_socket.hpp"
 #include "core/logger.hpp"
 #include "core/cvar_store.hpp"
-#include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include <algorithm>
@@ -2635,7 +2634,6 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
     // name on a local line without one: "[Guild] [You]: [Guild] Coggs has come
     // online."
     std::string msg;
-    bool guildLine = false;  // the MOTD, which is the one that is guild chat
     switch (data.eventType) {
         case GuildEvent::PROMOTION:
             if (data.numStrings >= 3)
@@ -2646,13 +2644,9 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
                 msg = data.strings[0] + " has demoted " + data.strings[1] + " to " + data.strings[2] + ".";
             break;
         case GuildEvent::MOTD:
-            // The interface writes this one itself, from the GUILD_MOTD event
-            // fired further down: chatframe.lua formats GUILD_MOTD_TEMPLATE
-            // and adds it. Only the client's own window needs a line here.
-            if (data.numStrings >= 1 && !ui::frameXmlOwns(ui::UiElement::Chat)) {
-                msg = "Guild Message of the Day: " + data.strings[0];
-                guildLine = true;
-            }
+            // Not a line from here: chatframe.lua formats GUILD_MOTD_TEMPLATE
+            // from the GUILD_MOTD event fired further down, and the chat
+            // window this client drew for itself is gone.
             break;
         case GuildEvent::JOINED:
             if (data.numStrings >= 1) msg = data.strings[0] + " has joined the guild.";
@@ -2736,7 +2730,7 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
 
     if (!msg.empty()) {
         MessageChatData chatMsg;
-        chatMsg.type = guildLine ? ChatType::GUILD : ChatType::SYSTEM;
+        chatMsg.type = ChatType::SYSTEM;
         chatMsg.language = ChatLanguage::UNIVERSAL;
         chatMsg.message = msg;
         owner_.addLocalChatMessage(chatMsg);
@@ -3095,29 +3089,8 @@ void SocialHandler::handlePlayedTime(network::Packet& packet) {
         owner_.fireAddonEvent("TIME_PLAYED_MSG",
                               {std::to_string(data.totalTimePlayed),
                                std::to_string(data.levelTimePlayed)});
-        // ...and the hand-built lines below are what this client says when it
-        // is drawing its own chat. With FrameXML drawing it they would be a
-        // second, differently worded copy printed beside the real one - the
-        // same shape as the gossip binder in quest_handler, where doing the
-        // work here as well as letting the interface do it asked twice.
-        if (ui::frameXmlOwns(ui::UiElement::Chat)) return;
-
-        uint32_t totalDays = data.totalTimePlayed / 86400;
-        uint32_t totalHours = (data.totalTimePlayed % 86400) / 3600;
-        uint32_t totalMinutes = (data.totalTimePlayed % 3600) / 60;
-        uint32_t levelDays = data.levelTimePlayed / 86400;
-        uint32_t levelHours = (data.levelTimePlayed % 86400) / 3600;
-        uint32_t levelMinutes = (data.levelTimePlayed % 3600) / 60;
-        std::string totalMsg = "Total time played: ";
-        if (totalDays > 0) totalMsg += std::to_string(totalDays) + " days, ";
-        if (totalHours > 0 || totalDays > 0) totalMsg += std::to_string(totalHours) + " hours, ";
-        totalMsg += std::to_string(totalMinutes) + " minutes";
-        std::string levelMsg = "Time played this level: ";
-        if (levelDays > 0) levelMsg += std::to_string(levelDays) + " days, ";
-        if (levelHours > 0 || levelDays > 0) levelMsg += std::to_string(levelHours) + " hours, ";
-        levelMsg += std::to_string(levelMinutes) + " minutes";
-        owner_.addSystemChatMessage(totalMsg);
-        owner_.addSystemChatMessage(levelMsg);
+        // That event is the whole answer: the hand-built lines this client
+        // wrote for its own chat window went with the window.
     }
 }
 

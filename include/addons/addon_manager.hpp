@@ -95,6 +95,9 @@ private:
     std::vector<TocFile> lodAddons_;
     std::set<std::string> lodLoaded_;
     game::GameHandler* gameHandler_ = nullptr;
+    /// Whether the first target of the session has asked for an interface
+    /// check yet; see fireEvent.
+    bool targetCheckRequested_ = false;
     LuaServices luaServices_;
     std::string addonsPath_;
 

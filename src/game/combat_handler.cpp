@@ -12,7 +12,6 @@
 #include "network/world_socket.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "core/cvar_store.hpp"
-#include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/combat_sound_manager.hpp"
 #include "audio/activity_sound_manager.hpp"
@@ -1382,15 +1381,11 @@ void CombatHandler::setTarget(uint64_t guid) {
     }
     owner_.fireAddonEvent("PLAYER_TARGET_CHANGED", {});
 
-    // Report the interface once, the first time there is a target to report it
-    // against. A target frame is only right or wrong with something targeted,
-    // and that is not a moment anything can be scheduled for - which is why
-    // this one has been diagnosed from readings taken when nothing was
-    // selected, where correct and broken look identical.
+    // The first target of the session, said plainly. The interface takes its
+    // own reading at the same moment, from PLAYER_TARGET_CHANGED above.
     static bool reportedOnce = false;
     if (!reportedOnce && guid != 0) {
         reportedOnce = true;
-        ui::frameXmlRequestCheck();
         // What UnitExists("target") resolves through, said plainly. The Lua
         // probe was meant to answer this and has not run; this is the same
         // question asked where it can actually be answered - the interface

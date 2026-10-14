@@ -12,6 +12,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "game/game_handler.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "rendering/animation/animation_ids.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -151,6 +152,14 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         LOG_INFO("Online world entry: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")"
                  " initial=", isInitialEntry);
         playerView_.resetCombatVisualState();
+
+        // The animation constants against this install's AnimationData.dbc,
+        // once a login: the first moment the archives are certainly mounted.
+        // The game did this, which had it reach into the animation code it
+        // has no use for.
+        if (isInitialEntry && assetManager_) {
+            rendering::anim::validateAgainstDBC(assetManager_->loadDBC("AnimationData.dbc"));
+        }
 
         // Reconnect to the same map: terrain stays loaded but all online entities are stale.
         // Despawn them properly so the server's fresh CREATE_OBJECTs will re-populate the world.

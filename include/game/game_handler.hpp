@@ -2457,9 +2457,6 @@ public:
     using ChargeCallback = std::function<void(uint64_t targetGuid, float x, float y, float z)>;
     void setChargeCallback(ChargeCallback cb) { chargeCallback_ = std::move(cb); }
 
-    // Level-up callback - fires when the player gains a level (newLevel > 1)
-    using LevelUpCallback = std::function<void(uint32_t newLevel)>;
-    void setLevelUpCallback(LevelUpCallback cb) { levelUpCallback_ = std::move(cb); }
 
     // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
     struct LevelUpDeltas {
@@ -4707,7 +4704,6 @@ private:
     NpcFarewellCallback npcFarewellCallback_;
     NpcVendorCallback npcVendorCallback_;
     ChargeCallback chargeCallback_;
-    LevelUpCallback levelUpCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     std::vector<TempEnchantTimer> tempEnchantTimers_;
     std::vector<BookPage> bookPages_;            // pages collected for the current readable item

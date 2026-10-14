@@ -33,7 +33,6 @@
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "core/cvar_store.hpp"
-#include "ui/framexml_takeover.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/player_voice_manager.hpp"
 #include <glm/gtx/quaternion.hpp>
@@ -901,9 +900,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Fires on initial login, teleports, instance transitions, and zone changes.
     if (addonEventCallback_) {
         fireAddonEvent("PLAYER_ENTERING_WORLD", {initialWorldEntry ? "1" : "0"});
-        // FrameXML arranges itself from this event, so the interface diagnostics
-        // wait for it rather than describing a layout nobody ever sees.
-        ui::frameXmlNoteWorldEntry();
         // Also fire ZONE_CHANGED_NEW_AREA and UPDATE_WORLD_STATES so map/BG addons refresh
         fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
         fireAddonEvent("UPDATE_WORLD_STATES", {});
@@ -3448,12 +3444,6 @@ void GameHandler::preloadDBCCaches() const {
     loadAreaNameCache();    // WorldMapArea.dbc
     loadMapNameCache();     // Map.dbc
     loadLfgDungeonDbc();    // LFGDungeons.dbc
-
-    // Validate animation constants against AnimationData.dbc
-    if (auto* am = services_.assetManager) {
-        auto animDbc = am->loadDBC("AnimationData.dbc");
-        rendering::anim::validateAgainstDBC(animDbc);
-    }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();

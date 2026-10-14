@@ -8,6 +8,7 @@ extern "C" {
 }
 #include "addons/addon_globals.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "game/game_handler.hpp"
 #include "core/logger.hpp"
 #include "core/window.hpp"
 #include "core/config_paths.hpp"
@@ -1705,6 +1706,21 @@ bool AddonManager::interfaceCommandBoolean(const std::string& expression) {
 
 void AddonManager::fireEvent(const std::string& event, const std::vector<std::string>& args) {
     luaEngine_.fireEvent(event, args);
+    // FrameXML arranges itself from this event, so the interface diagnostics
+    // wait for it rather than describing a layout nobody ever sees. Noted here,
+    // where the event reaches the interface, rather than by the game that
+    // raised it - the game has no business knowing FrameXML is there.
+    if (event == "PLAYER_ENTERING_WORLD") ui::frameXmlNoteWorldEntry();
+    // Report the interface once, the first time there is a target to report it
+    // against. A target frame is only right or wrong with something targeted,
+    // and that is not a moment anything can be scheduled for - which is why
+    // this one had been diagnosed from readings taken when nothing was
+    // selected, where correct and broken look identical.
+    if (event == "PLAYER_TARGET_CHANGED" && !targetCheckRequested_ &&
+        gameHandler_ && gameHandler_->getTargetGuid() != 0) {
+        targetCheckRequested_ = true;
+        ui::frameXmlRequestCheck();
+    }
 }
 
 void AddonManager::update(float deltaTime) {

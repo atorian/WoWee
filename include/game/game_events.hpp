@@ -95,4 +95,10 @@ struct PlayerCastFailed {
     bool routine = false;
 };
 
+/// The player reached a new level (SMSG_LEVELUP_INFO).
+struct PlayerLevelUp {
+    uint32_t oldLevel = 0;
+    uint32_t newLevel = 0;
+};
+
 } // namespace wowee::game::events

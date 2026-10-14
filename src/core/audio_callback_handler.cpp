@@ -11,6 +11,7 @@
 #include "audio/audio_coordinator.hpp"
 #include "audio/music_manager.hpp"
 #include "audio/audio_engine.hpp"
+#include "audio/ui_sound_manager.hpp"
 #include "ui/ui_manager.hpp"
 
 namespace wowee { namespace core {
@@ -50,15 +51,19 @@ std::optional<std::string> AudioCallbackHandler::resolveSoundEntryPath(uint32_t 
 }
 
 void AudioCallbackHandler::setupCallbacks() {
-    // Level-up callback - play sound, cheer emote, and trigger UI ding overlay + 3D effect
-    gameHandler_.setLevelUpCallback([this](uint32_t newLevel) {
+    // The player's own level-up: the sound, the ding banner and the 3D effect.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PlayerLevelUp>(
+        [this](const game::events::PlayerLevelUp& e) {
+        if (audioCoordinator_) {
+            if (auto* sfx = audioCoordinator_->getUiSoundManager()) sfx->playLevelUp();
+        }
         if (uiManager_) {
-            uiManager_->getGameScreen().toastManager().triggerDing(newLevel);
+            uiManager_->getGameScreen().toastManager().triggerDing(e.newLevel);
         }
         if (renderer_) {
             if (auto* ac = playerView_->getAnimationController()) ac->triggerLevelUpEffect(renderer_->getCharacterPosition());
         }
-    });
+    }));
 
     // Achievement earned callback - show toast banner
     gameHandler_.setAchievementEarnedCallback([this](uint32_t /*achievementId*/,
