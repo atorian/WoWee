@@ -1601,8 +1601,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
 
             bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
-            const bool particleDominantEffect = model.isSpellEffect &&
-                !model.particleEmitters.empty() && model.batches.size() <= 2;
 
             // Collect per-instance data for this model group
             pending.clear();
@@ -1759,7 +1757,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     else if (batch.indexCount == 0) skipped = "no indices";
                     else if (!model.isGroundDetail && batch.submeshLevel != lod)
                         skipped = "submeshLevel is not this LOD";
-                    else if (batch.batchOpacity < 0.01f) skipped = "opacity is zero";
+                    else if (batch.batchOpacity <= kM2BatchHiddenOpacity) skipped = "opacity is zero";
                     else if (!skyBatchAllowed(skyMode_, bi)) skipped = "sky batch rule";
                     else if (suppressBakedStars_ && batch.starLayer) skipped = "baked star layer";
                     if (diagThisModel) {
@@ -1905,12 +1903,12 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     }
 
                     // Opaque gate - transparent glow cards were handled above so their
-                    // sprites are generated before the mesh moves to pass 2.
-                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect;
+                    // sprites are generated before the mesh moves to pass 2, and
+                    // so is a layer the client blends for its alpha, to be
+                    // faded or left out per instance there.
+                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
+                                                batch.blendedByOpacity;
                     if (rawTransparent) continue;
-
-                    // Particle-dominant effects: emission geometry - skip opaque
-                    if (particleDominantEffect && batch.blendMode <= 1) continue;
 
                     // Handle texture animation: if this batch has a per-instance UV
                     // transform, write a separate SSBO range with the right ones.
@@ -1952,8 +1950,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
-                                e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
-                                    model.skyTextureWeightTracks, batch.weightTrackIndex,
+                                e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
+                                    model.textureWeightTracks, batch.weightTrackIndex,
                                     skyAnimationTimeMs(skyTimeOfDayHours_, duration), inst.globalSequenceTime,
                                     model.globalSequenceDurations);
                             }
@@ -2131,23 +2129,34 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         uint16_t targetLOD = desiredLOD;
         while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
 
-        const bool particleDominantEffect = model.isSpellEffect &&
-            !model.particleEmitters.empty() && model.batches.size() <= 2;
-
         for (const size_t batchIndex : model.materialDrawOrder) {
             const auto& batch = model.batches[batchIndex];
             if (batch.indexCount == 0) continue;
             if (!model.isGroundDetail && batch.submeshLevel != targetLOD) continue;
-            if (batch.batchOpacity < 0.01f) continue;
             if (!skyBatchAllowed(skyMode_, static_cast<std::size_t>(&batch - model.batches.data()))) continue;
 
-            // Pass 2 gate: only transparent/additive batches - or, for a faded
-            // instance, every batch, since the opaque pass left it out.
+            // Pass 2 gate: only transparent/additive batches, those the
+            // client blends for their alpha - or, for a faded instance, every
+            // batch, since the opaque pass left it out.
             {
                 const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect ||
-                                            instanceFaded;
+                                            batch.blendedByOpacity || instanceFaded;
                 if (!rawTransparent) continue;
             }
+
+            // The layer's own alpha for this instance: what the model fixes
+            // for it, times where it is in its fade when that animates.
+            // Nothing is drawn of a layer at zero - a spell's emitter mesh,
+            // there for a moment and then gone while its particles fly.
+            float layerOpacity = batch.batchOpacity;
+            if (batch.animatedOpacity) {
+                layerOpacity *= m2SampleBatchOpacity(
+                    model.colorAlphaTracks, batch.colorTrackIndex,
+                    model.textureWeightTracks, batch.weightTrackIndex,
+                    instance.currentSequenceIndex, instance.animTime,
+                    instance.globalSequenceTime, model.globalSequenceDurations);
+            }
+            if (layerOpacity <= kM2BatchHiddenOpacity) continue;
 
             // WOWEE_SKY_M2_SKIP_BLEND=<n> drops the sky's layers of one blend
             // mode. Its thirty-four batches are six opaque, ten alpha-blended
@@ -2183,8 +2192,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
                 continue;
             }
-
-            if (particleDominantEffect) continue; // emission-only mesh
 
             // Compute the UV transforms for this instance + batch
             //
@@ -2252,11 +2259,11 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.uv = uv;
             e.uv2 = uv2;
             e.tintScale = tintScale;
-            e.fadeAlpha = instanceFadeAlpha * batch.batchOpacity;
+            e.fadeAlpha = instanceFadeAlpha * layerOpacity;
             if (skyMode_) {
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
-                e.fadeAlpha *= skyBatchOpacity(model.skyColorAlphaTracks, batch.colorTrackIndex,
-                    model.skyTextureWeightTracks, batch.weightTrackIndex,
+                e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
+                    model.textureWeightTracks, batch.weightTrackIndex,
                     skyAnimationTimeMs(skyTimeOfDayHours_, duration), instance.globalSequenceTime,
                     model.globalSequenceDurations);
             }
@@ -2271,8 +2278,11 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             // Pipeline selection
             const uint8_t drawBlendMode = batch.drawState.drawBlendMode;
             VkPipeline desiredPipeline = blendPipeline(m2BlendPipeline(drawBlendMode));
-            // An opaque layer of a faded instance: blended by its fade.
-            if (instanceFaded && drawBlendMode <= 1) desiredPipeline = blended().alpha;
+            // An opaque layer of a faded instance, or one part way through
+            // its own fade: blended by it.
+            if ((instanceFaded || layerOpacity < kM2BatchOpaqueOpacity) && drawBlendMode <= 1) {
+                desiredPipeline = blended().alpha;
+            }
             if (desiredPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                 currentPipeline = desiredPipeline;
@@ -2638,8 +2648,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             for (const auto& batch : model.batches) {
-                if (batch.submeshLevel > 0 || !m2BatchCastsShadow(batch.blendMode,
-                    batch.batchOpacity, batch.glowCardLike, batch.starLayer)) continue;
+                // A layer that fades in and out is drawn blended, and blended
+                // layers cast no shadow.
+                if (batch.submeshLevel > 0 || batch.blendedByOpacity ||
+                    !m2BatchCastsShadow(batch.blendMode, batch.batchOpacity,
+                                        batch.glowCardLike, batch.starLayer)) continue;
                 const bool alphaCutout = batch.blendMode == 1;
                 // A leaf card with no texture is a shadow with no caster.
                 //

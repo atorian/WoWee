@@ -4480,6 +4480,23 @@ bool CharacterRenderer::getInstancePosition(uint32_t instanceId, glm::vec3& outP
     return true;
 }
 
+bool CharacterRenderer::getInstanceModelMatrix(uint32_t instanceId, glm::mat4& outMatrix) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    const auto& instance = it->second;
+    outMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                : getModelMatrix(instance);
+    return true;
+}
+
+bool CharacterRenderer::getInstanceDrawnOpacity(uint32_t instanceId, float& outOpacity) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    // The same as the body is drawn with in render().
+    outOpacity = std::clamp(std::min(it->second.opacity, it->second.stateAlpha), 0.0f, 1.0f);
+    return true;
+}
+
 void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmentId) {
     auto charIt = instances.find(charInstanceId);
     if (charIt == instances.end()) return;

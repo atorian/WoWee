@@ -103,6 +103,15 @@ struct M2ModelGPU {
         bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
+        /// The colour alpha or texture weight changes over the model's life,
+        /// so batchOpacity holds only the texture gate and the rest is sampled
+        /// per instance (m2SampleBatchOpacity).
+        bool animatedOpacity = false;
+        /// Drawn in the blended pass because of its alpha, whatever its blend
+        /// mode: the alpha animates, or is fixed below kM2BatchOpaqueOpacity.
+        /// The client blends such a layer, and in that pass each instance can
+        /// be faded or left out on its own.
+        bool blendedByOpacity = false;
         /// The texture this batch is hidden waiting for, when its first load
         /// failed. Empty once it has it. A hidden batch is never bound, so its
         /// descriptor and material can be rewritten when a retry succeeds.
@@ -228,7 +237,7 @@ struct M2ModelGPU {
     bool isTransportDoodad = false; // Animated ship sail/paddle child
     bool isBoat = false;            // Small boat; bobs if it turns out to be afloat
     bool hasTextureAnimation = false; // True if any batch has UV animation
-    bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
+    bool hasTransparentBatches = false; // True if any batch is drawn in the blended pass (blendMode >= 2 or blendedByOpacity)
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
 
     // Particle emitter data (kept from M2Model)
@@ -252,8 +261,11 @@ struct M2ModelGPU {
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;
     std::vector<uint16_t> textureTransformLookup;
-    std::vector<pipeline::M2AnimationTrack> skyColorAlphaTracks;
-    std::vector<pipeline::M2AnimationTrack> skyTextureWeightTracks;
+    // Batch transparency tracks, indexed by BatchGPU::colorTrackIndex and
+    // weightTrackIndex: sampled per instance for a batch whose transparency
+    // animates (BatchGPU::animatedOpacity), and by the sky on its day clock.
+    std::vector<pipeline::M2AnimationTrack> colorAlphaTracks;
+    std::vector<pipeline::M2AnimationTrack> textureWeightTracks;
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
     [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }

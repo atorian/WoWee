@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -172,13 +173,17 @@ private:
     static glm::vec3 applyEffectHeightOffset(const glm::vec3& basePos, const std::string& modelPath);
 
     // ---- Aura state visuals (spell_visual_state.cpp) ----
-    /// Where on the unit a kit's effect hangs: SpellVisualKit's effect columns.
-    enum class KitSlot : uint8_t { Head, Chest, Base, LeftHand, RightHand, Breath, Special };
     struct StateKit {
         struct Effect {
             std::string path;
-            KitSlot slot = KitSlot::Base;
+            /// The M2 attachment the effect hangs from, by the kit column it
+            /// came from (kKitEffectAttachments in spell_visual_state.cpp).
+            uint32_t attachmentId = 0;
             float scale = 1.0f;  // SpellVisualEffectName.Scale
+            /// SpellVisualEffectName.Min/MaxAllowedScale: the bounds of the
+            /// size the effect is drawn at, its unit's size included.
+            float minScale = 0.0f;
+            float maxScale = std::numeric_limits<float>::max();
         };
         std::vector<Effect> effects;
         glm::vec3 tint{1.0f};    // CharProc 1 (Color); white when it has none
@@ -189,7 +194,8 @@ private:
         size_t effectIndex = 0;     // into StateKit::effects
         uint32_t modelId = 0;
         uint32_t instanceId = 0;    // M2 instance; 0 while the model loads
-        glm::vec3 lastPosition{0.0f};
+        glm::mat4 lastTransform{1.0f};
+        float lastAlpha = 1.0f;     // the unit's own alpha, which the effect shares
     };
     struct UnitState {
         uint32_t instanceId = 0;
@@ -204,7 +210,11 @@ private:
     void updateStateVisuals(float deltaTime);
     /// Takes every state visual down and gives the bodies their own look back.
     void resetStateVisuals();
-    bool stateEffectPosition(uint32_t charInstanceId, KitSlot slot, glm::vec3& out);
+    /// Where an effect on this unit is drawn: its attachment's world matrix,
+    /// so it turns and sways with the body, times the effect's own scale,
+    /// the total held within the effect's allowed sizes.
+    bool stateEffectTransform(uint32_t charInstanceId, const StateKit::Effect& effect,
+                              glm::mat4& out);
     std::unordered_map<uint32_t, StateKit> stateKits_;  // visualId -> its StateKit
     bool stateKitsLoaded_ = false;
     std::unordered_map<uint64_t, UnitState> unitStates_;  // by unit guid

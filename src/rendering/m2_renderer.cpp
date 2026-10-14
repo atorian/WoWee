@@ -2,6 +2,7 @@
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_material.hpp"
+#include "rendering/m2_batch_opacity.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "core/env_flag.hpp"
@@ -2194,10 +2195,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Copy texture transform data for UV animation
     gpuModel.textureTransforms = model.textureTransforms;
     gpuModel.textureTransformLookup = model.textureTransformLookup;
-    if (skyMode_) {
-        gpuModel.skyColorAlphaTracks = model.colorAlphaTracks;
-        gpuModel.skyTextureWeightTracks = model.textureWeightTracks;
-    }
+    gpuModel.colorAlphaTracks = model.colorAlphaTracks;
+    gpuModel.textureWeightTracks = model.textureWeightTracks;
     gpuModel.hasTextureAnimation = false;
 
     // Build per-batch GPU entries
@@ -2416,29 +2415,32 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 }
             }
 
-            // Apply at-rest transparency and color alpha from the M2 animation tracks.
-            // These provide per-batch opacity for ghosts, ethereal effects, fading doodads, etc.
-            // Skip zero values: some animated tracks start at 0 and animate up, and baking
-            // that first keyframe would make the entire batch permanently invisible.
+            // The batch's colour alpha and texture weight: ghosts, ethereal
+            // effects, fading doodads, a spell's emitter mesh. One that never
+            // changes is applied here, a zero included - that layer is not
+            // drawn. One that animates is sampled on each instance's clock
+            // when drawn; taking any one of its keys here left it at that
+            // value for good, and an emitter mesh meant to show for a moment
+            // stood there solid. The sky reads its own on the day clock.
             {
-                float animAlpha = 1.0f;
                 if (batch.colorIndex < model.colorRGB.size()) {
                     // The batch's authored colour. A glow card is painted
                     // white and coloured here, so without it every fire in the
                     // world burns white: Orgrimmar's carries (1.0, 0.329, 0.0).
                     bgpu.tint = model.colorRGB[batch.colorIndex];
                 }
-                if (!skyMode_ && batch.colorIndex < model.colorAlphas.size()) {
-                    float ca = model.colorAlphas[batch.colorIndex];
-                    if (ca > 0.001f) animAlpha *= ca;
-                }
+                float atRest = 1.0f;
                 if (!skyMode_) {
-                    const float weight = m2TextureWeightOpacity(model.textureWeights,
-                        model.textureWeightLookup, batch.transparencyIndex);
-                    if (weight > 0.001f) animAlpha *= weight;
+                    const M2BatchOpacity opacity = m2BatchOpacity(
+                        gpuModel.colorAlphaTracks, bgpu.colorTrackIndex,
+                        gpuModel.textureWeightTracks, bgpu.weightTrackIndex);
+                    bgpu.animatedOpacity = opacity.animated;
+                    atRest = opacity.atRest;
                 }
-                bgpu.loadedOpacity = animAlpha;
-                bgpu.batchOpacity = hiddenForTexture ? 0.0f : animAlpha;
+                bgpu.blendedByOpacity = bgpu.animatedOpacity || atRest < kM2BatchOpaqueOpacity;
+                if (bgpu.blendedByOpacity) gpuModel.hasTransparentBatches = true;
+                bgpu.loadedOpacity = atRest;
+                bgpu.batchOpacity = hiddenForTexture ? 0.0f : atRest;
             }
 
             // Compute batch center and radius for glow sprite positioning
@@ -2747,8 +2749,11 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
     src.positions.reserve(model.vertices.size());
     for (const auto& v : model.vertices) src.positions.push_back(v.position);
     for (const auto& batch : gpuModel.batches) {
-        if (batch.submeshLevel != 0 || !m2BatchCastsShadow(batch.blendMode,
-            batch.batchOpacity, batch.glowCardLike, batch.starLayer)) {
+        // A layer that fades in and out is drawn blended, and blended layers
+        // cast no shadow.
+        if (batch.submeshLevel != 0 || batch.blendedByOpacity ||
+            !m2BatchCastsShadow(batch.blendMode, batch.batchOpacity,
+                                batch.glowCardLike, batch.starLayer)) {
             continue;
         }
         glm::vec3 albedo = batch.tint;

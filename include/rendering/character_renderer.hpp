@@ -177,6 +177,12 @@ public:
     bool getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId, float& outZ) const;
     bool getInstanceFootZ(uint32_t instanceId, float& outFootZ) const;
     bool getInstancePosition(uint32_t instanceId, glm::vec3& outPos) const;
+    /// Where the instance stands, which way it faces and how large it is: the
+    /// matrix its model is drawn with, the feet at its origin.
+    bool getInstanceModelMatrix(uint32_t instanceId, glm::mat4& outMatrix) const;
+    /// How opaque the instance is drawn: the lower of its fade and its aura
+    /// look's alpha. What is hung on it fades with it.
+    bool getInstanceDrawnOpacity(uint32_t instanceId, float& outOpacity) const;
 
     /** Debug: Log all available animations for an instance */
     void dumpAnimations(uint32_t instanceId) const;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rendering/m2_track_sampler.hpp"
+#include "rendering/m2_batch_opacity.hpp"
 
 namespace wowee::rendering {
 
@@ -16,13 +16,8 @@ inline float skyBatchOpacity(
     const std::vector<pipeline::M2AnimationTrack>& colors, uint16_t colorIndex,
     const std::vector<pipeline::M2AnimationTrack>& weights, uint16_t weightIndex,
     float dayTimeMs, float elapsedMs, const std::vector<uint32_t>& globalDurations) {
-    const auto sample = [&](const auto& tracks, uint16_t index) {
-        if (index >= tracks.size()) return 1.0f;
-        const float value = m2_track::sampleFloat(tracks[index], 0, dayTimeMs,
-                                                 elapsedMs, globalDurations, 1.0f);
-        return std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 1.0f;
-    };
-    return sample(colors, colorIndex) * sample(weights, weightIndex);
+    return m2SampleBatchOpacity(colors, colorIndex, weights, weightIndex,
+                                0, dayTimeMs, elapsedMs, globalDurations);
 }
 
 } // namespace wowee::rendering

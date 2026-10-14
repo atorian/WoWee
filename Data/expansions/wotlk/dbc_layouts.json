@@ -321,6 +321,8 @@
   "SpellVisualEffectName": {
     "FilePath": 2,
     "ID": 0,
+    "MaxAllowedScale": 6,
+    "MinAllowedScale": 5,
     "Scale": 4
   },
   "SpellVisualKit": {
