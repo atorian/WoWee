@@ -155,12 +155,9 @@ int handleMvpZone(int& i, int argc, char** argv) {
     sp.saveToFile(dir + "/creatures.json");
     // Demo object - a tree placement near the creature.
     wowee::editor::ObjectPlacer op;
-    wowee::editor::PlacedObject po;
-    po.type = wowee::editor::PlaceableType::M2;
-    po.path = "World/Generic/Tree.m2";
-    po.position = {centerX + 5.0f, centerY, centerZ};
-    po.scale = 1.0f;
-    op.getObjects().push_back(po);
+    op.setActivePath("World/Generic/Tree.m2",
+                     wowee::editor::PlaceableType::M2);
+    op.placeObject({centerX + 5.0f, centerY, centerZ});
     op.saveToFile(dir + "/objects.json");
     // Demo quest with objective + XP reward.
     wowee::editor::QuestEditor qe;

@@ -13,13 +13,13 @@ namespace editor {
 enum class PlaceableType { M2, WMO };
 
 struct PlacedObject {
-    PlaceableType type;
+    PlaceableType type = PlaceableType::M2;
     std::string path;
-    uint32_t nameId;
-    uint32_t uniqueId;
-    glm::vec3 position;
-    glm::vec3 rotation; // degrees
-    float scale;        // 1.0 = normal
+    uint32_t nameId = 0;
+    uint32_t uniqueId = 0;
+    glm::vec3 position{0.0f};
+    glm::vec3 rotation{0.0f}; // degrees
+    float scale = 1.0f;       // 1.0 = normal
     bool selected = false;
 };
 
