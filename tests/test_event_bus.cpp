@@ -2,6 +2,8 @@
 
 #include "core/event_bus.hpp"
 
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -130,4 +132,87 @@ TEST_CASE("events posted from another thread arrive on dispatch", "[events]") {
 
     bus.dispatchPosted();
     CHECK(total == 5050);
+}
+
+// Unsubscribing can destroy a whole presentation scope. Its running callback
+// must survive until it returns/throws, and must then release its captures.
+TEST_CASE("a throwing handler can remove subscriptions during delivery", "[events]") {
+    EventBus bus;
+    EventBus::Subscription throwing, removed;
+    std::vector<int> heard;
+    auto lifetime = std::make_shared<int>(42);
+    std::weak_ptr<int> released = lifetime;
+    throwing = bus.subscribe<Ping>([&, keepAlive = lifetime](const Ping&) {
+        throwing.reset();
+        removed.reset();
+        CHECK(*keepAlive == 42);
+        throw std::runtime_error("event handler regression");
+    });
+    lifetime.reset();
+    removed = bus.subscribe<Ping>([&](const Ping&) { heard.push_back(-1); });
+    auto survivor = bus.subscribe<Ping>([&](const Ping& p) { heard.push_back(p.value); });
+
+    CHECK_NOTHROW(bus.publish(Ping{1}));
+    CHECK(heard == std::vector<int>{1});
+    CHECK(released.expired());
+    bus.publish(Ping{2});
+    CHECK(heard == std::vector<int>{1, 2});
+}
+
+TEST_CASE("unknown handler exceptions do not stop a posted event batch", "[events]") {
+    EventBus bus;
+    std::vector<int> heard;
+    auto throwing = bus.subscribe<Ping>([](const Ping&) { throw 7; });
+    auto survivor = bus.subscribe<Ping>([&](const Ping& p) { heard.push_back(p.value); });
+    bus.post(Ping{1});
+    bus.post(Ping{2});
+    CHECK_NOTHROW(bus.dispatchPosted());
+    CHECK(heard == std::vector<int>{1, 2});
+}
+
+TEST_CASE("nested delivery keeps a removed outer handler alive until it unwinds", "[events]") {
+    EventBus bus;
+    EventBus::Subscription outer;
+    std::vector<int> heard;
+    auto lifetime = std::make_shared<int>(42);
+    std::weak_ptr<int> released = lifetime;
+    outer = bus.subscribe<Ping>([&, keepAlive = lifetime](const Ping& p) {
+        if (p.value == 1) {
+            outer.reset();
+            bus.publish(Ping{2});
+            CHECK(*keepAlive == 42);
+            CHECK_FALSE(released.expired());
+            throw std::runtime_error("outer delivery regression");
+        }
+    });
+    lifetime.reset();
+    auto survivor = bus.subscribe<Ping>([&](const Ping& p) { heard.push_back(p.value); });
+    CHECK_NOTHROW(bus.publish(Ping{1}));
+    CHECK(heard == std::vector<int>{2, 1});
+    CHECK(released.expired());
+    bus.publish(Ping{3});
+    CHECK(heard == std::vector<int>{2, 1, 3});
+}
+
+TEST_CASE("destroying removed captures can unsubscribe another handler", "[events]") {
+    EventBus bus;
+    struct Scope { EventBus::Subscription listener; };
+    auto scope = std::make_shared<Scope>();
+    std::weak_ptr<Scope> released = scope;
+    int scopedCalls = 0;
+    int survivorCalls = 0;
+    EventBus::Subscription owner;
+    owner = bus.subscribe<Ping>([&, keepAlive = scope](const Ping&) {
+        owner.reset();
+        CHECK(keepAlive);
+    });
+    scope->listener = bus.subscribe<Ping>([&](const Ping&) { ++scopedCalls; });
+    scope.reset();
+    auto survivor = bus.subscribe<Ping>([&](const Ping&) { ++survivorCalls; });
+
+    bus.publish(Ping{});
+    CHECK(released.expired());
+    bus.publish(Ping{});
+    CHECK(scopedCalls == 1);
+    CHECK(survivorCalls == 2);
 }

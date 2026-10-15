@@ -192,9 +192,9 @@ void RtScene::shutdown() {
 }
 
 void RtScene::destroyMeshGpu(Mesh& m) {
-    if (m.blas && pfnDestroyAs_) pfnDestroyAs_(ctx_->getDevice(), m.blas, nullptr);
-    m.blas = VK_NULL_HANDLE;
-    destroyBuffer(ctx_->getAllocator(), m.blasBuffer);
+    DeferredResources retired(*ctx_);
+    if (pfnDestroyAs_) retired.release(m.blas, pfnDestroyAs_);
+    retired.buffer(m.blasBuffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,8 +275,7 @@ void RtScene::setActive(bool active) {
 }
 
 void RtScene::releaseGpu() {
-    VmaAllocator alloc = ctx_->getAllocator();
-    VkDevice dev = ctx_->getDevice();
+    DeferredResources retired(*ctx_);
     ++gpuEpoch_;
     for (auto& m : meshes_) {
         destroyMeshGpu(m);
@@ -290,21 +289,21 @@ void RtScene::releaseGpu() {
     }
     pendingMeshes_.clear();
     for (auto& fr : frames_) {
-        destroyBuffer(alloc, fr.instances);
-        destroyBuffer(alloc, fr.tlasNodes);
-        destroyBuffer(alloc, fr.asInstances);
-        if (fr.tlas) pfnDestroyAs_(dev, fr.tlas, nullptr);
-        destroyBuffer(alloc, fr.tlasBuffer);
-        destroyBuffer(alloc, fr.scratch);
+        retired.buffer(fr.instances);
+        retired.buffer(fr.tlasNodes);
+        retired.buffer(fr.asInstances);
+        if (pfnDestroyAs_) retired.release(fr.tlas, pfnDestroyAs_);
+        retired.buffer(fr.tlasBuffer);
+        retired.buffer(fr.scratch);
         const VkDescriptorSet set = fr.set;
         fr = FrameResources{};
         fr.set = set;
     }
     for (GpuPool* p : {&triPool_, &nodePool_}) {
-        destroyBuffer(alloc, p->buffer);
+        retired.buffer(p->buffer);
         p->alloc = RtRangeAllocator{};
     }
-    destroyBuffer(alloc, meshTable_);
+    retired.buffer(meshTable_);
     meshTableCapacity_ = 0;
     meshTableDirty_ = true;
     builtVersion_ = ~0ull;

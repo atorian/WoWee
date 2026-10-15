@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <limits>
 #include <cstdlib>
+#include <functional>
+#include <utility>
+#include <vector>
 
 #include "core/env_flag.hpp"
 
@@ -120,6 +123,45 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     std::source_location where = std::source_location::current());
 
 void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image);
+
+/// Detach resource handles now and release them, in order, only after every
+/// frame slot has fenced. The queued work owns values, never its former owner.
+/// Use for resources replaced during play; do not reset their pools eagerly.
+class DeferredResources {
+public:
+    explicit DeferredResources(VkContext& ctx);
+    ~DeferredResources();
+    DeferredResources(const DeferredResources&) = delete;
+    DeferredResources& operator=(const DeferredResources&) = delete;
+
+    template<class Handle, class Destroy>
+    void release(Handle& handle, Destroy destroyFn) {
+        if (!handle) return;
+        auto retired = std::exchange(handle, Handle{});
+        auto device = device_;
+        add([device, retired, destroyFn] { destroyFn(device, retired, nullptr); });
+    }
+
+    template<class Handle>
+    void destroy(Handle& handle) {
+        if (!handle) return;
+        auto retired = std::exchange(handle, Handle{});
+        auto device = device_;
+        add([device, retired]() mutable { rendering::destroy(device, retired); });
+    }
+
+    void buffer(VkBuffer& buffer, VmaAllocation& allocation);
+    void buffer(AllocatedBuffer& buffer);
+    void image(VkImage& image, VmaAllocation& allocation);
+    void image(AllocatedImage& image);
+    void add(std::function<void()> cleanup) { cleanups_.push_back(std::move(cleanup)); }
+
+private:
+    VkContext& ctx_;
+    VkDevice device_;
+    VmaAllocator allocator_;
+    std::vector<std::function<void()>> cleanups_;
+};
 
 /// Give a Vulkan object a name the validation layer will print.
 ///

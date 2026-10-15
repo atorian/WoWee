@@ -273,10 +273,11 @@ void SwimEffects::recreatePipelines() {
         targetSamples_ = vkCtx->getMsaaSamples();
     }
 
-    // Destroy old pipelines (NOT layouts)
-    destroy(device, ripplePipeline);
-    destroy(device, bubblePipeline);
-    destroy(device, insectPipeline);
+    DeferredResources retired(*vkCtx);
+    // Retire old pipelines; layouts persist.
+    retired.destroy(ripplePipeline);
+    retired.destroy(bubblePipeline);
+    retired.destroy(insectPipeline);
 
     // Shared vertex input: pos(vec3) + size(float) + alpha(float) = 5 floats
     VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));

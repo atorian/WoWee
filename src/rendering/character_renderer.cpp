@@ -420,7 +420,10 @@ void CharacterRenderer::setFadedPass(VkRenderPass pass, VkSampleCountFlagBits sa
     if (pass == fadedPass_ && samples == fadedPassSamples_) return;
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
-    destroyPipelineSet(device, fadedPassPipes_);
+    auto retired = std::exchange(fadedPassPipes_, PipelineSet{});
+    vkCtx_->deferAfterAllFrameFences([device, retired]() mutable {
+        destroyPipelineSet(device, retired);
+    });
     fadedPass_ = pass;
     fadedPassSamples_ = samples;
     if (pass == VK_NULL_HANDLE) return;
@@ -617,37 +620,29 @@ void CharacterRenderer::shutdown() {
         });
     }
 
-    vkDeviceWaitIdle(vkCtx_->getDevice());
     VkDevice device = vkCtx_->getDevice();
-    VmaAllocator alloc = vkCtx_->getAllocator();
+    DeferredResources retired(*vkCtx_);
 
     // Clean up GPU resources for models
     for (auto& pair : models) {
-        destroyModelGPU(pair.second);
+        destroyModelGPU(pair.second, /*defer=*/true);
     }
 
     // Clean up instance bone buffers
     for (auto& pair : instances) {
-        destroyInstanceBones(pair.second);
+        destroyInstanceBones(pair.second, /*defer=*/true);
     }
 
-    // Model and bone destruction above is deferred; drain it now while the
-    // descriptor pools are still alive, since no further frames will run.
-    vkCtx_->flushDeferredCleanup();
-
-    // ~VkTexture is empty by design -- it has no device or allocator to free
-    // with -- so clearing the map drops the unique_ptrs without destroying the
-    // image, view or allocation behind each one. Both textures in an entry are
-    // owned here.
     for (auto& [path, entry] : textureCache) {
-        if (entry.texture) entry.texture->destroy(device, alloc);
-        if (entry.normalHeightMap) entry.normalHeightMap->destroy(device, alloc);
+        auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
+        auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
+        retired.add([texture, normal]() {});
     }
     textureCache.clear();
-    // The singletons the cache never held. Same reason as above.
-    if (whiteTexture_)       { whiteTexture_->destroy(device, alloc);       whiteTexture_.reset(); }
-    if (transparentTexture_) { transparentTexture_->destroy(device, alloc); transparentTexture_.reset(); }
-    if (flatNormalTexture_)  { flatNormalTexture_->destroy(device, alloc);  flatNormalTexture_.reset(); }
+    for (auto* texture : {&whiteTexture_, &transparentTexture_, &flatNormalTexture_}) {
+        auto owner = std::shared_ptr<VkTexture>(std::move(*texture));
+        retired.add([owner]() {});
+    }
     texturePropsByPtr_.clear();
     normalMapByTexPtr_.clear();
     textureCacheBytes_ = 0;
@@ -667,16 +662,20 @@ void CharacterRenderer::shutdown() {
     instances.clear();
 
     // Destroy pipelines
-    destroyPipelineSet(device, scenePipes_);
-    destroyPipelineSet(device, fadedPassPipes_);
+    auto scene = std::exchange(scenePipes_, PipelineSet{});
+    auto faded = std::exchange(fadedPassPipes_, PipelineSet{});
+    retired.add([device, scene, faded]() mutable {
+        destroyPipelineSet(device, scene);
+        destroyPipelineSet(device, faded);
+    });
     fadedPass_ = VK_NULL_HANDLE;
 
-    destroy(device, pipelineLayout_);
+    retired.destroy(pipelineLayout_);
 
     // Destroy material ring buffers
     for (int i = 0; i < 2; i++) {
         if (materialRingBuffer_[i]) {
-            vmaDestroyBuffer(alloc, materialRingBuffer_[i], materialRingAlloc_[i]);
+            retired.buffer(materialRingBuffer_[i], materialRingAlloc_[i]);
             materialRingBuffer_[i] = VK_NULL_HANDLE;
             materialRingAlloc_[i] = VK_NULL_HANDLE;
             materialRingMapped_[i] = nullptr;
@@ -686,23 +685,26 @@ void CharacterRenderer::shutdown() {
 
     // Destroy descriptor pools and layouts
     for (auto& materialDescPool : materialDescPools_) {
-        destroy(device, materialDescPool);
+        retired.destroy(materialDescPool);
     }
     if (boneDescPool_) {
-        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
-        vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
+        // Bone callbacks were queued first and return their sets before this pool.
+        retired.destroy(boneDescPool_);
         boneDescPool_ = VK_NULL_HANDLE;
     }
-    destroy(device, materialSetLayout_);
-    destroy(device, boneSetLayout_);
+    retired.destroy(materialSetLayout_);
+    retired.destroy(boneSetLayout_);
 
     // Shadow resources
-    destroy(device, shadowPipeline_);
-    destroy(device, shadowPipelineLayout_);
-    destroyShadowParamsSet(device, alloc, shadowParams_);
+    retired.destroy(shadowPipeline_);
+    retired.destroy(shadowPipelineLayout_);
+    retired.destroy(shadowParams_.pool);
+    shadowParams_.set = VK_NULL_HANDLE;
+    retired.destroy(shadowParams_.layout);
+    retired.buffer(shadowParams_.ubo, shadowParams_.alloc);
     shadowTexSetCache_.clear();
     for (auto& pool : shadowTexPool_) {
-        if (pool) { vkDestroyDescriptorPool(device, pool, nullptr); pool = VK_NULL_HANDLE; }
+        if (pool) { retired.destroy(pool); pool = VK_NULL_HANDLE; }
     }
 
     vkCtx_ = nullptr;
@@ -727,27 +729,21 @@ void CharacterRenderer::clear() {
         completedNormalMaps_.clear();
     }
 
-    vkDeviceWaitIdle(vkCtx_->getDevice());
-    VkDevice device = vkCtx_->getDevice();
 
     // Destroy GPU resources for all models
     for (auto& pair : models) {
-        destroyModelGPU(pair.second);
+        destroyModelGPU(pair.second, /*defer=*/true);
     }
 
     // Destroy bone buffers for all instances
     for (auto& pair : instances) {
-        destroyInstanceBones(pair.second);
+        destroyInstanceBones(pair.second, /*defer=*/true);
     }
 
-    // See CharacterRenderer::shutdown: ~VkTexture frees nothing on its own.
-    if (vkCtx_) {
-        VkDevice dev = vkCtx_->getDevice();
-        VmaAllocator vma = vkCtx_->getAllocator();
-        for (auto& [path, entry] : textureCache) {
-            if (entry.texture) entry.texture->destroy(dev, vma);
-            if (entry.normalHeightMap) entry.normalHeightMap->destroy(dev, vma);
-        }
+    for (auto& [path, entry] : textureCache) {
+        auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
+        auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
+        vkCtx_->deferAfterAllFrameFences([texture, normal]() {});
     }
     textureCache.clear();
     texturePropsByPtr_.clear();
@@ -762,30 +758,11 @@ void CharacterRenderer::clear() {
     compositeCache_.clear();
     failedTextureCache_.clear();
 
-    // Recreate default textures (needed by loadModel/loadTexture fallbacks)
-    whiteTexture_.reset();
-    transparentTexture_.reset();
-    flatNormalTexture_.reset();
-    createFallbackTextures(device);
-
+    // Fallback textures, ring offsets and per-frame pools stay alive. Their
+    // per-slot reset happens only after beginFrame has fenced that slot.
     models.clear();
     instances.clear();
 
-    // Reset material ring buffer offsets (buffers persist, just reset write position)
-    for (uint32_t& offset : materialRingOffset_) {
-        offset = 0;
-    }
-
-    // Reset descriptor pools (don't destroy - reuse for new allocations)
-    for (auto& materialDescPool : materialDescPools_) {
-        if (materialDescPool) {
-            vkResetDescriptorPool(device, materialDescPool, 0);
-        }
-    }
-    if (boneDescPool_) {
-        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
-        vkResetDescriptorPool(device, boneDescPool_, 0);
-    }
 }
 
 void CharacterRenderer::createFallbackTextures(VkDevice device) {

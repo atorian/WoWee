@@ -819,8 +819,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
         if (renderer_) {
             // Clear all world geometry from old map (including textures/models).
-            // WMO clearAll and M2 clear both call vkDeviceWaitIdle internally,
-            // ensuring no GPU command buffers reference old resources.
+            // Old GPU handles retire only after all frame fences; CPU scene
+            // ownership can switch immediately without stalling the device.
             if (auto* wmo = renderer_->getWMORenderer()) {
                 wmo->clearAll();
             }
@@ -829,7 +829,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             }
 
             // Full clear of character renderer: removes all instances, models,
-            // textures, and resets descriptor pools. This prevents stale GPU
+            // textures, retaining pools until their retired sets are freed. This prevents stale GPU
             // resources from accumulating across map changes (old creature
             // models, bone buffers, texture descriptor sets) which can cause
             // VK_ERROR_DEVICE_LOST on some drivers.
@@ -1220,7 +1220,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     // here silently and be reported by the first frame's own submit instead,
     // which put the blame one stage too late.
     if (renderer_ && renderer_->getVkContext()) {
-        renderer_->getVkContext()->waitIdle("world entry flush");
+        renderer_->getVkContext()->waitAllUploads();
     }
 
     if (loadingScreenOk) {

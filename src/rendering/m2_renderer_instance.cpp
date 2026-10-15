@@ -542,7 +542,6 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
 void M2Renderer::clear() {
     if (vkCtx_) {
-        vkDeviceWaitIdle(vkCtx_->getDevice());
         // Their owners see them gone (hasPosedEmitters) and ask again.
         destroyPosedEmitterModels();
         for (auto& [id, model] : models) {
@@ -551,74 +550,8 @@ void M2Renderer::clear() {
         for (auto& inst : instances) {
             destroyInstanceBones(inst);
         }
-        // Reset descriptor pools so new allocations succeed after reload.
-        // destroyModelGPU/destroyInstanceBones don't free individual sets,
-        // so the pools fill up across map changes without this reset.
-        VkDevice device = vkCtx_->getDevice();
-        if (materialDescPool_) {
-            vkResetDescriptorPool(device, materialDescPool_, 0);
-            // Re-allocate the glow texture descriptor set (pre-allocated during init,
-            // invalidated by pool reset).
-            // Cleared before the test, not inside it: the pool reset above
-            // invalidated whatever was here, so a run that does not re-allocate
-            // was leaving a dangling set behind to be bound.
-            glowTexDescSet_ = VK_NULL_HANDLE;
-            // Valid, not merely present. A texture whose upload or view
-            // creation failed writes a null view into this set, and the glow
-            // pass samples it - the same shape as the particle and ribbon sets.
-            if (glowTexture_ && glowTexture_->isValid() && particleTexLayout_) {
-                VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = materialDescPool_;
-                ai.descriptorSetCount = 1;
-                ai.pSetLayouts = &particleTexLayout_;
-                if (vkAllocateDescriptorSets(device, &ai, &glowTexDescSet_) == VK_SUCCESS) {
-                    VkDescriptorImageInfo imgInfo = glowTexture_->descriptorInfo();
-                    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    write.dstSet = glowTexDescSet_;
-                    write.dstBinding = 0;
-                    write.descriptorCount = 1;
-                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    write.pImageInfo = &imgInfo;
-                    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-                }
-            }
-        }
-        if (boneDescPool_) {
-            if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
-            vkResetDescriptorPool(device, boneDescPool_, 0);
-            // Re-allocate the dummy bone set (invalidated by pool reset)
-            dummyBoneSet_ = allocateBoneSet();
-            if (dummyBoneSet_ && dummyBoneBuffer_) {
-                VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = dummyBoneBuffer_;
-                bufInfo.offset = 0;
-                bufInfo.range = sizeof(glm::mat4);
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = dummyBoneSet_;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                write.pBufferInfo = &bufInfo;
-                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-            }
-            // Re-allocate mega bone sets (invalidated by pool reset)
-            for (int i = 0; i < 2; i++) {
-                megaBoneSet_[i] = allocateBoneSet();
-                if (megaBoneSet_[i] && megaBoneBuffer_[i]) {
-                    VkDescriptorBufferInfo mbInfo{};
-                    mbInfo.buffer = megaBoneBuffer_[i];
-                    mbInfo.offset = 0;
-                    mbInfo.range = VkDeviceSize(MEGA_BONE_MATRIX_CAPACITY) * sizeof(glm::mat4);
-                    VkWriteDescriptorSet mw{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    mw.dstSet = megaBoneSet_[i];
-                    mw.dstBinding = 0;
-                    mw.descriptorCount = 1;
-                    mw.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mw.pBufferInfo = &mbInfo;
-                    vkUpdateDescriptorSets(device, 1, &mw, 0, nullptr);
-                }
-            }
-        }
+        // Each retired model/instance returns its own sets after the fences.
+        // Keep the pools and persistent glow/dummy/mega-bone sets alive.
     }
     models.clear();
     pinnedModelIds_.clear();
@@ -639,6 +572,10 @@ void M2Renderer::clear() {
     // character/map.  Without this, the old session's textures fill the cache
     // budget and failedTextureRetryAt_ blocks legitimate reloads, causing an
     // infinite model-load loop on character switch.
+    for (auto& [path, entry] : textureCache) {
+        auto retired = std::shared_ptr<VkTexture>(std::move(entry.texture));
+        vkCtx_->deferAfterAllFrameFences([retired]() {});
+    }
     textureCache.clear();
     texturePropsByPtr_.clear();
     textureCacheBytes_ = 0;
@@ -651,7 +588,6 @@ void M2Renderer::clear() {
 }
 
 void M2Renderer::clearInstances() {
-    if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
     for (auto& inst : instances) destroyInstanceBones(inst);
     instances.clear();
     spatialGrid.clear();
@@ -787,20 +723,7 @@ void M2Renderer::cleanupUnusedModels() {
         }
     }
 
-    // Delete GPU resources and remove from map.
-    // Wait for the GPU to finish all in-flight frames before destroying any
-    // buffers - the previous frame's command buffer may still be referencing
-    // vertex/index buffers that are about to be freed. Without this wait,
-    // the GPU reads freed memory, which can cause VK_ERROR_DEVICE_LOST.
-    // Suspected (not yet confirmed) contributor to multi-second freezes seen
-    // right after taxi landings - timed here so the next repro pins it down.
-    if (!toRemove.empty() && vkCtx_) {
-        const auto waitStart = std::chrono::steady_clock::now();
-        vkDeviceWaitIdle(vkCtx_->getDevice());
-        const float waitMs = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - waitStart).count();
-        LOG_DEBUG("M2 cleanup: vkDeviceWaitIdle took ", waitMs, "ms (", toRemove.size(), " models to remove)");
-    }
+    // Retire through the same fence queue as explicit unload/map transitions.
     for (uint32_t id : toRemove) {
         auto it = models.find(id);
         if (it != models.end()) {
@@ -827,7 +750,6 @@ std::vector<uint32_t> M2Renderer::drainReapedModelIds() {
 void M2Renderer::unloadModel(uint32_t modelId) {
     auto it = models.find(modelId);
     if (it == models.end()) return;
-    if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
     destroyModelGPU(it->second);
     models.erase(it);
     modelUnusedSince_.erase(modelId);

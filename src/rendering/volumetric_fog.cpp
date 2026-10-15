@@ -179,8 +179,9 @@ bool VolumetricFog::createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags u
 
 void VolumetricFog::destroyVolume(Volume& v) {
     if (!ctx_) return;
-    if (v.view) { vkDestroyImageView(ctx_->getDevice(), v.view, nullptr); v.view = VK_NULL_HANDLE; }
-    if (v.image) { vmaDestroyImage(ctx_->getAllocator(), v.image, v.alloc); v.image = VK_NULL_HANDLE; v.alloc = VK_NULL_HANDLE; }
+    DeferredResources retired(*ctx_);
+    retired.release(v.view, vkDestroyImageView);
+    retired.image(v.image, v.alloc);
 }
 
 bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
@@ -312,8 +313,8 @@ void VolumetricFog::destroyVolumes() {
     volumesReady_ = false;
 }
 
-void VolumetricFog::writeComputeSets() {
-    for (uint32_t f = 0; f < MAX_FRAMES; f++) {
+void VolumetricFog::writeComputeSets(uint32_t f) {
+    {
         const uint32_t other = (f + 1) % MAX_FRAMES;
         VkDescriptorBufferInfo params{.buffer = paramsUBO_[f], .offset = 0, .range = sizeof(VolumeParamsGPU)};
         VkDescriptorImageInfo shadow{.sampler = depthSampler_, .imageView = shadowViews_[f],
@@ -357,7 +358,6 @@ bool VolumetricFog::applyPendingQuality() {
 
     // The volumes are bound in both frame slots' per-frame sets, and one of
     // those may still be in flight.
-    vkDeviceWaitIdle(ctx_->getDevice());
     const bool wasOn = volumesReady_;
     destroyVolumes();
 
@@ -381,7 +381,6 @@ bool VolumetricFog::applyPendingQuality() {
                     " volumes - staying off");
         return wasOn;
     }
-    writeComputeSets();
     volumesReady_ = true;
     historyValid_ = false;
     lastRecordedFrame_ = -1;
@@ -404,6 +403,9 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
                            const FrameInputs& in) {
     ZoneScopedN("VolumetricFog::record");
     if (!volumesReady_ || frame >= MAX_FRAMES || cmd == VK_NULL_HANDLE) return;
+
+    // Only this slot has fenced; the other slot may still be sampling its sets.
+    writeComputeSets(frame);
 
     // The inject pass interpolates between these to place every cell.
     VolumeParamsGPU p{};

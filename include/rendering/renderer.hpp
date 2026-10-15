@@ -604,7 +604,7 @@ private:
     // after every renderer that registers geometry with the scene.
     std::unique_ptr<RtScene> rtScene_;
     std::unique_ptr<RtLighting> rtLighting_;
-    void writeRtLightingBindings();
+    void writeRtLightingBindings(uint32_t slot);
     VkExtent2D sceneRenderExtent() const;
     void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa);
     bool rtRecordedThisFrame_ = false;
@@ -619,7 +619,7 @@ private:
     /// the weather and the hour ask for so walking indoors does not switch it.
     float fogExtinction_ = -1.0f;
     void renderVolumetricFog();
-    void writeFogVolumeBindings();
+    void writeFogVolumeBindings(uint32_t slot);
     float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.

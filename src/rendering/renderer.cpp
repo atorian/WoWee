@@ -1207,6 +1207,9 @@ void Renderer::shutdown() {
     renderGraph_.reset();
 
     destroyPerFrameResources();
+    // Shutdown has fenced the device; drain the last post-process/RT retirements
+    // before the context destroys its allocator. No more frames will run.
+    if (vkCtx) vkCtx->flushDeferredCleanup();
 
     camera.reset();
 
@@ -1267,9 +1270,6 @@ void Renderer::applyMsaaChange() {
 
     VkSampleCountFlagBits current = vkCtx->getMsaaSamples();
     if (samples == current) return;
-
-    // Single GPU wait - all subsequent operations are CPU-side object creation
-    vkDeviceWaitIdle(vkCtx->getDevice());
 
     // Set new MSAA and recreate swapchain (render pass, depth, MSAA image, framebuffers)
     vkCtx->setMsaaSamples(samples);
@@ -1411,7 +1411,7 @@ void Renderer::beginFrame() {
 
     // A fog quality change builds or frees its volumes, which the per-frame
     // sets bind - so between frames, before this one's set is used.
-    if (volumetricFog_ && volumetricFog_->applyPendingQuality()) writeFogVolumeBindings();
+    if (volumetricFog_) (void)volumetricFog_->applyPendingQuality();
 
     // Retire finished upload batches every frame.
     //
@@ -1459,9 +1459,8 @@ void Renderer::beginFrame() {
         }
     }
 
-    // Between frames, so a resize of the ray traced lighting's images can wait
-    // for the device and rewrite both slots' sets.
-    if (rtLighting_ && rtLighting_->prepare(sceneRenderExtent())) writeRtLightingBindings();
+    // Retire replaced images; each consumer set is rewritten after its fence.
+    if (rtLighting_) rtLighting_->prepare(sceneRenderExtent());
 
     rtRecordedThisFrame_ = false;
 
@@ -1475,6 +1474,8 @@ void Renderer::beginFrame() {
     // This slot's fence has just been waited on, so a frame it copied for the
     // recording two frames ago is complete.
     collectRecordedFrame();
+    writeRtLightingBindings(vkCtx->getCurrentFrame());
+    writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
     // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
@@ -1736,7 +1737,7 @@ bool Renderer::beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t heigh
 
 void Renderer::flushFrameCapture() {
     if (!frameSink_ || !screenCapture_ || !vkCtx) return;
-    vkDeviceWaitIdle(vkCtx->getDevice());
+    if (vkCtx->waitForSubmittedFrames("flush frame capture") != VK_SUCCESS) return;
     ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
     if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
     ScreenCapture* capture = screenCapture_.get();
@@ -1789,7 +1790,6 @@ void Renderer::recordScreenCapture() {
 bool Renderer::captureScreenshot(const std::string& outputPath) {
     if (!vkCtx) return false;
 
-    VkDevice device     = vkCtx->getDevice();
     VmaAllocator alloc  = vkCtx->getAllocator();
     VkExtent2D extent   = vkCtx->getSwapchainExtent();
     const auto& images  = vkCtx->getSwapchainImages();
@@ -1801,8 +1801,8 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
     uint32_t h = extent.height;
     VkDeviceSize bufSize = static_cast<VkDeviceSize>(w) * h * 4;
 
-    // Stall GPU so the swapchain image is idle
-    vkDeviceWaitIdle(device);
+    // Only submitted frames can still write the image we read back.
+    if (vkCtx->waitForSubmittedFrames("capture screenshot") != VK_SUCCESS) return false;
 
     // Create staging buffer
     VkBufferCreateInfo bufInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -3447,7 +3447,7 @@ void Renderer::syncSwimEffectsTargetPass() {
 
     if (swimEffects) swimEffects->setTargetPass(pass, samples);
     // Blended doodads follow the water out of the scene pass for the same
-    // reason. Built by refreshSwimEffectsPass, which waits for the GPU first.
+    // reason. Built by refreshSwimEffectsPass, which retires the old pipelines.
     blendedAfterWaterPass_ = swimEffectsDrawWithWater_ ? pass : VK_NULL_HANDLE;
     // The minimap for the same reason as the spray, and it is the more visible
     // of the two: it is a fixed disc in the corner of the screen, so any water
@@ -4114,7 +4114,6 @@ void Renderer::refreshSwimEffectsPass() {
     // Faded characters go wherever the blended world goes, after it.
     const bool fadedMoved = characterRenderer && characterRenderer->fadedPass() != blendedAfterWaterPass_;
     if (!sprayMoved && !minimapMoved && !blendedMoved && !fadedMoved) return;
-    vkDeviceWaitIdle(vkCtx->getDevice());
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
     if (blendedMoved) m2Renderer->setAfterWaterPass(blendedAfterWaterPass_, VK_SAMPLE_COUNT_1_BIT);
@@ -4507,11 +4506,10 @@ void Renderer::setRtLightingMode(int mode) {
     rtLighting_->setMode(static_cast<RtLighting::Mode>(std::clamp(mode, 0, 3)));
 }
 
-void Renderer::writeRtLightingBindings() {
+void Renderer::writeRtLightingBindings(uint32_t i) {
     if (!rtLighting_ || !vkCtx) return;
-    // RtLighting::prepare has waited for the device whenever it reports a
-    // change, so neither slot's set is in use.
-    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+    // beginFrame has fenced this slot; the other slot can still be in use.
+    {
         VkDescriptorImageInfo info[4]{};
         info[0].imageView = rtLighting_->lightViewForSlot(i);
         info[1].imageView = rtLighting_->giViewForSlot(i);
@@ -4564,11 +4562,10 @@ void Renderer::setVolumetricFogQuality(int quality) {
     volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(std::clamp(quality, 0, 3)));
 }
 
-void Renderer::writeFogVolumeBindings() {
+void Renderer::writeFogVolumeBindings(uint32_t i) {
     if (!volumetricFog_ || !vkCtx) return;
-    // applyPendingQuality has already waited for the device, so neither
-    // slot's set is in use by a frame still in flight.
-    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+    // beginFrame has fenced this slot; the other slot can still be in use.
+    {
         VkDescriptorImageInfo fogImgInfo{};
         fogImgInfo.imageView = volumetricFog_->getVolumeView(i);
         fogImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;

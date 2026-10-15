@@ -2281,6 +2281,22 @@ void Application::shutdown() {
         gameHandler->disconnect();
     }
 
+    // Workers capture AssetManager and render-owned upload state. Join them
+    // while both dependencies still exist; disconnect above cannot queue more.
+    if (entitySpawner_) entitySpawner_->shutdown();
+
+    if (renderer && renderer->getVkContext()) {
+        auto* ctx = renderer->getVkContext();
+        if (ctx->getDevice() != VK_NULL_HANDLE) {
+            const VkResult result = vkDeviceWaitIdle(ctx->getDevice()); // Application exit only.
+            if (result != VK_SUCCESS) {
+                LOG_ERROR("GPU wait failed during application shutdown: ", static_cast<int>(result));
+                ctx->noteDeviceLost("application shutdown", result);
+            }
+            ctx->flushDeferredCleanup();
+        }
+    }
+
     // Save floor cache before renderer is destroyed
     if (renderer && renderer->getWMORenderer()) {
         size_t cacheSize = renderer->getWMORenderer()->getFloorCacheSize();
@@ -2378,16 +2394,17 @@ void Application::shutdown() {
     LOG_DEBUG("Renderer shutdown complete, resetting...");
     renderer.reset();
 
-    // Shutdown audio coordinator after renderer (renderer may reference audio during shutdown)
+    LOG_DEBUG("Resetting world...");
+    world.reset();
+    LOG_DEBUG("Resetting gameHandler...");
+    gameHandler.reset();
+
+    // GameHandler teardown can still publish events consumed by audio.
     if (audioCoordinator_) {
         audioCoordinator_->shutdown();
     }
     audioCoordinator_.reset();
 
-    LOG_DEBUG("Resetting world...");
-    world.reset();
-    LOG_DEBUG("Resetting gameHandler...");
-    gameHandler.reset();
     gameServices_ = {};
     // Its transport calls into the auth handler; release it first.
     realmPatchSync_.reset();
@@ -2800,11 +2817,6 @@ void Application::performLogoutToLogin() {
     spawnedPlayerGuid_ = 0;
     spawnedAppearanceBytes_ = 0;
     spawnedFacialFeatures_ = 0;
-
-    if (renderer && renderer->getVkContext() && !renderer->getVkContext()->isDeviceLost()) {
-        LOG_DEBUG("Waiting for GPU idle before logout scene cleanup...");
-        vkDeviceWaitIdle(renderer->getVkContext()->getDevice());
-    }
 
     // --- Reset all EntitySpawner state (mount, creatures, players, GOs, queues, caches) ---
     if (entitySpawner_) entitySpawner_->resetAllState();

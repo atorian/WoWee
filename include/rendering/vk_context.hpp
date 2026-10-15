@@ -27,6 +27,7 @@ struct FrameData {
     /// timeline starts at, so the first wait on each slot returns immediately
     /// -- the same reason the fences are created VK_FENCE_CREATE_SIGNALED_BIT.
     uint64_t timelineValue = 0;
+    bool submitted = false; // A reset fence with no submit must never be waited on.
 };
 
 class VkContext {
@@ -190,10 +191,9 @@ public:
     /// from VK_EXT_device_fault. Every other result is ignored, so callers
     /// hand it whatever they got back.
     void noteDeviceLost(const char* where, VkResult result);
-    /// vkDeviceWaitIdle that names its caller when it fails. Three of these
-    /// sat unchecked on the way into the world, so a device already lost
-    /// during the load surfaced a frame later as the frame's own submit.
-    VkResult waitIdle(const char* where);
+    /// Wait only for frames actually submitted, for synchronous readback.
+    /// This does not drain the retirement queue or wait on unrelated uploads.
+    VkResult waitForSubmittedFrames(const char* where);
     [[nodiscard]] bool robustBufferAccessEnabled() const { return robustBufferAccessSupported_; }
     /// Acceleration structures, ray queries and buffer device addresses are all
     /// enabled. False on MoltenVK, which exposes none of them; the ray traced

@@ -313,11 +313,10 @@ bool RtLighting::createImages(VkExtent2D e) {
 }
 
 void RtLighting::destroyImages() {
-    VkDevice dev = ctx_->getDevice();
-    VmaAllocator alloc = ctx_->getAllocator();
-    for (Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) destroyImage(dev, alloc, t->img);
+    DeferredResources retired(*ctx_);
+    for (Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) retired.image(t->img);
     for (auto& s : slots_) {
-        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi, &s.reflection}) destroyImage(dev, alloc, t->img);
+        for (Target* t : {&s.gbuf, &s.hist, &s.histGi, &s.out, &s.outGi, &s.reflection}) retired.image(t->img);
         s.wroteImages = false;
         s.boundDepth = VK_NULL_HANDLE;
     }
@@ -330,7 +329,6 @@ bool RtLighting::prepare(VkExtent2D sceneExtent) {
         if (traceExtent_.width == 0 && !scene_->isActive()) return false;
         // Nothing of the pass or the scene's acceleration structures is kept
         // while off; the per-frame sets go back to the neutral image.
-        vkDeviceWaitIdle(ctx_->getDevice());
         destroyImages();
         scene_->setActive(false);
         havePrev_ = false;
@@ -344,7 +342,6 @@ bool RtLighting::prepare(VkExtent2D sceneExtent) {
                           std::max(1u, (sceneExtent.height + 1) / 2)};
     if (want.width == traceExtent_.width && want.height == traceExtent_.height) return false;
 
-    vkDeviceWaitIdle(ctx_->getDevice());
     destroyImages();
     if (!createImages(want)) {
         LOG_ERROR("RtLighting: failed to create ", want.width, "x", want.height, " images");

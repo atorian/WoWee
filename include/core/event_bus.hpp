@@ -1,6 +1,10 @@
 #pragma once
 
+#include "core/logger.hpp"
+
 #include <cstdint>
+#include <exception>
+#include <typeinfo>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -49,8 +53,7 @@ public:
         ~Subscription() { reset(); }
 
         void reset() {
-            if (bus_) bus_->unsubscribe(key_, id_);
-            bus_ = nullptr;
+            if (auto* bus = std::exchange(bus_, nullptr)) bus->unsubscribe(key_, id_);
         }
 
         /// Whether this still holds a subscription.
@@ -117,6 +120,7 @@ private:
             // Cleared rather than the handler destroyed: a handler that ends
             // its own subscription is still running when it does.
             bool live = true;
+            bool exceptionLogged = false;
         };
         // A deque, so a handler that subscribes while it runs does not move
         // the handler that is running.
@@ -125,12 +129,30 @@ private:
         bool hasRemoved = false;
 
         void deliver(const Event& event) {
-            ++delivering;
+            struct DeliveryGuard {
+                Channel& channel;
+                explicit DeliveryGuard(Channel& c) : channel(c) { ++channel.delivering; }
+                ~DeliveryGuard() {
+                    if (--channel.delivering == 0 && channel.hasRemoved) channel.compact();
+                }
+            } guard(*this);
             const size_t count = slots.size();
             for (size_t i = 0; i < count; ++i) {
-                if (slots[i].live) slots[i].handler(event);
+                if (!slots[i].live) continue;
+                try {
+                    slots[i].handler(event);
+                } catch (const std::exception& e) {
+                    if (!std::exchange(slots[i].exceptionLogged, true)) {
+                        LOG_ERROR("EventBus: subscriber ", slots[i].id, " for ", typeid(Event).name(),
+                                  " threw: ", e.what(), "; continuing delivery to remaining subscribers");
+                    }
+                } catch (...) {
+                    if (!std::exchange(slots[i].exceptionLogged, true)) {
+                        LOG_ERROR("EventBus: subscriber ", slots[i].id, " for ", typeid(Event).name(),
+                                  " threw an unknown exception; continuing delivery to remaining subscribers");
+                    }
+                }
             }
-            if (--delivering == 0 && hasRemoved) compact();
         }
 
         void remove(uint64_t id) override {
@@ -142,7 +164,13 @@ private:
         }
 
         void compact() {
-            std::erase_if(slots, [](const Slot& s) { return !s.live; });
+            // Destroy removed captures only after slots is consistent. A capture
+            // may own another Subscription whose destructor calls remove again.
+            std::deque<Slot> kept;
+            for (auto& slot : slots) {
+                if (slot.live) kept.push_back(std::move(slot));
+            }
+            slots.swap(kept);
             hasRemoved = false;
         }
     };

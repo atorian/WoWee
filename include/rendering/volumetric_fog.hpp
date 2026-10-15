@@ -148,7 +148,7 @@ private:
     void destroyVolume(Volume& v);
     bool createVolumes(glm::uvec3 size);
     void destroyVolumes();
-    void writeComputeSets();
+    void writeComputeSets(uint32_t frame);
 
     VkContext* ctx_ = nullptr;
     VkSampler sampler_ = VK_NULL_HANDLE;       // trilinear, clamped; owned by the context cache

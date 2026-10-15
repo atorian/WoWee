@@ -9,6 +9,43 @@
 namespace wowee {
 namespace rendering {
 
+DeferredResources::DeferredResources(VkContext& ctx)
+    : ctx_(ctx), device_(ctx.getDevice()), allocator_(ctx.getAllocator()) {}
+
+DeferredResources::~DeferredResources() {
+    if (cleanups_.empty()) return;
+    ctx_.deferAfterAllFrameFences([cleanups = std::move(cleanups_)]() {
+        for (auto& cleanup : cleanups) cleanup();
+    });
+}
+
+void DeferredResources::buffer(VkBuffer& buffer, VmaAllocation& allocation) {
+    if (!buffer) return;
+    auto retired = std::exchange(buffer, VK_NULL_HANDLE);
+    auto retiredAlloc = std::exchange(allocation, VK_NULL_HANDLE);
+    auto allocator = allocator_;
+    add([allocator, retired, retiredAlloc] { vmaDestroyBuffer(allocator, retired, retiredAlloc); });
+}
+
+void DeferredResources::buffer(AllocatedBuffer& value) {
+    buffer(value.buffer, value.allocation);
+    value = {};
+}
+
+void DeferredResources::image(VkImage& image, VmaAllocation& allocation) {
+    if (!image) return;
+    auto retired = std::exchange(image, VK_NULL_HANDLE);
+    auto retiredAlloc = std::exchange(allocation, VK_NULL_HANDLE);
+    auto allocator = allocator_;
+    add([allocator, retired, retiredAlloc] { vmaDestroyImage(allocator, retired, retiredAlloc); });
+}
+
+void DeferredResources::image(AllocatedImage& value) {
+    release(value.imageView, vkDestroyImageView);
+    image(value.image, value.allocation);
+    value = {};
+}
+
 AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
     VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage)
 {

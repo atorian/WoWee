@@ -276,20 +276,18 @@ void ScreenCapture::drawIndicator(VkCommandBuffer cmd, VkFramebuffer overlayFram
 
 void ScreenCapture::shutdown() {
     if (!ctx_) return;
-    VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
-    VmaAllocator allocator = ctx_->getAllocator();
+    DeferredResources retired(*ctx_);
     for (auto& b : buffers_) {
-        destroy(allocator, b.buffer, b.alloc);
+        retired.buffer(b.buffer, b.alloc);
         b.mapped = nullptr;
     }
     if (scaled_) {
-        vmaDestroyImage(allocator, scaled_, scaledAlloc_);
+        retired.image(scaled_, scaledAlloc_);
         scaled_ = VK_NULL_HANDLE;
         scaledAlloc_ = VK_NULL_HANDLE;
     }
-    destroy(device, indicatorPipeline_);
-    destroy(device, indicatorLayout_);
+    retired.destroy(indicatorPipeline_);
+    retired.destroy(indicatorLayout_);
     {
         std::lock_guard<std::mutex> lock(freeMutex_);
         free_.clear();

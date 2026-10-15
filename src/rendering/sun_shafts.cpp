@@ -135,8 +135,8 @@ bool SunShafts::ensureCompositePipeline() {
     if (compositePipeline_ != VK_NULL_HANDLE && format == compositeFormat_) return true;
     VkDevice device = ctx_->getDevice();
     // A rebuild replaces a pipeline an in-flight frame may have bound.
-    if (compositePipeline_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
-    destroy(device, compositePipeline_);
+    DeferredResources retired(*ctx_);
+    retired.destroy(compositePipeline_);
 
     ShaderPair shaders = loadShaderPair(device, "assets/shaders/postprocess.vert.spv",
                                         "assets/shaders/sun_shafts_composite.frag.spv", "sun shafts");
@@ -210,8 +210,9 @@ bool SunShafts::createTarget(Target& t, VkFormat format, VkImageUsageFlags usage
 
 void SunShafts::destroyTarget(Target& t) {
     if (!ctx_) return;
-    if (t.view) { vkDestroyImageView(ctx_->getDevice(), t.view, nullptr); t.view = VK_NULL_HANDLE; }
-    if (t.image) { vmaDestroyImage(ctx_->getAllocator(), t.image, t.alloc); t.image = VK_NULL_HANDLE; t.alloc = VK_NULL_HANDLE; }
+    DeferredResources retired(*ctx_);
+    retired.release(t.view, vkDestroyImageView);
+    retired.image(t.image, t.alloc);
 }
 
 void SunShafts::destroyTargets() {
@@ -231,7 +232,6 @@ bool SunShafts::ensureTargets(VkExtent2D extent) {
     }
     // Both slots' images are replaced, and the other slot's frame may still be
     // in flight with them bound. A resize is rare enough to wait for it.
-    vkDeviceWaitIdle(ctx_->getDevice());
     destroyTargets();
 
     // A quarter a side. The rays are blurred to nothing finer than that.
@@ -271,7 +271,14 @@ bool SunShafts::ensureTargets(VkExtent2D extent) {
         cmdPipelineBarrier2(cmd, dep);
     });
 
-    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+    sourceExtent_ = extent;
+    LOG_INFO("SunShafts: ", targetExtent_.width, "x", targetExtent_.height, " targets for a ",
+             extent.width, "x", extent.height, " swapchain");
+    return true;
+}
+
+void SunShafts::writeFrameSets(uint32_t i) {
+    {
         VkDescriptorImageInfo copyInfo{.sampler = sampler_, .imageView = frameCopy_[i].view,
                                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo raysOut{.sampler = VK_NULL_HANDLE, .imageView = rays_[i].view,
@@ -297,10 +304,6 @@ bool SunShafts::ensureTargets(VkExtent2D extent) {
         w[2].pImageInfo = &raysIn;
         vkUpdateDescriptorSets(ctx_->getDevice(), 3, w, 0, nullptr);
     }
-    sourceExtent_ = extent;
-    LOG_INFO("SunShafts: ", targetExtent_.width, "x", targetExtent_.height, " targets for a ",
-             extent.width, "x", extent.height, " swapchain");
-    return true;
 }
 
 bool SunShafts::record(VkCommandBuffer cmd, uint32_t frame, VkImage swapchainImage,
@@ -313,6 +316,7 @@ bool SunShafts::record(VkCommandBuffer cmd, uint32_t frame, VkImage swapchainIma
         return false;
     }
     if (!ensureTargets(extent) || !ensureCompositePipeline()) return false;
+    writeFrameSets(frame);
 
     const auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to,
                              VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,

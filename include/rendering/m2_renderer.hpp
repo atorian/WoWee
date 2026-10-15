@@ -1486,7 +1486,7 @@ private:
                                M2Instance& instance);
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
-    void destroyInstanceBones(M2Instance& inst, bool defer = false);
+    void destroyInstanceBones(M2Instance& inst, bool defer = true);
 };
 
 } // namespace rendering

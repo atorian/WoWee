@@ -503,7 +503,7 @@ private:
     PipelineSet buildPipelineSet(VkDevice device, VkRenderPass pass, VkSampleCountFlagBits samples,
                                  wowee::rendering::VkShaderModule& charVert,
                                  wowee::rendering::VkShaderModule& charFrag);
-    void destroyPipelineSet(VkDevice device, PipelineSet& set);
+    static void destroyPipelineSet(VkDevice device, PipelineSet& set);
     PipelineSet scenePipes_;          // the scene pass
     PipelineSet fadedPassPipes_;      // fadedPass_, when there is one
     VkRenderPass fadedPass_ = VK_NULL_HANDLE;

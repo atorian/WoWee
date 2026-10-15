@@ -429,14 +429,14 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
 
 void M2Renderer::destroyBlendedPipelines(BlendedPipelines& pipes) {
     if (!vkCtx_) return;
-    VkDevice device = vkCtx_->getDevice();
+    DeferredResources retired(*vkCtx_);
     for (VkPipeline* p : {&pipes.alpha, &pipes.noAlphaAdd, &pipes.additive, &pipes.modulate,
                           &pipes.modulate2x, &pipes.ribbon, &pipes.ribbonAdditive}) {
-        if (*p) vkDestroyPipeline(device, *p, nullptr);
+        retired.destroy(*p);
         *p = VK_NULL_HANDLE;
     }
     for (VkPipeline& p : pipes.particle) {
-        if (p) vkDestroyPipeline(device, p, nullptr);
+        retired.destroy(p);
         p = VK_NULL_HANDLE;
     }
 }
@@ -1170,24 +1170,27 @@ void M2Renderer::shutdown() {
 void M2Renderer::destroyModelGPU(M2ModelGPU& model) {
     if (!vkCtx_) return;
     releaseRtModel(model);
-    VmaAllocator alloc = vkCtx_->getAllocator();
-    destroy(alloc, model.vertexBuffer, model.vertexAlloc);
-    destroy(alloc, model.indexBuffer, model.indexAlloc);
-    VkDevice device = vkCtx_->getDevice();
-    for (auto& batch : model.batches) {
-        if (batch.materialSet) { vkFreeDescriptorSets(device, materialDescPool_, 1, &batch.materialSet); batch.materialSet = VK_NULL_HANDLE; }
-        destroy(alloc, batch.materialUBO, batch.materialUBOAlloc);
-    }
-    // Free pre-allocated particle texture descriptor sets
-    for (auto& pSet : model.particleTexSets) {
-        if (pSet) { vkFreeDescriptorSets(device, materialDescPool_, 1, &pSet); pSet = VK_NULL_HANDLE; }
-    }
-    model.particleTexSets.clear();
-    // Free ribbon texture descriptor sets
-    for (auto& rSet : model.ribbonTexSets) {
-        if (rSet) { vkFreeDescriptorSets(device, materialDescPool_, 1, &rSet); rSet = VK_NULL_HANDLE; }
-    }
-    model.ribbonTexSets.clear();
+    // Detach ownership immediately; command buffers retain these handles until
+    // every frame slot has fenced. Capture values, never this or model refs.
+    auto retired = std::make_shared<M2ModelGPU>(std::move(model));
+    model = {};
+    const VkDevice device = vkCtx_->getDevice();
+    const VmaAllocator alloc = vkCtx_->getAllocator();
+    const VkDescriptorPool pool = materialDescPool_;
+    vkCtx_->deferAfterAllFrameFences([retired, device, alloc, pool]() {
+        destroy(alloc, retired->vertexBuffer, retired->vertexAlloc);
+        destroy(alloc, retired->indexBuffer, retired->indexAlloc);
+        for (auto& batch : retired->batches) {
+            if (batch.materialSet) vkFreeDescriptorSets(device, pool, 1, &batch.materialSet);
+            destroy(alloc, batch.materialUBO, batch.materialUBOAlloc);
+        }
+        for (auto set : retired->particleTexSets) {
+            if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+        }
+        for (auto set : retired->ribbonTexSets) {
+            if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+        }
+    });
 }
 
 void M2Renderer::destroyInstanceBones(M2Instance& inst, bool defer) {

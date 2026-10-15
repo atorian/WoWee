@@ -76,6 +76,7 @@ private:
 
     bool createTarget(Target& t, VkFormat format, VkImageUsageFlags usage);
     void destroyTarget(Target& t);
+    void writeFrameSets(uint32_t frame);
     bool ensureTargets(VkExtent2D extent);
     void destroyTargets();
     bool ensureCompositePipeline();

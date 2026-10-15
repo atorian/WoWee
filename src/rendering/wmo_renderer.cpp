@@ -1295,28 +1295,24 @@ void WMORenderer::clearAll() {
     clearInstances();
 
     if (vkCtx_) {
-        VkDevice device = vkCtx_->getDevice();
-        VmaAllocator allocator = vkCtx_->getAllocator();
-        vkDeviceWaitIdle(device);
 
         // Free GPU resources for loaded models
         for (auto& [id, model] : loadedModels) {
             releaseRtModel(id);
             for (auto& group : model.groups) {
-                destroyGroupGPU(group);
+                destroyGroupGPU(group, /*defer=*/true);
             }
         }
 
         // Free cached textures
         for (auto& [path, entry] : textureCache) {
-            if (entry.texture) entry.texture->destroy(device, allocator);
-            if (entry.normalHeightMap) entry.normalHeightMap->destroy(device, allocator);
+            auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
+            auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
+            vkCtx_->deferAfterAllFrameFences([texture, normal]() {});
         }
 
-        // Reset descriptor pool so new allocations succeed after reload
-        if (materialDescPool_) {
-            vkResetDescriptorPool(device, materialDescPool_, 0);
-        }
+        // Deferred groups return individual descriptor sets; keep their pool.
+
     }
 
     loadedModels.clear();

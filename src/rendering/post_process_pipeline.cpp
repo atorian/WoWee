@@ -33,7 +33,7 @@ void PostProcessPipeline::shutdown() {
 // ========================= Frame-loop integration =========================
 
 void PostProcessPipeline::manageResources() {
-    // FSR resource management (safe: between frames, no command buffer in flight)
+    // FSR resource management: detach old handles; fence cleanup owns their lifetime.
     if (fsr_.needsRecreate && fsr_.sceneFramebuffer) {
         destroyFSRResources();
         fsr_.needsRecreate = false;
@@ -755,20 +755,18 @@ bool PostProcessPipeline::initFSRResources() {
 void PostProcessPipeline::destroyFSRResources() {
     if (!vkCtx_) return;
 
-    VkDevice device = vkCtx_->getDevice();
-    VmaAllocator alloc = vkCtx_->getAllocator();
-    vkDeviceWaitIdle(device);
+    DeferredResources retired(*vkCtx_);
 
-    destroy(device, fsr_.pipeline);
-    destroy(device, fsr_.pipelineLayout);
-    if (fsr_.descPool) { vkDestroyDescriptorPool(device, fsr_.descPool, nullptr); fsr_.descPool = VK_NULL_HANDLE; fsr_.descSet = VK_NULL_HANDLE; }
-    destroy(device, fsr_.descSetLayout);
-    if (fsr_.sceneFramebuffer) { vkDestroyFramebuffer(device, fsr_.sceneFramebuffer, nullptr); fsr_.sceneFramebuffer = VK_NULL_HANDLE; }
+    retired.destroy(fsr_.pipeline);
+    retired.destroy(fsr_.pipelineLayout);
+    if (fsr_.descPool) { retired.destroy(fsr_.descPool); fsr_.descPool = VK_NULL_HANDLE; fsr_.descSet = VK_NULL_HANDLE; }
+    retired.destroy(fsr_.descSetLayout);
+    if (fsr_.sceneFramebuffer) { retired.release(fsr_.sceneFramebuffer, vkDestroyFramebuffer); fsr_.sceneFramebuffer = VK_NULL_HANDLE; }
     fsr_.sceneSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-    destroyImage(device, alloc, fsr_.sceneDepthResolve);
-    destroyImage(device, alloc, fsr_.sceneMsaaColor);
-    destroyImage(device, alloc, fsr_.sceneDepth);
-    destroyImage(device, alloc, fsr_.sceneColor);
+    retired.image(fsr_.sceneDepthResolve);
+    retired.image(fsr_.sceneMsaaColor);
+    retired.image(fsr_.sceneDepth);
+    retired.image(fsr_.sceneColor);
 
     fsr_.internalWidth = 0;
     fsr_.internalHeight = 0;
@@ -1302,13 +1300,17 @@ bool PostProcessPipeline::initFSR2Resources() {
 void PostProcessPipeline::destroyFSR2Resources() {
     if (!vkCtx_) return;
 
-    VkDevice device = vkCtx_->getDevice();
-    VmaAllocator alloc = vkCtx_->getAllocator();
-    vkDeviceWaitIdle(device);
+    DeferredResources retired(*vkCtx_);
 
 #if WOWEE_HAS_AMD_FSR2
     if (fsr2_.useAmdBackend) {
-        ffxFsr2ContextDestroy(&fsr2_.amdContext);
+        auto context = std::make_shared<FfxFsr2Context>(fsr2_.amdContext);
+        auto scratch = std::exchange(fsr2_.amdScratchBuffer, nullptr);
+        fsr2_.amdContext = {};
+        retired.add([context, scratch] {
+            ffxFsr2ContextDestroy(context.get());
+            std::free(scratch);
+        });
         fsr2_.useAmdBackend = false;
     }
     if (fsr2_.amdScratchBuffer) {
@@ -1324,37 +1326,37 @@ void PostProcessPipeline::destroyFSR2Resources() {
     fsr2_.amdFsr3RuntimeLastError.clear();
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     if (fsr2_.amdFsr3Runtime) {
-        fsr2_.amdFsr3Runtime->shutdown();
-        fsr2_.amdFsr3Runtime.reset();
+        auto runtime = std::shared_ptr<AmdFsr3Runtime>(std::move(fsr2_.amdFsr3Runtime));
+        retired.add([runtime] { runtime->shutdown(); });
     }
 #endif
 
-    destroy(device, fsr2_.sharpenPipeline);
-    destroy(device, fsr2_.sharpenPipelineLayout);
-    if (fsr2_.sharpenDescPool) { vkDestroyDescriptorPool(device, fsr2_.sharpenDescPool, nullptr); fsr2_.sharpenDescPool = VK_NULL_HANDLE; fsr2_.sharpenDescSets[0] = fsr2_.sharpenDescSets[1] = VK_NULL_HANDLE; }
-    destroy(device, fsr2_.sharpenDescSetLayout);
+    retired.destroy(fsr2_.sharpenPipeline);
+    retired.destroy(fsr2_.sharpenPipelineLayout);
+    if (fsr2_.sharpenDescPool) { retired.destroy(fsr2_.sharpenDescPool); fsr2_.sharpenDescPool = VK_NULL_HANDLE; fsr2_.sharpenDescSets[0] = fsr2_.sharpenDescSets[1] = VK_NULL_HANDLE; }
+    retired.destroy(fsr2_.sharpenDescSetLayout);
 
-    destroy(device, fsr2_.accumulatePipeline);
-    destroy(device, fsr2_.accumulatePipelineLayout);
-    if (fsr2_.accumulateDescPool) { vkDestroyDescriptorPool(device, fsr2_.accumulateDescPool, nullptr); fsr2_.accumulateDescPool = VK_NULL_HANDLE; fsr2_.accumulateDescSets[0] = fsr2_.accumulateDescSets[1] = VK_NULL_HANDLE; }
-    destroy(device, fsr2_.accumulateDescSetLayout);
+    retired.destroy(fsr2_.accumulatePipeline);
+    retired.destroy(fsr2_.accumulatePipelineLayout);
+    if (fsr2_.accumulateDescPool) { retired.destroy(fsr2_.accumulateDescPool); fsr2_.accumulateDescPool = VK_NULL_HANDLE; fsr2_.accumulateDescSets[0] = fsr2_.accumulateDescSets[1] = VK_NULL_HANDLE; }
+    retired.destroy(fsr2_.accumulateDescSetLayout);
 
-    destroy(device, fsr2_.motionVecPipeline);
-    destroy(device, fsr2_.motionVecPipelineLayout);
-    if (fsr2_.motionVecDescPool) { vkDestroyDescriptorPool(device, fsr2_.motionVecDescPool, nullptr); fsr2_.motionVecDescPool = VK_NULL_HANDLE; fsr2_.motionVecDescSet = VK_NULL_HANDLE; }
-    destroy(device, fsr2_.motionVecDescSetLayout);
+    retired.destroy(fsr2_.motionVecPipeline);
+    retired.destroy(fsr2_.motionVecPipelineLayout);
+    if (fsr2_.motionVecDescPool) { retired.destroy(fsr2_.motionVecDescPool); fsr2_.motionVecDescPool = VK_NULL_HANDLE; fsr2_.motionVecDescSet = VK_NULL_HANDLE; }
+    retired.destroy(fsr2_.motionVecDescSetLayout);
 
-    if (fsr2_.sceneFramebuffer) { vkDestroyFramebuffer(device, fsr2_.sceneFramebuffer, nullptr); fsr2_.sceneFramebuffer = VK_NULL_HANDLE; }
+    if (fsr2_.sceneFramebuffer) { retired.release(fsr2_.sceneFramebuffer, vkDestroyFramebuffer); fsr2_.sceneFramebuffer = VK_NULL_HANDLE; }
     fsr2_.linearSampler = VK_NULL_HANDLE;  // Owned by VkContext sampler cache
     fsr2_.nearestSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
 
-    destroyImage(device, alloc, fsr2_.motionVectors);
-    for (auto& img : fsr2_.history) destroyImage(device, alloc, img);
-    destroyImage(device, alloc, fsr2_.framegenOutput);
-    destroyImage(device, alloc, fsr2_.sceneDepthResolve);
-    destroyImage(device, alloc, fsr2_.sceneMsaaColor);
-    destroyImage(device, alloc, fsr2_.sceneDepth);
-    destroyImage(device, alloc, fsr2_.sceneColor);
+    retired.image(fsr2_.motionVectors);
+    for (auto& img : fsr2_.history) retired.image(img);
+    retired.image(fsr2_.framegenOutput);
+    retired.image(fsr2_.sceneDepthResolve);
+    retired.image(fsr2_.sceneMsaaColor);
+    retired.image(fsr2_.sceneDepth);
+    retired.image(fsr2_.sceneColor);
 
     fsr2_.internalWidth = 0;
     fsr2_.internalHeight = 0;
@@ -1848,21 +1850,19 @@ bool PostProcessPipeline::initFXAAResources() {
 
 void PostProcessPipeline::destroyFXAAResources() {
     if (!vkCtx_) return;
-    VkDevice device = vkCtx_->getDevice();
-    VmaAllocator alloc = vkCtx_->getAllocator();
-    vkDeviceWaitIdle(device);
+    DeferredResources retired(*vkCtx_);
 
-    destroy(device, fxaa_.pipeline);
-    destroy(device, fxaa_.pipelineLayout);
-    if (fxaa_.descPool)       { vkDestroyDescriptorPool(device, fxaa_.descPool, nullptr);       fxaa_.descPool = VK_NULL_HANDLE; for (auto& s : fxaa_.descSet) s = VK_NULL_HANDLE; }
-    destroy(device, fxaa_.descSetLayout);
-    if (fxaa_.sceneFramebuffer) { vkDestroyFramebuffer(device, fxaa_.sceneFramebuffer, nullptr); fxaa_.sceneFramebuffer = VK_NULL_HANDLE; }
-    if (fxaa_.sharpenFramebuffer) { vkDestroyFramebuffer(device, fxaa_.sharpenFramebuffer, nullptr); fxaa_.sharpenFramebuffer = VK_NULL_HANDLE; }
+    retired.destroy(fxaa_.pipeline);
+    retired.destroy(fxaa_.pipelineLayout);
+    if (fxaa_.descPool)       { retired.destroy(fxaa_.descPool);       fxaa_.descPool = VK_NULL_HANDLE; for (auto& s : fxaa_.descSet) s = VK_NULL_HANDLE; }
+    retired.destroy(fxaa_.descSetLayout);
+    if (fxaa_.sceneFramebuffer) { retired.release(fxaa_.sceneFramebuffer, vkDestroyFramebuffer); fxaa_.sceneFramebuffer = VK_NULL_HANDLE; }
+    if (fxaa_.sharpenFramebuffer) { retired.release(fxaa_.sharpenFramebuffer, vkDestroyFramebuffer); fxaa_.sharpenFramebuffer = VK_NULL_HANDLE; }
     fxaa_.sceneSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-    destroyImage(device, alloc, fxaa_.sceneDepthResolve);
-    destroyImage(device, alloc, fxaa_.sceneMsaaColor);
-    destroyImage(device, alloc, fxaa_.sceneDepth);
-    destroyImage(device, alloc, fxaa_.sceneColor);
+    retired.image(fxaa_.sceneDepthResolve);
+    retired.image(fxaa_.sceneMsaaColor);
+    retired.image(fxaa_.sceneDepth);
+    retired.image(fxaa_.sceneColor);
 }
 
 void PostProcessPipeline::renderFXAAPass() {

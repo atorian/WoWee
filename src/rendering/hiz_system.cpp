@@ -47,8 +47,6 @@ void HiZSystem::shutdown() {
 
 bool HiZSystem::resize(uint32_t width, uint32_t height) {
     if (!ctx_) return false;
-    VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
 
     destroyDescriptors();
     destroyPyramidImage();
@@ -147,20 +145,19 @@ bool HiZSystem::createPyramidImage() {
 
 void HiZSystem::destroyPyramidImage() {
     if (!ctx_) return;
-    VkDevice device = ctx_->getDevice();
-    VmaAllocator alloc = ctx_->getAllocator();
+    DeferredResources retired(*ctx_);
 
-    destroy(device, depthSampler_);
+    retired.destroy(depthSampler_);
 
     for (uint32_t f = 0; f < MAX_FRAMES; f++) {
         for (auto& view : pyramidMipViews_[f]) {
-            if (view) { vkDestroyImageView(device, view, nullptr); view = VK_NULL_HANDLE; }
+            if (view) { retired.release(view, vkDestroyImageView); view = VK_NULL_HANDLE; }
         }
         pyramidMipViews_[f].clear();
 
-        if (pyramidViewAll_[f]) { vkDestroyImageView(device, pyramidViewAll_[f], nullptr); pyramidViewAll_[f] = VK_NULL_HANDLE; }
-        if (depthSamplerView_[f]) { vkDestroyImageView(device, depthSamplerView_[f], nullptr); depthSamplerView_[f] = VK_NULL_HANDLE; }
-        if (pyramidImage_[f]) { vmaDestroyImage(alloc, pyramidImage_[f], pyramidAlloc_[f]); pyramidImage_[f] = VK_NULL_HANDLE; }
+        if (pyramidViewAll_[f]) { retired.release(pyramidViewAll_[f], vkDestroyImageView); pyramidViewAll_[f] = VK_NULL_HANDLE; }
+        if (depthSamplerView_[f]) { retired.release(depthSamplerView_[f], vkDestroyImageView); depthSamplerView_[f] = VK_NULL_HANDLE; }
+        if (pyramidImage_[f]) { retired.image(pyramidImage_[f], pyramidAlloc_[f]); pyramidImage_[f] = VK_NULL_HANDLE; }
     }
 }
 
@@ -377,16 +374,16 @@ bool HiZSystem::createDescriptors() {
 
 void HiZSystem::destroyDescriptors() {
     if (!ctx_) return;
-    VkDevice device = ctx_->getDevice();
+    DeferredResources retired(*ctx_);
 
     // All descriptor sets are freed when pool is destroyed
-    destroy(device, buildDescPool_);
+    retired.destroy(buildDescPool_);
     // hizDescPool_ shares buildDescPool_, so nothing extra to destroy
 
     for (uint32_t f = 0; f < MAX_FRAMES; f++) {
         buildDescSets_[f].clear();
         hizDescSet_[f] = VK_NULL_HANDLE;
-        if (depthSamplerView_[f]) { vkDestroyImageView(device, depthSamplerView_[f], nullptr); depthSamplerView_[f] = VK_NULL_HANDLE; }
+        if (depthSamplerView_[f]) { retired.release(depthSamplerView_[f], vkDestroyImageView); depthSamplerView_[f] = VK_NULL_HANDLE; }
     }
 }
 

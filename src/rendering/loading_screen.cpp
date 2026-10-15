@@ -1,4 +1,5 @@
 #include "rendering/loading_screen.hpp"
+#include "rendering/imgui_texture.hpp"
 
 #include <SDL3/SDL_vulkan.h>
 #include "rendering/vk_context.hpp"
@@ -33,28 +34,16 @@ bool LoadingScreen::initialize() {
 }
 
 void LoadingScreen::shutdown() {
-    if (vkCtx && bgImage) {
-        VkDevice device = vkCtx->getDevice();
-        vkDeviceWaitIdle(device);
-
-        if (bgDescriptorSet) {
-            // ImGui manages descriptor set lifetime
-            bgDescriptorSet = VK_NULL_HANDLE;
-        }
-        bgSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-        if (bgImageView) {
-            vkDestroyImageView(device, bgImageView, nullptr);
-            bgImageView = VK_NULL_HANDLE;
-        }
-        if (bgImage) {
-            vkDestroyImage(device, bgImage, nullptr);
-            bgImage = VK_NULL_HANDLE;
-        }
-        if (bgMemory) {
-            vkFreeMemory(device, bgMemory, nullptr);
-            bgMemory = VK_NULL_HANDLE;
-        }
+    if (!vkCtx) return;
+    DeferredResources retired(*vkCtx);
+    if (bgDescriptorSet) {
+        auto set = std::exchange(bgDescriptorSet, VK_NULL_HANDLE);
+        retired.add([set]() mutable { removeImGuiTexture(set); });
     }
+    bgSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
+    retired.release(bgImageView, vkDestroyImageView);
+    retired.release(bgImage, vkDestroyImage);
+    retired.release(bgMemory, vkFreeMemory);
 }
 
 void LoadingScreen::selectRandomImage() {
@@ -89,16 +78,8 @@ bool LoadingScreen::loadImage(const std::string& path) {
         return false;
     }
 
-    // Clean up old image
-    if (bgImage) {
-        VkDevice device = vkCtx->getDevice();
-        vkDeviceWaitIdle(device);
-        bgSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-        if (bgImageView) { vkDestroyImageView(device, bgImageView, nullptr); bgImageView = VK_NULL_HANDLE; }
-        if (bgImage) { vkDestroyImage(device, bgImage, nullptr); bgImage = VK_NULL_HANDLE; }
-        if (bgMemory) { vkFreeMemory(device, bgMemory, nullptr); bgMemory = VK_NULL_HANDLE; }
-        bgDescriptorSet = VK_NULL_HANDLE;
-    }
+    // Old image and descriptor retire together after every frame fence.
+    shutdown();
 
     int channels;
     stbi_set_flip_vertically_on_load(false); // ImGui expects top-down

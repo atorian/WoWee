@@ -115,24 +115,10 @@ void VkContext::shutdown() {
         vkDeviceWaitIdle(device);
     }
 
-    // Clear deferred cleanup queues WITHOUT executing them.  By this point the
-    // sub-renderers (which own the descriptor pools/buffers these lambdas
-    // reference) have already been destroyed, so running them would call
-    // vkFreeDescriptorSets on invalid pools.  vkDestroyDevice reclaims all
-    // device-child resources anyway.
-    size_t droppedCleanups = 0;
-    for (auto& cleanups : deferredCleanup_) {
-        droppedCleanups += cleanups.size();
-        cleanups.clear();
-    }
-    // Said out loud, because these are exactly the objects vkDestroyDevice then
-    // reports as leaked, and without the count there is no way to tell that
-    // report apart from a resource nobody freed at all.
-    if (droppedCleanups > 0) {
-        LOG_INFO("shutdown: dropped ", droppedCleanups,
-                 " deferred destructions unexecuted (their pools are already gone;"
-                 " vkDestroyDevice reclaims them and validation counts them as leaked)");
-    }
+    // Late owners (including character-selection previews) may retire after
+    // Renderer::shutdown. Their callbacks own their handles and pools, so
+    // drain them after the device wait and before destroying the allocator.
+    flushDeferredCleanup();
 
     LOG_DEBUG("VkContext::shutdown - destroyImGuiResources...");
     destroyImGuiResources();
@@ -313,18 +299,22 @@ void VkContext::flushDeferredCleanup() {
     //
     // Call this while the subsystem's descriptor pools are still alive: the
     // queued lambdas free descriptor sets from them.
-    for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) {
-        runDeferredCleanup(fi);
-    }
+    bool pending;
+    do {
+        for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) runDeferredCleanup(fi);
+        pending = false;
+        for (const auto& queue : deferredCleanup_) pending |= !queue.empty();
+    } while (pending);
 }
 
 void VkContext::runDeferredCleanup(uint32_t frameIndex) {
     auto& q = deferredCleanup_[frameIndex];
     if (q.empty()) return;
-    for (auto& fn : q) {
+    std::vector<std::function<void()>> batch;
+    batch.swap(q);
+    for (auto& fn : batch) {
         if (fn) fn();
     }
-    q.clear();
 }
 
 VkSampler VkContext::getOrCreateSampler(const VkSamplerCreateInfo& info) {
@@ -1406,12 +1396,35 @@ void VkContext::noteDeviceLost(const char* where, VkResult result) {
     reportDeviceFault();
 }
 
-VkResult VkContext::waitIdle(const char* where) {
-    if (device == VK_NULL_HANDLE) return VK_SUCCESS;
-    const VkResult r = vkDeviceWaitIdle(device);
-    if (r != VK_SUCCESS) LOG_ERROR("vkDeviceWaitIdle failed in ", where, ": ", static_cast<int>(r));
-    noteDeviceLost(where, r);
-    return r;
+VkResult VkContext::waitForSubmittedFrames(const char* where) {
+    if (!device) return VK_SUCCESS;
+    VkResult result = VK_SUCCESS;
+    if (frameTimeline_) {
+        uint64_t value = 0;
+        for (const auto& frame : frames) {
+            if (frame.submitted) value = std::max(value, frame.timelineValue);
+        }
+        if (value == 0) return VK_SUCCESS;
+        VkSemaphoreWaitInfo wait{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        wait.semaphoreCount = 1;
+        wait.pSemaphores = &frameTimeline_;
+        wait.pValues = &value;
+        result = vkWaitSemaphores(device, &wait, 5000000000ULL);
+    } else {
+        VkFence fences[MAX_FRAMES_IN_FLIGHT]{};
+        uint32_t count = 0;
+        for (const auto& frame : frames) {
+            if (frame.submitted) fences[count++] = frame.inFlightFence;
+        }
+        if (count == 0) return VK_SUCCESS;
+        result = vkWaitForFences(device, count, fences, VK_TRUE, 5000000000ULL);
+    }
+    if (result != VK_SUCCESS) {
+        LOG_ERROR("Frame readback wait failed in ", where, ": ", static_cast<int>(result),
+                  "; readback skipped");
+        noteDeviceLost(where, result);
+    }
+    return result;
 }
 
 void VkContext::reportDeviceFault() {
@@ -2723,6 +2736,7 @@ void VkContext::addExtraPresent(ExtraPresent present) {
 void VkContext::resetFrameSyncState() {
     if (device == VK_NULL_HANDLE) return;
     ++syncResetGeneration_;
+    for (auto& frame : frames) frame.submitted = false;
     // How many asynchronous upload batches are still outstanding when a
     // rebuild happens. These are submitted without being waited on, one fence
     // each, and FrameXML makes hundreds where this client alone makes almost
@@ -2854,6 +2868,8 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
         noteDeviceLost("beginFrame frame-slot wait", fenceResult);
         return VK_NULL_HANDLE;
     }
+
+    frame.submitted = false;
 
     // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
     runDeferredCleanup(currentFrame);
@@ -3014,6 +3030,7 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo,
                                           frameTimeline_ != VK_NULL_HANDLE ? VK_NULL_HANDLE
                                                                            : frame.inFlightFence);
+    frame.submitted = (submitResult == VK_SUCCESS);
     if (submitResult == VK_SUCCESS && frameTimeline_ != VK_NULL_HANDLE) {
         // Only once the submit is in: on failure the timeline is never
         // signalled, and a slot left waiting on an unreachable value would

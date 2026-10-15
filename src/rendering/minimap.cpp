@@ -275,7 +275,8 @@ void Minimap::recreatePipelines() {
     if (!vkCtx || !displayPipelineLayout) return;
     VkDevice device = vkCtx->getDevice();
 
-    destroy(device, displayPipeline);
+    DeferredResources retired(*vkCtx);
+    retired.destroy(displayPipeline);
 
     VkShaderModule vs, fs;
     if (!vs.loadFromFile(device, "assets/shaders/minimap_display.vert.spv") ||

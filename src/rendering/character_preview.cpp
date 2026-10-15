@@ -490,26 +490,26 @@ void CharacterPreview::createFBO() {
 
 void CharacterPreview::destroyFBO() {
     if (!vkCtx_) return;
-    VkDevice device = vkCtx_->getDevice();
-    VmaAllocator allocator = vkCtx_->getAllocator();
+    DeferredResources retired(*vkCtx_);
 
     if (imguiTextureId_) {
-        removeImGuiTexture(imguiTextureId_);
+        auto set = std::exchange(imguiTextureId_, VK_NULL_HANDLE);
+        retired.add([set]() mutable { removeImGuiTexture(set); });
         imguiTextureId_ = VK_NULL_HANDLE;
     }
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-        destroy(allocator, previewUBO_[i], previewUBOAlloc_[i]);
+        retired.buffer(previewUBO_[i], previewUBOAlloc_[i]);
     }
 
-    destroy(device, previewDescPool_);
+    retired.destroy(previewDescPool_);
 
-    if (dummyShadowView_) { vkDestroyImageView(device, dummyShadowView_, nullptr); dummyShadowView_ = VK_NULL_HANDLE; }
-    if (dummyShadowImage_) { vmaDestroyImage(allocator, dummyShadowImage_, dummyShadowAlloc_); dummyShadowImage_ = VK_NULL_HANDLE; dummyShadowAlloc_ = VK_NULL_HANDLE; }
+    if (dummyShadowView_) { retired.release(dummyShadowView_, vkDestroyImageView); dummyShadowView_ = VK_NULL_HANDLE; }
+    if (dummyShadowImage_) { retired.image(dummyShadowImage_, dummyShadowAlloc_); dummyShadowImage_ = VK_NULL_HANDLE; dummyShadowAlloc_ = VK_NULL_HANDLE; }
 
     if (renderTarget_) {
-        renderTarget_->destroy(device, allocator);
-        renderTarget_.reset();
+        auto target = std::shared_ptr<VkRenderTarget>(std::move(renderTarget_));
+        retired.add([target]() {});
     }
 }
 
@@ -522,10 +522,9 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     // Remove existing instance.
-    // Must wait for GPU to finish - compositePass() may have recorded draw commands
-    // referencing this instance's bone buffers earlier in the current frame.
+    // removeInstance retires bones after all frame fences, including commands
+    // recorded by compositePass earlier in this frame.
     if (instanceId_ > 0) {
-        if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
         charRenderer_->removeInstance(instanceId_);
         instanceId_ = 0;
         modelLoaded_ = false;
