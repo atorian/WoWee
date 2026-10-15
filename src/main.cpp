@@ -95,12 +95,48 @@ static void crashHandlerSigaction(int sig, siginfo_t* info, void* /*ucontext*/) 
     raise(sig);
 }
 #else
+#ifdef _WIN32
+static void reportSignal(int sig);
+#endif
 static void crashHandler(int sig) {
     releaseMouseGrab();
+#ifdef _WIN32
+    // abort() - std::terminate, a failed check - raises no structured
+    // exception, and the C runtime's own top-level handler can turn an access
+    // violation into SIGSEGV before the filter below sees it. Either way the
+    // process ended with exit code 3 and nothing to say where.
+    if (sig == SIGABRT || sig == SIGSEGV || sig == SIGFPE) reportSignal(sig);
+#endif
     std::signal(sig, SIG_DFL);
     std::raise(sig);
 }
 #endif
+
+// What std::terminate was handed, for the abort report. Copied when it is
+// known, because the signal handler that writes the report must not allocate.
+static char g_terminateReason[512] = "";
+
+/// An exception nothing caught - thrown from a destructor, or out of a thread
+/// - ends in std::terminate, which used to say nothing about which one.
+[[noreturn]] static void terminateWithReason() {
+    if (auto current = std::current_exception()) {
+        try {
+            std::rethrow_exception(current);
+        } catch (const std::exception& e) {
+            std::snprintf(g_terminateReason, sizeof(g_terminateReason),
+                          "terminate: uncaught exception: %s", e.what());
+        } catch (...) {
+            std::snprintf(g_terminateReason, sizeof(g_terminateReason),
+                          "terminate: uncaught exception of a non-standard type");
+        }
+    } else {
+        std::snprintf(g_terminateReason, sizeof(g_terminateReason),
+                      "terminate: called without an active exception");
+    }
+    std::fprintf(stderr, "\n%s\n", g_terminateReason);
+    std::fflush(stderr);
+    std::abort();
+}
 
 #ifdef _WIN32
 // A crash on Windows, from any thread.
@@ -135,15 +171,44 @@ static void describeAddress(void* address, char* buffer, size_t size) {
     }
 }
 
-static LONG WINAPI windowsCrashFilter(EXCEPTION_POINTERS* info) {
-    releaseMouseGrab();
-    char line[512];
+static FILE* openCrashLog() {
     char fileName[64];
     const std::time_t now = std::time(nullptr);
     std::tm local{};
     localtime_s(&local, &now);
     std::strftime(fileName, sizeof(fileName), "logs/crash-%Y%m%d-%H%M%S.log", &local);
-    FILE* file = std::fopen(fileName, "w");
+    return std::fopen(fileName, "w");
+}
+
+// The stack as it stands in the handler: below its own frames and the
+// dispatcher's are the failing ones.
+static void writeCrashStack(HANDLE err, FILE* file) {
+    char line[512];
+    void* frames[64];
+    const USHORT count = RtlCaptureStackBackTrace(0, 64, frames, nullptr);
+    writeCrashFrame(err, file, "stack:\n");
+    for (USHORT i = 0; i < count; ++i) {
+        describeAddress(frames[i], line, sizeof(line));
+        writeCrashFrame(err, file, line);
+    }
+}
+
+static void reportSignal(int sig) {
+    FILE* file = openCrashLog();
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    char line[600];
+    const char* name = sig == SIGABRT ? "abort" : sig == SIGSEGV ? "SIGSEGV" : "SIGFPE";
+    snprintf(line, sizeof(line), "\n=== CRASH: %s at thread %lu ===\n%s%s", name, GetCurrentThreadId(),
+             g_terminateReason, g_terminateReason[0] ? "\n" : "");
+    writeCrashFrame(err, file, line);
+    writeCrashStack(err, file);
+    if (file) std::fclose(file);
+}
+
+static LONG WINAPI windowsCrashFilter(EXCEPTION_POINTERS* info) {
+    releaseMouseGrab();
+    char line[512];
+    FILE* file = openCrashLog();
     HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
 
     const EXCEPTION_RECORD* record = info ? info->ExceptionRecord : nullptr;
@@ -162,15 +227,7 @@ static LONG WINAPI windowsCrashFilter(EXCEPTION_POINTERS* info) {
         describeAddress(record->ExceptionAddress, line, sizeof(line));
         writeCrashFrame(err, file, line);
     }
-    // The stack as it stands in this filter: below the dispatcher's frames
-    // are the faulting ones.
-    void* frames[64];
-    const USHORT count = RtlCaptureStackBackTrace(0, 64, frames, nullptr);
-    writeCrashFrame(err, file, "stack:\n");
-    for (USHORT i = 0; i < count; ++i) {
-        describeAddress(frames[i], line, sizeof(line));
-        writeCrashFrame(err, file, line);
-    }
+    writeCrashStack(err, file);
     if (file) std::fclose(file);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -261,6 +318,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(windowsCrashFilter);
 #endif
+    std::set_terminate(terminateWithReason);
     // Change working directory so relative asset paths resolve from any launch
     // location. A signed macOS bundle keeps data in Contents/Resources because
     // Contents/MacOS may contain code only.
