@@ -1,0 +1,12 @@
+// Orgrimmar's Valley of Strength on its own terrain and buildings, in the
+// evening: the sky is already at its sunset bands while the ground must still
+// take direct light, as the client never puts its sun below the horizon.
+{
+  "map": "Kalimdor", "mapId": 1, "zoneId": 1637,
+  "hour": 20.5,
+  "server": [1676.0, -4315.0, 61.0],
+  "terrain": true,
+  "camera": { "offset": [-25, -25, 12], "lookAt": [0, 0, 2] },
+  "size": [1280, 720],
+  "frames": 60
+}

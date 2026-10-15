@@ -106,8 +106,7 @@ TEST_CASE("Orgrimmar morning keeps lit color and reveals shaded detail", "[light
     glm::vec3 diffuse = glm::vec3(255.0f, 201.82f, 106.08f) / 255.0f;
     glm::vec3 oldAmbient = ambient, oldDiffuse = diffuse;
     applyLightHeadroom(oldAmbient, oldDiffuse);
-    wowee::rendering::applyDaylightFill(ambient, diffuse,
-                                       glm::normalize(glm::vec3(0.45f, -0.86f, -0.39f)));
+    wowee::rendering::applyDaylightFill(ambient, diffuse);
     applyLightHeadroom(ambient, diffuse);
     const glm::vec3 lit = ambient + diffuse;
     const glm::vec3 oldLit = oldAmbient + oldDiffuse;
@@ -120,15 +119,13 @@ TEST_CASE("Orgrimmar morning keeps lit color and reveals shaded detail", "[light
     CHECK(ambient.r / lit.r > 0.44f);
 }
 
-TEST_CASE("daylight fill preserves night and fades continuously at sunrise", "[light]") {
-    for (float z : {0.4f, 0.0f}) {
-        glm::vec3 ambient(0.1f, 0.2f, 0.3f), diffuse(0.4f, 0.3f, 0.2f);
-        const auto a = ambient, d = diffuse;
-        wowee::rendering::applyDaylightFill(ambient, diffuse, glm::vec3(0.0f, -1.0f, z));
-        CHECK(ambient == a);
-        CHECK(diffuse == d);
+TEST_CASE("daylight fill moves light between the terms and never adds any", "[light]") {
+    glm::vec3 ambient(0.1f, 0.2f, 0.3f), diffuse(0.4f, 0.3f, 0.2f);
+    const glm::vec3 total = ambient + diffuse;
+    wowee::rendering::applyDaylightFill(ambient, diffuse);
+    for (int c = 0; c < 3; ++c) {
+        CHECK(ambient[c] + diffuse[c] == Catch::Approx(total[c]).margin(1e-6));
+        CHECK(ambient[c] > 0.0f);
+        CHECK(diffuse[c] > 0.0f);
     }
-    glm::vec3 a(0.1f), d(0.6f);
-    wowee::rendering::applyDaylightFill(a, d, glm::vec3(0.0f, -1.0f, -0.001f));
-    CHECK(a.r == Catch::Approx(0.1f).margin(0.0001f));
 }

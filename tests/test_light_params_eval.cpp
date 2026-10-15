@@ -48,6 +48,19 @@ TEST_CASE("a row with no fog distance band keeps the fallback's fog", "[light][f
     CHECK(p.fogStart == 300.0f);
 }
 
+TEST_CASE("a row sampled in the evening still sends its light down onto the ground",
+          "[light][sun]") {
+    // Half past eight: the sky bands are at their sunset colours, and the
+    // client's sun is still up, so the ground takes the row's direct light.
+    // The sun was being set at six, and the row's direct light then came from
+    // under the ground and reached nothing.
+    const LightParamsProfile profile{};
+    const LightingParams evening = sampleLightParams(profile, 2460, fallbackLight());
+    CHECK(glm::dot(-evening.directionalDir, glm::vec3(0.0f, 0.0f, 1.0f)) > 0.3f);
+    const LightingParams night = sampleLightParams(profile, 120, fallbackLight());
+    CHECK(glm::dot(-night.directionalDir, glm::vec3(0.0f, 0.0f, 1.0f)) > 0.3f);
+}
+
 TEST_CASE("a row's fog end is in thirty-sixths of a yard and its start a fraction of it",
           "[light][fog]") {
     LightParamsProfile profile;

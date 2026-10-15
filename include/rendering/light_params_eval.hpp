@@ -17,6 +17,7 @@
 
 #include "rendering/light_coords.hpp"
 #include "rendering/lighting_manager.hpp"
+#include "rendering/sun_direction.hpp"
 
 namespace wowee::rendering {
 
@@ -117,13 +118,8 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     }
     // No band holds a fog density, so fogDensity stays the fallback's.
 
-    const float angle = (timeHalfMinutes / static_cast<float>(LIGHT_HALF_MINUTES_PER_DAY)) *
-                        glm::two_pi<float>();
-    params.directionalDir = glm::normalize(glm::vec3(
-        std::sin(angle) * 0.6f,
-        -0.6f + std::cos(angle) * 0.4f,
-        std::cos(angle) * 0.6f
-    ));
+    params.directionalDir =
+        sunLightDirection(timeHalfMinutes / static_cast<float>(LIGHT_HALF_MINUTES_PER_DAY));
     return params;
 }
 

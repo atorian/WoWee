@@ -430,14 +430,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         // No light volume, or none naming a LightParams row: the fallback,
         // with time-based animation
         newParams = fallbackParams_;
-
-        // Animate sun direction
-        float angle = timeOfDay_ * glm::two_pi<float>();
-        newParams.directionalDir = glm::normalize(glm::vec3(
-            std::sin(angle) * 0.6f,
-            -0.6f + std::cos(angle) * 0.4f,
-            std::cos(angle) * 0.6f
-        ));
+        newParams.directionalDir = sunLightDirection(timeOfDay_);
 
         // Time-of-day color adjustments
         if (timeOfDay_ < 0.25f || timeOfDay_ > 0.75f) {
@@ -488,8 +481,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
                                std::getenv("WOWEE_ORGRIMMAR_PROBE_BASELINE");
     if (!isIndoors_ && !baselineProbe) {
-        applyDaylightFill(newParams.ambientColor, newParams.diffuseColor,
-                         newParams.directionalDir);
+        applyDaylightFill(newParams.ambientColor, newParams.diffuseColor);
     }
     applyLightHeadroom(newParams.ambientColor, newParams.diffuseColor);
 
