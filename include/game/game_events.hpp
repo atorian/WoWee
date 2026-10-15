@@ -15,6 +15,32 @@
 /// changed), never for who should react to it.
 namespace wowee::game::events {
 
+/// The server completed /logout or /quit. The client leaves after the frame.
+struct LogoutCompleted {
+    bool exiting = false;
+};
+
+/// Exit was requested without waiting for a successful server logout.
+struct ExitRequested {};
+
+/// TRANSFER_PENDING or NEW_WORLD announced the destination map.
+struct WorldTransferStarted {
+    uint32_t mapId = 0;
+};
+
+/// The server placed the player in a world (login, transfer or teleport).
+/// Positions are server coordinates, as carried by the packet.
+struct WorldEntered {
+    uint32_t mapId = 0;
+    float x = 0, y = 0, z = 0;
+    bool isInitialEntry = false;
+};
+
+/// The world connection closed. World state remains valid until client cleanup.
+struct Disconnected {
+    uint64_t characterGuid = 0;
+};
+
 /// The player released to a graveyard (true) or came back to life (false).
 struct GhostStateChanged {
     bool isGhost = false;

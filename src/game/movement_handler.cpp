@@ -1,5 +1,7 @@
 #include "game/movement_handler.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_events.hpp"
+#include "core/event_bus.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/spline_packet.hpp"
@@ -107,6 +109,15 @@ void MovementHandler::applyServerMovementSpeeds(float walk, float run, float run
 }
 
 void MovementHandler::registerOpcodes(DispatchTable& table) {
+    table[Opcode::SMSG_TRANSFER_PENDING] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_TRANSFER_PENDING too short; player remains in the current world");
+            return;
+        }
+        const auto mapId = packet.readUInt32();
+        packet.skipAll();
+        owner_.eventBus().publish(events::WorldTransferStarted{mapId});
+    };
     // Creature movement
     table[Opcode::SMSG_MONSTER_MOVE] = [this](network::Packet& packet) { handleMonsterMove(packet); };
     table[Opcode::SMSG_COMPRESSED_MOVES] = [this](network::Packet& packet) { handleCompressedMoves(packet); };
@@ -2077,8 +2088,9 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
 
     // Only where the destination was taken. A misfire leaves the player where
     // they are, so there is no world entry to announce.
-    if (!originMisfire && owner_.worldEntryCallbackRef()) {
-        owner_.worldEntryCallbackRef()(owner_.currentMapIdRef(), serverX, serverY, serverZ, false);
+    if (!originMisfire) {
+        owner_.eventBus().publish(events::WorldEntered{
+            owner_.getCurrentMapId(), serverX, serverY, serverZ, false});
     }
 }
 
@@ -2087,6 +2099,24 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         LOG_WARNING("SMSG_NEW_WORLD too short");
         return;
     }
+
+    pendingNewWorld_ = packet;
+    const auto mapId = packet.readUInt32();
+    packet.skipAll();
+    owner_.eventBus().publish(events::WorldTransferStarted{mapId});
+}
+
+void MovementHandler::applyPendingWorldTransfer() {
+    if (!pendingNewWorld_) {
+        LOG_WARNING("World transfer requested without NEW_WORLD; player remains in the current world");
+        return;
+    }
+    auto packet = std::move(*pendingNewWorld_);
+    pendingNewWorld_.reset();
+    applyNewWorld(packet);
+}
+
+void MovementHandler::applyNewWorld(network::Packet& packet) {
 
     uint32_t mapId = packet.readUInt32();
     float serverX = packet.readFloat();
@@ -2300,9 +2330,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         owner_.sendPing();
     }
 
-    if (owner_.worldEntryCallbackRef()) {
-        owner_.worldEntryCallbackRef()(mapId, serverX, serverY, serverZ, isSameMap);
-    }
+    owner_.eventBus().publish(events::WorldEntered{mapId, serverX, serverY, serverZ, false});
 
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("PLAYER_ENTERING_WORLD", {"0"});

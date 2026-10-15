@@ -16,7 +16,7 @@ namespace core {
 
 class PlayerView;
 
-/// Handles world entry, unstuck, hearthstone, and bind point callbacks.
+/// Presents world entry and handles unstuck, hearthstone and bind point callbacks.
 /// Owns hearth-teleport state and worldEntryMovementGraceTimer.
 class WorldEntryCallbackHandler {
 public:
@@ -28,6 +28,9 @@ public:
                               pipeline::AssetManager* assetManager);
 
     void setupCallbacks();
+
+    /// Applied by Application after frame submission, never by a packet handler.
+    void enterWorld(uint32_t mapId, float x, float y, float z, bool isInitialEntry);
 
     /// Called each frame from Application::update() to manage hearth-teleport freeze/thaw.
     void update(float deltaTime);

@@ -1518,9 +1518,9 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
     //
     // With no connection there is nobody to ask. At the login screen, or after
     // a disconnect, the button did nothing whatsoever.
-    if (!owner_.getSocket()) {
-        if (exitAfterLogout && owner_.logoutCompleteCallbackRef()) {
-            owner_.logoutCompleteCallbackRef()(true);
+    if (!owner_.isConnected()) {
+        if (exitAfterLogout) {
+            owner_.eventBus().publish(events::ExitRequested{});
         }
         return;
     }
@@ -1531,7 +1531,7 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
         // own button is for.
         if (exitAfterLogout) {
             LOG_WARNING("Exit Game asked for during a logout - closing now");
-            if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(true);
+            owner_.eventBus().publish(events::ExitRequested{});
             return;
         }
         owner_.addSystemChatMessage("Already logging out.");
@@ -3363,7 +3363,7 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
         loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
         if (exiting) {
             LOG_WARNING("Logout refused, but Exit Game was asked for - closing anyway");
-            if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(true);
+            owner_.eventBus().publish(events::ExitRequested{});
         } else {
             owner_.raiseUiError("Cannot logout right now.");
         }
@@ -3378,7 +3378,7 @@ void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
     owner_.addSystemChatMessage("Logout complete.");
     loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
     LOG_WARNING("Logout complete (exiting=", exiting ? "yes" : "no", ")");  // temporary: visible at default log level
-    if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(exiting);
+    owner_.eventBus().publish(events::LogoutCompleted{exiting});
 }
 
 // ============================================================

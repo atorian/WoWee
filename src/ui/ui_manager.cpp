@@ -461,7 +461,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
         case core::AppState::DISCONNECTED:
             // Nothing draws here, and nothing reaches here: no code sets this
             // state. A dropped world connection goes through
-            // Application::handleWorldDisconnect, which tears the world down
+            // Application's transition phase, which tears the world down
             // the way a logout does and puts the reason on the login screen -
             // which is where WoW puts it, and where AuthScreen now draws it
             // across the top of the page.

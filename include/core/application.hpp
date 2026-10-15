@@ -11,6 +11,7 @@
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
+#include "core/world_transition_queue.hpp"
 #include "core/cvar_store.hpp"
 #include "core/config_paths.hpp"
 #include "game/game_services.hpp"
@@ -108,7 +109,7 @@ public:
     // State management
     [[nodiscard]] AppState getState() const { return state; }
     void setState(AppState newState);
-    /// The world connection dropped: tear the world down and say so.
+    /// Queue a return to login after the world connection dropped.
     void handleWorldDisconnect();
 
     // Accessors
@@ -237,8 +238,8 @@ private:
     /// follows the entity, which reads as a ring sliding off a still NPC.
     void syncRenderInstancesToEntities(float deltaTime);
     void render();
-    void performLogoutToLogin();
-    void processDeferredLogoutToLogin();
+    void performLogoutToLogin(bool keepConnection);
+    void processWorldTransitions();
 
     /// Take the interface down, because the character it belongs to is leaving.
     ///
@@ -304,6 +305,7 @@ private:
     /// What the game announces, for anything in the client to hear. Declared
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
+    WorldTransitionQueue worldTransitions_{eventBus_};
     game::GameServices gameServices_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
@@ -465,11 +467,6 @@ private:
 
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
-    bool renderingFrame_ = false;
-    bool logoutToLoginPending_ = false;
-    /// Set by logoutToCharacterSelect for the teardown it shares with a
-    /// return to the login screen, which may run a frame later.
-    bool logoutKeepsConnection_ = false;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
     bool playerCharacterSpawned = false;

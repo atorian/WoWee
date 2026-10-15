@@ -24,6 +24,7 @@
 #include "core/animation_callback_handler.hpp"
 #include "core/transport_callback_handler.hpp"
 #include "core/world_entry_callback_handler.hpp"
+#include "game/movement_handler.hpp"
 #include "core/ui_screen_callback_handler.hpp"
 #include "core/realm_patch_sync.hpp"
 #include "core/realm_patches.hpp"
@@ -2147,7 +2148,7 @@ void Application::run() {
             throw;
         }
 
-        processDeferredLogoutToLogin();
+        processWorldTransitions();
 
         // Exit gracefully on GPU device lost (unrecoverable)
         if (renderer && renderer->getVkContext() && renderer->getVkContext()->isDeviceLost()) {
@@ -2559,21 +2560,6 @@ void Application::setState(AppState newState) {
                         if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
                     });
                 }
-                // The logout countdown finishing is not the end of it: the server
-                // confirms with SMSG_LOGOUT_COMPLETE, and only then does the client
-                // leave. Without this the countdown ran out and nothing happened.
-                gameHandler->setLogoutCompleteCallback([this](bool exiting) {
-                    if (exiting) {
-                        if (auto* ac = getAudioCoordinator()) {
-                            if (auto* music = ac->getMusicManager()) music->stopMusic(0.0f);
-                        }
-                        LOG_INFO("Logout complete - quitting");
-                        if (window) window->setShouldClose(true);
-                    } else {
-                        LOG_INFO("Logout complete - returning to character select");
-                        logoutToCharacterSelect();
-                    }
-                });
                 gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
                     if (getCameraController()) {
                         getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
@@ -2709,47 +2695,62 @@ void Application::reloadExpansionData() {
 /// The same path a logout takes, so the world is torn down the way it is meant
 /// to be, and the reason is put on the login screen where WoW puts it.
 void Application::handleWorldDisconnect() {
-    if (state != AppState::IN_GAME) return;
-    LOG_WARNING("Disconnected from the world server; returning to login");
-
-    disconnectNotice_ = "You have been disconnected from the server.";
-    logoutKeepsConnection_ = false;
-
-    // Who was playing, read before the teardown below forgets it. The handler
-    // has already let go of its own copy in disconnect().
-    uint64_t characterGuid = uiManager ? uiManager->getCharacterScreen().getSelectedGuid() : 0;
-    if (characterGuid == 0 && gameHandler) characterGuid = gameHandler->getPlayerGuid();
-
-    logoutToLogin();
-
-    // And straight back in, showing each step, rather than leaving the
-    // player at the login screen to do it all by hand.
-    if (uiScreenCallbacks_ && uiScreenCallbacks_->beginReconnect(characterGuid)) {
-        disconnectNotice_.clear();
-    }
+    if (state != AppState::IN_GAME && !(worldLoader_ && worldLoader_->isLoadingWorld())) return;
+    const uint64_t guid = gameHandler ? gameHandler->getPlayerGuid() : 0;
+    worldTransitions_.leave(WorldTransitionQueue::Destination::Reconnect, guid);
 }
 
 void Application::logoutToCharacterSelect() {
-    logoutKeepsConnection_ = true;
-    logoutToLogin();
+    worldTransitions_.leave(WorldTransitionQueue::Destination::CharacterSelect);
 }
 
 void Application::logoutToLogin() {
-    if (renderingFrame_) {
-        if (!logoutToLoginPending_) {
-            LOG_INFO("Logout requested during render; deferring until frame completes");
-        }
-        logoutToLoginPending_ = true;
-        return;
-    }
-
-    performLogoutToLogin();
+    worldTransitions_.leave(WorldTransitionQueue::Destination::Login);
 }
 
-void Application::processDeferredLogoutToLogin() {
-    if (!logoutToLoginPending_) return;
-    logoutToLoginPending_ = false;
-    performLogoutToLogin();
+void Application::processWorldTransitions() {
+    // The only transition phase, called by run() after render and submit.
+    // Applying NEW_WORLD may announce WorldEntered; consume it here too.
+    using Destination = WorldTransitionQueue::Destination;
+    while (auto request = worldTransitions_.takeNext()) {
+        if (auto* leave = std::get_if<WorldTransitionQueue::Leave>(&*request)) {
+            if (leave->destination == Destination::Exit) {
+                LOG_INFO("Logout complete - quitting after frame submission");
+                if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr)
+                    music->stopMusic(0.0f);
+                if (window) window->setShouldClose(true);
+                return;
+            }
+            const bool reconnect = leave->destination == Destination::Reconnect;
+            if (reconnect) {
+                // Connection-screen failures have no world to release; its
+                // retry controller observes the disconnected session itself.
+                if (state != AppState::IN_GAME && !addonsLoaded_ &&
+                    !(worldLoader_ && worldLoader_->isLoadingWorld()) && leave->characterGuid == 0)
+                    continue;
+                LOG_WARNING("Disconnected from the world server; returning to login after frame submission");
+                disconnectNotice_ = "You have been disconnected from the server.";
+            }
+            performLogoutToLogin(leave->destination == Destination::CharacterSelect);
+            if (reconnect && uiScreenCallbacks_ &&
+                uiScreenCallbacks_->beginReconnect(leave->characterGuid)) {
+                disconnectNotice_.clear();
+            }
+            return;
+        }
+        if (std::holds_alternative<game::events::WorldTransferStarted>(*request)) {
+            if (gameHandler && gameHandler->getMovementHandler()->hasPendingWorldTransfer())
+                gameHandler->getMovementHandler()->applyPendingWorldTransfer();
+        } else if (auto* entry = std::get_if<game::events::WorldEntered>(&*request)) {
+            if (worldEntryCallbacks_)
+                worldEntryCallbacks_->enterWorld(entry->mapId, entry->x, entry->y, entry->z,
+                                                 entry->isInitialEntry);
+        }
+    }
+    // A load pumps the game during warmup. Its event subscribers only record
+    // new transitions, which wait until the next frame has been submitted.
+    if (worldLoader_ && state != AppState::DISCONNECTED)
+        worldLoader_->processPendingEntry();
 }
 
 void Application::unloadInterface() {
@@ -2769,7 +2770,7 @@ void Application::unloadInterface() {
     addonsLoaded_ = false;
 }
 
-void Application::performLogoutToLogin() {
+void Application::performLogoutToLogin(bool keepConnection) {
     LOG_INFO("Logout requested");
 
     // Back to the character list when the server completed a logout and the
@@ -2777,9 +2778,7 @@ void Application::performLogoutToLogin() {
     // went to the login screen, closing the connection the server had just
     // kept open for the character list - and a new session asked for straight
     // after can be refused while the old one is still closing on the server.
-    const bool keepConnection =
-        logoutKeepsConnection_ && gameHandler && gameHandler->isConnected();
-    logoutKeepsConnection_ = false;
+    keepConnection = keepConnection && gameHandler && gameHandler->isConnected();
 
     // The interface leaves the world with the character that was wearing it.
     //
@@ -4404,8 +4403,8 @@ void Application::update(float deltaTime) {
             // exercises world assets and appearance queues without those packets.
             addonsLoaded_ = true;
             LOG_INFO("Mulgore probe: starting world entry");
-            worldLoader_->loadOnlineWorldTerrain(character.mapId, character.x, character.y, character.z);
-            LOG_INFO("Mulgore probe: world entry completed");
+            worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
+            LOG_INFO("Mulgore probe: world entry queued for the transition phase");
         }
     }
     // Offline regression fixture: exercises the real appearance/equipment
@@ -4623,13 +4622,6 @@ void Application::update(float deltaTime) {
             break;
 
         case AppState::IN_GAME:
-            // Checked before the frame rather than after it: everything below
-            // reads a world that is no longer being updated.
-            if (gameHandler && !std::getenv("WOWEE_MULGORE_PROBE") &&
-                gameHandler->getState() == game::WorldState::DISCONNECTED) {
-                handleWorldDisconnect();
-                break;
-            }
             updateInGame(deltaTime, updateCheckpoint);
             break;
 
@@ -4638,10 +4630,6 @@ void Application::update(float deltaTime) {
             break;
     }
 
-    // Process any pending world entry request via WorldLoader
-    if (worldLoader_ && state != AppState::DISCONNECTED) {
-        worldLoader_->processPendingEntry();
-    }
 
     // WOWEE_MODEL_PROBE has no world, so nothing else moves its model: its
     // animation plays and its particles fly here, WOWEE_PROBE_SECONDS (6 by
@@ -4795,7 +4783,6 @@ void Application::render() {
     ui::touchControls().draw();
 #endif
 
-    renderingFrame_ = true;
     // The offline stream fixture draws its uploads through the real world path.
     const bool drawWorld = state == AppState::IN_GAME || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
         std::getenv("WOWEE_FOUNTAIN_PROBE");
@@ -5684,8 +5671,6 @@ void Application::render() {
 
     stageStatFrames_ += 1;
     reportStageTimes();
-    renderingFrame_ = false;
-    processDeferredLogoutToLogin();
 }
 
 void Application::noteStageTime(const char* stage, float milliseconds) {

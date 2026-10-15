@@ -1329,13 +1329,6 @@ public:
     using StandStateCallback = std::function<void(uint8_t standState)>;
     void setStandStateCallback(StandStateCallback cb) { standStateCallback_ = std::move(cb); }
 
-    // Logout complete callback - fired when SMSG_LOGOUT_COMPLETE says the character
-    // is out of the world. exiting is true for /quit and /exit (leave the game),
-    // false for /logout and /camp (back to character select).
-    using LogoutCompleteCallback = std::function<void(bool exiting)>;
-    void setLogoutCompleteCallback(LogoutCompleteCallback cb) { logoutCompleteCallback_ = std::move(cb); }
-    auto& logoutCompleteCallbackRef() { return logoutCompleteCallback_; }
-
     // Appearance changed callback - fired when PLAYER_BYTES or facial features update (barber shop, etc.)
     using AppearanceChangedCallback = std::function<void()>;
     void setAppearanceChangedCallback(AppearanceChangedCallback cb) { appearanceChangedCallback_ = std::move(cb); }
@@ -1460,11 +1453,6 @@ public:
     void setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed);
     uint32_t getSkillCategory(uint32_t skillId) const;
     bool isProfessionSpell(uint32_t spellId) const;
-
-    // World entry callback (online mode - triggered when entering world)
-    // Parameters: mapId, x, y, z (canonical WoW coords), isInitialEntry=true on first login or reconnect
-    using WorldEntryCallback = std::function<void(uint32_t mapId, float x, float y, float z, bool isInitialEntry)>;
-    void setWorldEntryCallback(WorldEntryCallback cb) { worldEntryCallback_ = std::move(cb); }
 
     // Knockback callback: called when server sends SMSG_MOVE_KNOCK_BACK for the player.
     // Parameters: vcos, vsin (2D direction vector in server/wire coord space - the
@@ -3661,7 +3649,6 @@ public:
     auto& transportMoveCallbackRef() { return transportMoveCallback_; }
     auto& unitAnimHintCallbackRef() { return unitAnimHintCallback_; }
     auto& unitMoveFlagsCallbackRef() { return unitMoveFlagsCallback_; }
-    auto& worldEntryCallbackRef() { return worldEntryCallback_; }
 
     // ── Methods moved from private (domain handler use) ──────────────
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
@@ -4199,7 +4186,6 @@ private:
     // ---- Combat ----
     std::deque<std::string>    areaTriggerMsgs_;
 
-    WorldEntryCallback worldEntryCallback_;
     KnockBackCallback knockBackCallback_;
     CameraShakeCallback cameraShakeCallback_;
     AutoFollowCallback autoFollowCallback_;
@@ -4639,7 +4625,6 @@ private:
     NpcAggroCallback npcAggroCallback_;
     NpcRespawnCallback npcRespawnCallback_;
     StandStateCallback standStateCallback_;
-    LogoutCompleteCallback logoutCompleteCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     PlayerModelRebuildCallback playerModelRebuildCallback_;
     MeleeSwingCallback meleeSwingCallback_;

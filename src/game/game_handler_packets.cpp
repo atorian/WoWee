@@ -1094,14 +1094,6 @@ void GameHandler::registerCoreOpcodes() {
     // ---- Batch 5: Teleport, taxi, BG, LFG, arena, movement relay, mail, bank, auction, quests ----
 
     // Teleport
-    dispatchTable_[Opcode::SMSG_TRANSFER_PENDING] = [](network::Packet& packet) {
-        uint32_t pendingMapId = packet.readUInt32();
-        if (packet.hasRemaining(8)) {
-            packet.readUInt32(); // transportEntry
-            packet.readUInt32(); // transportMapId
-        }
-        (void)pendingMapId;
-    };
     dispatchTable_[Opcode::SMSG_TRANSFER_ABORTED] = [this](network::Packet& packet) {
         // uint32 mapId + uint8 reason, and a further uint8 for exactly three of
         // them - the expansion level, the difficulty and the unique message.
@@ -3651,6 +3643,9 @@ void GameHandler::processQueuedIncomingPackets() {
     int processed = 0;
 
     while (true) {
+        // A NEW_WORLD handler records the transition and stops at its packet
+        // boundary. New-map updates must not reach the outgoing entity world.
+        if (movementHandler_->hasPendingWorldTransfer()) break;
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - start).count();
         if (elapsedMs >= budgetMs) {

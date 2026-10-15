@@ -1,5 +1,6 @@
 #include "game/game_handler.hpp"
 #include "core/event_bus.hpp"
+#include "game/game_events.hpp"
 #include <stdexcept>
 #include "game/reputation_standing.hpp"
 
@@ -215,6 +216,7 @@ void GameHandler::returnToCharacterSelect() {
 }
 
 void GameHandler::clearWorldState() {
+    movementHandler_->cancelPendingWorldTransfer();
     activeCharacterGuid_ = 0;
     knownTitleBits_.clear();
     protocolMoneyCopper_.reset();
@@ -386,9 +388,13 @@ void GameHandler::updateNetworking() {
 
     // Detect server-side disconnect (socket closed during update)
     if (socket && !socket->isConnected() && state != WorldState::DISCONNECTED) {
-        if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
+        if (movementHandler_->hasPendingWorldTransfer() ||
+            (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork())) {
             LOG_WARNING("Server closed connection in state: ", worldStateName(state));
-            disconnect();
+            // The client releases the world after submitting the frame. Keep
+            // entities and the closed connection alive until that command.
+            setState(WorldState::DISCONNECTED);
+            eventBus().publish(events::Disconnected{playerGuid});
             return;
         }
         LOG_DEBUG("World socket closed with ", pendingIncomingPackets_.size(),
@@ -630,7 +636,7 @@ void GameHandler::update(float deltaTime) {
     // had set the flag this waited on for long enough that the three members
     // behind it were never written at all. A block that cannot run, guarding a
     // deferral that no longer happens, reads as though both still do.
-    if (!socket) {
+    if (!socket || state == WorldState::DISCONNECTED) {
         return;
     }
 
@@ -649,7 +655,8 @@ void GameHandler::update(float deltaTime) {
     }
 
     updateNetworking();
-    if (!socket) return;  // disconnect() may have been called
+    if (!socket || state == WorldState::DISCONNECTED ||
+        movementHandler_->hasPendingWorldTransfer()) return;
 
     // Sends a Warden response built off the main thread. Nothing else does:
     // without this the server's check goes unanswered and it drops the
@@ -1015,6 +1022,12 @@ void GameHandler::setState(WorldState newState) {
 
 void GameHandler::fail(const std::string& reason) {
     LOG_ERROR("World connection failed: ", reason);
+    if (state == WorldState::IN_WORLD) {
+        if (socket) socket->disconnect();
+        setState(WorldState::DISCONNECTED);
+        eventBus().publish(events::Disconnected{playerGuid});
+        return;
+    }
     setState(WorldState::FAILED);
 
     if (onFailure) {

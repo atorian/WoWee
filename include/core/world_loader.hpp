@@ -43,7 +43,7 @@ public:
     // Main terrain loading - drives loading screen, WMO/ADT detection, player spawn
     void loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float z);
 
-    // Process deferred world entry (called from Application::update each frame)
+    // Process deferred world entry in Application's phase after frame submission.
     void processPendingEntry();
 
     // Map name utilities
@@ -83,7 +83,7 @@ public:
     }
 
     // Reset methods (for logout / character switch)
-    void resetLoadedMap() { loadedMapId_ = 0xFFFFFFFF; }
+    void resetLoadedMap() { loadedMapId_ = 0xFFFFFFFF; pendingWorldEntry_.reset(); }
     void resetMapNameCache() { mapNameCacheLoaded_ = false; mapNameById_.clear(); }
 
 private:

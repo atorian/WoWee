@@ -795,10 +795,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     areaTriggerSuppressFirst_ = true;
     areaTriggerCooldown_ = deeprunTram ? 1.5f : 10.0f;
 
-    // Notify application to load terrain for this map/position (online mode)
-    if (worldEntryCallback_) {
-        worldEntryCallback_(data.mapId, data.x, data.y, data.z, initialWorldEntry);
-    }
+    eventBus().publish(events::WorldEntered{data.mapId, data.x, data.y, data.z, initialWorldEntry});
 
     // Send CMSG_SET_ACTIVE_MOVER on initial world entry and world transfers.
     if (playerGuid != 0 && socket) {

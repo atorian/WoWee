@@ -8,6 +8,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,10 @@ class GameHandler;
 
 class MovementHandler {
 public:
+    /// NEW_WORLD is held at the packet boundary until the client ends its frame.
+    [[nodiscard]] bool hasPendingWorldTransfer() const { return pendingNewWorld_.has_value(); }
+    void applyPendingWorldTransfer();
+    void cancelPendingWorldTransfer() { pendingNewWorld_.reset(); }
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
@@ -230,6 +235,8 @@ private:
     void handleMoveKnockBack(network::Packet& packet);
     void handleTeleportAck(network::Packet& packet);
     void handleNewWorld(network::Packet& packet);
+    void applyNewWorld(network::Packet& packet);
+    std::optional<network::Packet> pendingNewWorld_;
     void handleShowTaxiNodes(network::Packet& packet);
     void handleClientControlUpdate(network::Packet& packet);
     void handleActivateTaxiReply(network::Packet& packet);

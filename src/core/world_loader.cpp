@@ -8,6 +8,7 @@
 #include "core/world_loader.hpp"
 #include "core/application.hpp"
 #include "core/world_entry_callback_handler.hpp"
+#include "game/movement_handler.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/appearance_composer.hpp"
@@ -733,9 +734,13 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         return;
     }
 
-    // Guard against re-entrant calls. The worldEntryCallback defers new
-    // entries while this flag is set; we process them at the end.
+    // The transition phase owns this load. Packet handlers record requests
+    // during warmup; they never recurse into a load or release this world.
     loadingWorld_ = true;
+    struct LoadingGuard {
+        bool& loading;
+        ~LoadingGuard() { loading = false; }
+    } loadingGuard{loadingWorld_};
     pendingWorldEntry_.reset();
 
     // --- Loading screen for online mode ---
@@ -1099,9 +1104,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
             // If a new world entry was deferred during packet processing,
             // stop warming up this map - we'll load the new one after cleanup.
-            if (pendingWorldEntry_) {
-                LOG_DEBUG("loadOnlineWorldTerrain(map ", mapId,
-                            ") - deferred world entry pending, stopping warmup");
+            if (pendingWorldEntry_ || app_.worldTransitions_.hasWorldChange() ||
+                (gameHandler_ && gameHandler_->getMovementHandler()->hasPendingWorldTransfer())) {
+                LOG_WARNING("World load for map ", mapId,
+                            " interrupted by a queued transition; waiting for the next frame submission");
                 break;
             }
 
@@ -1230,23 +1236,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     // Track which map we actually loaded (used by same-map teleport check).
     loadedMapId_ = mapId;
 
-    // Clear loading flag and process any deferred world entry.
-    // A deferred entry occurs when SMSG_NEW_WORLD arrived during our warmup
-    // (e.g., an area trigger in a dungeon immediately teleporting the player out).
+    // A transition received in warmup belongs to the next submitted frame.
+    // In particular, do not enter IN_GAME or load the next map recursively.
     loadingWorld_ = false;
-    if (pendingWorldEntry_) {
-        auto entry = *pendingWorldEntry_;
-        pendingWorldEntry_.reset();
-        LOG_DEBUG("Processing deferred world entry: map ", entry.mapId);
-        if (app_.worldEntryCallbacks_) {
-            app_.worldEntryCallbacks_->setWorldEntryMovementGraceTimer(2.0f);
-            app_.worldEntryCallbacks_->setTaxiLandingClampTimer(0.0f);
-            app_.worldEntryCallbacks_->setLastTaxiFlight(false);
-        }
-        // Recursive call - sets loadedMapId_ and IN_GAME state for the final map.
-        loadOnlineWorldTerrain(entry.mapId, entry.x, entry.y, entry.z);
-        return;  // The recursive call handles setState(IN_GAME).
-    }
+    if (pendingWorldEntry_ || app_.worldTransitions_.hasWorldChange() ||
+        (gameHandler_ && gameHandler_->getMovementHandler()->hasPendingWorldTransfer())) return;
 
     // Only enter IN_GAME when this is the final map (no deferred entry pending).
     app_.setState(AppState::IN_GAME);
