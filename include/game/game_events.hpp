@@ -235,4 +235,12 @@ struct MeleeSwingResolved {
     bool critical = false;
 };
 
+/// One slot of the account data now holds this text - read from the local
+/// cache or sent by the server. `type` is a game::AccountDataType; the key
+/// bindings slots are what the interface answers by reloading its bindings.
+struct AccountDataLoaded {
+    uint8_t type = 0;
+    std::string text;
+};
+
 } // namespace wowee::game::events

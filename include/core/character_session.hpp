@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wowee {
 namespace addons { class AddonCatalog; class AddonManager; }
@@ -144,6 +145,10 @@ public:
     /// InterfaceState and its map stay; the Lua state, FrameXML and the addons
     /// are built anew, after the old state wrote its saved variables.
     void reloadInterfaceIfRequested();
+    /// In the Interface phase: put the account data's key bindings back in
+    /// force if they changed since the interface last loaded them. The game
+    /// says so outside this phase, where Lua may not run.
+    void applyChangedKeyBindings();
 
     // ---- Presenters and per-character frame state --------------------------
 
@@ -197,7 +202,12 @@ private:
     bool interfaceLeft_ = false;
     bool worldEntryPending_ = false;
     bool reloadPending_ = false;
+    /// The account data's key bindings changed since the interface loaded
+    /// them.
+    bool keyBindingsStale_ = false;
     std::unique_ptr<MapScope> map_;
+    /// Last, so it is the first to go: its handler writes this session.
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

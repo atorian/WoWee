@@ -470,6 +470,7 @@ bool Application::initialize() {
     gameServices_.events = &eventBus_;
     gameServices_.cvars = &cvars_;
     gameServices_.makeConnection = [] { return std::make_unique<network::WorldSocket>(); };
+    gameServices_.accountDataDir = core::getConfigRoot() + "/account_data";
     movementCollision_ =std::make_unique<RendererMovementCollision>(*renderer);
     gameServices_.movementCollision = movementCollision_.get();
 
@@ -4613,6 +4614,9 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     // A map finished loading: the character's interface is built at the first
     // entry and told of every later one.
     if (session_ && !worldTransitions_.leaving()) session_->enterWorldInterface();
+    // Before the events go out, so the UPDATE_BINDINGS LoadBindings raises
+    // reaches the buttons in this frame.
+    if (session_) session_->applyChangedKeyBindings();
     if (gameHandler) gameHandler->dispatchAddonEvents();
     dispatchInterfaceInput();
     // A lost mobile surface has no ImGui frame to build or submit. Network and

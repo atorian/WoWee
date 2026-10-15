@@ -8,6 +8,8 @@
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
+#include "game/account_data.hpp"
+#include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 
 namespace wowee::core {
@@ -24,6 +26,14 @@ CharacterSession::CharacterSession(const Services& services, Identity identity, 
         LOG_WARNING("Character session '", identity_.name,
                     "': no renderer, so spells are neither shown nor heard");
     }
+    subscriptions_.push_back(services_.events.subscribe<game::events::AccountDataLoaded>(
+        [this](const game::events::AccountDataLoaded& e) {
+            const auto type = static_cast<game::AccountDataType>(e.type);
+            if (type == game::AccountDataType::GlobalBindings ||
+                type == game::AccountDataType::CharacterBindings) {
+                keyBindingsStale_ = true;
+            }
+        }));
     if (interfaceKind_ == Interface::None) return;
     if (!services_.addonCatalog) {
         LOG_WARNING("Character session '", identity_.name, "': the addon system did "
@@ -112,6 +122,12 @@ bool CharacterSession::interfaceHoldsWorld() const {
 void CharacterSession::loadInterface() {
     auto& addons = *interface_.addons;
     addons.loadAllAddons();
+    // The bindings in force before anything asks for them, as the original
+    // client loads them: nothing in the interface calls LoadBindings at
+    // startup, so without this the saved set stayed in the account data and
+    // every key answered to its default.
+    if (auto* engine = addons.getLuaEngine()) engine->reloadKeyBindings();
+    keyBindingsStale_ = false;
     // Built: from here it hears the world, the login burst included.
     interfaceEntered_ = true;
     addons.fireEvent("VARIABLES_LOADED");
@@ -145,6 +161,13 @@ void CharacterSession::leaveWorldInterface() {
     // the destructor: handlers read the player and the map as they leave.
     if (interfaceHoldsWorld()) interface_.addons->fireEvent("PLAYER_LEAVING_WORLD");
     interfaceLeft_ = true;
+}
+
+void CharacterSession::applyChangedKeyBindings() {
+    if (!keyBindingsStale_ || !interfaceHoldsWorld()) return;
+    if (!requirePhase(services_.phase, Phase::Interface, "key binding reload")) return;
+    keyBindingsStale_ = false;
+    if (auto* engine = interface_.addons->getLuaEngine()) engine->reloadKeyBindings();
 }
 
 void CharacterSession::reloadInterfaceIfRequested() {

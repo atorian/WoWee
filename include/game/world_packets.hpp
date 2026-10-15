@@ -9,6 +9,7 @@
 #include "network/packet.hpp"
 #include "game/opcodes.hpp"
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -135,11 +136,45 @@ public:
 };
 
 /**
- * SMSG_ACCOUNT_DATA_TIMES parser
+ * SMSG_ACCOUNT_DATA_TIMES parser (WotLK): server time, a byte, the slot mask,
+ * then one time for each slot in the mask - only those, in slot order.
  */
 class AccountDataTimesParser {
 public:
     static bool parse(network::Packet& packet, AccountDataTimesData& data);
+};
+
+/**
+ * SMSG_UPDATE_ACCOUNT_DATA parser (WotLK): guid, type, time, the text's
+ * length, and the text zlib-compressed. Fails with `error` saying why.
+ */
+class UpdateAccountDataParser {
+public:
+    static bool parse(network::Packet& packet, UpdateAccountDataData& data, std::string& error);
+};
+
+/** CMSG_READY_FOR_ACCOUNT_DATA_TIMES: no body; the server answers with the account's times. */
+class ReadyForAccountDataTimesPacket {
+public:
+    static network::Packet build();
+};
+
+/** CMSG_REQUEST_ACCOUNT_DATA: one slot, answered with SMSG_UPDATE_ACCOUNT_DATA. */
+class RequestAccountDataPacket {
+public:
+    static network::Packet build(uint32_t type);
+};
+
+/**
+ * CMSG_UPDATE_ACCOUNT_DATA: one slot's new text and time. Empty text is sent
+ * with a length of zero and nothing after it, which is how a slot is cleared.
+ * Nothing, with `error` saying why, when the text cannot be sent - never an
+ * empty packet in its place, which would clear the slot on the server.
+ */
+class UpdateAccountDataPacket {
+public:
+    static std::optional<network::Packet> build(uint32_t type, uint32_t time,
+                                                const std::string& text, std::string& error);
 };
 
 /**

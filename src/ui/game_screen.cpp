@@ -52,6 +52,7 @@
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
 #include "game/shapeshift_forms.hpp"
+#include "game/account_data_handler.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -1794,7 +1795,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     } else if (bar[slotIdx].type == game::ActionBarSlot::ITEM && bar[slotIdx].id != 0) {
                         gameHandler.useItemById(bar[slotIdx].id);
                     } else if (bar[slotIdx].type == game::ActionBarSlot::MACRO) {
-                        chatPanel_.executeMacroText(gameHandler, gameHandler.getMacroText(bar[slotIdx].id));
+                        if (const auto* macro = gameHandler.accountData().macro(bar[slotIdx].id)) {
+                            chatPanel_.executeMacroText(gameHandler, macro->body);
+                        }
                     }
                 }
             }

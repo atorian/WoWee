@@ -727,6 +727,8 @@ set(WOWEE_SOURCES
     src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp
     src/game/social_handler.cpp
+    src/game/account_data.cpp
+    src/game/account_data_handler.cpp
     src/game/quest_handler.cpp
     src/game/quest_objectives.cpp
     src/game/entity_controller.cpp

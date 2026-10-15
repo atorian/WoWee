@@ -222,6 +222,11 @@ public:
     bool dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool alt,
                             bool down);
 
+    /// Put the key bindings of the set in force back in force -
+    /// LoadBindings(GetCurrentBindingSet()), as the original client does when
+    /// the world loads and when the account data's bindings change.
+    void reloadKeyBindings();
+
     /// The command this key holds, or empty. Whether the client would run it is
     /// a separate question - see clientActsOnBinding - and keeping the two
     /// apart is what lets a declined key be told from an unbound one.

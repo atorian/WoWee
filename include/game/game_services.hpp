@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -36,6 +37,10 @@ struct GameServices {
     std::function<std::unique_ptr<network::WorldConnection>()> makeConnection;
     // The walls units moving themselves run into between their reports.
     const MovementCollision* movementCollision = nullptr;
+    /// Where the account data - key bindings, macros, settings - is kept on
+    /// disk, one folder per account and server. Empty keeps none, which
+    /// AccountDataHandler says once.
+    std::string accountDataDir;
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };

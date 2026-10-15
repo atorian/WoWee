@@ -13,6 +13,7 @@
 #include "game/spell_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
+#include "game/account_data_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -307,6 +308,8 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
     LOG_INFO("Ready for character operations");
 
     setState(WorldState::READY);
+
+    accountDataHandler_->accountAuthenticated();
 
     // Request character list automatically
     requestCharacterList();
@@ -648,6 +651,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     lastTargetGuid = 0;
     tabCycleStale = true;
     entityController_->clearAll();
+    accountDataHandler_->characterSelected(characterGuid);
 
     // Build CMSG_PLAYER_LOGIN packet
     auto packet = PlayerLoginPacket::build(characterGuid);
@@ -747,6 +751,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     if (socket) {
         socket->tracePacketsFor(std::chrono::seconds(12), "login_verify_world");
     }
+    if (initialWorldEntry) accountDataHandler_->worldEntered();
 
     LOG_INFO("========================================");
     LOG_INFO("   SUCCESSFULLY ENTERED WORLD!");
@@ -986,18 +991,6 @@ void GameHandler::handleTutorialFlags(network::Packet& packet) {
     LOG_INFO("SMSG_TUTORIAL_FLAGS: [",
              flags[0], ", ", flags[1], ", ", flags[2], ", ", flags[3], ", ",
              flags[4], ", ", flags[5], ", ", flags[6], ", ", flags[7], "]");
-}
-
-void GameHandler::handleAccountDataTimes(network::Packet& packet) {
-    LOG_DEBUG("Handling SMSG_ACCOUNT_DATA_TIMES");
-
-    AccountDataTimesData data;
-    if (!AccountDataTimesParser::parse(packet, data)) {
-        LOG_WARNING("Failed to parse SMSG_ACCOUNT_DATA_TIMES");
-        return;
-    }
-
-    LOG_DEBUG("Account data times received (server time: ", data.serverTime, ")");
 }
 
 void GameHandler::handleMotd(network::Packet& packet) {
@@ -2332,7 +2325,6 @@ void GameHandler::setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t 
     if (type == ActionBarSlot::ITEM && id != 0) {
         queryItemInfo(id, 0);
     }
-    saveCharacterConfig();
     // Notify Lua addons that the action bar changed
         fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {std::to_string(slot + 1)});
         fireAddonEvent("ACTIONBAR_UPDATE_STATE", {});

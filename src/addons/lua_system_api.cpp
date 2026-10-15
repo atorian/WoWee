@@ -29,6 +29,7 @@
 #include "game/calendar_month.hpp"
 #include "game/calendar_data.hpp"
 #include "game/pet_action.hpp"
+#include "game/account_data_handler.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -4485,23 +4486,28 @@ static int lua_RunMacroText(lua_State* L) {
     return 0;
 }
 
-// RunMacro(id or name) - run a saved macro by which one it is.
+// RunMacro(index or name) - run a saved macro by which one it is: its place in
+// the macro frame (the account's 1-36, the character's 37-54), or its name,
+// which is how a macro written into another names it.
 static int lua_RunMacro(lua_State* L) {
     auto* svc = getLuaServices(L);
     auto* gh = getGameHandler(L);
     if (!svc || !svc->runMacroText || !gh) return 0;
-    uint32_t macroId = 0;
-    if (lua_isnumber(L, 1)) {
-        macroId = static_cast<uint32_t>(lua_tonumber(L, 1));
+    const game::Macro* found = nullptr;
+    if (lua_type(L, 1) == LUA_TNUMBER) {
+        const int index = static_cast<int>(lua_tonumber(L, 1));
+        const bool character = index > game::kMaxAccountMacros;
+        const auto& half = gh->accountData().macros(character);
+        const int pos = index - 1 - (character ? game::kMaxAccountMacros : 0);
+        if (pos >= 0 && pos < static_cast<int>(half.size())) found = &half[static_cast<size_t>(pos)];
     } else if (const char* name = lua_tostring(L, 1)) {
-        // By name, which is how a macro written into another macro names it.
-        for (uint32_t id : gh->getMacroIds()) {
-            if (gh->getMacroName(id) == name) { macroId = id; break; }
+        for (int c = 0; c < 2 && !found; ++c) {
+            for (const auto& macro : gh->accountData().macros(c == 1)) {
+                if (macro.name == name) { found = &macro; break; }
+            }
         }
     }
-    if (macroId == 0) return 0;
-    const std::string& body = gh->getMacroText(macroId);
-    if (!body.empty()) svc->runMacroText(body);
+    if (found && !found->body.empty()) svc->runMacroText(found->body);
     return 0;
 }
 
