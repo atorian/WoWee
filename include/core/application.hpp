@@ -98,8 +98,6 @@ public:
     // State management
     [[nodiscard]] AppState getState() const { return state; }
     void requestState(AppState newState);
-    /// Queue a return to login after the world connection dropped.
-    void handleWorldDisconnect();
 
     // Accessors
     Window* getWindow() { return window.get(); }
@@ -132,14 +130,6 @@ public:
 
     // Singleton access
     static Application& getInstance() { return *instance; }
-
-
-
-    // Logout to login screen
-    void logoutToLogin();
-    /// A logout the server has completed: the world goes, the connection
-    /// stays, and the character list comes back - as in the original client.
-    void logoutToCharacterSelect();
 
     // Render bounds lookup (for click targeting / selection) - delegates to EntitySpawner
     bool getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const;

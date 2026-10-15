@@ -74,7 +74,7 @@ public:
     void despawnAllGameObjects();
 
     // Full reset - despawns entities, waits for async loads, clears all state.
-    // Used by logoutToLogin() and loadOnlineWorldTerrain() for clean slate.
+    // Used by performLogoutToLogin() and loadOnlineWorldTerrain() for clean slate.
     void resetAllState();
 
     // Rebuild lookup tables (for reloadExpansionData after expansion change)
