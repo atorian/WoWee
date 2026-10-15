@@ -695,7 +695,7 @@ int lua_FontString_SetFormattedText(lua_State* L) {
     lua_getfield(L, -1, "format");
     lua_remove(L, -2);
     for (int i = 2; i <= n; ++i) lua_pushvalue(L, i);
-    if (lua_pcall(L, n - 1, 1, 0) != 0) {
+    if (checkedLuaCall(L, n - 1, 1, 0) != 0) {
         // A format string and its arguments disagreeing is an error in Lua, and
         // losing the file that asked for a label is worse than an unformatted
         // one.
@@ -2719,7 +2719,7 @@ static bool fillItemTooltipById(lua_State* L, game::GameHandler* gh,
         w->tooltipLines.clear();
         lua_pushvalue(L, 1);                                  // self
         lua_pushnumber(L, static_cast<lua_Number>(itemId));
-        if (lua_pcall(L, 2, 1, 0) == 0) {
+        if (checkedLuaCall(L, 2, 1, 0) == 0) {
             const bool ok = lua_toboolean(L, -1) != 0;
             lua_settop(L, top);
             if (ok) { w->shown = true; fireTooltipSetItem(L); return true; }
@@ -4107,7 +4107,7 @@ int lua_Frame_SetNormalFontObject(lua_State* L) {
         lua_getfield(L, 1, "GetFontString");
         if (lua_isfunction(L, -1)) {
             lua_pushvalue(L, 1);
-            if (lua_pcall(L, 1, 1, 0) != 0) {
+            if (checkedLuaCall(L, 1, 1, 0) != 0) {
                 lua_pop(L, 1);
                 lua_pushnil(L);
             }
@@ -5604,7 +5604,7 @@ static int lua_CreateFrame(lua_State* L) {
                     lua_getfield(L, -1, one.c_str());
                     if (lua_isfunction(L, -1)) {
                         lua_pushvalue(L, -3);            // the frame
-                        if (lua_pcall(L, 1, 0, 0) != 0) {
+                        if (checkedLuaCall(L, 1, 0, 0) != 0) {
                             // Once per template. A template that fails fails
                             // for every frame using it, and the loop this very
                             // failure causes then repeats it: one run wrote the
@@ -8956,7 +8956,7 @@ void LuaEngine::fireEvent(const std::string& eventName,
                 }
 
                 int nargs = 1 + static_cast<int>(args.size());
-                if (lua_pcall(L_, nargs, 0, 0) != 0) {
+                if (checkedLuaCall(L_, nargs, 0, 0) != 0) {
                     const char* err = lua_tostring(L_, -1);
                     std::string errStr = err ? err : "(unknown)";
                     LOG_ERROR("LuaEngine: event '", eventName, "' handler error: ", errStr);
@@ -9850,7 +9850,7 @@ std::string LuaEngine::bindingCommandForKey(const std::string& key) {
     lua_getglobal(L_, "GetBindingAction");
     if (!lua_isfunction(L_, -1)) { lua_pop(L_, 1); return ""; }
     lua_pushstring(L_, key.c_str());
-    if (lua_pcall(L_, 1, 1, 0) != 0) {
+    if (checkedLuaCall(L_, 1, 1, 0) != 0) {
         LOG_WARNING("GetBindingAction(", key, ") failed: ",
                     luaL_optstring(L_, -1, "?"));
         lua_pop(L_, 1);
@@ -9880,7 +9880,7 @@ bool LuaEngine::runBindingScript(const std::string& command, bool down) {
     lua_getfield(L_, -1, command.c_str());
     if (!lua_isfunction(L_, -1)) { lua_pop(L_, 2); return false; }
     lua_pushstring(L_, down ? "down" : "up");
-    if (lua_pcall(L_, 1, 0, 0) != 0) {
+    if (checkedLuaCall(L_, 1, 0, 0) != 0) {
         LOG_WARNING("Binding ", command, " failed: ",
                     luaL_optstring(L_, -1, "?"));
         lua_pop(L_, 1);
@@ -9906,7 +9906,7 @@ LuaEngine::PadKeyOutcome LuaEngine::dispatchPadKey(const char* padKey) {
     if (top && top->name == "KeyBindingFrame") {
         bool waiting = false;
         if (luaL_loadstring(L_, "return KeyBindingFrame ~= nil and KeyBindingFrame.selected ~= nil") == 0 &&
-            lua_pcall(L_, 0, 1, 0) == 0) {
+            checkedLuaCall(L_, 0, 1, 0) == 0) {
             waiting = lua_toboolean(L_, -1) != 0;
         }
         lua_pop(L_, 1);  // the answer, or the error in its place
@@ -10590,7 +10590,7 @@ void LuaEngine::setSliderValue(uint32_t wid, float value) {
     if (!lua_isfunction(L_, -1)) { lua_pop(L_, 3); return; }
     lua_pushvalue(L_, -2);
     lua_pushnumber(L_, value);
-    if (lua_pcall(L_, 2, 0, 0) != 0) {
+    if (checkedLuaCall(L_, 2, 0, 0) != 0) {
         LOG_WARNING("Wheel glide: SetValue on ", scriptOrigin(widgets_, wid, "SetValue"),
                     " failed: ", luaL_optstring(L_, -1, "?"));
         lua_pop(L_, 1);
@@ -11153,7 +11153,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
                         if (onWorld && !cursorItemCameFromInventory()) {
                             lua_getglobal(L_, "ClearCursor");
                             if (lua_isfunction(L_, -1)) {
-                                if (lua_pcall(L_, 0, 0, 0) != 0) lua_pop(L_, 1);
+                                if (checkedLuaCall(L_, 0, 0, 0) != 0) lua_pop(L_, 1);
                             } else {
                                 lua_pop(L_, 1);
                             }
@@ -11431,6 +11431,7 @@ void LuaEngine::drainPendingTextChanged() {
 }
 
 void LuaEngine::dispatchOnUpdate(float elapsed) {
+    if (L_) checkLuaExecution(L_, "OnUpdate");
     // Asked for by the check, and answered here because only this side can ask
     // the interface anything.
     if (ui::frameXmlTakeProbeRequest()) runInterfaceProbe();
@@ -11447,7 +11448,7 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
     lua_getglobal(L_, "__WoweeTickAnimations");
     if (lua_isfunction(L_, -1)) {
         lua_pushnumber(L_, elapsed);
-        if (lua_pcall(L_, 1, 0, 0) != 0) {
+        if (checkedLuaCall(L_, 1, 0, 0) != 0) {
             LOG_WARNING("animation tick error: ", luaL_optstring(L_, -1, "?"));
             lua_pop(L_, 1);
         }
@@ -11604,7 +11605,7 @@ bool LuaEngine::dispatchSlashCommand(const std::string& command, const std::stri
                     // Call the handler with args
                     lua_pushvalue(L_, -1); // copy handler
                     lua_pushstring(L_, args.c_str());
-                    if (lua_pcall(L_, 1, 0, 0) != 0) {
+                    if (checkedLuaCall(L_, 1, 0, 0) != 0) {
                         const char* serr = lua_tostring(L_, -1);
                         LOG_ERROR("LuaEngine: SlashCmdList['", name, "'] error: ",
                                   serr ? serr : "?");
@@ -11822,7 +11823,7 @@ int runChunk(lua_State* L, const char* chunk, size_t len, const char* name) {
         lua_remove(L, base + 1);
         return 1;
     }
-    const int rc = lua_pcall(L, 0, 0, base + 1);
+    const int rc = checkedLuaCall(L, 0, 0, base + 1);
     lua_remove(L, base + 1);
     return rc;
 }

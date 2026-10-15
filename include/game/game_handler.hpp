@@ -3324,6 +3324,10 @@ public:
      * @param deltaTime Time since last update in seconds
      */
     void update(float deltaTime);
+    /// Client frame phases may poll protocol work separately from simulation.
+    /// update() remains the combined entry for callers such as GameHarness.
+    void updateNetwork(float deltaTime);
+    void updateGame(float deltaTime);
     void updateNetworking();
     void updateTimers(float deltaTime);
     void updateEntityInterpolation(float deltaTime);

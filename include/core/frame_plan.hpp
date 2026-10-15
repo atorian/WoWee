@@ -22,8 +22,8 @@ constexpr FramePlan framePlanFor(AppState state) {
     switch (state) {
         case AppState::AUTHENTICATION: return {.authNetwork = true, .view = FrameView::Login};
         case AppState::REALM_SELECTION: return {.authNetwork = true, .view = FrameView::Realms};
-        case AppState::CHARACTER_CREATION: return {.worldNetwork = true, .view = FrameView::CharacterCreation};
-        case AppState::CHARACTER_SELECTION: return {.worldNetwork = true, .view = FrameView::Characters};
+        case AppState::CHARACTER_CREATION: return {.worldNetwork = true, .game = true, .view = FrameView::CharacterCreation};
+        case AppState::CHARACTER_SELECTION: return {.worldNetwork = true, .game = true, .view = FrameView::Characters};
         case AppState::IN_GAME: return {.worldNetwork = true, .game = true, .world = true, .view = FrameView::World};
         case AppState::DISCONNECTED: return {.view = FrameView::Disconnected};
         case AppState::FIRST_RUN: return {.view = FrameView::FirstRun};

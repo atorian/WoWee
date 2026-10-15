@@ -1,5 +1,7 @@
 # Lessons
 
+- 2026-10-15 — A visible FPS test used a settings-only profile, so the user's Isengard realm disappeared from the running client's server list. Preserve the complete active profile (including realm/account selection) for interactive test launches; keep stripped profiles confined to unattended runs. Restore the user's full profile immediately after measurement and verify the requested realm is present before leaving the client open.
+
 - 2026-10-10 — WoWee with StormLib: verify suggested CMake option combinations before recommending them. `WOWEE_BUILD_TESTS=OFF` fails because `wowee_link_stormlib` is defined inside the test guard but called by asset targets outside it. Until that scope is fixed, configure with `WOWEE_BUILD_TESTS=ON`; build only the required application targets to avoid building all tests.
 
 - 2026-10-10 — Windows tools launched from WSL can inherit an incomplete `PATHEXT` (observed: `.CPL` only). Before a Windows build or shader validation, ensure the child process environment includes `.COM;.EXE;.BAT;.CMD` and the required MSYS2 runtime on PATH; otherwise windres/cmd cannot launch GCC or a validator can fail to load its runtime. Check each native command’s exit code before claiming success. Keep these fixes local to the child process.

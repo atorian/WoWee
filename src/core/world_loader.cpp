@@ -7,6 +7,7 @@
 #include "core/zone_tracker.hpp"
 #include "core/world_loader.hpp"
 #include "core/application.hpp"
+#include "core/frame_phase.hpp"
 #include "core/world_entry_callback_handler.hpp"
 #include "game/movement_handler.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -729,6 +730,7 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
 }
 
 void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float z) {
+    app_.requireTransitions("world terrain load");
     if (!renderer_ || !assetManager_ || !assetManager_->isInitialized()) {
         LOG_WARNING("Cannot load online terrain: renderer or assets not ready");
         return;
@@ -1100,7 +1102,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             }
 
             // Drain network and process deferred spawn/composite queues while hidden.
-            if (gameHandler_) gameHandler_->update(1.0f / 60.0f);
+            if (gameHandler_) {
+                ScopedPhase networkPhase(app_.currentPhase_, Phase::Network);
+                gameHandler_->updateNetwork(1.0f / 60.0f);
+            }
 
             // If a new world entry was deferred during packet processing,
             // stop warming up this map - we'll load the new one after cleanup.
@@ -1111,7 +1116,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 break;
             }
 
-            if (world_) world_->update(1.0f / 60.0f);
+            {
+                ScopedPhase gamePhase(app_.currentPhase_, Phase::Game);
+                if (gameHandler_) gameHandler_->updateGame(1.0f / 60.0f);
+                if (world_) world_->update(1.0f / 60.0f);
+            }
 
             // Process all spawn/equipment/transport queues during warmup
             entitySpawner_->update();

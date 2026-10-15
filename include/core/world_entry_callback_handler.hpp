@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include "core/frame_plan.hpp"
 #include <glm/glm.hpp>
 
 namespace wowee {
@@ -25,14 +26,15 @@ public:
                               game::GameHandler& gameHandler,
                               WorldLoader* worldLoader,
                               EntitySpawner* entitySpawner,
-                              pipeline::AssetManager* assetManager);
+                              pipeline::AssetManager* assetManager,
+                              const Phase& currentPhase);
 
     void setupCallbacks();
 
     /// Applied by Application after frame submission, never by a packet handler.
     void enterWorld(uint32_t mapId, float x, float y, float z, bool isInitialEntry);
 
-    /// Called each frame from Application::update() to manage hearth-teleport freeze/thaw.
+    /// Called in the Game phase to manage hearth-teleport freeze/thaw.
     void update(float deltaTime);
 
     // State queries (used by Application::update)
@@ -78,6 +80,7 @@ private:
     WorldLoader* worldLoader_;
     EntitySpawner* entitySpawner_;
     pipeline::AssetManager* assetManager_;
+    const Phase& currentPhase_;
 
     // Hearth teleport: freeze player until terrain loads at destination (moved from Application)
     bool hearthTeleportPending_ = false;

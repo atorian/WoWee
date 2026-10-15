@@ -147,6 +147,11 @@ void GameScreen::applySavedDisplayMode(core::Window* window) {
     // would be read into is written by hand above the window.
     window->setFullscreen(settingsPanel_.pendingFullscreen);
     window->setVsync(settingsPanel_.pendingVsync);
+    // The cap applies to login and character selection too. Waiting until the
+    // first in-world update leaves those screens uncapped once the extra sleep
+    // in Application::run is removed.
+    window->setFrameCap(frameCapFpsForChoice(settingsPanel_.pendingFrameCap));
+    settingsPanel_.frameCapApplied_ = true;
 }
 
 // Set UI services and propagate to child components

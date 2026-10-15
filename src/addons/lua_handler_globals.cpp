@@ -1,4 +1,5 @@
 #include "addons/lua_handler_globals.hpp"
+#include "addons/lua_services.hpp"
 
 #include <cstring>
 
@@ -63,7 +64,20 @@ void pushSaveTable(lua_State* L) {
 void setLegacyHandlerGlobals(bool on) { gLegacyHandlerGlobals = on; }
 bool legacyHandlerGlobals() { return gLegacyHandlerGlobals; }
 
+void checkLuaExecution(lua_State* L, const char* operation) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_services");
+    auto* services = static_cast<LuaServices*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    if (services && services->checkExecutionPhase) services->checkExecutionPhase(operation);
+}
+
+int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc) {
+    checkLuaExecution(L, "Lua call");
+    return lua_pcall(L, nargs, nresults, errfunc);
+}
+
 int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
+    checkLuaExecution(L, script ? script : "frame handler");
     if (!gLegacyHandlerGlobals || nargs < 1)
         return lua_pcall(L, nargs, 0, errfunc);
 

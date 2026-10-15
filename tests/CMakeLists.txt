@@ -289,6 +289,7 @@ register_test_target(test_framexml_takeover)
 add_executable(test_lua_handler_globals
     test_lua_handler_globals.cpp
     ${CMAKE_SOURCE_DIR}/src/addons/lua_handler_globals.cpp
+    ${TEST_COMMON_SOURCES}
 )
 target_include_directories(test_lua_handler_globals PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_lua_handler_globals SYSTEM PRIVATE

@@ -13,6 +13,22 @@ using wowee::test::Body;
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
 
+TEST_CASE("network dispatch receives logout state and only Game advances its countdown",
+          "[session][harness][frame]") {
+    GameHarness h;
+    h.enterWorld();
+    h.game().requestLogout();
+    h.receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(0));
+    h.game().updateNetwork(0.0f);
+    REQUIRE(h.game().isLoggingOut());
+    const float countdown = h.game().getLogoutCountdown();
+    REQUIRE(countdown > 0);
+    h.game().updateNetwork(3.0f);
+    CHECK(h.game().getLogoutCountdown() == countdown);
+    h.game().updateGame(3.0f);
+    CHECK(h.game().getLogoutCountdown() == Catch::Approx(countdown - 3.0f));
+}
+
 TEST_CASE("logout completion announces the destination and preserves the session during pump",
           "[session][harness]") {
     GameHarness h;

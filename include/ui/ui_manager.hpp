@@ -77,8 +77,8 @@ public:
     void update(float deltaTime);
 
     /**
-     * Render UI based on current application state
-     * @param appState Current application state
+     * Build UI draw lists and process controls in the client's Interface phase.
+     * @param view Screen selected by this frame's plan
      * @param authHandler Authentication handler reference
      * @param gameHandler Game handler reference
      */

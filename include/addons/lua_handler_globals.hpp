@@ -24,6 +24,10 @@ struct lua_State;
 
 namespace wowee::addons {
 
+/// Ask the client whether Lua may run in the current frame phase.
+void checkLuaExecution(lua_State* L, const char* operation);
+int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc);
+
 /// Publish those globals around every script handler, or do not.
 ///
 /// Set from AddonManager::loadFrameXml, off the interface's own

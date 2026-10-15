@@ -22,6 +22,8 @@ extern "C" {
 #include <string>
 
 #include "addons/lua_handler_globals.hpp"
+#include "addons/lua_services.hpp"
+#include "core/frame_phase.hpp"
 
 using wowee::addons::legacyHandlerGlobals;
 using wowee::addons::pcallScript;
@@ -237,4 +239,60 @@ TEST_CASE("A handler that raises still gives the names back",
     // it had, not whatever the handler was holding when it died.
     CHECK(fx.global("this") == "before");
     CHECK(fx.global("arg1") == "kept");
+}
+
+TEST_CASE("a frame handler cannot mutate Lua state during Render", "[lua][frame]") {
+    Fixture f;
+    const char* script = GENERATE("OnUpdate", "OnEvent", "OnShow", "OnClick", "OnSizeChanged");
+    setLegacyHandlerGlobals(GENERATE(false, true));
+    f.handler(script, "called = (called or 0) + 1");
+    auto phase = wowee::core::Phase::Render;
+    wowee::addons::LuaServices services;
+    services.checkExecutionPhase = [&](const char* operation) {
+        wowee::core::requireLuaPhase(phase, operation);
+    };
+    lua_pushlightuserdata(f.L, &services);
+    lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
+
+    CHECK_THROWS_AS(f.dispatch(script, {}), std::logic_error);
+    lua_getglobal(f.L, "called");
+    CHECK(lua_isnil(f.L, -1));
+    lua_pop(f.L, 1);
+
+    phase = wowee::core::Phase::Interface;
+    CHECK(f.dispatch(script, {}) == 0);
+    lua_getglobal(f.L, "called");
+    CHECK(lua_tointeger(f.L, -1) == 1);
+    lua_pop(f.L, 1);
+}
+
+TEST_CASE("a Lua chunk cannot bypass the frame boundary", "[lua][frame]") {
+    Fixture f;
+    auto phase = wowee::core::Phase::Render;
+    wowee::addons::LuaServices services;
+    services.checkExecutionPhase = [&](const char* operation) {
+        wowee::core::requireLuaPhase(phase, operation);
+    };
+    lua_pushlightuserdata(f.L, &services);
+    lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
+    REQUIRE(luaL_loadstring(f.L, "called = true") == 0);
+    CHECK_THROWS_AS(wowee::addons::checkedLuaCall(f.L, 0, 0, 0), std::logic_error);
+    phase = wowee::core::Phase::Interface;
+    CHECK(wowee::addons::checkedLuaCall(f.L, 0, 0, 0) == 0);
+    lua_getglobal(f.L, "called");
+    CHECK(lua_toboolean(f.L, -1));
+}
+
+TEST_CASE("a loading network phase cannot release a world and restores its caller on failure",
+          "[frame]") {
+    using wowee::core::Phase;
+    auto phase = Phase::Transitions;
+    try {
+        wowee::core::ScopedPhase network(phase, Phase::Network);
+        wowee::core::requirePhase(phase, Phase::Transitions, "world logout");
+        FAIL("network dispatch released a world");
+    } catch (const std::logic_error& error) {
+        CHECK(std::string(error.what()).find("world logout") != std::string::npos);
+    }
+    CHECK_NOTHROW(wowee::core::requirePhase(phase, Phase::Transitions, "world logout"));
 }

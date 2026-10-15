@@ -197,14 +197,15 @@ public:
     void setActiveMapName(const std::string& name);
 
 private:
-    void runFrame(std::chrono::steady_clock::time_point frameStart);
-    void beginPhase(Phase phase) { currentPhase_ = phase; }
+    void runFrame();
+    void beginPhase(Phase phase);
+    void requireTransitions(const char* operation) const;
     void pumpInput(float deltaTime);
     void prepareFrame();
     void dispatchNetwork(float deltaTime, const FramePlan& plan);
     void updateGame(float deltaTime, const FramePlan& plan);
     void syncPresentation(float deltaTime, const FramePlan& plan);
-    void beginInterface(float deltaTime);
+    void updateInterface(float deltaTime, FrameView view);
 
     /// Tell the renderer what the game knows about the world - the zone,
     /// the realm's clock and weather, the player's state - before it updates.
@@ -220,9 +221,8 @@ private:
     /// submitted: the window draws into the same frame.
     void updateMapWindow();
 
-    /// One frame of being in the world - the largest arm of update()'s state
-    /// switch. updateCheckpoint travels by reference because the caller's catch
-    /// reports it: an exception here has to say where here was.
+    /// In-world work in the Game phase. The checkpoint and local stage labels
+    /// identify a failure without obscuring runFrame's phase order.
     void updateInGame(float deltaTime, const char*& updateCheckpoint);
 
     /// Everything the server says about how the player moves - speeds, rooting,
@@ -460,11 +460,14 @@ private:
     // hang. Long but healthy work that renders its own frames (world load) must beat
     // it too, or the watchdog mistakes the load for a hang.
     std::atomic<int64_t> watchdogHeartbeatMs_{0};
+    std::atomic<bool> watchdogRequestRelease_{false};
 
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
     Phase currentPhase_ = Phase::Idle;
+    std::chrono::steady_clock::time_point phaseStartedAt_{};
     FramePacer pacer_;
+    float networkUpdateMs_ = 0.0f;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
     bool playerCharacterSpawned = false;

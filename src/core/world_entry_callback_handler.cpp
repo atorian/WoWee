@@ -1,4 +1,5 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "core/frame_phase.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
 #include "core/entity_spawner.hpp"
@@ -27,13 +28,15 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     game::GameHandler& gameHandler,
     WorldLoader* worldLoader,
     EntitySpawner* entitySpawner,
-    pipeline::AssetManager* assetManager)
+    pipeline::AssetManager* assetManager,
+    const Phase& currentPhase)
     : renderer_(renderer)
     , playerView_(playerView)
     , gameHandler_(gameHandler)
     , worldLoader_(worldLoader)
     , entitySpawner_(entitySpawner)
     , assetManager_(assetManager)
+    , currentPhase_(currentPhase)
 {
 }
 
@@ -147,6 +150,7 @@ static void precacheNearbyTiles(rendering::TerrainManager* terrainMgr,
 // ── callbacks ────────────────────────────────────────────────────
 
 void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, float z, bool isInitialEntry) {
+    requirePhase(currentPhase_, Phase::Transitions, "world entry");
     LOG_INFO("Online world entry: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")"
              " initial=", isInitialEntry);
     playerView_.resetCombatVisualState();

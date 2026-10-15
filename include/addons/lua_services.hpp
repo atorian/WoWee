@@ -14,6 +14,8 @@ namespace wowee::game  { class ExpansionRegistry; }
 namespace wowee::addons {
 
 struct LuaServices {
+    /// The client enforces its frame boundary before entering any Lua handler.
+    std::function<void(const char*)> checkExecutionPhase;
     core::Window*            window            = nullptr;
     audio::AudioCoordinator* audioCoordinator  = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;

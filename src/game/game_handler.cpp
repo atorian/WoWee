@@ -630,6 +630,11 @@ void GameHandler::updateTimers(float deltaTime) {
 }
 
 void GameHandler::update(float deltaTime) {
+    updateNetwork(deltaTime);
+    updateGame(deltaTime);
+}
+
+void GameHandler::updateNetwork(float deltaTime) {
     // The char-create callback used to be deferred to here, out of the packet
     // handler and so out of any render pass. It is not any more: the
     // SMSG_CHAR_CREATE handler calls charCreateCallback_ itself, and nothing
@@ -732,6 +737,12 @@ void GameHandler::update(float deltaTime) {
         }
         if (charDeleteCallback_) charDeleteCallback_(deleted, msg);
     }
+
+}
+
+void GameHandler::updateGame(float deltaTime) {
+    if (!socket || state == WorldState::CONNECTING || state == WorldState::DISCONNECTED ||
+        state == WorldState::FAILED || movementHandler_->hasPendingWorldTransfer()) return;
 
     // Validate target still exists
     if (targetGuid != 0 && !entityController_->getEntityManager().hasEntity(targetGuid)) {
