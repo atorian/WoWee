@@ -42,8 +42,9 @@ public:
     void setWorldEntryMovementGraceTimer(float t) { worldEntryMovementGraceTimer_ = t; }
     [[nodiscard]] bool isHearthTeleportPending() const { return hearthTeleportPending_; }
 
-    // Reset state (logout/disconnect)
-    void resetState();
+    /// A map's load has begun: the grace and landing timers, and any hearth
+    /// freeze, start over for the new arrival.
+    void beginMapEntry();
 
     // Taxi state (managed by Application::update, but tracked here for clarity)
     [[nodiscard]] bool getLastTaxiFlight() const { return lastTaxiFlight_; }

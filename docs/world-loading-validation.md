@@ -21,8 +21,10 @@ The former readiness rules are retained:
   at least four tiles can substitute for the height check. The 25-second hard cap
   remains, with a warning describing incomplete ground/work.
 - Pending GPU uploads keep the loading view up instead of blocking in a fence wait.
-- Cancelled preparation never blocks a transition. Asset changes wait until old
-  jobs finish; final shutdown joins before releasing AssetManager.
+- Ending a map (`MapScope`) cancels its jobs and joins them in the transition;
+  each worker stops at its next token check, so the join is bounded by one read
+  or parse. Asset changes wait until no map scope stands; final shutdown ends
+  the scope before releasing AssetManager.
 
 Run unit/domain checks with `ctest --test-dir build-dev -R
 "world_load_progress|session_domain|lua_handler_globals" --output-on-failure`.

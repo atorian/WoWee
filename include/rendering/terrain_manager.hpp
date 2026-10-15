@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include "core/job_group.hpp"
 
 #include "core/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
@@ -73,6 +74,7 @@ struct TerrainTile {
  * Pre-processed tile data ready for GPU upload (produced by background thread)
  */
 struct PendingTile {
+    core::JobGroup::Token token;
     TileCoord coord;
     pipeline::ADTTerrain terrain;
     pipeline::TerrainMesh mesh;
@@ -197,6 +199,7 @@ class TerrainManager {
 public:
     TerrainManager();
     ~TerrainManager();
+    void setJobToken(core::JobGroup::Token token) { mapToken_ = std::move(token); }
 
     /**
      * Initialize terrain manager
@@ -234,7 +237,6 @@ public:
     void unloadTile(int x, int y);
 
     void stopWorkers();  // Stop worker threads without restarting (for shutdown)
-    void softReset();  // Clear tile data without stopping worker threads (non-blocking)
 
     /**
      * Precache a set of tiles (for taxi routes, etc.)
@@ -517,6 +519,8 @@ private:
     std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
     void logMissingAdtOnce(const std::string& adtPath);
     std::atomic<bool> workerRunning{false};
+    core::JobGroup standaloneJobs_;
+    core::JobGroup::Token mapToken_ = standaloneJobs_.token();
 
     // Track tiles currently queued or being processed to avoid duplicates
     std::unordered_map<TileCoord, bool, TileCoord::Hash> pendingTiles; // THREAD-SAFE: protected by queueMutex

@@ -90,9 +90,9 @@ std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& 
     float maxDistSq = maxDist * maxDist;
     // The same list, for the same reason; see renderM2Particles. A ribbon
     // emitter is a particle emitter as far as this list is concerned.
-    for (size_t idx : particleInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        const auto& inst = instances[idx];
+    for (size_t idx : scene_->particleInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        const auto& inst = scene_->instances[idx];
         if (!inst.cachedModel || !inst.cachedModel->isWaterVegetation) continue;
         glm::vec3 diff = inst.position - camPos;
         if (glm::dot(diff, diff) <= maxDistSq) {
@@ -561,8 +561,8 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             }
         }
     };
-    for (const auto& inst : instances) addInstanceRibbons(inst);
-    for (const auto& [id, posed] : posedEmitters_) addInstanceRibbons(posed.inst);
+    for (const auto& inst : scene_->instances) addInstanceRibbons(inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceRibbons(posed.inst);
 
     // Periodic diagnostic: spell ribbon draw count
     {
@@ -570,7 +570,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         if (++ribbonDiagFrame_ % 300 == 1) {
             size_t spellRibbonDraws = 0;
             size_t spellRibbonVerts = 0;
-            for (const auto& inst : instances) {
+            for (const auto& inst : scene_->instances) {
                 if (!inst.cachedModel || !inst.cachedModel->isSpellEffect) continue;
                 for (const auto& ribbon : inst.ribbons) {
                     if (ribbon.edges.size() >= 2) {
@@ -862,15 +862,15 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // - got any of it. The sphere is the model's and its particles' reach,
     // with room for a particle's own size.
     constexpr float kParticleSizeMargin = 2.0f;
-    for (size_t idx : particleInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        const M2Instance& inst = instances[idx];
+    for (size_t idx : scene_->particleInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        const M2Instance& inst = scene_->instances[idx];
         if (inst.particles.empty()) continue;
         const float radius = std::max(inst.cachedPaddedRadius, inst.particleReach) + kParticleSizeMargin;
         if (!viewFrustum.intersectsSphere(inst.cachedCullCenter, radius)) continue;
         addInstanceParticles(inst);
     }
-    for (const auto& [id, posed] : posedEmitters_) addInstanceParticles(posed.inst);
+    for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceParticles(posed.inst);
     if (droppedForSpace > 0) {
         static core::LogBudget overflowBudget(8, "M2 particle buffer overflows");
         if (overflowBudget.take()) {
@@ -884,7 +884,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         static uint32_t spellParticleDiagFrame_ = 0;
         if (++spellParticleDiagFrame_ % 300 == 1) {
             size_t spellPtc = 0;
-            for (const auto& inst : instances) {
+            for (const auto& inst : scene_->instances) {
                 if (inst.cachedModel && inst.cachedModel->isSpellEffect)
                     spellPtc += inst.particles.size();
             }

@@ -5,6 +5,7 @@
 #include "rendering/wmo_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include <stdexcept>
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_batch_merge.hpp"
@@ -337,10 +338,10 @@ void WMORenderer::shutdown() {
     // - and nothing to call it on either, which is what this used to try.
     if (!vkCtx_) {
         loadedModels.clear();
-        loadingModels_.clear();
-        instances.clear();
-        spatialGrid.clear();
-        instanceIndexById.clear();
+        scene_->loadingModels_.clear();
+        scene_->instances.clear();
+        scene_->spatialGrid.clear();
+        scene_->instanceIndexById.clear();
         initialized_ = false;
         return;
     }
@@ -360,10 +361,10 @@ void WMORenderer::shutdown() {
 
     // Incremental loads also own uploaded groups, even before publication.
     // Closing during city streaming must release those buffers as well.
-    for (auto& [id, model] : loadingModels_) {
+    for (auto& [id, model] : scene_->loadingModels_) {
         for (auto& group : model.groups) destroyGroupGPU(group);
     }
-    loadingModels_.clear();
+    scene_->loadingModels_.clear();
 
     // Free cached textures
     for (auto& [path, entry] : textureCache) {
@@ -384,9 +385,9 @@ void WMORenderer::shutdown() {
     if (flatNormalTexture_) { flatNormalTexture_->destroy(device, allocator); flatNormalTexture_.reset(); }
 
     loadedModels.clear();
-    instances.clear();
-    spatialGrid.clear();
-    instanceIndexById.clear();
+    scene_->instances.clear();
+    scene_->spatialGrid.clear();
+    scene_->instanceIndexById.clear();
 
     // destroyGroupGPU defers its frees, and those lambdas release descriptor
     // sets from the pool destroyed just below. Drain them here, while the pool
@@ -487,7 +488,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
 
     // The accumulating model lives across calls, so a resumed load picks up its
     // textures, materials and the groups already uploaded.
-    ModelData& modelData = loadingModels_[id];
+    ModelData& modelData = scene_->loadingModels_[id];
     modelData.id = id;
     modelData.boundingBoxMin = model.boundingBoxMin;
     modelData.boundingBoxMax = model.boundingBoxMax;
@@ -682,7 +683,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     if (modelData.loadedGroups == 0) {
         core::Logger::getInstance().warning("No valid groups loaded for WMO ", id);
         vkCtx_->endUploadBatch();
-        loadingModels_.erase(id);
+        scene_->loadingModels_.erase(id);
         return ModelLoadResult::Failed;
     }
 
@@ -976,7 +977,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     registerRtModel(id, modelData);
     if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
     loadedModels[id] = std::move(modelData);
-    loadingModels_.erase(id);
+    scene_->loadingModels_.erase(id);
     retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
     return ModelLoadResult::Complete;
@@ -987,9 +988,9 @@ bool WMORenderer::isModelLoaded(uint32_t id) const {
 }
 
 bool WMORenderer::instanceHasCollisionGeometry(uint32_t instanceId) const {
-    auto it = std::find_if(instances.begin(), instances.end(),
+    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
                            [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it == instances.end()) return false;
+    if (it == scene_->instances.end()) return false;
     auto model = loadedModels.find(it->modelId);
     return model != loadedModels.end() && model->second.setupDone &&
            !model->second.groups.empty();
@@ -1015,7 +1016,7 @@ void WMORenderer::unloadModel(uint32_t id) {
 void WMORenderer::cleanupUnusedModels() {
     // Build set of model IDs that are still referenced by instances
     std::unordered_set<uint32_t> usedModelIds;
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         usedModelIds.insert(instance.modelId);
     }
 
@@ -1069,10 +1070,10 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
         instance.worldGroupBounds.emplace_back(gMin, gMax);
     }
 
-    instances.push_back(instance);
-    size_t idx = instances.size() - 1;
-    instanceIndexById[instance.id] = idx;
-    insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    scene_->instances.push_back(instance);
+    size_t idx = scene_->instances.size() - 1;
+    scene_->instanceIndexById[instance.id] = idx;
+    insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
     return instance.id;
 }
@@ -1106,9 +1107,9 @@ void WMORenderer::refreshInstanceBounds(WMOInstance& inst) {
 }
 
 void WMORenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     inst.position = position;
     inst.updateModelMatrix();
     refreshInstanceBounds(inst);
@@ -1116,21 +1117,21 @@ void WMORenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posi
 }
 
 void WMORenderer::setInstanceIsTransport(uint32_t instanceId, bool isTransport) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    instances[idxIt->second].isTransport = isTransport;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    scene_->instances[idxIt->second].isTransport = isTransport;
 }
 
 void WMORenderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    instances[idxIt->second].hidden = hidden;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    scene_->instances[idxIt->second].hidden = hidden;
 }
 
 void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
     const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
 
@@ -1167,14 +1168,14 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
     // A moving hull changes only its own grid membership. Rebuilding every
     // building here made each active ship pay for the entire streamed world
     // once per frame, even while the player was standing still in Dalaran.
-    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+    refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
                  inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
 }
 
 void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform) {
-    auto it = std::find_if(instances.begin(), instances.end(),
+    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it == instances.end()) {
+    if (it == scene_->instances.end()) {
         // Nothing to parent to. The M2 was already created, so silently dropping
         // it here leaves it stranded at the origin, drawn nowhere and owned by
         // no one - invisible in a way that looks exactly like a load failure.
@@ -1199,9 +1200,9 @@ void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId
 size_t WMORenderer::setInstanceDoodadAnimation(uint32_t instanceId, uint32_t animationId,
                                                bool loop) {
     if (!m2Renderer_) return 0;
-    auto it = std::find_if(instances.begin(), instances.end(),
+    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
                            [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it == instances.end()) return 0;
+    if (it == scene_->instances.end()) return 0;
     for (const auto& doodad : it->doodads) {
         // A no-op for a doodad without that sequence, so the barrels and
         // lanterns sharing the deck are left alone.
@@ -1219,29 +1220,29 @@ const std::vector<WMORenderer::DoodadTemplate>* WMORenderer::getDoodadTemplates(
 }
 
 bool WMORenderer::hasInstance(uint32_t instanceId) const {
-    return std::find_if(instances.begin(), instances.end(),
+    return std::find_if(scene_->instances.begin(), scene_->instances.end(),
                         [instanceId](const WMOInstance& inst) { return inst.id == instanceId; })
-           != instances.end();
+           != scene_->instances.end();
 }
 
 void WMORenderer::removeInstance(uint32_t instanceId) {
-    auto it = std::find_if(instances.begin(), instances.end(),
+    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it != instances.end()) {
+    if (it != scene_->instances.end()) {
         if (m2Renderer_) {
             std::vector<uint32_t> doodadIds;
             doodadIds.reserve(it->doodads.size());
             for (const auto& doodad : it->doodads) doodadIds.push_back(doodad.m2InstanceId);
             m2Renderer_->removeInstances(doodadIds);
         }
-        instances.erase(it);
+        scene_->instances.erase(it);
         rebuildSpatialIndex();
         core::Logger::getInstance().debug("Removed WMO instance ", instanceId);
     }
 }
 
 void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
-    if (instanceIds.empty() || instances.empty()) {
+    if (instanceIds.empty() || scene_->instances.empty()) {
         return;
     }
 
@@ -1251,7 +1252,7 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         // world to rebuild its index lists, and a town's WMOs carry hundreds
         // of doodads between them.
         std::vector<uint32_t> doodadIds;
-        for (const auto& inst : instances) {
+        for (const auto& inst : scene_->instances) {
             if (toRemove.find(inst.id) == toRemove.end()) {
                 continue;
             }
@@ -1262,16 +1263,16 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         m2Renderer_->removeInstances(doodadIds);
     }
 
-    const size_t oldSize = instances.size();
-    instances.erase(std::remove_if(instances.begin(), instances.end(),
+    const size_t oldSize = scene_->instances.size();
+    scene_->instances.erase(std::remove_if(scene_->instances.begin(), scene_->instances.end(),
                    [&toRemove](const WMOInstance& inst) {
                        return toRemove.find(inst.id) != toRemove.end();
                    }),
-                   instances.end());
+                   scene_->instances.end());
 
-    if (instances.size() != oldSize) {
+    if (scene_->instances.size() != oldSize) {
         rebuildSpatialIndex();
-        core::Logger::getInstance().debug("Removed ", (oldSize - instances.size()),
+        core::Logger::getInstance().debug("Removed ", (oldSize - scene_->instances.size()),
                                           " WMO instances (batched)");
     }
 }
@@ -1279,16 +1280,18 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 void WMORenderer::clearInstances() {
     if (m2Renderer_) {
         std::vector<uint32_t> doodadIds;
-        for (const auto& inst : instances) {
+        for (const auto& inst : scene_->instances) {
             for (const auto& doodad : inst.doodads) doodadIds.push_back(doodad.m2InstanceId);
         }
         m2Renderer_->removeInstances(doodadIds);
     }
-    instances.clear();
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    floorCacheWork_.reset();
-    precomputedFloorGrid.clear();  // Invalidate floor cache when instances change
+    // An unfinished model is map work, not a reusable cache entry. Its
+    // already uploaded groups retire behind the same fences as full models.
+    for (auto& [id, model] : scene_->loadingModels_) {
+        releaseRtModel(id);
+        for (auto& group : model.groups) destroyGroupGPU(group, true);
+    }
+    *scene_ = InstanceState{};
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
 
@@ -1325,8 +1328,8 @@ void WMORenderer::clearAll() {
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
     textureBudgetRejectWarnings_ = 0;
-    floorCacheWork_.reset();
-    precomputedFloorGrid.clear();
+    scene_->floorCacheWork_.reset();
+    scene_->precomputedFloorGrid.clear();
 
     LOG_INFO("Cleared all WMO models, instances, and texture cache");
 }
@@ -1344,12 +1347,12 @@ void WMORenderer::resetQueryStats() {
 }
 
 bool WMORenderer::saveFloorCache() const {
-    if (mapName_.empty()) {
+    if (scene_->mapName_.empty()) {
         core::Logger::getInstance().warning("Cannot save floor cache: no map name set");
         return false;
     }
 
-    std::string filepath = "cache/wmo_floor_" + mapName_ + ".bin";
+    std::string filepath = "cache/wmo_floor_" + scene_->mapName_ + ".bin";
 
     // Create directory if needed
     std::filesystem::path path(filepath);
@@ -1373,33 +1376,33 @@ bool WMORenderer::saveFloorCache() const {
     // Write header: magic + version + count
     const uint32_t magic = 0x574D4F46;  // "WMOF"
     const uint32_t version = 1;
-    const uint64_t count = precomputedFloorGrid.size();
+    const uint64_t count = scene_->precomputedFloorGrid.size();
 
     file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     file.write(reinterpret_cast<const char*>(&version), sizeof(version));
     file.write(reinterpret_cast<const char*>(&count), sizeof(count));
 
     // Write each entry: key (uint64) + height (float)
-    for (const auto& [key, height] : precomputedFloorGrid) {
+    for (const auto& [key, height] : scene_->precomputedFloorGrid) {
         file.write(reinterpret_cast<const char*>(&key), sizeof(key));
         file.write(reinterpret_cast<const char*>(&height), sizeof(height));
     }
 
-    core::Logger::getInstance().info("Saved WMO floor cache (", mapName_, "): ", count, " entries");
+    core::Logger::getInstance().info("Saved WMO floor cache (", scene_->mapName_, "): ", count, " entries");
     return true;
 }
 
 bool WMORenderer::loadFloorCache() {
-    if (mapName_.empty()) {
+    if (scene_->mapName_.empty()) {
         core::Logger::getInstance().warning("Cannot load floor cache: no map name set");
         return false;
     }
 
-    std::string filepath = "cache/wmo_floor_" + mapName_ + ".bin";
+    std::string filepath = "cache/wmo_floor_" + scene_->mapName_ + ".bin";
 
     std::ifstream file(filepath, std::ios::binary);
     if (!file) {
-        core::Logger::getInstance().info("No existing floor cache for map: ", mapName_);
+        core::Logger::getInstance().info("No existing floor cache for map: ", scene_->mapName_);
         return false;
     }
 
@@ -1417,33 +1420,33 @@ bool WMORenderer::loadFloorCache() {
     }
 
     // Read entries
-    floorCacheWork_.reset();
-    precomputedFloorGrid.clear();
-    precomputedFloorGrid.reserve(count);
+    scene_->floorCacheWork_.reset();
+    scene_->precomputedFloorGrid.clear();
+    scene_->precomputedFloorGrid.reserve(count);
 
     for (uint64_t i = 0; i < count; i++) {
         uint64_t key;
         float height;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
         file.read(reinterpret_cast<char*>(&height), sizeof(height));
-        precomputedFloorGrid[key] = height;
+        scene_->precomputedFloorGrid[key] = height;
     }
 
-    core::Logger::getInstance().info("Loaded WMO floor cache (", mapName_, "): ", precomputedFloorGrid.size(), " entries");
+    core::Logger::getInstance().info("Loaded WMO floor cache (", scene_->mapName_, "): ", scene_->precomputedFloorGrid.size(), " entries");
     return true;
 }
 
 void WMORenderer::beginFloorCachePrecompute() {
-    floorCacheWork_ = FloorCacheWork{.count = instances.size(), .startSize = precomputedFloorGrid.size()};
-    LOG_INFO("Pre-computing floor cache for ", instances.size(), " WMO instances...");
+    scene_->floorCacheWork_ = FloorCacheWork{.count = scene_->instances.size(), .startSize = scene_->precomputedFloorGrid.size()};
+    LOG_INFO("Pre-computing floor cache for ", scene_->instances.size(), " WMO instances...");
 }
 
 bool WMORenderer::precomputeFloorCacheStep(size_t maxSamples) {
-    if (!floorCacheWork_) return true;
-    auto& work = *floorCacheWork_;
+    if (!scene_->floorCacheWork_) return true;
+    auto& work = *scene_->floorCacheWork_;
     size_t visited = 0;
-    while (work.instance < std::min(work.count, instances.size()) && visited < maxSamples) {
-        const auto& instance = instances[work.instance];
+    while (work.instance < std::min(work.count, scene_->instances.size()) && visited < maxSamples) {
+        const auto& instance = scene_->instances[work.instance];
         const auto& lo = instance.worldBoundsMin;
         const auto& hi = instance.worldBoundsMax;
         const float startX = std::floor(lo.x / FLOOR_GRID_CELL_SIZE) * FLOOR_GRID_CELL_SIZE;
@@ -1459,31 +1462,31 @@ bool WMORenderer::precomputeFloorCacheStep(size_t maxSamples) {
         const float y = startY + (work.y + 0.5f) * FLOOR_GRID_CELL_SIZE;
         const uint64_t key = floorGridKey(x, y);
         ++visited;
-        if (!precomputedFloorGrid.contains(key)) {
+        if (!scene_->precomputedFloorGrid.contains(key)) {
             ++work.samples;
             if (auto height = getFloorHeight(x, y, hi.z + 10.0f))
-                precomputedFloorGrid[key] = *height;
+                scene_->precomputedFloorGrid[key] = *height;
         }
         if (++work.y >= stepsY) { work.y = 0; ++work.x; }
     }
-    if (work.instance < std::min(work.count, instances.size())) return false;
+    if (work.instance < std::min(work.count, scene_->instances.size())) return false;
     LOG_INFO("Floor cache precompute complete: ", work.samples, " samples checked, ",
-             precomputedFloorGrid.size() - std::min(precomputedFloorGrid.size(), work.startSize),
-             " new entries, total ", precomputedFloorGrid.size());
-    floorCacheWork_.reset();
+             scene_->precomputedFloorGrid.size() - std::min(scene_->precomputedFloorGrid.size(), work.startSize),
+             " new entries, total ", scene_->precomputedFloorGrid.size());
+    scene_->floorCacheWork_.reset();
     return true;
 }
 
 void WMORenderer::rebuildSpatialIndex() {
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    instanceIndexById.reserve(instances.size());
+    scene_->spatialGrid.clear();
+    scene_->instanceIndexById.clear();
+    scene_->instanceIndexById.reserve(scene_->instances.size());
 
-    for (size_t i = 0; i < instances.size(); i++) {
-        const auto& inst = instances[i];
-        instanceIndexById[inst.id] = i;
+    for (size_t i = 0; i < scene_->instances.size(); i++) {
+        const auto& inst = scene_->instances[i];
+        scene_->instanceIndexById[inst.id] = i;
 
-        insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
+        insertBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
 }
 
@@ -1495,20 +1498,20 @@ void WMORenderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& q
     // collision, floor and containment query in this file reaches the world
     // through this one function, and a transport that is on another continent
     // must not be standable on this one.
-    gatherIds(spatialGrid, queryMin, queryMax, tl_candidateIdScratch,
+    gatherIds(scene_->spatialGrid, queryMin, queryMax, tl_candidateIdScratch,
               [&](uint32_t id) {
-                  auto idxIt = instanceIndexById.find(id);
-                  if (idxIt != instanceIndexById.end() && !instances[idxIt->second].hidden) {
+                  auto idxIt = scene_->instanceIndexById.find(id);
+                  if (idxIt != scene_->instanceIndexById.end() && !scene_->instances[idxIt->second].hidden) {
                       outIndices.push_back(idxIt->second);
                   }
               });
 
     // Safety fallback: if the grid misses due streaming/index drift, avoid
     // tunneling by scanning all instances instead of returning no candidates.
-    if (outIndices.empty() && !instances.empty()) {
-        outIndices.reserve(instances.size());
-        for (size_t i = 0; i < instances.size(); i++) {
-            if (!instances[i].hidden) outIndices.push_back(i);
+    if (outIndices.empty() && !scene_->instances.empty()) {
+        outIndices.reserve(scene_->instances.size());
+        for (size_t i = 0; i < scene_->instances.size(); i++) {
+            if (!scene_->instances[i].hidden) outIndices.push_back(i);
         }
     }
 }
@@ -1543,7 +1546,7 @@ void WMORenderer::prepareRender() {
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                          const glm::vec3* viewerPos) {
-    if (!opaquePipeline_ || instances.empty()) {
+    if (!opaquePipeline_ || scene_->instances.empty()) {
         lastDrawCalls = 0;
         return;
     }
@@ -1563,10 +1566,10 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     // already does loadedModels.find() and bails on miss, so this pre-filter
     // was a redundant hashmap lookup per instance every frame. Just include
     // every instance; the cull step prunes unloaded ones.
-    visibleInstances_.clear();
-    visibleInstances_.reserve(instances.size());
-    for (size_t i = 0; i < instances.size(); ++i) {
-        visibleInstances_.push_back(i);
+    scene_->visibleInstances_.clear();
+    scene_->visibleInstances_.reserve(scene_->instances.size());
+    for (size_t i = 0; i < scene_->instances.size(); ++i) {
+        scene_->visibleInstances_.push_back(i);
     }
 
     glm::vec3 camPos = camera.getPosition();
@@ -1592,8 +1595,8 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
         result.distanceCulled = 0;
         result.instanceIndex = instIdx;
 
-        if (instIdx >= instances.size()) return;
-        const auto& instance = instances[instIdx];
+        if (instIdx >= scene_->instances.size()) return;
+        const auto& instance = scene_->instances[instIdx];
         // Somewhere else entirely - see setInstanceHidden.
         if (instance.hidden) return;
         auto mdlIt = loadedModels.find(instance.modelId);
@@ -1646,7 +1649,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             }
         }
         if (usePortalCulling) {
-            portalVisibleGroupSet_.clear();
+            scene_->portalVisibleGroupSet_.clear();
             // Both viewpoints seed the walk. The frustum belongs to the camera,
             // so its group is the principled start - but at a doorway or in a
             // hallway the camera and the character stand in different groups,
@@ -1662,7 +1665,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             const glm::vec3 localViewer =
                 glm::vec3(instance.invModelMatrix * glm::vec4(portalViewerPos, 1.0f));
             getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum,
-                                       instance.modelMatrix, portalVisibleGroupSet_);
+                                       instance.modelMatrix, scene_->portalVisibleGroupSet_);
             // Use the unordered_set directly - was copying into portalVisibleGroups_,
             // sorting it, and binary-searching per group. The set lookup is O(1)
             // per group and skips the per-instance copy + sort.
@@ -1670,7 +1673,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
 
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             if (usePortalCulling &&
-                portalVisibleGroupSet_.find(static_cast<uint32_t>(gi)) == portalVisibleGroupSet_.end()) {
+                scene_->portalVisibleGroupSet_.find(static_cast<uint32_t>(gi)) == scene_->portalVisibleGroupSet_.end()) {
                 result.portalCulled++;
                 continue;
             }
@@ -1707,11 +1710,11 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     };
 
     // Resize drawLists to match (reuses previous capacity)
-    drawLists_.resize(visibleInstances_.size());
+    scene_->drawLists_.resize(scene_->visibleInstances_.size());
 
     // Sequential culling (parallel dispatch overhead > savings for typical instance counts)
-    for (size_t j = 0; j < visibleInstances_.size(); ++j) {
-        cullInstance(visibleInstances_[j], drawLists_[j]);
+    for (size_t j = 0; j < scene_->visibleInstances_.size(); ++j) {
+        cullInstance(scene_->visibleInstances_[j], scene_->drawLists_[j]);
     }
 
     // ── Phase 2: Vulkan draw ────────────────────────────────
@@ -1726,9 +1729,9 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
     int currentPipelineKind = 0;
 
-    for (const auto& dl : drawLists_) {
-        if (dl.instanceIndex >= instances.size() || dl.model == nullptr) continue;
-        const auto& instance = instances[dl.instanceIndex];
+    for (const auto& dl : scene_->drawLists_) {
+        if (dl.instanceIndex >= scene_->instances.size() || dl.model == nullptr) continue;
+        const auto& instance = scene_->instances[dl.instanceIndex];
         const ModelData& model = *dl.model;
 
 
@@ -1915,7 +1918,7 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                                const glm::vec3& shadowCenter, float shadowRadius) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (instances.empty() || loadedModels.empty()) return;
+    if (scene_->instances.empty() || loadedModels.empty()) return;
 
     // Once a frame: the WMO pass casts into the sun's map only.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
@@ -1934,7 +1937,7 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     const float wmoCullRadius = std::max(shadowRadius, 180.0f);
     const float wmoCullRadiusSq = wmoCullRadius * wmoCullRadius;
 
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         // Distance cull using world bounding box - WMO origins can be far from
         // their geometry, so point-based culling misses large buildings.
         glm::vec3 closest = glm::clamp(shadowCenter, instance.worldBoundsMin, instance.worldBoundsMax);
@@ -2053,7 +2056,7 @@ VkDescriptorSet WMORenderer::shadowTexSet(VkTexture* tex, uint32_t frameIndex) {
 
 uint32_t WMORenderer::getTotalTriangleCount() const {
     uint32_t total = 0;
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         auto modelIt = loadedModels.find(instance.modelId);
         if (modelIt != loadedModels.end()) {
             total += modelIt->second.getTotalTriangles();
@@ -2511,7 +2514,7 @@ size_t WMORenderer::evictUnreferencedTextures(size_t bytesNeeded) {
         }
     };
     for (const auto& [id, model] : loadedModels) collect(model);
-    for (const auto& [id, model] : loadingModels_) collect(model);
+    for (const auto& [id, model] : scene_->loadingModels_) collect(model);
 
     std::vector<std::pair<uint64_t, std::string>> candidates;
     candidates.reserve(textureCache.size());
@@ -3471,8 +3474,8 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
 
     // Fast path: current active interior group and its neighbors are usually
     // the right answer for player-floor queries while moving in cities/buildings.
-    if (activeGroup_.isValid() && activeGroup_.instanceIdx < instances.size()) {
-        const auto& instance = instances[activeGroup_.instanceIdx];
+    if (activeGroup_.isValid() && activeGroup_.instanceIdx < scene_->instances.size()) {
+        const auto& instance = scene_->instances[activeGroup_.instanceIdx];
         auto it = loadedModels.find(instance.modelId);
         if (it != loadedModels.end() && instance.modelId == activeGroup_.modelId) {
             const ModelData& model = it->second;
@@ -3512,7 +3515,7 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (outsideCollisionFocus(instance)) continue;
 
         auto it = loadedModels.find(instance.modelId);
@@ -3643,12 +3646,12 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
 std::optional<float> WMORenderer::getInstanceFloorHeight(uint32_t instanceId,
                                                          float glX, float glY, float glZ,
                                                          float* outNormalZ) const {
-    const auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) {
+    const auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) {
         return std::nullopt;
     }
 
-    const auto& instance = instances[idxIt->second];
+    const auto& instance = scene_->instances[idxIt->second];
     const auto modelIt = loadedModels.find(instance.modelId);
     if (modelIt == loadedModels.end()) return std::nullopt;
     const auto& model = modelIt->second;
@@ -3722,7 +3725,7 @@ void WMORenderer::debugDumpGroupsAtPosition(float glX, float glY, float glZ) con
     int totalGroupsOverlapping = 0;
     int totalFloorHits = 0;
 
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         auto it = loadedModels.find(instance.modelId);
         if (it == loadedModels.end()) continue;
         const ModelData& model = it->second;
@@ -3895,7 +3898,7 @@ bool WMORenderer::segmentBlocked(const glm::vec3& from, const glm::vec3& to) con
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (outsideCollisionFocus(instance)) continue;
         if (!rayIntersectsAABB(from, dir, instance.worldBoundsMin, instance.worldBoundsMax)) {
             continue;
@@ -3960,7 +3963,7 @@ bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to,
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (outsideCollisionFocus(instance)) continue;
 
         const float broadMargin = PLAYER_RADIUS + 1.5f;
@@ -4157,8 +4160,8 @@ bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to,
 
 void WMORenderer::updateActiveGroup(float glX, float glY, float glZ) {
     // If active group is still valid, check if player is still inside it
-    if (activeGroup_.isValid() && activeGroup_.instanceIdx < instances.size()) {
-        const auto& instance = instances[activeGroup_.instanceIdx];
+    if (activeGroup_.isValid() && activeGroup_.instanceIdx < scene_->instances.size()) {
+        const auto& instance = scene_->instances[activeGroup_.instanceIdx];
         if (instance.modelId == activeGroup_.modelId) {
             auto it = loadedModels.find(instance.modelId);
             if (it != loadedModels.end()) {
@@ -4214,7 +4217,7 @@ void WMORenderer::updateActiveGroup(float glX, float glY, float glZ) {
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (!withinWorldBounds(instance, glX, glY, glZ)) {
             continue;
         }
@@ -4298,7 +4301,7 @@ std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (outsideCollisionFocus(instance)) continue;
         if (!withinWorldBounds(instance, glX, glY, glZ)) continue;
 
@@ -4412,7 +4415,7 @@ float WMORenderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (outsideCollisionFocus(instance)) continue;
 
         glm::vec3 center = (instance.worldBoundsMin + instance.worldBoundsMax) * 0.5f;
@@ -4549,7 +4552,7 @@ void WMORenderer::collectGrassClearings(float minX, float minY, float maxX, floa
     constexpr float kEase = 9.0f;
     const float reach = kClearing + kEase;
 
-    for (const auto& inst : instances) {
+    for (const auto& inst : scene_->instances) {
         if (inst.worldBoundsMax.x + reach < minX || inst.worldBoundsMin.x - reach > maxX ||
             inst.worldBoundsMax.y + reach < minY || inst.worldBoundsMin.y - reach > maxY) {
             continue;
@@ -4640,7 +4643,7 @@ void WMORenderer::releaseRtModel(uint32_t modelId) {
 void WMORenderer::syncRtScene() {
     if (!rtScene_ || !rtScene_->isActive()) return;
     const uint64_t gen = ++rtSyncGeneration_;
-    for (const auto& inst : instances) {
+    for (const auto& inst : scene_->instances) {
         if (inst.hidden) continue;
         auto mesh = rtModelMeshes_.find(inst.modelId);
         if (mesh == rtModelMeshes_.end()) continue;
@@ -4670,3 +4673,20 @@ void WMORenderer::syncRtScene() {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee::rendering {
+WMORenderer::InstanceSession::InstanceSession(WMORenderer& renderer)
+    : renderer_(renderer) {
+    if (renderer_.scene_ != &renderer_.defaultInstances_)
+        throw std::logic_error("WMORenderer already has a scene owner");
+    state_ = std::make_unique<InstanceState>(std::move(renderer_.defaultInstances_));
+    renderer_.defaultInstances_ = InstanceState{};
+    renderer_.scene_ = state_.get();
+}
+
+WMORenderer::InstanceSession::~InstanceSession() {
+    if (renderer_.getFloorCacheSize()) renderer_.saveFloorCache();
+    renderer_.clearInstances();
+    renderer_.scene_ = &renderer_.defaultInstances_;
+}
+}

@@ -9,6 +9,7 @@
 #include "core/entity_spawner.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
+#include "core/map_scope.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
 #include "core/frame_plan.hpp"
@@ -50,7 +51,7 @@ using WorldMap = world_map::WorldMapFacade;
 }
 namespace ui { class UIManager; class MapWindow; }
 namespace auth { class AuthHandler; }
-namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
+namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; }
@@ -110,7 +111,6 @@ public:
     ui::UIManager* getUIManager() { return uiManager.get(); }
     auth::AuthHandler* getAuthHandler() { return authHandler.get(); }
     game::GameHandler* getGameHandler() { return gameHandler.get(); }
-    game::World* getWorld() { return world.get(); }
     pipeline::AssetManager* getAssetManager() { return assetManager.get(); }
     addons::AddonManager* getAddonManager() { return addonManager_.get(); }
     game::ExpansionRegistry* getExpansionRegistry() { return expansionRegistry_.get(); }
@@ -321,7 +321,6 @@ private:
     std::unique_ptr<RendererTransportScene> transportScene_;
     // The walls other players run into between their movement reports.
     std::unique_ptr<game::MovementCollision> movementCollision_;
-    std::unique_ptr<game::World> world;
     std::unique_ptr<pipeline::AssetManager> assetManager;
     std::unique_ptr<addons::AddonManager> addonManager_;
     // Set by ReloadUI() from inside Lua, acted on between frames - the reload
@@ -404,6 +403,10 @@ private:
     std::unique_ptr<EntitySpawner> entitySpawner_;
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
+    /// Everything held while on one map - see MapScope. Created and destroyed
+    /// only in Transitions; declared after what it borrows so it goes first.
+    std::unique_ptr<MapScope> mapScope_;
+    MapScope::Services mapScopeServices();
     std::unique_ptr<rendering::LoadingScreen> loadingScreen_;
 #ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
     std::unique_ptr<LoadingFrameProbe> loadingProbe_;
@@ -478,18 +481,12 @@ private:
     float networkUpdateMs_ = 0.0f;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
-    bool playerCharacterSpawned = false;
-    bool npcsSpawned = false;
     bool spawnSnapToGround = true;
     float lastFrameTime = 0.0f;
 
     // Player character info (for model spawning)
     game::Race playerRace_ = game::Race::HUMAN;
     game::Gender playerGender_ = game::Gender::MALE;
-    game::Class playerClass_ = game::Class::WARRIOR;
-    uint64_t spawnedPlayerGuid_ = 0;
-    uint32_t spawnedAppearanceBytes_ = 0;
-    uint8_t spawnedFacialFeatures_ = 0;
 
     // Static empty values for null-safe delegation
     static inline const std::string emptyString_;
@@ -499,22 +496,8 @@ private:
     float lastSentCanonicalYaw_ = 1000.0f;   // Sentinel - triggers first send
     bool idleYawned_ = false;
 
-    // M2 transport riding: last frame's locked (canonical) render position, used to
-    // detect how far the player tried to walk this frame so that delta can be applied
-    // on top of the fixed ride offset instead of either fully locking movement or
-    // recomputing the offset from an absolute position (see application.cpp's "M2
-    // transport riding" block for why the latter is a no-op identity).
-    glm::vec3 lastM2RideLockedCanonical_ = glm::vec3(0.0f);
-    bool hasM2RideLock_ = false;
-    glm::vec3 lastWMORideLockedRender_ = glm::vec3(0.0f);
-    bool hasWMORideLock_ = false;
-    uint64_t lastWMORideTransportGuid_ = 0;
-    uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
-    // Set when a rider boards or transfers onto a WMO ship whose deck collision hasn't
-    // finished loading yet - holds the boarding-time offset (and freezes camera follow)
-    // until this exact transport instance's deck floor exists, instead of letting gravity
-    // fold into the attachment and drop the rider through the hull.
-    bool deckFloorPending_ = false;
+    // Transport riding locks (M2 and WMO) and the pending deck floor live in
+    // MapScope::TransportRide: they name transports of the current map.
 
     bool wasAutoAttacking_ = false;
     /// Whether the player was swimming last frame, so weapons are put away

@@ -3,6 +3,7 @@
 #include "core/logger.hpp"
 #include "core/input.hpp"
 #include "core/coordinates.hpp"
+#include "core/entity_spawner.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_events.hpp"
 #include "addons/addon_manager.hpp"
@@ -20,7 +21,8 @@ LoadingFrameProbe::LoadingFrameProbe(Application& app, EventBus& events)
     waitStage_ = std::getenv("WOWEE_LOADING_TEST_STAGE") ? std::getenv("WOWEE_LOADING_TEST_STAGE") : "warmup";
     if (!std::getenv("WOWEE_MULGORE_PROBE") ||
         (action_ != "close" && action_ != "disconnect" && action_ != "logout" &&
-         action_ != "transfer" && action_ != "release" && action_ != "resize" && action_ != "ready")) {
+         action_ != "transfer" && action_ != "release" && action_ != "resize" && action_ != "ready" &&
+         action_ != "entry-spawn")) {
         fail("requires offline fixture and a supported action");
     }
     subscriptions_.push_back(events_.subscribe<PostedLoadingProbe>([this](const auto&) { posted_ = true; }));
@@ -46,6 +48,31 @@ void LoadingFrameProbe::fail(const char* detail) {
 void LoadingFrameProbe::streaming(const FramePlan& plan) {
     if (done_) return;
     auto* loader = app_.getWorldLoader();
+    // A real network burst can contain the first create blocks before the
+    // client's entry transition. Observe the visible result before any old
+    // periodic repair scan can hide a discarded notification.
+    constexpr uint64_t entryGuid = 0xF130000001000042ULL;
+    if (action_ == "entry-spawn" && plan.world && !entrySpawnQueued_) {
+        entrySpawnQueued_ = true;
+        const auto display = app_.getEntitySpawner()->getGryphonDisplayId();
+        if (!display) { fail("fixture has no gryphon display"); return; }
+        auto entity = std::make_shared<game::Unit>(entryGuid);
+        const glm::vec3 destination(-8549.58f, 1003.11f, 89.7306f);
+        const auto pos = coords::serverToCanonical(destination);
+        entity->setPosition(pos.x + 4, pos.y, pos.z, 0);
+        entity->setDisplayId(display);
+        app_.getGameHandler()->getEntityManager().addEntity(entryGuid, entity);
+        app_.getEntitySpawner()->queueCreatureSpawn(entryGuid, display, pos.x + 4, pos.y, pos.z, 0);
+        app_.getGameHandler()->currentMapIdRef() = 0;
+        app_.getGameHandler()->setPosition(destination.x, destination.y, destination.z);
+        events_.post(game::events::WorldEntered{0, destination.x, destination.y, destination.z, false});
+    }
+    if (action_ == "entry-spawn" && entrySpawnQueued_ && plan.loading) inWorld_ = true;
+    if (action_ == "entry-spawn" && inWorld_ && plan.world) {
+        if (app_.getEntitySpawner()->getCreatureInstanceId(entryGuid)) pass("early entry spawn is visible without a repair scan");
+        else fail("entry transition discarded the first creature spawn");
+        return;
+    }
     if (!fired_ && installed_ && app_.getState() == AppState::AUTHENTICATION) {
         fail("world load failed before the requested action"); return;
     }

@@ -174,11 +174,11 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
 void M2Renderer::unloadPosedEmitterModel(uint32_t handle) {
     auto it = posedEmitterModels_.find(handle);
     if (it == posedEmitterModels_.end()) return;
-    for (auto posedIt = posedEmitters_.begin(); posedIt != posedEmitters_.end();) {
+    for (auto posedIt = scene_->posedEmitters_.begin(); posedIt != scene_->posedEmitters_.end();) {
         if (posedIt->second.modelHandle == handle) {
             LOG_WARNING("M2 posed emitters ", posedIt->first, " outlived their model '",
                         it->second.gpu.name, "' - removed with it");
-            posedIt = posedEmitters_.erase(posedIt);
+            posedIt = scene_->posedEmitters_.erase(posedIt);
         } else {
             ++posedIt;
         }
@@ -210,7 +210,7 @@ uint32_t M2Renderer::createPosedEmitters(uint32_t modelHandle) {
     auto modelIt = posedEmitterModels_.find(modelHandle);
     if (modelIt == posedEmitterModels_.end()) return 0;
     const uint32_t id = nextPosedEmitters_++;
-    PosedEmitters& posed = posedEmitters_[id];
+    PosedEmitters& posed = scene_->posedEmitters_[id];
     posed.modelHandle = modelHandle;
     posed.inst.id = id;
     posed.inst.cachedModel = &modelIt->second.gpu;
@@ -219,16 +219,16 @@ uint32_t M2Renderer::createPosedEmitters(uint32_t modelHandle) {
 }
 
 void M2Renderer::removePosedEmitters(uint32_t id) {
-    posedEmitters_.erase(id);
+    scene_->posedEmitters_.erase(id);
 }
 
 bool M2Renderer::hasPosedEmitters(uint32_t id) const {
-    return posedEmitters_.contains(id);
+    return scene_->posedEmitters_.contains(id);
 }
 
 void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
-    auto it = posedEmitters_.find(id);
-    if (it == posedEmitters_.end()) return;
+    auto it = scene_->posedEmitters_.find(id);
+    if (it == scene_->posedEmitters_.end()) return;
     PosedEmitters& posed = it->second;
     posed.posed = pose.posed;
     if (!pose.posed) return;
@@ -251,7 +251,7 @@ void M2Renderer::setPosedEmittersPose(uint32_t id, const EmitterPose& pose) {
 }
 
 void M2Renderer::updatePosedEmitters(float dt) {
-    for (auto& [id, posed] : posedEmitters_) {
+    for (auto& [id, posed] : scene_->posedEmitters_) {
         M2Instance& inst = posed.inst;
         const M2ModelGPU& gpu = *inst.cachedModel;
         if (posed.posed && !gpu.particleEmitters.empty()) emitParticles(inst, gpu, dt);
@@ -272,7 +272,7 @@ void M2Renderer::destroyPosedEmitterModels() {
                 if (set) vkFreeDescriptorSets(device, materialDescPool_, 1, &set);
         }
     }
-    posedEmitters_.clear();
+    scene_->posedEmitters_.clear();
     posedEmitterModels_.clear();
     ++*materialPoolGeneration_;
 }

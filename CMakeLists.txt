@@ -662,6 +662,7 @@ set(WOWEE_SOURCES
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
     src/core/world_loader.cpp
+    src/core/map_scope.cpp
     src/core/zone_tracker.cpp
     src/core/player_view.cpp
     src/core/spell_presentation.cpp
@@ -740,7 +741,6 @@ set(WOWEE_SOURCES
     src/game/transport_path_repository.cpp
     src/game/transport_clock_sync.cpp
     src/game/transport_animator.cpp
-    src/game/world.cpp
     src/game/player.cpp
     src/game/entity.cpp
     src/game/opcodes.cpp
@@ -995,6 +995,7 @@ set(WOWEE_SOURCES
     src/rendering/m2_renderer_instance.cpp
     src/rendering/m2_renderer_posed_emitters.cpp
     src/rendering/character_emitters.cpp
+    src/rendering/map_render_session.cpp
     src/rendering/m2_model_classifier.cpp
     src/rendering/render_graph.cpp
     src/rendering/hiz_system.cpp
@@ -1253,7 +1254,6 @@ set(WOWEE_HEADERS
     include/auth/crypto.hpp
 
     include/game/game_handler.hpp
-    include/game/world.hpp
     include/game/player.hpp
     include/game/entity.hpp
     include/game/opcodes.hpp

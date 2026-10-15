@@ -46,8 +46,11 @@ and interface updates, then draws the loading overlay through the normal render
 submission. WorldLoader starts jobs and reports Pending/Ready/Failed with a reason;
 it never polls SDL, dispatches packets, updates the game or presents another frame.
 Application owns scene cleanup, player preparation and the final state change.
-Only the Transitions phase starts/cancels/commits world lifetimes. Cancellation
-does not wait for preparation futures; their assets remain alive until workers end.
+Only the Transitions phase starts/cancels/commits world lifetimes. A world
+lifetime is a `MapScope`: ending it cancels its `JobGroup` and joins the work
+still running against it - preparation, terrain workers, spawn jobs - before its
+state goes. Workers check the token between steps, so the join waits for at most
+one read or parse, never for the remaining load.
 
 Keep the original tile and warmup completion rules. Observe convergence after
 Present, including initial spawns, ground near the entry point and upload fences.

@@ -64,8 +64,8 @@ struct WorldLoader::Load {
     glm::vec3 spawn;
     Stage stage = Stage::Preparing;
     WorldLoadStatus status;
-    std::shared_ptr<std::atomic<bool>> cancelled = std::make_shared<std::atomic<bool>>(false);
-    std::future<std::shared_ptr<PreparedMap>> future;
+    JobGroup::Token token;
+    JobGroup::Future<std::shared_ptr<PreparedMap>> future;
     std::shared_ptr<PreparedMap> prepared;
     Clock::time_point started = Clock::now(), stageStarted = started;
     WorldTileProgress tiles;
@@ -78,56 +78,21 @@ WorldLoader::WorldLoader(const Phase& phase, rendering::Renderer* renderer,
                          pipeline::AssetManager* assets)
     : phase_(phase), renderer_(renderer), assetManager_(assets) {}
 
-WorldLoader::~WorldLoader() {
-    cancelWorldPreload();
-    if (load_) {
-        load_->cancelled->store(true);
-        retiredLoads_.push_back(std::move(load_));
-    }
-    for (auto& load : retiredLoads_) if (load->future.valid()) load->future.wait();
-    collectRetiredLoads();
-}
+WorldLoader::~WorldLoader() { cancelWorldPreload(); }
 
-void WorldLoader::collectRetiredLoads() {
-    std::erase_if(retiredLoads_, [](const auto& load) {
-        if (!load->future.valid()) return true;
-        if (load->future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-        try {
-            const auto prepared = load->future.get();
-            if (prepared && !prepared->error.empty())
-                LOG_WARNING("Cancelled map preparation failed: map=", load->entry.mapId, " ", prepared->error);
-        }
-        catch (const std::exception& error) {
-            LOG_WARNING("Cancelled map preparation failed: map=", load->entry.mapId, " ", error.what());
-        }
-        return true;
-    });
+WorldLoader::Session::Session(WorldLoader& owner, std::unique_ptr<Load> load)
+    : owner_(owner), load_(std::move(load)) {
+    if (owner_.load_) throw std::logic_error("World loader already has a map owner");
+    owner_.load_ = load_.get();
 }
-
-bool WorldLoader::hasBackgroundWork() const {
-    const auto pending = [](const auto& load) {
-        return load && load->future.valid() && load->future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
-    };
-    return pending(load_) || std::any_of(retiredLoads_.begin(), retiredLoads_.end(), pending);
+WorldLoader::Session::~Session() {
+    load_->token.cancel();
+    if (load_->future.valid()) load_->future.wait();
+    owner_.load_ = nullptr;
 }
-
-void WorldLoader::cancel() {
-    if (!requirePhase(phase_, Phase::Transitions, "cancel world load")) return;
-    if (load_) {
-        load_->cancelled->store(true);
-        LOG_INFO("World load cancelled: map=", load_->entry.mapId,
-                 " elapsed_ms=", secondsSince(load_->started) * 1000);
-        retiredLoads_.push_back(std::move(load_));
-    }
-    collectRetiredLoads();
+uint32_t WorldLoader::getLoadedMapId() const {
+    return load_ && load_->stage == Stage::Finished ? load_->entry.mapId : 0xFFFFFFFF;
 }
-
-void WorldLoader::resetLoadedMap() {
-    cancel();
-    loadedMapId_ = 0xFFFFFFFF;
-    pendingWorldEntry_.reset();
-}
-
 std::optional<WorldLoader::Entry> WorldLoader::takePendingEntry() {
     return std::exchange(pendingWorldEntry_, std::nullopt);
 }
@@ -166,33 +131,34 @@ std::string WorldLoader::resolveMapName(uint32_t mapId) {
     return mapIdToName(mapId);
 }
 
-void WorldLoader::begin(Entry entry) {
-    if (!requirePhase(phase_, Phase::Transitions, "begin world load")) return;
-    cancel();
-    load_ = std::make_unique<Load>();
+std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& jobs) {
+    if (!requirePhase(phase_, Phase::Transitions, "begin world load")) return {};
+    auto session = std::make_unique<Session>(*this, std::make_unique<Load>());
+    load_->token = jobs.token();
     load_->entry = entry;
     load_->spawn = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
     if (!renderer_ || !assetManager_ || !assetManager_->isInitialized()) {
         fail("Renderer or assets are unavailable");
-        return;
+        return session;
     }
     load_->mapName = resolveMapName(entry.mapId);
-    if (load_->mapName.empty()) { fail("No map name for id " + std::to_string(entry.mapId)); return; }
+    if (load_->mapName.empty()) { fail("No map name for id " + std::to_string(entry.mapId)); return session; }
     cancelWorldPreload();
     saveLastWorldInfo(entry.mapId, load_->mapName, entry.x, entry.y);
     LOG_INFO("World load started: map=", entry.mapId, " name=", load_->mapName,
              " server=(", entry.x, ",", entry.y, ",", entry.z, ")");
     auto* assets = assetManager_;
-    load_->future = ThreadPool::ioWorkers().submit([assets, name = load_->mapName, cancelled = load_->cancelled] {
-        return prepareMap(*assets, name, cancelled);
+    load_->future = jobs.submit([assets, name = load_->mapName](const JobGroup::Token& token) {
+        return prepareMap(*assets, name, token);
     });
+    return session;
 }
 
 std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::AssetManager& assets,
-        const std::string& mapName, const std::shared_ptr<std::atomic<bool>>& cancelled) {
+        const std::string& mapName, const JobGroup::Token& token) {
     auto result = std::make_shared<PreparedMap>();
     const std::string wdtPath = "World\\Maps\\" + mapName + "\\" + mapName + ".wdt";
-    if (cancelled->load()) return result;
+    if (!token.current()) return result;
     auto data = assets.readFile(wdtPath);
     if (data.empty()) {
         LOG_WARNING("No WDT at ", wdtPath, "; trying ordinary ADT streaming");
@@ -203,11 +169,11 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
     auto& model = result->root;
     const auto& path = result->wdt.rootWMOPath;
     data = assets.readFile(path);
-    if (cancelled->load()) return result;
+    if (!token.current()) return result;
     if (data.empty()) { result->error = "Cannot read root WMO " + path; return result; }
     model = pipeline::WMOLoader::load(data);
     for (uint32_t group = 0; group < model.nGroups; ++group) {
-        if (cancelled->load()) return result;
+        if (!token.current()) return result;
         bool found = false;
         for (const auto& candidate : pipeline::wmoGroupCandidates(path, group)) {
             data = assets.readFileOptional(candidate);
@@ -223,7 +189,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
     }
     if (!model.isValid()) { result->error = "Invalid root WMO " + path; return result; }
     for (const auto& texture : model.textures) {
-        if (cancelled->load()) return result;
+        if (!token.current()) return result;
         const auto key = textureKey(texture);
         if (key.empty() || result->wmoTextures.contains(key)) continue;
         auto image = assets.loadTexture(key, true);
@@ -249,7 +215,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
     const auto interiors = pipeline::interiorDoodads(model);
     std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> models;
     for (uint32_t index = set.startIndex; index < set.startIndex + set.count && index < model.doodads.size(); ++index) {
-        if (cancelled->load()) return result;
+        if (!token.current()) return result;
         const auto& doodad = model.doodads[index];
         const auto name = model.doodadNames.find(doodad.nameIndex);
         if (name == model.doodadNames.end() || name->second.empty()) {
@@ -267,7 +233,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
             if (m2->isValid()) {
                 it->second = m2;
                 for (const auto& texture : m2->textures) {
-                    if (cancelled->load()) return result;
+                    if (!token.current()) return result;
                     const auto key = textureKey(texture.filename);
                     if (!key.empty() && !result->m2Textures.contains(key))
                         result->m2Textures[key] = assets.loadTexture(key, true);
@@ -324,7 +290,6 @@ bool WorldLoader::initializeScene() {
 
 const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
     if (!requirePhase(phase_, Phase::Streaming, "stream world load")) return status();
-    collectRetiredLoads();
     if (!load_ || stage() == Stage::Finished || stage() == Stage::Failed) return status();
     auto& load = *load_;
     auto* ctx = renderer_ ? renderer_->getVkContext() : nullptr;
@@ -453,9 +418,8 @@ bool WorldLoader::finish() {
         ctx->pollUploadBatches();
         if (!ctx->uploadsComplete()) return false;
     }
-    loadedMapId_ = load_->entry.mapId;
     load_->stage = Stage::Finished;
-    LOG_INFO("World load complete: map=", loadedMapId_, " total_ms=", secondsSince(load_->started) * 1000,
+    LOG_INFO("World load complete: map=", load_->entry.mapId, " total_ms=", secondsSince(load_->started) * 1000,
              " warmup_ms=", secondsSince(load_->stageStarted) * 1000);
     load_->prepared.reset();
     return true;

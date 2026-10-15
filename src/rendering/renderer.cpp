@@ -1088,7 +1088,8 @@ void Renderer::shutdown() {
     if (terrainManager) {
         terrainManager->stopWorkers();
         LOG_DEBUG("Renderer::shutdown - terrainManager reset...");
-        terrainManager.reset();
+        standaloneTerrain_.reset();
+        terrainManager = nullptr;
     }
 
     LOG_DEBUG("Renderer::shutdown - terrainRenderer...");
@@ -3781,10 +3782,13 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
 
     // Create and initialize terrain manager
     if (!terrainManager) {
-        terrainManager = std::make_unique<TerrainManager>();
+        standaloneTerrain_ = std::make_unique<TerrainManager>();
+        terrainManager = standaloneTerrain_.get();
+        if (mapJobToken_.current()) terrainManager->setJobToken(mapJobToken_);
         if (!terrainManager->initialize(assetManager, terrainRenderer.get())) {
             LOG_ERROR("Failed to initialize terrain manager");
-            terrainManager.reset();
+            standaloneTerrain_.reset();
+            terrainManager = nullptr;
             return false;
         }
         // Set water renderer for terrain streaming
@@ -4792,3 +4796,18 @@ void Renderer::buildFrameGraph() {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee::rendering {
+std::unique_ptr<TerrainManager> Renderer::takeTerrainSession() {
+    if (!standaloneTerrain_ || terrainManager != standaloneTerrain_.get())
+        throw std::logic_error("Terrain session already has a scene owner");
+    return std::move(standaloneTerrain_);
+}
+void Renderer::releaseTerrainSession(TerrainManager* session) {
+    if (terrainManager != session) {
+        LOG_ERROR("Terrain session released by a different scene owner");
+        return;
+    }
+    terrainManager = nullptr;
+}
+}

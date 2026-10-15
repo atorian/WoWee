@@ -123,11 +123,17 @@ public:
     // Update orientation only, without disrupting an in-progress movement interpolation.
     void setOrientation(float o) { orientation = o; }
 
+    /// Whether the server has said where this object is. A stationary object's
+    /// create block need not carry a position - a corpse's often does not - and
+    /// an object with none is not drawn at the map origin.
+    [[nodiscard]] bool hasPosition() const { return hasPosition_; }
+
     void setPosition(float px, float py, float pz, float o) {
         x = px;
         y = py;
         z = pz;
         orientation = o;
+        hasPosition_ = true;
         isMoving_ = false; // Instant position set cancels interpolation
         usePathMode_ = false;
         activeSpline_.reset();
@@ -284,6 +290,7 @@ protected:
     float y = 0.0f;
     float z = 0.0f;
     float orientation = 0.0f;
+    bool hasPosition_ = false;
 
     // Update fields (dynamic values) - flat sorted vector. See FlatFieldMap docs.
     FlatFieldMap fields;

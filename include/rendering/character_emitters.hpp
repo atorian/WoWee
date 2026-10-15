@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <memory>
 
 namespace wowee {
 namespace rendering {
@@ -21,13 +22,27 @@ class M2Renderer;
 /// update() runs once both renderers have finished the frame's animation, so
 /// the emitters follow this frame's skeleton rather than the last one's.
 class CharacterEmitters {
+    struct InstanceState;
 public:
+    /// The owning scene holds this lease. Geometry/texture caches stay here;
+    /// instances, collision indexes and incomplete uploads die with the lease.
+    class InstanceSession {
+    public:
+        explicit InstanceSession(CharacterEmitters& renderer);
+        ~InstanceSession();
+        InstanceSession(const InstanceSession&) = delete;
+        InstanceSession& operator=(const InstanceSession&) = delete;
+    private:
+        CharacterEmitters& renderer_;
+        std::unique_ptr<InstanceState> state_;
+    };
     CharacterEmitters(CharacterRenderer& characters, M2Renderer& m2);
     ~CharacterEmitters();
     CharacterEmitters(const CharacterEmitters&) = delete;
     CharacterEmitters& operator=(const CharacterEmitters&) = delete;
 
     void update(float deltaTime);
+    void clearInstances();
 
 private:
     struct Model {
@@ -50,8 +65,13 @@ private:
     /// Per CharacterRenderer model load (EmitterSource::modelSerial).
     std::unordered_map<uint64_t, Model> models_;
     /// Per CharacterRenderer instance.
-    std::unordered_map<uint32_t, Binding> bindings_;
     uint64_t frame_ = 0;
+    struct InstanceState {
+        std::unordered_map<uint32_t, Binding> bindings_;
+    };
+    InstanceState defaultInstances_;
+    InstanceState* scene_ = &defaultInstances_;
+
 };
 
 } // namespace rendering

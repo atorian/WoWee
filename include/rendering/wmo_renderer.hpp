@@ -50,7 +50,20 @@ class VkTexture;
  * - Portal visibility (future)
  */
 class WMORenderer {
+    struct InstanceState;
 public:
+    /// The owning scene holds this lease. Geometry/texture caches stay here;
+    /// instances, collision indexes and incomplete uploads die with the lease.
+    class InstanceSession {
+    public:
+        explicit InstanceSession(WMORenderer& renderer);
+        ~InstanceSession();
+        InstanceSession(const InstanceSession&) = delete;
+        InstanceSession& operator=(const InstanceSession&) = delete;
+    private:
+        WMORenderer& renderer_;
+        std::unique_ptr<InstanceState> state_;
+    };
     WMORenderer();
     ~WMORenderer();
 
@@ -251,7 +264,7 @@ public:
     /**
      * Get number of active instances
      */
-    uint32_t getInstanceCount() const { return instances.size(); }
+    uint32_t getInstanceCount() const { return scene_->instances.size(); }
     size_t getLoadedModelCount() const { return loadedModels.size(); }
 
     /**
@@ -440,11 +453,11 @@ public:
     void updateActiveGroup(float glX, float glY, float glZ);
 
     // Floor cache persistence (zone-specific files)
-    void setMapName(const std::string& name) { mapName_ = name; }
-    const std::string& getMapName() const { return mapName_; }
+    void setMapName(const std::string& name) { scene_->mapName_ = name; }
+    const std::string& getMapName() const { return scene_->mapName_; }
     bool saveFloorCache() const;  // Saves to cache/wmo_floor_<mapName>.bin
     bool loadFloorCache();        // Loads from cache/wmo_floor_<mapName>.bin
-    size_t getFloorCacheSize() const { return precomputedFloorGrid.size(); }
+    size_t getFloorCacheSize() const { return scene_->precomputedFloorGrid.size(); }
 
     /// Loading can yield between batches instead of blocking the client frame.
     void beginFloorCachePrecompute();
@@ -871,7 +884,6 @@ private:
     void releaseRtModel(uint32_t modelId);
 
     // Current map name for zone-specific floor cache
-    std::string mapName_;
 
     // Vulkan pipelines
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
@@ -929,12 +941,10 @@ private:
     std::unordered_map<uint32_t, ModelData> loadedModels;
     // Models part-way through an incremental load; moved into loadedModels once
     // every group is uploaded, so a half-built model is never rendered.
-    std::unordered_map<uint32_t, ModelData> loadingModels_;
     size_t modelCacheLimit_ = 4000;
     uint32_t modelLimitRejectWarnings_ = 0;
 
     // Active instances
-    std::vector<WMOInstance> instances;
     uint32_t nextInstanceId = 1;
 
     bool initialized_ = false;
@@ -970,8 +980,6 @@ private:
     CollisionFocus collisionFocus;
 
     // Uniform grid for fast local collision queries.
-    SpatialGrid spatialGrid;
-    std::unordered_map<uint32_t, size_t> instanceIndexById;
     // Collision scratch buffers are thread_local (see wmo_renderer.cpp) for thread-safety.
 
     // Parallel visibility culling
@@ -984,9 +992,6 @@ private:
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
     };
-    std::vector<size_t> visibleInstances_;      // reused per frame
-    std::vector<InstanceDrawList> drawLists_;    // reused per frame
-    std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
 
     // Collision query profiling - atomic because getFloorHeight is dispatched
     // on async threads from camera_controller while the main thread reads these.
@@ -995,12 +1000,10 @@ private:
 
     // Floor height cache - persistent precomputed grid
     static constexpr float FLOOR_GRID_CELL_SIZE = 2.0f;  // 2 unit grid cells
-    mutable std::unordered_map<uint64_t, float> precomputedFloorGrid;  // key -> floor height
     struct FloorCacheWork {
         size_t instance = 0, count = 0, samples = 0, startSize = 0;
         int x = 0, y = 0;
     };
-    std::optional<FloorCacheWork> floorCacheWork_;
     mutable uint32_t currentFrameId = 0;
 
     uint64_t floorGridKey(float x, float y) const {
@@ -1053,6 +1056,21 @@ private:
             entries[slot] = { .key = k, .resultZ = result, .normalZ = normalZ, .frameId = frame };
         }
     };
+    struct InstanceState {
+        std::unordered_map<uint32_t, ModelData> loadingModels_;
+        std::vector<WMOInstance> instances;
+        SpatialGrid spatialGrid;
+        std::unordered_map<uint32_t, size_t> instanceIndexById;
+        std::vector<size_t> visibleInstances_;      // reused per frame
+        std::vector<InstanceDrawList> drawLists_;    // reused per frame
+        std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
+        mutable std::unordered_map<uint64_t, float> precomputedFloorGrid;  // key -> floor height
+        std::optional<FloorCacheWork> floorCacheWork_;
+        std::string mapName_;
+    };
+    InstanceState defaultInstances_;
+    InstanceState* scene_ = &defaultInstances_;
+
 };
 
 } // namespace rendering

@@ -171,47 +171,13 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
         rendering::anim::validateAgainstDBC(assetManager_->loadDBC("AnimationData.dbc"));
     }
 
-    // Reconnect to the same map: terrain stays loaded but all online entities are stale.
-    // Despawn them properly so the server's fresh CREATE_OBJECTs will re-populate the world.
-    uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
-    if (entitySpawner_ && mapId == currentLoadedMap && renderer_.getTerrainManager() && isInitialEntry) {
-        LOG_INFO("Reconnect to same map ", mapId, ": clearing stale online entities (terrain preserved)");
-
-        // Pending spawn queues and failure caches - clear so previously-failed GUIDs can retry.
-        // Dead creature guids will be re-populated from fresh server state.
-        entitySpawner_->clearAllQueues();
-
-        // Properly despawn all tracked instances from the renderer
-        entitySpawner_->despawnAllCreatures();
-        entitySpawner_->despawnAllPlayers();
-        entitySpawner_->despawnAllGameObjects();
-
-        // Update player position and re-queue nearby tiles (same logic as teleport)
-        glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(x, y, z));
-        glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
-        renderer_.getCharacterPosition() = renderPos;
-        if (playerView_.getCameraController()) {
-            auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
-            if (ft) *ft = renderPos;
-            playerView_.getCameraController()->clearMovementInputs();
-            playerView_.getCameraController()->suppressMovementFor(1.0f);
-            playerView_.getCameraController()->suspendGravityFor(10.0f);
-            // The heightfield loads before the buildings do, and over
-            // anything underground it sits well above where the player
-            // actually is. Hold the floor to what the server said until
-            // the WMOs have had time to arrive.
-            playerView_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
-        }
-        worldEntryMovementGraceTimer_ = 2.0f;
-        taxiLandingClampTimer_ = 0.0f;
-        lastTaxiFlight_ = false;
-        renderer_.getTerrainManager()->processReadyTiles();
-        precacheNearbyTiles(renderer_.getTerrainManager(), renderPos, 8);
-        return;
-    }
+    // A login is always a new map scope, even onto the map just left: the
+    // server sends every object afresh, and the previous session's presentation
+    // ended with its scope.
+    const uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
 
     // Same-map teleport (taxi landing, GM teleport, hearthstone on same continent):
-    if (mapId == currentLoadedMap && renderer_.getTerrainManager()) {
+    if (!isInitialEntry && mapId == currentLoadedMap && renderer_.getTerrainManager()) {
         // Check if teleport is far enough to need terrain loading (>500 render units)
         glm::vec3 oldPos = renderer_.getCharacterPosition();
         glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(x, y, z));
@@ -497,11 +463,11 @@ void WorldEntryCallbackHandler::update(float deltaTime) {
     }
 }
 
-void WorldEntryCallbackHandler::resetState() {
+void WorldEntryCallbackHandler::beginMapEntry() {
     hearthTeleportPending_ = false;
     hearthTeleportPos_ = glm::vec3(0.0f);
     hearthTeleportTimer_ = 0.0f;
-    worldEntryMovementGraceTimer_ = 0.0f;
+    worldEntryMovementGraceTimer_ = 2.0f;
     lastTaxiFlight_ = false;
     taxiLandingClampTimer_ = 0.0f;
 }

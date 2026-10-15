@@ -35,6 +35,7 @@ private:
     bool fired_ = false, done_ = false, installed_ = false;
     bool posted_ = false, sentEvents_ = false, luaVerified_ = false;
     bool keyHeld_ = false, keyReleased_ = false, inWorld_ = false;
+    bool entrySpawnQueued_ = false;
     Clock::time_point started_ = Clock::now(), actionAt_{}, worldAt_{};
     glm::vec3 worldPosition_{0};
 };

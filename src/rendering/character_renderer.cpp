@@ -16,6 +16,7 @@
  */
 #include <atomic>
 #include "rendering/character_renderer.hpp"
+#include <stdexcept>
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
@@ -609,7 +610,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 void CharacterRenderer::shutdown() {
     if (!vkCtx_) return;
 
-    LOG_INFO("CharacterRenderer::shutdown instances=", instances.size(),
+    LOG_INFO("CharacterRenderer::shutdown instances=", scene_->instances.size(),
              " models=", models.size(), " override=", (void*)renderPassOverride_);
 
     // Wait for any in-flight background normal map generation threads
@@ -629,7 +630,7 @@ void CharacterRenderer::shutdown() {
     }
 
     // Clean up instance bone buffers
-    for (auto& pair : instances) {
+    for (auto& pair : scene_->instances) {
         destroyInstanceBones(pair.second, /*defer=*/true);
     }
 
@@ -659,7 +660,7 @@ void CharacterRenderer::shutdown() {
     flatNormalTexture_.reset();
 
     models.clear();
-    instances.clear();
+    scene_->instances.clear();
 
     // Destroy pipelines
     auto scene = std::exchange(scenePipes_, PipelineSet{});
@@ -713,7 +714,7 @@ void CharacterRenderer::shutdown() {
 void CharacterRenderer::clear() {
     if (!vkCtx_) return;
 
-    LOG_INFO("CharacterRenderer::clear instances=", instances.size(),
+    LOG_INFO("CharacterRenderer::clear instances=", scene_->instances.size(),
              " models=", models.size());
 
     // Wait for any in-flight background normal map generation threads
@@ -735,10 +736,7 @@ void CharacterRenderer::clear() {
         destroyModelGPU(pair.second, /*defer=*/true);
     }
 
-    // Destroy bone buffers for all instances
-    for (auto& pair : instances) {
-        destroyInstanceBones(pair.second, /*defer=*/true);
-    }
+    clearInstances();
 
     for (auto& [path, entry] : textureCache) {
         auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
@@ -761,8 +759,11 @@ void CharacterRenderer::clear() {
     // Fallback textures, ring offsets and per-frame pools stay alive. Their
     // per-slot reset happens only after beginFrame has fenced that slot.
     models.clear();
-    instances.clear();
+}
 
+void CharacterRenderer::clearInstances() {
+    for (auto& [id, instance] : scene_->instances) destroyInstanceBones(instance, true);
+    *scene_ = InstanceState{};
 }
 
 void CharacterRenderer::createFallbackTextures(VkDevice device) {
@@ -2172,14 +2173,14 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.cachedModel = &gpuRef;
 
     uint32_t id = instance.id;
-    instances[id] = std::move(instance);
+    scene_->instances[id] = std::move(instance);
     return id;
 }
 
 void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId, bool loop,
                                       uint32_t oneShotReturnAnim) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         core::Logger::getInstance().warning("Cannot play animation: instance ", instanceId, " not found");
         return;
     }
@@ -2248,7 +2249,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     // Single pass: fade-in, movement, and animation bone collection
     toUpdate_.clear();
 
-    for (auto& pair : instances) {
+    for (auto& pair : scene_->instances) {
         auto& inst = pair.second;
         inst.posedThisFrame = false;
 
@@ -2377,7 +2378,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     }
 
     // Update weapon attachment transforms (after all bone matrices are computed)
-    for (auto& pair : instances) {
+    for (auto& pair : scene_->instances) {
         auto& instance = pair.second;
         if (instance.weaponAttachments.empty()) continue;
         if (glm::distance2(instance.position, cameraPos) > animUpdateRadiusSq) continue;
@@ -2387,8 +2388,8 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             : getModelMatrix(instance);
 
         for (auto& wa : instance.weaponAttachments) {
-            auto weapIt = instances.find(wa.weaponInstanceId);
-            if (weapIt == instances.end()) continue;
+            auto weapIt = scene_->instances.find(wa.weaponInstanceId);
+            if (weapIt == scene_->instances.end()) continue;
 
             // Get the bone matrix for the attachment bone
             glm::mat4 boneMat(1.0f);
@@ -2463,8 +2464,8 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
             // Enchant visuals ride the weapon, offset to their attachment point on it.
             for (const auto& fx : wa.effects) {
-                auto fxIt = instances.find(fx.effectInstanceId);
-                if (fxIt == instances.end()) continue;
+                auto fxIt = scene_->instances.find(fx.effectInstanceId);
+                if (fxIt == scene_->instances.end()) continue;
                 fxIt->second.overrideModelMatrix =
                     weaponMat * glm::translate(glm::mat4(1.0f), fx.offset);
                 fxIt->second.hasOverrideModelMatrix = true;
@@ -2482,8 +2483,8 @@ constexpr int32_t kKeyBoneShoulderR = 3;
 constexpr int32_t kKeyBoneSpineLow = 4;
 
 void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
     auto& instance = it->second;
     const auto& model = models[instance.modelId].data;
     const auto& sequences = model.sequences;
@@ -2645,11 +2646,11 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 // --- Rendering ---
 
 void CharacterRenderer::prepareRender(uint32_t frameIndex) {
-    if (instances.empty() || !scenePipes_.opaque) return;
+    if (scene_->instances.empty() || !scenePipes_.opaque) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
-    for (auto& [id, instance] : instances) {
+    for (auto& [id, instance] : scene_->instances) {
         int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
         if (numBones <= 0) continue;
 
@@ -2718,7 +2719,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // there is one, and in the scene pass after the blended world when not.
     const PipelineSet& pipes =
         part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
-    if (instances.empty() || !pipes.opaque) {
+    if (scene_->instances.empty() || !pipes.opaque) {
         return;
     }
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
@@ -2846,7 +2847,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkPipeline currentPipeline = pipes.opaque;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
-    for (auto& pair : instances) {
+    for (auto& pair : scene_->instances) {
         auto& instance = pair.second;
 
         // Skip invisible instances (e.g., player in first-person mode)
@@ -3485,7 +3486,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                                      const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (instances.empty() || models.empty()) return;
+    if (scene_->instances.empty() || models.empty()) return;
     if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
@@ -3505,7 +3506,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
     // Which set is bound at 0 right now, so a run of opaque batches does not
     // rebind the same fallback for each one.
     VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
-    for (auto& pair : instances) {
+    for (auto& pair : scene_->instances) {
         auto& inst = pair.second;
         if (!inst.visible) continue;
 
@@ -3708,7 +3709,7 @@ void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<Loca
     Frustum frustum;
     frustum.extractFromMatrix(camera.getProjectionMatrix() * camera.getViewMatrix());
     const glm::vec3 camPos = camera.getPosition();
-    for (const auto& [id, inst] : instances) {
+    for (const auto& [id, inst] : scene_->instances) {
         if (!inst.visible) continue;
         const auto mit = models.find(inst.modelId);
         if (mit == models.end() || mit->second.data.lights.empty()) continue;
@@ -3801,7 +3802,7 @@ glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) c
 
 void CharacterRenderer::updateInteriorLight(
         const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt) {
-    for (auto& [id, instance] : instances) {
+    for (auto& [id, instance] : scene_->instances) {
         // A weapon's position stays where it was created; it is carried by
         // the matrix its parent's bone gives it.
         const glm::vec3 origin = instance.hasOverrideModelMatrix
@@ -3818,27 +3819,27 @@ void CharacterRenderer::updateInteriorLight(
 }
 
 void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.position = position;
     }
 }
 
 void CharacterRenderer::setInstanceAnimationSpeed(uint32_t instanceId, float speed) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) it->second.animationSpeed = speed;
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) it->second.animationSpeed = speed;
 }
 
 void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.rotation = rotation;
     }
 }
 
 void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.torsoYawOverrideRad = deltaYawRad;
     }
 }
@@ -3850,14 +3851,14 @@ const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const
 }
 
 const pipeline::M2Model* CharacterRenderer::getInstanceModelData(uint32_t instanceId) const {
-    auto instIt = instances.find(instanceId);
-    if (instIt == instances.end()) return nullptr;
+    auto instIt = scene_->instances.find(instanceId);
+    if (instIt == scene_->instances.end()) return nullptr;
     return getModelData(instIt->second.modelId);
 }
 
 void CharacterRenderer::forEachEmitterSource(
         const std::function<void(const EmitterSource&)>& visit) const {
-    for (const auto& [id, inst] : instances) {
+    for (const auto& [id, inst] : scene_->instances) {
         const M2ModelGPU* model = inst.cachedModel;
         if (!model || !model->hasEmitters) continue;
         EmitterSource source;
@@ -3879,16 +3880,16 @@ void CharacterRenderer::forEachEmitterSource(
 }
 
 void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
     it->second.opacity = 0.0f;
     it->second.fadeInTime = 0.0f;
     it->second.fadeInDuration = durationSeconds;
 }
 
 void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
         it->second.opacity = clampedOpacity;
         // Cancel any fade-in in progress to avoid overwriting the new opacity
@@ -3898,14 +3899,14 @@ void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
         // whole visual together instead of leaving opaque weapons floating on
         // a translucent stealthed creature.
         for (const auto& attachment : it->second.weaponAttachments) {
-            auto weaponIt = instances.find(attachment.weaponInstanceId);
-            if (weaponIt != instances.end()) {
+            auto weaponIt = scene_->instances.find(attachment.weaponInstanceId);
+            if (weaponIt != scene_->instances.end()) {
                 weaponIt->second.opacity = clampedOpacity;
                 weaponIt->second.fadeInDuration = 0.0f;
             }
             for (const auto& effect : attachment.effects) {
-                auto effectIt = instances.find(effect.effectInstanceId);
-                if (effectIt != instances.end()) {
+                auto effectIt = scene_->instances.find(effect.effectInstanceId);
+                if (effectIt != scene_->instances.end()) {
                     effectIt->second.opacity = clampedOpacity;
                     effectIt->second.fadeInDuration = 0.0f;
                 }
@@ -3915,8 +3916,8 @@ void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
 }
 
 void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
     const float clampedAlpha = std::clamp(alpha, 0.0f, 1.0f);
     auto apply = [&](CharacterInstance& inst) {
         inst.stateTint = tint;
@@ -3926,94 +3927,94 @@ void CharacterRenderer::setInstanceStateLook(uint32_t instanceId, const glm::vec
     // The weapons and their enchants are instances of their own; they take
     // the look with the body, as they take its opacity.
     for (const auto& attachment : it->second.weaponAttachments) {
-        auto weaponIt = instances.find(attachment.weaponInstanceId);
-        if (weaponIt != instances.end()) apply(weaponIt->second);
+        auto weaponIt = scene_->instances.find(attachment.weaponInstanceId);
+        if (weaponIt != scene_->instances.end()) apply(weaponIt->second);
         for (const auto& effect : attachment.effects) {
-            auto effectIt = instances.find(effect.effectInstanceId);
-            if (effectIt != instances.end()) apply(effectIt->second);
+            auto effectIt = scene_->instances.find(effect.effectInstanceId);
+            if (effectIt != scene_->instances.end()) apply(effectIt->second);
         }
     }
     // One level only: a companion's own companions are not followed, so no
     // chain of them can come back round.
     for (const uint32_t companionId : it->second.lookCompanions) {
-        auto companionIt = instances.find(companionId);
-        if (companionIt != instances.end()) apply(companionIt->second);
+        auto companionIt = scene_->instances.find(companionId);
+        if (companionIt != scene_->instances.end()) apply(companionIt->second);
     }
 }
 
 void CharacterRenderer::setInstanceCameraFade(uint32_t instanceId, float alpha) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
     const float clamped = std::clamp(alpha, 0.0f, 1.0f);
     if (it->second.cameraFade == clamped) return;
     auto apply = [&](CharacterInstance& inst) { inst.cameraFade = clamped; };
     apply(it->second);
     for (const auto& attachment : it->second.weaponAttachments) {
-        auto weaponIt = instances.find(attachment.weaponInstanceId);
-        if (weaponIt != instances.end()) apply(weaponIt->second);
+        auto weaponIt = scene_->instances.find(attachment.weaponInstanceId);
+        if (weaponIt != scene_->instances.end()) apply(weaponIt->second);
         for (const auto& effect : attachment.effects) {
-            auto effectIt = instances.find(effect.effectInstanceId);
-            if (effectIt != instances.end()) apply(effectIt->second);
+            auto effectIt = scene_->instances.find(effect.effectInstanceId);
+            if (effectIt != scene_->instances.end()) apply(effectIt->second);
         }
     }
     for (const uint32_t companionId : it->second.lookCompanions) {
-        auto companionIt = instances.find(companionId);
-        if (companionIt != instances.end()) apply(companionIt->second);
+        auto companionIt = scene_->instances.find(companionId);
+        if (companionIt != scene_->instances.end()) apply(companionIt->second);
     }
 }
 
 void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companionId) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end() || companionId == instanceId || !instances.count(companionId)) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end() || companionId == instanceId || !scene_->instances.count(companionId)) return;
     auto& companions = it->second.lookCompanions;
     // Drop the ones already removed, so a rider mounting all day keeps a short list.
-    std::erase_if(companions, [&](uint32_t id) { return !instances.count(id); });
+    std::erase_if(companions, [&](uint32_t id) { return !scene_->instances.count(id); });
     if (std::find(companions.begin(), companions.end(), companionId) == companions.end())
         companions.push_back(companionId);
-    auto& companion = instances.at(companionId);
+    auto& companion = scene_->instances.at(companionId);
     companion.stateTint = it->second.stateTint;
     companion.stateAlpha = it->second.stateAlpha;
     companion.cameraFade = it->second.cameraFade;
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.activeGeosets = geosets;
     }
 }
 
 void CharacterRenderer::setDrawSkinExtra(uint32_t instanceId, bool enabled) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.drawSkinExtra = enabled;
     }
 }
 
 void CharacterRenderer::setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, VkTexture* texture) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.groupTextureOverrides[geosetGroup] = texture;
     }
 }
 
 void CharacterRenderer::setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, VkTexture* texture) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.textureSlotOverrides[textureSlot] = texture;
     }
 }
 
 void CharacterRenderer::clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         it->second.textureSlotOverrides.erase(textureSlot);
     }
 }
 
 void CharacterRenderer::setInstanceVisible(uint32_t instanceId, bool visible) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) {
         if (it->second.visible != visible) {
             LOG_INFO("CharacterRenderer::setInstanceVisible id=", instanceId, " visible=", visible);
         }
@@ -4021,8 +4022,8 @@ void CharacterRenderer::setInstanceVisible(uint32_t instanceId, bool visible) {
 
         // Also hide/show attached weapons (for first-person mode)
         for (const auto& wa : it->second.weaponAttachments) {
-            auto weapIt = instances.find(wa.weaponInstanceId);
-            if (weapIt != instances.end()) {
+            auto weapIt = scene_->instances.find(wa.weaponInstanceId);
+            if (weapIt != scene_->instances.end()) {
                 weapIt->second.visible = visible;
             }
         }
@@ -4030,12 +4031,12 @@ void CharacterRenderer::setInstanceVisible(uint32_t instanceId, bool visible) {
 }
 
 void CharacterRenderer::removeInstance(uint32_t instanceId) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return;
 
     LOG_INFO("CharacterRenderer::removeInstance id=", instanceId,
              " pos=(", it->second.position.x, ",", it->second.position.y, ",", it->second.position.z, ")",
-             " remaining=", instances.size() - 1,
+             " remaining=", scene_->instances.size() - 1,
              " override=", (void*)renderPassOverride_);
 
     // Remove child attachments first (helmets/weapons/enchant effects),
@@ -4056,13 +4057,13 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
     // reference these descriptor sets.
     destroyInstanceBones(it->second, /*defer=*/true);
 
-    instances.erase(it);
+    scene_->instances.erase(it);
 }
 
 bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animationId,
                                           float& animationTimeMs, float& animationDurationMs) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         return false;
     }
 
@@ -4084,8 +4085,8 @@ bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animati
 }
 
 const std::vector<uint32_t>* CharacterRenderer::getFootstepEventTimes(uint32_t instanceId) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         return nullptr;
     }
 
@@ -4105,8 +4106,8 @@ const std::vector<uint32_t>* CharacterRenderer::getFootstepEventTimes(uint32_t i
 }
 
 bool CharacterRenderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         return false;
     }
 
@@ -4126,8 +4127,8 @@ bool CharacterRenderer::hasAnimation(uint32_t instanceId, uint32_t animationId) 
 
 bool CharacterRenderer::getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const {
     out.clear();
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         return false;
     }
 
@@ -4141,8 +4142,8 @@ bool CharacterRenderer::getAnimationSequences(uint32_t instanceId, std::vector<p
 }
 
 bool CharacterRenderer::getInstanceModelName(uint32_t instanceId, std::string& modelName) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) {
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) {
         return false;
     }
     auto modelIt = models.find(it->second.modelId);
@@ -4216,8 +4217,8 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
                                       const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
                                       const std::string& texturePath,
                                       const glm::mat4& localTransform) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) {
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) {
         core::Logger::getInstance().warning("attachWeapon: character instance ", charInstanceId, " not found");
         return false;
     }
@@ -4277,8 +4278,8 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     if (weaponInstanceId == 0) return false;
 
     // Mark weapon instance as override-positioned
-    auto weapIt = instances.find(weaponInstanceId);
-    if (weapIt != instances.end()) {
+    auto weapIt = scene_->instances.find(weaponInstanceId);
+    if (weapIt != scene_->instances.end()) {
         weapIt->second.hasOverrideModelMatrix = true;
         weapIt->second.opacity = charInstance.opacity;
         weapIt->second.stateTint = charInstance.stateTint;
@@ -4303,8 +4304,8 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
 }
 
 bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
@@ -4336,8 +4337,8 @@ bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCen
 
 bool CharacterRenderer::getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId,
                                                  float& outZ) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
@@ -4350,8 +4351,8 @@ bool CharacterRenderer::getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t ke
 }
 
 bool CharacterRenderer::getInstanceHeight(uint32_t instanceId, float& outHeight) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
@@ -4367,8 +4368,8 @@ bool CharacterRenderer::getInstanceHeight(uint32_t instanceId, float& outHeight)
 }
 
 bool CharacterRenderer::getInstanceFootZ(uint32_t instanceId, float& outFootZ) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
@@ -4380,15 +4381,15 @@ bool CharacterRenderer::getInstanceFootZ(uint32_t instanceId, float& outFootZ) c
 }
 
 bool CharacterRenderer::getInstancePosition(uint32_t instanceId, glm::vec3& outPos) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     outPos = it->second.position;
     return true;
 }
 
 bool CharacterRenderer::getInstanceModelMatrix(uint32_t instanceId, glm::mat4& outMatrix) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     const auto& instance = it->second;
     outMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
                                                 : getModelMatrix(instance);
@@ -4396,8 +4397,8 @@ bool CharacterRenderer::getInstanceModelMatrix(uint32_t instanceId, glm::mat4& o
 }
 
 bool CharacterRenderer::getInstanceDrawnOpacity(uint32_t instanceId, float& outOpacity) const {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return false;
+    auto it = scene_->instances.find(instanceId);
+    if (it == scene_->instances.end()) return false;
     // The same as the body is drawn with in render().
     outOpacity = std::clamp(std::min(it->second.opacity, it->second.stateAlpha) * it->second.cameraFade,
                             0.0f, 1.0f);
@@ -4405,8 +4406,8 @@ bool CharacterRenderer::getInstanceDrawnOpacity(uint32_t instanceId, float& outO
 }
 
 void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmentId) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) return;
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) return;
     auto& attachments = charIt->second.weaponAttachments;
 
     for (auto it = attachments.begin(); it != attachments.end(); ++it) {
@@ -4431,8 +4432,8 @@ void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmen
 
 bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachmentId,
                                    uint32_t toAttachmentId, const glm::mat4& localTransform) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) return false;
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) return false;
     auto& attachments = charIt->second.weaponAttachments;
     auto it = std::find_if(attachments.begin(), attachments.end(),
         [&](const WeaponAttachment& a) { return a.attachmentId == fromAttachmentId; });
@@ -4454,7 +4455,7 @@ bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachm
         moved.offset = offset;
         moved.localTransform = localTransform;
         moved.sheathPush = 0.0f;
-        instances.at(charInstanceId).weaponAttachments.push_back(std::move(moved));
+        scene_->instances.at(charInstanceId).weaponAttachments.push_back(std::move(moved));
     } else {
         it->localTransform = localTransform;
     }
@@ -4464,7 +4465,7 @@ bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachm
 void CharacterRenderer::unloadModelIfUnused(uint32_t modelId) {
     auto modelIt = models.find(modelId);
     if (modelIt == models.end()) return;
-    for (const auto& p : instances) {
+    for (const auto& p : scene_->instances) {
         if (p.second.modelId == modelId) return;
     }
     destroyModelGPU(modelIt->second, /*defer=*/true);
@@ -4475,8 +4476,8 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
                                            uint32_t visualSlot,
                                            const pipeline::M2Model& effectModel,
                                            uint32_t effectModelId) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) return false;
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) return false;
 
     auto& attachments = charIt->second.weaponAttachments;
     auto waIt = std::find_if(attachments.begin(), attachments.end(),
@@ -4504,8 +4505,8 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     uint32_t effectInstanceId = createInstance(effectModelId, glm::vec3(0.0f));
     if (effectInstanceId == 0) return false;
 
-    auto fxIt = instances.find(effectInstanceId);
-    if (fxIt == instances.end()) return false;
+    auto fxIt = scene_->instances.find(effectInstanceId);
+    if (fxIt == scene_->instances.end()) return false;
     fxIt->second.hasOverrideModelMatrix = true;
     fxIt->second.isEffectModel = true;
     fxIt->second.animationLoop = true;
@@ -4526,13 +4527,13 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
 }
 
 void CharacterRenderer::setInstanceSceneModel(uint32_t instanceId, bool isScene) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) it->second.isSceneModel = isScene;
+    auto it = scene_->instances.find(instanceId);
+    if (it != scene_->instances.end()) it->second.isSceneModel = isScene;
 }
 
 void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId) {
-    auto charIt = instances.find(charInstanceId);
-    if (charIt == instances.end()) return;
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) return;
 
     for (auto& wa : charIt->second.weaponAttachments) {
         if (wa.attachmentId != attachmentId) continue;
@@ -4543,8 +4544,8 @@ void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t at
 }
 
 bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform) {
-    auto instIt = instances.find(instanceId);
-    if (instIt == instances.end()) return false;
+    auto instIt = scene_->instances.find(instanceId);
+    if (instIt == scene_->instances.end()) return false;
     const auto& instance = instIt->second;
 
     // Find attachment point using shared lookup logic
@@ -4570,8 +4571,8 @@ bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t att
 }
 
 void CharacterRenderer::dumpAnimations(uint32_t instanceId) const {
-    auto instIt = instances.find(instanceId);
-    if (instIt == instances.end()) {
+    auto instIt = scene_->instances.find(instanceId);
+    if (instIt == scene_->instances.end()) {
         core::Logger::getInstance().info("dumpAnimations: instance ", instanceId, " not found");
         return;
     }
@@ -4647,3 +4648,19 @@ void CharacterRenderer::recreatePipelines() {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee::rendering {
+CharacterRenderer::InstanceSession::InstanceSession(CharacterRenderer& renderer)
+    : renderer_(renderer) {
+    if (renderer_.scene_ != &renderer_.defaultInstances_)
+        throw std::logic_error("CharacterRenderer already has a scene owner");
+    state_ = std::make_unique<InstanceState>(std::move(renderer_.defaultInstances_));
+    renderer_.defaultInstances_ = InstanceState{};
+    renderer_.scene_ = state_.get();
+}
+
+CharacterRenderer::InstanceSession::~InstanceSession() {
+    renderer_.clearInstances();
+    renderer_.scene_ = &renderer_.defaultInstances_;
+}
+}

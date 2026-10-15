@@ -31,6 +31,15 @@ public:
     EntityManager& getEntityManager() { return entityManager; }
     [[nodiscard]] const EntityManager& getEntityManager() const { return entityManager; }
 
+    /// Present every object in view again, as its create block did: the
+    /// model, worn equipment, a rider's mount, the death pose, a door's state
+    /// and a released corpse. The client asks for this when it builds a new
+    /// scene - entering a map, or a far teleport within one - because the
+    /// server does not send an object that is still in range a second time,
+    /// and a create that arrived before the scene existed had nowhere to go.
+    /// Sends nothing to the server.
+    void announceObjectsInView();
+
     // --- Name / info cache queries ---
     void queryPlayerName(uint64_t guid);
     void queryCreatureInfo(uint32_t entry, uint64_t guid);
@@ -300,6 +309,13 @@ private:
     void dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                               const std::shared_ptr<Entity>& entity,
                               const std::shared_ptr<Unit>& unit, bool isDead);
+    // The presentation half of each create, shared by the create handlers and
+    // announceObjectsInView.
+    void announceUnit(uint64_t guid, ObjectType objectType,
+                      const std::shared_ptr<Entity>& entity,
+                      const std::shared_ptr<Unit>& unit, bool isDead);
+    void announceGameObject(uint64_t guid, const GameObject& go);
+    void announceCorpse(uint64_t guid, const Entity& corpse);
     // Track item/container on CREATE.
     void trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated);
     // Update item fields on VALUES update.
@@ -327,7 +343,7 @@ private:
     void onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity);
     void onCreateGameObject(const UpdateBlock& block, std::shared_ptr<Entity>& entity);
     void onCreateItem(const UpdateBlock& block, bool& newItemCreated);
-    void onCreateCorpse(const UpdateBlock& block);
+    void onCreateCorpse(const UpdateBlock& block, const Entity& corpse);
     void handleDisplayIdChange(const UpdateBlock& block,
                                const std::shared_ptr<Entity>& entity,
                                const std::shared_ptr<Unit>& unit,

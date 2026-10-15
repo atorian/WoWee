@@ -497,7 +497,20 @@ struct M2ParamsUBO {
  * Handles rendering of M2 models (doodads like trees, rocks, bushes)
  */
 class M2Renderer {
+    struct InstanceState;
 public:
+    /// The owning scene holds this lease. Geometry/texture caches stay here;
+    /// instances, collision indexes and incomplete uploads die with the lease.
+    class InstanceSession {
+    public:
+        explicit InstanceSession(M2Renderer& renderer);
+        ~InstanceSession();
+        InstanceSession(const InstanceSession&) = delete;
+        InstanceSession& operator=(const InstanceSession&) = delete;
+    private:
+        M2Renderer& renderer_;
+        std::unique_ptr<InstanceState> state_;
+    };
     M2Renderer();
     ~M2Renderer();
 
@@ -706,7 +719,7 @@ public:
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
     /// respawn it instead of silently addressing a dead handle forever.
     [[nodiscard]] bool hasInstance(uint32_t instanceId) const {
-        return instanceIndexById.find(instanceId) != instanceIndexById.end();
+        return scene_->instanceIndexById.find(instanceId) != scene_->instanceIndexById.end();
     }
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
@@ -794,7 +807,7 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
-    [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(instances.size()); }
+    [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
 
@@ -1110,8 +1123,6 @@ private:
     // IDs lets render() match each result back to the instance it was computed
     // for.  cullSubmittedIds_ is the dispatch just recorded (results not ready);
     // cullReadableIds_ is the previous one, matching the mapped data now.
-    std::vector<uint32_t> cullSubmittedIds_[2];
-    std::vector<uint32_t> cullReadableIds_[2];
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     // 9 floats each, for every trail in view. One riding phoenix lays 660
@@ -1149,7 +1160,6 @@ private:
     // cache "already uploaded" model IDs (e.g. TerrainManager) reconcile against
     // this so a reaped model is re-loaded instead of skipped as a stale hit.
     std::vector<uint32_t> reapedModelIds_;
-    std::vector<M2Instance> instances;
 
     // Emitters posed by another renderer; see loadPosedEmitterModel. Their
     // models hold emitters only, and the instances only the emitter state,
@@ -1166,7 +1176,6 @@ private:
         bool posed = false;
     };
     std::unordered_map<uint32_t, PosedEmitterModel> posedEmitterModels_;
-    std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
     uint32_t nextPosedEmitterModel_ = 1;
     uint32_t nextPosedEmitters_ = 1;
     /// Bumped whenever materialDescPool_ is reset or destroyed. A set freed
@@ -1193,7 +1202,6 @@ private:
             return h;
         }
     };
-    std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
 
     uint32_t nextInstanceId = 1;
     uint32_t lastDrawCallCount = 0;
@@ -1249,12 +1257,9 @@ private:
     void rebuildInstanceIndexLists();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
-    SpatialGrid spatialGrid;
-    std::unordered_map<uint32_t, size_t> instanceIndexById;
 
     /// Instances by 64-yard column, for the view and shadow passes to reject
     /// whole regions before looking at any instance in them. See M2CullGrid.
-    M2CullGrid cullGrid_;
     /// Files (or refiles) an instance in cullGrid_ from its current position
     /// and cull data. Called wherever those change.
     void fileInCullGrid(const M2Instance& instance);
@@ -1276,7 +1281,6 @@ private:
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of
     // thousands of them.
-    std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
     // Collision scratch buffers are thread_local (see m2_renderer.cpp) for thread-safety.
 
     // Collision query profiling - atomic because getFloorHeight is dispatched
@@ -1384,15 +1388,8 @@ private:
     static constexpr size_t MAX_M2_PARTICLE_QUADS = 131072;
 
     // Animation update buffers (avoid per-frame allocation)
-    std::vector<size_t> boneWorkIndices_;        // Reused each frame
-    std::vector<std::future<void>> animFutures_; // Reused each frame
-    bool spatialIndexDirty_ = false;
 
     // Fast-path instance index lists (rebuilt in rebuildSpatialIndex / on create)
-    std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
-    std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
-    std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
-    std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
 
     // M2 particle emitter system. Each emitter holds as many particles as its
     // pool allows (m2EmitterPool), with no cap per instance.
@@ -1487,6 +1484,27 @@ private:
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
     void destroyInstanceBones(M2Instance& inst, bool defer = true);
+    struct InstanceState {
+        std::vector<M2Instance> instances;
+        std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
+        std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
+        SpatialGrid spatialGrid;
+        std::unordered_map<uint32_t, size_t> instanceIndexById;
+        M2CullGrid cullGrid_;
+        std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
+        std::vector<uint32_t> cullSubmittedIds_[2];
+        std::vector<uint32_t> cullReadableIds_[2];
+        std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
+        std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
+        std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
+        std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
+        std::vector<size_t> boneWorkIndices_;        // Reused each frame
+        std::vector<std::future<void>> animFutures_; // Reused each frame
+        bool spatialIndexDirty_ = false;
+    };
+    InstanceState defaultInstances_;
+    InstanceState* scene_ = &defaultInstances_;
+
 };
 
 } // namespace rendering

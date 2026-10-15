@@ -109,7 +109,7 @@
 #include "game/chat_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
-#include "game/world.hpp"
+#include "core/map_scope.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/packet_parsers.hpp"
 #include "pipeline/asset_inventory.hpp"
@@ -448,7 +448,6 @@ bool Application::initialize() {
 
     // Create subsystems
     authHandler = std::make_unique<auth::AuthHandler>();
-    world = std::make_unique<game::World>();
 
     // Create and initialize expansion registry
     expansionRegistry_ = std::make_unique<game::ExpansionRegistry>();
@@ -1590,6 +1589,13 @@ bool Application::initialize() {
     // Set up UI callbacks
     setupUICallbacks();
 
+    // The offline sky, fountain and glass probes place their models without
+    // loading a map. Theirs is a scene like any other, owned the same way.
+    if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && entitySpawner_ && renderer && gameHandler) {
+        mapScope_ = std::make_unique<MapScope>(mapScopeServices(), 571);
+        mapScope_->adoptRenderers();
+    }
+
     LOG_INFO("Application initialized successfully");
     running = true;
     return true;
@@ -1721,6 +1727,10 @@ void Application::beginPhase(Phase phase) {
 
 bool Application::requireTransitions(const char* operation) const {
     return requirePhase(currentPhase_, Phase::Transitions, operation);
+}
+
+MapScope::Services Application::mapScopeServices() {
+    return MapScope::Services{*entitySpawner_, renderer.get(), *gameHandler, *playerView_};
 }
 
 void Application::pumpInput(float deltaTime, const FramePlan& plan) {
@@ -2293,11 +2303,11 @@ void Application::shutdown() {
     // Before the renderer it records through and the device it draws with.
     if (mapWindow_) mapWindow_->close();
 
-    // The window is already hidden. Join background map reads before assets die.
-    if (worldLoader_) {
-        worldLoader_->cancel();
-        worldLoader_.reset();
-    }
+    // The window is already hidden. The map goes first: its destruction joins
+    // the map's preparation, terrain and spawn workers while the assets, the
+    // renderer and the loader they use still exist.
+    mapScope_.reset();
+    worldLoader_.reset();
     loadingScreen_.reset();
 
     // End the session while the renderer is still alive. disconnect() fires a
@@ -2311,10 +2321,6 @@ void Application::shutdown() {
     if (gameHandler) {
         gameHandler->disconnect();
     }
-
-    // Workers capture AssetManager and render-owned upload state. Join them
-    // while both dependencies still exist; disconnect above cannot queue more.
-    if (entitySpawner_) entitySpawner_->shutdown();
 
     if (renderer && renderer->getVkContext()) {
         auto* ctx = renderer->getVkContext();
@@ -2425,8 +2431,6 @@ void Application::shutdown() {
     LOG_DEBUG("Renderer shutdown complete, resetting...");
     renderer.reset();
 
-    LOG_DEBUG("Resetting world...");
-    world.reset();
     LOG_DEBUG("Resetting gameHandler...");
     gameHandler.reset();
 
@@ -2490,29 +2494,17 @@ void Application::setState(AppState newState) {
             if (uiManager && assetManager) {
                 uiManager->getCharacterScreen().setAssetManager(assetManager.get());
             }
-            // A backstop. Leaving the world goes through performLogoutToLogin,
-            // which takes the interface down there; this catches any other way
-            // of arriving here with it still standing, and does nothing when
-            // it is already down.
-            // Interface teardown was completed before this transition.
-            // Ensure no stale in-world player model leaks into the next login attempt.
-            // If we reuse a previously spawned instance without forcing a respawn, appearance (notably hair) can desync.
-            npcsSpawned = false;
-            playerCharacterSpawned = false;
+            // The character screen has no map. Leaving the world went through
+            // performLogoutToLogin, which ended the map scope and with it the
+            // player's model; this is the backstop for any other way here.
+            if (mapScope_) {
+                LOG_WARNING("Character screen reached with map ", mapScope_->mapId(),
+                            " still in scope; releasing it now");
+                mapScope_.reset();
+            }
+            if (worldLoader_) worldLoader_->discardPendingEntry();
             if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
             wasAutoAttacking_ = false;
-            if (worldLoader_) worldLoader_->resetLoadedMap();
-            spawnedPlayerGuid_ = 0;
-            spawnedAppearanceBytes_ = 0;
-            spawnedFacialFeatures_ = 0;
-            if (renderer && renderer->getCharacterRenderer()) {
-                uint32_t oldInst = renderer->getCharacterInstanceId();
-                if (oldInst > 0) {
-                    playerView_->setCharacterFollow(0);
-                    if (auto* ac = getAnimationController()) ac->clearMount();
-                    renderer->getCharacterRenderer()->removeInstance(oldInst);
-                }
-            }
             break;
         case AppState::IN_GAME: {
             // Wire up movement opcodes from camera controller
@@ -2852,60 +2844,21 @@ void Application::performLogoutToLogin(bool keepConnection) {
         else gameHandler->disconnect();
     }
 
-    // --- Per-session flags ---
-    npcsSpawned = false;
-    playerCharacterSpawned = false;
+    // The map and everything drawn on it - terrain, buildings, creatures, the
+    // player's own model and mount - end with its scope, as on a map change.
+    mapScope_.reset();
+    if (worldLoader_) worldLoader_->discardPendingEntry();
+
+    // The session's own state, which is not the map's.
     if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
     wasAutoAttacking_ = false;
-    if (worldLoader_) worldLoader_->resetLoadedMap();
-    if (worldEntryCallbacks_) worldEntryCallbacks_->resetState();
     facingSendCooldown_ = 0.0f;
     lastSentCanonicalYaw_ = 1000.0f;
     idleYawned_ = false;
-
-    // --- Charge state ---
     if (animationCallbacks_) animationCallbacks_->resetChargeState();
-
-    // --- Player identity ---
-    spawnedPlayerGuid_ = 0;
-    spawnedAppearanceBytes_ = 0;
-    spawnedFacialFeatures_ = 0;
-
-    // --- Reset all EntitySpawner state (mount, creatures, players, GOs, queues, caches) ---
-    if (entitySpawner_) entitySpawner_->resetAllState();
-
-    world.reset();
-
-    if (renderer) {
-        playerView_->resetCombatVisualState();
-        // Remove old player model so it doesn't persist into next session
-        if (auto* charRenderer = renderer->getCharacterRenderer()) {
-            charRenderer->removeInstance(1);
-        }
-        // Clear all world geometry renderers
-        if (auto* wmo = renderer->getWMORenderer()) {
-            wmo->clearInstances();
-        }
-        if (auto* m2 = renderer->getM2Renderer()) {
-            m2->clear();
-        }
-        // Clear terrain tile tracking + water surfaces so next world entry starts fresh.
-        // softReset() rather than a full teardown: it clears the tile data
-        // without blocking on worker thread joins.
-        if (auto* terrain = renderer->getTerrainManager()) {
-            terrain->softReset();
-        }
-        if (auto* questMarkers = renderer->getQuestMarkerRenderer()) {
-            questMarkers->clear();
-        }
-        if (auto* footprints = renderer->getFootprintRenderer()) {
-            footprints->clear();
-        }
-        if (auto* ac = getAnimationController()) ac->clearMount();
-        playerView_->setCharacterFollow(0);
-        if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
-            music->stopMusic(0.0f);
-        }
+    playerView_->resetCombatVisualState();
+    if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
+        music->stopMusic(0.0f);
     }
 
     if (keepConnection) {
@@ -3035,6 +2988,7 @@ void Application::applyServerMovementState(float deltaTime) {
         isM2Transport = (tr && tr->isM2);
     }
     bool onWMOTransport = onTransportNow && !isM2Transport;
+    auto& ride = mapScope_->ride();
     if (worldEntryCallbacks_ && worldEntryCallbacks_->getWorldEntryMovementGraceTimer() > 0.0f) {
         worldEntryCallbacks_->setWorldEntryMovementGraceTimer(
             worldEntryCallbacks_->getWorldEntryMovementGraceTimer() - deltaTime);
@@ -3063,7 +3017,7 @@ void Application::applyServerMovementState(float deltaTime) {
                               !gameHandler->isMounted();
     getCameraController()->setExternalFollow(
         externallyDrivenMotion || landingClampActive || hearthFreeze ||
-        transportTransferFreeze || deckFloorPending_);
+        transportTransferFreeze || ride.deckFloorPending);
     getCameraController()->setExternalMoving(externallyDrivenMotion);
     if (externallyDrivenMotion) {
         // Drop any stale local movement toggles while server drives taxi motion.
@@ -3274,7 +3228,6 @@ void Application::applyServerMovementState(float deltaTime) {
         auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
         if (tr) {
             const uint64_t transportGuid = gameHandler->getPlayerTransportGuid();
-            const uint32_t mapId = gameHandler->getCurrentMapId();
             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
             const glm::vec3 tentativeRender = renderer->getCharacterPosition();
             const glm::vec3 expectedRender(
@@ -3285,16 +3238,16 @@ void Application::applyServerMovementState(float deltaTime) {
             // GUID on the destination map. Never interpret the continent-
             // sized difference from the previous map's ride lock as deck
             // walking: doing so rewrites a valid server transport offset
-            // into a huge negative Z and drops the rider underwater.
-            const bool sameRideFrame = hasWMORideLock_ &&
-                lastWMORideTransportGuid_ == transportGuid &&
-                lastWMORideMapId_ == mapId;
+            // into a huge negative Z and drops the rider underwater. The
+            // lock belongs to the map scope, so a new map starts without one.
+            const bool sameRideFrame = ride.hasWmoLock &&
+                ride.wmoTransportGuid == transportGuid;
             if (!sameRideFrame && !tr->isM2) {
-                deckFloorPending_ = true;
+                ride.deckFloorPending = true;
             }
             if (sameRideFrame && getCameraController()) {
                 const glm::vec3 localMotion =
-                    tentativeRender - lastWMORideLockedRender_;
+                    tentativeRender - ride.wmoLockedRender;
                 if (getCameraController()->isMoving()) {
                     intendedRender.x += localMotion.x;
                     intendedRender.y += localMotion.y;
@@ -3326,8 +3279,8 @@ void Application::applyServerMovementState(float deltaTime) {
                     intendedRender.z <= *deckFloor + 0.35f) {
                     intendedRender.z = *deckFloor + 0.10f;
                     cameraController->suppressVerticalPhysics();
-                    deckFloorPending_ = false;
-                } else if (deckFloorPending_ &&
+                    ride.deckFloorPending = false;
+                } else if (ride.deckFloorPending &&
                            !tm->isTransportCollisionReady(transportGuid)) {
                     // A continent transfer registers the transport GO
                     // before its WMO collision necessarily finishes loading.
@@ -3335,7 +3288,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // deck exists instead of releasing gravity after a timer.
                     intendedRender = expectedRender;
                     cameraController->suppressVerticalPhysics();
-                } else if (deckFloorPending_) {
+                } else if (ride.deckFloorPending) {
                     // Collision is loaded and still found no deck underfoot,
                     // which is a real answer, not a not-ready one. The hold
                     // above waits for geometry to arrive; it must not
@@ -3348,7 +3301,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // reapplied the boarding offset every frame forever. That
                     // is a rider running on the spot, unable to walk far
                     // enough to trigger disembark and so unable to get off.
-                    deckFloorPending_ = false;
+                    ride.deckFloorPending = false;
                 }
             }
 
@@ -3360,10 +3313,9 @@ void Application::applyServerMovementState(float deltaTime) {
         glm::vec3 canonical = gameHandler->getComposedWorldPosition();
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
         renderer->getCharacterPosition() = renderPos;
-        lastWMORideLockedRender_ = renderPos;
-        hasWMORideLock_ = true;
-        lastWMORideTransportGuid_ = gameHandler->getPlayerTransportGuid();
-        lastWMORideMapId_ = gameHandler->getCurrentMapId();
+        ride.wmoLockedRender = renderPos;
+        ride.hasWmoLock = true;
+        ride.wmoTransportGuid = gameHandler->getPlayerTransportGuid();
         gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
         if (getCameraController()) {
             glm::vec3* followTarget = getCameraController()->getFollowTargetMutable();
@@ -3376,10 +3328,9 @@ void Application::applyServerMovementState(float deltaTime) {
         // Warrior Charge: interpolation delegated to AnimationCallbackHandler
         animationCallbacks_->updateCharge(deltaTime);
     } else {
-        hasWMORideLock_ = false;
-        lastWMORideTransportGuid_ = 0;
-        lastWMORideMapId_ = 0xFFFFFFFFu;
-        deckFloorPending_ = false;
+        ride.hasWmoLock = false;
+        ride.wmoTransportGuid = 0;
+        ride.deckFloorPending = false;
         glm::vec3 renderPos = renderer->getCharacterPosition();
 
         // M2 transport riding: resolve in canonical space and lock once per frame.
@@ -3406,8 +3357,8 @@ void Application::applyServerMovementState(float deltaTime) {
                     game::TransportManager::isDeeprunTramTransport(*tr);
                 glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
                 glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
-                if (hasM2RideLock_) {
-                    glm::vec3 walkDelta = tentativeCanonical - lastM2RideLockedCanonical_;
+                if (ride.hasM2Lock) {
+                    glm::vec3 walkDelta = tentativeCanonical - ride.m2LockedCanonical;
                     // Root cause found: the 60-unit clamp added last round was a backstop
                     // that treated the symptom, not the cause - live data showed it
                     // getting maxed out exactly (horizDist=60.0 at the eventual disembark),
@@ -3477,14 +3428,14 @@ void Application::applyServerMovementState(float deltaTime) {
                 glm::vec3 lockedCanonical = tr->position + localOffset;
                 renderPos = core::coords::canonicalToRender(lockedCanonical);
                 renderer->getCharacterPosition() = renderPos;
-                lastM2RideLockedCanonical_ = lockedCanonical;
-                hasM2RideLock_ = true;
+                ride.m2LockedCanonical = lockedCanonical;
+                ride.hasM2Lock = true;
             }
         } else {
-            hasM2RideLock_ = false;
+            ride.hasM2Lock = false;
         }
         if (auto* ac = getAnimationController()) {
-            ac->setM2TransportRiding(hasM2RideLock_);
+            ac->setM2TransportRiding(ride.hasM2Lock);
         }
 
         // Model-Z reversal probe: the floor-selection log stays
@@ -4017,6 +3968,14 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
 
 void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     updateCheckpoint = "in_game: enter";
+    if (!mapScope_) {
+        // In game is entered only by completing a map's load, and leaving the
+        // map leaves the state. A frame here without one is a broken transition.
+        static bool reported = false;
+        if (!std::exchange(reported, true))
+            LOG_ERROR("In-game frame without a map scope; world update skipped until the next map entry");
+        return;
+    }
     const char* inGameStep = "begin";
     try {
     auto runInGameStage = [&](const char* stageName, auto&& fn) {
@@ -4108,13 +4067,6 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
         }
     }
 
-    inGameStep = "world update";
-    updateCheckpoint = "in_game: world update";
-    runInGameStage("world->update", [&] {
-        if (world) {
-            world->update(deltaTime);
-        }
-    });
     inGameStep = "spawn/equipment queues";
     updateCheckpoint = "in_game: spawn/equipment queues";
     runInGameStage("spawn/equipment queues", [&] {
@@ -4123,88 +4075,6 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
             cr->processPendingNormalMaps(4);
         }
     });
-    // Self-heal missing creature visuals: if a nearby UNIT exists in
-    // entity state but has no render instance, queue a spawn retry.
-    inGameStep = "creature resync scan";
-    updateCheckpoint = "in_game: creature resync scan";
-    if (gameHandler) {
-        static float creatureResyncTimer = 0.0f;
-        creatureResyncTimer += deltaTime;
-        if (creatureResyncTimer >= 3.0f) {
-            creatureResyncTimer = 0.0f;
-
-            glm::vec3 playerPos(0.0f);
-            bool havePlayerPos = false;
-            uint64_t playerGuid = gameHandler->getPlayerGuid();
-            if (auto playerEntity = gameHandler->getEntityManager().getEntity(playerGuid)) {
-                playerPos = glm::vec3(playerEntity->getX(), playerEntity->getY(), playerEntity->getZ());
-                havePlayerPos = true;
-            }
-
-            // Counters for the summary below. "No NPCs at all" has three
-            // possible causes that look identical in-world - the server
-            // sent no units, the units exist but carry no display id, or
-            // they exist and the spawner is refusing them - and the
-            // difference decides where to look.
-            int unitsSeen = 0, unitsNoDisplay = 0, unitsSpawned = 0, unitsQueued = 0;
-
-            const float kResyncRadiusSq = 260.0f * 260.0f;
-            for (const auto& pair : gameHandler->getEntityManager().getEntities()) {
-                uint64_t guid = pair.first;
-                const auto& entity = pair.second;
-                if (!entity || guid == playerGuid) continue;
-                if (entity->getType() != game::ObjectType::UNIT) continue;
-                unitsSeen++;
-                auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
-                if (!unit || unit->getDisplayId() == 0) { unitsNoDisplay++; continue; }
-                if (entitySpawner_->isCreatureSpawned(guid)) { unitsSpawned++; continue; }
-                if (entitySpawner_->isCreaturePending(guid)) { unitsQueued++; continue; }
-
-                if (havePlayerPos) {
-                    glm::vec3 pos(unit->getX(), unit->getY(), unit->getZ());
-                    glm::vec3 delta = pos - playerPos;
-                    float distSq = glm::dot(delta, delta);
-                    if (distSq > kResyncRadiusSq) continue;
-                }
-
-                float retryScale = 1.0f;
-                {
-                    using game::fieldIndex; using game::UF;
-                    uint16_t si = fieldIndex(UF::OBJECT_FIELD_SCALE_X);
-                    if (si != 0xFFFF) {
-                        uint32_t raw = unit->getField(si);
-                        if (raw != 0) {
-                            float s2 = 1.0f;
-                            s2 = std::bit_cast<float>(raw);
-                            if (s2 > 0.01f && s2 < 100.0f) retryScale = s2;
-                        }
-                    }
-                }
-                entitySpawner_->queueCreatureSpawn(guid, unit->getDisplayId(),
-                    unit->getX(), unit->getY(), unit->getZ(),
-                    unit->getOrientation(), retryScale);
-            }
-
-            // Silent during normal play: this only speaks up when the
-            // world holds units and none of them have a model.
-            if (unitsSeen > 0 && unitsSpawned == 0) {
-                LOG_WARNING("No creature models for ", unitsSeen,
-                            " units in range (", unitsNoDisplay,
-                            " without a display id, ", unitsQueued,
-                            " queued, lookups built=",
-                            entitySpawner_->areCreatureLookupsBuilt() ? "yes" : "no", ")");
-            } else if (unitsSeen == 0) {
-                static float noUnitsFor = 0.0f;
-                noUnitsFor += 3.0f;
-                if (noUnitsFor >= 9.0f) {
-                    noUnitsFor = 0.0f;
-                    LOG_WARNING("No UNIT entities in range at all - the server has "
-                                "sent no creatures, or their update blocks were dropped");
-                }
-            }
-        }
-    }
-
     inGameStep = "gameobject/transport queues";
     updateCheckpoint = "in_game: gameobject/transport queues";
     runInGameStage("gameobject/transport queues", [&] {
@@ -4444,7 +4314,9 @@ void Application::prepareFrame() {
     }
     // Offline regression fixture: exercises the real appearance/equipment
     // queues and GPU uploads without authenticating or changing realm state.
-    if (std::getenv("WOWEE_ENTITY_STREAM_PROBE") && entitySpawner_ &&
+    // Its players belong to a map scope: the sky probe's, or the Mulgore
+    // probe's once its entry has begun.
+    if (std::getenv("WOWEE_ENTITY_STREAM_PROBE") && entitySpawner_ && entitySpawner_->hasMap() &&
         renderer && renderer->getCharacterRenderer()) {
         static bool seeded = false, complete = false;
         static std::vector<float> times;
@@ -4608,7 +4480,6 @@ void Application::updateGame(float deltaTime, const FramePlan& plan) {
             if (ms > 50.0f) LOG_WARNING("SLOW update stage 'gameHandler->update': ", ms, "ms");
         }
     }
-    if (plan.loading && world) world->update(deltaTime);
     if (plan.world) {
         const char* checkpoint = "in_game: enter";
         updateInGame(deltaTime, checkpoint);
@@ -5896,9 +5767,10 @@ void Application::setupUICallbacks() {
         [this](uint64_t guid) {
             uint64_t localGuid = gameHandler ? gameHandler->getPlayerGuid() : 0;
             uint64_t activeGuid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
+            const uint64_t modelGuid = mapScope_ ? mapScope_->playerModel().guid : 0;
             return (localGuid != 0 && guid == localGuid) ||
                    (activeGuid != 0 && guid == activeGuid) ||
-                   (spawnedPlayerGuid_ != 0 && guid == spawnedPlayerGuid_);
+                   (modelGuid != 0 && guid == modelGuid);
         });
     entitySpawnCallbacks_->setupCallbacks();
 
@@ -5930,7 +5802,12 @@ void Application::setupUICallbacks() {
 }
 
 void Application::spawnPlayerCharacter() {
-    if (playerCharacterSpawned) return;
+    if (!mapScope_) {
+        LOG_ERROR("Player model not spawned: no map scope to hold it");
+        return;
+    }
+    auto& playerModel = mapScope_->playerModel();
+    if (playerModel.spawned) return;
     if (!renderer || !renderer->getCharacterRenderer() || !renderer->getCamera()) return;
 
     auto* charRenderer = renderer->getCharacterRenderer();
@@ -6104,7 +5981,7 @@ void Application::spawnPlayerCharacter() {
                 static_cast<int>(spawnPos.x), ", ",
                 static_cast<int>(spawnPos.y), ", ",
                 static_cast<int>(spawnPos.z), ")");
-        playerCharacterSpawned = true;
+        playerModel.spawned = true;
 
         // Set voice profile to match character race/gender
         if (auto* asm_ = audioCoordinator_ ? audioCoordinator_->getActivitySoundManager() : nullptr) {
@@ -6124,13 +6001,13 @@ void Application::spawnPlayerCharacter() {
 
         // Track which character's appearance this instance represents so we can
         // respawn if the user logs into a different character without restarting.
-        spawnedPlayerGuid_ = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
-        spawnedAppearanceBytes_ = 0;
-        spawnedFacialFeatures_ = 0;
+        playerModel.guid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
+        playerModel.appearanceBytes = 0;
+        playerModel.facialFeatures = 0;
         if (gameHandler) {
             if (const game::Character* ch = gameHandler->getActiveCharacter()) {
-                spawnedAppearanceBytes_ = ch->appearanceBytes;
-                spawnedFacialFeatures_ = ch->facialFeatures;
+                playerModel.appearanceBytes = ch->appearanceBytes;
+                playerModel.facialFeatures = ch->facialFeatures;
             }
         }
 
@@ -6145,14 +6022,15 @@ void Application::spawnPlayerCharacter() {
 }
 
 void Application::refreshPlayerCharacterModel() {
-    if (!playerCharacterSpawned || !gameHandler) return;
+    if (!mapScope_ || !mapScope_->playerModel().spawned || !gameHandler) return;
+    auto& playerModel = mapScope_->playerModel();
     const game::Character* ch = gameHandler->getActiveCharacter();
     if (!ch) return;
     // Only rebuild when the visible appearance actually changed. PLAYER_BYTES_2
     // also carries rest state, so the appearance hook fires on entering/leaving
     // inns and cities - a full respawn on those would be needless and jarring.
-    if (ch->appearanceBytes == spawnedAppearanceBytes_ &&
-        ch->facialFeatures == spawnedFacialFeatures_) {
+    if (ch->appearanceBytes == playerModel.appearanceBytes &&
+        ch->facialFeatures == playerModel.facialFeatures) {
         return;
     }
     LOG_INFO("Rebuilding player model in place for appearance change (barber shop)");
@@ -6169,10 +6047,7 @@ void Application::refreshPlayerCharacterModel() {
             renderer->getCharacterRenderer()->removeInstance(oldInst);
         }
     }
-    playerCharacterSpawned = false;
-    spawnedPlayerGuid_ = 0;
-    spawnedAppearanceBytes_ = 0;
-    spawnedFacialFeatures_ = 0;
+    playerModel = {};
 
     spawnSnapToGround = false; // don't snap Z - stay at the current position
     if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
@@ -6209,7 +6084,7 @@ void Application::setPressedGameObject(uint64_t guid) {
     // Cleared first, always: a press that moves from one object to another has
     // to take the light off the first, and the release clears with guid 0.
     m2->clearInstanceHighlights();
-    if (guid == 0 || !entitySpawner_) return;
+    if (guid == 0 || !entitySpawner_ || !entitySpawner_->hasMap()) return;
     const auto& objects = entitySpawner_->getGameObjectInstances();
     auto it = objects.find(guid);
     // A building drawn as a WMO has no M2 instance to light; it keeps the
@@ -6586,8 +6461,10 @@ std::string Application::currentRealmPatchKey() const {
 /// world half-drawn from the old data would keep the rest of it.
 void Application::updateRealmPatchMount() {
     if (!assetManager) return;
+    // A map scope still standing may have work reading the archives; its end
+    // joins that work.
     const bool worldInUse = state == AppState::IN_GAME || state == AppState::LOADING_WORLD ||
-                            (worldLoader_ && worldLoader_->hasBackgroundWork());
+                            mapScope_ != nullptr;
     const std::string realm = currentRealmPatchKey();
 
     // Connected somewhere else: these archives are not that realm's. Taken down

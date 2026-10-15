@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "core/map_scope.hpp"
 #include "core/frame_phase.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
@@ -12,14 +13,9 @@
 #include "rendering/renderer.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
-#include "rendering/animation/melee_anim_chains.hpp"
-#include "rendering/animation/animation_ids.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "rendering/terrain_manager.hpp"
-#include "rendering/quest_marker_renderer.hpp"
-#include "rendering/footprint_renderer.hpp"
 #include "rendering/loading_screen.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -124,74 +120,15 @@ void spawnInstancePortalVisuals(uint32_t mapId,
 void Application::beginWorldLoading(WorldLoader::Entry entry) {
     if (!requireTransitions("enter loading world")) return;
     const auto [mapId, x, y, z] = entry;
-    worldLoader_->cancel();
-    // --- Clean up previous map's state on map change ---
-    // (Same cleanup as logout, but preserves player identity and renderer objects.)
-    LOG_DEBUG("Begin world load: map=", mapId, " previousMap=", worldLoader_->getLoadedMapId());
-    bool hasRendererData = renderer && (renderer->getWMORenderer() || renderer->getM2Renderer());
-    if (worldLoader_->getLoadedMapId() != 0xFFFFFFFF || hasRendererData) {
-        LOG_WARNING("Map change: cleaning up old map ", worldLoader_->getLoadedMapId(), " before loading map ", mapId);
-
-        // Clear pending queues first (these don't touch GPU resources)
-        entitySpawner_->clearAllQueues();
-
-        // Transport GUIDs are reused across maps (for example, Undercity elevator
-        // GUIDs become Deeprun tram GUIDs). The renderer instances are map-local,
-        // so the logical transport/path state must be map-local too; otherwise a
-        // newly spawned SubwayCar is rebound to the old elevator path.
-        if (gameHandler) {
-            gameHandler->clearPlayerTransport();
-            if (auto* tm = gameHandler->getTransportManager()) {
-                tm->clearTransports();
-            }
-        }
-
-        if (renderer) {
-            // Clear all world geometry from old map (including textures/models).
-            // Old GPU handles retire only after all frame fences; CPU scene
-            // ownership can switch immediately without stalling the device.
-            if (auto* wmo = renderer->getWMORenderer()) {
-                wmo->clearAll();
-            }
-            if (auto* m2 = renderer->getM2Renderer()) {
-                m2->clear();
-            }
-
-            // Full clear of character renderer: removes all instances, models,
-            // textures, retaining pools until their retired sets are freed. This prevents stale GPU
-            // resources from accumulating across map changes (old creature
-            // models, bone buffers, texture descriptor sets) which can cause
-            // VK_ERROR_DEVICE_LOST on some drivers.
-            if (auto* cr = renderer->getCharacterRenderer()) {
-                cr->clear();
-                getPlayerView()->setCharacterFollow(0);
-            }
-            // Reset equipment dirty tracking so composited textures are rebuilt
-            // after spawnPlayerCharacter() recreates the character instance.
-            if (gameHandler) {
-                gameHandler->resetEquipmentDirtyTracking();
-            }
-
-            if (auto* terrain = renderer->getTerrainManager()) {
-                terrain->softReset();
-                terrain->setStreamingEnabled(false); // Activate only after the new map name is installed.
-            }
-            if (auto* questMarkers = renderer->getQuestMarkerRenderer()) {
-                questMarkers->clear();
-            }
-            if (auto* footprints = renderer->getFootprintRenderer()) {
-                footprints->clear();
-            }
-            if (auto* ac = getAnimationController()) ac->clearMount();
-        }
-
-        // Clear application-level instance tracking (after renderer cleanup)
-        entitySpawner_->resetAllState();
-
-        // Force player character re-spawn on new map
-        playerCharacterSpawned = false;
+    // The previous map - finished, or a load this entry supersedes, even on
+    // the same map - ends here: its work is cancelled and joined, its streaming
+    // stopped and its instances released before the next scope binds the
+    // spawner and the renderers.
+    if (mapScope_) {
+        LOG_INFO("Map change: ending map ", mapScope_->mapId(), " before loading map ", mapId);
+        mapScope_.reset();
     }
-
+    mapScope_ = std::make_unique<MapScope>(mapScopeServices(), *worldLoader_, entry);
 
     if (gameHandler) {
         gameHandler->cancelFollow();
@@ -208,11 +145,7 @@ void Application::beginWorldLoading(WorldLoader::Entry entry) {
         camera->setEnabled(false);
     }
     if (renderer) renderer->getCharacterPosition() = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(x, y, z)));
-    if (worldEntryCallbacks_) {
-        worldEntryCallbacks_->setWorldEntryMovementGraceTimer(2.0f);
-        worldEntryCallbacks_->setTaxiLandingClampTimer(0);
-        worldEntryCallbacks_->setLastTaxiFlight(false);
-    }
+    if (worldEntryCallbacks_) worldEntryCallbacks_->beginMapEntry();
     setState(AppState::LOADING_WORLD);
     if (!loadingScreen_) {
         loadingScreen_ = std::make_unique<rendering::LoadingScreen>();
@@ -224,11 +157,13 @@ void Application::beginWorldLoading(WorldLoader::Entry entry) {
     loadingScreen_->setZoneName(friendly ? friendly : (gameHandler ? gameHandler->getMapName(mapId) : std::string()));
     loadingScreen_->setStatus("Preparing world...");
     loadingScreen_->setProgress(0);
-    worldLoader_->begin(entry);
 }
 
 void Application::prepareWorldPlayer() {
     if (!requireTransitions("prepare loading player")) return;
+    // The scene's renderers exist now - built by the first entry, found by
+    // later ones - and this map's scope takes its instances and terrain.
+    mapScope_->adoptRenderers();
     onWorldRenderersReady();
     setActiveMapName(worldLoader_->mapName());
     if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
@@ -242,41 +177,14 @@ void Application::prepareWorldPlayer() {
         }
     }
 
-    // Spawn player model for online mode (skip if already spawned, e.g. teleport)
+    // The player's model is an instance of this map's scene, so every map
+    // spawns it; the previous one ended with the previous scope.
     if (gameHandler) {
         const game::Character* activeChar = gameHandler->getActiveCharacter();
         if (activeChar) {
-            const uint64_t activeGuid = gameHandler->getActiveCharacterGuid();
-            const bool appearanceChanged =
-                (activeGuid != spawnedPlayerGuid_) ||
-                (activeChar->appearanceBytes != spawnedAppearanceBytes_) ||
-                (activeChar->facialFeatures != spawnedFacialFeatures_) ||
-                (activeChar->race != playerRace_) ||
-                (activeChar->gender != playerGender_) ||
-                (activeChar->characterClass != playerClass_);
-
-            if (!playerCharacterSpawned || appearanceChanged) {
-                if (appearanceChanged) {
-                    LOG_INFO("Respawning player model for new/changed character: guid=0x",
-                             std::hex, activeGuid, std::dec);
-                }
-                // Remove old instance so we don't keep stale visuals.
-                if (renderer && renderer->getCharacterRenderer()) {
-                    uint32_t oldInst = renderer->getCharacterInstanceId();
-                    if (oldInst > 0) {
-                        getPlayerView()->setCharacterFollow(0);
-                        if (auto* ac = getAnimationController()) ac->clearMount();
-                        renderer->getCharacterRenderer()->removeInstance(oldInst);
-                    }
-                }
-                playerCharacterSpawned = false;
-                spawnedPlayerGuid_ = 0;
-                spawnedAppearanceBytes_ = 0;
-                spawnedFacialFeatures_ = 0;
-
+            if (!mapScope_->playerModel().spawned) {
                 playerRace_ = activeChar->race;
                 playerGender_ = activeChar->gender;
-                playerClass_ = activeChar->characterClass;
                 spawnSnapToGround = false;
                 if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
                 if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons(); // will no-op until instance exists
@@ -298,49 +206,10 @@ void Application::prepareWorldPlayer() {
         camera->reset();
         camera->setEnabled(false);
     }
-    if (gameHandler && renderer && renderer->getCharacterRenderer()) {
-        auto* cr = renderer->getCharacterRenderer();
-        auto* spawner = entitySpawner_.get();
-
-        gameHandler->setNpcDeathCallback([cr, spawner](uint64_t guid) {
-            spawner->markCreatureDead(guid);
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                cr->playAnimation(instanceId, rendering::anim::DEATH, false);
-            }
-        });
-
-        gameHandler->setNpcRespawnCallback([cr, spawner](uint64_t guid) {
-            spawner->unmarkCreatureDead(guid);
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
-            }
-        });
-
-        // Probe the creature model for the best available attack animation
-        gameHandler->setNpcSwingCallback([cr, spawner](uint64_t guid) {
-            uint32_t instanceId = spawner->getCreatureInstanceId(guid);
-            if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
-            if (instanceId != 0 && cr) {
-                const auto attackAnims =
-                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
-                bool played = false;
-                for (uint32_t anim : attackAnims) {
-                    if (cr->hasAnimation(instanceId, anim)) {
-                        cr->playAnimation(instanceId, anim, false);
-                        played = true;
-                        break;
-                    }
-                }
-                if (!played) cr->playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
-            }
-        });
-    }
-
-
+    // NPC death, respawn and swing are presented by AnimationCallbackHandler,
+    // which owns those callbacks from setup. Registering them again here for
+    // every map replaced its versions (and the rise animation) silently, and
+    // left the spawn presentation of a map scope's first objects without them.
 }
 
 void Application::finishWorldGeometry() {

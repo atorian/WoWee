@@ -66,6 +66,10 @@ void PlayerView::attachWorld() {
     cameraController_->reset();
 }
 
+void PlayerView::detachWorld() {
+    cameraController_->setTerrainManager(nullptr);
+}
+
 void PlayerView::setCharacterFollow(uint32_t instanceId) {
     renderer_.setCharacterFollow(instanceId);
     if (instanceId > 0) cameraController_->setFollowTarget(&renderer_.getCharacterPosition());

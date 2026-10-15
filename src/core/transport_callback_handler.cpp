@@ -148,6 +148,11 @@ void TransportCallbackHandler::setupCallbacks() {
     // Transport spawn callback (online mode) - register transports with TransportManager
     gameHandler_.setTransportSpawnCallback([this](uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation) {
         // Get the GameObject instance now so late queue processing can rely on stable IDs.
+        if (!entitySpawner_.hasMap()) {
+            LOG_WARNING("Transport spawn callback: no map scope for GUID 0x", std::hex, guid, std::dec,
+                        "; it is registered when the scope presents its objects");
+            return;
+        }
         auto& goInstances2 = entitySpawner_.getGameObjectInstances();
         auto it = goInstances2.find(guid);
         if (it == goInstances2.end()) {
@@ -173,6 +178,9 @@ void TransportCallbackHandler::setupCallbacks() {
             LOG_WARNING("Transport move callback: TransportManager is null!");
             return;
         }
+        // No scene yet: the map scope presents the transport from its entity,
+        // at the position this update has just written there.
+        if (!entitySpawner_.hasMap()) return;
 
         if (entitySpawner_.hasTransportRegistrationPending(guid)) {
             entitySpawner_.setTransportPendingMove(guid, x, y, z, orientation);

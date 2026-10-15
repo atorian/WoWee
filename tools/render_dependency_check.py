@@ -44,6 +44,10 @@ CORE_ALLOWED = {
     "core/logger.hpp", "core/profiler.hpp", "core/env_flag.hpp", "core/thread_pool.hpp",
     "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
     "core/memory_monitor.hpp", "core/geoset_rules.hpp",
+    # Header-only, over thread_pool.hpp: the lifetime fence a map's work and
+    # its terrain workers are tracked by. The renderer is handed a token; it
+    # knows nothing of the client that owns the group.
+    "core/job_group.hpp",
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)

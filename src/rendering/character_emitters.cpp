@@ -1,4 +1,5 @@
 #include "rendering/character_emitters.hpp"
+#include <stdexcept>
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "core/logger.hpp"
@@ -10,13 +11,18 @@ CharacterEmitters::CharacterEmitters(CharacterRenderer& characters, M2Renderer& 
     : characters_(characters), m2_(m2) {}
 
 CharacterEmitters::~CharacterEmitters() {
-    for (auto& [instanceId, binding] : bindings_) release(binding);
+    clearInstances();
+}
+
+void CharacterEmitters::clearInstances() {
+    for (auto& [instanceId, binding] : scene_->bindings_) release(binding);
+    *scene_ = InstanceState{};
 }
 
 void CharacterEmitters::update(float deltaTime) {
     ++frame_;
     characters_.forEachEmitterSource([&](const CharacterRenderer::EmitterSource& source) {
-        Binding& binding = bindings_[source.instanceId];
+        Binding& binding = scene_->bindings_[source.instanceId];
         binding.seenFrame = frame_;
 
         // The model was loaded again under the same id, or M2Renderer was
@@ -58,10 +64,10 @@ void CharacterEmitters::update(float deltaTime) {
     });
 
     // Instances that are gone, or whose model no longer has emitters.
-    for (auto it = bindings_.begin(); it != bindings_.end();) {
+    for (auto it = scene_->bindings_.begin(); it != scene_->bindings_.end();) {
         if (it->second.seenFrame != frame_) {
             release(it->second);
-            it = bindings_.erase(it);
+            it = scene_->bindings_.erase(it);
         } else {
             ++it;
         }
@@ -84,3 +90,19 @@ void CharacterEmitters::release(Binding& binding) {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee::rendering {
+CharacterEmitters::InstanceSession::InstanceSession(CharacterEmitters& renderer)
+    : renderer_(renderer) {
+    if (renderer_.scene_ != &renderer_.defaultInstances_)
+        throw std::logic_error("CharacterEmitters already has a scene owner");
+    state_ = std::make_unique<InstanceState>(std::move(renderer_.defaultInstances_));
+    renderer_.defaultInstances_ = InstanceState{};
+    renderer_.scene_ = state_.get();
+}
+
+CharacterEmitters::InstanceSession::~InstanceSession() {
+    renderer_.clearInstances();
+    renderer_.scene_ = &renderer_.defaultInstances_;
+}
+}

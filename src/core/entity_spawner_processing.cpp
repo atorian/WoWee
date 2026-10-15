@@ -55,7 +55,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
     const auto tickStart = std::chrono::steady_clock::now();
     int modelUploads = 0;
 
-    for (auto it = asyncCreatureLoads_.begin(); it != asyncCreatureLoads_.end(); ) {
+    for (auto it = spawns_->asyncCreatureLoads_.begin(); it != spawns_->asyncCreatureLoads_.end(); ) {
         if (std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - tickStart).count() >= budgetMs) {
             break;
@@ -73,21 +73,17 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         // Preserve decoded data until an upload slot is available, while still
         // draining stale requests, failures and cache hits without GPU work.
         const auto& prepared = *it->ready;
-        const auto request = requestedCreatureDisplayIds_.find(prepared.guid);
-        const bool current = request != requestedCreatureDisplayIds_.end() &&
-                             request->second == prepared.displayId;
+        const bool current = spawns_->jobs_.accepts(prepared.token);
         if (current && prepared.valid && !prepared.permanent_failure && prepared.model &&
-            !displayIdModelCache_.count(prepared.displayId) && modelUploads >= maxUploadsThisTick) {
+            !assets_.displayIdModelCache_.count(prepared.displayId) && modelUploads >= maxUploadsThisTick) {
             ++it;
             continue;
         }
         auto result = std::move(*it->ready);
-        it = asyncCreatureLoads_.erase(it);
-        asyncCreatureDisplayLoads_.erase(result.displayId);
+        it = spawns_->asyncCreatureLoads_.erase(it);
+        spawns_->asyncCreatureDisplayLoads_.erase(result.displayId);
 
-        auto requested = requestedCreatureDisplayIds_.find(result.guid);
-        if (requested == requestedCreatureDisplayIds_.end() ||
-            requested->second != result.displayId) {
+        if (!spawns_->jobs_.accepts(result.token)) {
             // A VALUES update changed the display while this model was loading.
             // The replacement request is already queued; never instantiate stale
             // geometry (notably the lumberjack's log-carrying model while chopping).
@@ -102,35 +98,36 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         // point, blocking ALL ready futures (including zero-cost ones) after a
         // single upload, which throttled creature spawn throughput during world load.
         if (result.permanent_failure) {
-            nonRenderableCreatureDisplayIds_.insert(result.displayId);
-            creaturePermanentFailureGuids_.insert(result.guid);
-            pendingCreatureSpawnGuids_.erase(result.guid);
-            creatureSpawnRetryDeadlines_.erase(result.guid);
+            assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
+            spawns_->creaturePermanentFailureGuids_.insert(result.guid);
+            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
             continue;
         }
         if (!result.valid || !result.model) {
-            pendingCreatureSpawnGuids_.erase(result.guid);
-            creatureSpawnRetryDeadlines_.erase(result.guid);
+            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
             continue;
         }
 
         // Another async result may have already uploaded this displayId while this
         // task was still running; in that case, skip duplicate GPU upload.
-        if (displayIdModelCache_.find(result.displayId) != displayIdModelCache_.end()) {
-            pendingCreatureSpawnGuids_.erase(result.guid);
-            creatureSpawnRetryDeadlines_.erase(result.guid);
-            if (!creatureInstances_.count(result.guid) &&
-                !creaturePermanentFailureGuids_.count(result.guid)) {
+        if (assets_.displayIdModelCache_.find(result.displayId) != assets_.displayIdModelCache_.end()) {
+            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
+            if (!spawns_->creatureInstances_.count(result.guid) &&
+                !spawns_->creaturePermanentFailureGuids_.count(result.guid)) {
                 PendingCreatureSpawn s{};
                 s.guid = result.guid;
+                s.token = result.token;
                 s.displayId = result.displayId;
                 s.x = result.x;
                 s.y = result.y;
                 s.z = result.z;
                 s.orientation = result.orientation;
                 s.scale = result.scale;
-                pendingCreatureSpawns_.push_back(s);
-                pendingCreatureSpawnGuids_.insert(result.guid);
+                spawns_->pendingCreatureSpawns_.push_back(s);
+                spawns_->pendingCreatureSpawnGuids_.insert(result.guid);
             }
             continue;
         }
@@ -138,7 +135,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         // Model parsed on background thread - upload to GPU on main thread.
         auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!charRenderer) {
-            pendingCreatureSpawnGuids_.erase(result.guid);
+            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
             continue;
         }
 
@@ -152,10 +149,10 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
         if (!charRenderer->loadModel(*result.model, result.modelId)) {
             charRenderer->setPredecodedBLPCache(nullptr);
-            nonRenderableCreatureDisplayIds_.insert(result.displayId);
-            creaturePermanentFailureGuids_.insert(result.guid);
-            pendingCreatureSpawnGuids_.erase(result.guid);
-            creatureSpawnRetryDeadlines_.erase(result.guid);
+            assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
+            spawns_->creaturePermanentFailureGuids_.insert(result.guid);
+            spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
             continue;
         }
         charRenderer->setPredecodedBLPCache(nullptr);
@@ -169,26 +166,27 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         }
         // Save remaining pre-decoded textures (display skins) for spawnOnlineCreature
         if (!result.predecodedTextures.empty()) {
-            displayIdPredecodedTextures_[result.displayId] = std::move(result.predecodedTextures);
+            spawns_->displayIdPredecodedTextures_[result.displayId] = std::move(result.predecodedTextures);
         }
-        displayIdModelCache_[result.displayId] = result.modelId;
-        pendingCreatureSpawnGuids_.erase(result.guid);
-        creatureSpawnRetryDeadlines_.erase(result.guid);
+        assets_.displayIdModelCache_[result.displayId] = result.modelId;
+        spawns_->pendingCreatureSpawnGuids_.erase(result.guid);
+        spawns_->creatureSpawnRetryDeadlines_.erase(result.guid);
 
         // Re-queue as a normal pending spawn - model is now cached, so sync spawn is fast
         // (only creates instance + applies textures, no file I/O).
-        if (!creatureInstances_.count(result.guid) &&
-            !creaturePermanentFailureGuids_.count(result.guid)) {
+        if (!spawns_->creatureInstances_.count(result.guid) &&
+            !spawns_->creaturePermanentFailureGuids_.count(result.guid)) {
             PendingCreatureSpawn s{};
             s.guid = result.guid;
+                s.token = result.token;
             s.displayId = result.displayId;
             s.x = result.x;
             s.y = result.y;
             s.z = result.z;
             s.orientation = result.orientation;
             s.scale = result.scale;
-            pendingCreatureSpawns_.push_back(s);
-            pendingCreatureSpawnGuids_.insert(result.guid);
+            spawns_->pendingCreatureSpawns_.push_back(s);
+            spawns_->pendingCreatureSpawnGuids_.insert(result.guid);
         }
     }
 }
@@ -219,7 +217,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
     static constexpr float kCompositeBudgetMs = 2.0f;
     auto startTime = std::chrono::steady_clock::now();
 
-    for (auto it = asyncNpcCompositeLoads_.begin(); it != asyncNpcCompositeLoads_.end(); ) {
+    for (auto it = spawns_->asyncNpcCompositeLoads_.begin(); it != spawns_->asyncNpcCompositeLoads_.end(); ) {
         if (!unlimited) {
             float elapsed = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - startTime).count();
@@ -231,7 +229,8 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
             continue;
         }
         auto result = it->future.get();
-        it = asyncNpcCompositeLoads_.erase(it);
+        it = spawns_->asyncNpcCompositeLoads_.erase(it);
+        if (!spawns_->jobs_.accepts(result.token)) continue;
 
         const auto& info = result.info;
 
@@ -307,16 +306,16 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
         }
     }
 
-    if (pendingCreatureSpawns_.empty()) return;
-    if (!creatureLookupsBuilt_) {
+    if (spawns_->pendingCreatureSpawns_.empty()) return;
+    if (!assets_.creatureLookupsBuilt_) {
         buildCreatureDisplayLookups();
-        if (!creatureLookupsBuilt_) return;
+        if (!assets_.creatureLookupsBuilt_) return;
     }
 
     int processed = 0;
     int asyncLaunched = 0;
-    size_t rotationsLeft = pendingCreatureSpawns_.size();
-    while (!pendingCreatureSpawns_.empty() &&
+    size_t rotationsLeft = spawns_->pendingCreatureSpawns_.size();
+    while (!spawns_->pendingCreatureSpawns_.empty() &&
            (unlimited || processed < MAX_SPAWNS_PER_FRAME) &&
            rotationsLeft > 0) {
         // Check time budget every iteration (including first - async results may
@@ -327,53 +326,51 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             if (elapsedMs >= kSpawnBudgetMs) break;
         }
 
-        PendingCreatureSpawn s = pendingCreatureSpawns_.front();
-        pendingCreatureSpawns_.pop_front();
+        PendingCreatureSpawn s = spawns_->pendingCreatureSpawns_.front();
+        spawns_->pendingCreatureSpawns_.pop_front();
 
-        auto requested = requestedCreatureDisplayIds_.find(s.guid);
-        if (requested == requestedCreatureDisplayIds_.end() ||
-            requested->second != s.displayId) {
+        if (!spawns_->jobs_.accepts(s.token)) {
             // Stale entry superseded by a newer display request for this guid.
             erasePendingGuidIfUnqueued(s.guid);
             continue;
         }
 
-        if (nonRenderableCreatureDisplayIds_.count(s.displayId)) {
-            pendingCreatureSpawnGuids_.erase(s.guid);
-            creatureSpawnRetryDeadlines_.erase(s.guid);
+        if (assets_.nonRenderableCreatureDisplayIds_.count(s.displayId)) {
+            spawns_->pendingCreatureSpawnGuids_.erase(s.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
             processed++;
-            rotationsLeft = pendingCreatureSpawns_.size();
+            rotationsLeft = spawns_->pendingCreatureSpawns_.size();
             continue;
         }
 
-        const bool needsNewModel = (displayIdModelCache_.find(s.displayId) == displayIdModelCache_.end());
+        const bool needsNewModel = (assets_.displayIdModelCache_.find(s.displayId) == assets_.displayIdModelCache_.end());
 
         // For new models: launch async load on background thread instead of blocking.
         if (needsNewModel) {
             // Keep exactly one background load per displayId. Additional spawns for
             // the same displayId stay queued and will spawn once cache is populated.
-            if (asyncCreatureDisplayLoads_.count(s.displayId)) {
-                pendingCreatureSpawns_.push_back(s);
+            if (spawns_->asyncCreatureDisplayLoads_.count(s.displayId)) {
+                spawns_->pendingCreatureSpawns_.push_back(s);
                 rotationsLeft--;
                 continue;
             }
 
             const int maxAsync = unlimited ? (MAX_ASYNC_CREATURE_LOADS * 4) : MAX_ASYNC_CREATURE_LOADS;
-            if (static_cast<int>(asyncCreatureLoads_.size()) + asyncLaunched >= maxAsync) {
+            if (static_cast<int>(spawns_->asyncCreatureLoads_.size()) + asyncLaunched >= maxAsync) {
                 // Too many in-flight - defer to next frame
-                pendingCreatureSpawns_.push_back(s);
+                spawns_->pendingCreatureSpawns_.push_back(s);
                 rotationsLeft--;
                 continue;
             }
 
             std::string m2Path = getModelPathForDisplayId(s.displayId);
             if (m2Path.empty()) {
-                nonRenderableCreatureDisplayIds_.insert(s.displayId);
-                creaturePermanentFailureGuids_.insert(s.guid);
-                pendingCreatureSpawnGuids_.erase(s.guid);
-                creatureSpawnRetryDeadlines_.erase(s.guid);
+                assets_.nonRenderableCreatureDisplayIds_.insert(s.displayId);
+                spawns_->creaturePermanentFailureGuids_.insert(s.guid);
+                spawns_->pendingCreatureSpawnGuids_.erase(s.guid);
+                spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
                 processed++;
-                rotationsLeft = pendingCreatureSpawns_.size();
+                rotationsLeft = spawns_->pendingCreatureSpawns_.size();
                 continue;
             }
 
@@ -381,7 +378,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             // batches and draws nothing, and the effects a script hangs on it
             // still have somewhere to hang.
             // Launch async M2 load - file I/O and parsing happen off the main thread.
-            uint32_t modelId = nextCreatureModelId_++;
+            uint32_t modelId = assets_.nextCreatureModelId_++;
             auto* am = assetManager_;
 
             // The display's rows are copied for the worker, which works out
@@ -391,20 +388,23 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             // the main thread for every new NPC a town shows.
             std::optional<CreatureDisplayData> displayCopy;
             std::optional<HumanoidDisplayExtra> extraCopy;
-            if (auto itDD = displayDataMap_.find(s.displayId); itDD != displayDataMap_.end()) {
+            if (auto itDD = assets_.displayDataMap_.find(s.displayId); itDD != assets_.displayDataMap_.end()) {
                 displayCopy = itDD->second;
                 if (itDD->second.extraDisplayId != 0) {
-                    if (auto itHE = humanoidExtraMap_.find(itDD->second.extraDisplayId);
-                        itHE != humanoidExtraMap_.end()) {
+                    if (auto itHE = assets_.humanoidExtraMap_.find(itDD->second.extraDisplayId);
+                        itHE != assets_.humanoidExtraMap_.end()) {
                         extraCopy = itHE->second;
                     }
                 }
             }
 
             AsyncCreatureLoad load;
-            load.future = ThreadPool::ioWorkers().submit(
-                [am, m2Path, modelId, s, displayCopy, extraCopy]() -> PreparedCreatureModel {
-                    PreparedCreatureModel result;
+            load.future = spawns_->jobs_.submit(s.token, 
+                [am, m2Path, modelId, s, displayCopy, extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
+                    PreparedCreatureModel result{};
+                    result.token = jobToken;
+                    result.guid = s.guid; result.displayId = s.displayId;
+                    if (!jobToken.current()) return result;
                     // Collect display skin texture paths for pre-decode below.
                     std::vector<std::string> skinPaths;
                     if (displayCopy) {
@@ -608,11 +608,11 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                     result.valid = true;
                     return result;
                 });
-            asyncCreatureLoads_.push_back(std::move(load));
-            asyncCreatureDisplayLoads_.insert(s.displayId);
+            spawns_->asyncCreatureLoads_.push_back(std::move(load));
+            spawns_->asyncCreatureDisplayLoads_.insert(s.displayId);
             asyncLaunched++;
-            // Don't erase from pendingCreatureSpawnGuids_ - the async result handler will do it
-            rotationsLeft = pendingCreatureSpawns_.size();
+            // Don't erase from spawns_->pendingCreatureSpawnGuids_ - the async result handler will do it
+            rotationsLeft = spawns_->pendingCreatureSpawns_.size();
             processed++;
             continue;
         }
@@ -620,8 +620,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
         // Guard the invariant spawnOnlineCreature relies on: it will not load a model
         // itself, so a cache miss here must go back through the async path rather than
         // silently dropping the creature.
-        if (displayIdModelCache_.find(s.displayId) == displayIdModelCache_.end()) {
-            pendingCreatureSpawns_.push_back(s);
+        if (assets_.displayIdModelCache_.find(s.displayId) == assets_.displayIdModelCache_.end()) {
+            spawns_->pendingCreatureSpawns_.push_back(s);
             rotationsLeft--;
             continue;
         }
@@ -636,25 +636,25 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 LOG_WARNING("spawnOnlineCreature took ", spawnMs, "ms displayId=", s.displayId);
             }
         }
-        pendingCreatureSpawnGuids_.erase(s.guid);
+        spawns_->pendingCreatureSpawnGuids_.erase(s.guid);
 
         // If spawn still failed, retry for a bounded wall-clock window. A frame
         // count made the timeout vary wildly with refresh rate and load stalls.
-        if (!creatureInstances_.count(s.guid)) {
-            if (creaturePermanentFailureGuids_.erase(s.guid) > 0) {
-                creatureSpawnRetryDeadlines_.erase(s.guid);
+        if (!spawns_->creatureInstances_.count(s.guid)) {
+            if (spawns_->creaturePermanentFailureGuids_.erase(s.guid) > 0) {
+                spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
                 processed++;
                 continue;
             }
             const auto now = std::chrono::steady_clock::now();
-            const auto deadlineIt = creatureSpawnRetryDeadlines_.try_emplace(
+            const auto deadlineIt = spawns_->creatureSpawnRetryDeadlines_.try_emplace(
                 s.guid, now + CREATURE_SPAWN_RETRY_WINDOW).first;
             if (now < deadlineIt->second) {
-                pendingCreatureSpawns_.push_back(s);
-                pendingCreatureSpawnGuids_.insert(s.guid);
+                spawns_->pendingCreatureSpawns_.push_back(s);
+                spawns_->pendingCreatureSpawnGuids_.insert(s.guid);
             } else {
-                creatureSpawnRetryDeadlines_.erase(s.guid);
-                const int used = ++creatureSpawnRetryWindowsUsed_[s.guid];
+                spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
+                const int used = ++spawns_->creatureSpawnRetryWindowsUsed_[s.guid];
                 if (used < MAX_CREATURE_SPAWN_RETRY_WINDOWS) {
                     // Another window rather than an abandonment. Nothing asks
                     // again once this queue lets go: the server does not
@@ -664,10 +664,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                                 used, " of ", MAX_CREATURE_SPAWN_RETRY_WINDOWS,
                                 ": guid=0x", std::hex, s.guid, std::dec,
                                 " displayId=", s.displayId, " - retrying");
-                    pendingCreatureSpawns_.push_back(s);
-                    pendingCreatureSpawnGuids_.insert(s.guid);
+                    spawns_->pendingCreatureSpawns_.push_back(s);
+                    spawns_->pendingCreatureSpawnGuids_.insert(s.guid);
                 } else {
-                    creatureSpawnRetryWindowsUsed_.erase(s.guid);
+                    spawns_->creatureSpawnRetryWindowsUsed_.erase(s.guid);
                     LOG_WARNING("Dropping creature spawn after ",
                                 MAX_CREATURE_SPAWN_RETRY_WINDOWS,
                                 " retry windows: guid=0x",
@@ -676,10 +676,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 }
             }
         } else {
-            creatureSpawnRetryDeadlines_.erase(s.guid);
-            creatureSpawnRetryWindowsUsed_.erase(s.guid);
+            spawns_->creatureSpawnRetryDeadlines_.erase(s.guid);
+            spawns_->creatureSpawnRetryWindowsUsed_.erase(s.guid);
         }
-        rotationsLeft = pendingCreatureSpawns_.size();
+        rotationsLeft = spawns_->pendingCreatureSpawns_.size();
         processed++;
     }
 }
@@ -690,7 +690,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
     constexpr float kPlayerBudgetMs = 2.0f;
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (!cr) return;
-    for (auto it = asyncPlayerLoads_.begin(); it != asyncPlayerLoads_.end();) {
+    for (auto it = spawns_->asyncPlayerLoads_.begin(); it != spawns_->asyncPlayerLoads_.end();) {
         if (std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count() >= kPlayerBudgetMs) break;
         if (it->wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
@@ -698,14 +698,12 @@ void EntitySpawner::processPlayerSpawnQueue() {
             continue;
         }
         auto ready = it->get();
-        it = asyncPlayerLoads_.erase(it);
+        it = spawns_->asyncPlayerLoads_.erase(it);
         const auto& s = ready.request;
-        const auto expected = playerSpawnRevisions_.find(s.guid);
-        if (expected == playerSpawnRevisions_.end() || expected->second != s.revision ||
-            !pendingPlayerSpawnGuids_.erase(s.guid) || playerInstances_.count(s.guid)) continue;
-        playerSpawnRevisions_.erase(expected);
+        if (!spawns_->jobs_.accepts(s.token) ||
+            !spawns_->pendingPlayerSpawnGuids_.erase(s.guid) || spawns_->playerInstances_.count(s.guid)) continue;
         if (!ready.model) continue;
-        preparedPlayerModels_[(uint32_t(s.raceId) << 8) | s.genderId] = ready.model;
+        assets_.preparedPlayerModels_[(uint32_t(s.raceId) << 8) | s.genderId] = ready.model;
         // Use the latest position after the asynchronous load, not its old snapshot.
         float x = s.x, y = s.y, z = s.z, orientation = s.orientation;
         if (gameHandler_) {
@@ -714,36 +712,38 @@ void EntitySpawner::processPlayerSpawnQueue() {
                 orientation = entity->getOrientation();
             }
         }
-        preparedPlayerSpawn_ = &ready;
+        spawns_->preparedPlayerSpawn_ = &ready;
         cr->setPredecodedBLPCache(&ready.textures, true);
         struct AppearanceGuard {
             EntitySpawner* spawner;
             rendering::CharacterRenderer* renderer;
             ~AppearanceGuard() {
-                spawner->preparedPlayerSpawn_ = nullptr;
+                spawner->spawns_->preparedPlayerSpawn_ = nullptr;
                 renderer->setPredecodedBLPCache(nullptr);
             }
         } guard{this, cr};
         spawnOnlinePlayer(s.guid, s.raceId, s.genderId, s.appearanceBytes,
                           s.facialFeatures, x, y, z, orientation);
-        if (auto equipment = pendingOnlinePlayerEquipment_.find(s.guid);
-            equipment != pendingOnlinePlayerEquipment_.end()) {
-            deferredEquipmentQueue_.emplace_back(s.guid, equipment->second);
-            pendingOnlinePlayerEquipment_.erase(equipment);
+        if (auto equipment = spawns_->pendingOnlinePlayerEquipment_.find(s.guid);
+            equipment != spawns_->pendingOnlinePlayerEquipment_.end()) {
+            spawns_->deferredEquipmentQueue_.emplace_back(s.guid, equipment->second);
+            spawns_->pendingOnlinePlayerEquipment_.erase(equipment);
         }
     }
     // Snapshot inputs only. Workers never touch entity maps, instances or GPU state.
-    while (!pendingPlayerSpawns_.empty() && asyncPlayerLoads_.size() < 2) {
-        const auto request = pendingPlayerSpawns_.front();
-        pendingPlayerSpawns_.pop_front();
-        if (!pendingPlayerSpawnGuids_.count(request.guid)) continue;
+    while (!spawns_->pendingPlayerSpawns_.empty() && spawns_->asyncPlayerLoads_.size() < 2) {
+        const auto request = spawns_->pendingPlayerSpawns_.front();
+        spawns_->pendingPlayerSpawns_.pop_front();
+        if (!spawns_->pendingPlayerSpawnGuids_.count(request.guid)) continue;
         auto* assets = assetManager_;
         const uint32_t key = (uint32_t(request.raceId) << 8) | request.genderId;
-        auto cached = preparedPlayerModels_.find(key);
-        auto model = cached != preparedPlayerModels_.end() ? cached->second : nullptr;
-        asyncPlayerLoads_.push_back(ThreadPool::ioWorkers().submit(
-            [assets, request, model = std::move(model)]() mutable {
-                PreparedPlayerSpawn ready;
+        auto cached = assets_.preparedPlayerModels_.find(key);
+        auto model = cached != assets_.preparedPlayerModels_.end() ? cached->second : nullptr;
+        spawns_->asyncPlayerLoads_.push_back(spawns_->jobs_.submit(request.token, 
+            [assets, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
+                PreparedPlayerSpawn ready{};
+                ready.request = request;
+                if (!jobToken.current()) return ready;
                 ready.request = request;
                 if (!model) {
                     const auto path = game::getPlayerModelPath(static_cast<game::Race>(request.raceId),
@@ -807,7 +807,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
 void EntitySpawner::processAsyncEquipmentResults() {
     const auto start = std::chrono::steady_clock::now();
     constexpr float kEquipmentBudgetMs = 2.0f;
-    for (auto it = asyncEquipmentLoads_.begin(); it != asyncEquipmentLoads_.end(); ) {
+    for (auto it = spawns_->asyncEquipmentLoads_.begin(); it != spawns_->asyncEquipmentLoads_.end(); ) {
         if (std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count() >= kEquipmentBudgetMs) break;
         if (!it->future.valid() ||
@@ -816,23 +816,22 @@ void EntitySpawner::processAsyncEquipmentResults() {
             continue;
         }
         auto result = it->future.get();
-        it = asyncEquipmentLoads_.erase(it);
+        it = spawns_->asyncEquipmentLoads_.erase(it);
 
         auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!charRenderer) continue;
 
-        auto appearance = onlinePlayerAppearance_.find(result.guid);
-        auto revision = equipmentRevisions_.find(result.guid);
-        if (appearance == onlinePlayerAppearance_.end() ||
+        auto appearance = spawns_->onlinePlayerAppearance_.find(result.guid);
+        if (appearance == spawns_->onlinePlayerAppearance_.end() ||
             appearance->second.instanceId != result.instanceId ||
-            revision == equipmentRevisions_.end() || revision->second != result.revision) continue;
-        preparedEquipmentUpdate_ = &result;
+            !spawns_->jobs_.accepts(result.token)) continue;
+        spawns_->preparedEquipmentUpdate_ = &result;
         charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
         struct EquipmentGuard {
             EntitySpawner* spawner;
             rendering::CharacterRenderer* renderer;
             ~EquipmentGuard() {
-                spawner->preparedEquipmentUpdate_ = nullptr;
+                spawner->spawns_->preparedEquipmentUpdate_ = nullptr;
                 renderer->setPredecodedBLPCache(nullptr);
             }
         } guard{this, charRenderer};
@@ -842,21 +841,22 @@ void EntitySpawner::processAsyncEquipmentResults() {
 
 void EntitySpawner::processDeferredEquipmentQueue() {
     processAsyncEquipmentResults();
-    if (deferredEquipmentQueue_.empty() || asyncEquipmentLoads_.size() >= 2) return;
-    auto [guid, equipment] = deferredEquipmentQueue_.front();
-    deferredEquipmentQueue_.pop_front();
-    const auto appearance = onlinePlayerAppearance_.find(guid);
-    if (appearance == onlinePlayerAppearance_.end()) {
-        pendingOnlinePlayerEquipment_[guid] = equipment;
+    if (spawns_->deferredEquipmentQueue_.empty() || spawns_->asyncEquipmentLoads_.size() >= 2) return;
+    auto [guid, equipment] = spawns_->deferredEquipmentQueue_.front();
+    spawns_->deferredEquipmentQueue_.pop_front();
+    const auto appearance = spawns_->onlinePlayerAppearance_.find(guid);
+    if (appearance == spawns_->onlinePlayerAppearance_.end()) {
+        spawns_->pendingOnlinePlayerEquipment_[guid] = equipment;
         return;
     }
     const auto snapshot = appearance->second;
-    const auto revision = equipmentRevisions_[guid];
+    const auto token = spawns_->jobs_.request(JobGroup::Channel::Equipment, guid);
     auto* assets = assetManager_;
     AsyncEquipmentLoad load;
-    load.future = ThreadPool::ioWorkers().submit( [assets, guid, equipment, snapshot, revision] {
+    load.future = spawns_->jobs_.submit(token, [assets, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
         PreparedEquipmentUpdate ready;
-        ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.revision = revision;
+        ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.token = jobToken;
+        if (!jobToken.current()) return ready;
         ready.displayInfoIds = equipment.first; ready.inventoryTypes = equipment.second;
         std::vector<std::string> paths{snapshot.bodySkinPath};
         paths.insert(paths.end(), snapshot.underwearPaths.begin(), snapshot.underwearPaths.end());
@@ -943,11 +943,11 @@ void EntitySpawner::processDeferredEquipmentQueue() {
             snapshot.underwearPaths, ready.regions, ready.predecodedTextures);
         return ready;
     });
-    asyncEquipmentLoads_.push_back(std::move(load));
+    spawns_->asyncEquipmentLoads_.push_back(std::move(load));
 }
 
 void EntitySpawner::processAsyncGameObjectResults() {
-    for (auto it = asyncGameObjectLoads_.begin(); it != asyncGameObjectLoads_.end(); ) {
+    for (auto it = spawns_->asyncGameObjectLoads_.begin(); it != spawns_->asyncGameObjectLoads_.end(); ) {
         if (!it->future.valid() ||
             it->future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             ++it;
@@ -955,15 +955,16 @@ void EntitySpawner::processAsyncGameObjectResults() {
         }
 
         auto result = it->future.get();
-        it = asyncGameObjectLoads_.erase(it);
+        it = spawns_->asyncGameObjectLoads_.erase(it);
 
-        asyncGameObjectGuids_.erase(result.guid);
-        const bool abandoned = abandonedGameObjectGuids_.erase(result.guid) > 0;
+        spawns_->asyncGameObjectGuids_.erase(result.guid);
+        const bool abandoned = !spawns_->jobs_.accepts(result.token);
 
+        if (!result.isWmo) spawns_->asyncGameObjectM2Displays_.erase(result.displayId);
+        if (abandoned) continue;
         if (!result.isWmo) {
-            asyncGameObjectM2Displays_.erase(result.displayId);
             finishM2GameObjectLoad(result);
-            if (abandoned || gameObjectDisplayIdFailedCache_.count(result.displayId)) continue;
+            if (abandoned || assets_.gameObjectDisplayIdFailedCache_.count(result.displayId)) continue;
             // The model is resident now, so this only makes the instance.
             spawnOnlineGameObject(result.guid, result.entry, result.displayId,
                                   result.x, result.y, result.z, result.orientation, result.scale);
@@ -980,7 +981,7 @@ void EntitySpawner::processAsyncGameObjectResults() {
             LOG_WARNING("Game object model did not load: displayId=", result.displayId,
                         " entry=", result.entry, " ", result.modelPath, " - ",
                         result.error.empty() ? std::string("unreadable") : result.error);
-            gameObjectDisplayIdFailedCache_.insert(result.displayId);
+            assets_.gameObjectDisplayIdFailedCache_.insert(result.displayId);
             continue;
         }
 
@@ -989,16 +990,16 @@ void EntitySpawner::processAsyncGameObjectResults() {
         if (!wmoRenderer) continue;
 
         uint32_t modelId = 0;
-        auto itCache = gameObjectDisplayIdWmoCache_.find(result.displayId);
-        if (itCache == gameObjectDisplayIdWmoCache_.end()) {
+        auto itCache = assets_.gameObjectDisplayIdWmoCache_.find(result.displayId);
+        if (itCache == assets_.gameObjectDisplayIdWmoCache_.end()) {
             // Not uploaded yet: hand it to the incremental uploader rather than
             // pushing the whole model through here, which stalled the frame for
             // as long as 40ms on a transport. The spawn finishes in
             // finishWmoSpawn once every texture and group is up.
             PendingWmoUpload pending;
             pending.result = std::move(result);
-            pending.modelId = nextGameObjectWmoModelId_++;
-            pendingWmoUploads_.push_back(std::move(pending));
+            pending.modelId = assets_.nextGameObjectWmoModelId_++;
+            spawns_->pendingWmoUploads_.push_back(std::move(pending));
             continue;
         }
         modelId = itCache->second;
@@ -1016,36 +1017,37 @@ void EntitySpawner::finishM2GameObjectLoad(PreparedGameObjectWMO& result) {
     if (!m2Renderer) return;
 
     // Another object of this display may have put it up meanwhile.
-    if (auto cached = gameObjectDisplayIdModelCache_.find(result.displayId);
-        cached != gameObjectDisplayIdModelCache_.end() && m2Renderer->hasModel(cached->second)) {
+    if (auto cached = assets_.gameObjectDisplayIdModelCache_.find(result.displayId);
+        cached != assets_.gameObjectDisplayIdModelCache_.end() && m2Renderer->hasModel(cached->second)) {
         return;
     }
     if (!result.valid || !result.m2Model) {
         LOG_WARNING("Game object model did not load: displayId=", result.displayId,
                     " entry=", result.entry, " ", result.modelPath, " - ",
                     result.error.empty() ? std::string("unreadable") : result.error);
-        gameObjectDisplayIdFailedCache_.insert(result.displayId);
+        assets_.gameObjectDisplayIdFailedCache_.insert(result.displayId);
         return;
     }
 
-    const uint32_t modelId = nextGameObjectModelId_++;
+    const uint32_t modelId = assets_.nextGameObjectModelId_++;
     m2Renderer->setPredecodedBLPCache(&result.predecodedTextures);
     const bool loaded = m2Renderer->loadModel(*result.m2Model, modelId);
     m2Renderer->setPredecodedBLPCache(nullptr);
     if (!loaded) {
         LOG_WARNING("Failed to load gameobject model: ", result.modelPath);
-        gameObjectDisplayIdFailedCache_.insert(result.displayId);
+        assets_.gameObjectDisplayIdFailedCache_.insert(result.displayId);
         return;
     }
     // Resident across the away-and-back cycle, as the synchronous path keeps it.
     m2Renderer->setModelPinned(modelId, true);
-    gameObjectDisplayIdModelCache_[result.displayId] = modelId;
+    assets_.gameObjectDisplayIdModelCache_[result.displayId] = modelId;
 }
 
 // Creates the render instance and the transport/doodad follow-ups once a model
 // is fully uploaded. Split out so both the cached path and the incremental
 // uploader end the same way.
 void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t modelId) {
+    if (!spawns_->jobs_.accepts(result.token)) return;
     auto* wmoRenderer = renderer_ ? renderer_->getWMORenderer() : nullptr;
     if (!wmoRenderer) return;
 
@@ -1055,7 +1057,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
         modelId, renderPos, glm::vec3(0.0f, 0.0f, result.orientation), result.scale);
     if (instanceId == 0) return;
 
-    gameObjectInstances_[result.guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
+    spawns_->gameObjectInstances_[result.guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
 
     // The synchronous WMO path notifies TransportManager after creating the
     // render instance. Do the same here: unique/uncached transport WMOs (notably
@@ -1083,7 +1085,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
             batch.z = result.z;
             batch.orientation = result.orientation;
             batch.doodadBudget = doodadTemplates->size();
-            pendingTransportDoodadBatches_.push_back(batch);
+            spawns_->pendingTransportDoodadBatches_.push_back(batch);
         }
     }
 }
@@ -1091,12 +1093,12 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
 // Uploads one pending model per frame under a budget, finishing its spawn when
 // the last texture and group are in.
 void EntitySpawner::processPendingWmoUploads() {
-    if (pendingWmoUploads_.empty()) return;
+    if (spawns_->pendingWmoUploads_.empty()) return;
     auto* wmoRenderer = renderer_ ? renderer_->getWMORenderer() : nullptr;
-    if (!wmoRenderer) { pendingWmoUploads_.clear(); return; }
+    if (!wmoRenderer) { spawns_->pendingWmoUploads_.clear(); return; }
 
     constexpr float kUploadBudgetMs = 6.0f;
-    auto& pending = pendingWmoUploads_.front();
+    auto& pending = spawns_->pendingWmoUploads_.front();
 
     wmoRenderer->setPredecodedBLPCache(&pending.result.predecodedTextures);
     const auto status = wmoRenderer->loadModelIncremental(
@@ -1106,12 +1108,12 @@ void EntitySpawner::processPendingWmoUploads() {
     if (status == rendering::WMORenderer::ModelLoadResult::InProgress) return;
 
     if (status == rendering::WMORenderer::ModelLoadResult::Complete) {
-        gameObjectDisplayIdWmoCache_[pending.result.displayId] = pending.modelId;
+        assets_.gameObjectDisplayIdWmoCache_[pending.result.displayId] = pending.modelId;
         finishWmoSpawn(pending.result, pending.modelId);
     } else {
         LOG_WARNING("Failed to load async gameobject WMO: ", pending.result.modelPath);
     }
-    pendingWmoUploads_.erase(pendingWmoUploads_.begin());
+    spawns_->pendingWmoUploads_.erase(spawns_->pendingWmoUploads_.begin());
 }
 
 void EntitySpawner::processGameObjectSpawnQueue() {
@@ -1120,13 +1122,13 @@ void EntitySpawner::processGameObjectSpawnQueue() {
     // Then advance one in-progress upload, which may finish a spawn.
     processPendingWmoUploads();
 
-    if (pendingGameObjectSpawns_.empty()) return;
+    if (spawns_->pendingGameObjectSpawns_.empty()) return;
 
     static int goQueueLogCounter = 0;
     if (++goQueueLogCounter % 60 == 1) {
-        LOG_DEBUG("GO queue: ", pendingGameObjectSpawns_.size(), " pending, ",
-                 gameObjectInstances_.size(), " spawned, ",
-                 gameObjectDisplayIdFailedCache_.size(), " failed");
+        LOG_DEBUG("GO queue: ", spawns_->pendingGameObjectSpawns_.size(), " pending, ",
+                 spawns_->gameObjectInstances_.size(), " spawned, ",
+                 assets_.gameObjectDisplayIdFailedCache_.size(), " failed");
     }
 
     // Process spawns: anything already resident spawns here, which is cheap;
@@ -1137,32 +1139,32 @@ void EntitySpawner::processGameObjectSpawnQueue() {
     static constexpr float kBudgetMs = 2.0f;
     static constexpr int kMaxAsyncLoads = 4;
 
-    if (!gameObjectLookupsBuilt_) buildGameObjectDisplayLookups();
+    if (!assets_.gameObjectLookupsBuilt_) buildGameObjectDisplayLookups();
     auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
     std::unordered_set<uint64_t> waitingGuids;
 
-    for (size_t i = 0; i < pendingGameObjectSpawns_.size();) {
+    for (size_t i = 0; i < spawns_->pendingGameObjectSpawns_.size();) {
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - startTime).count();
         if (elapsedMs >= kBudgetMs) break;
 
-        const PendingGameObjectSpawn s = pendingGameObjectSpawns_[i];
+        const PendingGameObjectSpawn s = spawns_->pendingGameObjectSpawns_[i];
         if (waitingGuids.count(s.guid)) { ++i; continue; }
         // A model already found broken is not read again, for any object.
-        if (gameObjectDisplayIdFailedCache_.count(s.displayId)) {
-            pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin() +
+        if (assets_.gameObjectDisplayIdFailedCache_.count(s.displayId)) {
+            spawns_->pendingGameObjectSpawns_.erase(spawns_->pendingGameObjectSpawns_.begin() +
                                            static_cast<std::ptrdiff_t>(i));
             continue;
         }
         auto waitForLoad = [&]() { waitingGuids.insert(s.guid); ++i; };
         auto done = [&]() {
-            pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin() +
+            spawns_->pendingGameObjectSpawns_.erase(spawns_->pendingGameObjectSpawns_.begin() +
                                            static_cast<std::ptrdiff_t>(i));
         };
-        const bool slotFree = static_cast<int>(asyncGameObjectLoads_.size()) < kMaxAsyncLoads;
+        const bool slotFree = static_cast<int>(spawns_->asyncGameObjectLoads_.size()) < kMaxAsyncLoads;
 
         std::string modelPath;
-        if (gameObjectLookupsBuilt_) {
+        if (assets_.gameObjectLookupsBuilt_) {
             // Check transport overrides first
             if (gameHandler_ && gameHandler_->isTransportGuid(s.guid)) {
                 modelPath = transportModelPath(s.entry, s.displayId);
@@ -1175,7 +1177,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         bool isWmo = lowerPath.size() >= 4 && lowerPath.substr(lowerPath.size() - 4) == ".wmo";
-        bool isCached = isWmo && gameObjectDisplayIdWmoCache_.count(s.displayId);
+        bool isCached = isWmo && assets_.gameObjectDisplayIdWmoCache_.count(s.displayId);
 
         // An uncached WMO: file I/O, parse and texture decode on a worker.
         // Without a free slot it waits: the synchronous path decoded its
@@ -1186,9 +1188,12 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             PendingGameObjectSpawn captureSpawn = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
-            load.future = ThreadPool::ioWorkers().submit(
-                [am, captureSpawn, capturePath]() -> PreparedGameObjectWMO {
-                    PreparedGameObjectWMO result;
+            load.future = spawns_->jobs_.submit(s.token, 
+                [am, captureSpawn, capturePath](const JobGroup::Token& jobToken) -> PreparedGameObjectWMO {
+                    PreparedGameObjectWMO result{};
+                    result.token = jobToken;
+                    result.guid = captureSpawn.guid; result.displayId = captureSpawn.displayId;
+                    if (!jobToken.current()) return result;
                     result.guid = captureSpawn.guid;
                     result.entry = captureSpawn.entry;
                     result.displayId = captureSpawn.displayId;
@@ -1250,8 +1255,8 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     result.valid = true;
                     return result;
                 });
-            asyncGameObjectLoads_.push_back(std::move(load));
-            asyncGameObjectGuids_.insert(s.guid);
+            spawns_->asyncGameObjectLoads_.push_back(std::move(load));
+            spawns_->asyncGameObjectGuids_.insert(s.guid);
             done();
             continue;
         }
@@ -1263,13 +1268,13 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         const bool isM2 = !isWmo && !modelPath.empty();
         bool m2Resident = false;
         if (isM2 && m2Renderer) {
-            auto cached = gameObjectDisplayIdModelCache_.find(s.displayId);
-            m2Resident = cached != gameObjectDisplayIdModelCache_.end() &&
+            auto cached = assets_.gameObjectDisplayIdModelCache_.find(s.displayId);
+            m2Resident = cached != assets_.gameObjectDisplayIdModelCache_.end() &&
                          m2Renderer->hasModel(cached->second);
         }
         if (isM2 && m2Renderer && !m2Resident &&
-            !gameObjectDisplayIdFailedCache_.count(s.displayId)) {
-            if (!slotFree || asyncGameObjectM2Displays_.count(s.displayId)) {
+            !assets_.gameObjectDisplayIdFailedCache_.count(s.displayId)) {
+            if (!slotFree || spawns_->asyncGameObjectM2Displays_.count(s.displayId)) {
                 waitForLoad();
                 continue;
             }
@@ -1277,9 +1282,12 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             PendingGameObjectSpawn captureSpawn = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
-            load.future = ThreadPool::ioWorkers().submit(
-                [am, captureSpawn, capturePath]() -> PreparedGameObjectWMO {
-                    PreparedGameObjectWMO result;
+            load.future = spawns_->jobs_.submit(s.token, 
+                [am, captureSpawn, capturePath](const JobGroup::Token& jobToken) -> PreparedGameObjectWMO {
+                    PreparedGameObjectWMO result{};
+                    result.token = jobToken;
+                    result.guid = captureSpawn.guid; result.displayId = captureSpawn.displayId;
+                    if (!jobToken.current()) return result;
                     result.guid = captureSpawn.guid;
                     result.entry = captureSpawn.entry;
                     result.displayId = captureSpawn.displayId;
@@ -1334,9 +1342,9 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     result.valid = true;
                     return result;
                 });
-            asyncGameObjectLoads_.push_back(std::move(load));
-            asyncGameObjectM2Displays_.insert(s.displayId);
-            asyncGameObjectGuids_.insert(s.guid);
+            spawns_->asyncGameObjectLoads_.push_back(std::move(load));
+            spawns_->asyncGameObjectM2Displays_.insert(s.displayId);
+            spawns_->asyncGameObjectGuids_.insert(s.guid);
             done();
             continue;
         }
@@ -1348,7 +1356,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
 }
 
 void EntitySpawner::processPendingTransportRegistrations() {
-    if (pendingTransportRegistrations_.empty()) return;
+    if (spawns_->pendingTransportRegistrations_.empty()) return;
     if (!gameHandler_ || !renderer_) return;
 
     auto* transportManager = gameHandler_->getTransportManager();
@@ -1359,15 +1367,15 @@ void EntitySpawner::processPendingTransportRegistrations() {
     static constexpr float kRegistrationBudgetMs = 2.0f;
     int processed = 0;
 
-    for (auto it = pendingTransportRegistrations_.begin();
-         it != pendingTransportRegistrations_.end() && processed < kMaxRegistrationsPerFrame;) {
+    for (auto it = spawns_->pendingTransportRegistrations_.begin();
+         it != spawns_->pendingTransportRegistrations_.end() && processed < kMaxRegistrationsPerFrame;) {
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - startTime).count();
         if (elapsedMs >= kRegistrationBudgetMs) break;
 
         const PendingTransportRegistration pending = *it;
-        auto goIt = gameObjectInstances_.find(pending.guid);
-        if (goIt == gameObjectInstances_.end()) {
+        auto goIt = spawns_->gameObjectInstances_.find(pending.guid);
+        if (goIt == spawns_->gameObjectInstances_.end()) {
             // GO model spawns are budgeted per frame and often land AFTER the
             // transport registration is queued. Erasing on the first miss
             // silently raced the spawn queue and left transports (Deeprun
@@ -1377,7 +1385,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
                 LOG_WARNING("Transport registration dropped: GO render instance never "
                             "spawned for GUID 0x", std::hex, pending.guid, std::dec,
                             " entry=", pending.entry, " displayId=", pending.displayId);
-                it = pendingTransportRegistrations_.erase(it);
+                it = spawns_->pendingTransportRegistrations_.erase(it);
             } else {
                 ++it;
             }
@@ -1389,7 +1397,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
                 pending.guid, goIt->second.instanceId, !goIt->second.isWmo, pending.displayId);
             transportManager->updateServerTransport(
                 pending.guid, glm::vec3(pending.x, pending.y, pending.z), pending.orientation);
-            it = pendingTransportRegistrations_.erase(it);
+            it = spawns_->pendingTransportRegistrations_.erase(it);
             continue;
         }
 
@@ -1476,15 +1484,15 @@ void EntitySpawner::processPendingTransportRegistrations() {
         transportManager->updateServerTransport(
             pending.guid, glm::vec3(pending.x, pending.y, pending.z), pending.orientation);
 
-        auto moveIt = pendingTransportMoves_.find(pending.guid);
-        if (moveIt != pendingTransportMoves_.end()) {
+        auto moveIt = spawns_->pendingTransportMoves_.find(pending.guid);
+        if (moveIt != spawns_->pendingTransportMoves_.end()) {
             const PendingTransportMove latestMove = moveIt->second;
             transportManager->updateServerTransport(
                 pending.guid, glm::vec3(latestMove.x, latestMove.y, latestMove.z), latestMove.orientation);
             LOG_DEBUG("Replayed queued transport move for GUID=0x", std::hex, pending.guid, std::dec,
                      " pos=(", latestMove.x, ", ", latestMove.y, ", ", latestMove.z,
                      ") orientation=", latestMove.orientation);
-            pendingTransportMoves_.erase(moveIt);
+            spawns_->pendingTransportMoves_.erase(moveIt);
         }
 
         // MO_TRANSPORT (type 15) boats route via their taxi path (data[0] ->
@@ -1558,12 +1566,12 @@ void EntitySpawner::processPendingTransportRegistrations() {
         }
 
         ++processed;
-        it = pendingTransportRegistrations_.erase(it);
+        it = spawns_->pendingTransportRegistrations_.erase(it);
     }
 }
 
 void EntitySpawner::processPendingTransportDoodads() {
-    if (pendingTransportDoodadBatches_.empty()) return;
+    if (spawns_->pendingTransportDoodadBatches_.empty()) return;
     if (!renderer_ || !assetManager_) return;
 
     auto* wmoRenderer = renderer_->getWMORenderer();
@@ -1581,22 +1589,22 @@ void EntitySpawner::processPendingTransportDoodads() {
     if (vkCtx) vkCtx->beginUploadBatch();
 
     size_t budgetLeft = MAX_TRANSPORT_DOODADS_PER_FRAME;
-    for (auto it = pendingTransportDoodadBatches_.begin();
-         it != pendingTransportDoodadBatches_.end() && budgetLeft > 0;) {
+    for (auto it = spawns_->pendingTransportDoodadBatches_.begin();
+         it != spawns_->pendingTransportDoodadBatches_.end() && budgetLeft > 0;) {
         // Time budget check
         float elapsedMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - startTime).count();
         if (elapsedMs >= kDoodadBudgetMs) break;
-        auto goIt = gameObjectInstances_.find(it->guid);
-        if (goIt == gameObjectInstances_.end() || !goIt->second.isWmo ||
+        auto goIt = spawns_->gameObjectInstances_.find(it->guid);
+        if (goIt == spawns_->gameObjectInstances_.end() || !goIt->second.isWmo ||
             goIt->second.instanceId != it->instanceId || goIt->second.modelId != it->modelId) {
-            it = pendingTransportDoodadBatches_.erase(it);
+            it = spawns_->pendingTransportDoodadBatches_.erase(it);
             continue;
         }
 
         const auto* doodadTemplates = wmoRenderer->getDoodadTemplates(it->modelId);
         if (!doodadTemplates || doodadTemplates->empty()) {
-            it = pendingTransportDoodadBatches_.erase(it);
+            it = spawns_->pendingTransportDoodadBatches_.erase(it);
             continue;
         }
 
@@ -1703,7 +1711,7 @@ void EntitySpawner::processPendingTransportDoodads() {
                 wmoTransform = glm::rotate(wmoTransform, it->orientation, glm::vec3(0, 0, 1));
                 wmoRenderer->setInstanceTransform(it->instanceId, wmoTransform);
             }
-            it = pendingTransportDoodadBatches_.erase(it);
+            it = spawns_->pendingTransportDoodadBatches_.erase(it);
         } else {
             ++it;
         }
@@ -1714,18 +1722,18 @@ void EntitySpawner::processPendingTransportDoodads() {
 }
 
 void EntitySpawner::processPendingMount() {
-    if (pendingMountDisplayId_ == 0) return;
-    uint32_t mountDisplayId = pendingMountDisplayId_;
+    if (spawns_->pendingMountDisplayId_ == 0) return;
+    uint32_t mountDisplayId = spawns_->pendingMountDisplayId_;
     uint32_t modelId = 0;
     std::string m2Path;
     float preparedRiderHeight = 0.0f;
     const ModelLoad load = loadRemoteMountModel(mountDisplayId, modelId, m2Path, preparedRiderHeight);
     if (load == ModelLoad::Pending) return;
-    pendingMountDisplayId_ = 0;
+    spawns_->pendingMountDisplayId_ = 0;
     if (load == ModelLoad::Failed) return;
     auto* charRenderer = renderer_->getCharacterRenderer();
 
-    mountModelId_ = modelId;
+    spawns_->mountModelId_ = modelId;
 
     // Create mount instance at player position
     glm::vec3 mountPos = renderer_->getCharacterPosition();
@@ -1738,7 +1746,7 @@ void EntitySpawner::processPendingMount() {
         return;
     }
 
-    mountInstanceId_ = instanceId;
+    spawns_->mountInstanceId_ = instanceId;
     // Shadowform darkens the mount too.
     charRenderer->addLookCompanion(renderer_->getCharacterInstanceId(), instanceId);
 
@@ -1819,22 +1827,22 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
     riderHeight = 1.8f;
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return ModelLoad::Pending;
     auto* cr = renderer_->getCharacterRenderer();
-    if (unloadableMountDisplayIds_.count(displayId)) return ModelLoad::Failed;
+    if (assets_.unloadableMountDisplayIds_.count(displayId)) return ModelLoad::Failed;
 
     // Reported once per display; what failed beneath it is logged where it failed.
     auto fail = [&](const char* why) {
         LOG_WARNING("Mount/form displayId ", displayId, " not drawn: ", why,
                     modelPath.empty() ? std::string() : " (" + modelPath + ")",
                     "; the player is drawn without it");
-        unloadableMountDisplayIds_.insert(displayId);
+        assets_.unloadableMountDisplayIds_.insert(displayId);
         return ModelLoad::Failed;
     };
 
     modelPath = getModelPathForDisplayId(displayId);
     if (modelPath.empty()) return fail("no model is named for it in CreatureDisplayInfo/CreatureModelData");
 
-    auto cached = displayIdModelCache_.find(displayId);
-    if (cached != displayIdModelCache_.end() && cr->getModelData(cached->second)) {
+    auto cached = assets_.displayIdModelCache_.find(displayId);
+    if (cached != assets_.displayIdModelCache_.end() && cr->getModelData(cached->second)) {
         modelId = cached->second;
     } else {
         pipeline::M2Model model;
@@ -1845,18 +1853,18 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
             std::replace(key.begin(), key.end(), '/', '\\');
             std::transform(key.begin(), key.end(), key.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            auto loaded = attachmentModelData_.find(key);
-            if (loaded != attachmentModelData_.end() && !loaded->second)
+            auto loaded = assets_.attachmentModelData_.find(key);
+            if (loaded != assets_.attachmentModelData_.end() && !loaded->second)
                 return fail("its model could not be loaded");
             return ModelLoad::Pending;
         }
         auto skins = getCreatureSkinPaths(displayId, modelPath);
         if (skins.empty()) {
-            auto display = displayDataMap_.find(displayId);
-            for (const auto& [candidateId, candidate] : displayDataMap_) {
-                auto path = modelIdToPath_.find(candidate.modelId);
-                if ((display != displayDataMap_.end() && candidate.modelId == display->second.modelId) ||
-                    (display == displayDataMap_.end() && path != modelIdToPath_.end() && path->second == modelPath)) {
+            auto display = assets_.displayDataMap_.find(displayId);
+            for (const auto& [candidateId, candidate] : assets_.displayDataMap_) {
+                auto path = assets_.modelIdToPath_.find(candidate.modelId);
+                if ((display != assets_.displayDataMap_.end() && candidate.modelId == display->second.modelId) ||
+                    (display == assets_.displayDataMap_.end() && path != assets_.modelIdToPath_.end() && path->second == modelPath)) {
                     skins = getCreatureSkinPaths(candidateId, modelPath);
                     if (!skins.empty()) break;
                 }
@@ -1887,17 +1895,17 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
             if (!loadWeaponM2(modelPath, model, path)) ready = false;
         }
         if (!ready) return ModelLoad::Pending;
-        cr->setPredecodedBLPCache(&preparedAttachmentTextures_, true);
+        cr->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_, true);
         struct TextureGuard {
             rendering::CharacterRenderer* renderer;
             ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }
         } guard{cr};
-        modelId = nextCreatureModelId_++;
+        modelId = assets_.nextCreatureModelId_++;
         if (!cr->loadModel(model, modelId)) {
             modelId = 0;
             return fail("the renderer refused its model");
         }
-        displayIdModelCache_[displayId] = modelId;
+        assets_.displayIdModelCache_[displayId] = modelId;
         if (skins.empty()) {
             // Only a skin slot some batch draws with is missing: many models
             // carry one their submeshes never use.
@@ -1951,28 +1959,28 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
 }
 
 void EntitySpawner::processPendingRemotePlayerMounts() {
-    if (pendingRemotePlayerMounts_.empty() || !renderer_) return;
+    if (spawns_->pendingRemotePlayerMounts_.empty() || !renderer_) return;
     auto* cr = renderer_->getCharacterRenderer();
     if (!cr) return;
 
     // Workers prepare mount geometry and textures; publish at most one ready
     // transition per frame, retaining the current visual while loading.
-    for (auto it = pendingRemotePlayerMounts_.begin();
-         it != pendingRemotePlayerMounts_.end(); ++it) {
+    for (auto it = spawns_->pendingRemotePlayerMounts_.begin();
+         it != spawns_->pendingRemotePlayerMounts_.end(); ++it) {
         const uint64_t guid = it->first;
         const uint32_t displayId = it->second;
 
         if (displayId == 0) {
             removeRemotePlayerMount(guid);
-            pendingRemotePlayerMounts_.erase(it);
+            spawns_->pendingRemotePlayerMounts_.erase(it);
             return;
         }
-        auto playerIt = playerInstances_.find(guid);
-        if (playerIt == playerInstances_.end()) continue; // initial fields can precede rendering
+        auto playerIt = spawns_->playerInstances_.find(guid);
+        if (playerIt == spawns_->playerInstances_.end()) continue; // initial fields can precede rendering
 
-        auto current = remotePlayerMounts_.find(guid);
-        if (current != remotePlayerMounts_.end() && current->second.displayId == displayId) {
-            pendingRemotePlayerMounts_.erase(it);
+        auto current = spawns_->remotePlayerMounts_.find(guid);
+        if (current != spawns_->remotePlayerMounts_.end() && current->second.displayId == displayId) {
+            spawns_->pendingRemotePlayerMounts_.erase(it);
             return;
         }
         uint32_t modelId = 0;
@@ -1986,7 +1994,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             // repeated the warning, 29,000 times in one session; a mount
             // ridden before it is not this one.
             removeRemotePlayerMount(guid);
-            pendingRemotePlayerMounts_.erase(it);
+            spawns_->pendingRemotePlayerMounts_.erase(it);
             return;
         }
 
@@ -1999,8 +2007,8 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);
                 return entity && entity->isEntityMoving();
             }();
-            const bool flying = creatureFlyingState_.count(guid) > 0;
-            const bool walking = creatureWalkingState_.count(guid) > 0;
+            const bool flying = spawns_->creatureFlyingState_.count(guid) > 0;
+            const bool walking = spawns_->creatureWalkingState_.count(guid) > 0;
             uint32_t mountAnim = moving
                 ? (flying ? rendering::anim::FLY_FORWARD
                           : (walking ? rendering::anim::WALK : rendering::anim::RUN))
@@ -2012,14 +2020,14 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
             cr->addLookCompanion(playerIt->second, mountInstance);  // Shadowform darkens the mount too
             setRemotePlayerWeaponsSheathed(guid, true);  // no rider holds a weapon
-            remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
+            spawns_->remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
                                          .instanceId = mountInstance, .riderHeight = riderHeight};
             LOG_INFO("Remote player mounted: guid=0x", std::hex, guid, std::dec,
                      " displayId=", displayId, " riderHeight=", riderHeight,
                      " model=", modelPath);
             glm::mat4 seat;
             if (!cr->getAttachmentTransform(mountInstance, kMountSeatAttachment, seat) &&
-                seatlessMountDisplayIds_.insert(displayId).second) {
+                assets_.seatlessMountDisplayIds_.insert(displayId).second) {
                 LOG_WARNING("Mount displayId ", displayId, " (", modelPath, ") has no saddle attachment ",
                             kMountSeatAttachment, "; its riders are placed at a guessed height of ",
                             riderHeight);
@@ -2028,28 +2036,28 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             LOG_WARNING("Remote player mount displayId ", displayId, " (", modelPath,
                         "): the renderer created no instance; the player is drawn without it");
         }
-        pendingRemotePlayerMounts_.erase(it);
+        spawns_->pendingRemotePlayerMounts_.erase(it);
         return;
     }
 }
 
 void EntitySpawner::processPendingRemotePlayerForms() {
-    if (pendingRemotePlayerForms_.empty() || !renderer_) return;
+    if (spawns_->pendingRemotePlayerForms_.empty() || !renderer_) return;
     auto* cr = renderer_->getCharacterRenderer();
     if (!cr) return;
 
     // As for mounts: the model is prepared on workers, and one player at most
     // changes shape per frame, keeping what is shown until the new one is in.
-    for (auto it = pendingRemotePlayerForms_.begin(); it != pendingRemotePlayerForms_.end(); ++it) {
+    for (auto it = spawns_->pendingRemotePlayerForms_.begin(); it != spawns_->pendingRemotePlayerForms_.end(); ++it) {
         const uint64_t guid = it->first;
         const uint32_t displayId = it->second;
-        auto playerIt = playerInstances_.find(guid);
-        if (playerIt == playerInstances_.end()) continue;  // fields can precede the body
+        auto playerIt = spawns_->playerInstances_.find(guid);
+        if (playerIt == spawns_->playerInstances_.end()) continue;  // fields can precede the body
 
         if (displayId == 0) {
             removeRemotePlayerForm(guid);
             LOG_INFO("Remote player back in own form: guid=0x", std::hex, guid, std::dec);
-            pendingRemotePlayerForms_.erase(it);
+            spawns_->pendingRemotePlayerForms_.erase(it);
             return;
         }
         uint32_t modelId = 0;
@@ -2059,25 +2067,25 @@ void EntitySpawner::processPendingRemotePlayerForms() {
         if (load == ModelLoad::Pending) continue;
         if (load == ModelLoad::Failed) {
             // Logged once for the display; players in it are drawn in their own form.
-            undrawableFormDisplayIds_.insert(displayId);
+            assets_.undrawableFormDisplayIds_.insert(displayId);
             removeRemotePlayerForm(guid);
-            pendingRemotePlayerForms_.erase(it);
+            spawns_->pendingRemotePlayerForms_.erase(it);
             return;
         }
 
         // From one form to another the body stays where it was put away.
-        auto existing = remotePlayerForms_.find(guid);
-        const uint32_t character = existing != remotePlayerForms_.end()
+        auto existing = spawns_->remotePlayerForms_.find(guid);
+        const uint32_t character = existing != spawns_->remotePlayerForms_.end()
             ? existing->second.characterInstanceId : playerIt->second;
         const uint32_t shown = playerIt->second;
         glm::vec3 pos(0.0f);
         cr->getInstancePosition(shown, pos);
         const uint32_t formInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
         if (formInstance == 0) {
-            pendingRemotePlayerForms_.erase(it);
+            spawns_->pendingRemotePlayerForms_.erase(it);
             return;
         }
-        if (existing != remotePlayerForms_.end()) cr->removeInstance(existing->second.formInstanceId);
+        if (existing != spawns_->remotePlayerForms_.end()) cr->removeInstance(existing->second.formInstanceId);
         cr->setInstanceVisible(character, false);
         removeRemotePlayerMount(guid);  // a form is never ridden; the server drops the mount too
 
@@ -2087,8 +2095,8 @@ void EntitySpawner::processPendingRemotePlayerForms() {
             if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
                 yaw = entity->getOrientation() + glm::radians(90.0f);
                 const bool moving = entity->isEntityMoving();
-                const bool flying = creatureFlyingState_.count(guid) > 0;
-                const bool swimming = creatureSwimmingState_.count(guid) > 0;
+                const bool flying = spawns_->creatureFlyingState_.count(guid) > 0;
+                const bool swimming = spawns_->creatureSwimmingState_.count(guid) > 0;
                 anim = moving ? (flying ? rendering::anim::FLY_FORWARD
                                         : swimming ? rendering::anim::SWIM : rendering::anim::RUN)
                               : (flying ? rendering::anim::FLY_IDLE
@@ -2103,71 +2111,73 @@ void EntitySpawner::processPendingRemotePlayerForms() {
         cr->playAnimation(formInstance, anim, true);
 
         playerIt->second = formInstance;
-        remotePlayerForms_[guid] = {.displayId = displayId, .formInstanceId = formInstance,
+        spawns_->remotePlayerForms_[guid] = {.displayId = displayId, .formInstanceId = formInstance,
                                     .characterInstanceId = character};
         LOG_INFO("Remote player form: guid=0x", std::hex, guid, std::dec, " displayId=", displayId,
                  " model=", modelPath);
-        pendingRemotePlayerForms_.erase(it);
+        spawns_->pendingRemotePlayerForms_.erase(it);
         return;
     }
 }
 
 void EntitySpawner::erasePendingGuidIfUnqueued(uint64_t guid) {
-    for (const auto& pending : pendingCreatureSpawns_) {
+    for (const auto& pending : spawns_->pendingCreatureSpawns_) {
         if (pending.guid == guid) return;
     }
-    pendingCreatureSpawnGuids_.erase(guid);
+    spawns_->pendingCreatureSpawnGuids_.erase(guid);
 }
 
 void EntitySpawner::despawnCreature(uint64_t guid) {
-    // If this guid is a PLAYER, it will be tracked in playerInstances_.
+    if (!spawns_) return;
+    // If this guid is a PLAYER, it will be tracked in spawns_->playerInstances_.
     // Route to the correct despawn path so we don't leak instances.
-    if (playerInstances_.count(guid)) {
+    if (spawns_->playerInstances_.count(guid)) {
         despawnPlayer(guid);
         return;
     }
 
-    pendingCreatureSpawnGuids_.erase(guid);
-    requestedCreatureDisplayIds_.erase(guid);
-    creatureActiveEmotes_.erase(guid);
-    creatureSpawnRetryDeadlines_.erase(guid);
+    spawns_->pendingCreatureSpawnGuids_.erase(guid);
+    spawns_->jobs_.cancel(JobGroup::Channel::Creature, guid);
+    spawns_->creatureActiveEmotes_.erase(guid);
+    spawns_->creatureSpawnRetryDeadlines_.erase(guid);
     // Cleared with the rest, so the map does not grow and a creature that
     // comes back into range starts with its full allowance again.
-    creatureSpawnRetryWindowsUsed_.erase(guid);
-    creaturePermanentFailureGuids_.erase(guid);
-    deadCreatureGuids_.erase(guid);
+    spawns_->creatureSpawnRetryWindowsUsed_.erase(guid);
+    spawns_->creaturePermanentFailureGuids_.erase(guid);
+    spawns_->deadCreatureGuids_.erase(guid);
 
-    auto it = creatureInstances_.find(guid);
-    if (it == creatureInstances_.end()) return;
+    auto it = spawns_->creatureInstances_.find(guid);
+    if (it == spawns_->creatureInstances_.end()) return;
 
     if (renderer_ && renderer_->getCharacterRenderer()) {
         renderer_->getCharacterRenderer()->removeInstance(it->second);
     }
 
-    creatureInstances_.erase(it);
-    creatureModelIds_.erase(guid);
-    creatureDisplayIds_.erase(guid);
-    creatureRenderPosCache_.erase(guid);
-    creatureWeaponsAttached_.erase(guid);
-    creatureWeaponAttachAttempts_.erase(guid);
-    creatureWasMoving_.erase(guid);
-    creatureWasSwimming_.erase(guid);
-    creatureWasFlying_.erase(guid);
-    creatureWasWalking_.erase(guid);
-    creatureSwimmingState_.erase(guid);
-    creatureWalkingState_.erase(guid);
-    creatureFlyingState_.erase(guid);
-    creatureWasStealthed_.erase(guid);
+    spawns_->creatureInstances_.erase(it);
+    spawns_->creatureModelIds_.erase(guid);
+    spawns_->creatureDisplayIds_.erase(guid);
+    spawns_->creatureRenderPosCache_.erase(guid);
+    spawns_->creatureWeaponsAttached_.erase(guid);
+    spawns_->creatureWeaponAttachAttempts_.erase(guid);
+    spawns_->creatureWasMoving_.erase(guid);
+    spawns_->creatureWasSwimming_.erase(guid);
+    spawns_->creatureWasFlying_.erase(guid);
+    spawns_->creatureWasWalking_.erase(guid);
+    spawns_->creatureSwimmingState_.erase(guid);
+    spawns_->creatureWalkingState_.erase(guid);
+    spawns_->creatureFlyingState_.erase(guid);
+    spawns_->creatureWasStealthed_.erase(guid);
 
     LOG_DEBUG("Despawned creature: guid=0x", std::hex, guid, std::dec);
 }
 
 void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
-    auto it = gameObjectInstances_.find(guid);
-    if (it == gameObjectInstances_.end()) {
+    if (!spawns_) return;
+    auto it = spawns_->gameObjectInstances_.find(guid);
+    if (it == spawns_->gameObjectInstances_.end()) {
         // The model is built after the create block is read, and a door that
         // is already open when it comes into view has its state in that block.
-        gameObjectPendingState_[guid] = goState;
+        spawns_->gameObjectPendingState_[guid] = goState;
         return;
     }
     // A WMO has no animation sequences to hold a pose with.
@@ -2176,7 +2186,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     if (!m2) return;
 
     const uint32_t instanceId = it->second.instanceId;
-    gameObjectPendingState_.erase(guid);
+    spawns_->gameObjectPendingState_.erase(guid);
 
     // Whether an open pose should also stop blocking.
     //
@@ -2265,20 +2275,22 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
 }
 
 void EntitySpawner::despawnGameObject(uint64_t guid) {
+    if (!spawns_) return;
     // A spawn still waiting, or still loading on a worker, is cancelled too:
     // otherwise it lands after the server has removed the object, and the
     // object stays in the world with nothing left to remove it.
-    std::erase_if(pendingGameObjectSpawns_,
+    std::erase_if(spawns_->pendingGameObjectSpawns_,
                   [guid](const PendingGameObjectSpawn& s) { return s.guid == guid; });
-    if (asyncGameObjectGuids_.count(guid)) abandonedGameObjectGuids_.insert(guid);
+    spawns_->jobs_.cancel(JobGroup::Channel::GameObject, guid);
+    spawns_->gameObjectPendingState_.erase(guid);
 
-    pendingTransportDoodadBatches_.erase(
-        std::remove_if(pendingTransportDoodadBatches_.begin(), pendingTransportDoodadBatches_.end(),
+    spawns_->pendingTransportDoodadBatches_.erase(
+        std::remove_if(spawns_->pendingTransportDoodadBatches_.begin(), spawns_->pendingTransportDoodadBatches_.end(),
                        [guid](const PendingTransportDoodadBatch& b) { return b.guid == guid; }),
-        pendingTransportDoodadBatches_.end());
+        spawns_->pendingTransportDoodadBatches_.end());
 
-    auto it = gameObjectInstances_.find(guid);
-    if (it == gameObjectInstances_.end()) return;
+    auto it = spawns_->gameObjectInstances_.find(guid);
+    if (it == spawns_->gameObjectInstances_.end()) return;
 
     if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
         if (auto* transportManager = gameHandler_->getTransportManager()) {
@@ -2310,20 +2322,20 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
         }
     }
 
-    gameObjectInstances_.erase(it);
+    spawns_->gameObjectInstances_.erase(it);
 
     LOG_DEBUG("Despawned gameobject: guid=0x", std::hex, guid, std::dec);
 }
 
 bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel,
                                  const std::string& texturePath) {
-    if (preparedEquipmentUpdate_) {
+    if (spawns_->preparedEquipmentUpdate_) {
         std::string key = m2Path;
         std::replace(key.begin(), key.end(), '/', '\\');
         std::transform(key.begin(), key.end(), key.begin(),
             [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        auto ready = preparedEquipmentUpdate_->models.find(key);
-        if (ready == preparedEquipmentUpdate_->models.end() || !ready->second) return false;
+        auto ready = spawns_->preparedEquipmentUpdate_->models.find(key);
+        if (ready == spawns_->preparedEquipmentUpdate_->models.end() || !ready->second) return false;
         outModel = *ready->second;
         return outModel.isValid();
     }
@@ -2336,26 +2348,29 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
     const std::string key = normalize(m2Path);
     const std::string skinKey = normalize(texturePath);
     const std::string taskKey = key + '|' + skinKey;
-    if (auto pending = asyncAttachmentLoads_.find(taskKey); pending != asyncAttachmentLoads_.end()) {
+    if (auto pending = spawns_->asyncAttachmentLoads_.find(taskKey); pending != spawns_->asyncAttachmentLoads_.end()) {
         if (pending->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return false;
         auto result = pending->second.get();
-        asyncAttachmentLoads_.erase(pending);
-        attachmentModelData_[key] = result.models[key];
+        spawns_->asyncAttachmentLoads_.erase(pending);
+        if (!spawns_->jobs_.accepts(result.token)) return false;
+        assets_.attachmentModelData_[key] = result.models[key];
         for (auto& [path, texture] : result.predecodedTextures)
-            preparedAttachmentTextures_[path] = std::move(texture);
+            spawns_->preparedAttachmentTextures_[path] = std::move(texture);
     }
-    auto cached = attachmentModelData_.find(key);
-    if (cached != attachmentModelData_.end() && !cached->second) return false;
-    if (cached != attachmentModelData_.end() &&
-        (skinKey.empty() || preparedAttachmentTextures_.count(skinKey))) {
+    auto cached = assets_.attachmentModelData_.find(key);
+    if (cached != assets_.attachmentModelData_.end() && !cached->second) return false;
+    if (cached != assets_.attachmentModelData_.end() &&
+        (skinKey.empty() || spawns_->preparedAttachmentTextures_.count(skinKey))) {
         outModel = *cached->second;
         return outModel.isValid();
     }
-    if (asyncAttachmentLoads_.size() >= 2) return false;
-    auto model = cached == attachmentModelData_.end() ? nullptr : cached->second;
+    if (spawns_->asyncAttachmentLoads_.size() >= 2) return false;
+    auto model = cached == assets_.attachmentModelData_.end() ? nullptr : cached->second;
     auto* assets = assetManager_;
-    asyncAttachmentLoads_[taskKey] = ThreadPool::ioWorkers().submit([assets, key, skinKey, model] {
-        PreparedEquipmentUpdate ready;
+    spawns_->asyncAttachmentLoads_[taskKey] = spawns_->jobs_.submit([assets, key, skinKey, model](const JobGroup::Token& jobToken) {
+        PreparedEquipmentUpdate ready{};
+                    ready.token = jobToken;
+                    if (!jobToken.current()) return ready;
         auto parsed = model;
         if (!parsed) {
             parsed = std::make_shared<pipeline::M2Model>();

@@ -2,6 +2,7 @@
 
 #include "core/frame_plan.hpp"
 #include "core/world_load_progress.hpp"
+#include "core/job_group.hpp"
 #include <future>
 #include <glm/glm.hpp>
 #include <string>
@@ -24,6 +25,7 @@ namespace core {
 /// Handles terrain streaming, map transitions, world preloading,
 /// and coordinate-aware tile management for online world entry.
 class WorldLoader {
+    struct Load;
 public:
     WorldLoader(const Phase& phase, rendering::Renderer* renderer, pipeline::AssetManager* assetManager);
     ~WorldLoader();
@@ -32,17 +34,25 @@ public:
     enum class Stage { Idle, Preparing, Prepared, Geometry, Collision, GeometryReady, Warmup, Finished, Failed };
 
     /// Lifecycle commands are issued by Application in Transitions.
-    void begin(Entry entry);
+    class Session {
+    public:
+        Session(WorldLoader& owner, std::unique_ptr<Load> load);
+        ~Session();
+        Session(const Session&) = delete;
+        Session& operator=(const Session&) = delete;
+    private:
+        WorldLoader& owner_;
+        std::unique_ptr<Load> load_;
+    };
+    std::unique_ptr<Session> begin(Entry entry, JobGroup& jobs);
     bool initializeScene();
     void beginWarmup();
     bool finish();
-    void cancel();
     /// Streaming phase: poll worker results and progress without pumping a frame.
     const WorldLoadStatus& update(float deltaTime);
     void observeReadiness(bool spawnsPending);
     const WorldLoadStatus& status() const;
     Stage stage() const;
-    bool hasBackgroundWork() const;
     float warmupSeconds() const;
     Entry entry() const;
     const std::string& mapName() const;
@@ -69,7 +79,7 @@ public:
     [[nodiscard]] LastWorldInfo loadLastWorldInfo() const;
 
     // State accessors
-    [[nodiscard]] uint32_t getLoadedMapId() const { return loadedMapId_; }
+    [[nodiscard]] uint32_t getLoadedMapId() const;
     [[nodiscard]] bool hasPendingEntry() const { return pendingWorldEntry_.has_value(); }
 
     // Get cached map name by ID (returns empty string if not found)
@@ -84,27 +94,20 @@ public:
     }
 
     // Reset methods (for logout / character switch)
-    void resetLoadedMap();
+    void discardPendingEntry() { pendingWorldEntry_.reset(); }
     std::optional<Entry> takePendingEntry();
     void resetMapNameCache() { mapNameCacheLoaded_ = false; mapNameById_.clear(); }
 
 private:
     struct PreparedMap;
-    struct Load;
     const Phase& phase_;
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;
-    std::unique_ptr<Load> load_;
-    // Cancel never joins a worker in a transition. Retain its future until it
-    // completes; destruction joins before AssetManager can be released.
-    std::vector<std::unique_ptr<Load>> retiredLoads_;
-    void collectRetiredLoads();
+    Load* load_ = nullptr;  // Borrowed from MapScope's Session.
     void fail(const std::string& reason);
     std::string resolveMapName(uint32_t mapId);
     static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,
-        const std::string& mapName, const std::shared_ptr<std::atomic<bool>>& cancelled);
-
-    uint32_t loadedMapId_ = 0xFFFFFFFF;
+        const std::string& mapName, const JobGroup::Token& token);
     std::optional<Entry> pendingWorldEntry_;
 
     // Map.dbc name cache (loaded once per session)

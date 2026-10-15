@@ -98,7 +98,10 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     });
 
     // GameObject custom animation callback (e.g. chest opening)
+    // Without a map scope there is no scene to animate; the scope presents
+    // each object as the entities have it when it is built.
     gameHandler_.setGameObjectCustomAnimCallback([this](uint64_t guid, uint32_t animId) {
+        if (!entitySpawner_.hasMap()) return;
         auto& goInstances = entitySpawner_.getGameObjectInstances();
         auto it = goInstances.find(guid);
         if (it == goInstances.end()) return;
@@ -148,6 +151,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     });
 
     gameHandler_.setGameObjectMoveCallback([this](uint64_t guid, float x, float y, float z, float orientation) {
+        if (!entitySpawner_.hasMap()) return;
         auto& goInstMap = entitySpawner_.getGameObjectInstances();
         auto it = goInstMap.find(guid);
         if (it == goInstMap.end()) {

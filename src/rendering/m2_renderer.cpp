@@ -1,6 +1,7 @@
 #include <atomic>
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
+#include <stdexcept>
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_batch_opacity.hpp"
 #include "rendering/m2_track_sampler.hpp"
@@ -122,9 +123,9 @@ void M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     // and nothing else (local_lights.hpp). A lamp out of view lights nothing,
     // even where what it would light is on screen.
     constexpr float kNearDoodadSq = 10.0f * 10.0f;
-    for (const size_t index : lightInstanceIndices_) {
-        if (index >= instances.size()) continue;
-        const auto& inst = instances[index];
+    for (const size_t index : scene_->lightInstanceIndices_) {
+        if (index >= scene_->instances.size()) continue;
+        const auto& inst = scene_->instances[index];
         const M2ModelGPU* model = inst.cachedModel;
         if (!model || model->lights.empty() || !inst.cachedIsValid) continue;
         const glm::vec3 toCam = inst.position - cameraPos;
@@ -511,7 +512,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // each doubling reallocates the whole thing mid-frame: measured at 8.9ms
     // crossing 32k and 18.5ms crossing 64k, doubling again each time. Take that
     // allocation up front, where a stall is invisible.
-    instances.reserve(65536);
+    scene_->instances.reserve(65536);
 
     const unsigned hc = std::thread::hardware_concurrency();
     const size_t availableCores = (hc > 1u) ? static_cast<size_t>(hc - 1u) : 1ull;
@@ -689,7 +690,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         // Fresh buffers hold no bone data - invalidate any per-instance upload
         // tracking so prepareRender() re-uploads everything (defensive: instances
         // are normally empty when this runs, but re-init must not skip uploads).
-        for (auto& inst : instances) {
+        for (auto& inst : scene_->instances) {
             inst.megaBoneUploadedSlot[0] = inst.megaBoneUploadedSlot[1] = 0;
         }
     }
@@ -1063,14 +1064,14 @@ void M2Renderer::shutdown() {
     destroyPosedEmitterModels();
 
     // Destroy instance bone buffers
-    for (auto& inst : instances) {
+    for (auto& inst : scene_->instances) {
         destroyInstanceBones(inst);
     }
-    instances.clear();
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    cullGrid_.clear();
-    instanceDedupMap_.clear();
+    scene_->instances.clear();
+    scene_->spatialGrid.clear();
+    scene_->instanceIndexById.clear();
+    scene_->cullGrid_.clear();
+    scene_->instanceDedupMap_.clear();
     // Model and bone destruction above is deferred; drain it now while the
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
@@ -2527,7 +2528,7 @@ void M2Renderer::syncRtScene() {
         rtSeen_[id] = gen;
         rtMeshOf_[id] = mesh;
     };
-    for (auto& inst : instances) {
+    for (auto& inst : scene_->instances) {
         auto it = models.find(inst.modelId);
         const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
         const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f;
@@ -2569,3 +2570,19 @@ void M2Renderer::syncRtScene() {
 
 } // namespace rendering
 } // namespace wowee
+
+namespace wowee::rendering {
+M2Renderer::InstanceSession::InstanceSession(M2Renderer& renderer)
+    : renderer_(renderer) {
+    if (renderer_.scene_ != &renderer_.defaultInstances_)
+        throw std::logic_error("M2Renderer already has a scene owner");
+    state_ = std::make_unique<InstanceState>(std::move(renderer_.defaultInstances_));
+    renderer_.defaultInstances_ = InstanceState{};
+    renderer_.scene_ = state_.get();
+}
+
+M2Renderer::InstanceSession::~InstanceSession() {
+    renderer_.clearInstances();
+    renderer_.scene_ = &renderer_.defaultInstances_;
+}
+}

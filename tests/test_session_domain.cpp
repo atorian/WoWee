@@ -5,8 +5,11 @@
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "game/movement_flags.hpp"
+#include "game/entity_controller.hpp"
+#include "game/update_field_table.hpp"
 #include "core/world_transition_queue.hpp"
 
+#include <algorithm>
 #include <vector>
 
 using wowee::game::Opcode;
@@ -266,6 +269,87 @@ TEST_CASE("transfer pending announces its map without destroying the current wor
     CHECK(transfers.front().mapId == 1);
     CHECK(h.game().getCurrentMapId() == h.player().mapId);
     CHECK(h.game().getPlayerGuid() == h.player().guid);
+}
+
+TEST_CASE("a new map scope is shown every object already in view, once, without asking the server",
+          "[session][harness][mapscope]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+
+    auto creature = std::make_shared<Unit>(0x1001);
+    creature->setDisplayId(4321);
+    creature->setMaxHealth(100);
+    creature->setHealth(100);
+    creature->setNpcFlags(0x02);  // a quest giver: its status is not asked again
+    creature->setPosition(10.0f, 20.0f, 30.0f, 1.5f);
+    auto corpse = std::make_shared<Unit>(0x1002);
+    corpse->setDisplayId(4322);
+    corpse->setMaxHealth(100);
+    corpse->setHealth(0);
+    auto invisible = std::make_shared<Unit>(0x1003);  // no display: never drawn
+    auto rider = std::make_shared<Player>(0x1004);
+    rider->setDisplayId(49);
+    rider->setMountDisplayId(14337);
+    auto door = std::make_shared<GameObject>(0x1005);
+    door->setEntry(77);
+    door->setDisplayId(411);
+    door->setField(fieldIndex(UF::GAMEOBJECT_BYTES_1), 0);  // open
+    for (const auto& entity : std::initializer_list<std::shared_ptr<Entity>>{
+             creature, corpse, invisible, rider, door})
+        h.game().getEntityManager().addEntity(entity->getGuid(), entity);
+
+    std::vector<uint64_t> creatures, deaths;
+    std::vector<std::pair<uint64_t, uint32_t>> mounts;
+    std::vector<std::pair<uint64_t, uint8_t>> doorStates;
+    std::vector<uint64_t> objects;
+    h.game().setCreatureSpawnCallback([&](uint64_t guid, uint32_t displayId, float x, float y, float z,
+                                          float orientation, float) {
+        creatures.push_back(guid);
+        if (guid == creature->getGuid()) {
+            CHECK(displayId == 4321);
+            CHECK(x == 10.0f);
+            CHECK(y == 20.0f);
+            CHECK(z == 30.0f);
+            CHECK(orientation == 1.5f);
+        }
+    });
+    h.game().setNpcDeathCallback([&](uint64_t guid) { deaths.push_back(guid); });
+    h.game().setOtherPlayerMountCallback([&](uint64_t guid, uint32_t display) { mounts.emplace_back(guid, display); });
+    h.game().setGameObjectStateCallback([&](uint64_t guid, uint8_t state) { doorStates.emplace_back(guid, state); });
+    h.game().setGameObjectSpawnCallback([&](uint64_t guid, uint32_t entry, uint32_t displayId,
+                                            float, float, float, float, float) {
+        objects.push_back(guid);
+        CHECK(entry == 77);
+        CHECK(displayId == 411);
+    });
+    h.server().clearSent();
+
+    h.game().getEntityController()->announceObjectsInView();
+
+    std::sort(creatures.begin(), creatures.end());
+    CHECK(creatures == std::vector<uint64_t>{creature->getGuid(), corpse->getGuid()});
+    CHECK(deaths == std::vector<uint64_t>{corpse->getGuid()});
+    CHECK(mounts == std::vector<std::pair<uint64_t, uint32_t>>{{rider->getGuid(), 14337}});
+    CHECK(doorStates == std::vector<std::pair<uint64_t, uint8_t>>{{door->getGuid(), 0}});
+    CHECK(objects == std::vector<uint64_t>{door->getGuid()});
+    CHECK(h.sentOpcodes().empty());
+}
+
+TEST_CASE("an empty view announces nothing, and the local player is never presented as another",
+          "[session][harness][mapscope]") {
+    using namespace wowee::game;
+    GameHarness h;
+    h.enterWorld();
+    auto self = std::make_shared<Player>(h.player().guid);
+    self->setDisplayId(49);
+    h.game().getEntityManager().addEntity(self->getGuid(), self);
+    unsigned spawns = 0;
+    h.game().setPlayerSpawnCallback([&](uint64_t, uint32_t, uint8_t, uint8_t, uint32_t, uint8_t,
+                                        float, float, float, float) { ++spawns; });
+    h.game().setCreatureSpawnCallback([&](uint64_t, uint32_t, float, float, float, float, float) { ++spawns; });
+    h.game().getEntityController()->announceObjectsInView();
+    CHECK(spawns == 0);
 }
 
 TEST_CASE("game notifications wait for the interface and own their arguments", "[session][harness][addonqueue]") {

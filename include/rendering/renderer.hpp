@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include "core/job_group.hpp"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -166,7 +167,10 @@ public:
 
     Camera* getCamera() { return camera.get(); }
     TerrainRenderer* getTerrainRenderer() const { return terrainRenderer.get(); }
-    TerrainManager* getTerrainManager() const { return terrainManager.get(); }
+    TerrainManager* getTerrainManager() const { return terrainManager; }
+    void setMapJobToken(core::JobGroup::Token token) { mapJobToken_ = std::move(token); }
+    std::unique_ptr<TerrainManager> takeTerrainSession();
+    void releaseTerrainSession(TerrainManager* session);
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
     Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
@@ -304,7 +308,11 @@ private:
     /// That line, asked of the terrain, the buildings and where the camera is.
     [[nodiscard]] float sampleSunOcclusion() const;
 
-    std::unique_ptr<TerrainManager> terrainManager;
+    // A standalone scene owns its default session. The client transfers that
+    // session into MapScope as soon as the renderers have been initialized.
+    std::unique_ptr<TerrainManager> standaloneTerrain_;
+    TerrainManager* terrainManager = nullptr;
+    core::JobGroup::Token mapJobToken_;
     std::unique_ptr<WaterRenderer> waterRenderer;
     std::unique_ptr<Skybox> skybox;
     std::unique_ptr<Celestial> celestial;

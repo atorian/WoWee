@@ -65,7 +65,7 @@ EntitySpawner::EntitySpawner(rendering::Renderer* renderer,
 {
 }
 
-EntitySpawner::~EntitySpawner() { clearAllQueues(); }
+EntitySpawner::~EntitySpawner() = default;
 // --- Lifecycle ---
 
 void EntitySpawner::initialize() {
@@ -75,6 +75,7 @@ void EntitySpawner::initialize() {
 }
 
 void EntitySpawner::update() {
+    if (!spawns_) return;
     // Submit appearance, equipment and attachment copies together before the
     // next draw. The default upload queue is the graphics queue, so rendering
     // observes the recorded barriers without a CPU fence wait per texture.
@@ -86,16 +87,17 @@ void EntitySpawner::update() {
     } uploadGuard{uploadCtx};
     // Drain even abandoned attachment requests so despawning an owner cannot
     // occupy a worker slot indefinitely. Only completed futures are consumed.
-    for (auto it = asyncAttachmentLoads_.begin(); it != asyncAttachmentLoads_.end();) {
+    for (auto it = spawns_->asyncAttachmentLoads_.begin(); it != spawns_->asyncAttachmentLoads_.end();) {
         if (it->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             ++it;
             continue;
         }
         auto ready = it->second.get();
-        for (auto& [path, model] : ready.models) attachmentModelData_[path] = std::move(model);
+        if (!spawns_->jobs_.accepts(ready.token)) { it = spawns_->asyncAttachmentLoads_.erase(it); continue; }
+        for (auto& [path, model] : ready.models) assets_.attachmentModelData_[path] = std::move(model);
         for (auto& [path, texture] : ready.predecodedTextures)
-            preparedAttachmentTextures_[path] = std::move(texture);
-        it = asyncAttachmentLoads_.erase(it);
+            spawns_->preparedAttachmentTextures_[path] = std::move(texture);
+        it = spawns_->asyncAttachmentLoads_.erase(it);
     }
     processPlayerSpawnQueue();
     processCreatureSpawnQueue();
@@ -120,7 +122,7 @@ void EntitySpawner::syncCreatureStealthVisuals() {
     // Doing that each frame with the mutex-locked getEntity() plus a
     // dynamic_pointer_cast per creature was a measurable main-thread cost in
     // crowded areas - a few sweeps per second is visually indistinguishable.
-    if (++stealthSyncFrameCounter_ % 15 != 0) return;
+    if (++spawns_->stealthSyncFrameCounter_ % 15 != 0) return;
 
     // EntitySpawner::update() runs on the main thread, so the unlocked
     // getEntities() reference is safe and avoids a mutex acquire per creature.
@@ -129,7 +131,7 @@ void EntitySpawner::syncCreatureStealthVisuals() {
     // Undetected stealth is culled by the server. Units that are sent with the
     // CREEP visibility flag use the translucent detected-stealth presentation.
     constexpr float kDetectedStealthOpacity = 0.35f;
-    for (const auto& [guid, instanceId] : creatureInstances_) {
+    for (const auto& [guid, instanceId] : spawns_->creatureInstances_) {
         auto entIt = entities.find(guid);
         if (entIt == entities.end() || !entIt->second) continue;
         const game::Entity* entity = entIt->second.get();
@@ -138,7 +140,7 @@ void EntitySpawner::syncCreatureStealthVisuals() {
         const auto* unit = static_cast<const game::Unit*>(entity);
 
         const bool stealthed = unit->hasCreepVisibility();
-        auto [it, inserted] = creatureWasStealthed_.try_emplace(guid, stealthed);
+        auto [it, inserted] = spawns_->creatureWasStealthed_.try_emplace(guid, stealthed);
         if (!inserted && it->second == stealthed) continue;
 
         it->second = stealthed;
@@ -147,150 +149,52 @@ void EntitySpawner::syncCreatureStealthVisuals() {
     }
 }
 
-void EntitySpawner::shutdown() {
-    clearAllQueues();
-    // Clear all instances
-    creatureInstances_.clear();
-    creatureModelIds_.clear();
-    creatureDisplayIds_.clear();
-    requestedCreatureDisplayIds_.clear();
-    creatureRenderPosCache_.clear();
-    creatureWasMoving_.clear();
-    creatureWasSwimming_.clear();
-    creatureWasFlying_.clear();
-    creatureWasWalking_.clear();
-    creatureSwimmingState_.clear();
-    creatureWalkingState_.clear();
-    creatureFlyingState_.clear();
-    creatureActiveEmotes_.clear();
-    creatureWasStealthed_.clear();
-    creatureWeaponsAttached_.clear();
-    creatureWeaponAttachAttempts_.clear();
-    playerInstances_.clear();
-    onlinePlayerAppearance_.clear();
-    remotePlayerMounts_.clear();
-    pendingRemotePlayerMounts_.clear();
-    remotePlayerLocomotion_.clear();
-    remotePlayerForms_.clear();
-    pendingRemotePlayerForms_.clear();
-    gameObjectInstances_.clear();
-}
-
-void EntitySpawner::resetAllState() {
-    // Wait for in-flight async loads before clearing state
-    for (auto& load : asyncCreatureLoads_) {
-        if (load.future.valid()) load.future.wait();
-    }
-
-    // Despawn all entities (renderer cleanup)
-    despawnAllCreatures();
-    despawnAllPlayers();
-    despawnAllGameObjects();
-    clearMountState();
-
-    // Clear all queues and async loads
-    clearAllQueues();
-
-    // Clear all instance tracking
-    creatureInstances_.clear();
-    creatureModelIds_.clear();
-    creatureDisplayIds_.clear();
-    requestedCreatureDisplayIds_.clear();
-    creatureRenderPosCache_.clear();
-    playerInstances_.clear();
-    onlinePlayerAppearance_.clear();
-    remotePlayerMounts_.clear();
-    pendingRemotePlayerMounts_.clear();
-    remotePlayerLocomotion_.clear();
-    remotePlayerForms_.clear();
-    pendingRemotePlayerForms_.clear();
-    gameObjectInstances_.clear();
-
-    // Clear animation state maps
-    creatureWasMoving_.clear();
-    creatureWasSwimming_.clear();
-    creatureWasFlying_.clear();
-    creatureWasWalking_.clear();
-    creatureSwimmingState_.clear();
-    creatureWalkingState_.clear();
-    creatureFlyingState_.clear();
-    creatureActiveEmotes_.clear();
-    // Carried over, a stale entry matching the creature's current stealth state
-    // suppresses the opacity call that would apply it, so a stealthed NPC came
-    // back fully opaque after a relog. shutdown() already cleared this.
-    creatureWasStealthed_.clear();
-    creatureWeaponsAttached_.clear();
-    creatureWeaponAttachAttempts_.clear();
-    modelIdIsWolfLike_.clear();
-
-    // Clear display/spawn caches
-    nonRenderableCreatureDisplayIds_.clear();
-    displayIdModelCache_.clear();
-    unloadableMountDisplayIds_.clear();
-    seatlessMountDisplayIds_.clear();
-    displayIdTexturesApplied_.clear();
-    charSectionsCache_.clear();
-    charSectionsCacheBuilt_ = false;
-
-    // Clear GO display caches
-    gameObjectDisplayIdModelCache_.clear();
-    gameObjectDisplayIdWmoCache_.clear();
-    gameObjectDisplayIdFailedCache_.clear();
-}
-
-void EntitySpawner::rebuildLookups() {
-    creatureLookupsBuilt_ = false;
-    displayDataMap_.clear();
-    humanoidExtraMap_.clear();
-    creatureModelIds_.clear();
-    creatureRenderPosCache_.clear();
-    nonRenderableCreatureDisplayIds_.clear();
-    initialize();
-}
-
 bool EntitySpawner::hasWorkPending() const {
-    return !pendingCreatureSpawns_.empty() || !asyncCreatureLoads_.empty() ||
-           !asyncNpcCompositeLoads_.empty() || !pendingPlayerSpawns_.empty() || !asyncPlayerLoads_.empty() ||
-           !asyncEquipmentLoads_.empty() || !deferredEquipmentQueue_.empty() ||
-           !pendingGameObjectSpawns_.empty() || !asyncGameObjectLoads_.empty() ||
-           !asyncAttachmentLoads_.empty();
+    if (!spawns_) return false;
+    return !spawns_->pendingCreatureSpawns_.empty() || !spawns_->asyncCreatureLoads_.empty() ||
+           !spawns_->asyncNpcCompositeLoads_.empty() || !spawns_->pendingPlayerSpawns_.empty() || !spawns_->asyncPlayerLoads_.empty() ||
+           !spawns_->asyncEquipmentLoads_.empty() || !spawns_->deferredEquipmentQueue_.empty() ||
+           !spawns_->pendingGameObjectSpawns_.empty() || !spawns_->asyncGameObjectLoads_.empty() ||
+           !spawns_->asyncAttachmentLoads_.empty();
 }
 
 void EntitySpawner::clearMountState() {
-    if (mountInstanceId_ != 0 && renderer_) {
+    if (!spawns_) return;
+    if (spawns_->mountInstanceId_ != 0 && renderer_) {
         if (auto* charRenderer = renderer_->getCharacterRenderer()) {
-            charRenderer->removeInstance(mountInstanceId_);
+            charRenderer->removeInstance(spawns_->mountInstanceId_);
         }
     }
-    mountInstanceId_ = 0;
-    mountModelId_ = 0;
-    pendingMountDisplayId_ = 0;
+    spawns_->mountInstanceId_ = 0;
+    spawns_->mountModelId_ = 0;
+    spawns_->pendingMountDisplayId_ = 0;
 }
 
 void EntitySpawner::setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId) {
+    if (!spawns_) return;
     if (guid == 0) return;
-    pendingRemotePlayerMounts_[guid] = displayId;
+    spawns_->pendingRemotePlayerMounts_[guid] = displayId;
 }
 
 void EntitySpawner::setRemotePlayerFormDisplayId(uint64_t guid, uint32_t displayId) {
     if (guid == 0) return;
-    auto current = remotePlayerForms_.find(guid);
-    const uint32_t shown = current != remotePlayerForms_.end() ? current->second.displayId : 0;
+    auto current = spawns_->remotePlayerForms_.find(guid);
+    const uint32_t shown = current != spawns_->remotePlayerForms_.end() ? current->second.displayId : 0;
     if (displayId == shown) {
-        pendingRemotePlayerForms_.erase(guid);
+        spawns_->pendingRemotePlayerForms_.erase(guid);
         return;
     }
-    pendingRemotePlayerForms_[guid] = displayId;
+    spawns_->pendingRemotePlayerForms_[guid] = displayId;
 }
 
 void EntitySpawner::removeRemotePlayerForm(uint64_t guid) {
-    auto it = remotePlayerForms_.find(guid);
-    if (it == remotePlayerForms_.end()) return;
+    auto it = spawns_->remotePlayerForms_.find(guid);
+    if (it == spawns_->remotePlayerForms_.end()) return;
     const RemotePlayerForm form = it->second;
-    remotePlayerForms_.erase(it);
+    spawns_->remotePlayerForms_.erase(it);
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    auto playerIt = playerInstances_.find(guid);
-    if (playerIt != playerInstances_.end() && playerIt->second == form.formInstanceId) {
+    auto playerIt = spawns_->playerInstances_.find(guid);
+    if (playerIt != spawns_->playerInstances_.end() && playerIt->second == form.formInstanceId) {
         // The body goes back where the form was, facing the same way.
         if (cr) {
             glm::vec3 pos(0.0f);
@@ -303,45 +207,49 @@ void EntitySpawner::removeRemotePlayerForm(uint64_t guid) {
     }
     if (cr && form.formInstanceId != 0) cr->removeInstance(form.formInstanceId);
     // The movement state was the form's; the body's animation is chosen afresh.
-    creatureWasMoving_.erase(guid);
-    creatureWasFlying_.erase(guid);
-    creatureWasSwimming_.erase(guid);
-    creatureWasWalking_.erase(guid);
+    spawns_->creatureWasMoving_.erase(guid);
+    spawns_->creatureWasFlying_.erase(guid);
+    spawns_->creatureWasSwimming_.erase(guid);
+    spawns_->creatureWasWalking_.erase(guid);
 }
 
 void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
-    auto it = remotePlayerMounts_.find(guid);
-    if (it == remotePlayerMounts_.end()) return;
+    auto it = spawns_->remotePlayerMounts_.find(guid);
+    if (it == spawns_->remotePlayerMounts_.end()) return;
     if (renderer_) {
         if (auto* cr = renderer_->getCharacterRenderer()) {
             if (it->second.instanceId != 0) cr->removeInstance(it->second.instanceId);
-            auto playerIt = playerInstances_.find(guid);
-            if (playerIt != playerInstances_.end()) {
+            auto playerIt = spawns_->playerInstances_.find(guid);
+            if (playerIt != spawns_->playerInstances_.end()) {
                 cr->playAnimation(playerIt->second, rendering::anim::STAND, true);
             }
         }
     }
-    remotePlayerMounts_.erase(it);
+    spawns_->remotePlayerMounts_.erase(it);
     setRemotePlayerWeaponsSheathed(guid, false);
 }
 
 void EntitySpawner::queueTransportRegistration(uint64_t guid, uint32_t entry, uint32_t displayId,
                                                 float x, float y, float z, float orientation) {
-    pendingTransportRegistrations_.push_back({guid, entry, displayId, x, y, z, orientation});
+    if (!spawns_) return;
+    spawns_->pendingTransportRegistrations_.push_back({guid, entry, displayId, x, y, z, orientation});
 }
 
 void EntitySpawner::setTransportPendingMove(uint64_t guid, float x, float y, float z, float orientation) {
-    pendingTransportMoves_[guid] = {x, y, z, orientation};
+    if (!spawns_) return;
+    spawns_->pendingTransportMoves_[guid] = {x, y, z, orientation};
 }
 
 bool EntitySpawner::hasTransportRegistrationPending(uint64_t guid) const {
-    return std::any_of(pendingTransportRegistrations_.begin(), pendingTransportRegistrations_.end(),
+    if (!spawns_) return false;
+    return std::any_of(spawns_->pendingTransportRegistrations_.begin(), spawns_->pendingTransportRegistrations_.end(),
                        [guid](const PendingTransportRegistration& reg) { return reg.guid == guid; });
 }
 
 void EntitySpawner::updateTransportRegistration(uint64_t guid, uint32_t displayId,
                                                  float x, float y, float z, float orientation) {
-    for (auto& reg : pendingTransportRegistrations_) {
+    if (!spawns_) return;
+    for (auto& reg : spawns_->pendingTransportRegistrations_) {
         if (reg.guid == guid) {
             reg.displayId = displayId;
             reg.x = x; reg.y = y; reg.z = z; reg.orientation = orientation;
@@ -354,123 +262,57 @@ void EntitySpawner::updateTransportRegistration(uint64_t guid, uint32_t displayI
 
 void EntitySpawner::queueCreatureSpawn(uint64_t guid, uint32_t displayId,
                                         float x, float y, float z, float orientation, float scale) {
-    if (creatureInstances_.count(guid)) return;
-    requestedCreatureDisplayIds_[guid] = displayId;
-    if (pendingCreatureSpawnGuids_.count(guid)) {
+    if (!spawns_) return;
+    if (spawns_->creatureInstances_.count(guid)) return;
+    const auto token = spawns_->jobs_.replace(JobGroup::Channel::Creature, guid);
+    if (spawns_->pendingCreatureSpawnGuids_.count(guid)) {
         // Replace any not-yet-started request. An older async result can still
         // finish later; processAsyncCreatureResults rejects it against the map.
-        pendingCreatureSpawns_.erase(
-            std::remove_if(pendingCreatureSpawns_.begin(), pendingCreatureSpawns_.end(),
+        spawns_->pendingCreatureSpawns_.erase(
+            std::remove_if(spawns_->pendingCreatureSpawns_.begin(), spawns_->pendingCreatureSpawns_.end(),
                            [guid](const PendingCreatureSpawn& spawn) {
                                return spawn.guid == guid;
                            }),
-            pendingCreatureSpawns_.end());
+            spawns_->pendingCreatureSpawns_.end());
     }
-    pendingCreatureSpawns_.push_back({guid, displayId, x, y, z, orientation, scale});
-    pendingCreatureSpawnGuids_.insert(guid);
+    spawns_->pendingCreatureSpawns_.push_back({guid, displayId, x, y, z, orientation, scale, token});
+    spawns_->pendingCreatureSpawnGuids_.insert(guid);
 }
 
 void EntitySpawner::queuePlayerSpawn(uint64_t guid, uint8_t raceId, uint8_t genderId,
                                       uint32_t appearanceBytes, uint8_t facialFeatures,
                                       float x, float y, float z, float orientation) {
-    if (playerInstances_.count(guid)) return;
-    if (pendingPlayerSpawnGuids_.count(guid)) return;
-    const uint64_t revision = ++nextPlayerSpawnRevision_;
-    playerSpawnRevisions_[guid] = revision;
-    pendingPlayerSpawns_.push_back({guid, raceId, genderId, appearanceBytes, facialFeatures,
-                                  x, y, z, orientation, revision});
-    pendingPlayerSpawnGuids_.insert(guid);
+    if (!spawns_) return;
+    if (spawns_->playerInstances_.count(guid)) return;
+    if (spawns_->pendingPlayerSpawnGuids_.count(guid)) return;
+    const auto token = spawns_->jobs_.replace(JobGroup::Channel::Player, guid);
+    spawns_->pendingPlayerSpawns_.push_back({guid, raceId, genderId, appearanceBytes, facialFeatures,
+                                  x, y, z, orientation, token});
+    spawns_->pendingPlayerSpawnGuids_.insert(guid);
 }
 
 void EntitySpawner::queueGameObjectSpawn(uint64_t guid, uint32_t entry, uint32_t displayId,
                                           float x, float y, float z, float orientation, float scale) {
-    pendingGameObjectSpawns_.push_back({guid, entry, displayId, x, y, z, orientation, scale});
+    if (!spawns_) return;
+    const auto token = spawns_->jobs_.replace(JobGroup::Channel::GameObject, guid);
+    spawns_->pendingGameObjectSpawns_.push_back({guid, entry, displayId, x, y, z, orientation, scale, token});
 }
 
 void EntitySpawner::queuePlayerEquipment(uint64_t guid,
                                           const std::array<uint32_t, 19>& displayInfoIds,
                                           const std::array<uint8_t, 19>& inventoryTypes) {
-    equipmentRevisions_[guid] = ++nextEquipmentRevision_;
-    for (auto& queued : deferredEquipmentQueue_) {
+    if (!spawns_) return;
+    spawns_->jobs_.replace(JobGroup::Channel::Equipment, guid);
+    for (auto& queued : spawns_->deferredEquipmentQueue_) {
         if (queued.first == guid) {
             queued.second = {displayInfoIds, inventoryTypes};
             return;
         }
     }
-    deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
+    spawns_->deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
 }
 
 // --- Immediate despawn wrappers ---
-
-void EntitySpawner::clearAllQueues() {
-    // Only teardown/map transitions join workers, before changing their asset
-    // dataset. Ordinary frame updates only poll; pooled futures never wait in
-    // their destructor, so these explicit lifetime fences are required.
-    for (auto& future : asyncPlayerLoads_) if (future.valid()) future.wait();
-    for (auto& load : asyncCreatureLoads_) if (load.future.valid()) load.future.wait();
-    for (auto& load : asyncEquipmentLoads_) if (load.future.valid()) load.future.wait();
-    for (auto& load : asyncNpcCompositeLoads_) if (load.future.valid()) load.future.wait();
-    for (auto& load : asyncGameObjectLoads_) if (load.future.valid()) load.future.wait();
-    for (auto& [key, future] : asyncAttachmentLoads_) if (future.valid()) future.wait();
-    asyncAttachmentLoads_.clear();
-    attachmentModelData_.clear();
-    preparedAttachmentTextures_.clear();
-    playerSpawnRevisions_.clear();
-    pendingCreatureSpawns_.clear();
-    pendingCreatureSpawnGuids_.clear();
-    requestedCreatureDisplayIds_.clear();
-    creatureSpawnRetryDeadlines_.clear();
-    creaturePermanentFailureGuids_.clear();
-    deadCreatureGuids_.clear();
-    pendingPlayerSpawns_.clear();
-    pendingPlayerSpawnGuids_.clear();
-    pendingOnlinePlayerEquipment_.clear();
-    equipmentRevisions_.clear();
-    deferredEquipmentQueue_.clear();
-    pendingGameObjectSpawns_.clear();
-    // Including the one that is already partway onto the GPU. An incremental
-    // upload survives a map change otherwise: processPendingWmoUploads() only
-    // gives up when the renderer pointer is null, and a transition leaves the
-    // WMORenderer alive with its contents cleared. The upload then finishes
-    // against a renderer that no longer knows the model, calls finishWmoSpawn()
-    // on the new map, and puts the old map's building - or a transport, which
-    // then registers itself here - into a world it does not belong to.
-    pendingWmoUploads_.clear();
-    pendingTransportRegistrations_.clear();
-    pendingTransportMoves_.clear();
-    pendingTransportDoodadBatches_.clear();
-    asyncCreatureLoads_.clear();
-    asyncCreatureDisplayLoads_.clear();
-    asyncPlayerLoads_.clear();
-    preparedPlayerModels_.clear();
-    asyncEquipmentLoads_.clear();
-    asyncNpcCompositeLoads_.clear();
-    asyncGameObjectLoads_.clear();
-    asyncGameObjectM2Displays_.clear();
-    asyncGameObjectGuids_.clear();
-    abandonedGameObjectGuids_.clear();
-}
-
-void EntitySpawner::despawnAllCreatures() {
-    std::vector<uint64_t> guids;
-    guids.reserve(creatureInstances_.size());
-    for (const auto& [g, _] : creatureInstances_) guids.push_back(g);
-    for (auto g : guids) despawnCreature(g);
-}
-
-void EntitySpawner::despawnAllPlayers() {
-    std::vector<uint64_t> guids;
-    guids.reserve(playerInstances_.size());
-    for (const auto& [g, _] : playerInstances_) guids.push_back(g);
-    for (auto g : guids) despawnPlayer(g);
-}
-
-void EntitySpawner::despawnAllGameObjects() {
-    std::vector<uint64_t> guids;
-    guids.reserve(gameObjectInstances_.size());
-    for (const auto& [g, _] : gameObjectInstances_) guids.push_back(g);
-    for (auto g : guids) despawnGameObject(g);
-}
 
 // --- Methods extracted from Application (with comments preserved) ---
 
@@ -488,10 +330,10 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
     // Non-humanoids (wolves/boars/etc.) can expose non-zero virtual item fields
     // and otherwise end up with comedic floating weapons.
     uint32_t displayId = unit->getDisplayId();
-    auto dIt = displayDataMap_.find(displayId);
-    if (dIt == displayDataMap_.end()) return false;
+    auto dIt = assets_.displayDataMap_.find(displayId);
+    if (dIt == assets_.displayDataMap_.end()) return false;
     uint32_t extraDisplayId = dIt->second.extraDisplayId;
-    if (extraDisplayId == 0 || humanoidExtraMap_.find(extraDisplayId) == humanoidExtraMap_.end()) {
+    if (extraDisplayId == 0 || assets_.humanoidExtraMap_.find(extraDisplayId) == assets_.humanoidExtraMap_.end()) {
         return false;
     }
 
@@ -557,7 +399,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         }
 
         if (!loadWeaponM2(m2Path, weaponModel, texturePath)) return false;
-        charRenderer->setPredecodedBLPCache(&preparedAttachmentTextures_, true);
+        charRenderer->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_, true);
         auto* uploadCtx = renderer_->getVkContext();
         if (uploadCtx) uploadCtx->beginUploadBatch();
         struct AttachmentGuard {
@@ -569,8 +411,8 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
             }
         } guard{charRenderer, uploadCtx};
         const std::string attachmentKey = m2Path + '|' + texturePath;
-        auto [cachedId, inserted] = attachmentModelIds_.try_emplace(attachmentKey, 0);
-        if (inserted) cachedId->second = nextWeaponModelId_++;
+        auto [cachedId, inserted] = assets_.attachmentModelIds_.try_emplace(attachmentKey, 0);
+        if (inserted) cachedId->second = assets_.nextWeaponModelId_++;
         return charRenderer->attachWeapon(instanceId, attachmentId,
             weaponModel, cachedId->second, texturePath);
     };
@@ -623,25 +465,26 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
 
 bool EntitySpawner::retryCreatureVirtualWeapons(uint64_t guid, uint32_t instanceId,
                                                 uint8_t maxAttempts) {
-    if (creatureWeaponsAttached_.count(guid)) return false;
-    const auto attemptIt = creatureWeaponAttachAttempts_.find(guid);
-    const uint8_t attempts = attemptIt != creatureWeaponAttachAttempts_.end()
+    if (!spawns_) return false;
+    if (spawns_->creatureWeaponsAttached_.count(guid)) return false;
+    const auto attemptIt = spawns_->creatureWeaponAttachAttempts_.find(guid);
+    const uint8_t attempts = attemptIt != spawns_->creatureWeaponAttachAttempts_.end()
         ? attemptIt->second : 0;
     if (attempts >= maxAttempts) return false;
 
     if (tryAttachCreatureVirtualWeapons(guid, instanceId)) {
-        creatureWeaponsAttached_.insert(guid);
-        creatureWeaponAttachAttempts_.erase(guid);
+        spawns_->creatureWeaponsAttached_.insert(guid);
+        spawns_->creatureWeaponAttachAttempts_.erase(guid);
     } else {
-        if (asyncAttachmentLoads_.empty())
-            creatureWeaponAttachAttempts_[guid] = static_cast<uint8_t>(attempts + 1);
+        if (spawns_->asyncAttachmentLoads_.empty())
+            spawns_->creatureWeaponAttachAttempts_[guid] = static_cast<uint8_t>(attempts + 1);
     }
     return true;
 }
 
 
 void EntitySpawner::buildCharSectionsCache() {
-    if (charSectionsCacheBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
+    if (assets_.charSectionsCacheBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
     auto dbc = assetManager_->loadDBC("CharSections.dbc");
     if (!dbc) return;
     const auto* csL = pipeline::getActiveDBCLayout()
@@ -658,26 +501,26 @@ void EntitySpawner::buildCharSectionsCache() {
         for (int ti = 0; ti < 3; ti++) {
             std::string tex = dbc->getString(r, csF.texture1 + ti);
             if (tex.empty()) continue;
-            charSectionsCache_.emplace(
+            assets_.charSectionsCache_.emplace(
                 charSectionKey(static_cast<uint8_t>(race), static_cast<uint8_t>(sex),
                                static_cast<uint8_t>(section), static_cast<uint8_t>(variation),
                                static_cast<uint8_t>(color), ti),
                 tex);
         }
     }
-    charSectionsCacheBuilt_ = true;
-    LOG_INFO("CharSections cache built: ", charSectionsCache_.size(), " entries");
+    assets_.charSectionsCacheBuilt_ = true;
+    LOG_INFO("CharSections cache built: ", assets_.charSectionsCache_.size(), " entries");
 }
 
 std::string EntitySpawner::lookupCharSection(uint8_t race, uint8_t sex, uint8_t section,
                                            uint8_t variation, uint8_t color, int texIndex) const {
-    auto it = charSectionsCache_.find(
+    auto it = assets_.charSectionsCache_.find(
         charSectionKey(race, sex, section, variation, color, texIndex));
-    return (it != charSectionsCache_.end()) ? it->second : std::string();
+    return (it != assets_.charSectionsCache_.end()) ? it->second : std::string();
 }
 
 void EntitySpawner::buildCreatureDisplayLookups() {
-    if (creatureLookupsBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
+    if (assets_.creatureLookupsBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
 
     LOG_INFO("Building creature display lookups from DBC files");
 
@@ -710,9 +553,9 @@ void EntitySpawner::buildCreatureDisplayLookups() {
                 const float displayScale = cdi->getFloat(i, scaleField);
                 if (displayScale > 0.0f) data.displayScale = displayScale;
             }
-            displayDataMap_[cdi->getUInt32(i, cdiL ? (*cdiL)["ID"] : 0)] = data;
+            assets_.displayDataMap_[cdi->getUInt32(i, cdiL ? (*cdiL)["ID"] : 0)] = data;
         }
-        LOG_INFO("Loaded ", displayDataMap_.size(), " display→model mappings");
+        LOG_INFO("Loaded ", assets_.displayDataMap_.size(), " display→model mappings");
     }
 
     // CreatureDisplayInfoExtra.dbc structure (3.3.5a):
@@ -758,9 +601,9 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             }
             extra.bakeName = cdie->getString(i, bakeField);
             if (!extra.bakeName.empty()) withBakeName++;
-            humanoidExtraMap_[cdie->getUInt32(i, cdieL ? (*cdieL)["ID"] : 0)] = extra;
+            assets_.humanoidExtraMap_[cdie->getUInt32(i, cdieL ? (*cdieL)["ID"] : 0)] = extra;
         }
-        LOG_DEBUG("Loaded ", humanoidExtraMap_.size(), " humanoid display extra entries (",
+        LOG_DEBUG("Loaded ", assets_.humanoidExtraMap_.size(), " humanoid display extra entries (",
                  withBakeName, " with baked textures, ", numEquipSlots, " equip slots, ",
                  dbcFieldCount, " DBC fields, bakeField=", bakeField, ")");
     }
@@ -777,16 +620,16 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             // mounts were never found.
             path = pipeline::modelPathToM2(path);
             const uint32_t modelId = cmd->getUInt32(i, cmdL ? (*cmdL)["ID"] : 0);
-            modelIdToPath_[modelId] = path;
+            assets_.modelIdToPath_[modelId] = path;
             // The other half of a creature's size. Zero appears in the file
             // and means unset rather than invisible, so it keeps 1.0.
             const uint32_t scaleField = cmdL ? (*cmdL)["ModelScale"] : 4;
             if (scaleField != 0xFFFFFFFF && scaleField < cmd->getFieldCount()) {
                 const float modelScale = cmd->getFloat(i, scaleField);
-                if (modelScale > 0.0f) modelIdToScale_[modelId] = modelScale;
+                if (modelScale > 0.0f) assets_.modelIdToScale_[modelId] = modelScale;
             }
         }
-        LOG_INFO("Loaded ", modelIdToPath_.size(), " model→path mappings");
+        LOG_INFO("Loaded ", assets_.modelIdToPath_.size(), " model→path mappings");
     }
 
     // Resolve gryphon/wyvern display IDs by exact model path so taxi mounts have textures.
@@ -820,10 +663,10 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             std::string skin1, skin2, skin3;
         };
         std::unordered_map<std::string, SkinDonor> donorByPath;
-        for (const auto& [dispId, data] : displayDataMap_) {
+        for (const auto& [dispId, data] : assets_.displayDataMap_) {
             if (data.skin1.empty()) continue;
-            auto itPath = modelIdToPath_.find(data.modelId);
-            if (itPath == modelIdToPath_.end()) continue;
+            auto itPath = assets_.modelIdToPath_.find(data.modelId);
+            if (itPath == assets_.modelIdToPath_.end()) continue;
             const std::string key = normalizePath(itPath->second);
             auto it = donorByPath.find(key);
             // Lowest display id wins, so the choice does not depend on the
@@ -834,11 +677,11 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         }
 
         int recovered = 0;
-        for (auto& [dispId, data] : displayDataMap_) {
+        for (auto& [dispId, data] : assets_.displayDataMap_) {
             (void)dispId;
             if (!data.skin1.empty() || data.extraDisplayId != 0) continue;
-            auto itPath = modelIdToPath_.find(data.modelId);
-            if (itPath == modelIdToPath_.end()) continue;
+            auto itPath = assets_.modelIdToPath_.find(data.modelId);
+            if (itPath == assets_.modelIdToPath_.end()) continue;
             auto donor = donorByPath.find(normalizePath(itPath->second));
             if (donor == donorByPath.end()) continue;
             data.skin1 = donor->second.skin1;
@@ -859,7 +702,7 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         // Collect ALL model IDs that map to this path (multiple model IDs can
         // share the same .m2 file, e.g. modelId 147 and 792 both → Gryphon.m2)
         std::vector<uint32_t> modelIds;
-        for (const auto& [mid, path] : modelIdToPath_) {
+        for (const auto& [mid, path] : assets_.modelIdToPath_) {
             if (normalizePath(path) == target) {
                 modelIds.push_back(mid);
             }
@@ -867,7 +710,7 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         if (modelIds.empty()) return 0;
         uint32_t bestDisplayId = 0;
         int bestScore = -1;
-        for (const auto& [dispId, data] : displayDataMap_) {
+        for (const auto& [dispId, data] : assets_.displayDataMap_) {
             bool matches = false;
             for (uint32_t mid : modelIds) {
                 if (data.modelId == mid) { matches = true; break; }
@@ -885,11 +728,11 @@ void EntitySpawner::buildCreatureDisplayLookups() {
         return bestDisplayId;
     };
 
-    gryphonDisplayId_ = resolveDisplayIdForExactPath("Creature\\Gryphon\\Gryphon.m2");
-    wyvernDisplayId_  = resolveDisplayIdForExactPath("Creature\\Wyvern\\Wyvern.m2");
-    gameServices_->gryphonDisplayId = gryphonDisplayId_;
-    gameServices_->wyvernDisplayId  = wyvernDisplayId_;
-    LOG_INFO("Taxi mount displayIds: gryphon=", gryphonDisplayId_, " wyvern=", wyvernDisplayId_);
+    assets_.gryphonDisplayId_ = resolveDisplayIdForExactPath("Creature\\Gryphon\\Gryphon.m2");
+    assets_.wyvernDisplayId_  = resolveDisplayIdForExactPath("Creature\\Wyvern\\Wyvern.m2");
+    gameServices_->gryphonDisplayId = assets_.gryphonDisplayId_;
+    gameServices_->wyvernDisplayId  = assets_.wyvernDisplayId_;
+    LOG_INFO("Taxi mount displayIds: gryphon=", assets_.gryphonDisplayId_, " wyvern=", assets_.wyvernDisplayId_);
 
     // CharHairGeosets.dbc: maps (race, sex, hairStyleId) → skinSectionId for hair mesh
     // Col 0: ID, Col 1: RaceID, Col 2: SexID, Col 3: VariationID, Col 4: GeosetID, Col 5: Showscalp
@@ -907,9 +750,9 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             const uint32_t key = appearanceKey(static_cast<uint8_t>(raceId),
                                               static_cast<uint8_t>(sexId),
                                               static_cast<uint8_t>(variation));
-            hairGeosetMap_[key] = static_cast<uint16_t>(useDefaultScalp ? 1 : geosetId);
+            assets_.hairGeosetMap_[key] = static_cast<uint16_t>(useDefaultScalp ? 1 : geosetId);
         }
-        LOG_INFO("Loaded ", hairGeosetMap_.size(), " hair geoset mappings from CharHairGeosets.dbc");
+        LOG_INFO("Loaded ", assets_.hairGeosetMap_.size(), " hair geoset mappings from CharHairGeosets.dbc");
     }
 
     // CharacterFacialHairStyles.dbc: maps (race, sex, facialHairId) → geoset IDs
@@ -935,12 +778,12 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             fhg.geoset100 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset100));
             fhg.geoset300 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset300));
             fhg.geoset200 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset200));
-            facialHairGeosetMap_[key] = fhg;
+            assets_.facialHairGeosetMap_[key] = fhg;
         }
-        LOG_INFO("Loaded ", facialHairGeosetMap_.size(), " facial hair geoset mappings from CharacterFacialHairStyles.dbc");
+        LOG_INFO("Loaded ", assets_.facialHairGeosetMap_.size(), " facial hair geoset mappings from CharacterFacialHairStyles.dbc");
     }
 
-    creatureLookupsBuilt_ = true;
+    assets_.creatureLookupsBuilt_ = true;
 }
 
 std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
@@ -967,28 +810,28 @@ std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
             break;
     }
 
-    auto itData = displayDataMap_.find(displayId);
-    if (itData == displayDataMap_.end()) {
+    auto itData = assets_.displayDataMap_.find(displayId);
+    if (itData == assets_.displayDataMap_.end()) {
         // Some sources (e.g., taxi nodes) may provide a modelId directly.
-        auto itPath = modelIdToPath_.find(displayId);
-        if (itPath != modelIdToPath_.end()) {
+        auto itPath = assets_.modelIdToPath_.find(displayId);
+        if (itPath != assets_.modelIdToPath_.end()) {
             return itPath->second;
         }
         if (displayId == 30412) return "Creature\\Gryphon\\Gryphon.m2";
         if (displayId == 30413) return "Creature\\Wyvern\\Wyvern.m2";
-        if (warnedMissingDisplayDataIds_.insert(displayId).second) {
+        if (assets_.warnedMissingDisplayDataIds_.insert(displayId).second) {
             LOG_WARNING("No display data for displayId ", displayId,
-                        " (displayDataMap_ has ", displayDataMap_.size(), " entries)");
+                        " (assets_.displayDataMap_ has ", assets_.displayDataMap_.size(), " entries)");
         }
         return "";
     }
 
-    auto itPath = modelIdToPath_.find(itData->second.modelId);
-    if (itPath == modelIdToPath_.end()) {
-        if (warnedMissingModelPathIds_.insert(displayId).second) {
+    auto itPath = assets_.modelIdToPath_.find(itData->second.modelId);
+    if (itPath == assets_.modelIdToPath_.end()) {
+        if (assets_.warnedMissingModelPathIds_.insert(displayId).second) {
             LOG_WARNING("No model path for modelId ", itData->second.modelId,
                         " from displayId ", displayId,
-                        " (modelIdToPath_ has ", modelIdToPath_.size(), " entries)");
+                        " (assets_.modelIdToPath_ has ", assets_.modelIdToPath_.size(), " entries)");
         }
         return "";
     }
@@ -999,8 +842,8 @@ std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
     // from "it reached it and the model looks the same". At debug, with the
     // other per-creature lines: WOWEE_LOG_LEVEL=debug when that is the question.
     if (itData->second.extraDisplayId != 0 &&
-        humanoidDisplayCanaryCount_ < 5) {
-        ++humanoidDisplayCanaryCount_;
+        assets_.humanoidDisplayCanaryCount_ < 5) {
+        ++assets_.humanoidDisplayCanaryCount_;
         LOG_DEBUG("Humanoid display ", displayId, " -> model ",
                     itData->second.modelId, " -> ", itPath->second);
     }
@@ -1010,15 +853,15 @@ std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
 
 audio::VoiceType EntitySpawner::detectVoiceTypeFromDisplayId(uint32_t displayId) const {
     // Look up display data
-    auto itDisplay = displayDataMap_.find(displayId);
-    if (itDisplay == displayDataMap_.end() || itDisplay->second.extraDisplayId == 0) {
+    auto itDisplay = assets_.displayDataMap_.find(displayId);
+    if (itDisplay == assets_.displayDataMap_.end() || itDisplay->second.extraDisplayId == 0) {
         LOG_INFO("Voice detection: displayId ", displayId, " -> GENERIC (no display data)");
         return audio::VoiceType::GENERIC;  // Not a humanoid or no extra data
     }
 
     // Look up humanoid extra data (race/sex info)
-    auto itExtra = humanoidExtraMap_.find(itDisplay->second.extraDisplayId);
-    if (itExtra == humanoidExtraMap_.end()) {
+    auto itExtra = assets_.humanoidExtraMap_.find(itDisplay->second.extraDisplayId);
+    if (itExtra == assets_.humanoidExtraMap_.end()) {
         LOG_INFO("Voice detection: displayId ", displayId, " -> GENERIC (no humanoid extra data)");
         return audio::VoiceType::GENERIC;
     }
@@ -1052,7 +895,7 @@ audio::VoiceType EntitySpawner::detectVoiceTypeFromDisplayId(uint32_t displayId)
 }
 
 void EntitySpawner::buildGameObjectDisplayLookups() {
-    if (gameObjectLookupsBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
+    if (assets_.gameObjectLookupsBuilt_ || !assetManager_ || !assetManager_->isInitialized()) return;
 
     LOG_INFO("Building gameobject display lookups from DBC files");
 
@@ -1068,23 +911,23 @@ void EntitySpawner::buildGameObjectDisplayLookups() {
             // GameObjectDisplayInfo names .mdx and .mdl alike; this knew only
             // the first, so a .mdl gameobject had no model path at all.
             modelName = pipeline::modelPathToM2(modelName);
-            gameObjectDisplayIdToPath_[displayId] = modelName;
+            assets_.gameObjectDisplayIdToPath_[displayId] = modelName;
         }
-        LOG_INFO("Loaded ", gameObjectDisplayIdToPath_.size(), " gameobject display mappings");
+        LOG_INFO("Loaded ", assets_.gameObjectDisplayIdToPath_.size(), " gameobject display mappings");
     } else {
         LOG_WARNING("GameObjectDisplayInfo.dbc failed to load - no GO display mappings available");
     }
 
-    if (gameObjectDisplayIdToPath_.empty()) {
+    if (assets_.gameObjectDisplayIdToPath_.empty()) {
         LOG_WARNING("GO display mapping table is EMPTY - game objects will not render");
     }
 
-    gameObjectLookupsBuilt_ = true;
+    assets_.gameObjectLookupsBuilt_ = true;
 }
 
 std::string EntitySpawner::getGameObjectModelPathForDisplayId(uint32_t displayId) const {
-    auto it = gameObjectDisplayIdToPath_.find(displayId);
-    if (it == gameObjectDisplayIdToPath_.end()) return "";
+    auto it = assets_.gameObjectDisplayIdToPath_.find(displayId);
+    if (it == assets_.gameObjectDisplayIdToPath_.end()) return "";
     return it->second;
 }
 
@@ -1095,19 +938,21 @@ std::string EntitySpawner::getGameObjectModelPathForDisplayId(uint32_t displayId
 /// is not in either map. Three callers - bounds, foot Z and position - each
 /// had this, identically, and a fourth reader would have made it four.
 uint32_t EntitySpawner::characterInstanceIdForGuid(uint64_t guid) const {
+    if (!spawns_) return 0;
     if (!renderer_) return 0;
     if (gameHandler_ && guid == gameHandler_->getPlayerGuid()) {
         const uint32_t own = renderer_->getCharacterInstanceId();
         if (own != 0) return own;
     }
-    auto pit = playerInstances_.find(guid);
-    if (pit != playerInstances_.end()) return pit->second;
-    auto cit = creatureInstances_.find(guid);
-    if (cit != creatureInstances_.end()) return cit->second;
+    auto pit = spawns_->playerInstances_.find(guid);
+    if (pit != spawns_->playerInstances_.end()) return pit->second;
+    auto cit = spawns_->creatureInstances_.find(guid);
+    if (cit != spawns_->creatureInstances_.end()) return cit->second;
     return 0;
 }
 
 bool EntitySpawner::getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const {
+    if (!spawns_) return false;
     if (!renderer_) return false;
 
     // M2 game objects (mailboxes, chests, nodes, etc.) render via the M2
@@ -1119,8 +964,8 @@ bool EntitySpawner::getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, 
     // bounding sphere from a building's AABB diagonal is enormous and would
     // swallow nearby objects in the picker. They keep the conservative
     // fallback sphere used by the click handlers.
-    auto goIt = gameObjectInstances_.find(guid);
-    if (goIt != gameObjectInstances_.end()) {
+    auto goIt = spawns_->gameObjectInstances_.find(guid);
+    if (goIt != spawns_->gameObjectInstances_.end()) {
         const auto& go = goIt->second;
         if (go.isWmo) return false;
         auto* m2 = renderer_->getM2Renderer();
@@ -1135,6 +980,7 @@ bool EntitySpawner::getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, 
 }
 
 bool EntitySpawner::getRenderFootZForGuid(uint64_t guid, float& outFootZ) const {
+    if (!spawns_) return false;
     if (!renderer_ || !renderer_->getCharacterRenderer()) return false;
     const uint32_t instanceId = characterInstanceIdForGuid(guid);
     if (instanceId == 0) return false;
@@ -1143,6 +989,7 @@ bool EntitySpawner::getRenderFootZForGuid(uint64_t guid, float& outFootZ) const 
 }
 
 bool EntitySpawner::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const {
+    if (!spawns_) return false;
     if (!renderer_ || !renderer_->getCharacterRenderer()) return false;
     const uint32_t instanceId = characterInstanceIdForGuid(guid);
     if (instanceId == 0) return false;
@@ -1157,8 +1004,8 @@ EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidat
     std::shared_ptr<pipeline::M2Model> model;
     std::string resolvedPath;
     for (const auto& path : candidatePaths) {
-        auto it = attachmentModelData_.find(path);
-        if (it != attachmentModelData_.end()) {
+        auto it = assets_.attachmentModelData_.find(path);
+        if (it != assets_.attachmentModelData_.end()) {
             if (!it->second) continue;  // known missing - try the next candidate
             model = it->second;
             resolvedPath = path;
@@ -1167,7 +1014,7 @@ EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidat
 
         auto data = assetManager_->readFile(path);
         if (data.empty()) {
-            attachmentModelData_[path] = nullptr;
+            assets_.attachmentModelData_[path] = nullptr;
             continue;
         }
         auto parsed = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(data));
@@ -1179,31 +1026,31 @@ EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidat
             if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, *parsed);
         }
         if (!parsed->isValid()) {
-            attachmentModelData_[path] = nullptr;
+            assets_.attachmentModelData_[path] = nullptr;
             continue;
         }
-        attachmentModelData_[path] = parsed;
+        assets_.attachmentModelData_[path] = parsed;
         model = std::move(parsed);
         resolvedPath = path;
         break;
     }
     if (!model) return {};
 
-    // 2) Model id is per (geometry, texture) - see attachmentModelIds_.
+    // 2) Model id is per (geometry, texture) - see assets_.attachmentModelIds_.
     const std::string key = resolvedPath + '|' + texturePath;
-    auto idIt = attachmentModelIds_.find(key);
-    if (idIt == attachmentModelIds_.end()) {
-        idIt = attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
+    auto idIt = assets_.attachmentModelIds_.find(key);
+    if (idIt == assets_.attachmentModelIds_.end()) {
+        idIt = assets_.attachmentModelIds_.emplace(key, assets_.nextCreatureModelId_++).first;
     }
     return CachedAttachmentModel{.modelId = idIt->second, .model = std::move(model)};
 }
 
 std::string EntitySpawner::getHumanoidBakePath(uint32_t displayId) const {
     if (!assetManager_) return "";
-    auto disp = displayDataMap_.find(displayId);
-    if (disp == displayDataMap_.end() || disp->second.extraDisplayId == 0) return "";
-    auto extra = humanoidExtraMap_.find(disp->second.extraDisplayId);
-    if (extra == humanoidExtraMap_.end() || extra->second.bakeName.empty()) return "";
+    auto disp = assets_.displayDataMap_.find(displayId);
+    if (disp == assets_.displayDataMap_.end() || disp->second.extraDisplayId == 0) return "";
+    auto extra = assets_.humanoidExtraMap_.find(disp->second.extraDisplayId);
+    if (extra == assets_.humanoidExtraMap_.end() || extra->second.bakeName.empty()) return "";
 
     // The bakes live in one directory and the dbc names only the file. It is
     // Textures\BakedNpcTextures, which is where the world path has always
@@ -1216,10 +1063,10 @@ std::string EntitySpawner::getHumanoidBakePath(uint32_t displayId) const {
 bool EntitySpawner::getHumanoidAppearance(uint32_t displayId, uint8_t& race,
                                           uint8_t& sex, uint32_t& appearanceBytes,
                                           uint8_t& facialHair) const {
-    auto disp = displayDataMap_.find(displayId);
-    if (disp == displayDataMap_.end() || disp->second.extraDisplayId == 0) return false;
-    auto extra = humanoidExtraMap_.find(disp->second.extraDisplayId);
-    if (extra == humanoidExtraMap_.end()) return false;
+    auto disp = assets_.displayDataMap_.find(displayId);
+    if (disp == assets_.displayDataMap_.end() || disp->second.extraDisplayId == 0) return false;
+    auto extra = assets_.humanoidExtraMap_.find(disp->second.extraDisplayId);
+    if (extra == assets_.humanoidExtraMap_.end()) return false;
 
     race = extra->second.raceId;
     sex = extra->second.sexId;
@@ -1240,10 +1087,10 @@ bool EntitySpawner::getHumanoidAppearance(uint32_t displayId, uint8_t& race,
 std::vector<std::pair<uint32_t, uint8_t>>
 EntitySpawner::getHumanoidEquipment(uint32_t displayId) const {
     std::vector<std::pair<uint32_t, uint8_t>> out;
-    auto disp = displayDataMap_.find(displayId);
-    if (disp == displayDataMap_.end() || disp->second.extraDisplayId == 0) return out;
-    auto extra = humanoidExtraMap_.find(disp->second.extraDisplayId);
-    if (extra == humanoidExtraMap_.end()) return out;
+    auto disp = assets_.displayDataMap_.find(displayId);
+    if (disp == assets_.displayDataMap_.end() || disp->second.extraDisplayId == 0) return out;
+    auto extra = assets_.humanoidExtraMap_.find(disp->second.extraDisplayId);
+    if (extra == assets_.humanoidExtraMap_.end()) return out;
 
     // CreatureDisplayInfoExtra's slot order, against the inventory types
     // applyEquipment matches on. The order is the dbc's and the numbers are
@@ -1274,8 +1121,8 @@ EntitySpawner::getCreatureSkinPaths(uint32_t displayId,
                                     const std::string& modelPath) const {
     std::vector<std::pair<uint32_t, std::string>> out;
     if (!assetManager_) return out;
-    auto it = displayDataMap_.find(displayId);
-    if (it == displayDataMap_.end()) return out;
+    auto it = assets_.displayDataMap_.find(displayId);
+    if (it == assets_.displayDataMap_.end()) return out;
 
     std::string modelDir;
     if (const size_t slash = modelPath.rfind('\\'); slash != std::string::npos) {
@@ -1354,7 +1201,7 @@ void EntitySpawner::playCreatureSpawnPose(uint64_t guid, uint32_t instanceId) {
     if (!charRenderer) return;
 // Spawn in the correct pose. If the server marked this creature dead before
 // the queued spawn was processed, start directly in death animation.
-if (deadCreatureGuids_.count(guid)) {
+if (spawns_->deadCreatureGuids_.count(guid)) {
     charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
 } else {
     // Check if this NPC has a persistent emote state (e.g. working, eating, dancing)
@@ -1369,13 +1216,13 @@ if (deadCreatureGuids_.count(guid)) {
         ? gameHandler_->emotes().animByEmotesId(npcEmote)
         : 0;
     if (npcEmoteAnim == 0) {
-        auto activeIt = creatureActiveEmotes_.find(guid);
-        if (activeIt != creatureActiveEmotes_.end()) {
+        auto activeIt = spawns_->creatureActiveEmotes_.find(guid);
+        if (activeIt != spawns_->creatureActiveEmotes_.end()) {
             npcEmoteAnim = activeIt->second;
         }
     }
     if (npcEmoteAnim != 0 && charRenderer->hasAnimation(instanceId, npcEmoteAnim)) {
-        creatureActiveEmotes_[guid] = npcEmoteAnim;
+        spawns_->creatureActiveEmotes_[guid] = npcEmoteAnim;
         charRenderer->playAnimation(instanceId, npcEmoteAnim, true);
     } else if (charRenderer->hasAnimation(instanceId, rendering::anim::BIRTH)) {
         // Play birth animation (one-shot) - will return to STAND after
@@ -1403,7 +1250,7 @@ void EntitySpawner::normalizeHumanoidClothingGeosets(uint32_t instanceId, uint32
                                                      uint32_t displayId) {
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
-    auto itDisplayData = displayDataMap_.find(displayId);
+    auto itDisplayData = assets_.displayDataMap_.find(displayId);
 // With full humanoid overrides disabled, some character-style NPC models still render
 // conflicting clothing geosets at once (global capes, robe skirts over trousers).
 // Normalize only clothing groups while leaving all other model batches untouched.
@@ -1441,9 +1288,9 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
     // "bracers". CreatureDisplayInfoExtra is the authoritative indication
     // that this display uses humanoid equipment geosets.
     const bool hasHumanoidDisplayExtra =
-        itDisplayData != displayDataMap_.end() &&
+        itDisplayData != assets_.displayDataMap_.end() &&
         itDisplayData->second.extraDisplayId != 0 &&
-        humanoidExtraMap_.find(itDisplayData->second.extraDisplayId) != humanoidExtraMap_.end();
+        assets_.humanoidExtraMap_.find(itDisplayData->second.extraDisplayId) != assets_.humanoidExtraMap_.end();
     if (hasHumanoidDisplayExtra &&
         (hasGroup3 || hasGroup4 || hasGroup5 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15)) {
         bool hasRenderableCape = false;
@@ -1472,24 +1319,24 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial300 = 300;
         uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
         ItemGeosetColumns chestColumns, legsColumns;
-        if (itDisplayData != displayDataMap_.end() &&
+        if (itDisplayData != assets_.displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
-            auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
-            if (itExtra != humanoidExtraMap_.end()) {
+            auto itExtra = assets_.humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
+            if (itExtra != assets_.humanoidExtraMap_.end()) {
                 hasHumanoidExtra = true;
                 extraRaceId = itExtra->second.raceId;
                 extraSexId = itExtra->second.sexId;
                 hasEquippedTabard = (itExtra->second.equipDisplayId[9] != 0);
                 const uint32_t hairKey = appearanceKey(
                     extraRaceId, extraSexId, itExtra->second.hairStyleId);
-                auto itHairGeo = hairGeosetMap_.find(hairKey);
-                if (itHairGeo != hairGeosetMap_.end() && itHairGeo->second > 0) {
+                auto itHairGeo = assets_.hairGeosetMap_.find(hairKey);
+                if (itHairGeo != assets_.hairGeosetMap_.end() && itHairGeo->second > 0) {
                     selectedHairScalp = itHairGeo->second;
                 }
                 const uint32_t facialKey = appearanceKey(
                     extraRaceId, extraSexId, itExtra->second.facialHairId);
-                auto itFacial = facialHairGeosetMap_.find(facialKey);
-                if (itFacial != facialHairGeosetMap_.end()) {
+                auto itFacial = assets_.facialHairGeosetMap_.find(facialKey);
+                if (itFacial != assets_.facialHairGeosetMap_.end()) {
                     // A zero variant means the character has none of that
                     // feature, and x00 is an id no model carries - which is
                     // what resolveGeoset reads as "none" further down.
@@ -1675,10 +1522,10 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             uint16_t wantTabard = kGeosetDefaultTabard;  // Default fallback
 
             // Try to read tabard geoset variant from ItemDisplayInfo.dbc (slot 9)
-            if (hasHumanoidExtra && itDisplayData != displayDataMap_.end() &&
+            if (hasHumanoidExtra && itDisplayData != assets_.displayDataMap_.end() &&
                 itDisplayData->second.extraDisplayId != 0) {
-                auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
-                if (itExtra != humanoidExtraMap_.end()) {
+                auto itExtra = assets_.humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
+                if (itExtra != assets_.humanoidExtraMap_.end()) {
                     uint32_t tabardDisplayId = itExtra->second.equipDisplayId[9];
                     if (tabardDisplayId != 0) {
                         auto itemDisplayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
@@ -1779,11 +1626,11 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                                                    uint32_t displayId) {
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
-    if (!charSectionsCacheBuilt_) buildCharSectionsCache();
-    auto itDD = displayDataMap_.find(displayId);
-    if (itDD != displayDataMap_.end() && itDD->second.extraDisplayId != 0) {
-        auto itExtra2 = humanoidExtraMap_.find(itDD->second.extraDisplayId);
-        if (itExtra2 != humanoidExtraMap_.end()) {
+    if (!assets_.charSectionsCacheBuilt_) buildCharSectionsCache();
+    auto itDD = assets_.displayDataMap_.find(displayId);
+    if (itDD != assets_.displayDataMap_.end() && itDD->second.extraDisplayId != 0) {
+        auto itExtra2 = assets_.humanoidExtraMap_.find(itDD->second.extraDisplayId);
+        if (itExtra2 != assets_.humanoidExtraMap_.end()) {
             const auto& extra = itExtra2->second;
             const auto* md = charRenderer->getModelData(modelId);
             if (md) {
@@ -1839,8 +1686,8 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         // and a wrong face looks the same whichever failed:
                         // the table having the art, the art loading, and the
                         // model having a slot to put it in.
-                        if (npcHeadDetailCanaryCount_ < 8) {
-                            ++npcHeadDetailCanaryCount_;
+                        if (assets_.npcHeadDetailCanaryCount_ < 8) {
+                            ++assets_.npcHeadDetailCanaryCount_;
                             // The face art this NPC was given, beside the
                             // face it was asked for. CharSections is keyed
                             // on (variation, colour) and a lookup that misses
@@ -1897,11 +1744,11 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
     auto texStart = std::chrono::steady_clock::now();
-    displayIdTexturesApplied_.insert(displayId);
+    assets_.displayIdTexturesApplied_.insert(displayId);
 
     // Use pre-decoded textures from async creature load (if available)
-    auto itPreDec = displayIdPredecodedTextures_.find(displayId);
-    bool hasPreDec = (itPreDec != displayIdPredecodedTextures_.end());
+    auto itPreDec = spawns_->displayIdPredecodedTextures_.find(displayId);
+    bool hasPreDec = (itPreDec != spawns_->displayIdPredecodedTextures_.end());
     if (hasPreDec) {
         charRenderer->setPredecodedBLPCache(&itPreDec->second, true);
     }
@@ -1935,8 +1782,8 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     // Check if this is a humanoid NPC with extra display info
     bool hasHumanoidTexture = false;
     if (dispData.extraDisplayId != 0) {
-        auto itExtra = humanoidExtraMap_.find(dispData.extraDisplayId);
-        if (itExtra != humanoidExtraMap_.end()) {
+        auto itExtra = assets_.humanoidExtraMap_.find(dispData.extraDisplayId);
+        if (itExtra != assets_.humanoidExtraMap_.end()) {
             const auto& extra = itExtra->second;
             LOG_DEBUG("  Found humanoid extra: raceId=", static_cast<int>(extra.raceId), " sexId=", static_cast<int>(extra.sexId),
                       " hairStyle=", static_cast<int>(extra.hairStyleId), " hairColor=", static_cast<int>(extra.hairColorId),
@@ -1978,10 +1825,12 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             // (in processAsyncNpcCompositeResults).
             auto* am = assetManager_;
             AsyncNpcCompositeLoad load;
-            load.future = ThreadPool::ioWorkers().submit(
+            load.future = spawns_->jobs_.submit(
                 [am, extraCopy, skinSlots = std::move(skinSlots),
-                 hairSlots = std::move(hairSlots), modelId, displayId, isHdCharacterModel]() mutable -> PreparedNpcComposite {
-                    PreparedNpcComposite result;
+                 hairSlots = std::move(hairSlots), modelId, displayId, isHdCharacterModel](const JobGroup::Token& jobToken) mutable -> PreparedNpcComposite {
+                    PreparedNpcComposite result{};
+                    result.token = jobToken;
+                    if (!jobToken.current()) return result;
                     DeferredNpcComposite& def = result.info;
                     def.modelId = modelId;
                     def.displayId = displayId;
@@ -2186,7 +2035,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
                     }
                     return result;
                 });
-            asyncNpcCompositeLoads_.push_back(std::move(load));
+            spawns_->asyncNpcCompositeLoads_.push_back(std::move(load));
             hasHumanoidTexture = true;  // skip non-humanoid skin block
         } else {
             LOG_WARNING("  extraDisplayId ", dispData.extraDisplayId, " not found in humanoidExtraMap");
@@ -2276,7 +2125,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
 
     // Clear pre-decoded cache after applying all display textures
     charRenderer->setPredecodedBLPCache(nullptr);
-    displayIdPredecodedTextures_.erase(displayId);
+    spawns_->displayIdPredecodedTextures_.erase(displayId);
     {
         auto texEnd = std::chrono::steady_clock::now();
         float texMs = std::chrono::duration<float, std::milli>(texEnd - texStart).count();
@@ -2288,35 +2137,35 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
 }
 
 float EntitySpawner::creatureModelScale(uint32_t displayId) const {
-    auto disp = displayDataMap_.find(displayId);
-    if (disp == displayDataMap_.end()) return 1.0f;
-    auto it = modelIdToScale_.find(disp->second.modelId);
-    return it != modelIdToScale_.end() ? it->second : 1.0f;
+    auto disp = assets_.displayDataMap_.find(displayId);
+    if (disp == assets_.displayDataMap_.end()) return 1.0f;
+    auto it = assets_.modelIdToScale_.find(disp->second.modelId);
+    return it != assets_.modelIdToScale_.end() ? it->second : 1.0f;
 }
 
 float EntitySpawner::creatureDisplayScale(uint32_t displayId) const {
-    auto it = displayDataMap_.find(displayId);
-    return it != displayDataMap_.end() ? it->second.displayScale : 1.0f;
+    auto it = assets_.displayDataMap_.find(displayId);
+    return it != assets_.displayDataMap_.end() ? it->second.displayScale : 1.0f;
 }
 
 void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return;
 
     // Skip if lookups not yet built (asset manager not ready)
-    if (!creatureLookupsBuilt_) return;
+    if (!assets_.creatureLookupsBuilt_) return;
 
     // Skip if already spawned
-    if (creatureInstances_.count(guid)) return;
-    if (nonRenderableCreatureDisplayIds_.count(displayId)) {
-        creaturePermanentFailureGuids_.insert(guid);
+    if (spawns_->creatureInstances_.count(guid)) return;
+    if (assets_.nonRenderableCreatureDisplayIds_.count(displayId)) {
+        spawns_->creaturePermanentFailureGuids_.insert(guid);
         return;
     }
 
     // Get model path from displayId
     std::string m2Path = getModelPathForDisplayId(displayId);
     if (m2Path.empty()) {
-        nonRenderableCreatureDisplayIds_.insert(displayId);
-        creaturePermanentFailureGuids_.insert(guid);
+        assets_.nonRenderableCreatureDisplayIds_.insert(displayId);
+        spawns_->creaturePermanentFailureGuids_.insert(guid);
         return;
     }
     auto* charRenderer = renderer_->getCharacterRenderer();
@@ -2325,8 +2174,8 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // has published it. Reading and parsing the M2 here instead would put file I/O on
     // the main thread mid-frame, so treat a miss as "not ready" and let the caller
     // re-queue the spawn through the async path.
-    auto cacheIt = displayIdModelCache_.find(displayId);
-    if (cacheIt == displayIdModelCache_.end()) {
+    auto cacheIt = assets_.displayIdModelCache_.find(displayId);
+    if (cacheIt == assets_.displayIdModelCache_.end()) {
         LOG_WARNING("spawnOnlineCreature: model not loaded yet for displayId=", displayId,
                     " - deferring to async load");
         return;
@@ -2356,8 +2205,8 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
             std::string path = "?";
             uint32_t entry = 0;
             std::string name;
-            if (auto disp = displayDataMap_.find(displayId); disp != displayDataMap_.end()) {
-                if (auto pi = modelIdToPath_.find(disp->second.modelId); pi != modelIdToPath_.end()) {
+            if (auto disp = assets_.displayDataMap_.find(displayId); disp != assets_.displayDataMap_.end()) {
+                if (auto pi = assets_.modelIdToPath_.find(disp->second.modelId); pi != assets_.modelIdToPath_.end()) {
                     path = pi->second;
                 }
             }
@@ -2386,15 +2235,15 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // Apply skin textures from CreatureDisplayInfo.dbc (only once per displayId model).
     // Track separately from model cache because async loading may upload the model
     // before textures are applied.
-    auto itDisplayData = displayDataMap_.find(displayId);
-    bool needsTextures = (displayIdTexturesApplied_.find(displayId) == displayIdTexturesApplied_.end());
-    if (needsTextures && itDisplayData != displayDataMap_.end()) {
+    auto itDisplayData = assets_.displayDataMap_.find(displayId);
+    bool needsTextures = (assets_.displayIdTexturesApplied_.find(displayId) == assets_.displayIdTexturesApplied_.end());
+    if (needsTextures && itDisplayData != assets_.displayDataMap_.end()) {
         applyCreatureDisplayTextures(displayId, modelId, itDisplayData->second);
     }
 
     // Use the entity's latest server-authoritative position rather than the stale spawn
     // position. Movement packets (SMSG_MONSTER_MOVE) can arrive while a creature is still
-    // queued in pendingCreatureSpawns_ and get silently dropped. getLatestX/Y/Z returns
+    // queued in spawns_->pendingCreatureSpawns_ and get silently dropped. getLatestX/Y/Z returns
     // the movement destination if the entity is mid-move, which is always up-to-date
     // regardless of distance culling (unlike getX/Y/Z which requires updateMovement).
     if (gameHandler_) {
@@ -2461,16 +2310,16 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     playCreatureSpawnPose(guid, instanceId);
 
     // Track instance
-    creatureInstances_[guid] = instanceId;
-    creatureModelIds_[guid] = modelId;
-    creatureDisplayIds_[guid] = displayId;
-    creatureRenderPosCache_[guid] = renderPos;
+    spawns_->creatureInstances_[guid] = instanceId;
+    spawns_->creatureModelIds_[guid] = modelId;
+    spawns_->creatureDisplayIds_[guid] = displayId;
+    spawns_->creatureRenderPosCache_[guid] = renderPos;
     if (weaponsAttachedNow) {
-        creatureWeaponsAttached_.insert(guid);
-        creatureWeaponAttachAttempts_.erase(guid);
+        spawns_->creatureWeaponsAttached_.insert(guid);
+        spawns_->creatureWeaponAttachAttempts_.erase(guid);
     } else {
-        creatureWeaponsAttached_.erase(guid);
-        creatureWeaponAttachAttempts_[guid] = 1;
+        spawns_->creatureWeaponsAttached_.erase(guid);
+        spawns_->creatureWeaponAttachAttempts_[guid] = 1;
     }
     LOG_DEBUG("Spawned creature: guid=0x", std::hex, guid, std::dec,
              " displayId=", displayId, " at (", x, ", ", y, ", ", z, ")");
@@ -2478,3 +2327,14 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
 
 } // namespace core
 } // namespace wowee
+
+namespace wowee::core {
+void EntitySpawner::rebuildLookups() {
+    if (spawns_) {
+        LOG_ERROR("Cannot rebuild entity asset caches while a map is active");
+        return;
+    }
+    assets_ = AssetCaches{};
+    initialize();
+}
+}

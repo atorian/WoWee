@@ -37,6 +37,9 @@ public:
     /// Once the world's renderers exist: the camera collides with what they
     /// hold, and is put back on the ground. Again after every world load.
     void attachWorld();
+    /// The map's terrain is gone with its scope: the camera stops colliding
+    /// with it until the next map attaches its own.
+    void detachWorld();
 
     /// Follow this character instance; 0 for none.
     void setCharacterFollow(uint32_t instanceId);

@@ -63,7 +63,20 @@ struct WeaponAttachment {
  * - Texture loading from BLP via AssetManager
  */
 class CharacterRenderer {
+    struct InstanceState;
 public:
+    /// The owning scene holds this lease. Geometry/texture caches stay here;
+    /// instances, collision indexes and incomplete uploads die with the lease.
+    class InstanceSession {
+    public:
+        explicit InstanceSession(CharacterRenderer& renderer);
+        ~InstanceSession();
+        InstanceSession(const InstanceSession&) = delete;
+        InstanceSession& operator=(const InstanceSession&) = delete;
+    private:
+        CharacterRenderer& renderer_;
+        std::unique_ptr<InstanceState> state_;
+    };
     CharacterRenderer();
     ~CharacterRenderer();
 
@@ -72,6 +85,7 @@ public:
                     VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT);
     void shutdown();
     void clear();  // Remove all models/instances/textures but keep pipelines/pools
+    void clearInstances();  // Retain process model/material caches.
 
     void setAssetManager(pipeline::AssetManager* am) { assetManager = am; }
 
@@ -236,8 +250,8 @@ public:
 
     // Model id an instance renders with (0 if the instance doesn't exist).
     [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const {
-        auto it = instances.find(instanceId);
-        return it != instances.end() ? it->second.modelId : 0;
+        auto it = scene_->instances.find(instanceId);
+        return it != scene_->instances.end() ? it->second.modelId : 0;
     }
 
     /**
@@ -258,7 +272,7 @@ public:
     /** Get the world-space transform of an attachment point on an instance. */
     bool getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform);
 
-    [[nodiscard]] size_t getInstanceCount() const { return instances.size(); }
+    [[nodiscard]] size_t getInstanceCount() const { return scene_->instances.size(); }
 
     // Normal mapping settings. There are no parallax settings: characters are
     // drawn without parallax whatever the world uses (see the material setup).
@@ -586,7 +600,6 @@ private:
     std::unique_ptr<VkTexture> flatNormalTexture_;
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
-    std::unordered_map<uint32_t, CharacterInstance> instances;
 
     uint32_t nextInstanceId = 1;
     uint64_t nextModelLoadSerial_ = 1;
@@ -663,6 +676,12 @@ private:
     VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
     VkDescriptorSet shadowTexDescSet(VkTexture* tex, uint32_t frameIndex);
+    struct InstanceState {
+        std::unordered_map<uint32_t, CharacterInstance> instances;
+    };
+    InstanceState defaultInstances_;
+    InstanceState* scene_ = &defaultInstances_;
+
 };
 
 } // namespace rendering

@@ -85,7 +85,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
                                     uint8_t facialFeatures,
                                     float x, float y, float z, float orientation) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
-    if (playerInstances_.count(guid)) return;
+    if (spawns_->playerInstances_.count(guid)) return;
 
     // Skip local player - already spawned as the main character
     if (gameHandler_) {
@@ -93,7 +93,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         uint64_t activeGuid = gameHandler_->getActiveCharacterGuid();
         if ((localGuid != 0 && guid == localGuid) ||
             (activeGuid != 0 && guid == activeGuid) ||
-            (spawnedPlayerGuid_ != 0 && guid == spawnedPlayerGuid_)) {
+            (spawns_->spawnedPlayerGuid_ != 0 && guid == spawns_->spawnedPlayerGuid_)) {
             return;
         }
     }
@@ -102,30 +102,30 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // Base geometry model: cache by (race, gender)
     uint32_t cacheKey = (static_cast<uint32_t>(raceId) << 8) | static_cast<uint32_t>(genderId & 0xFF);
     uint32_t modelId = 0;
-    auto itCache = playerModelCache_.find(cacheKey);
-    if (itCache != playerModelCache_.end()) {
+    auto itCache = assets_.playerModelCache_.find(cacheKey);
+    if (itCache != assets_.playerModelCache_.end()) {
         modelId = itCache->second;
         if (!charRenderer->getModelData(modelId)) {
             LOG_WARNING("spawnOnlinePlayer: cached player model missing after world reload, reloading modelId=",
                         modelId, " race=", static_cast<int>(raceId),
                         " gender=", static_cast<int>(genderId));
-            playerTextureSlotsByModelId_.erase(modelId);
-            playerModelCache_.erase(itCache);
+            assets_.playerTextureSlotsByModelId_.erase(modelId);
+            assets_.playerModelCache_.erase(itCache);
             modelId = 0;
         }
     }
     // This consumer never reads or parses a file. Its worker supplied the
     // immutable model and finished appearance atlas before publishing readiness.
-    if (!preparedPlayerSpawn_ || !preparedPlayerSpawn_->model) return;
+    if (!spawns_->preparedPlayerSpawn_ || !spawns_->preparedPlayerSpawn_->model) return;
     if (modelId == 0) {
-        modelId = nextPlayerModelId_++;
-        if (!charRenderer->loadModel(*preparedPlayerSpawn_->model, modelId)) return;
-        playerModelCache_[cacheKey] = modelId;
+        modelId = assets_.nextPlayerModelId_++;
+        if (!charRenderer->loadModel(*spawns_->preparedPlayerSpawn_->model, modelId)) return;
+        assets_.playerModelCache_[cacheKey] = modelId;
     }
 
     // Determine texture slots once per model
     {
-        auto [slotIt, inserted] = playerTextureSlotsByModelId_.try_emplace(modelId);
+        auto [slotIt, inserted] = assets_.playerTextureSlotsByModelId_.try_emplace(modelId);
         if (inserted) {
             PlayerTextureSlots slots;
             if (const auto* md = charRenderer->getModelData(modelId)) {
@@ -148,12 +148,12 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
 
     const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
     const uint8_t hairStyleId = look.hairStyleId;
-    const auto& bodySkinPath = preparedPlayerSpawn_->bodySkinPath;
-    const auto& skinExtraPath = preparedPlayerSpawn_->skinExtraPath;
-    const auto& hairTexturePath = preparedPlayerSpawn_->hairTexturePath;
-    const auto& faceLowerPath = preparedPlayerSpawn_->faceLowerPath;
-    const auto& faceUpperPath = preparedPlayerSpawn_->faceUpperPath;
-    const auto& underwearPaths = preparedPlayerSpawn_->underwearPaths;
+    const auto& bodySkinPath = spawns_->preparedPlayerSpawn_->bodySkinPath;
+    const auto& skinExtraPath = spawns_->preparedPlayerSpawn_->skinExtraPath;
+    const auto& hairTexturePath = spawns_->preparedPlayerSpawn_->hairTexturePath;
+    const auto& faceLowerPath = spawns_->preparedPlayerSpawn_->faceLowerPath;
+    const auto& faceUpperPath = spawns_->preparedPlayerSpawn_->faceUpperPath;
+    const auto& underwearPaths = spawns_->preparedPlayerSpawn_->underwearPaths;
     const std::string pelvisPath = defaultPelvisPath(raceId, genderId);
 
     // Composite base skin + face + underwear overlays
@@ -184,7 +184,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     else if (!underwearPaths.empty()) skinExtraTex = charRenderer->loadTexture(underwearPaths[0]);
     else skinExtraTex = charRenderer->loadTexture(pelvisPath);
 
-    const PlayerTextureSlots& slots = playerTextureSlotsByModelId_[modelId];
+    const PlayerTextureSlots& slots = assets_.playerTextureSlotsByModelId_[modelId];
     if (slots.skin >= 0 && compositeTex) {
         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.skin), compositeTex);
     }
@@ -197,22 +197,22 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
 
     // Geosets: body + selected hair/facial hair. Do not enable every group-0
     // submesh; that activates all hair scalp variants at once.
-    const uint16_t selectedHairScalp = selectHairScalpGeoset(hairGeosetMap_, raceId, genderId, hairStyleId);
-    auto itFacial = facialHairGeosetMap_.find(appearanceKey(raceId, genderId, facialFeatures));
+    const uint16_t selectedHairScalp = selectHairScalpGeoset(assets_.hairGeosetMap_, raceId, genderId, hairStyleId);
+    auto itFacial = assets_.facialHairGeosetMap_.find(appearanceKey(raceId, genderId, facialFeatures));
     std::unordered_set<uint16_t> activeGeosets = bareGeosetsFor(
         selectedHairScalp,
-        itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
+        itFacial != assets_.facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
     // This one is drawn before equipment is known and wants the no-cloak panel;
     // the shared set leaves group 15 alone so the equipment pass can decide.
     activeGeosets.insert(kGeosetNoCape);
     charRenderer->setActiveGeosets(instanceId, activeGeosets);
 
-    if (deadCreatureGuids_.count(guid)) {
+    if (spawns_->deadCreatureGuids_.count(guid)) {
         charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
     } else {
         charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
     }
-    playerInstances_[guid] = instanceId;
+    spawns_->playerInstances_[guid] = instanceId;
 
     // The mount field may have arrived before this render instance, or the
     // player may be re-created without another values update. Reconcile from
@@ -237,7 +237,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     if (!faceLowerPath.empty()) st.underwearPaths.push_back(faceLowerPath);
     if (!faceUpperPath.empty()) st.underwearPaths.push_back(faceUpperPath);
     for (const auto& up : underwearPaths) st.underwearPaths.push_back(up);
-    onlinePlayerAppearance_[guid] = std::move(st);
+    spawns_->onlinePlayerAppearance_[guid] = std::move(st);
 }
 
 void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
@@ -253,9 +253,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 
     // If the player isn't spawned yet, store equipment until spawn.
-    auto appIt = onlinePlayerAppearance_.find(guid);
-    if (!playerInstances_.count(guid) || appIt == onlinePlayerAppearance_.end()) {
-        pendingOnlinePlayerEquipment_[guid] = {displayInfoIds, inventoryTypes};
+    auto appIt = spawns_->onlinePlayerAppearance_.find(guid);
+    if (!spawns_->playerInstances_.count(guid) || appIt == spawns_->onlinePlayerAppearance_.end()) {
+        spawns_->pendingOnlinePlayerEquipment_[guid] = {displayInfoIds, inventoryTypes};
         return;
     }
 
@@ -317,15 +317,15 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // Group 4 (4xx) = forearms/gloves, 5 (5xx) = shins/boots, 8 (8xx) = wrists/sleeves,
     // 13 (13xx) = legs/trousers.  Missing defaults caused the shin-mesh gap (status.md).
     uint8_t hairStyleId = static_cast<uint8_t>((st.appearanceBytes >> 16) & 0xFF);
-    const uint16_t selectedHairScalp = selectHairScalpGeoset(hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
-    auto itFacial = facialHairGeosetMap_.find(
+    const uint16_t selectedHairScalp = selectHairScalpGeoset(assets_.hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
+    auto itFacial = assets_.facialHairGeosetMap_.find(
         appearanceKey(st.raceId, st.genderId, st.facialFeatures));
     // The same bare set as everywhere else. This built its own and had drifted:
     // it named ears 701 where the other three name 702, which is the variant
     // that has ears on it - so a player composed through this path lost them.
     std::unordered_set<uint16_t> geosets = bareGeosetsFor(
         selectedHairScalp,
-        itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, st.raceId);
+        itFacial != assets_.facialHairGeosetMap_.end() ? &itFacial->second : nullptr, st.raceId);
 
     const uint32_t geosetGroup1Field = idiL ? (*idiL)["GeosetGroup1"] : 7;
     const uint32_t geosetGroup2Field = idiL ? (*idiL)["GeosetGroup2"] : 8;
@@ -510,7 +510,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             }
 
             if (helmModel.isValid()) {
-                const uint32_t helmModelId = nextWeaponModelId_++;
+                const uint32_t helmModelId = assets_.nextWeaponModelId_++;
                 // Attachment point 0 (head bone), fallback to 11 (explicit head).
                 const bool attached = charRenderer->attachWeapon(
                     st.instanceId, kAttachHelm, helmModel, helmModelId, helm.texturePath);
@@ -537,7 +537,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
             if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
             if (charRenderer->attachWeapon(st.instanceId, attachmentId, model,
-                                           nextWeaponModelId_++, side.texturePath)) {
+                                           assets_.nextWeaponModelId_++, side.texturePath)) {
                 LOG_DEBUG("Attached shoulder ", attachmentId, ": ", side.baseModelPath,
                           " tex: ", side.texturePath);
             }
@@ -618,11 +618,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
     // --- Textures (skin atlas compositing) ---
 
-    if (!preparedEquipmentUpdate_) return;
-    const auto& regionLayers = preparedEquipmentUpdate_->regions;
+    if (!spawns_->preparedEquipmentUpdate_) return;
+    const auto& regionLayers = spawns_->preparedEquipmentUpdate_->regions;
 
-    const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
-    if (slotsIt == playerTextureSlotsByModelId_.end()) return;
+    const auto slotsIt = assets_.playerTextureSlotsByModelId_.find(st.modelId);
+    if (slotsIt == assets_.playerTextureSlotsByModelId_.end()) return;
     const PlayerTextureSlots& slots = slotsIt->second;
     if (slots.skin < 0) return;
 
@@ -636,7 +636,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // on a mount, on the back, whatever their sheath state says. Every point
     // a weapon can be on is cleared first, so one that moved leaves no copy.
     for (const uint32_t point : kWeaponAttachmentPoints) charRenderer->detachWeapon(st.instanceId, point);
-    const bool sheathed = remotePlayerMounts_.count(guid) != 0;
+    const bool sheathed = spawns_->remotePlayerMounts_.count(guid) != 0;
     st.weaponsSheathed = sheathed;
     static constexpr std::pair<int, game::EquipSlot> weaponSlots[] = {
         {15, game::EquipSlot::MAIN_HAND},
@@ -690,7 +690,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         const uint8_t inventoryType = inventoryTypes[slotIndex];
         const uint32_t point = sheathed ? riderWeaponAttachment(equipSlot, inventoryType)
                                         : weaponAttachment(false, equipSlot, inventoryType);
-        uint32_t weaponModelId = nextWeaponModelId_++;
+        uint32_t weaponModelId = assets_.nextWeaponModelId_++;
         if (!charRenderer->attachWeapon(st.instanceId, point, weaponModel, weaponModelId, texturePath)) {
             continue;  // attachWeapon says why
         }
@@ -699,8 +699,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 }
 
 void EntitySpawner::setRemotePlayerWeaponsSheathed(uint64_t guid, bool sheathed) {
-    auto appIt = onlinePlayerAppearance_.find(guid);
-    if (appIt == onlinePlayerAppearance_.end() || !renderer_) return;
+    auto appIt = spawns_->onlinePlayerAppearance_.find(guid);
+    if (appIt == spawns_->onlinePlayerAppearance_.end() || !renderer_) return;
     OnlinePlayerAppearanceState& st = appIt->second;
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer || st.instanceId == 0 || st.weaponsSheathed == sheathed) return;
@@ -728,20 +728,20 @@ void EntitySpawner::setRemotePlayerWeaponsSheathed(uint64_t guid, bool sheathed)
 void EntitySpawner::reconcileRemotePlayerForms() {
     if (!gameHandler_) return;
     auto& entities = gameHandler_->getEntityManager();
-    for (const auto& [guid, instanceId] : playerInstances_) {
+    for (const auto& [guid, instanceId] : spawns_->playerInstances_) {
         (void)instanceId;
         auto entity = entities.getEntity(guid);
         if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
         uint32_t form = std::static_pointer_cast<game::Unit>(entity)->getFormDisplayId();
-        if (form != 0 && undrawableFormDisplayIds_.count(form)) form = 0;
+        if (form != 0 && assets_.undrawableFormDisplayIds_.count(form)) form = 0;
         // A humanoid display - an illusion or a costume into another race - is
         // a character model dressed from CreatureDisplayInfoExtra, which only
         // the NPC compositing path can do. Until forms are built by that path
         // the player keeps their own body rather than a bald, untextured one.
         if (form != 0) {
-            auto disp = displayDataMap_.find(form);
-            if (disp != displayDataMap_.end() && disp->second.extraDisplayId != 0) {
-                undrawableFormDisplayIds_.insert(form);
+            auto disp = assets_.displayDataMap_.find(form);
+            if (disp != assets_.displayDataMap_.end() && disp->second.extraDisplayId != 0) {
+                assets_.undrawableFormDisplayIds_.insert(form);
                 LOG_WARNING("Remote player humanoid form displayId=", form,
                          " is not drawn yet; the player keeps their own body");
                 form = 0;
@@ -752,40 +752,41 @@ void EntitySpawner::reconcileRemotePlayerForms() {
 }
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
-    pendingPlayerSpawnGuids_.erase(guid);
-    playerSpawnRevisions_.erase(guid);
-    equipmentRevisions_.erase(guid);
-    pendingOnlinePlayerEquipment_.erase(guid);
-    std::erase_if(pendingPlayerSpawns_, [guid](const auto& request) { return request.guid == guid; });
-    std::erase_if(deferredEquipmentQueue_, [guid](const auto& request) { return request.first == guid; });
+    if (!spawns_) return;
+    spawns_->pendingPlayerSpawnGuids_.erase(guid);
+    spawns_->jobs_.cancel(JobGroup::Channel::Player, guid);
+    spawns_->jobs_.cancel(JobGroup::Channel::Equipment, guid);
+    spawns_->pendingOnlinePlayerEquipment_.erase(guid);
+    std::erase_if(spawns_->pendingPlayerSpawns_, [guid](const auto& request) { return request.guid == guid; });
+    std::erase_if(spawns_->deferredEquipmentQueue_, [guid](const auto& request) { return request.first == guid; });
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
-    pendingRemotePlayerMounts_.erase(guid);
+    spawns_->pendingRemotePlayerMounts_.erase(guid);
     removeRemotePlayerMount(guid);
     // Before the lookup below: what is freed with the model is the character,
     // and while a form is shown the map holds the form instead.
-    pendingRemotePlayerForms_.erase(guid);
+    spawns_->pendingRemotePlayerForms_.erase(guid);
     removeRemotePlayerForm(guid);
-    auto it = playerInstances_.find(guid);
-    if (it == playerInstances_.end()) return;
+    auto it = spawns_->playerInstances_.find(guid);
+    if (it == spawns_->playerInstances_.end()) return;
     auto* charRenderer = renderer_->getCharacterRenderer();
     // Player composites get a fresh model id per spawn (unlike displayId-keyed
     // creature models, which stay cached), so free the model with the instance.
     const uint32_t compositeModelId = charRenderer->getInstanceModelId(it->second);
     charRenderer->removeInstance(it->second);
     if (compositeModelId != 0) charRenderer->unloadModelIfUnused(compositeModelId);
-    playerInstances_.erase(it);
-    onlinePlayerAppearance_.erase(guid);
-    pendingOnlinePlayerEquipment_.erase(guid);
-    deadCreatureGuids_.erase(guid);
-    creatureRenderPosCache_.erase(guid);
-    creatureSwimmingState_.erase(guid);
-    creatureWalkingState_.erase(guid);
-    creatureFlyingState_.erase(guid);
-    creatureWasMoving_.erase(guid);
-    creatureWasSwimming_.erase(guid);
-    creatureWasFlying_.erase(guid);
-    creatureWasWalking_.erase(guid);
-    remotePlayerLocomotion_.erase(guid);
+    spawns_->playerInstances_.erase(it);
+    spawns_->onlinePlayerAppearance_.erase(guid);
+    spawns_->pendingOnlinePlayerEquipment_.erase(guid);
+    spawns_->deadCreatureGuids_.erase(guid);
+    spawns_->creatureRenderPosCache_.erase(guid);
+    spawns_->creatureSwimmingState_.erase(guid);
+    spawns_->creatureWalkingState_.erase(guid);
+    spawns_->creatureFlyingState_.erase(guid);
+    spawns_->creatureWasMoving_.erase(guid);
+    spawns_->creatureWasSwimming_.erase(guid);
+    spawns_->creatureWasFlying_.erase(guid);
+    spawns_->creatureWasWalking_.erase(guid);
+    spawns_->remotePlayerLocomotion_.erase(guid);
 }
 
 // ---------------------------------------------------------------------------
@@ -849,17 +850,17 @@ std::string EntitySpawner::transportModelPath(uint32_t entry, uint32_t displayId
 void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
     if (!renderer_ || !assetManager_) return;
 
-    if (!gameObjectLookupsBuilt_) {
+    if (!assets_.gameObjectLookupsBuilt_) {
         buildGameObjectDisplayLookups();
     }
-    if (!gameObjectLookupsBuilt_) return;
+    if (!assets_.gameObjectLookupsBuilt_) return;
 
     LOG_DEBUG("GO spawn attempt: guid=0x", std::hex, guid, std::dec,
              " displayId=", displayId, " entry=", entry,
              " pos=(", x, ", ", y, ", ", z, ")");
 
-    auto goIt = gameObjectInstances_.find(guid);
-    if (goIt != gameObjectInstances_.end()) {
+    auto goIt = spawns_->gameObjectInstances_.find(guid);
+    if (goIt != spawns_->gameObjectInstances_.end()) {
         // A tracked instance ID is only meaningful while the renderer still holds
         // it. Renderer-wide clears (map change, device reset) drop instances
         // without going through despawnGameObject(), which used to leave this map
@@ -879,11 +880,11 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         if (!instanceAlive) {
             LOG_WARNING("GO render instance vanished - respawning: guid=0x", std::hex, guid, std::dec,
                         " displayId=", displayId, " instanceId=", goIt->second.instanceId);
-            gameObjectInstances_.erase(goIt);
-            goIt = gameObjectInstances_.end();
+            spawns_->gameObjectInstances_.erase(goIt);
+            goIt = spawns_->gameObjectInstances_.end();
         }
     }
-    if (goIt != gameObjectInstances_.end()) {
+    if (goIt != spawns_->gameObjectInstances_.end()) {
         if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
             if (auto* transportManager = gameHandler_->getTransportManager()) {
                 if (transportManager->getTransport(guid)) {
@@ -964,14 +965,14 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         if (!wmoRenderer) return;
 
         uint32_t modelId = 0;
-        auto itCache = gameObjectDisplayIdWmoCache_.find(displayId);
-        if (itCache != gameObjectDisplayIdWmoCache_.end()) {
+        auto itCache = assets_.gameObjectDisplayIdWmoCache_.find(displayId);
+        if (itCache != assets_.gameObjectDisplayIdWmoCache_.end()) {
             modelId = itCache->second;
             // Only use cached entry if the model is still resident in the renderer_
             if (wmoRenderer->isModelLoaded(modelId)) {
                 loadedAsWmo = true;
             } else {
-                gameObjectDisplayIdWmoCache_.erase(itCache);
+                assets_.gameObjectDisplayIdWmoCache_.erase(itCache);
                 modelId = 0;
             }
         }
@@ -1001,9 +1002,9 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                 }
 
                 if (loadedGroups > 0 || wmoModel.nGroups == 0) {
-                    modelId = nextGameObjectWmoModelId_++;
+                    modelId = assets_.nextGameObjectWmoModelId_++;
                     if (wmoRenderer->loadModel(wmoModel, modelId)) {
-                        gameObjectDisplayIdWmoCache_[displayId] = modelId;
+                        assets_.gameObjectDisplayIdWmoCache_[displayId] = modelId;
                         loadedAsWmo = true;
                     } else {
                         LOG_WARNING("Failed to load gameobject WMO model: ", modelPath);
@@ -1025,7 +1026,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                 return;
             }
 
-            gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
+            spawns_->gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
             LOG_DEBUG("Spawned gameobject WMO: guid=0x", std::hex, guid, std::dec,
                      " displayId=", displayId, " at (", x, ", ", y, ", ", z, ")");
 
@@ -1046,7 +1047,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                     const size_t doodadBudget = std::min(doodadTemplates->size(), kMaxTransportDoodads);
                     LOG_DEBUG("Queueing ", doodadBudget, "/", doodadTemplates->size(),
                              " transport doodads for WMO instance ", instanceId);
-                    pendingTransportDoodadBatches_.push_back(PendingTransportDoodadBatch{
+                    spawns_->pendingTransportDoodadBatches_.push_back(PendingTransportDoodadBatch{
                         guid,
                         modelId,
                         instanceId,
@@ -1088,27 +1089,27 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // Skip displayIds that permanently failed to load (e.g. empty/unsupported M2s).
         // Without this guard the same empty model is re-parsed every frame, causing
         // sustained log spam and wasted CPU.
-        if (gameObjectDisplayIdFailedCache_.count(displayId)) return;
+        if (assets_.gameObjectDisplayIdFailedCache_.count(displayId)) return;
 
         uint32_t modelId = 0;
-        auto itCache = gameObjectDisplayIdModelCache_.find(displayId);
-        if (itCache != gameObjectDisplayIdModelCache_.end()) {
+        auto itCache = assets_.gameObjectDisplayIdModelCache_.find(displayId);
+        if (itCache != assets_.gameObjectDisplayIdModelCache_.end()) {
             modelId = itCache->second;
             if (!m2Renderer->hasModel(modelId)) {
                 LOG_WARNING("GO M2 cache hit but model gone: displayId=", displayId,
                             " modelId=", modelId, " path=", modelPath,
                             " - reloading");
-                gameObjectDisplayIdModelCache_.erase(itCache);
-                itCache = gameObjectDisplayIdModelCache_.end();
+                assets_.gameObjectDisplayIdModelCache_.erase(itCache);
+                itCache = assets_.gameObjectDisplayIdModelCache_.end();
             }
         }
-        if (itCache == gameObjectDisplayIdModelCache_.end()) {
-            modelId = nextGameObjectModelId_++;
+        if (itCache == assets_.gameObjectDisplayIdModelCache_.end()) {
+            modelId = assets_.nextGameObjectModelId_++;
 
             auto m2Data = assetManager_->readFile(modelPath);
             if (m2Data.empty()) {
                 LOG_WARNING("Failed to read gameobject M2: ", modelPath);
-                gameObjectDisplayIdFailedCache_.insert(displayId);
+                assets_.gameObjectDisplayIdFailedCache_.insert(displayId);
                 return;
             }
 
@@ -1119,7 +1120,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             model.name = modelPath;
             if (model.vertices.empty()) {
                 LOG_WARNING("Failed to parse gameobject M2: ", modelPath);
-                gameObjectDisplayIdFailedCache_.insert(displayId);
+                assets_.gameObjectDisplayIdFailedCache_.insert(displayId);
                 return;
             }
 
@@ -1140,7 +1141,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
 
             if (!m2Renderer->loadModel(model, modelId)) {
                 LOG_WARNING("Failed to load gameobject model: ", modelPath);
-                gameObjectDisplayIdFailedCache_.insert(displayId);
+                assets_.gameObjectDisplayIdFailedCache_.insert(displayId);
                 return;
             }
 
@@ -1149,7 +1150,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             // evicted the model - the log showed PostBoxHuman.m2 (the mailbox)
             // going through exactly that reap/reload churn on every return trip.
             m2Renderer->setModelPinned(modelId, true);
-            gameObjectDisplayIdModelCache_[displayId] = modelId;
+            assets_.gameObjectDisplayIdModelCache_[displayId] = modelId;
         }
 
         uint32_t instanceId = m2Renderer->createInstance(modelId, renderPos,
@@ -1176,12 +1177,12 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             m2Renderer->setSkipCollision(instanceId, true);
         }
 
-        gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};
+        spawns_->gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};
 
         // Its animation is its state's: the one the server described before
         // this model existed.
-        if (auto pending = gameObjectPendingState_.find(guid);
-            pending != gameObjectPendingState_.end()) {
+        if (auto pending = spawns_->gameObjectPendingState_.find(guid);
+            pending != spawns_->gameObjectPendingState_.end()) {
             applyGameObjectState(guid, pending->second);
         }
 

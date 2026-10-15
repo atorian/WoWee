@@ -13,6 +13,7 @@
 #include "game/chat_handler.hpp"
 #include "game/transport_manager.hpp"
 #include "game/movement_handler.hpp"
+#include "game/inventory_handler.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
 #include "network/world_connection.hpp"
@@ -1687,6 +1688,20 @@ void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                                             const std::shared_ptr<Entity>& entity,
                                             const std::shared_ptr<Unit>& unit,
                                             bool isDead) {
+    announceUnit(guid, objectType, entity, unit, isDead);
+    // Query quest giver status for NPCs with questgiver flag (0x02)
+    if (objectType == ObjectType::UNIT && (unit->getNpcFlags() & NPC_FLAG_QUESTGIVER) &&
+        owner_.getSocket()) {
+        network::Packet qsPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_QUERY));
+        qsPkt.writeUInt64(guid);
+        owner_.getSocket()->send(qsPkt);
+    }
+}
+
+void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
+                                     const std::shared_ptr<Entity>& entity,
+                                     const std::shared_ptr<Unit>& unit,
+                                     bool isDead) {
     if (objectType == ObjectType::PLAYER && guid == owner_.getPlayerGuid()) {
         return;  // Skip local player - spawned separately via spawnPlayerCharacter()
     }
@@ -1724,13 +1739,46 @@ void EntityController::dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
     if (isDead && owner_.npcDeathCallbackRef()) {
         owner_.npcDeathCallbackRef()(guid);
     }
-    // Query quest giver status for NPCs with questgiver flag (0x02)
-    if (objectType == ObjectType::UNIT && (unit->getNpcFlags() & NPC_FLAG_QUESTGIVER) &&
-        owner_.getSocket()) {
-        network::Packet qsPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_QUERY));
-        qsPkt.writeUInt64(guid);
-        owner_.getSocket()->send(qsPkt);
+}
+
+void EntityController::announceObjectsInView() {
+    size_t units = 0, players = 0, objects = 0, corpses = 0;
+    for (const auto& [guid, entity] : entityManager.getEntities()) {
+        if (!entity) continue;
+        switch (entity->getType()) {
+        case ObjectType::UNIT:
+        case ObjectType::PLAYER: {
+            auto unit = std::static_pointer_cast<Unit>(entity);
+            if (unit->getDisplayId() == 0) break;  // Never drawn; its create said so.
+            const bool dead = isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(),
+                                                unit->getDynamicFlags());
+            announceUnit(guid, entity->getType(), entity, unit, dead);
+            if (entity->getType() == ObjectType::PLAYER && guid != owner_.getPlayerGuid()) {
+                ++players;
+                if (unit->getMountDisplayId() != 0 && owner_.otherPlayerMountCallbackRef())
+                    owner_.otherPlayerMountCallbackRef()(guid, unit->getMountDisplayId());
+            } else if (entity->getType() == ObjectType::UNIT) {
+                ++units;
+            }
+            break;
+        }
+        case ObjectType::GAMEOBJECT:
+            announceGameObject(guid, static_cast<const GameObject&>(*entity));
+            ++objects;
+            break;
+        case ObjectType::CORPSE:
+            announceCorpse(guid, *entity);
+            ++corpses;
+            break;
+        default:
+            break;
+        }
     }
+    // Other players' clothes come from their visible items, kept beside the
+    // entities by the inventory domain.
+    owner_.getInventoryHandler()->emitAllOtherPlayerEquipment();
+    LOG_INFO("Presented objects in view: units=", units, " players=", players,
+             " gameobjects=", objects, " corpses=", corpses);
 }
 
 // Track online item/container objects during CREATE.
@@ -2002,7 +2050,7 @@ struct EntityController::ItemTypeHandler : EntityController::IObjectTypeHandler 
 struct EntityController::CorpseTypeHandler : EntityController::IObjectTypeHandler {
     EntityController& ctl_;
     explicit CorpseTypeHandler(EntityController& c) : ctl_(c) {}
-    void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& /*entity*/, bool&) override { ctl_.onCreateCorpse(block); }
+    void onCreate(const UpdateBlock& block, std::shared_ptr<Entity>& entity, bool&) override { ctl_.onCreateCorpse(block, *entity); }
 };
 
 // ============================================================
@@ -2184,18 +2232,6 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
         }
         queryGameObjectInfo(itEntry->second, block.guid);
     }
-    // What it is doing, which the create block carries as surely as an update
-    // does: a door standing open when the player walks into the room says so
-    // here and nowhere else. Only the update path read it, so every object came
-    // into view in its closed pose and stayed there until something changed it.
-    const uint16_t ufBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
-    if (ufBytes1 != 0xFFFF) {
-        auto itBytes = block.fields.find(ufBytes1);
-        if (itBytes != block.fields.end() && owner_.gameObjectStateCallbackRef()) {
-            owner_.gameObjectStateCallbackRef()(
-                block.guid, static_cast<uint8_t>(itBytes->second & 0xFF));
-        }
-    }
 
     // Detect transport GameObjects via UPDATEFLAG_TRANSPORT (0x0002)
     LOG_DEBUG("GameObject CREATE: guid=0x", std::hex, block.guid, std::dec,
@@ -2210,20 +2246,32 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
                  " pos=(", go->getX(), ", ", go->getY(), ", ", go->getZ(), ")");
         // Note: TransportSpawnCallback will be invoked from Application after WMO instance is created
     }
-    if (go->getDisplayId() != 0 && owner_.gameObjectSpawnCallbackRef()) {
+    announceGameObject(block.guid, *go);
+}
+
+void EntityController::announceGameObject(uint64_t guid, const GameObject& go) {
+    // What it is doing, which the create block carries as surely as an update
+    // does: a door standing open when the player walks into the room says so
+    // here and nowhere else. Only the update path read it, so every object came
+    // into view in its closed pose and stayed there until something changed it.
+    const uint16_t ufBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
+    if (ufBytes1 != 0xFFFF && go.hasField(ufBytes1) && owner_.gameObjectStateCallbackRef()) {
+        owner_.gameObjectStateCallbackRef()(guid, static_cast<uint8_t>(go.getField(ufBytes1) & 0xFF));
+    }
+    if (go.getDisplayId() != 0 && owner_.gameObjectSpawnCallbackRef()) {
         float goScale = 1.0f;
         {
             uint16_t scaleIdx = fieldIndex(UF::OBJECT_FIELD_SCALE_X);
             if (scaleIdx != 0xFFFF) {
-                uint32_t raw = entity->getField(scaleIdx);
+                uint32_t raw = go.getField(scaleIdx);
                 if (raw != 0) {
                     goScale = bitsToFloat(raw);
                     if (goScale <= 0.01f || goScale > 100.0f) goScale = 1.0f;
                 }
             }
         }
-        owner_.gameObjectSpawnCallbackRef()(block.guid, go->getEntry(), go->getDisplayId(),
-            go->getX(), go->getY(), go->getZ(), go->getOrientation(), goScale);
+        owner_.gameObjectSpawnCallbackRef()(guid, go.getEntry(), go.getDisplayId(),
+            go.getX(), go.getY(), go.getZ(), go.getOrientation(), goScale);
     }
     // Fire transport move callback for transports (position update on re-creation).
     // NOTE: do NOT mark the guid as server-updated here. A CREATE only carries the
@@ -2233,9 +2281,9 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
     // skips the entry->DBC path remap - WotLK ship GO entries don't match
     // TransportAnimation.dbc 1:1, so they were left stationary. Only genuine
     // movement updates (onValuesUpdateGameObject / MOVEMENT blocks) set that flag.
-    if (transportGuids_.count(block.guid) && owner_.transportMoveCallbackRef()) {
-        owner_.transportMoveCallbackRef()(block.guid,
-            go->getX(), go->getY(), go->getZ(), go->getOrientation());
+    if (transportGuids_.count(guid) && owner_.transportMoveCallbackRef()) {
+        owner_.transportMoveCallbackRef()(guid,
+            go.getX(), go.getY(), go.getZ(), go.getOrientation());
     }
 }
 
@@ -2243,22 +2291,35 @@ void EntityController::onCreateItem(const UpdateBlock& block, bool& newItemCreat
     trackItemOnCreate(block, newItemCreated);
 }
 
-void EntityController::onCreateCorpse(const UpdateBlock& block) {
-    auto field = [&](UF f, uint32_t offset = 0) -> uint32_t {
+namespace {
+/// A corpse object's own fields, read the same way at its create and when it
+/// is presented again.
+struct CorpseFields {
+    const Entity& corpse;
+    uint32_t operator()(UF f, uint32_t offset = 0) const {
         const uint16_t idx = fieldIndex(f);
         if (idx == 0xFFFF) return 0;
-        auto it = block.fields.find(static_cast<uint16_t>(idx + offset));
-        return it != block.fields.end() ? it->second : 0;
-    };
-    const uint32_t ownerLow = field(UF::CORPSE_FIELD_OWNER);
-    const uint64_t ownerGuid = (static_cast<uint64_t>(field(UF::CORPSE_FIELD_OWNER, 1)) << 32) | ownerLow;
-    const uint32_t corpseFlags = field(UF::CORPSE_FIELD_FLAGS);
+        return corpse.getField(static_cast<uint16_t>(idx + offset));
+    }
+    uint64_t ownerGuid() const {
+        return (static_cast<uint64_t>((*this)(UF::CORPSE_FIELD_OWNER, 1)) << 32) |
+               (*this)(UF::CORPSE_FIELD_OWNER);
+    }
+    bool ownedBy(uint64_t playerGuid) const {
+        const uint32_t ownerLow = (*this)(UF::CORPSE_FIELD_OWNER);
+        return ownerGuid() == playerGuid ||
+               (ownerLow != 0 && ownerLow == static_cast<uint32_t>(playerGuid));
+    }
     // Bones are not a body. Application::updateCorpseBones draws them as the
     // race's death skeleton, whoever they belonged to, for as long as the
     // object is in view.
-    const bool bones = (corpseFlags & CORPSE_FLAG_BONES) != 0;
-    const bool own = ownerGuid == owner_.getPlayerGuid() ||
-                     (ownerLow != 0 && ownerLow == static_cast<uint32_t>(owner_.getPlayerGuid()));
+    bool bones() const { return ((*this)(UF::CORPSE_FIELD_FLAGS) & CORPSE_FLAG_BONES) != 0; }
+};
+} // namespace
+
+void EntityController::onCreateCorpse(const UpdateBlock& block, const Entity& corpse) {
+    const CorpseFields field{corpse};
+    const bool own = field.ownedBy(owner_.getPlayerGuid());
 
     // Detect player's own corpse object so we have the position even when
     // SMSG_DEATH_RELEASE_LOC hasn't been received (e.g. login as ghost).
@@ -2271,7 +2332,7 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
     // login-as-ghost path already sends. Gating the guid on the position
     // meant a ghost who walked back to a corpse that arrived without one
     // could never take it, however close they stood.
-    if (own && !bones) {
+    if (own && !field.bones()) {
         owner_.corpseGuidRef()  = block.guid;
         // The position only where the block actually carried one; a
         // stationary create may not, and overwriting a good answer from
@@ -2284,23 +2345,31 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
             owner_.corpseMapIdRef() = owner_.currentMapIdRef();
             owner_.corpsePositionValidRef() = true;
         }
+        LOG_INFO("Corpse object detected: guid=0x", std::hex, owner_.corpseGuidRef(), std::dec,
+                 " server=(", block.x, ", ", block.y, ", ", block.z,
+                 ") map=", owner_.corpseMapIdRef());
+    }
+    announceCorpse(block.guid, corpse);
+}
 
+void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
+    const CorpseFields field{corpse};
+    const bool bones = field.bones();
+    if (field.ownedBy(owner_.getPlayerGuid())) {
+        if (bones) return;
         // Corpse objects carry ownership and position but not a standalone
         // render model. Reuse the owning character's appearance and equipment
         // under the corpse GUID, then force the queued instance into DEATH.
         auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
             [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
         if (characterIt != owner_.charactersRef().end() && owner_.playerSpawnCallbackRef()) {
-            glm::vec3 canonical = core::coords::serverToCanonical(
-                glm::vec3(block.x, block.y, block.z));
-            float orientation = core::coords::serverToCanonicalYaw(block.orientation);
             owner_.playerSpawnCallbackRef()(
-                block.guid, 0,
+                guid, 0,
                 static_cast<uint8_t>(characterIt->race),
                 static_cast<uint8_t>(characterIt->gender),
                 characterIt->appearanceBytes,
                 characterIt->facialFeatures,
-                canonical.x, canonical.y, canonical.z, orientation);
+                corpse.getX(), corpse.getY(), corpse.getZ(), corpse.getOrientation());
 
             if (owner_.playerEquipmentCallbackRef()) {
                 std::array<uint32_t, 19> displayInfoIds{};
@@ -2310,23 +2379,21 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
                     displayInfoIds[i] = characterIt->equipment[i].displayModel;
                     inventoryTypes[i] = characterIt->equipment[i].inventoryType;
                 }
-                owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+                owner_.playerEquipmentCallbackRef()(guid, displayInfoIds, inventoryTypes);
             }
         }
         if (owner_.npcDeathCallbackRef()) {
-            owner_.npcDeathCallbackRef()(block.guid);
+            owner_.npcDeathCallbackRef()(guid);
         }
-        LOG_INFO("Corpse object detected: guid=0x", std::hex, owner_.corpseGuidRef(), std::dec,
-                 " server=(", block.x, ", ", block.y, ", ", block.z,
-                 ") map=", owner_.corpseMapIdRef());
         return;
     }
-    if (own || bones || !block.hasMovement) return;
+    if (bones || !corpse.hasPosition()) return;
 
     // Someone else's body, released but not yet bones. The owner may be far
     // away or offline, so everything it looks like comes off the corpse
     // object itself, the way the original client builds it: race, gender and
     // skin in BYTES_1, face and hair in BYTES_2, the gear as display ids.
+    const uint32_t corpseFlags = field(UF::CORPSE_FIELD_FLAGS);
     const uint32_t bytes1 = field(UF::CORPSE_FIELD_BYTES_1);
     const uint32_t bytes2 = field(UF::CORPSE_FIELD_BYTES_2);
     const auto race = static_cast<uint8_t>((bytes1 >> 8) & 0xFF);
@@ -2336,10 +2403,9 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
     const uint32_t appearance = ((bytes1 >> 24) & 0xFF) | ((bytes2 & 0xFF) << 8) |
                                 (((bytes2 >> 8) & 0xFF) << 16) | (((bytes2 >> 16) & 0xFF) << 24);
     const auto facialHair = static_cast<uint8_t>((bytes2 >> 24) & 0xFF);
-    const glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(block.x, block.y, block.z));
-    owner_.playerSpawnCallbackRef()(block.guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
-                                    appearance, facialHair, canonical.x, canonical.y, canonical.z,
-                                    core::coords::serverToCanonicalYaw(block.orientation));
+    owner_.playerSpawnCallbackRef()(guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
+                                    appearance, facialHair, corpse.getX(), corpse.getY(), corpse.getZ(),
+                                    corpse.getOrientation());
     if (owner_.playerEquipmentCallbackRef()) {
         std::array<uint32_t, 19> displayInfoIds{};
         std::array<uint8_t, 19> inventoryTypes{};
@@ -2352,9 +2418,9 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
         constexpr auto kBack = static_cast<size_t>(EquipSlot::BACK);
         if (corpseFlags & CORPSE_FLAG_HIDE_HELM) { displayInfoIds[kHead] = 0; inventoryTypes[kHead] = 0; }
         if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { displayInfoIds[kBack] = 0; inventoryTypes[kBack] = 0; }
-        owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+        owner_.playerEquipmentCallbackRef()(guid, displayInfoIds, inventoryTypes);
     }
-    if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(block.guid);
+    if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(guid);
 }
 
 // ============================================================

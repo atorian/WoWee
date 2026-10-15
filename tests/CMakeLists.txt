@@ -2803,6 +2803,7 @@ endforeach()
 
 # The loading screen keeps its former terrain/warmup readiness criteria.
 wowee_add_test(test_world_load_progress SOURCES test_world_load_progress.cpp)
+wowee_add_test(test_job_group SOURCES test_job_group.cpp)
 
 wowee_add_test(test_addon_event_queue SOURCES test_addon_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/src/addons/lua_handler_globals.cpp

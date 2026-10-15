@@ -38,7 +38,7 @@ void M2Renderer::fileInCullGrid(const M2Instance& instance) {
     // by the pass's radius: the model's bound radius at this scale, times 1.5.
     const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
                                                    : instance.cachedBoundRadius;
-    cullGrid_.update(instance.id, M2CullGrid::Entry{
+    scene_->cullGrid_.update(instance.id, M2CullGrid::Entry{
         .position = instance.position,
         .cullCenter = instance.cachedCullCenter,
         .cullRadius = instance.cachedPaddedRadius,
@@ -48,7 +48,7 @@ void M2Renderer::fileInCullGrid(const M2Instance& instance) {
 void M2Renderer::gatherViewCandidates(const glm::vec3& camPos, const Frustum& frustum,
                                       float maxPossibleDistSq, std::vector<uint32_t>& out) const {
     out.clear();
-    for (const auto& cell : cullGrid_.cells()) {
+    for (const auto& cell : scene_->cullGrid_.cells()) {
         if (cell.ids.empty()) continue;
         // Nothing in a column is drawn further away than this, and nothing
         // whose cull sphere is outside the frustum - and the column's box
@@ -56,8 +56,8 @@ void M2Renderer::gatherViewCandidates(const glm::vec3& camPos, const Frustum& fr
         if (distanceSqToBox(camPos, cell.viewMin, cell.viewMax) > maxPossibleDistSq) continue;
         if (!frustum.intersectsAABB(cell.viewMin, cell.viewMax)) continue;
         for (const uint32_t id : cell.ids) {
-            const auto it = instanceIndexById.find(id);
-            if (it != instanceIndexById.end() && it->second < instances.size()) {
+            const auto it = scene_->instanceIndexById.find(id);
+            if (it != scene_->instanceIndexById.end() && it->second < scene_->instances.size()) {
                 out.push_back(static_cast<uint32_t>(it->second));
             }
         }
@@ -68,15 +68,15 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
                                         std::vector<uint32_t>& out) const {
     out.clear();
     const float invRadius = shadowRadius > 0.0f ? 1.0f / shadowRadius : 0.0f;
-    for (const auto& cell : cullGrid_.cells()) {
+    for (const auto& cell : scene_->cullGrid_.cells()) {
         if (cell.ids.empty()) continue;
         // The light's box, not the camera's: a caster behind the camera can
         // still throw its shadow into view.
         if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
                                cell.maxShadowRadius * invRadius)) continue;
         for (const uint32_t id : cell.ids) {
-            const auto it = instanceIndexById.find(id);
-            if (it != instanceIndexById.end() && it->second < instances.size()) {
+            const auto it = scene_->instanceIndexById.find(id);
+            if (it != scene_->instanceIndexById.end() && it->second < scene_->instances.size()) {
                 out.push_back(static_cast<uint32_t>(it->second));
             }
         }
@@ -86,9 +86,9 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
 void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
     if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z)) return;
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
 
     // The box the instance is filed under, which is what it has to be taken
     // out of once it has moved.
@@ -108,33 +108,33 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     fileInCullGrid(inst);
 
     // Incrementally update spatial grid
-    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+    refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
                  inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    scene_->instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
 }
 
 void M2Renderer::setInstanceHighlight(uint32_t instanceId, float amount) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    instances[idxIt->second].highlight = amount;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    scene_->instances[idxIt->second].highlight = amount;
 }
 
 void M2Renderer::clearInstanceHighlights() {
     // A walk of every instance rather than a record of the lit one, because a
     // press can end with the instance gone - the object despawned, the tile
     // unloaded - and a remembered id would then light whatever took its slot.
-    for (auto& inst : instances) inst.highlight = 0.0f;
+    for (auto& inst : scene_->instances) inst.highlight = 0.0f;
 }
 
 void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     inst.animSpeed = frozen ? 0.0f : 1.0f;
     inst.holdAtEnd = false;
     inst.nextAnimation.reset();
@@ -144,18 +144,18 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
 }
 
 void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     inst.animTime = 0.0f;
     if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
                                           bool skipToEnd) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return;
     const auto& seqs = inst.cachedModel->sequences;
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
@@ -210,9 +210,9 @@ bool startPlannedAnimation(M2Instance& inst, const M2AnimationPlay& play) {
 
 bool M2Renderer::playInstanceAnimation(uint32_t instanceId, const M2AnimationPlay& now,
                                        const std::optional<M2AnimationPlay>& next) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return false;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return false;
+    auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
     if (!startPlannedAnimation(inst, now)) return false;
     inst.nextAnimation = now.end == M2AnimationPlay::End::Next ? next : std::nullopt;
@@ -231,9 +231,9 @@ void M2Renderer::advanceToNextAnimation(M2Instance& inst) {
 }
 
 void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId, bool loop) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return;
     const auto& seqs = inst.cachedModel->sequences;
     // Find the first sequence matching the requested animation ID
@@ -253,9 +253,9 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
 }
 
 bool M2Renderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return false;
-    const auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return false;
+    const auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
     for (const auto& seq : inst.cachedModel->sequences) {
         if (seq.id == animationId) return true;
@@ -264,9 +264,9 @@ bool M2Renderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
 }
 
 float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return 0.0f;
-    const auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return 0.0f;
+    const auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return 0.0f;
     const auto& seqs = inst.cachedModel->sequences;
     if (seqs.empty()) return 0.0f;
@@ -276,24 +276,24 @@ float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
 }
 
 bool M2Renderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return false;
-    const auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return false;
+    const auto& inst = scene_->instances[idxIt->second];
     outCenter = inst.cachedCullCenter;
     outRadius = inst.cachedVisualRadius;
     return outRadius > 0.0f;
 }
 
 void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
     // Reject NaN matrix - would propagate into the model matrix uniform
     // and the spatial-grid bounds, leaving stale grid cells pointing at
     // a NaN-bounded instance.
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++)
             if (!std::isfinite(transform[c][r])) return;
-    auto& inst = instances[idxIt->second];
+    auto& inst = scene_->instances[idxIt->second];
 
     // Remove old grid cells before updating bounds
     const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
@@ -325,12 +325,12 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         const DedupKey oldKey = keyFor(oldPosition);
         const DedupKey newKey = keyFor(inst.position);
         if (!(oldKey == newKey)) {
-            auto oldIt = instanceDedupMap_.find(oldKey);
+            auto oldIt = scene_->instanceDedupMap_.find(oldKey);
             // Only drop the entry if it still names this instance.
-            if (oldIt != instanceDedupMap_.end() && oldIt->second == instanceId) {
-                instanceDedupMap_.erase(oldIt);
+            if (oldIt != scene_->instanceDedupMap_.end() && oldIt->second == instanceId) {
+                scene_->instanceDedupMap_.erase(oldIt);
             }
-            instanceDedupMap_.emplace(newKey, instanceId);
+            scene_->instanceDedupMap_.emplace(newKey, instanceId);
         }
     }
 
@@ -344,22 +344,22 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     fileInCullGrid(inst);
 
     // Incrementally update spatial grid (remove old cells, add new cells)
-    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+    refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
                  inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
     // No spatialIndexDirty_ = true - handled incrementally
 }
 
 void M2Renderer::removeInstance(uint32_t instanceId) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
     size_t idx = idxIt->second;
-    if (idx >= instances.size()) return;
+    if (idx >= scene_->instances.size()) return;
 
-    auto& inst = instances[idx];
+    auto& inst = scene_->instances[idx];
 
     // Remove from spatial grid incrementally (same pattern as the move-update path)
-    eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
-    cullGrid_.remove(instanceId);
+    eraseBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    scene_->cullGrid_.remove(instanceId);
 
     // Remove from dedup map
     if (!inst.cachedIsGroundDetail) {
@@ -367,20 +367,20 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
                     .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
-        instanceDedupMap_.erase(dk);
+        scene_->instanceDedupMap_.erase(dk);
     }
 
     destroyInstanceBones(inst, /*defer=*/true);
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
-    instanceIndexById.erase(instanceId);
-    if (idx < instances.size() - 1) {
-        uint32_t movedId = instances.back().id;
-        instances[idx] = std::move(instances.back());
-        instances.pop_back();
-        instanceIndexById[movedId] = idx;
+    scene_->instanceIndexById.erase(instanceId);
+    if (idx < scene_->instances.size() - 1) {
+        uint32_t movedId = scene_->instances.back().id;
+        scene_->instances[idx] = std::move(scene_->instances.back());
+        scene_->instances.pop_back();
+        scene_->instanceIndexById[movedId] = idx;
     } else {
-        instances.pop_back();
+        scene_->instances.pop_back();
     }
 
     rebuildInstanceIndexLists();
@@ -389,50 +389,50 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 void M2Renderer::rebuildInstanceIndexLists() {
     // Rebuild the lightweight auxiliary index vectors (animated, particle, light).
     // These are small vectors of indices that are rebuilt cheaply.
-    animatedInstanceIndices_.clear();
-    particleOnlyInstanceIndices_.clear();
-    particleInstanceIndices_.clear();
-    lightInstanceIndices_.clear();
-    for (size_t i = 0; i < instances.size(); i++) {
-        auto& ri = instances[i];
-        if (ri.cachedHasEmitters) particleInstanceIndices_.push_back(i);
+    scene_->animatedInstanceIndices_.clear();
+    scene_->particleOnlyInstanceIndices_.clear();
+    scene_->particleInstanceIndices_.clear();
+    scene_->lightInstanceIndices_.clear();
+    for (size_t i = 0; i < scene_->instances.size(); i++) {
+        auto& ri = scene_->instances[i];
+        if (ri.cachedHasEmitters) scene_->particleInstanceIndices_.push_back(i);
         if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
-            animatedInstanceIndices_.push_back(i);
+            scene_->animatedInstanceIndices_.push_back(i);
         else if (ri.cachedHasEmitters)
-            particleOnlyInstanceIndices_.push_back(i);
+            scene_->particleOnlyInstanceIndices_.push_back(i);
         if (ri.cachedModel && ri.cachedModel->canThrowLocalLight())
-            lightInstanceIndices_.push_back(i);
+            scene_->lightInstanceIndices_.push_back(i);
     }
 }
 
 void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
-    instances[idxIt->second].isGameObject = isGameObject;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
+    scene_->instances[idxIt->second].isGameObject = isGameObject;
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
-    instances[idxIt->second].skipCollision = skip;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
+    scene_->instances[idxIt->second].skipCollision = skip;
 }
 
 void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
-    instances[idxIt->second].skipWallCollision = skip;
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
+    scene_->instances[idxIt->second].skipWallCollision = skip;
 }
 
 void M2Renderer::setInteriorLight(uint32_t instanceId, const std::optional<InteriorLight>& light) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
-    instances[idxIt->second].interiorLight = packInteriorLight(light);
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
+    scene_->instances[idxIt->second].interiorLight = packInteriorLight(light);
 }
 
 void M2Renderer::finishInstance(uint32_t instanceId) {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return;
-    auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end()) return;
+    auto& inst = scene_->instances[idxIt->second];
     if (inst.finishing) return;
     inst.finishing = true;
     // Its particles have at most their longest life left to run.
@@ -454,9 +454,9 @@ void M2Renderer::reapFinishedInstances() {
     const auto now = std::chrono::steady_clock::now();
     std::vector<uint32_t> done;
     std::erase_if(finishingInstances_, [&](const FinishingInstance& f) {
-        auto idxIt = instanceIndexById.find(f.instanceId);
-        if (idxIt == instanceIndexById.end()) return true;  // removed meanwhile
-        const auto& inst = instances[idxIt->second];
+        auto idxIt = scene_->instanceIndexById.find(f.instanceId);
+        if (idxIt == scene_->instanceIndexById.end()) return true;  // removed meanwhile
+        const auto& inst = scene_->instances[idxIt->second];
         const bool ribbonsLeft = std::any_of(inst.ribbons.begin(), inst.ribbons.end(),
                                              [](const auto& r) { return !r.edges.empty(); });
         // Gone when nothing it emitted is left - or when its particles have
@@ -471,7 +471,7 @@ void M2Renderer::reapFinishedInstances() {
 }
 
 void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
-    if (instanceIds.empty() || instances.empty()) {
+    if (instanceIds.empty() || scene_->instances.empty()) {
         return;
     }
 
@@ -488,10 +488,10 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     std::vector<size_t> holes;
     holes.reserve(instanceIds.size());
     for (uint32_t id : instanceIds) {
-        auto idxIt = instanceIndexById.find(id);
-        if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) continue;
+        auto idxIt = scene_->instanceIndexById.find(id);
+        if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) continue;
         if (!toRemove.insert(id).second) continue;
-        auto& inst = instances[idxIt->second];
+        auto& inst = scene_->instances[idxIt->second];
         holes.push_back(idxIt->second);
 
         const GridCell minCell = toSpatialCell(inst.worldBoundsMin);
@@ -507,22 +507,22 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
                         .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
                         .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
             // Only drop the entry if it still names this instance.
-            auto dedupIt = instanceDedupMap_.find(dk);
-            if (dedupIt != instanceDedupMap_.end() && dedupIt->second == id) {
-                instanceDedupMap_.erase(dedupIt);
+            auto dedupIt = scene_->instanceDedupMap_.find(dk);
+            if (dedupIt != scene_->instanceDedupMap_.end() && dedupIt->second == id) {
+                scene_->instanceDedupMap_.erase(dedupIt);
             }
         }
         destroyInstanceBones(inst, /*defer=*/true);
-        cullGrid_.remove(id);
-        instanceIndexById.erase(idxIt);
+        scene_->cullGrid_.remove(id);
+        scene_->instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
 
     for (const GridCell& cell : touchedCells) {
-        auto it = spatialGrid.find(cell);
-        if (it == spatialGrid.end()) continue;
+        auto it = scene_->spatialGrid.find(cell);
+        if (it == scene_->spatialGrid.end()) continue;
         std::erase_if(it->second, [&](uint32_t id) { return toRemove.count(id) != 0; });
-        if (it->second.empty()) spatialGrid.erase(it);
+        if (it->second.empty()) scene_->spatialGrid.erase(it);
     }
 
     // Fill the holes from the back, highest first, so a slot being filled is
@@ -530,12 +530,12 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     // remaining hole is a survivor.
     std::sort(holes.begin(), holes.end(), std::greater<>());
     for (size_t hole : holes) {
-        const size_t last = instances.size() - 1;
+        const size_t last = scene_->instances.size() - 1;
         if (hole != last) {
-            instances[hole] = std::move(instances[last]);
-            instanceIndexById[instances[hole].id] = hole;
+            scene_->instances[hole] = std::move(scene_->instances[last]);
+            scene_->instanceIndexById[scene_->instances[hole].id] = hole;
         }
-        instances.pop_back();
+        scene_->instances.pop_back();
     }
     rebuildInstanceIndexLists();
 }
@@ -547,7 +547,7 @@ void M2Renderer::clear() {
         for (auto& [id, model] : models) {
             destroyModelGPU(model);
         }
-        for (auto& inst : instances) {
+        for (auto& inst : scene_->instances) {
             destroyInstanceBones(inst);
         }
         // Each retired model/instance returns its own sets after the fences.
@@ -555,18 +555,18 @@ void M2Renderer::clear() {
     }
     models.clear();
     pinnedModelIds_.clear();
-    instances.clear();
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    cullGrid_.clear();
-    boneSeedInstanceByModel_.clear();
-    instanceDedupMap_.clear();
-    for (auto& ids : cullSubmittedIds_) ids.clear();
-    for (auto& ids : cullReadableIds_) ids.clear();
-    animatedInstanceIndices_.clear();
-    particleOnlyInstanceIndices_.clear();
-    particleInstanceIndices_.clear();
-    lightInstanceIndices_.clear();
+    scene_->instances.clear();
+    scene_->spatialGrid.clear();
+    scene_->instanceIndexById.clear();
+    scene_->cullGrid_.clear();
+    scene_->boneSeedInstanceByModel_.clear();
+    scene_->instanceDedupMap_.clear();
+    for (auto& ids : scene_->cullSubmittedIds_) ids.clear();
+    for (auto& ids : scene_->cullReadableIds_) ids.clear();
+    scene_->animatedInstanceIndices_.clear();
+    scene_->particleOnlyInstanceIndices_.clear();
+    scene_->particleInstanceIndices_.clear();
+    scene_->lightInstanceIndices_.clear();
 
     // Clear texture cache so stale textures don't block loads for the next
     // character/map.  Without this, the old session's textures fill the cache
@@ -588,19 +588,8 @@ void M2Renderer::clear() {
 }
 
 void M2Renderer::clearInstances() {
-    for (auto& inst : instances) destroyInstanceBones(inst);
-    instances.clear();
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    cullGrid_.clear();
-    boneSeedInstanceByModel_.clear();
-    instanceDedupMap_.clear();
-    for (auto& ids : cullSubmittedIds_) ids.clear();
-    for (auto& ids : cullReadableIds_) ids.clear();
-    animatedInstanceIndices_.clear();
-    particleOnlyInstanceIndices_.clear();
-    particleInstanceIndices_.clear();
-    lightInstanceIndices_.clear();
+    for (auto& inst : scene_->instances) destroyInstanceBones(inst);
+    *scene_ = InstanceState{};
 }
 
 void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
@@ -613,19 +602,19 @@ void M2Renderer::resetQueryStats() {
 }
 
 void M2Renderer::rebuildSpatialIndex() {
-    spatialGrid.clear();
-    instanceIndexById.clear();
-    boneSeedInstanceByModel_.clear();
-    instanceDedupMap_.clear();
-    instanceIndexById.reserve(instances.size());
-    animatedInstanceIndices_.clear();
-    particleOnlyInstanceIndices_.clear();
-    particleInstanceIndices_.clear();
-    lightInstanceIndices_.clear();
+    scene_->spatialGrid.clear();
+    scene_->instanceIndexById.clear();
+    scene_->boneSeedInstanceByModel_.clear();
+    scene_->instanceDedupMap_.clear();
+    scene_->instanceIndexById.reserve(scene_->instances.size());
+    scene_->animatedInstanceIndices_.clear();
+    scene_->particleOnlyInstanceIndices_.clear();
+    scene_->particleInstanceIndices_.clear();
+    scene_->lightInstanceIndices_.clear();
 
-    for (size_t i = 0; i < instances.size(); i++) {
-        auto& inst = instances[i];
-        instanceIndexById[inst.id] = i;
+    for (size_t i = 0; i < scene_->instances.size(); i++) {
+        auto& inst = scene_->instances[i];
+        scene_->instanceIndexById[inst.id] = i;
 
         // Re-cache model pointer (may have changed after model map modifications)
         auto mdlIt = models.find(inst.modelId);
@@ -637,45 +626,45 @@ void M2Renderer::rebuildSpatialIndex() {
                         .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
                         .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
                         .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
-            instanceDedupMap_[dk] = inst.id;
+            scene_->instanceDedupMap_[dk] = inst.id;
         }
 
         if (inst.cachedHasEmitters) {
-            particleInstanceIndices_.push_back(i);
+            scene_->particleInstanceIndices_.push_back(i);
         }
         if (inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
-            animatedInstanceIndices_.push_back(i);
+            scene_->animatedInstanceIndices_.push_back(i);
         } else if (inst.cachedHasEmitters) {
-            particleOnlyInstanceIndices_.push_back(i);
+            scene_->particleOnlyInstanceIndices_.push_back(i);
         }
         if (inst.cachedModel && inst.cachedModel->canThrowLocalLight()) {
-            lightInstanceIndices_.push_back(i);
+            scene_->lightInstanceIndices_.push_back(i);
         }
 
-        insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
+        insertBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
-    cullGrid_.clear();
-    for (const auto& inst : instances) fileInCullGrid(inst);
-    spatialIndexDirty_ = false;
+    scene_->cullGrid_.clear();
+    for (const auto& inst : scene_->instances) fileInCullGrid(inst);
+    scene_->spatialIndexDirty_ = false;
 }
 
 void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax,
                                   std::vector<size_t>& outIndices) const {
     outIndices.clear();
 
-    gatherIds(spatialGrid, queryMin, queryMax, tl_m2_candidateIdScratch,
+    gatherIds(scene_->spatialGrid, queryMin, queryMax, tl_m2_candidateIdScratch,
               [&](uint32_t id) {
-                  auto idxIt = instanceIndexById.find(id);
-                  if (idxIt != instanceIndexById.end()) {
+                  auto idxIt = scene_->instanceIndexById.find(id);
+                  if (idxIt != scene_->instanceIndexById.end()) {
                       outIndices.push_back(idxIt->second);
                   }
               });
 
     // Safety fallback to preserve collision correctness if the spatial index
     // misses candidates (e.g. during streaming churn).
-    if (outIndices.empty() && !instances.empty()) {
-        outIndices.reserve(instances.size());
-        for (size_t i = 0; i < instances.size(); i++) {
+    if (outIndices.empty() && !scene_->instances.empty()) {
+        outIndices.reserve(scene_->instances.size());
+        for (size_t i = 0; i < scene_->instances.size(); i++) {
             outIndices.push_back(i);
         }
     }
@@ -693,7 +682,7 @@ void M2Renderer::setModelPinned(uint32_t modelId, bool pinned) {
 void M2Renderer::cleanupUnusedModels() {
     // Build set of model IDs that are still referenced by instances
     std::unordered_set<uint32_t> usedModelIds;
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         usedModelIds.insert(instance.modelId);
     }
 
@@ -964,7 +953,7 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
 
 uint32_t M2Renderer::getTotalTriangleCount() const {
     uint32_t total = 0;
-    for (const auto& instance : instances) {
+    for (const auto& instance : scene_->instances) {
         if (instance.cachedModel) {
             total += instance.cachedModel->indexCount / 3;
         }
@@ -979,7 +968,7 @@ void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) con
     gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
     int reported = 0;
     for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         const char* rejected = nullptr;
         if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) {
             rejected = "outside the collision focus";
@@ -1013,9 +1002,9 @@ void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) con
 
 bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
                                         glm::vec3& outMax) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return false;
-    const auto& inst = instances[idxIt->second];
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return false;
+    const auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
     outMin = inst.worldBoundsMin;
     outMax = inst.worldBoundsMax;
@@ -1025,11 +1014,11 @@ bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
 std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
                                                        float glX, float glY,
                                                        float glZ) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) {
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) {
         return std::nullopt;
     }
-    const auto& instance = instances[idxIt->second];
+    const auto& instance = scene_->instances[idxIt->second];
     if (!instance.cachedModel || instance.scale <= 0.001f) return std::nullopt;
     const M2ModelGPU& model = *instance.cachedModel;
     if (!model.collision.valid()) return std::nullopt;
@@ -1081,7 +1070,7 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
     gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
 
     for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (collisionFocus.excludes(instance.worldBoundsMin,
                                     instance.worldBoundsMax)) {
             continue;
@@ -1196,7 +1185,7 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
 
     // Check against all M2 instances in local space (rotation-aware).
     for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (collisionFocus.excludes(instance.worldBoundsMin,
                                     instance.worldBoundsMax)) {
             continue;
@@ -1332,7 +1321,7 @@ float M2Renderer::raycastCollision(const glm::vec3& origin, const glm::vec3& dir
     gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
 
     for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = instances[idx];
+        const auto& instance = scene_->instances[idx];
         if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) continue;
         if (!instance.cachedModel || instance.scale <= 0.001f) continue;
         const M2ModelGPU& model = *instance.cachedModel;
@@ -1390,7 +1379,7 @@ void M2Renderer::recreatePipelines() {
 void M2Renderer::collectGrassClearings(float minX, float minY, float maxX, float maxY,
                                        std::vector<pipeline::GrassClearingSource>& out) const {
     constexpr float kEase = 4.0f;
-    for (const auto& inst : instances) {
+    for (const auto& inst : scene_->instances) {
         // The ground detail IS the grass's kin - clutter clearing the ground
         // around clutter would eat the whole field.
         if (inst.cachedIsGroundDetail) continue;

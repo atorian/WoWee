@@ -320,7 +320,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     LOG_DEBUG("Preparing tile [", x, ",", y, "] (CPU work)");
 
     // Early-exit check - worker should bail fast during shutdown
-    if (!workerRunning.load()) return nullptr;
+    if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
     // Try Wowee Open Terrain format first (custom zones)
     std::string wotBase = "custom_zones/" + mapName + "/" + mapName + "_" +
@@ -424,7 +424,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         }
     }
 
-    if (!workerRunning.load()) return nullptr;
+    if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
     // WotLK split ADTs can store placements in *_obj0.adt.
     // Only needed for ADT-loaded tiles, not for WOT custom zones.
@@ -511,9 +511,10 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         return nullptr;
     }
 
-    if (!workerRunning.load()) return nullptr;
+    if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
     auto pending = std::make_shared<PendingTile>();
+    pending->token = mapToken_;
     pending->coord = coord;
     pending->terrain = std::move(*terrainPtr);
     pending->mesh = std::move(mesh);
@@ -613,7 +614,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     // Pre-load M2 doodads (CPU: read files, parse models)
     int skippedNameId = 0, skippedFileNotFound = 0, skippedInvalid = 0, skippedSkinNotFound = 0;
     for (const auto& placement : pending->terrain.doodadPlacements) {
-        if (!workerRunning.load()) return nullptr;
+        if (!workerRunning.load() || !mapToken_.current()) return nullptr;
         if (placement.nameId >= pending->terrain.doodadNames.size()) {
             skippedNameId++;
             continue;
@@ -656,12 +657,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     ensureGroundEffectTablesLoaded();
     generateGroundClutterPlacements(pending, preparedModelIds);
 
-    if (!workerRunning.load()) return nullptr;
+    if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
     // Pre-load WMOs (CPU: read files, parse models and groups)
     if (!pending->terrain.wmoPlacements.empty()) {
         for (const auto& placement : pending->terrain.wmoPlacements) {
-            if (!workerRunning.load()) return nullptr;
+            if (!workerRunning.load() || !mapToken_.current()) return nullptr;
             if (placement.nameId >= pending->terrain.wmoNames.size()) continue;
 
             const std::string& wmoPath = pending->terrain.wmoNames[placement.nameId];
@@ -718,7 +719,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                 glm::vec3 rot = placementEuler(placement.rotation);
 
                 // Pre-load WMO doodads (M2 models inside WMO)
-                if (!workerRunning.load()) return nullptr;
+                if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
                 // Skip WMO doodads if this placement was already prepared by another tile's worker.
                 // This prevents 15+ copies of Stormwind's ~6000 doodads from being parsed
@@ -920,7 +921,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
         }
     }
 
-    if (!workerRunning.load()) return nullptr;
+    if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
     // Pre-load terrain texture BLP data on background thread so finalizeTile
     // doesn't block the main thread with file I/O.
@@ -1441,11 +1442,12 @@ void TerrainManager::workerLoop() {
         }
 
         if (hasWork) {
-            auto pending = prepareTile(coord.x, coord.y);
+            auto lifetime = core::JobGroup::track(mapToken_);
+            auto pending = lifetime && mapToken_.current() ? prepareTile(coord.x, coord.y) : nullptr;
 
             std::lock_guard<std::mutex> lock(queueMutex);
             --preparingTiles_;
-            if (pending) {
+            if (pending && pending->token.current()) {
                 readyQueue.push(pending);
             } else {
                 // Mark as failed so we don't re-enqueue
@@ -1468,7 +1470,7 @@ void TerrainManager::processReadyTiles() {
         while (!readyQueue.empty()) {
             auto pending = readyQueue.front();
             readyQueue.pop();
-            if (pending) {
+            if (pending && pending->token.current()) {
                 FinalizingTile ft;
                 ft.pending = std::move(pending);
                 finalizingTiles_.push_back(std::move(ft));
@@ -1747,6 +1749,7 @@ void TerrainManager::stopWorkers() {
         return;
     }
     LOG_DEBUG("stopWorkers: signaling ", workerThreads.size(), " workers to stop...");
+    standaloneJobs_.cancel();
     workerRunning.store(false);
     queueCV.notify_all();
 
@@ -1764,48 +1767,6 @@ void TerrainManager::stopWorkers() {
     LOG_DEBUG("stopWorkers: done");
 }
 
-void TerrainManager::softReset() {
-    // Clear queues (workers may still be running - they'll find empty queues)
-    {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        loadQueue.clear();
-        while (!readyQueue.empty()) readyQueue.pop();
-    }
-    pendingTiles.clear();
-    finalizingTiles_.clear();
-    placedDoodadIds.clear();
-    placedWmoIds.clear();
-    {
-        std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
-        uploadedM2Ids_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
-        preparedWmoUniqueIds_.clear();
-    }
-
-    // Clear tile cache - keys are (x,y) without map name, so stale entries from
-    // a different map with overlapping coordinates would produce wrong geometry.
-    {
-        std::lock_guard<std::mutex> lock(tileCacheMutex_);
-        tileCache_.clear();
-        tileCacheLru_.clear();
-    }
-
-    LOG_INFO("Soft-resetting terrain (clearing tiles + water + cache, workers stay alive)");
-    loadedTiles.clear();
-    failedTiles.clear();
-
-    currentTile = {.x = -1, .y = -1};
-    lastStreamTile = {.x = -1, .y = -1};
-
-    if (terrainRenderer) {
-        terrainRenderer->clear();
-    }
-    if (waterRenderer) {
-        waterRenderer->clear();
-    }
-}
 
 TileCoord TerrainManager::worldToTile(float glX, float glY) const {
     auto [tileX, tileY] = core::coords::worldToTile(glX, glY);

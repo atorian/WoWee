@@ -66,19 +66,19 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
         }
 
-    auto seedIt = boneSeedInstanceByModel_.find(modelId);
-    if (seedIt != boneSeedInstanceByModel_.end()) {
-        auto idxIt = instanceIndexById.find(seedIt->second);
-        if (idxIt != instanceIndexById.end() && idxIt->second < instances.size()) {
-            const auto& existing = instances[idxIt->second];
+    auto seedIt = scene_->boneSeedInstanceByModel_.find(modelId);
+    if (seedIt != scene_->boneSeedInstanceByModel_.end()) {
+        auto idxIt = scene_->instanceIndexById.find(seedIt->second);
+        if (idxIt != scene_->instanceIndexById.end() && idxIt->second < scene_->instances.size()) {
+            const auto& existing = scene_->instances[idxIt->second];
             if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
                 instance.boneMatrices = existing.boneMatrices;
                 instance.bonesDirty[0] = instance.bonesDirty[1] = true;
             } else {
-                boneSeedInstanceByModel_.erase(seedIt);  // stale entry
+                scene_->boneSeedInstanceByModel_.erase(seedIt);  // stale entry
             }
         } else {
-            boneSeedInstanceByModel_.erase(seedIt);  // that instance is gone
+            scene_->boneSeedInstanceByModel_.erase(seedIt);  // that instance is gone
         }
     }
 
@@ -87,7 +87,7 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
         computeBoneMatrices(model, instance, &cachedView_);
     }
     if (!instance.boneMatrices.empty()) {
-        boneSeedInstanceByModel_.emplace(modelId, instance.id);
+        scene_->boneSeedInstanceByModel_.emplace(modelId, instance.id);
     }
 }
 
@@ -133,8 +133,8 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
-        auto dit = instanceDedupMap_.find(dk);
-        if (dit != instanceDedupMap_.end()) {
+        auto dit = scene_->instanceDedupMap_.find(dk);
+        if (dit != scene_->instanceDedupMap_.end()) {
             return dit->second;
         }
     }
@@ -183,30 +183,30 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
-        instanceDedupMap_[dk] = instance.id;
+        scene_->instanceDedupMap_[dk] = instance.id;
     }
 
     // WOWEE_M2_CENSUS: what the model is drawn at, beside what it was
     // authored at. The load-time census gives the authored height; a game
     // object's scale comes from the server and is only known here.
     censusInstance(instance);
-    instances.push_back(instance);
-    size_t idx = instances.size() - 1;
+    scene_->instances.push_back(instance);
+    size_t idx = scene_->instances.size() - 1;
     // Track special instances for fast-path iteration
     if (mdlRef.hasEmitters()) {
-        particleInstanceIndices_.push_back(idx);
+        scene_->particleInstanceIndices_.push_back(idx);
     }
     if (mdlRef.hasAnimation && !mdlRef.disableAnimation) {
-        animatedInstanceIndices_.push_back(idx);
+        scene_->animatedInstanceIndices_.push_back(idx);
     } else if (mdlRef.hasEmitters()) {
-        particleOnlyInstanceIndices_.push_back(idx);
+        scene_->particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdlRef.canThrowLocalLight()) {
-        lightInstanceIndices_.push_back(idx);
+        scene_->lightInstanceIndices_.push_back(idx);
     }
-    instanceIndexById[instance.id] = idx;
-    fileInCullGrid(instances[idx]);
-    insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    scene_->instanceIndexById[instance.id] = idx;
+    fileInCullGrid(scene_->instances[idx]);
+    insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
 }
@@ -235,8 +235,8 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
-        auto dit = instanceDedupMap_.find(dk);
-        if (dit != instanceDedupMap_.end()) {
+        auto dit = scene_->instanceDedupMap_.find(dk);
+        if (dit != scene_->instanceDedupMap_.end()) {
             return dit->second;
         }
     }
@@ -288,29 +288,29 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
-        instanceDedupMap_[dk] = instance.id;
+        scene_->instanceDedupMap_[dk] = instance.id;
     }
 
     // WOWEE_M2_CENSUS: what the model is drawn at, beside what it was
     // authored at. The load-time census gives the authored height; a game
     // object's scale comes from the server and is only known here.
     censusInstance(instance);
-    instances.push_back(instance);
-    size_t idx = instances.size() - 1;
+    scene_->instances.push_back(instance);
+    size_t idx = scene_->instances.size() - 1;
     if (mdl2.hasEmitters()) {
-        particleInstanceIndices_.push_back(idx);
+        scene_->particleInstanceIndices_.push_back(idx);
     }
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
-        animatedInstanceIndices_.push_back(idx);
+        scene_->animatedInstanceIndices_.push_back(idx);
     } else if (mdl2.hasEmitters()) {
-        particleOnlyInstanceIndices_.push_back(idx);
+        scene_->particleOnlyInstanceIndices_.push_back(idx);
     }
     if (mdl2.canThrowLocalLight()) {
-        lightInstanceIndices_.push_back(idx);
+        scene_->lightInstanceIndices_.push_back(idx);
     }
-    instanceIndexById[instance.id] = idx;
-    fileInCullGrid(instances[idx]);
-    insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    scene_->instanceIndexById[instance.id] = idx;
+    fileInCullGrid(scene_->instances[idx]);
+    insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
 }
@@ -335,7 +335,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     const glm::mat4 viewProjection = projection * view;
     cachedView_ = view;
     ZoneScopedN("M2Renderer::update");
-    if (spatialIndexDirty_) {
+    if (scene_->spatialIndexDirty_) {
         rebuildSpatialIndex();
     }
 
@@ -350,7 +350,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     const float maxRenderDistance = std::min(
         cappedViewDistance(),
         viewDistanceScale_ *
-            ((instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
+            ((scene_->instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
                  ? rendering::M2_MAX_RENDER_DISTANCE_HIGH_DENSITY
                  : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY));
     cachedMaxRenderDistSq_ = maxRenderDistance * maxRenderDistance;
@@ -371,7 +371,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     // waterfall with no bones of its own scrolled once after it loaded and
     // then stood still, and one with emitters - wrapped at a fixed 3.3 s
     // below, whatever its sequence - stopped for the rest of each lap.
-    for (auto& instance : instances) {
+    for (auto& instance : scene_->instances) {
         instance.animTime += dtMs;
         instance.globalSequenceTime += dtMs;
         // A boat asks once whether it is on water - the canal may stream in
@@ -410,12 +410,12 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     //
     // Only this renderer has skyMode_, and only on a change worth seeing, so it
     // is quiet unless asked for with WOWEE_LOG_LEVEL=info.
-    if (skyMode_ && !instances.empty()) {
-        const auto& sky = instances.front();
+    if (skyMode_ && !scene_->instances.empty()) {
+        const auto& sky = scene_->instances.front();
         const bool restarted = sky.animTime < skyDiagAnimTime_;
         if (restarted || sky.id != skyDiagInstanceId_ ||
             sky.animTime - skyDiagAnimTime_ > 1000.0f) {
-            LOG_INFO("skyM2: instance=", sky.id, " instances=", instances.size(),
+            LOG_INFO("skyM2: instance=", sky.id, " instances=", scene_->instances.size(),
                      " animTime=", sky.animTime, " duration=", sky.animDuration,
                      " gsTime=", sky.globalSequenceTime, " dtMs=", dtMs,
                      restarted ? " RESTARTED" : "");
@@ -430,9 +430,9 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     static constexpr float kParticleWrapMs = 3333.0f;
     // Only for those with no sequence length to wrap at; the rest were
     // wrapped at their own above.
-    for (size_t idx : particleOnlyInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        auto& instance = instances[idx];
+    for (size_t idx : scene_->particleOnlyInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        auto& instance = scene_->instances[idx];
         if (instance.animDuration > 0.0f) continue;
         // Use iterative subtraction instead of fmod() to preserve precision
         while (instance.animTime > kParticleWrapMs) {
@@ -440,8 +440,8 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         }
     }
 
-    boneWorkIndices_.clear();
-    boneWorkIndices_.reserve(animatedInstanceIndices_.size());
+    scene_->boneWorkIndices_.clear();
+    scene_->boneWorkIndices_.reserve(scene_->animatedInstanceIndices_.size());
 
     // Update animated instances (full animation state + bone computation culling)
     // Note: animTime was already advanced by dtMs in the global loop above.
@@ -454,9 +454,9 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     const float clutterAnimCutoffSq = (groundDetailMaxDistance_ > 0.0f)
         ? (groundDetailMaxDistance_ * groundDetailMaxDistance_) : 0.0f;
 
-    for (size_t idx : animatedInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        auto& instance = instances[idx];
+    for (size_t idx : scene_->animatedInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        auto& instance = scene_->instances[idx];
 
         if (clutterAnimCutoffSq > 0.0f && instance.cachedIsGroundDetail) {
             const glm::vec3 toCam = instance.position - cachedCamPos_;
@@ -574,19 +574,19 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
         instance.frameSkipCounter++;
         if ((instance.frameSkipCounter % boneInterval) != 0) continue;
 
-        boneWorkIndices_.push_back(idx);
+        scene_->boneWorkIndices_.push_back(idx);
     }
 
     // Compute bone matrices (expensive, parallel if enough work)
-    const size_t animCount = boneWorkIndices_.size();
+    const size_t animCount = scene_->boneWorkIndices_.size();
     if (animCount > 0) {
         static const size_t minParallelAnimInstances = std::max<size_t>(
             8, envSizeOrDefault("WOWEE_M2_ANIM_MT_MIN", 96));
         if (animCount < minParallelAnimInstances || numAnimThreads_ <= 1) {
             // Sequential - not enough work to justify thread overhead
-            for (size_t i : boneWorkIndices_) {
-                if (i >= instances.size()) continue;
-                auto& inst = instances[i];
+            for (size_t i : scene_->boneWorkIndices_) {
+                if (i >= scene_->instances.size()) continue;
+                auto& inst = scene_->instances[i];
                 if (!inst.cachedModel) continue;
                 computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
             }
@@ -598,9 +598,9 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                 1, (animCount + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
             const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
             if (numThreads <= 1) {
-                for (size_t i : boneWorkIndices_) {
-                    if (i >= instances.size()) continue;
-                    auto& inst = instances[i];
+                for (size_t i : scene_->boneWorkIndices_) {
+                    if (i >= scene_->instances.size()) continue;
+                    auto& inst = scene_->instances[i];
                     if (!inst.cachedModel) continue;
                     computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
                 }
@@ -610,18 +610,18 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
 
                 auto processRange = [this](size_t begin, size_t end) {
                     for (size_t j = begin; j < end; ++j) {
-                        size_t idx = boneWorkIndices_[j];
-                        if (idx >= instances.size()) continue;
-                        auto& inst = instances[idx];
+                        size_t idx = scene_->boneWorkIndices_[j];
+                        if (idx >= scene_->instances.size()) continue;
+                        auto& inst = scene_->instances[idx];
                         if (!inst.cachedModel) continue;
                         computeBoneMatrices(*inst.cachedModel, inst, &cachedView_);
                     }
                 };
 
                 // Reuse persistent futures vector to avoid allocation
-                animFutures_.clear();
-                if (animFutures_.capacity() < numThreads) {
-                    animFutures_.reserve(numThreads);
+                scene_->animFutures_.clear();
+                if (scene_->animFutures_.capacity() < numThreads) {
+                    scene_->animFutures_.reserve(numThreads);
                 }
 
                 // Dispatch all but the last chunk to the shared pool; process the
@@ -630,13 +630,13 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                 size_t start = 0;
                 for (size_t t = 0; t + 1 < numThreads; ++t) {
                     size_t end = start + chunkSize + (t < remainder ? 1 : 0);
-                    animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+                    scene_->animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
                         [processRange, start, end]() { processRange(start, end); }));
                     start = end;
                 }
                 processRange(start, animCount);
 
-                for (auto& f : animFutures_) {
+                for (auto& f : scene_->animFutures_) {
                     f.get();
                 }
             }
@@ -667,9 +667,9 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
 
     // Particle update (sequential - uses RNG, not thread-safe)
     // Only iterate instances that have particle emitters (pre-built list).
-    for (size_t idx : particleInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        auto& instance = instances[idx];
+    for (size_t idx : scene_->particleInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        auto& instance = scene_->instances[idx];
         // Distance cull: only update particles within visible range
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
@@ -739,7 +739,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
 static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
-    if (!initialized_ || instances.empty()) return;
+    if (!initialized_ || scene_->instances.empty()) return;
     (void)camera;  // reserved for future frustum-based culling
     reapFinishedInstances();
 
@@ -749,9 +749,9 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     // all 300 matrices instead of being truncated into a fixed stride and
     // reading into its neighbour's range.
     uint32_t nextOffset = 1;
-    for (size_t idx : animatedInstanceIndices_) {
-        if (idx >= instances.size()) continue;
-        auto& instance = instances[idx];
+    for (size_t idx : scene_->animatedInstanceIndices_) {
+        if (idx >= scene_->instances.size()) continue;
+        auto& instance = scene_->instances[idx];
 
         if (instance.boneMatrices.empty()) {
             instance.megaBoneOffset = 0;  // Use identity slot
@@ -834,12 +834,12 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
 // buffer. render() consumes the completed output left in this frame slot from
 // its previous use; this dispatch produces results for the slot's next reuse.
 void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
-    if (!cullPipeline_ || instances.empty()) return;
+    if (!cullPipeline_ || scene_->instances.empty()) return;
 
     // --- Compute per-instance adaptive distances (same formula as old CPU cull) ---
     const float targetRenderDist = viewDistanceScale_ *
-        ((instances.size() > 2000) ? 300.0f
-         : (instances.size() > 1000) ? 500.0f
+        ((scene_->instances.size() > 2000) ? 300.0f
+         : (scene_->instances.size() > 1000) ? 500.0f
                                      : 1000.0f);
     const float shrinkRate = 0.005f;
     const float growRate   = 0.05f;
@@ -931,11 +931,11 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     // after the early-out above, so "readable" always describes the last dispatch
     // actually recorded on this slot.
     if (frameIndex < 2) {
-        cullReadableIds_[frameIndex].swap(cullSubmittedIds_[frameIndex]);
-        cullSubmittedIds_[frameIndex].clear();
-        cullSubmittedIds_[frameIndex].reserve(numInstances);
+        scene_->cullReadableIds_[frameIndex].swap(scene_->cullSubmittedIds_[frameIndex]);
+        scene_->cullSubmittedIds_[frameIndex].clear();
+        scene_->cullSubmittedIds_[frameIndex].reserve(numInstances);
         for (uint32_t i = 0; i < numInstances; i++)
-            cullSubmittedIds_[frameIndex].push_back(instances[cullCandidates_[i]].id);
+            scene_->cullSubmittedIds_[frameIndex].push_back(scene_->instances[cullCandidates_[i]].id);
     }
 
     // --- Upload per-instance cull data (SSBO, binding 1) ---
@@ -945,7 +945,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     if (cullInputMapped_[frameIndex]) {
         auto* input = static_cast<CullInstanceGPU*>(cullInputMapped_[frameIndex]);
         for (uint32_t i = 0; i < numInstances; i++) {
-            const auto& inst = instances[cullCandidates_[i]];
+            const auto& inst = scene_->instances[cullCandidates_[i]];
             float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
                 maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
                 inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
@@ -1064,7 +1064,7 @@ void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
 }  // namespace
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (instances.empty() || !opaquePipeline_) {
+    if (scene_->instances.empty() || !opaquePipeline_) {
         return;
     }
 
@@ -1072,7 +1072,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     static bool loggedOnce = false;
     if (!loggedOnce) {
         loggedOnce = true;
-        LOG_INFO("M2 render: ", instances.size(), " instances, ", models.size(), " models");
+        LOG_INFO("M2 render: ", scene_->instances.size(), " instances, ", models.size(), " models");
     }
 
     // Periodic diagnostic: report render pipeline stats every 10 seconds
@@ -1080,7 +1080,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     if (++diagCounter == 600) { // ~10s at 60fps
         diagCounter = 0;
         uint32_t totalValid = 0, totalAnimated = 0, totalBonesReady = 0, totalMegaBoneOk = 0;
-        for (const auto& inst : instances) {
+        for (const auto& inst : scene_->instances) {
             if (inst.cachedIsValid) totalValid++;
             if (inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
                 totalAnimated++;
@@ -1088,7 +1088,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 if (inst.megaBoneOffset != 0) totalMegaBoneOk++;
             }
         }
-        LOG_INFO("M2 diag: total=", instances.size(),
+        LOG_INFO("M2 diag: total=", scene_->instances.size(),
                  " valid=", totalValid,
                  " animated=", totalAnimated,
                  " bonesReady=", totalBonesReady,
@@ -1126,18 +1126,18 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // "previously visible", which prevents the 1-frame-on / 1-frame-off
     // oscillation that showed up as doodad flicker near moving characters.
     if (gpuCullAvailable) {
-        const auto& ids = cullReadableIds_[frameIndex < 2 ? frameIndex : 0];
+        const auto& ids = scene_->cullReadableIds_[frameIndex < 2 ? frameIndex : 0];
         for (size_t k = 0; k < ids.size(); ++k) {
             // Fast path: with no churn since that dispatch the ordering still
             // matches, so skip the hash lookup.
             M2Instance* inst = nullptr;
-            if (k < instances.size() && instances[k].id == ids[k]) {
-                inst = &instances[k];
+            if (k < scene_->instances.size() && scene_->instances[k].id == ids[k]) {
+                inst = &scene_->instances[k];
             } else {
-                auto idxIt = instanceIndexById.find(ids[k]);
-                if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size())
+                auto idxIt = scene_->instanceIndexById.find(ids[k]);
+                if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size())
                     continue;  // instance was removed since the dispatch
-                inst = &instances[idxIt->second];
+                inst = &scene_->instances[idxIt->second];
             }
             inst->cullVerdictSerial = verdictSerial;
             if (visibility[k]) {
@@ -1151,7 +1151,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         }
     } else {
         // No GPU cull data - conservatively treat everything as visible.
-        for (auto& inst : instances) {
+        for (auto& inst : scene_->instances) {
             inst.lastCullVisible = 1;
             inst.hizPrevCulledFrames = 0;
         }
@@ -1161,8 +1161,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     float maxRenderDistanceSq;
     if (!gpuCullAvailable) {
         const float targetRenderDist = viewDistanceScale_ *
-            ((instances.size() > 2000) ? 300.0f
-             : (instances.size() > 1000) ? 500.0f
+            ((scene_->instances.size() > 2000) ? 300.0f
+             : (scene_->instances.size() > 1000) ? 500.0f
                                          : 1000.0f);
         const float shrinkRate = 0.005f;
         const float growRate = 0.05f;
@@ -1190,7 +1190,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     transparentVisible_.clear();
     skyDiagDrawsOpaque_ = 0;
     skyDiagDrawsTransparent_ = 0;
-    const size_t expectedVisible = std::min(instances.size() / 3, size_t(600));
+    const size_t expectedVisible = std::min(scene_->instances.size() / 3, size_t(600));
     if (sortedVisible_.capacity() < expectedVisible) {
         sortedVisible_.reserve(expectedVisible);
     }
@@ -1215,7 +1215,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // thousand instances in Dalaran - for the few thousand it drew.
     std::vector<uint32_t>& candidates = viewCandidates_;
     if (forceNoCull_) {
-        candidates.resize(instances.size());
+        candidates.resize(scene_->instances.size());
         for (uint32_t i = 0; i < candidates.size(); ++i) candidates[i] = i;
     } else {
         gatherViewCandidates(camPos, frustum, maxPossibleDistSq, candidates);
@@ -1241,7 +1241,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         out.transparent.reserve((end - begin) / 12);
         for (uint32_t k = begin; k < end; ++k) {
             const uint32_t i = list[k];
-            const auto& instance = instances[i];
+            const auto& instance = scene_->instances[i];
             // A finished effect shows only the particles it has left.
             if (instance.finishing) continue;
             float distSq;
@@ -1330,7 +1330,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // from before the camera moved can make them differ.
     static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
     if (cullCheck && !forceNoCull_ && !skyMode_) {
-        std::vector<uint32_t> all(instances.size());
+        std::vector<uint32_t> all(scene_->instances.size());
         for (uint32_t i = 0; i < all.size(); ++i) all[i] = i;
         std::vector<VisibleChunk> whole(1);
         classifyInto(whole, all, 0, 0, static_cast<uint32_t>(all.size()));
@@ -1340,7 +1340,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                              whole[0].transparent.size() != transparentVisible_.size();
         if (now - lastReport > std::chrono::seconds(differs ? 1 : 10)) {
             lastReport = now;
-            LOG_WARNING("M2 cull check: columns kept ", candidates.size(), " of ", instances.size(),
+            LOG_WARNING("M2 cull check: columns kept ", candidates.size(), " of ", scene_->instances.size(),
                         " to classify; visible opaque ", sortedVisible_.size(), " vs ",
                         whole[0].opaque.size(), " whole-world, transparent ",
                         transparentVisible_.size(), " vs ", whole[0].transparent.size(),
@@ -1382,7 +1382,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             LOG_INFO("skyM2 cull: ", drawn ? "DRAWN" : "CULLED",
                      " opaque=", sortedVisible_.size(),
                      " transparent=", transparentVisible_.size(),
-                     " instances=", instances.size());
+                     " instances=", scene_->instances.size());
         }
     }
 
@@ -1482,11 +1482,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             // Pull the model through the first entry's instance.cachedModel pointer
             // (set at addInstance) instead of doing models.find(groupModelId) per group.
             const auto& firstEntry = sortedVisible_[visStart];
-            if (firstEntry.index >= instances.size() || !instances[firstEntry.index].cachedModel) {
+            if (firstEntry.index >= scene_->instances.size() || !scene_->instances[firstEntry.index].cachedModel) {
                 visStart = groupEnd;
                 continue;
             }
-            const M2ModelGPU& model = *instances[firstEntry.index].cachedModel;
+            const M2ModelGPU& model = *scene_->instances[firstEntry.index].cachedModel;
             if (skipGroundDetail_ && model.isGroundDetail) {
                 visStart = groupEnd;
                 continue;
@@ -1502,8 +1502,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             pending.clear();
             for (size_t vi = visStart; vi < groupEnd; vi++) {
                 const auto& entry = sortedVisible_[vi];
-                if (entry.index >= instances.size()) continue;
-                auto& instance = instances[entry.index];
+                if (entry.index >= scene_->instances.size()) continue;
+                auto& instance = scene_->instances[entry.index];
 
                 // Distance-based fade alpha
                 float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
@@ -1556,7 +1556,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             size_t writtenInstances = 0;
             for (const auto& p : pending) {
                 if (instanceDataCount_ >= MAX_INSTANCE_DATA) break;
-                auto& inst = instances[p.instanceIdx];
+                auto& inst = scene_->instances[p.instanceIdx];
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
@@ -1690,7 +1690,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     if (shouldUseGlowSprite) {
                         // Generate glow sprites for each instance in the group
                         for (size_t j = lodIdx; j < lodEnd; j++) {
-                            auto& inst = instances[pending[j].instanceIdx];
+                            auto& inst = scene_->instances[pending[j].instanceIdx];
                             glm::vec3 worldPos;
                             if (model.isGroundFire &&
                                 !model.particleEmitters.empty()) {
@@ -1832,7 +1832,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         }
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             const auto& p = pending[j];
-                            auto& inst = instances[p.instanceIdx];
+                            auto& inst = scene_->instances[p.instanceIdx];
                             M2UVTransform uv, uv2;
                             if (tt) {
                                 uv = m2SampleUVTransform(*tt, inst.currentSequenceIndex,
@@ -1944,7 +1944,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                    .sort = ms(m2T1, m2T2),
                    .record = ms(m2T2, m2T3),
                    .visible = sortedVisible_.size(),
-                   .instances = instances.size()});
+                   .instances = scene_->instances.size()});
     }
 }
 
@@ -1986,8 +1986,8 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
 
     for (const auto& entry : transparentVisible_) {
-        if (entry.index >= instances.size()) continue;
-        auto& instance = instances[entry.index];
+        if (entry.index >= scene_->instances.size()) continue;
+        auto& instance = scene_->instances[entry.index];
 
         // Model boundary: read cachedModel off the instance - was doing a
         // per-boundary models.find() even though every instance already has
@@ -2345,7 +2345,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
                               const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (instances.empty() || models.empty()) return;
+    if (scene_->instances.empty() || models.empty()) return;
 
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
@@ -2440,8 +2440,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             std::erase_if(bucket, [&](const std::pair<uint32_t, uint32_t>& caster) {
                 // Only ever this frame's list, but an index that no longer
                 // names the instance it was culled as is dropped, not drawn.
-                if (caster.second >= instances.size()) return true;
-                const auto& instance = instances[caster.second];
+                if (caster.second >= scene_->instances.size()) return true;
+                const auto& instance = scene_->instances[caster.second];
                 if (instance.modelId != caster.first || !instance.cachedModel) return true;
                 return !insideFootprint(instance, *instance.cachedModel);
             });
@@ -2460,7 +2460,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // This walked every instance resident, ninety thousand in Dalaran.
         gatherShadowCandidates(lightSpaceMatrix, shadowRadius, shadowCandidates_);
         for (const uint32_t i : shadowCandidates_) {
-            const auto& instance = instances[i];
+            const auto& instance = scene_->instances[i];
             if (!castsHere(instance)) continue;
             shadowCasters_[instance.cachedModel->shadowWindFoliage ? 1 : 0].emplace_back(
                 instance.modelId, i);
@@ -2472,14 +2472,14 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
         if (cullCheck && resetDescriptors) {
             size_t whole = 0;
-            for (const auto& instance : instances) whole += castsHere(instance) ? 1 : 0;
+            for (const auto& instance : scene_->instances) whole += castsHere(instance) ? 1 : 0;
             const size_t kept = shadowCasters_[0].size() + shadowCasters_[1].size();
             static std::chrono::steady_clock::time_point lastReport{};
             const auto now = std::chrono::steady_clock::now();
             if (now - lastReport > std::chrono::seconds(whole != kept ? 1 : 10)) {
                 lastReport = now;
                 LOG_WARNING("M2 shadow cull check: columns kept ", shadowCandidates_.size(), " of ",
-                            instances.size(), " to test; casters ", kept, " vs ", whole,
+                            scene_->instances.size(), " to test; casters ", kept, " vs ", whole,
                             " whole-world", whole != kept ? "  <-- DIFFERS" : "");
             }
         }
@@ -2512,7 +2512,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             std::size_t groupEnd = g;
             while (groupEnd < casters.size() && casters[groupEnd].first == modelId) ++groupEnd;
 
-            const auto& firstInstance = instances[casters[g].second];
+            const auto& firstInstance = scene_->instances[casters[g].second];
             if (!firstInstance.cachedModel) { g = groupEnd; continue; }
             const M2ModelGPU& model = *firstInstance.cachedModel;
 
@@ -2564,7 +2564,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 }
 
                 for (std::size_t k = g; k < groupEnd; ++k) {
-                    const auto& instance = instances[casters[k].second];
+                    const auto& instance = scene_->instances[casters[k].second];
                     // The instance's own origin is what gives the wind its
                     // per-tree phase; the height and amplitude beside it are
                     // the model's.

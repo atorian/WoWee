@@ -317,6 +317,9 @@ void AnimationCallbackHandler::setupCallbacks() {
         // mask of all ones; the spline opcodes each pass the one bit they are
         // named after, so starting to swim no longer says anything about
         // whether the creature is also flying.
+        // Movement state is kept per map scope. Before one exists the flags
+        // have nowhere to go; the unit's next movement update carries them.
+        if (!entitySpawner_.hasMap()) return;
         const auto apply = [&](game::MovementFlags flag, auto& state) {
             const uint32_t bit = static_cast<uint32_t>(flag);
             if ((mask & bit) == 0) return;
@@ -334,7 +337,7 @@ void AnimationCallbackHandler::setupCallbacks() {
     // reloads. One-shots play once and resume the retained state loop.
     gameHandler_.setEmoteAnimCallback([this](uint64_t guid, uint32_t emoteAnim, bool isState) {
         auto* cr = renderer_.getCharacterRenderer();
-        if (!cr) return;
+        if (!cr || !entitySpawner_.hasMap()) return;
         auto entity = gameHandler_.getEntityManager().getEntity(guid);
         const bool isCreature = entity && entity->getType() == game::ObjectType::UNIT;
         auto& activeEmotes = entitySpawner_.getCreatureActiveEmotes();
