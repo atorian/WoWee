@@ -155,6 +155,14 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
              " initial=", isInitialEntry);
     playerView_.resetCombatVisualState();
 
+    // An unfinished load is superseded even when the next destination is on
+    // the same map. Application cancels its old work at the frame boundary.
+    if (worldLoader_ && worldLoader_->stage() != WorldLoader::Stage::Idle &&
+        worldLoader_->stage() != WorldLoader::Stage::Finished) {
+        worldLoader_->setPendingEntry(mapId, x, y, z);
+        return;
+    }
+
     // The animation constants against this install's AnimationData.dbc,
     // once a login: the first moment the archives are certainly mounted.
     // The game did this, which had it reach into the animation code it
@@ -454,7 +462,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                      " tiles around bind point (same map) tile=[", tileX, ",", tileY, "]");
         } else {
             // Different map: warm the file cache so ADT parsing is fast when
-            // loadOnlineWorldTerrain runs its blocking load loop.
+            // LOADING_WORLD advances the destination's streaming work.
             // homeBindPos_ is canonical; startWorldPreload expects server coords.
             glm::vec3 server = core::coords::canonicalToServer(glm::vec3(x, y, z));
             if (worldLoader_) {

@@ -19,7 +19,8 @@ Checklist when changing a transition:
 - Keep the event subscriber limited to recording a request.
 - Apply teardown, entry and reconnect in the phase after submission.
 - Let logout/disconnect/exit supersede pending world entries.
-- During loading warmup, record new requests and return to the main loop;
-  do not apply them recursively from `GameHandler::update`.
+- Loading is an ordinary `LOADING_WORLD` frame. New entries cancel or supersede
+  pending preparation in Transitions; disconnect/logout/exit use the same queue.
+  Never pump a second frame or apply a transition from `GameHandler::update`.
 - Test packet input through `GameHarness`: state survives `pump()` and changes
   only when the client issues the transition command afterward.

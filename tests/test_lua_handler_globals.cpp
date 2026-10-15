@@ -247,7 +247,7 @@ TEST_CASE("a frame handler outside Interface returns a protected Lua error", "[l
     setLegacyHandlerGlobals(GENERATE(false, true));
     f.handler(script, "called = (called or 0) + 1");
     auto phase = GENERATE(wowee::core::Phase::Idle, wowee::core::Phase::Input,
-        wowee::core::Phase::Network, wowee::core::Phase::Game, wowee::core::Phase::Events,
+        wowee::core::Phase::Network, wowee::core::Phase::Game, wowee::core::Phase::Events, wowee::core::Phase::Streaming,
         wowee::core::Phase::Present, wowee::core::Phase::Render,
         wowee::core::Phase::Transitions, wowee::core::Phase::Pace);
     wowee::addons::LuaServices services;

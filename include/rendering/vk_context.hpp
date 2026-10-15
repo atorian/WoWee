@@ -135,6 +135,7 @@ public:
     void freeRawStaging();
     void deferStagingCleanup(AllocatedBuffer staging);
     void pollUploadBatches();    // Check completed async uploads, free staging buffers
+    [[nodiscard]] bool uploadsComplete() const { return inFlightBatches_.empty() && !inUploadBatch_; }
     void waitAllUploads();       // Block until all in-flight uploads complete
 
     // Defer resource destruction until it is safe with multiple frames in flight.

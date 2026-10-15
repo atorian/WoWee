@@ -1287,6 +1287,7 @@ void WMORenderer::clearInstances() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    floorCacheWork_.reset();
     precomputedFloorGrid.clear();  // Invalidate floor cache when instances change
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
@@ -1324,6 +1325,7 @@ void WMORenderer::clearAll() {
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
     textureBudgetRejectWarnings_ = 0;
+    floorCacheWork_.reset();
     precomputedFloorGrid.clear();
 
     LOG_INFO("Cleared all WMO models, instances, and texture cache");
@@ -1415,6 +1417,7 @@ bool WMORenderer::loadFloorCache() {
     }
 
     // Read entries
+    floorCacheWork_.reset();
     precomputedFloorGrid.clear();
     precomputedFloorGrid.reserve(count);
 
@@ -1430,59 +1433,45 @@ bool WMORenderer::loadFloorCache() {
     return true;
 }
 
-void WMORenderer::precomputeFloorCache() {
-    if (instances.empty()) {
-        core::Logger::getInstance().info("precomputeFloorCache: no instances to precompute");
-        return;
-    }
+void WMORenderer::beginFloorCachePrecompute() {
+    floorCacheWork_ = FloorCacheWork{.count = instances.size(), .startSize = precomputedFloorGrid.size()};
+    LOG_INFO("Pre-computing floor cache for ", instances.size(), " WMO instances...");
+}
 
-    size_t startSize = precomputedFloorGrid.size();
-    size_t samplesChecked = 0;
-
-    core::Logger::getInstance().info("Pre-computing floor cache for ", instances.size(), " WMO instances...");
-
-    for (const auto& instance : instances) {
-        // Get world bounds for this instance
-        const glm::vec3& boundsMin = instance.worldBoundsMin;
-        const glm::vec3& boundsMax = instance.worldBoundsMax;
-
-        // Sample reference Z is above the structure
-        float refZ = boundsMax.z + 10.0f;
-
-        // Iterate over grid points within the bounds
-        float startX = std::floor(boundsMin.x / FLOOR_GRID_CELL_SIZE) * FLOOR_GRID_CELL_SIZE;
-        float startY = std::floor(boundsMin.y / FLOOR_GRID_CELL_SIZE) * FLOOR_GRID_CELL_SIZE;
-
-        int stepsX = static_cast<int>((boundsMax.x - startX) / FLOOR_GRID_CELL_SIZE) + 1;
-        int stepsY = static_cast<int>((boundsMax.y - startY) / FLOOR_GRID_CELL_SIZE) + 1;
-        for (int ix = 0; ix < stepsX; ++ix) {
-            float x = startX + ix * FLOOR_GRID_CELL_SIZE;
-            for (int iy = 0; iy < stepsY; ++iy) {
-                float y = startY + iy * FLOOR_GRID_CELL_SIZE;
-                // Sample at grid cell center
-                float sampleX = x + FLOOR_GRID_CELL_SIZE * 0.5f;
-                float sampleY = y + FLOOR_GRID_CELL_SIZE * 0.5f;
-
-                // Check if already cached
-                uint64_t key = floorGridKey(sampleX, sampleY);
-                if (precomputedFloorGrid.find(key) != precomputedFloorGrid.end()) {
-                    continue;  // Already computed
-                }
-
-                samplesChecked++;
-
-                // Query floor height and store result in the precomputed grid
-                auto h = getFloorHeight(sampleX, sampleY, refZ);
-                if (h) {
-                    precomputedFloorGrid[key] = *h;
-                }
-            }
+bool WMORenderer::precomputeFloorCacheStep(size_t maxSamples) {
+    if (!floorCacheWork_) return true;
+    auto& work = *floorCacheWork_;
+    size_t visited = 0;
+    while (work.instance < std::min(work.count, instances.size()) && visited < maxSamples) {
+        const auto& instance = instances[work.instance];
+        const auto& lo = instance.worldBoundsMin;
+        const auto& hi = instance.worldBoundsMax;
+        const float startX = std::floor(lo.x / FLOOR_GRID_CELL_SIZE) * FLOOR_GRID_CELL_SIZE;
+        const float startY = std::floor(lo.y / FLOOR_GRID_CELL_SIZE) * FLOOR_GRID_CELL_SIZE;
+        const int stepsX = static_cast<int>((hi.x - startX) / FLOOR_GRID_CELL_SIZE) + 1;
+        const int stepsY = static_cast<int>((hi.y - startY) / FLOOR_GRID_CELL_SIZE) + 1;
+        if (work.x >= stepsX || stepsY <= 0) {
+            ++work.instance;
+            work.x = work.y = 0;
+            continue;
         }
+        const float x = startX + (work.x + 0.5f) * FLOOR_GRID_CELL_SIZE;
+        const float y = startY + (work.y + 0.5f) * FLOOR_GRID_CELL_SIZE;
+        const uint64_t key = floorGridKey(x, y);
+        ++visited;
+        if (!precomputedFloorGrid.contains(key)) {
+            ++work.samples;
+            if (auto height = getFloorHeight(x, y, hi.z + 10.0f))
+                precomputedFloorGrid[key] = *height;
+        }
+        if (++work.y >= stepsY) { work.y = 0; ++work.x; }
     }
-
-    size_t newEntries = precomputedFloorGrid.size() - startSize;
-    core::Logger::getInstance().info("Floor cache precompute complete: ", samplesChecked, " samples checked, ",
-                                     newEntries, " new entries, total ", precomputedFloorGrid.size());
+    if (work.instance < std::min(work.count, instances.size())) return false;
+    LOG_INFO("Floor cache precompute complete: ", work.samples, " samples checked, ",
+             precomputedFloorGrid.size() - std::min(precomputedFloorGrid.size(), work.startSize),
+             " new entries, total ", precomputedFloorGrid.size());
+    floorCacheWork_.reset();
+    return true;
 }
 
 void WMORenderer::rebuildSpatialIndex() {

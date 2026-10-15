@@ -26,6 +26,7 @@ endif()
 # Options
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(WOWEE_BUILD_TESTS "Build tests" ON)
+option(WOWEE_LOADING_FRAME_TEST_CLIENT "Build the native loading integration client instead of the ordinary client" OFF)
 option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build configs; pairs well with Debug)" OFF)
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
 option(WOWEE_ENABLE_LTO "Link-time optimisation for the client in Release builds" ON)
@@ -653,6 +654,7 @@ endif()
 set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
+    src/core/application_world_loading.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
@@ -1413,6 +1415,18 @@ else()
     add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
 endif()
 
+# Explicit test configuration only: no fixture code or environment switches
+# enter the ordinary client. A distinct output name prevents replacing it.
+if(WOWEE_LOADING_FRAME_TEST_CLIENT)
+    if(NOT WOWEE_BUILD_TESTS OR ANDROID)
+        message(FATAL_ERROR "The loading integration client requires desktop tests")
+    endif()
+    target_sources(wowee PRIVATE tests/loading_frame_probe.cpp)
+    target_include_directories(wowee PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_definitions(wowee PRIVATE WOWEE_LOADING_FRAME_TEST_CLIENT=1)
+    set_target_properties(wowee PROPERTIES OUTPUT_NAME wowee_loading_test_client)
+endif()
+
 # Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF. Set up on
 # wowee_base, which the client and every tool linking the libraries share.
 if(WOWEE_ENABLE_TRACY)
@@ -1928,11 +1942,13 @@ if(WIN32)
 endif()
 
 # Install targets
-install(TARGETS wowee
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
+if(NOT WOWEE_LOADING_FRAME_TEST_CLIENT)
+    install(TARGETS wowee
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+    )
+endif()
 
 # Note: tool install rules are placed next to each target definition below.
 

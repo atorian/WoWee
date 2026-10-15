@@ -1,6 +1,8 @@
 #pragma once
 
-#include <functional>
+#include "core/frame_plan.hpp"
+#include "core/world_load_progress.hpp"
+#include <future>
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -15,34 +17,36 @@ namespace wowee {
 
 namespace rendering { class Renderer; class LoadingScreen; }
 namespace pipeline { class AssetManager; class DBCLayout; }
-namespace game { class GameHandler; class World; }
 
 namespace core {
 
-class Application;
-class EntitySpawner;
-class AppearanceComposer;
-class Window;
 
 /// Handles terrain streaming, map transitions, world preloading,
 /// and coordinate-aware tile management for online world entry.
 class WorldLoader {
 public:
-    WorldLoader(Application& app,
-                rendering::Renderer* renderer,
-                pipeline::AssetManager* assetManager,
-                game::GameHandler* gameHandler,
-                EntitySpawner* entitySpawner,
-                AppearanceComposer* appearanceComposer,
-                Window* window,
-                game::World* world);
+    WorldLoader(const Phase& phase, rendering::Renderer* renderer, pipeline::AssetManager* assetManager);
     ~WorldLoader();
 
-    // Main terrain loading - drives loading screen, WMO/ADT detection, player spawn
-    void loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float z);
+    struct Entry { uint32_t mapId; float x, y, z; };
+    enum class Stage { Idle, Preparing, Prepared, Geometry, Collision, GeometryReady, Warmup, Finished, Failed };
 
-    // Process deferred world entry in Application's phase after frame submission.
-    void processPendingEntry();
+    /// Lifecycle commands are issued by Application in Transitions.
+    void begin(Entry entry);
+    bool initializeScene();
+    void beginWarmup();
+    bool finish();
+    void cancel();
+    /// Streaming phase: poll worker results and progress without pumping a frame.
+    const WorldLoadStatus& update(float deltaTime);
+    void observeReadiness(bool spawnsPending);
+    const WorldLoadStatus& status() const;
+    Stage stage() const;
+    bool hasBackgroundWork() const;
+    float warmupSeconds() const;
+    Entry entry() const;
+    const std::string& mapName() const;
+    bool isInstance() const;
 
     // Map name utilities
     static const char* mapIdToName(uint32_t mapId);
@@ -66,7 +70,6 @@ public:
 
     // State accessors
     [[nodiscard]] uint32_t getLoadedMapId() const { return loadedMapId_; }
-    [[nodiscard]] bool isLoadingWorld() const { return loadingWorld_; }
     [[nodiscard]] bool hasPendingEntry() const { return pendingWorldEntry_.has_value(); }
 
     // Get cached map name by ID (returns empty string if not found)
@@ -75,59 +78,34 @@ public:
         return (it != mapNameById_.end()) ? it->second : std::string{};
     }
 
-    // Set pending world entry for deferred processing via processPendingEntry()
+    // Application takes the last pending destination at its transition boundary.
     void setPendingEntry(uint32_t mapId, float x, float y, float z) {
-        pendingWorldEntry_ = PendingWorldEntry{.mapId = mapId, .x = x, .y = y, .z = z};
+        pendingWorldEntry_ = Entry{.mapId = mapId, .x = x, .y = y, .z = z};
     }
 
     // Reset methods (for logout / character switch)
-    void resetLoadedMap() { loadedMapId_ = 0xFFFFFFFF; pendingWorldEntry_.reset(); }
+    void resetLoadedMap();
+    std::optional<Entry> takePendingEntry();
     void resetMapNameCache() { mapNameCacheLoaded_ = false; mapNameById_.clear(); }
 
 private:
-    /// The loading screen, while a world is being loaded into.
-    ///
-    /// Loading a map takes seconds, and the screen has to keep drawing through
-    /// it or the window stops answering the compositor and the desktop paints it
-    /// as hung. So every slow step pumps it, and pumping was written out as
-    /// `if (ok) { screen.render(); window->swapBuffers(); }` wherever a step was
-    /// slow enough to need it.
-    ///
-    /// `ok` is false when the screen could not be set up at all - the world
-    /// still loads, it is just loaded blind.
-    struct LoadingUi {
-        rendering::LoadingScreen* screen = nullptr;
-        Window* window = nullptr;
-        bool ok = false;
-        std::function<void(const char*, float)> showProgress;
-
-        /// Draw one frame of the loading screen, if there is one.
-        void pump() const;
-    };
-
-    /// Read the map's WDT, then load either its root WMO or its terrain tiles,
-    /// and precompute what the player will stand on. The longest step of a world
-    /// load by far, which is why it takes the loading screen with it.
-    void loadMapGeometry(uint32_t mapId, const std::string& mapName,
-                         const glm::vec3& spawnCanonical, const glm::vec3& spawnRender,
-                         const LoadingUi& ui);
-
-    Application& app_;
+    struct PreparedMap;
+    struct Load;
+    const Phase& phase_;
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;
-    game::GameHandler* gameHandler_;
-    EntitySpawner* entitySpawner_;
-    AppearanceComposer* appearanceComposer_;
-    Window* window_;
-    game::World* world_;
+    std::unique_ptr<Load> load_;
+    // Cancel never joins a worker in a transition. Retain its future until it
+    // completes; destruction joins before AssetManager can be released.
+    std::vector<std::unique_ptr<Load>> retiredLoads_;
+    void collectRetiredLoads();
+    void fail(const std::string& reason);
+    std::string resolveMapName(uint32_t mapId);
+    static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,
+        const std::string& mapName, const std::shared_ptr<std::atomic<bool>>& cancelled);
 
-    uint32_t loadedMapId_ = 0xFFFFFFFF;  // Map ID of currently loaded terrain (0xFFFFFFFF = none)
-    bool loadingWorld_ = false;          // True while loadOnlineWorldTerrain is running
-
-    struct PendingWorldEntry {
-        uint32_t mapId; float x, y, z;
-    };
-    std::optional<PendingWorldEntry> pendingWorldEntry_;
+    uint32_t loadedMapId_ = 0xFFFFFFFF;
+    std::optional<Entry> pendingWorldEntry_;
 
     // Map.dbc name cache (loaded once per session)
     bool mapNameCacheLoaded_ = false;

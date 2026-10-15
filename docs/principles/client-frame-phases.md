@@ -3,7 +3,7 @@
 Chosen for WoWee on 2026-10-15. Applies when adding per-frame client work.
 
 `Application::runFrame` is the authoritative sequence: Input, Network, Game,
-Events, Interface, Present, Render, Transitions, Pace. `framePlanFor(AppState)`
+Events, Streaming, Interface, Present, Render, Transitions, Pace. `framePlanFor(AppState)`
 chooses the connection, simulation, world presentation and view for the frame.
 Compute one const plan before Input and pass it through the phases. State setters
 require Transitions; other phases only request a state change.
@@ -37,10 +37,19 @@ Checklist:
   route Lua-backed buttons in Interface and keep their keys until the next sample.
 - Separate structural extraction from changes in execution order.
 - Keep Lua callbacks, UI buttons and widget mutation out of Render.
-- Preserve the phase across nested loading work and exceptions.
+- Keep loading work in its designated phases; restore phase scopes on exceptions.
 - Put lifecycle mutations after submit, and all cap waits in Pace.
 - Verify behavior with packet/Lua tests and compare frame profiles.
 
-WorldLoader keeps its loading loop. Its network and game steps temporarily
-mark their phases and restore Transitions; it never applies transitions from
-inside a packet update. This does not introduce a shared background-work budget.
+`LOADING_WORLD` runs the same frame with network, simulation, streaming, events
+and interface updates, then draws the loading overlay through the normal render
+submission. WorldLoader starts jobs and reports Pending/Ready/Failed with a reason;
+it never polls SDL, dispatches packets, updates the game or presents another frame.
+Application owns scene cleanup, player preparation and the final state change.
+Only the Transitions phase starts/cancels/commits world lifetimes. Cancellation
+does not wait for preparation futures; their assets remain alive until workers end.
+
+Keep the original tile and warmup completion rules. Observe convergence after
+Present, including initial spawns, ground near the entry point and upload fences.
+An unfinished load can be superseded by another entry, even into the same map.
+This does not introduce a shared background-work budget.

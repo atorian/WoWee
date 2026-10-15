@@ -362,10 +362,19 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
-    [[nodiscard]] int getPendingTileCount() const { return static_cast<int>(pendingTiles.size()); }
-    [[nodiscard]] int getReadyQueueCount() const { return static_cast<int>(readyQueue.size()); }
+    [[nodiscard]] int getPendingTileCount() const {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return static_cast<int>(pendingTiles.size());
+    }
+    [[nodiscard]] int getReadyQueueCount() const {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return static_cast<int>(readyQueue.size());
+    }
     /** Total unfinished tiles (worker threads + ready queue + finalizing) */
-    [[nodiscard]] int getRemainingTileCount() const { return static_cast<int>(pendingTiles.size() + readyQueue.size() + finalizingTiles_.size()); }
+    [[nodiscard]] int getRemainingTileCount() const {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return static_cast<int>(pendingTiles.size() + readyQueue.size() + finalizingTiles_.size());
+    }
     [[nodiscard]] TileCoord getCurrentTile() const { return currentTile; }
 
     /** Process one ready tile (for loading screens with per-tile progress updates) */
@@ -483,7 +492,7 @@ private:
     // THREAD-SAFE: guards loadQueue, readyQueue, and pendingTiles.
     // Workers wait on queueCV; main thread signals when new tiles are enqueued
     // or when readyQueue drains below maxReadyQueueSize_.
-    std::mutex queueMutex;
+    mutable std::mutex queueMutex;
     std::condition_variable queueCV;
     std::deque<TileCoord> loadQueue;              // THREAD-SAFE: protected by queueMutex
     std::queue<std::shared_ptr<PendingTile>> readyQueue; // THREAD-SAFE: protected by queueMutex

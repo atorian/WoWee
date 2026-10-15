@@ -518,6 +518,17 @@ void MovementHandler::setFlightAirborne(bool airborne) {
     sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
 }
 
+void MovementHandler::stopInputMovement() {
+    const struct { uint32_t flags; Opcode stop; } axes[] = {
+        {static_cast<uint32_t>(MovementFlags::FORWARD) | static_cast<uint32_t>(MovementFlags::BACKWARD), Opcode::MSG_MOVE_STOP},
+        {static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) | static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT), Opcode::MSG_MOVE_STOP_STRAFE},
+        {static_cast<uint32_t>(MovementFlags::TURN_LEFT) | static_cast<uint32_t>(MovementFlags::TURN_RIGHT), Opcode::MSG_MOVE_STOP_TURN},
+        {static_cast<uint32_t>(MovementFlags::PITCH_UP) | static_cast<uint32_t>(MovementFlags::PITCH_DOWN), Opcode::MSG_MOVE_STOP_PITCH},
+        {static_cast<uint32_t>(MovementFlags::ASCENDING) | static_cast<uint32_t>(MovementFlags::DESCENDING), Opcode::MSG_MOVE_STOP_ASCEND},
+    };
+    for (const auto& axis : axes) if (movementInfo.flags & axis.flags) sendMovement(axis.stop);
+}
+
 void MovementHandler::sendMovement(Opcode opcode) {
     if (owner_.getState() != WorldState::IN_WORLD) {
         LOG_WARNING("Cannot send movement in state: ", (int)owner_.getState());
@@ -531,7 +542,9 @@ void MovementHandler::sendMovement(Opcode opcode) {
         (opcode == Opcode::MSG_MOVE_STOP) ||
         (opcode == Opcode::MSG_MOVE_STOP_STRAFE) ||
         (opcode == Opcode::MSG_MOVE_STOP_TURN) ||
-        (opcode == Opcode::MSG_MOVE_STOP_SWIM);
+        (opcode == Opcode::MSG_MOVE_STOP_SWIM) ||
+        (opcode == Opcode::MSG_MOVE_STOP_ASCEND) ||
+        (opcode == Opcode::MSG_MOVE_STOP_PITCH);
     // Held back, and said: a packet not sent leaves the server with the last
     // position it was told, while the player walks on here - so every NPC the
     // player then walks up to is out of the server's reach, and refuses in
@@ -646,6 +659,18 @@ void MovementHandler::sendMovement(Opcode opcode) {
         case Opcode::MSG_MOVE_STOP_TURN:
             movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
                                     static_cast<uint32_t>(MovementFlags::TURN_RIGHT));
+            break;
+        case Opcode::MSG_MOVE_START_PITCH_UP:
+            movementInfo.flags = (movementInfo.flags & ~static_cast<uint32_t>(MovementFlags::PITCH_DOWN)) |
+                                 static_cast<uint32_t>(MovementFlags::PITCH_UP);
+            break;
+        case Opcode::MSG_MOVE_START_PITCH_DOWN:
+            movementInfo.flags = (movementInfo.flags & ~static_cast<uint32_t>(MovementFlags::PITCH_UP)) |
+                                 static_cast<uint32_t>(MovementFlags::PITCH_DOWN);
+            break;
+        case Opcode::MSG_MOVE_STOP_PITCH:
+            movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::PITCH_UP) |
+                                    static_cast<uint32_t>(MovementFlags::PITCH_DOWN));
             break;
         case Opcode::MSG_MOVE_FALL_LAND:
             movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::FALLING);

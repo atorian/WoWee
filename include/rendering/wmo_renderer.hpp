@@ -446,8 +446,9 @@ public:
     bool loadFloorCache();        // Loads from cache/wmo_floor_<mapName>.bin
     size_t getFloorCacheSize() const { return precomputedFloorGrid.size(); }
 
-    // Pre-compute floor cache for all loaded WMO instances
-    void precomputeFloorCache();
+    /// Loading can yield between batches instead of blocking the client frame.
+    void beginFloorCachePrecompute();
+    bool precomputeFloorCacheStep(size_t maxSamples);
 
     // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
     void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
@@ -995,6 +996,11 @@ private:
     // Floor height cache - persistent precomputed grid
     static constexpr float FLOOR_GRID_CELL_SIZE = 2.0f;  // 2 unit grid cells
     mutable std::unordered_map<uint64_t, float> precomputedFloorGrid;  // key -> floor height
+    struct FloorCacheWork {
+        size_t instance = 0, count = 0, samples = 0, startSize = 0;
+        int x = 0, y = 0;
+    };
+    std::optional<FloorCacheWork> floorCacheWork_;
     mutable uint32_t currentFrameId = 0;
 
     uint64_t floorGridKey(float x, float y) const {

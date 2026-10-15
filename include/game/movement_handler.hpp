@@ -36,6 +36,8 @@ public:
     // --- Public API (delegated from GameHandler) ---
 
     void sendMovement(Opcode opcode);
+    /// Stop client-directed motion before suspending control (e.g. a map load).
+    void stopInputMovement();
     void setPosition(float x, float y, float z);
     void setOrientation(float orientation);
     void setMovementPitch(float radians) { movementInfo.pitch = radians; }

@@ -21,9 +21,6 @@ public:
 
     void selectRandomImage();
 
-    // Render the loading screen with progress bar and status text (pure ImGui)
-    void render();
-
     // Draw loading screen as ImGui overlay (call within an existing ImGui frame).
     // Used during warmup to overlay loading screen on top of the rendered world.
     void renderOverlay();

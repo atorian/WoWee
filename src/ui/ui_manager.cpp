@@ -451,6 +451,9 @@ void UIManager::render(core::FrameView view, auth::AuthHandler* authHandler, gam
             }
             break;
 
+        case core::FrameView::Loading:
+            authScreen->stopLoginMusic();
+            break; // Application builds the loading overlay in this ImGui frame.
         case core::FrameView::World:
             authScreen->stopLoginMusic();
             if (gameHandler) {

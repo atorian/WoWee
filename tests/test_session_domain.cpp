@@ -4,6 +4,7 @@
 #include "game/game_events.hpp"
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
+#include "game/movement_flags.hpp"
 #include "core/world_transition_queue.hpp"
 
 #include <vector>
@@ -12,6 +13,34 @@ using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::GameHarness;
 namespace ev = wowee::game::events;
+
+TEST_CASE("suspending client movement sends stop packets before controls are frozen", "[session][harness][loading]") {
+    GameHarness h;
+    h.enterWorld();
+    h.game().sendMovement(Opcode::MSG_MOVE_START_FORWARD);
+    h.game().sendMovement(Opcode::MSG_MOVE_START_STRAFE_LEFT);
+    h.game().sendMovement(Opcode::MSG_MOVE_START_TURN_RIGHT);
+    h.game().sendMovement(Opcode::MSG_MOVE_START_PITCH_UP);
+    h.game().sendMovement(Opcode::MSG_MOVE_START_ASCEND);
+    h.server().clearSent();
+    h.game().getMovementHandler()->stopInputMovement();
+    CHECK(h.sentOpcodes() == std::vector<wowee::game::LogicalOpcode>{Opcode::MSG_MOVE_STOP,
+        Opcode::MSG_MOVE_STOP_STRAFE, Opcode::MSG_MOVE_STOP_TURN, Opcode::MSG_MOVE_STOP_PITCH, Opcode::MSG_MOVE_STOP_ASCEND});
+    // The heartbeat the server reads after loading must carry the stopped state.
+    h.game().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    auto* heartbeat = h.lastSent(Opcode::MSG_MOVE_HEARTBEAT);
+    REQUIRE(heartbeat);
+    auto packet = *heartbeat;
+    REQUIRE(packet.readPackedGuid() == h.player().guid);
+    const uint32_t flags = packet.readUInt32();
+    using F = wowee::game::MovementFlags;
+    CHECK((flags & (static_cast<uint32_t>(F::FORWARD) | static_cast<uint32_t>(F::STRAFE_LEFT) |
+                    static_cast<uint32_t>(F::TURN_RIGHT) | static_cast<uint32_t>(F::PITCH_UP) |
+                    static_cast<uint32_t>(F::ASCENDING))) == 0);
+    h.server().clearSent();
+    h.game().getMovementHandler()->stopInputMovement();
+    CHECK(h.sentOpcodes().empty());
+}
 
 TEST_CASE("network dispatch receives logout state and only Game advances its countdown",
           "[session][harness][frame]") {

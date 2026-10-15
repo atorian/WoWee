@@ -49,6 +49,10 @@
 #include "core/logger.hpp"
 #include "core/memory_monitor.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/loading_screen.hpp"
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+#include "loading_frame_probe.hpp"
+#endif
 #include "rendering/loot_sparkles.hpp"
 #include "rendering/corpse_bones.hpp"
 #include "rendering/vk_context.hpp"
@@ -1535,9 +1539,11 @@ bool Application::initialize() {
 
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
         worldLoader_ = std::make_unique<WorldLoader>(
-            *this, renderer.get(), assetManager.get(), gameHandler.get(),
-            entitySpawner_.get(), appearanceComposer_.get(), window.get(),
-            world.get());
+            currentPhase_, renderer.get(), assetManager.get());
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+        if (std::getenv("WOWEE_LOADING_TEST"))
+            loadingProbe_ = std::make_unique<LoadingFrameProbe>(*this, eventBus_);
+#endif
 
         // Re-wire UIServices now that all services (addonManager_, worldLoader_) are available
         if (uiManager) {
@@ -1660,6 +1666,9 @@ void Application::run() {
     }
 
     LOG_INFO("Main loop ended");
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    if (loadingProbe_) loadingProbe_->loopEnded();
+#endif
 }
 
 void Application::runFrame() {
@@ -1675,6 +1684,7 @@ void Application::runFrame() {
         beginPhase(Phase::Game);        prepareFrame();
         if (plan.game) updateGame(dt, plan);
         beginPhase(Phase::Events);      eventBus_.dispatchPosted();
+        beginPhase(Phase::Streaming);   updateStreaming(dt, plan);
         beginPhase(Phase::Interface);   updateInterface(dt, plan);
         if (window->shouldClose()) return;
         beginPhase(Phase::Present);     syncPresentation(dt, plan);
@@ -1714,6 +1724,9 @@ bool Application::requireTransitions(const char* operation) const {
 }
 
 void Application::pumpInput(float deltaTime, const FramePlan& plan) {
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    if (loadingProbe_) loadingProbe_->beginFrame();
+#endif
     beatWatchdog();
     // What a burst of warnings left in the buffer. A warning no longer
     // writes itself to disk one line at a time - see Logger::flushIfStale -
@@ -2261,6 +2274,11 @@ void Application::updateMapWindow(const FramePlan& plan) {
 void Application::shutdown() {
     ScopedPhase shuttingDown(currentPhase_, Phase::Transitions);
     LOG_DEBUG("Shutting down application...");
+    // Close visibly before saved variables or worker lifetime fences can delay cleanup.
+    if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    loadingProbe_.reset();
+#endif
     {
         ScopedPhase interfaceShutdown(currentPhase_, Phase::Interface);
         unloadInterface();
@@ -2275,16 +2293,12 @@ void Application::shutdown() {
     // Before the renderer it records through and the device it draws with.
     if (mapWindow_) mapWindow_->close();
 
-    // Hide the window immediately so the OS doesn't think the app is frozen
-    // during the (potentially slow) resource cleanup below.
-    if (window && window->getSDLWindow()) {
-        SDL_HideWindow(window->getSDLWindow());
-    }
-
-    // Stop background world preloader before destroying AssetManager
+    // The window is already hidden. Join background map reads before assets die.
     if (worldLoader_) {
-        worldLoader_->cancelWorldPreload();
-    };
+        worldLoader_->cancel();
+        worldLoader_.reset();
+    }
+    loadingScreen_.reset();
 
     // End the session while the renderer is still alive. disconnect() fires a
     // despawn callback per entity, and those release creature and player
@@ -2456,6 +2470,8 @@ void Application::setState(AppState newState) {
 
     // Handle state transitions
     switch (newState) {
+        case AppState::LOADING_WORLD:
+            break;
         case AppState::FIRST_RUN:
             // Nothing to enter: the screen builds what is missing and the
             // client is reopened afterwards.
@@ -2735,8 +2751,7 @@ void Application::processWorldTransitions() {
             if (reconnect) {
                 // Connection-screen failures have no world to release; its
                 // retry controller observes the disconnected session itself.
-                if (state != AppState::IN_GAME && !addonsLoaded_ &&
-                    !(worldLoader_ && worldLoader_->isLoadingWorld()) && leave->characterGuid == 0)
+                if (state != AppState::IN_GAME && state != AppState::LOADING_WORLD && !addonsLoaded_ && leave->characterGuid == 0)
                     continue;
                 LOG_WARNING("Disconnected from the world server; returning to login after frame submission");
                 disconnectNotice_ = "You have been disconnected from the server.";
@@ -2757,10 +2772,14 @@ void Application::processWorldTransitions() {
                                                  entry->isInitialEntry);
         }
     }
-    // A load pumps the game during warmup. Its event subscribers only record
-    // new transitions, which wait until the next frame has been submitted.
-    if (worldLoader_ && state != AppState::DISCONNECTED)
-        worldLoader_->processPendingEntry();
+    if (!worldLoader_) return;
+    if (auto entry = worldLoader_->takePendingEntry()) beginWorldLoading(*entry);
+    if (state == AppState::LOADING_WORLD) {
+        if (worldLoader_->stage() == WorldLoader::Stage::Prepared && worldLoader_->initializeScene())
+            prepareWorldPlayer();
+        if (worldLoader_->stage() == WorldLoader::Stage::GeometryReady) finishWorldGeometry();
+        if (worldLoader_->status().result == WorldLoadResult::Ready) completeWorldLoading();
+    }
 }
 
 void Application::loadWorldInterface() {
@@ -4393,6 +4412,17 @@ void Application::prepareFrame() {
                 }
                 gameHandler->currentMapIdRef() = character.mapId;
             }
+            // General offline entry coordinates also exercise WMO-only maps.
+            if (const char* map = std::getenv("WOWEE_WORLD_PROBE_MAP")) {
+                character.mapId = static_cast<uint32_t>(std::strtoul(map, nullptr, 10));
+                for (const auto& [key, value] : {
+                    std::pair{"WOWEE_WORLD_PROBE_X", &character.x},
+                    std::pair{"WOWEE_WORLD_PROBE_Y", &character.y},
+                    std::pair{"WOWEE_WORLD_PROBE_Z", &character.z}}) {
+                    if (const char* text = std::getenv(key)) *value = std::strtof(text, nullptr);
+                }
+                gameHandler->currentMapIdRef() = character.mapId;
+            }
             if (orgrimmar) renderer->getLightingManager()->setTimeOfDay(8.73333f / 24.0f);
             if (const char* hour = std::getenv("WOWEE_SHADOW_PROBE_HOUR")) {
                 const float h = std::atof(hour);
@@ -4570,7 +4600,7 @@ void Application::updateGame(float deltaTime, const FramePlan& plan) {
     if (plan.worldNetwork && gameHandler) {
         const auto start = std::chrono::steady_clock::now();
         gameHandler->updateGame(deltaTime);
-        if (plan.world && spellPresentation_) spellPresentation_->update(deltaTime);
+        if ((plan.world || plan.loading) && spellPresentation_) spellPresentation_->update(deltaTime);
         if (plan.world) {
             const float ms = networkUpdateMs_ + std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count();
@@ -4578,10 +4608,37 @@ void Application::updateGame(float deltaTime, const FramePlan& plan) {
             if (ms > 50.0f) LOG_WARNING("SLOW update stage 'gameHandler->update': ", ms, "ms");
         }
     }
+    if (plan.loading && world) world->update(deltaTime);
     if (plan.world) {
         const char* checkpoint = "in_game: enter";
         updateInGame(deltaTime, checkpoint);
     }
+}
+
+void Application::updateStreaming(float deltaTime, const FramePlan& plan) {
+    const auto stage = worldLoader_ ? worldLoader_->stage() : WorldLoader::Stage::Idle;
+    const bool sceneReady = stage == WorldLoader::Stage::Geometry || stage == WorldLoader::Stage::Collision ||
+                            stage == WorldLoader::Stage::GeometryReady || stage == WorldLoader::Stage::Warmup;
+    if (plan.loading && sceneReady && renderer && renderer->getCharacterRenderer()) {
+        if (entitySpawner_) entitySpawner_->update();
+        renderer->getCharacterRenderer()->processPendingNormalMaps(4);
+        updateQuestMarkers();
+    }
+    if (!worldLoader_) return;
+    const auto& status = worldLoader_->update(deltaTime);
+    if (plan.loading) {
+        if (loadingScreen_) {
+            loadingScreen_->setStatus(status.reason);
+            loadingScreen_->setProgress(status.progress);
+        }
+        if (status.result == WorldLoadResult::Failed && !worldTransitions_.leaving()) {
+            disconnectNotice_ = status.reason;
+            worldTransitions_.leave(WorldTransitionQueue::Destination::Login);
+        }
+    }
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    if (loadingProbe_) loadingProbe_->streaming(plan);
+#endif
 }
 
 void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
@@ -4610,7 +4667,7 @@ void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
     }
 
     // Update renderer (camera, etc.) only when in-game
-    if (renderer && plan.world) {
+    if (renderer && (plan.world || plan.loading)) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
             presentWorldToRenderer(deltaTime);
@@ -4661,10 +4718,15 @@ void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
             LOG_WARNING("SLOW update stage 'renderer->update': ", ruMs, "ms");
         }
     }
+    if (plan.loading && worldLoader_)
+        worldLoader_->observeReadiness(entitySpawner_ && entitySpawner_->hasWorkPending());
 }
 
 void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     const FrameView view = plan.view;
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    if (loadingProbe_) loadingProbe_->interfaceFrame(plan);
+#endif
     if (worldInterfaceEntryPending_) {
         worldInterfaceEntryPending_ = false;
         if (!worldTransitions_.leaving()) loadWorldInterface();
@@ -4675,7 +4737,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     // simulation still run, and the single Pace phase limits the background loop.
     if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) {
         if (worldTransitions_.leaving() ||
-            (requestedState_ && *requestedState_ != AppState::IN_GAME && plan.world)) unloadInterface();
+            (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) unloadInterface();
         return;
     }
     // Update UI
@@ -4720,7 +4782,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
-    if (view == FrameView::World && addonManager_ && addonsLoaded_)
+    if ((plan.world || plan.loading) && addonManager_ && addonsLoaded_)
         addonManager_->update(deltaTime);
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);
@@ -5570,6 +5632,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
             });
         }
 
+        if (plan.loading && loadingScreen_) loadingScreen_->renderOverlay();
         // Only now is the draw data closed.
         uiManager->finishImGuiFrame();
 
@@ -5578,7 +5641,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
 
     if (gameHandler) gameHandler->dispatchAddonEvents();
     if (worldTransitions_.leaving() ||
-        (requestedState_ && *requestedState_ != AppState::IN_GAME && plan.world)) {
+        (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) {
         unloadInterface();
     }
 
@@ -5629,7 +5692,7 @@ void Application::renderFrame(const FramePlan& plan) {
     // row counted in one place and not the other comes out as a sheet taller
     // than what is on it, which nothing but looking will catch. The in-game
     // screenshot key cannot reach the login screen, which is where that card is.
-    if (const char* shot = std::getenv("WOWEE_SCREENSHOT"); shot != nullptr) {
+    if (const char* shot = std::getenv("WOWEE_SCREENSHOT"); shot != nullptr && !plan.loading) {
         // Let the interface settle first: ImGui sizes much of its layout from
         // what it measured last frame, and hides a window outright for its
         // first frame or two while it fits itself.
@@ -6523,7 +6586,8 @@ std::string Application::currentRealmPatchKey() const {
 /// world half-drawn from the old data would keep the rest of it.
 void Application::updateRealmPatchMount() {
     if (!assetManager) return;
-    const bool worldInUse = state == AppState::IN_GAME || (worldLoader_ && worldLoader_->isLoadingWorld());
+    const bool worldInUse = state == AppState::IN_GAME || state == AppState::LOADING_WORLD ||
+                            (worldLoader_ && worldLoader_->hasBackgroundWork());
     const std::string realm = currentRealmPatchKey();
 
     // Connected somewhere else: these archives are not that realm's. Taken down

@@ -71,9 +71,11 @@ class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
 class RealmPatchSync;
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+class LoadingFrameProbe;
+#endif
 
 class Application {
-    friend class WorldLoader;
 
 public:
     Application();
@@ -197,6 +199,11 @@ private:
     void prepareFrame();
     void dispatchNetwork(float deltaTime, const FramePlan& plan);
     void updateGame(float deltaTime, const FramePlan& plan);
+    void updateStreaming(float deltaTime, const FramePlan& plan);
+    void beginWorldLoading(WorldLoader::Entry entry);
+    void prepareWorldPlayer();
+    void finishWorldGeometry();
+    void completeWorldLoading();
     void syncPresentation(float deltaTime, const FramePlan& plan);
     void updateInterface(float deltaTime, const FramePlan& plan);
 
@@ -397,6 +404,10 @@ private:
     std::unique_ptr<EntitySpawner> entitySpawner_;
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
+    std::unique_ptr<rendering::LoadingScreen> loadingScreen_;
+#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
+    std::unique_ptr<LoadingFrameProbe> loadingProbe_;
+#endif
     std::unique_ptr<audio::AudioCoordinator> audioCoordinator_;
     std::unique_ptr<ZoneTracker> zoneTracker_;
     std::unique_ptr<rendering::SpellVisualSystem> spellVisualSystem_;

@@ -1,5 +1,7 @@
 # Lessons
 
+- 2026-10-15 — Do not declare a frame refactor complete after selected tests alone: run `sweep_guard`, remove replaced APIs, and keep RAII subscription ownership consistent with existing subscribers. Native integration fixtures belong under `tests/` behind an explicit, default-off build option; an environment variable alone must not ship a new test scenario in the ordinary client.
+
 - 2026-10-15 — Frame boundaries must be enforced at every Lua entry, including loading, input and teardown. Execute Lua only in Interface through protected Lua calls; queue game notifications and SDL input. Freeze one frame plan before Input and apply state changes only in Transitions. Lifecycle violations abort debug/tests; release reports each operation/phase pair once and keeps the client alive.
 
 - 2026-10-15 — A visible FPS test used a settings-only profile, so the user's Isengard realm disappeared from the running client's server list. Preserve the complete active profile (including realm/account selection) for interactive test launches; keep stripped profiles confined to unattended runs. Restore the user's full profile immediately after measurement and verify the requested realm is present before leaving the client open.
