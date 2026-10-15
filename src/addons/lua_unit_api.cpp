@@ -2290,9 +2290,9 @@ static int lua_UnitReaction(lua_State* L) {
 
 /// Which side the battlefield scoreboard is showing: 1 Alliance, 0 Horde,
 /// -1 both. Set by the frame's tabs through SetBattlefieldScoreFaction.
-static int& battlefieldScoreFaction() {
-    static int faction = -1;
-    return faction;
+/// The character's, in InterfaceState::battlefield, with the sort below.
+static int& battlefieldScoreFaction(lua_State* L) {
+    return interfaceState(L).battlefield.scoreFaction;
 }
 
 /// Which column the scoreboard is sorted by, and which way.
@@ -2300,13 +2300,11 @@ static int& battlefieldScoreFaction() {
 /// The direction lives here because the interface does not keep it: clicking a
 /// column hands the same name over again and expects the order to reverse,
 /// which only works if something remembers what it was.
-static std::string& battlefieldSortColumn() {
-    static std::string column;
-    return column;
+static std::string& battlefieldSortColumn(lua_State* L) {
+    return interfaceState(L).battlefield.scoreSortColumn;
 }
-static bool& battlefieldSortDescending() {
-    static bool descending = true;
-    return descending;
+static bool& battlefieldSortDescending(lua_State* L) {
+    return interfaceState(L).battlefield.scoreSortDescending;
 }
 
 /// The scoreboard rows that pass the current filter, in the current order.
@@ -2315,10 +2313,10 @@ static bool& battlefieldSortDescending() {
 /// GetBattlefieldScore call, once per row per redraw, and a battleground holds
 /// forty players.
 static std::vector<const game::BgPlayerScore*>
-filteredBgScores(const game::BgScoreboardData& sb) {
+filteredBgScores(lua_State* L, const game::BgScoreboardData& sb) {
     std::vector<const game::BgPlayerScore*> rows;
     rows.reserve(sb.players.size());
-    const int want = battlefieldScoreFaction();
+    const int want = battlefieldScoreFaction(L);
     for (const auto& p : sb.players) {
         // A row with no team on the wire cannot be filtered out of a faction
         // tab - a battleground sends none, so every row shows on both tabs
@@ -2327,7 +2325,7 @@ filteredBgScores(const game::BgScoreboardData& sb) {
             rows.push_back(&p);
     }
 
-    const std::string& column = battlefieldSortColumn();
+    const std::string& column = battlefieldSortColumn(L);
     if (column.empty()) return rows;
 
     // Only the columns this client has the numbers for. "class" is not one of
@@ -2350,7 +2348,7 @@ filteredBgScores(const game::BgScoreboardData& sb) {
         return 0.0;
     };
     const bool byName = (column == "name");
-    const bool descending = battlefieldSortDescending();
+    const bool descending = battlefieldSortDescending(L);
     std::stable_sort(rows.begin(), rows.end(),
                      [&](const game::BgPlayerScore* a, const game::BgPlayerScore* b) {
                          if (byName) {
@@ -2741,8 +2739,8 @@ void registerUnitLuaAPI(lua_State* L) {
                 // the rows they hand back - the frame does no filtering of its
                 // own and would otherwise show everyone under either tab.
                 {"SetBattlefieldScoreFaction", [](lua_State* L) -> int {
-            if (lua_isnoneornil(L, 1)) battlefieldScoreFaction() = -1;
-            else battlefieldScoreFaction() = static_cast<int>(lua_tonumber(L, 1));
+            if (lua_isnoneornil(L, 1)) battlefieldScoreFaction(L) = -1;
+            else battlefieldScoreFaction(L) = static_cast<int>(lua_tonumber(L, 1));
             return 0;
         }},
                 // SortBattlefieldScoreData(column) - order the rows.
@@ -2756,18 +2754,18 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"SortBattlefieldScoreData", [](lua_State* L) -> int {
             std::string column(luaL_optstring(L, 1, ""));
             if (column.empty()) return 0;
-            if (column == battlefieldSortColumn()) {
-                battlefieldSortDescending() = !battlefieldSortDescending();
+            if (column == battlefieldSortColumn(L)) {
+                battlefieldSortDescending(L) = !battlefieldSortDescending(L);
             } else {
-                battlefieldSortColumn() = column;
-                battlefieldSortDescending() = (column != "name");
+                battlefieldSortColumn(L) = column;
+                battlefieldSortDescending(L) = (column != "name");
             }
             return 0;
         }},
                 {"GetNumBattlefieldScores", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
-            lua_pushnumber(L, sb ? static_cast<double>(filteredBgScores(*sb).size()) : 0.0);
+            lua_pushnumber(L, sb ? static_cast<double>(filteredBgScores(L, *sb).size()) : 0.0);
             return 1;
         }},
                 {"GetBattlefieldScore", [](lua_State* L) -> int {
@@ -2776,7 +2774,7 @@ void registerUnitLuaAPI(lua_State* L) {
             int index = static_cast<int>(luaL_checknumber(L, 1));
             const auto* sb = gh ? gh->getBgScoreboard() : nullptr;
             if (!sb) return luaReturnNil(L);
-            const auto rows = filteredBgScores(*sb);
+            const auto rows = filteredBgScores(L, *sb);
             if (index < 1 || index > static_cast<int>(rows.size())) {
                 return luaReturnNil(L);
             }
@@ -3093,7 +3091,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 // showed an item's repair cost.
                 {"InRepairMode", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const bool active = repairCursorUp() && gh && gh->isVendorWindowOpen();
+            const bool active = repairCursorUp(L) && gh && gh->isVendorWindowOpen();
             lua_pushboolean(L, active ? 1 : 0);
             return 1;
         }},
@@ -3108,7 +3106,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 // is falsy, which is the branch a no-op takes.
                 {"IsInventoryItemLocked",   [](lua_State* L) -> int {
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, slot > 0 && cursorEquipSlot() == slot);
+            lua_pushboolean(L, slot > 0 && cursorEquipSlot(L) == slot);
             return 1;
         }},
                 // GetInventoryItemBroken(unit, slot) - worn out, so the
@@ -3138,7 +3136,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"CursorCanGoInSlot",       [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const uint32_t held = cursorItemId();
+            const uint32_t held = cursorItemId(L);
             if (!gh || slot < 1 || held == 0) { lua_pushboolean(L, 0); return 1; }
             const auto* info = gh->getItemInfo(held);
             if (!info || !info->valid) { lua_pushboolean(L, 0); return 1; }

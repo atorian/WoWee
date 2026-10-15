@@ -311,6 +311,13 @@ void frameXmlNoteAddOnLoaded(const std::string& addOnName);
 bool frameXmlAddOnLoaded(std::string_view addOnName);
 bool frameXmlDrawsCombatText();
 
+/// The interface whose facts this module holds has closed: its Lua state is
+/// gone, with the character it belonged to or for a /reload. What it had
+/// loaded, what its cursor carried and the bridge to that cursor are its own,
+/// and the next interface - possibly another character's - starts without
+/// them. Called by LuaEngine::shutdown, before the state closes.
+void frameXmlInterfaceClosed();
+
 /// The icon of the item the cursor is carrying, or empty for nothing.
 ///
 /// Picking an item up in WoW takes it out of its slot and puts it on the

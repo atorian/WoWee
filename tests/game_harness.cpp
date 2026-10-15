@@ -201,19 +201,25 @@ std::vector<uint8_t> GameHarness::authChallengeBody(uint32_t serverSeed) {
 }
 
 std::vector<uint8_t> GameHarness::charEnumBody(const PlayerSpec& p) {
+    return charEnumBody(std::vector<PlayerSpec>{p});
+}
+
+std::vector<uint8_t> GameHarness::charEnumBody(const std::vector<PlayerSpec>& characters) {
     Body b;
-    b.u8(1);                       // one character
-    b.u64(p.guid).cstr(p.name);
-    b.u8(p.race).u8(p.classId).u8(0 /* male */);
-    b.u32(0).u8(0);                // skin, face, hair style and colour; facial hair
-    b.u8(p.level);
-    b.u32(12 /* Elwynn */).u32(p.mapId).f32(p.x).f32(p.y).f32(p.z);
-    b.u32(0);                      // guild
-    b.u32(0);                      // character flags
-    b.u32(0).u8(0);                // customization flags, first login
-    b.u32(0).u32(0).u32(0);        // pet: display, level, family
-    for (int slot = 0; slot < 23; ++slot) {
-        b.u32(0).u8(0).u32(0);     // display, inventory type, enchant aura
+    b.u8(static_cast<uint8_t>(characters.size()));
+    for (const PlayerSpec& p : characters) {
+        b.u64(p.guid).cstr(p.name);
+        b.u8(p.race).u8(p.classId).u8(0 /* male */);
+        b.u32(0).u8(0);                // skin, face, hair style and colour; facial hair
+        b.u8(p.level);
+        b.u32(12 /* Elwynn */).u32(p.mapId).f32(p.x).f32(p.y).f32(p.z);
+        b.u32(0);                      // guild
+        b.u32(0);                      // character flags
+        b.u32(0).u8(0);                // customization flags, first login
+        b.u32(0).u32(0).u32(0);        // pet: display, level, family
+        for (int slot = 0; slot < 23; ++slot) {
+            b.u32(0).u8(0).u32(0);     // display, inventory type, enchant aura
+        }
     }
     return b.bytes();
 }

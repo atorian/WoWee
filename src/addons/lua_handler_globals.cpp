@@ -20,7 +20,6 @@ bool gLegacyHandlerGlobals = false;
 /// save the outer handler's arg1 would be the inner one's from the moment it
 /// returned.
 int gHandlerDepth = 0;
-int gHandlerSaveRef = LUA_NOREF;
 
 constexpr int kMaxHandlerArgs = 9;
 const char* const kHandlerArgNames[kMaxHandlerArgs] = {
@@ -41,21 +40,21 @@ void rawGetGlobal(lua_State* L, const char* name) {
 
 /// Push the table the saved values live in.
 ///
-/// Held by reference rather than looked up by name, and checked rather than
-/// trusted: a reference belongs to one lua_State and this file outlives them.
-/// A client that tears the interface down and builds it again gets a new state
-/// in which that number means something else or nothing at all, and writing
-/// through it is not an error Lua reports - it is a write into whatever is
-/// there.
+/// Kept in the state's own registry under a name, so each Lua state has its
+/// own and nothing outside one refers into it. It was a luaL_ref number held
+/// in this file, which outlives the states: every character's interface is a
+/// new state, in which that number names whatever the new state's registry
+/// put there - a table as often as not, so the "is it still a table" check
+/// passed and the saved globals were written into someone else's table.
+constexpr const char* kHandlerSaveKey = "wowee_handler_globals_save";
+
 void pushSaveTable(lua_State* L) {
-    if (gHandlerSaveRef != LUA_NOREF) {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, gHandlerSaveRef);
-        if (lua_istable(L, -1)) return;
-        lua_pop(L, 1);
-    }
+    lua_getfield(L, LUA_REGISTRYINDEX, kHandlerSaveKey);
+    if (lua_istable(L, -1)) return;
+    lua_pop(L, 1);
     lua_newtable(L);
     lua_pushvalue(L, -1);
-    gHandlerSaveRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_setfield(L, LUA_REGISTRYINDEX, kHandlerSaveKey);
     gHandlerDepth = 0;
 }
 

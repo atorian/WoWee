@@ -136,6 +136,8 @@ public:
     /// to take one of these steps by hand.
     static std::vector<uint8_t> authChallengeBody(uint32_t serverSeed);
     static std::vector<uint8_t> charEnumBody(const PlayerSpec& player);
+    /// The list of an account with several characters, for a relog.
+    static std::vector<uint8_t> charEnumBody(const std::vector<PlayerSpec>& characters);
     static std::vector<uint8_t> loginVerifyWorldBody(const PlayerSpec& player);
 
 private:

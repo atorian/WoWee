@@ -237,6 +237,21 @@ bool frameXmlDrawsCombatText() {
     return false;
 }
 
+void frameXmlInterfaceClosed() {
+    {
+        std::lock_guard<std::mutex> guard(gLoadedAddOnsLock);
+        gLoadedAddOns.clear();
+    }
+    gCombatTextAddOn.store(false, std::memory_order_relaxed);
+    gWorldEntered.store(false, std::memory_order_relaxed);
+    // An item still on the cursor was the closing interface's: drawing its
+    // icon over the next character's world - and treating clicks as a drop -
+    // is what a logout with something in hand used to leave behind.
+    gCursorItem.clear();
+    gCursorHeldSlot = nullptr;
+    gCursorPutDown = nullptr;
+}
+
 void frameXmlNoteWorldEntry() { gWorldEntered.store(true, std::memory_order_relaxed); }
 bool frameXmlWorldEntered() { return gWorldEntered.load(std::memory_order_relaxed); }
 

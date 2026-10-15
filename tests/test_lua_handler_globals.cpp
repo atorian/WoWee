@@ -20,6 +20,7 @@ extern "C" {
 }
 
 #include <string>
+#include <vector>
 
 #include "addons/lua_handler_globals.hpp"
 #include "addons/lua_services.hpp"
@@ -328,4 +329,46 @@ TEST_CASE("the Lua OnLoad bridge enforces Interface inside its caller's protecti
     lua_getglobal(f.L, "f");
     CHECK(lua_pcall(f.L, 1, 0, 0) == 0);
     CHECK_FALSE(f.globalIsNil("called"));
+}
+
+TEST_CASE("One Lua state's saved handler globals never land in the next one's",
+          "[handlerglobals][charactersession]") {
+    // Every character in the world gets a Lua state of its own. The table the
+    // saved `this`/`argN` go into was kept as a luaL_ref number in a file-scope
+    // variable, and the number outlived the state it named: in the next state
+    // it named whatever that state's registry put there first - a table, so
+    // the "is it still a table" check passed, and the globals were written
+    // into it.
+    {
+        Fixture first;
+        setLegacyHandlerGlobals(true);
+        first.handler("OnClick", "sawOne = arg1");
+        REQUIRE(first.dispatch("OnClick", {"LeftButton"}) == 0);
+    }
+    Fixture second;
+    setLegacyHandlerGlobals(true);
+    // Tables of the second state's own, held by reference the way the engine
+    // holds frame scripts - the same registry slots the first state used.
+    std::vector<int> refs;
+    for (int i = 0; i < 8; ++i) {
+        lua_newtable(second.L);
+        refs.push_back(luaL_ref(second.L, LUA_REGISTRYINDEX));
+    }
+    // Something to save: the names hold values from before the handler, as
+    // they do mid-interface, so the save writes more than nils.
+    REQUIRE(luaL_dostring(second.L, "this = 'outer'; arg1 = 'before'") == 0);
+    second.handler("OnClick", "sawOne = arg1");
+    REQUIRE(second.dispatch("OnClick", {"RightButton"}) == 0);
+    CHECK(second.global("sawOne") == "RightButton");
+    CHECK(second.global("arg1") == "before");
+    for (int ref : refs) {
+        lua_rawgeti(second.L, LUA_REGISTRYINDEX, ref);
+        REQUIRE(lua_istable(second.L, -1));
+        lua_pushnil(second.L);
+        const bool untouched = lua_next(second.L, -2) == 0;
+        if (!untouched) lua_pop(second.L, 2);
+        INFO("registry ref " << ref);
+        CHECK(untouched);
+        lua_pop(second.L, 1);
+    }
 }

@@ -663,6 +663,7 @@ set(WOWEE_SOURCES
     src/core/helm_visual.cpp
     src/core/world_loader.cpp
     src/core/map_scope.cpp
+    src/core/character_session.cpp
     src/core/zone_tracker.cpp
     src/core/player_view.cpp
     src/core/spell_presentation.cpp

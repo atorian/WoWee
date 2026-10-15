@@ -375,20 +375,23 @@ bool npcWithinInteractRange(game::GameHandler* gh, uint64_t npcGuid) {
 /// The interface counts teams 1, 2, 3 for the three bracket sizes and passes
 /// that position; the wire wants the team's own id, which is what every arena
 /// command is addressed by. The same mapping the roster request uses.
-bool& guildShowOffline() { static bool show = true; return show; }
-std::string& guildSortField() { static std::string field = "name"; return field; }
-bool& guildSortReverse() { static bool rev = false; return rev; }
+///
+/// The roster's filter and order, and every selection below, are the
+/// character's: InterfaceState, so the next character starts from the defaults.
+bool& guildShowOffline(lua_State* L) { return interfaceState(L).guild.showOffline; }
+std::string& guildSortField(lua_State* L) { return interfaceState(L).guild.sortField; }
+bool& guildSortReverse(lua_State* L) { return interfaceState(L).guild.sortReverse; }
 
-std::vector<const game::GuildRosterMember*> guildRosterView(game::GameHandler* gh) {
+std::vector<const game::GuildRosterMember*> guildRosterView(lua_State* L, game::GameHandler* gh) {
     std::vector<const game::GuildRosterMember*> view;
     if (!gh) return view;
     const auto& roster = gh->getGuildRoster();
     view.reserve(roster.members.size());
     for (const auto& m : roster.members) {
-        if (!guildShowOffline() && !m.online) continue;
+        if (!guildShowOffline(L) && !m.online) continue;
         view.push_back(&m);
     }
-    const std::string& by = guildSortField();
+    const std::string& by = guildSortField(L);
     // Ties break on name so a redraw cannot reorder equal rows under the
     // player's cursor - a level sort over a guild of forty otherwise shuffles
     // every row of the same level each time the roster arrives.
@@ -410,7 +413,7 @@ std::vector<const game::GuildRosterMember*> guildRosterView(game::GameHandler* g
         return a->name < b->name;
     };
     std::stable_sort(view.begin(), view.end(), less);
-    if (guildSortReverse()) std::reverse(view.begin(), view.end());
+    if (guildSortReverse(L)) std::reverse(view.begin(), view.end());
     return view;
 }
 
@@ -422,14 +425,14 @@ std::vector<const game::GuildRosterMember*> guildRosterView(game::GameHandler* g
 /// "group" is one of the fields the headers send and there is nothing here to
 /// answer it with: SMSG_WHO carries no party for the players it lists. It
 /// falls through to the name, which is the same order the column had before.
-std::string& whoSortField() { static std::string field = "name"; return field; }
-bool& whoSortReverse() { static bool rev = false; return rev; }
+std::string& whoSortField(lua_State* L) { return interfaceState(L).who.sortField; }
+bool& whoSortReverse(lua_State* L) { return interfaceState(L).who.sortReverse; }
 
-std::vector<const game::WhoEntry*> whoResultsView(game::GameHandler* gh) {
+std::vector<const game::WhoEntry*> whoResultsView(lua_State* L, game::GameHandler* gh) {
     std::vector<const game::WhoEntry*> view;
     if (!gh) return view;
     for (const auto& w : gh->getWhoResults()) view.push_back(&w);
-    const std::string& by = whoSortField();
+    const std::string& by = whoSortField(L);
     auto less = [&](const game::WhoEntry* a, const game::WhoEntry* b) {
         if (by == "level")      { if (a->level != b->level) return a->level < b->level; }
         else if (by == "class") { if (a->classId != b->classId) return a->classId < b->classId; }
@@ -443,7 +446,7 @@ std::vector<const game::WhoEntry*> whoResultsView(game::GameHandler* gh) {
         return a->name < b->name;
     };
     std::stable_sort(view.begin(), view.end(), less);
-    if (whoSortReverse()) std::reverse(view.begin(), view.end());
+    if (whoSortReverse(L)) std::reverse(view.begin(), view.end());
     return view;
 }
 
@@ -496,7 +499,7 @@ static int lua_GetNumGuildMembers(lua_State* L) {
     // the whole roster while indexing a filtered view walked off the end of it.
     // The second is how many of the guild are online, filtered or not, which is
     // what the "N of M online" line means.
-    const auto view = guildRosterView(gh);
+    const auto view = guildRosterView(L, gh);
     int online = 0;
     for (const auto& m : gh->getGuildRoster().members)
         if (m.online) online++;
@@ -510,7 +513,7 @@ static int lua_GetGuildRosterInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnNil(L); }
-    const auto view = guildRosterView(gh);
+    const auto view = guildRosterView(L, gh);
     if (index > static_cast<int>(view.size())) { return luaReturnNil(L); }
     const auto& m = *view[static_cast<size_t>(index) - 1];
 
@@ -705,8 +708,8 @@ static int lua_GetAutoCompleteResults(lua_State* L) {
 
 /// Which row the friends and ignore lists have selected. The client has no
 /// opinion about either; they are what the player last clicked.
-static int& selectedFriend() { static int v = 0; return v; }
-static int& selectedIgnore() { static int v = 0; return v; }
+static int& selectedFriend(lua_State* L) { return interfaceState(L).selectedFriend; }
+static int& selectedIgnore(lua_State* L) { return interfaceState(L).selectedIgnore; }
 
 // SendSystemMessage(text) - put a line in the chat as the client itself would
 static int lua_SendSystemMessage(lua_State* L) {
@@ -821,13 +824,13 @@ static void setGroupAssistantByName(lua_State* L, bool apply) {
 /// The getter answered a flat zero and the setter forgot, which is what killed
 /// note editing: every dialog that edits a note reads the selection to know
 /// whose note it is, and index zero is nobody.
-int& selectedGuildRosterRow() { static int row = 0; return row; }
+int& selectedGuildRosterRow(lua_State* L) { return interfaceState(L).guild.selectedRosterRow; }
 
 /// The name in a guild roster row, or empty. The note calls take an index and
 /// the client's own verbs take a name, so this is where the two meet.
-std::string guildRosterNameAt(game::GameHandler* gh, int index) {
+std::string guildRosterNameAt(lua_State* L, game::GameHandler* gh, int index) {
     if (!gh || index < 1) return {};
-    const auto view = guildRosterView(gh);
+    const auto view = guildRosterView(L, gh);
     if (index > static_cast<int>(view.size())) return {};
     return view[static_cast<size_t>(index) - 1]->name;
 }
@@ -835,14 +838,11 @@ std::string guildRosterNameAt(game::GameHandler* gh, int index) {
 /// Whether the player has opted out of loot rolls. The server is told and
 /// keeps the real state; nothing sends it back, so it is remembered here for
 /// the menu that shows a tick beside it.
-bool& optOutOfLoot() { static bool out = false; return out; }
+bool& optOutOfLoot(lua_State* L) { return interfaceState(L).optedOutOfLoot; }
 
 /// Which row the panel has selected. The client has no opinion - it is what
 /// the player last clicked - so it lives here rather than being invented.
-int& selectedFaction() {
-    static int selected = 1;
-    return selected;
-}
+int& selectedFaction(lua_State* L) { return interfaceState(L).selectedFaction; }
 
 }  // namespace
 
@@ -1115,9 +1115,10 @@ static int lua_GetNumGuildEvents(lua_State* L) {
     //
     // GuildEventLog_Update calls this first, so the tab opening is what sends
     // it: empty log, request, reply, event, and the update runs again with
-    // entries. Once per session, so a guild with genuinely no events does not
-    // ask again every time the tab is drawn.
-    static bool asked = false;
+    // entries. Once per character, so a guild with genuinely no events does not
+    // ask again every time the tab is drawn - and the next character's guild,
+    // which is another guild with another log, is still asked.
+    bool& asked = interfaceState(L).guild.eventLogRequested;
     if (gh && !asked && gh->getGuildEventLog().empty() && gh->isInGuild()) {
         asked = true;
         gh->requestGuildEventLog();
@@ -1476,11 +1477,11 @@ void registerSocialLuaAPI(lua_State* L) {
                 // holds everyone either way - so the list shows them, which is
                 // what answering true says.
                 {"GetGuildRosterShowOffline", [](lua_State* L) -> int {
-            lua_pushboolean(L, guildShowOffline() ? 1 : 0);
+            lua_pushboolean(L, guildShowOffline(L) ? 1 : 0);
             return 1;
         }},
                 {"SetGuildRosterShowOffline", [](lua_State* L) -> int {
-            guildShowOffline() = lua_toboolean(L, 1) != 0;
+            guildShowOffline(L) = lua_toboolean(L, 1) != 0;
             return 0;
         }},
                 // SortWho(field) - name, zone, guild, race, level, class or
@@ -1488,8 +1489,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // contract as SortGuildRoster: the same field twice reverses.
                 {"SortWho", [](lua_State* L) -> int {
             const std::string field = luaL_optstring(L, 1, "name");
-            if (field == whoSortField()) whoSortReverse() = !whoSortReverse();
-            else { whoSortField() = field; whoSortReverse() = false; }
+            if (field == whoSortField(L)) whoSortReverse(L) = !whoSortReverse(L);
+            else { whoSortField(L) = field; whoSortReverse(L) = false; }
             return 0;
         }},
                 // Voice again: nothing can be muted, so nothing is added to the
@@ -1529,7 +1530,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || idx < 1) return luaReturnNil(L);
-            const auto view = guildRosterView(gh);
+            const auto view = guildRosterView(L, gh);
             if (idx > static_cast<int>(view.size())) return luaReturnNil(L);
             // The roster reports it in days, fractionally.
             const float days = view[static_cast<size_t>(idx) - 1]->lastOnline;
@@ -2198,8 +2199,8 @@ void registerSocialLuaAPI(lua_State* L) {
                 // nothing else, and expects the API to remember.
                 {"SortGuildRoster", [](lua_State* L) -> int {
             const std::string field = luaL_optstring(L, 1, "name");
-            if (field == guildSortField()) guildSortReverse() = !guildSortReverse();
-            else { guildSortField() = field; guildSortReverse() = false; }
+            if (field == guildSortField(L)) guildSortReverse(L) = !guildSortReverse(L);
+            else { guildSortField(L) = field; guildSortReverse(L) = false; }
             return 0;
         }},
                 // The three answers to a battlefield manager prompt. All were
@@ -2247,11 +2248,11 @@ void registerSocialLuaAPI(lua_State* L) {
         }},
                 {"GetGuildRosterInfo",      lua_GetGuildRosterInfo},
                 {"SetGuildRosterSelection", [](lua_State* L) -> int {
-            selectedGuildRosterRow() = static_cast<int>(luaL_optnumber(L, 1, 0));
+            selectedGuildRosterRow(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
             return 0;
         }},
                 {"GetGuildRosterSelection", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedGuildRosterRow());
+            lua_pushnumber(L, selectedGuildRosterRow(L));
             return 1;
         }},
                 // The two note editors. Both dialogs read the selection to
@@ -2261,13 +2262,13 @@ void registerSocialLuaAPI(lua_State* L) {
                 // text and threw it away.
                 {"GuildRosterSetPublicNote", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const std::string name = guildRosterNameAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const std::string name = guildRosterNameAt(L, gh,static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (!name.empty()) gh->setGuildPublicNote(name, luaL_optstring(L, 2, ""));
             return 0;
         }},
                 {"GuildRosterSetOfficerNote", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const std::string name = guildRosterNameAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
+            const std::string name = guildRosterNameAt(L, gh,static_cast<int>(luaL_optnumber(L, 1, 0)));
             if (!name.empty()) gh->setGuildOfficerNote(name, luaL_optstring(L, 2, ""));
             return 0;
         }},
@@ -2432,7 +2433,7 @@ void registerSocialLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             int index = static_cast<int>(luaL_checknumber(L, 1));
             if (!gh || index < 1) { return luaReturnNil(L); }
-            const auto view = whoResultsView(gh);
+            const auto view = whoResultsView(L, gh);
             if (index > static_cast<int>(view.size())) { return luaReturnNil(L); }
             const auto& w = *view[static_cast<size_t>(index) - 1];
 
@@ -2610,13 +2611,13 @@ void registerSocialLuaAPI(lua_State* L) {
         }},
                 {"SendSystemMessage",   lua_SendSystemMessage},
                 {"GetSelectedFriend", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedFriend()); return 1; }},
+            lua_pushnumber(L, selectedFriend(L)); return 1; }},
                 {"SetSelectedFriend", [](lua_State* L) -> int {
-            selectedFriend() = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
+            selectedFriend(L) = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
                 {"GetSelectedIgnore", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedIgnore()); return 1; }},
+            lua_pushnumber(L, selectedIgnore(L)); return 1; }},
                 {"SetSelectedIgnore", [](lua_State* L) -> int {
-            selectedIgnore() = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
+            selectedIgnore(L) = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
                 {"AddOrRemoveFriend",   lua_AddOrRemoveFriend},
                 {"AddOrDelIgnore",      lua_AddOrDelIgnore},
                 // DoReadyCheck() - what /readycheck does
@@ -2814,11 +2815,11 @@ void registerSocialLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"GetSelectedFaction", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedFaction());
+            lua_pushnumber(L, selectedFaction(L));
             return 1;
         }},
                 {"SetSelectedFaction", [](lua_State* L) -> int {
-            selectedFaction() = static_cast<int>(luaL_checknumber(L, 1));
+            selectedFaction(L) = static_cast<int>(luaL_checknumber(L, 1));
             return 0;
         }},
                 {"ForceGossip", [](lua_State* L) -> int {
@@ -3095,12 +3096,12 @@ void registerSocialLuaAPI(lua_State* L) {
                 // never showed a tick and never turned itself off again.
                 {"SetOptOutOfLoot", [](lua_State* L) -> int {
             const bool out = lua_toboolean(L, 1) != 0;
-            optOutOfLoot() = out;
+            optOutOfLoot(L) = out;
             if (auto* gh = getGameHandler(L)) gh->sendOptOutOfLoot(out);
             return 0;
         }},
                 {"GetOptOutOfLoot", [](lua_State* L) -> int {
-            lua_pushboolean(L, optOutOfLoot() ? 1 : 0);
+            lua_pushboolean(L, optOutOfLoot(L) ? 1 : 0);
             return 1;
         }},
                 // Both send a real opcode now; sendSetDifficulty used to write

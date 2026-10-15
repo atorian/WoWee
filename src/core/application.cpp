@@ -341,7 +341,8 @@ bool Application::initialize() {
         // press rather than holding on to it.
         ui::gamepadControls().setKeyRouter([this](const char* padKey) {
             ui::PadKeyAnswer answer;
-            auto* engine = addonManager_ ? addonManager_->getLuaEngine() : nullptr;
+            auto* addons = characterAddons();
+            auto* engine = addons ? addons->getLuaEngine() : nullptr;
             if (!engine) return answer;
             auto outcome = engine->dispatchPadKey(padKey);
             if (outcome.taken) {
@@ -782,7 +783,11 @@ bool Application::initialize() {
             uiServices.assetManager = assetManager.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
-            uiServices.addonManager = addonManager_.get();  // May be nullptr here, re-wire later
+            uiServices.addonManager = [this] { return characterAddons(); };
+            uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
+            uiServices.requestInterfaceReload = [this] {
+                if (session_) session_->requestInterfaceReload();
+            };
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
             uiServices.screenRecording = screenRecording_.get();
@@ -808,24 +813,30 @@ bool Application::initialize() {
             gameHandler->getTransportManager()->loadTaxiPathNodeDBC(assetManager.get());
         }
 
-        // Initialize addon system
-        addonManager_ = std::make_unique<addons::AddonManager>();
+        // The addon system: what is on disk, for the whole run. Each character
+        // in the world gets an interface of its own, built from it.
+        addonCatalog_ = std::make_unique<addons::AddonCatalog>();
         // Bindings ask the interface whether someone is typing before they
         // fire. Set here rather than at the call sites because every panel
         // polls its own key from inside its own draw - there are many askers
         // and one answer.
         ui::setTypedInputProbe(
             [this]() -> bool {
-                if (!addonManager_ || !addonsLoaded_) return false;
-                auto* engine = addonManager_->getLuaEngine();
+                auto* addons = worldInterface();
+                auto* engine = addons ? addons->getLuaEngine() : nullptr;
                 return engine != nullptr && engine->editBoxHasFocus();
             });
-        addons::LuaServices luaSvc;
+        addons::LuaServices& luaSvc = luaServices_;
+        luaErrorReport_ = std::make_unique<addons::LuaErrorReport>();
+        luaSvc.errorReport = luaErrorReport_.get();
         luaSvc.executionPhase = [this] { return currentPhase_; };
         luaSvc.window            = window.get();
         luaSvc.audioCoordinator  = audioCoordinator_.get();
         luaSvc.expansionRegistry = expansionRegistry_.get();
-        luaSvc.requestReloadUI = [this]() { reloadUiPending_ = true; };
+        // Acted on between frames - the reload destroys the state that asked.
+        luaSvc.requestReloadUI = [this]() {
+            if (session_) session_->requestInterfaceReload();
+        };
         luaSvc.openSettings = [uim = uiManager.get()](const std::string& tab) {
             if (uim) uim->getGameScreen().openSettings(tab.empty() ? nullptr : tab.c_str());
         };
@@ -1129,11 +1140,9 @@ bool Application::initialize() {
         // device to upload it; both exist by now.
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
-        const bool interfaceReady = [&] {
-            ScopedPhase interfaceInit(currentPhase_, Phase::Interface);
-            return addonManager_->initialize(gameHandler.get(), luaSvc);
-        }();
-        if (interfaceReady) {
+        // No Lua state is made here: each character in the world gets its
+        // own, built by its CharacterSession.
+        {
             // FrameXML and the AddOns folder are loose directories on disk, not
             // assets reached through the manifest, and they belong to the
             // installation rather than to whichever expansion happens to supply
@@ -1156,18 +1165,10 @@ bool Application::initialize() {
                 }
             }
             std::string addonsDir = interfaceRoot + "/interface/AddOns";
-            addonManager_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
-            addonManager_->scanAddons(addonsDir);
-            // Wire Lua errors to UI error display
-            addonManager_->getLuaEngine()->setLuaErrorCallback([gh = gameHandler.get()](const std::string& err) {
-                // Not addUIError: that reports by firing an event, which runs
-                // script, which is how a script error came to report itself.
-                if (gh) gh->addScriptError(err);
-            });
-            // The game-menu button opens this client's settings panel.
-            addonManager_->getLuaEngine()->setOpenSettingsCallback([this] {
-                if (auto* uim = uiManager.get()) uim->getGameScreen().openSettings();
-            });
+            addonCatalog_->setFrameXmlDir(interfaceRoot + "/interface/FrameXML");
+            addonCatalog_->scan(addonsDir);
+            // Lua errors and the game-menu button are wired per interface, by
+            // the CharacterSession that builds it.
             // No second announcement of a chat message.
             //
             // This registered a callback that fired CHAT_MSG_* itself, off its
@@ -1186,17 +1187,14 @@ bool Application::initialize() {
             // What it did better, the channel's index, moved into the handler's
             // own firing.
             // Wire generic game events to addon dispatch
+            // To the interface of the character in the world, while it hears it.
             gameHandler->setAddonEventCallback([this](const std::string& event, const std::vector<std::string>& args) {
-                if (addonManager_ && addonsLoaded_) {
-                    addonManager_->fireEvent(event, args);
-                }
+                if (auto* addons = worldInterface()) addons->fireEvent(event, args);
             });
             // How a keybinding reaches the frame that replaced this client's own
             // window. Without it, a key toggled a window nothing draws.
             gameHandler->setInterfaceCommandCallback([this](const std::string& lua) {
-                if (addonManager_ && addonsLoaded_) {
-                    addonManager_->runInterfaceCommand(lua);
-                }
+                if (auto* addons = worldInterface()) addons->runInterfaceCommand(lua);
             });
             // Wire spell icon path resolver for Lua API (GetSpellInfo, UnitBuff icon, etc.)
             {
@@ -1530,10 +1528,7 @@ bool Application::initialize() {
                     return out;
                 });
             }
-            LOG_INFO("Addon system initialized, found ", addonManager_->getAddons().size(), " addon(s)");
-        } else {
-            LOG_WARNING("Failed to initialize addon system");
-            addonManager_.reset();
+            LOG_INFO("Addon system initialized, found ", addonCatalog_->addons().size(), " addon(s)");
         }
 
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
@@ -1544,7 +1539,7 @@ bool Application::initialize() {
             loadingProbe_ = std::make_unique<LoadingFrameProbe>(*this, eventBus_);
 #endif
 
-        // Re-wire UIServices now that all services (addonManager_, worldLoader_) are available
+        // Re-wire UIServices now that all services (addonCatalog_, worldLoader_) are available
         if (uiManager) {
             ui::UIServices uiServices;
             uiServices.window = window.get();
@@ -1552,7 +1547,11 @@ bool Application::initialize() {
             uiServices.assetManager = assetManager.get();
             uiServices.gameHandler = gameHandler.get();
             uiServices.expansionRegistry = expansionRegistry_.get();
-            uiServices.addonManager = addonManager_.get();
+            uiServices.addonManager = [this] { return characterAddons(); };
+            uiServices.addonCatalog = addonCatalog_.get();
+            uiServices.requestInterfaceReload = [this] {
+                if (session_) session_->requestInterfaceReload();
+            };
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
             uiServices.screenRecording = screenRecording_.get();
@@ -1591,9 +1590,13 @@ bool Application::initialize() {
 
     // The offline sky, fountain and glass probes place their models without
     // loading a map. Theirs is a scene like any other, owned the same way.
-    if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && entitySpawner_ && renderer && gameHandler) {
-        mapScope_ = std::make_unique<MapScope>(mapScopeServices(), 571);
-        mapScope_->adoptRenderers();
+    // No character stands in it, so its session has no interface.
+    if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && entitySpawner_ && renderer && gameHandler &&
+        assetManager && playerView_) {
+        session_ = std::make_unique<CharacterSession>(characterSessionServices(),
+                                                      CharacterSession::Identity{},
+                                                      CharacterSession::Interface::None);
+        session_->enterScene(mapScopeServices(), 571).adoptRenderers();
     }
 
     LOG_INFO("Application initialized successfully");
@@ -1733,6 +1736,59 @@ MapScope::Services Application::mapScopeServices() {
     return MapScope::Services{*entitySpawner_, renderer.get(), *gameHandler, *playerView_};
 }
 
+CharacterSession::Services Application::characterSessionServices() {
+    return CharacterSession::Services{
+        .phase = currentPhase_,
+        .events = eventBus_,
+        .game = *gameHandler,
+        .renderer = renderer.get(),
+        .spawner = *entitySpawner_,
+        .spellVisuals = spellVisualSystem_.get(),
+        .audio = audioCoordinator_.get(),
+        .assets = *assetManager,
+        .addonCatalog = addonCatalog_.get(),
+        .luaServices = luaServices_,
+        .playerView = *playerView_,
+        .appearance = appearanceComposer_.get(),
+        .animationCallbacks = animationCallbacks_.get(),
+    };
+}
+
+addons::AddonManager* Application::characterAddons() {
+    return session_ ? session_->addonManager() : nullptr;
+}
+
+addons::AddonManager* Application::worldInterface() {
+    return session_ && session_->interfaceHoldsWorld() ? session_->addonManager() : nullptr;
+}
+
+void Application::beginCharacterSession() {
+    if (!requireTransitions("begin character session")) return;
+    const uint64_t guid = gameHandler->getPlayerGuid();
+    // A map change keeps the character. A character whose interface was
+    // already told it left the world is not in it any more, whatever the
+    // guid: it is entering again and gets a session of its own.
+    if (session_ && session_->identity().guid == guid && !session_->interfaceHasLeft()) return;
+    if (session_) {
+        // No logout in between - a different character, or the same one
+        // coming back after its interface was taken down.
+        LOG_WARNING("Character 0x", std::hex, guid, " entering the world while 0x",
+                    session_->identity().guid, std::dec,
+                    " still has a session; ending that one first");
+        session_.reset();
+    }
+    // The name keys the per-character saved variables; see characterIdentityOf.
+    session_ = std::make_unique<CharacterSession>(
+        characterSessionServices(),
+        characterIdentityOf(guid, gameHandler->getCharacters(), gameHandler->lookupName(guid)),
+        sessionInterface_);
+}
+
+void Application::leaveWorldInterface() {
+    if (!session_) return;
+    session_->leaveWorldInterface();
+}
+
 void Application::pumpInput(float deltaTime, const FramePlan& plan) {
 #ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
     if (loadingProbe_) loadingProbe_->beginFrame();
@@ -1781,8 +1837,8 @@ void Application::pumpInput(float deltaTime, const FramePlan& plan) {
     // the code that opens the box, and not one character after it arrived.
     // Asserted per frame rather than on a focus change because the backend
     // can turn it off again at any point.
-    if (window && addonManager_ && addonsLoaded_) {
-        if (auto* engine = addonManager_->getLuaEngine();
+    if (auto* addons = window ? worldInterface() : nullptr) {
+        if (auto* engine = addons->getLuaEngine();
             engine && engine->editBoxHasFocus()) {
             if (SDL_Window* sdlWindow = window->getSDLWindow();
                 sdlWindow && !SDL_TextInputActive(sdlWindow)) {
@@ -1956,14 +2012,14 @@ void Application::dispatchInterfaceInput() {
                 // happens without the check, and a frame that did not
                 // ask must not swallow it either.
                 bool takenByUi = false;
-                if (addonManager_ && addonManager_->getLuaEngine()) {
+                if (auto* addons = characterAddons()) {
                     // ImGui's cursor, not SDL's, because that is what
                     // the rest of the widget dispatch is fed and the
                     // two need not agree on a scaled display. Flipped
                     // to bottom-origin for the same reason the button
                     // dispatch is: the tree measures upward.
                     const ImGuiIO& mio = ImGui::GetIO();
-                    takenByUi = addonManager_->getLuaEngine()->dispatchMouseWheel(
+                    takenByUi = addons->getLuaEngine()->dispatchMouseWheel(
                         mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y,
                         wheelClicks(event.wheel.y, event.wheel.timestamp));
                 }
@@ -1981,8 +2037,8 @@ void Application::dispatchInterfaceInput() {
         // purpose, so the amount could only be reached with the arrows and
         // typing "12" did nothing at all.
         if (event.type == SDL_EVENT_TEXT_INPUT) {
-            if (addonManager_ && addonsLoaded_) {
-                if (auto* engine = addonManager_->getLuaEngine()) {
+            if (auto* addons = worldInterface()) {
+                if (auto* engine = addons->getLuaEngine()) {
                     if (engine->editBoxHasFocus()) {
                         // Unless it is the slash that opened this box,
                         // arriving after it took focus - see
@@ -2003,7 +2059,7 @@ void Application::dispatchInterfaceInput() {
             // click will do - item comparison appears on shift, and an
             // action button's self-cast indicator on alt. Four frames
             // listen and none had ever been told.
-            if (addonManager_ && addonsLoaded_) {
+            if (auto* addons = worldInterface()) {
                 const char* modName = nullptr;
                 switch (event.key.key) {
                     case SDLK_LSHIFT: modName = "LSHIFT"; break;
@@ -2033,7 +2089,7 @@ void Application::dispatchInterfaceInput() {
                         LOG_WARNING("MODIFIER_STATE_CHANGED fired for ",
                                     modName, " down - the client sees shift");
                     }
-                    addonManager_->fireEvent(
+                    addons->fireEvent(
                         "MODIFIER_STATE_CHANGED",
                         {modName, event.type == SDL_EVENT_KEY_DOWN ? "1" : "0"});
                 }
@@ -2043,8 +2099,8 @@ void Application::dispatchInterfaceInput() {
             // An addon's edit box takes the keystroke before anything
             // else looks at it. Otherwise typing into one would also
             // walk the character, and backspace would trip a keybind.
-            if (addonManager_ && addonsLoaded_) {
-                if (auto* engine = addonManager_->getLuaEngine();
+            if (auto* addons = worldInterface()) {
+                if (auto* engine = addons->getLuaEngine();
                     engine && engine->editBoxHasFocus()) {
                     // Command counts as control here, because this is the
                     // copy-and-paste modifier and on a Mac that is the one
@@ -2090,7 +2146,7 @@ void Application::dispatchInterfaceInput() {
                 // pickup. The key is only swallowed when one of them
                 // actually takes it, so with nothing up the movement
                 // keys and every binding carry on exactly as before.
-                if (auto* engine = addonManager_->getLuaEngine()) {
+                if (auto* engine = addons->getLuaEngine()) {
                     if (engine->dispatchFrameKey(event.key.key, true)) {
                         // Escape says so, because "Escape does nothing"
                         // is a live report and this is one of the three
@@ -2117,7 +2173,7 @@ void Application::dispatchInterfaceInput() {
                 // has no path for, which until now could be bound in
                 // the interface's own key-binding panel and then never
                 // honoured by any press.
-                if (auto* engine = addonManager_->getLuaEngine()) {
+                if (auto* engine = addons->getLuaEngine()) {
                     const SDL_Keymod mods = event.key.mod;
                     if (engine->dispatchBindingKey(
                             event.key.key,
@@ -2218,18 +2274,20 @@ void Application::namePadKeysForInterface() {
     //
     // Written when the pad changes rather than every frame: it is a dozen
     // globals, and the only thing that moves them is a different controller.
+    //
+    // Remembered per interface (CharacterSession::padKeyNamesWritten): each
+    // character's Lua state, and each /reload's, starts without them.
+    auto* addons = characterAddons();
+    auto* engine = addons ? addons->getLuaEngine() : nullptr;
+    // Tried again next frame: the interface is built after the pad is opened,
+    // and this is worth nothing until it exists.
+    if (!engine || !engine->isInitialized()) return;
     auto& pad = core::gamepad();
     const auto kind = pad.isConnected() ? pad.kind() : core::Gamepad::Kind::Unknown;
-    if (kind == padKeyNamesFor_) return;
-    padKeyNamesFor_ = kind;
+    int& written = session_->padKeyNamesWritten();
+    if (static_cast<int>(kind) == written) return;
+    written = static_cast<int>(kind);
     if (!pad.isConnected()) return;
-    auto* engine = addonManager_ ? addonManager_->getLuaEngine() : nullptr;
-    if (!engine) {
-        // Tried again next frame: the interface is built after the pad is
-        // opened, and this is worth nothing until it exists.
-        padKeyNamesFor_ = core::Gamepad::Kind::Unknown;
-        return;
-    }
 
     std::string code;
     for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
@@ -2289,11 +2347,11 @@ void Application::shutdown() {
 #ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
     loadingProbe_.reset();
 #endif
+    // The interface hears the character leave while the world still stands;
+    // the session itself ends below, with its map.
     {
         ScopedPhase interfaceShutdown(currentPhase_, Phase::Interface);
-        unloadInterface();
-        if (addonManager_) addonManager_->shutdown();
-        addonManager_.reset();
+        leaveWorldInterface();
     }
 
     // Before the window, whose destructor takes SDL down with it.
@@ -2303,10 +2361,11 @@ void Application::shutdown() {
     // Before the renderer it records through and the device it draws with.
     if (mapWindow_) mapWindow_->close();
 
-    // The window is already hidden. The map goes first: its destruction joins
-    // the map's preparation, terrain and spawn workers while the assets, the
-    // renderer and the loader they use still exist.
-    mapScope_.reset();
+    // The window is already hidden. The character goes first, its map first of
+    // all: the map's destruction joins its preparation, terrain and spawn
+    // workers while the assets, the renderer and the loader they use still
+    // exist; then the interface writes the saved variables and closes.
+    session_.reset();
     worldLoader_.reset();
     loadingScreen_.reset();
 
@@ -2408,9 +2467,8 @@ void Application::shutdown() {
         worldMap_.reset();
     }
     playerView_.reset();
-    // It draws through the spell visuals and plays through the audio, and must
-    // not hear another event once they are gone.
-    spellPresentation_.reset();
+    // The spell presentation, which draws through the spell visuals, ended
+    // with the character session above.
     if (spellVisualSystem_) {
         spellVisualSystem_->shutdown();
         spellVisualSystem_.reset();
@@ -2494,17 +2552,18 @@ void Application::setState(AppState newState) {
             if (uiManager && assetManager) {
                 uiManager->getCharacterScreen().setAssetManager(assetManager.get());
             }
-            // The character screen has no map. Leaving the world went through
-            // performLogoutToLogin, which ended the map scope and with it the
-            // player's model; this is the backstop for any other way here.
-            if (mapScope_) {
-                LOG_WARNING("Character screen reached with map ", mapScope_->mapId(),
-                            " still in scope; releasing it now");
-                mapScope_.reset();
+            // The character screen has no character in the world. Leaving the
+            // world went through performLogoutToLogin, which ended the
+            // character's session and with it the map and the interface; this
+            // is the backstop for any other way here.
+            if (session_) {
+                LOG_WARNING("Character screen reached with '", session_->identity().name,
+                            "' still in the world (map ",
+                            session_->map() ? static_cast<int>(session_->map()->mapId()) : -1,
+                            "); ending that session now");
+                session_.reset();
             }
             if (worldLoader_) worldLoader_->discardPendingEntry();
-            if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
-            wasAutoAttacking_ = false;
             break;
         case AppState::IN_GAME: {
             // Wire up movement opcodes from camera controller
@@ -2721,7 +2780,7 @@ void Application::processWorldTransitions() {
     if (!requireTransitions("apply world transitions")) return;
     // Warmup can receive a leave after Interface has finished. Preserve it until
     // the next Interface can deliver PLAYER_LEAVING_WORLD against the live world.
-    if (worldTransitions_.leaving() && addonsLoaded_) return;
+    if (worldTransitions_.leaving() && session_ && session_->interfaceHoldsWorld()) return;
     if (requestedState_) {
         const auto next = *requestedState_;
         requestedState_.reset();
@@ -2743,7 +2802,7 @@ void Application::processWorldTransitions() {
             if (reconnect) {
                 // Connection-screen failures have no world to release; its
                 // retry controller observes the disconnected session itself.
-                if (state != AppState::IN_GAME && state != AppState::LOADING_WORLD && !addonsLoaded_ && leave->characterGuid == 0)
+                if (state != AppState::IN_GAME && state != AppState::LOADING_WORLD && !session_ && leave->characterGuid == 0)
                     continue;
                 LOG_WARNING("Disconnected from the world server; returning to login after frame submission");
                 disconnectNotice_ = "You have been disconnected from the server.";
@@ -2774,60 +2833,6 @@ void Application::processWorldTransitions() {
     }
 }
 
-void Application::loadWorldInterface() {
-    if (!requirePhase(currentPhase_, Phase::Interface, "interface world entry")) return;
-    // Load addons once per session on first world entry
-    if (addonManager_ && !addonsLoaded_) {
-        // Set character name for per-character SavedVariables
-        if (gameHandler) {
-            const std::string& charName = gameHandler->lookupName(gameHandler->getPlayerGuid());
-            if (!charName.empty()) {
-                addonManager_->setCharacterName(charName);
-            } else {
-                // Fallback: find name from character list
-                for (const auto& c : gameHandler->getCharacters()) {
-                    if (c.guid == gameHandler->getPlayerGuid()) {
-                        addonManager_->setCharacterName(c.name);
-                        break;
-                    }
-                }
-            }
-        }
-        addonManager_->loadAllAddons();
-        addonsLoaded_ = true;
-        addonManager_->fireEvent("VARIABLES_LOADED");
-        // After VARIABLES_LOADED, which is when the chat window
-        // settings are available to be read. Every chat frame
-        // answers this by applying its saved font, colour, size
-        // and docked state; without it they keep the defaults
-        // they were built with however much was saved.
-        addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
-        addonManager_->fireEvent("PLAYER_LOGIN");
-        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-    } else if (addonManager_ && addonsLoaded_) {
-        // Subsequent world entries (e.g. teleport, instance entry)
-        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-    }
-}
-
-void Application::unloadInterface() {
-    if (!requirePhase(currentPhase_, Phase::Interface, "interface teardown")) return;
-    if (addonManager_ && addonsLoaded_) {
-        addonManager_->fireEvent("PLAYER_LEAVING_WORLD");
-        // Saves the saved variables on its way out, so this has to run while
-        // the outgoing character is still the one named - the per-character
-        // files are keyed by that name, and writing them after it changed
-        // would put one character's variables in another's file.
-        addonManager_->unloadAll();
-        // And now it goes, so nothing can be written under it by accident.
-        // The next world entry sets the name of whoever logged in before it
-        // loads anything; an unset name skips the per-character files rather
-        // than guessing at one.
-        addonManager_->setCharacterName("");
-    }
-    addonsLoaded_ = false;
-}
-
 void Application::performLogoutToLogin(bool keepConnection) {
     if (!requireTransitions("world logout")) return;
     LOG_INFO("Logout requested");
@@ -2844,19 +2849,13 @@ void Application::performLogoutToLogin(bool keepConnection) {
         else gameHandler->disconnect();
     }
 
-    // The map and everything drawn on it - terrain, buildings, creatures, the
-    // player's own model and mount - end with its scope, as on a map change.
-    mapScope_.reset();
+    // The character leaves: their map and everything drawn on it, their
+    // interface (which writes their saved variables on the way out), their
+    // presenters and frame state - all of it ends with their session, and
+    // nothing is left for the next character to find.
+    session_.reset();
     if (worldLoader_) worldLoader_->discardPendingEntry();
 
-    // The session's own state, which is not the map's.
-    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
-    wasAutoAttacking_ = false;
-    facingSendCooldown_ = 0.0f;
-    lastSentCanonicalYaw_ = 1000.0f;
-    idleYawned_ = false;
-    if (animationCallbacks_) animationCallbacks_->resetChargeState();
-    playerView_->resetCombatVisualState();
     if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
         music->stopMusic(0.0f);
     }
@@ -2988,7 +2987,7 @@ void Application::applyServerMovementState(float deltaTime) {
         isM2Transport = (tr && tr->isM2);
     }
     bool onWMOTransport = onTransportNow && !isM2Transport;
-    auto& ride = mapScope_->ride();
+    auto& ride = currentMap()->ride();
     if (worldEntryCallbacks_ && worldEntryCallbacks_->getWorldEntryMovementGraceTimer() > 0.0f) {
         worldEntryCallbacks_->setWorldEntryMovementGraceTimer(
             worldEntryCallbacks_->getWorldEntryMovementGraceTimer() - deltaTime);
@@ -3137,11 +3136,12 @@ void Application::applyServerMovementState(float deltaTime) {
         }
     }
     bool idleOrbit = getCameraController()->isIdleOrbit();
-    if (idleOrbit && !idleYawned_ && renderer) {
+    bool& idleYawned = session_->playerSync().idleYawned;
+    if (idleOrbit && !idleYawned && renderer) {
         if (auto* ac = getAnimationController()) ac->playEmote("yawn");
-        idleYawned_ = true;
+        idleYawned = true;
     } else if (!idleOrbit) {
-        idleYawned_ = false;
+        idleYawned = false;
     }
     }
     if (renderer) {
@@ -3491,18 +3491,19 @@ void Application::applyServerMovementState(float deltaTime) {
         // the old facing and position-corrects on the next heartbeat - the
         // micro-teleporting the GM observed.
         // Skip while keyboard-turning: the server tracks that via TURN_LEFT/RIGHT flags.
-        facingSendCooldown_ -= deltaTime;
+        auto& sync = session_->playerSync();
+        sync.facingSendCooldown -= deltaTime;
         const auto& mi = gameHandler->getMovementInfo();
         constexpr uint32_t kTurnFlags =
             static_cast<uint32_t>(game::MovementFlags::TURN_LEFT) |
             static_cast<uint32_t>(game::MovementFlags::TURN_RIGHT);
         bool keyboardTurning = (mi.flags & kTurnFlags) != 0;
-        if (!keyboardTurning && facingSendCooldown_ <= 0.0f) {
-            float yawDiff = core::coords::normalizeAngleRad(canonicalYaw - lastSentCanonicalYaw_);
+        if (!keyboardTurning && sync.facingSendCooldown <= 0.0f) {
+            float yawDiff = core::coords::normalizeAngleRad(canonicalYaw - sync.lastSentCanonicalYaw);
             if (std::abs(yawDiff) > glm::radians(3.0f)) {
                 gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
-                lastSentCanonicalYaw_ = canonicalYaw;
-                facingSendCooldown_ = 0.1f;  // max 10 Hz
+                sync.lastSentCanonicalYaw = canonicalYaw;
+                sync.facingSendCooldown = 0.1f;  // max 10 Hz
             }
         }
 
@@ -3968,7 +3969,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
 
 void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     updateCheckpoint = "in_game: enter";
-    if (!mapScope_) {
+    if (!currentMap()) {
         // In game is entered only by completing a map's load, and leaving the
         // map leaves the state. A frame here without one is a broken transition.
         static bool reported = false;
@@ -4028,10 +4029,11 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
             appearanceComposer_->loadEquippedWeapons();
         }
         // Swap back to melee weapon when auto-attack stops
-        if (!autoAttacking && wasAutoAttacking_ && appearanceComposer_ && appearanceComposer_->isShowingRanged()) {
+        bool& wasAutoAttacking = session_->playerSync().wasAutoAttacking;
+        if (!autoAttacking && wasAutoAttacking && appearanceComposer_ && appearanceComposer_->isShowingRanged()) {
             appearanceComposer_->showRangedWeapon(false);
         }
-        wasAutoAttacking_ = autoAttacking;
+        wasAutoAttacking = autoAttacking;
     }
 
     // Weapons go away on entering the water. You cannot swim with a sword out,
@@ -4041,12 +4043,13 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     {
         auto* cc = renderer ? getCameraController() : nullptr;
         const bool swimmingNow = cc && cc->isSwimming();
-        if (swimmingNow && !wasSwimmingForSheath_ && appearanceComposer_
+        bool& wasSwimming = session_->playerSync().wasSwimmingForSheath;
+        if (swimmingNow && !wasSwimming && appearanceComposer_
             && !appearanceComposer_->isWeaponsSheathed()) {
             appearanceComposer_->setWeaponsSheathed(true);
             appearanceComposer_->loadEquippedWeapons();
         }
-        wasSwimmingForSheath_ = swimmingNow;
+        wasSwimming = swimmingNow;
     }
 
     // Toggle weapon sheathe state with Z (ignored while UI captures keyboard).
@@ -4178,11 +4181,15 @@ void Application::followRendererUpdate(float deltaTime) {
     // Announce the crossing. zonetext.lua and worldstateframe.lua both listen
     // for ZONE_CHANGED_INDOORS, and WoW answers the way back out with a plain
     // ZONE_CHANGED - there is no outdoors counterpart.
+    // The edge is the character's: the next one starts outdoors, as this did.
     const bool indoors = renderer->isPlayerIndoors();
-    if (indoors != cameraIndoors_ && gameHandler) {
-        gameHandler->fireAddonEvent(indoors ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
+    if (session_) {
+        bool& wasIndoors = session_->playerSync().cameraIndoors;
+        if (indoors != wasIndoors && gameHandler) {
+            gameHandler->fireAddonEvent(indoors ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
+        }
+        wasIndoors = indoors;
     }
-    cameraIndoors_ = indoors;
 
     // The listener stands where the camera does.
     if (const auto* camera = renderer->getCamera()) {
@@ -4305,8 +4312,10 @@ void Application::prepareFrame() {
             auto& movement = gameHandler->movementInfoRef();
             movement.x = character.x; movement.y = character.y; movement.z = character.z;
             // Addon login events require live UNIT update fields. This fixture
-            // exercises world assets and appearance queues without those packets.
-            addonsLoaded_ = true;
+            // exercises world assets and appearance queues without those
+            // packets: its character's interface hears events and OnUpdate from
+            // the start and loads nothing.
+            sessionInterface_ = CharacterSession::Interface::EventsOnly;
             LOG_INFO("Mulgore probe: starting world entry");
             worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
             LOG_INFO("Mulgore probe: world entry queued for the transition phase");
@@ -4472,7 +4481,10 @@ void Application::updateGame(float deltaTime, const FramePlan& plan) {
     if (plan.worldNetwork && gameHandler) {
         const auto start = std::chrono::steady_clock::now();
         gameHandler->updateGame(deltaTime);
-        if ((plan.world || plan.loading) && spellPresentation_) spellPresentation_->update(deltaTime);
+        if (plan.world || plan.loading) {
+            if (auto* spells = session_ ? session_->spellPresentation() : nullptr)
+                spells->update(deltaTime);
+        }
         if (plan.world) {
             const float ms = networkUpdateMs_ + std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count();
@@ -4598,17 +4610,16 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
 #ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
     if (loadingProbe_) loadingProbe_->interfaceFrame(plan);
 #endif
-    if (worldInterfaceEntryPending_) {
-        worldInterfaceEntryPending_ = false;
-        if (!worldTransitions_.leaving()) loadWorldInterface();
-    }
+    // A map finished loading: the character's interface is built at the first
+    // entry and told of every later one.
+    if (session_ && !worldTransitions_.leaving()) session_->enterWorldInterface();
     if (gameHandler) gameHandler->dispatchAddonEvents();
     dispatchInterfaceInput();
     // A lost mobile surface has no ImGui frame to build or submit. Network and
     // simulation still run, and the single Pace phase limits the background loop.
     if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) {
         if (worldTransitions_.leaving() ||
-            (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) unloadInterface();
+            (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) leaveWorldInterface();
         return;
     }
     // Update UI
@@ -4625,36 +4636,12 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     }
     // A reload asked for by the interface. Done here, between frames, because
     // the request comes from inside the Lua state that the reload destroys -
-    // performing it at the call site would free the machinery mid-call.
-    if (reloadUiPending_) {
-        reloadUiPending_ = false;
-        if (addonManager_) {
-            addonManager_->reload();
-            // The same three the /reload command sends, so an interface
-            // reloaded from a popup comes up in the same state as one reloaded
-            // from chat rather than waiting for events that already fired.
-            // Silent through the login burst, for the same reason the load
-            // itself is: the unit frames initialize their dropdowns on these
-            // events, every initializer ends in UnitPopup_ShowMenu, and that
-            // ends in PlaySound("igMainMenuOpen"). Eight of them arrive inside
-            // thirty milliseconds and stack into one hit a few seconds after
-            // entering the world. The real client is behind a loading screen
-            // here. See LuaEngine::setUiSoundsSuppressed.
-            addons::LuaEngine::setUiSoundsSuppressed(true);
-            addonManager_->fireEvent("VARIABLES_LOADED");
-            // After VARIABLES_LOADED, which is when the chat window
-            // settings are available to be read. Every chat frame
-            // answers this by applying its saved font, colour, size
-            // and docked state; without it they keep the defaults
-            // they were built with however much was saved.
-            addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
-            addonManager_->fireEvent("PLAYER_LOGIN");
-            addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-            addons::LuaEngine::setUiSoundsSuppressed(false);
-        }
+    // performing it at the call site would free the machinery mid-call. Both
+    // ReloadUI and this client's own /reload ask the session for it.
+    if (session_) session_->reloadInterfaceIfRequested();
+    if (plan.world || plan.loading) {
+        if (auto* addons = worldInterface()) addons->update(deltaTime);
     }
-    if ((plan.world || plan.loading) && addonManager_ && addonsLoaded_)
-        addonManager_->update(deltaTime);
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);
     if (!renderer) return;
@@ -4701,10 +4688,10 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     // of character select - /logout ran, the character left the world, and the
     // interface it had been using never went away.
     const bool drawWidgets = view == FrameView::World;
-    if (drawWidgets && addonManager_ && addonManager_->getLuaEngine() && renderer) {
+    if (drawWidgets && characterAddons() && renderer) {
         runInterfaceStage("addonWidgets", [&] {
             const ImGuiIO& io = ImGui::GetIO();
-            auto* engine = addonManager_->getLuaEngine();
+            auto* engine = characterAddons()->getLuaEngine();
 
             // The portrait is the character itself rendered small, so it is
             // produced here rather than read from a file, and handed to the
@@ -5450,7 +5437,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
                 // above.
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
                     !engine->mouseOverFrameXml()) {
-                    const uint32_t carried = addons::cursorItemId();
+                    const uint32_t carried = session_->interfaceState().cursor.itemId();
                     if (carried != 0 && gameHandler) {
                         const auto* info = gameHandler->getItemInfo(carried);
                         const std::string name = info ? info->name : std::string();
@@ -5495,10 +5482,10 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
         //
         // The same guard the layout runs under, so the two never disagree
         // about whether there is an interface to draw.
-        if (drawWidgets && addonManager_ && addonManager_->getLuaEngine() && renderer) {
+        if (drawWidgets && characterAddons() && renderer) {
             runInterfaceStage("frameXml->draw", [&] {
                 const ImGuiIO& uiIo = ImGui::GetIO();
-                widgetRenderer_.draw(addonManager_->getLuaEngine()->widgets(),
+                widgetRenderer_.draw(characterAddons()->getLuaEngine()->widgets(),
                                      uiIo.DisplaySize.x, uiIo.DisplaySize.y);
             });
         }
@@ -5513,7 +5500,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     if (gameHandler) gameHandler->dispatchAddonEvents();
     if (worldTransitions_.leaving() ||
         (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) {
-        unloadInterface();
+        leaveWorldInterface();
     }
 
 }
@@ -5767,7 +5754,8 @@ void Application::setupUICallbacks() {
         [this](uint64_t guid) {
             uint64_t localGuid = gameHandler ? gameHandler->getPlayerGuid() : 0;
             uint64_t activeGuid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
-            const uint64_t modelGuid = mapScope_ ? mapScope_->playerModel().guid : 0;
+            const MapScope* map = currentMap();
+            const uint64_t modelGuid = map ? map->playerModel().guid : 0;
             return (localGuid != 0 && guid == localGuid) ||
                    (activeGuid != 0 && guid == activeGuid) ||
                    (modelGuid != 0 && guid == modelGuid);
@@ -5780,9 +5768,8 @@ void Application::setupUICallbacks() {
         audioCoordinator_.get());
     animationCallbacks_->setupCallbacks();
 
-    spellPresentation_ = std::make_unique<SpellPresentation>(
-        eventBus_, *gameHandler, *renderer, *entitySpawner_, spellVisualSystem_.get(),
-        audioCoordinator_.get(), *assetManager);
+    // How spells look and sound is the character's: CharacterSession builds
+    // its SpellPresentation when the character enters the world.
 
     // ── NPC interaction: greeting, farewell, vendor, aggro voice ──
     npcInteractionCallbacks_ = std::make_unique<NPCInteractionCallbackHandler>(
@@ -5802,11 +5789,11 @@ void Application::setupUICallbacks() {
 }
 
 void Application::spawnPlayerCharacter() {
-    if (!mapScope_) {
+    if (!currentMap()) {
         LOG_ERROR("Player model not spawned: no map scope to hold it");
         return;
     }
-    auto& playerModel = mapScope_->playerModel();
+    auto& playerModel = currentMap()->playerModel();
     if (playerModel.spawned) return;
     if (!renderer || !renderer->getCharacterRenderer() || !renderer->getCamera()) return;
 
@@ -6022,8 +6009,8 @@ void Application::spawnPlayerCharacter() {
 }
 
 void Application::refreshPlayerCharacterModel() {
-    if (!mapScope_ || !mapScope_->playerModel().spawned || !gameHandler) return;
-    auto& playerModel = mapScope_->playerModel();
+    if (!currentMap() || !currentMap()->playerModel().spawned || !gameHandler) return;
+    auto& playerModel = currentMap()->playerModel();
     const game::Character* ch = gameHandler->getActiveCharacter();
     if (!ch) return;
     // Only rebuild when the visible appearance actually changed. PLAYER_BYTES_2
@@ -6464,7 +6451,7 @@ void Application::updateRealmPatchMount() {
     // A map scope still standing may have work reading the archives; its end
     // joins that work.
     const bool worldInUse = state == AppState::IN_GAME || state == AppState::LOADING_WORLD ||
-                            mapScope_ != nullptr;
+                            currentMap() != nullptr;
     const std::string realm = currentRealmPatchKey();
 
     // Connected somewhere else: these archives are not that realm's. Taken down

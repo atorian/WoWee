@@ -2812,6 +2812,19 @@ target_include_directories(test_addon_event_queue SYSTEM PRIVATE ${CMAKE_SOURCE_
 target_link_libraries(test_addon_event_queue PRIVATE wowee_game_harness lua51)
 target_compile_definitions(test_addon_event_queue PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# ── test_character_session ───────────────────────────────────
+# What one character in the world leaves for the next: the real LFG bindings
+# (whose ticks and folds used to be function statics) run in one character's
+# Lua state and then in the next one's, the identity a relog's session takes
+# from the game, and the saved variables keyed by it. The LFG bindings are the
+# ones that link without the whole interface; the rest share their accessor.
+wowee_add_test(test_character_session SOURCES test_character_session.cpp
+    ${CMAKE_SOURCE_DIR}/src/addons/toc_parser.cpp
+    ${CMAKE_SOURCE_DIR}/src/addons/lua_lfg_api.cpp)
+target_include_directories(test_character_session SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_link_libraries(test_character_session PRIVATE wowee_game_harness lua51)
+target_compile_definitions(test_character_session PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # ── test_cvar_store ──────────────────────────────────────────
 # The CVars the game, the interface and the addons share: one name whatever
 # its case, and a value that survives the client closing.

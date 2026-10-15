@@ -55,6 +55,7 @@
 // script can ask "did this one still work" without reading the output.
 
 #include "addons/addon_manager.hpp"
+#include "addons/interface_state.hpp"
 #include "addons/lua_services.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/settings_panel.hpp"
@@ -168,8 +169,15 @@ int main(int argc, char** argv) {
     settingServices.setClientSetting = [](const std::string& key, const std::string& value) {
         gameScreen.getSettingsPanel().setSettingValue(key, value);
     };
-    wowee::addons::AddonManager mgr;
-    if (!mgr.initialize(nullptr, settingServices)) {
+    // What the client builds per character: the catalog of what is on disk,
+    // and one interface over one character's interface state. No character
+    // here, so no per-character saved variables.
+    wowee::addons::AddonCatalog catalog;
+    catalog.setFrameXmlDir(assetPath + "/interface/FrameXML");
+    catalog.scan(assetPath + "/interface/AddOns");
+    wowee::addons::InterfaceState interfaceState;
+    wowee::addons::AddonManager mgr(catalog, interfaceState, nullptr, settingServices, "");
+    if (!mgr.isInitialized()) {
         std::fprintf(stderr, "framexml_run: Lua would not initialise\n");
         return 2;
     }
@@ -186,8 +194,6 @@ int main(int argc, char** argv) {
         engine->widgets().noteScreenSize(1920.0f, 1080.0f);
     }
 
-    mgr.setFrameXmlDir(assetPath + "/interface/FrameXML");
-    mgr.scanAddons(assetPath + "/interface/AddOns");
     mgr.loadAllAddons();
 
     std::printf("== load: %zu error(s)\n", errors.size());

@@ -30,12 +30,14 @@ namespace fs = std::filesystem;
 
 namespace wowee::addons {
 
-AddonManager::AddonManager() = default;
-AddonManager::~AddonManager() { shutdown(); }
-
-bool AddonManager::initialize(game::GameHandler* gameHandler, const LuaServices& services) {
-    gameHandler_ = gameHandler;
-    luaServices_ = services;
+AddonManager::AddonManager(AddonCatalog& catalog, InterfaceState& interfaceState,
+                           game::GameHandler* gameHandler, const LuaServices& services,
+                           std::string characterName)
+    : catalog_(catalog),
+      characterName_(std::move(characterName)),
+      gameHandler_(gameHandler),
+      luaServices_(services),
+      luaEngine_(interfaceState) {
     // Supplied here rather than by the caller: the manager is what owns the
     // list of load-on-demand addons and the Lua state that asks for them, and
     // wiring it anywhere else would mean handing one to the other.
@@ -54,10 +56,22 @@ bool AddonManager::initialize(game::GameHandler* gameHandler, const LuaServices&
         setAddonEnabled(name, enabled);
     };
     luaEngine_.setLuaServices(luaServices_);
-    if (!luaEngine_.initialize()) return false;
+    if (!luaEngine_.initialize()) {
+        LOG_ERROR("AddonManager: no Lua state for '", characterName_,
+                  "' - the interface will not load and the world is played "
+                  "without FrameXML or addons");
+        return;
+    }
     luaEngine_.setGameHandler(gameHandler);
     luaEngine_.setLuaServices(luaServices_);
-    return true;
+}
+
+AddonManager::~AddonManager() {
+    // While the character this interface belongs to is still the one named and
+    // the Lua state still holds their variables; then the state goes, and the
+    // frames with it.
+    saveAllSavedVariables();
+    luaEngine_.shutdown();
 }
 
 namespace {
@@ -101,11 +115,16 @@ std::filesystem::path resolvePath(const std::filesystem::path& base,
 
 } // namespace
 
-void AddonManager::scanAddons(const std::string& addonsPath) {
+AddonCatalog::AddonCatalog() = default;
+
+void AddonCatalog::rescan() {
+    if (!addonsPath_.empty()) scan(addonsPath_);
+}
+
+void AddonCatalog::scan(const std::string& addonsPath) {
     addonsPath_ = addonsPath;
     addons_.clear();
     lodAddons_.clear();
-    lodLoaded_.clear();
 
     // Two places are searched. The game data's own Interface\AddOns is where a
     // player's existing addons already live, and an "addons" directory beside
@@ -238,7 +257,7 @@ void AddonManager::scanAddons(const std::string& addonsPath) {
     loadEnabledState();
 }
 
-std::vector<std::string> AddonManager::deferredAddonGlobals() const {
+std::vector<std::string> AddonCatalog::deferredAddonGlobals() const {
     std::vector<std::string> names;
     for (const TocFile& addon : lodAddons_) {
         // A disabled addon is never going to load, so its names stay absent -
@@ -345,11 +364,23 @@ void AddonManager::loadAllAddons() {
     // panel behind them, and the missing-API fallback answering with a truthy
     // no-op turns every one of those tests into "already loaded" - the panel is
     // never asked for and the branch runs against a stand-in.
-    luaEngine_.declareDeferredGlobals(deferredAddonGlobals());
+    if (addonsLoaded_) {
+        LOG_ERROR("AddonManager: interface for '", characterName_,
+                  "' asked to load a second time; refused - it would build every "
+                  "frame again on top of the first");
+        return;
+    }
+    if (!luaEngine_.isInitialized()) {
+        LOG_ERROR("AddonManager: no Lua state for '", characterName_,
+                  "', so no interface is loaded");
+        return;
+    }
+    luaEngine_.declareDeferredGlobals(catalog_.deferredAddonGlobals());
 
     const char* wantFrameXml = std::getenv("WOWEE_LOAD_FRAMEXML");
     const bool loadIt = wantFrameXml ? (std::string(wantFrameXml) != "0") : true;
-    if (loadIt && !frameXmlDir_.empty()) {
+    const std::string& frameXmlDir = catalog_.frameXmlDir();
+    if (loadIt && !frameXmlDir.empty()) {
         // Silent while the interface builds itself, the way the real client is
         // silent behind its loading screen.
         //
@@ -379,7 +410,7 @@ void AddonManager::loadAllAddons() {
                 static_cast<float>(luaServices_.window->getHeight()));
         }
         luaEngine_.setUiSoundsSuppressed(true);
-        loadFrameXml(frameXmlDir_);
+        loadFrameXml(frameXmlDir);
         luaEngine_.setUiSoundsSuppressed(false);
         // The client's own options, as a category in FrameXML's Interface
         // Options. After FrameXML rather than in the bootstrap, because
@@ -426,21 +457,23 @@ void AddonManager::loadAllAddons() {
 
     // Only hand the Lua VM the addons that are actually enabled, so disabled ones
     // don't appear via GetNumAddOns/IsAddOnLoaded either.
+    const auto& addons = catalog_.addons();
+    const auto& lodAddons = catalog_.loadOnDemandAddons();
     std::vector<TocFile> enabled;
-    enabled.reserve(addons_.size() + lodAddons_.size());
-    for (const auto& addon : addons_) {
+    enabled.reserve(addons.size() + lodAddons.size());
+    for (const auto& addon : addons) {
         if (isAddonEnabled(addon.addonName)) enabled.push_back(addon);
     }
     // Load-on-demand addons are listed too, as WoW lists them: an addon
     // manager panel shows the talent tree and the auction house alongside
     // everything else, and GetNumAddOns counts them. They carry a flag so
     // IsAddOnLoaded does not mistake being listed for being loaded.
-    for (const auto& addon : lodAddons_) {
+    for (const auto& addon : lodAddons) {
         if (isAddonEnabled(addon.addonName)) enabled.push_back(addon);
     }
     luaEngine_.setAddonList(enabled);
     int loaded = 0, failed = 0, skipped = 0;
-    for (const auto& addon : addons_) {
+    for (const auto& addon : addons) {
         if (!isAddonEnabled(addon.addonName)) {
             LOG_INFO("AddonManager: skipping disabled addon: ", addon.addonName);
             skipped++;
@@ -457,21 +490,21 @@ void AddonManager::loadAllAddons() {
 
 // ---- Per-addon enable/disable (persisted) ----------------------------------
 
-bool AddonManager::isAddonEnabled(const std::string& addonName) const {
+bool AddonCatalog::isAddonEnabled(const std::string& addonName) const {
     auto it = addonEnabled_.find(addonName);
     return (it == addonEnabled_.end()) ? true : it->second;  // default: enabled
 }
 
-void AddonManager::setAddonEnabled(const std::string& addonName, bool enabled) {
+void AddonCatalog::setAddonEnabled(const std::string& addonName, bool enabled) {
     addonEnabled_[addonName] = enabled;
     saveEnabledState();
 }
 
-std::string AddonManager::enabledStatePath() {
+std::string AddonCatalog::enabledStatePath() {
     return core::getConfigRoot() + "/addons.cfg";
 }
 
-void AddonManager::loadEnabledState() {
+void AddonCatalog::loadEnabledState() {
     std::ifstream in(enabledStatePath());
     if (!in) return;
     std::string line;
@@ -484,10 +517,11 @@ void AddonManager::loadEnabledState() {
     }
 }
 
-void AddonManager::saveEnabledState() const {
+void AddonCatalog::saveEnabledState() const {
     std::ofstream out(enabledStatePath(), std::ios::trunc);
     if (!out) {
-        LOG_WARNING("AddonManager: could not write ", enabledStatePath());
+        LOG_WARNING("AddonManager: could not write ", enabledStatePath(),
+                    " - the addon enable choices are lost at the next start");
         return;
     }
     // Persist an explicit line only for addons we actually know about, so stale
@@ -497,14 +531,6 @@ void AddonManager::saveEnabledState() const {
     }
 }
 
-std::string AddonManager::getSavedVariablesPath(const TocFile& addon) const {
-    return addon.basePath + "/" + addon.addonName + ".lua.saved";
-}
-
-std::string AddonManager::getSavedVariablesPerCharacterPath(const TocFile& addon) const {
-    if (characterName_.empty()) return "";
-    return addon.basePath + "/" + addon.addonName + "." + characterName_ + ".lua.saved";
-}
 
 // The client's settings, as panels in FrameXML's Interface Options.
 //
@@ -520,8 +546,7 @@ std::string AddonManager::getSavedVariablesPerCharacterPath(const TocFile& addon
 // reproduced - this client has settings that one never had - but it reads the
 // same way round.
 void AddonManager::registerWoweeOptionsPanel() {
-    static const char* kPanelScript = kWoweeOptionsPanelLua;
-    if (!luaEngine_.executeString(kPanelScript)) {
+    if (!luaEngine_.executeString(kWoweeOptionsPanelLua)) {
         LOG_WARNING("Wowee options panel did not register: ", luaEngine_.lastError());
     }
 }
@@ -543,8 +568,7 @@ void AddonManager::giveCoinAmountsClearance() {
     //
     // Hooked rather than edited into MoneyFrame.lua, so the interface's own
     // file stays Blizzard's and this stays visible as ours.
-    static const char* kScript = kCoinAmountClearanceLua;
-    if (!luaEngine_.executeString(kScript)) {
+    if (!luaEngine_.executeString(kCoinAmountClearanceLua)) {
         LOG_WARNING("Coin amount clearance did not apply: ", luaEngine_.lastError());
     }
     // Chat lines that do not fade out from under the player.
@@ -791,7 +815,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
     //
     // Fired straight into the interface rather than through ChangeChatColor.
     // That binding asks the game handler to fire the event, and the application
-    // drops every event it is handed until addonsLoaded_ is true - which
+    // drops every event it is handed until the interface has entered the world
+    // (CharacterSession::interfaceHoldsWorld) - which
     // happens at world entry, long after this runs. So all twenty-six went
     // nowhere and the table kept the white that chatframe.lua writes over it at
     // file scope, and every line of chat in the game drew the same colour.
@@ -1476,7 +1501,7 @@ bool AddonManager::loadXmlFile(const std::string& path, int depth) {
         // name - inspectpvpframe.xml asks for PVPFrameTemplates.xml - and by a
         // path back out of its own folder, and both mean the same place.
         const fs::path base = fs::path(frameXmlResolvedDir_.empty()
-                                           ? frameXmlDir_ : frameXmlResolvedDir_);
+                                           ? catalog_.frameXmlDir() : frameXmlResolvedDir_);
         if (!base.empty()) {
             if (fs::path p = resolvePath(base, fs::path(name).filename().string());
                 !p.empty()) {
@@ -1572,17 +1597,21 @@ bool AddonManager::loadXmlFile(const std::string& path, int depth) {
 }
 
 bool AddonManager::loadAddon(const TocFile& addon) {
+    // Remembered before anything runs: its saved variables are in this state
+    // from the next line, and they are written back from this list - the ones
+    // this interface read - whatever the disk says by the time it closes.
+    loadedAddons_.push_back(addon);
     // Load SavedVariables before addon code (so globals are available at load time)
     auto savedVars = addon.getSavedVariables();
     if (!savedVars.empty()) {
-        std::string svPath = getSavedVariablesPath(addon);
+        std::string svPath = addon.savedVariablesPath();
         luaEngine_.loadSavedVariables(svPath);
         LOG_DEBUG("AddonManager: loaded saved variables for '", addon.addonName, "'");
     }
     // Load per-character SavedVariables
     auto savedVarsPC = addon.getSavedVariablesPerCharacter();
     if (!savedVarsPC.empty()) {
-        std::string svpcPath = getSavedVariablesPerCharacterPath(addon);
+        std::string svpcPath = addon.savedVariablesPerCharacterPath(characterName_);
         if (!svpcPath.empty()) {
             luaEngine_.loadSavedVariables(svpcPath);
             LOG_DEBUG("AddonManager: loaded per-character saved variables for '", addon.addonName, "'");
@@ -1640,7 +1669,7 @@ bool AddonManager::loadAddOnByName(const std::string& name, std::string& reason)
     if (lodLoaded_.count(key)) { reason.clear(); return true; }
 
     const TocFile* found = nullptr;
-    for (const TocFile& a : lodAddons_) {
+    for (const TocFile& a : catalog_.loadOnDemandAddons()) {
         if (lowered(a.addonName) == key) { found = &a; break; }
     }
     if (!found) {
@@ -1650,7 +1679,7 @@ bool AddonManager::loadAddOnByName(const std::string& name, std::string& reason)
         // UIParentLoadAddOn("Blizzard_TokenUI"), whose .toc has no such line,
         // and that reported MISSING for an addon already running - raising the
         // "Couldn't load" popup over a UI that was working.
-        for (const TocFile& a : addons_) {
+        for (const TocFile& a : catalog_.addons()) {
             if (lowered(a.addonName) != key) continue;
             if (!isAddonEnabled(a.addonName)) { reason = "DISABLED"; return false; }
             // Only once the startup pass has actually run it. Before that it is
@@ -1729,71 +1758,23 @@ void AddonManager::update(float deltaTime) {
 }
 
 void AddonManager::saveAllSavedVariables() {
-    // Only what a loaded interface is holding. unloadAll saves, tears the Lua
-    // state down and then scans the disk again - so the addon list is full
-    // again while the state that held their variables is gone, and the save on
-    // the way out of the process would write every one of those files from a
-    // state that never loaded them.
-    if (!addonsLoaded_) return;
-    for (const auto& addon : addons_) {
+    // Only what this interface read in: an addon it never loaded has nothing
+    // of its own in this state, and writing its file from here would replace
+    // what is there with nothing.
+    if (!luaEngine_.isInitialized()) return;
+    for (const auto& addon : loadedAddons_) {
         auto savedVars = addon.getSavedVariables();
         if (!savedVars.empty()) {
-            std::string svPath = getSavedVariablesPath(addon);
-            luaEngine_.saveSavedVariables(svPath, savedVars);
+            luaEngine_.saveSavedVariables(addon.savedVariablesPath(), savedVars);
         }
         auto savedVarsPC = addon.getSavedVariablesPerCharacter();
         if (!savedVarsPC.empty()) {
-            std::string svpcPath = getSavedVariablesPerCharacterPath(addon);
+            const std::string svpcPath = addon.savedVariablesPerCharacterPath(characterName_);
             if (!svpcPath.empty()) {
                 luaEngine_.saveSavedVariables(svpcPath, savedVarsPC);
             }
         }
     }
-}
-
-bool AddonManager::unloadAll() {
-    saveAllSavedVariables();
-    addons_.clear();
-    lodAddons_.clear();
-    lodLoaded_.clear();
-    addonsLoaded_ = false;
-    // Closing the state is what disposes of the interface: the widget tree
-    // goes down with it, so the frames FrameXML built are gone rather than
-    // left for the next load to build a second copy on top of.
-    luaEngine_.shutdown();
-
-    luaEngine_.setLuaServices(luaServices_);
-    if (!luaEngine_.initialize()) {
-        LOG_ERROR("AddonManager: failed to reinitialize the Lua VM");
-        return false;
-    }
-    luaEngine_.setGameHandler(gameHandler_);
-    luaEngine_.setLuaServices(luaServices_);
-
-    // The list of what is on disk is not part of the interface and has to
-    // survive it - the AddOns manager on character select reads it while
-    // nothing is loaded at all.
-    if (!addonsPath_.empty()) scanAddons(addonsPath_);
-    return true;
-}
-
-bool AddonManager::reload() {
-    LOG_INFO("AddonManager: reloading all addons...");
-    if (!unloadAll()) {
-        LOG_ERROR("AddonManager: failed to reinitialize Lua VM during reload");
-        return false;
-    }
-    if (!addonsPath_.empty()) {
-        loadAllAddons();
-    }
-    LOG_INFO("AddonManager: reload complete");
-    return true;
-}
-
-void AddonManager::shutdown() {
-    saveAllSavedVariables();
-    addons_.clear();
-    luaEngine_.shutdown();
 }
 
 } // namespace wowee::addons

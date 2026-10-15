@@ -2273,7 +2273,7 @@ int lua_Tooltip_SetQuestLogRewardSpell(lua_State* L) {
     if (gh) {
         // Through the row mapper: the selected index is a display index into a
         // log grouped under zone headers, not a position in getQuestLog().
-        if (const auto* q = wowee::addons::questAtLogRow(gh, gh->getSelectedQuestLogIndex()))
+        if (const auto* q = wowee::addons::questAtLogRow(L, gh, gh->getSelectedQuestLogIndex()))
             spellId = q->rewardSpellId;
     }
     lua_pushboolean(L, spellId && fillSpellTooltip(w, gh, spellId) ? 1 : 0);
@@ -2365,7 +2365,7 @@ int lua_Tooltip_SetTradeSkillItem(lua_State* L) {
     // neither the same length nor the same order: subscripting the recipes
     // described whatever happened to sit at that offset - "Enchant Bracer -
     // Lesser Spirit" was shown as "Enchant Bracer - Minor Deflection".
-    const auto* recipe = wowee::addons::recipeAtTradeSkillRow(gh, index);
+    const auto* recipe = wowee::addons::recipeAtTradeSkillRow(L, gh, index);
     if (!recipe) { lua_pushboolean(L, 0); return 1; }
     const uint32_t spellId = recipe->spellId;
     if (spellId == 0) { lua_pushboolean(L, 0); return 1; }
@@ -5707,7 +5707,7 @@ static int lua_CreateFrame(lua_State* L) {
 
 // strsplit(delimiter, str) - WoW's string split
 
-LuaEngine::LuaEngine() = default;
+LuaEngine::LuaEngine(InterfaceState& interfaceState) : interfaceState_(interfaceState) {}
 
 LuaEngine::~LuaEngine() {
     shutdown();
@@ -5754,6 +5754,10 @@ bool LuaEngine::initialize() {
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "wowee_lua_engine");
 
+    // The character's interface state, which every binding that keeps
+    // something between calls reads through this state rather than a static.
+    bindInterfaceState(L_, &interfaceState_);
+
     setLuaServices(luaServices_);
     registerCoreAPI();
     registerEventAPI();
@@ -5775,8 +5779,11 @@ void LuaEngine::shutdown() {
         reportMissingApi();
         // Before the state goes: the cursor bridge holds this pointer so the
         // client's own windows can ask what FrameXML is carrying, and calling
-        // through it after the close would be reading a freed state.
-        ui::frameXmlSetCursorBridge(nullptr, nullptr);
+        // through it after the close would be reading a freed state. The rest
+        // of what the takeover module recorded about this interface - its
+        // loaded addons, its cursor icon - goes with it too: the next state
+        // may be another character's.
+        ui::frameXmlInterfaceClosed();
         lua_close(L_);
         L_ = nullptr;
         // The frames go with the state that built them. Without this the next
@@ -8866,7 +8873,7 @@ void LuaEngine::fireEvent(const std::string& eventName,
     // late reply lands at a redraw rather than between two lookups of the same
     // index.
     if (eventName == "TRADE_SKILL_UPDATE" || eventName == "TRADE_SKILL_SHOW") {
-        invalidateTradeSkillRows();
+        invalidateTradeSkillRows(L_);
     }
 
     // An event handler may cause another event, which is ordinary and has to
@@ -9378,9 +9385,9 @@ void LuaEngine::reportMissingApi() const {
     // Written again here so the counts are the session's final ones; the first
     // sighting of each error already put the file on disk.
     writeLuaErrorReport();
-    if (!luaErrors_.empty()) {
-        LOG_WARNING("LuaEngine: ", luaErrors_.size(),
-                    " distinct Lua error(s) this session - see ",
+    if (errorReport().distinct() > 0) {
+        LOG_WARNING("LuaEngine: ", errorReport().distinct(),
+                    " distinct Lua error(s) this run - see ",
                     core::getConfigRoot(), "/lua_errors.txt");
     }
     // Every name is checked against _G before being reported, so without a
@@ -9569,8 +9576,16 @@ void LuaEngine::reportMissingApi() const {
 }
 
 void LuaEngine::noteLuaError(const std::string& message) {
+    errorReport().note(message);
+}
+
+void LuaEngine::writeLuaErrorReport() const {
+    errorReport().write();
+}
+
+void LuaErrorReport::note(const std::string& message) {
     if (message.empty()) return;
-    auto [it, inserted] = luaErrors_.emplace(message, 0u);
+    auto [it, inserted] = errors_.emplace(message, 0u);
     ++it->second;
     // Written the first time each distinct error is seen, not only at
     // shutdown. The errors worth reading are often the ones just before a
@@ -9578,11 +9593,11 @@ void LuaEngine::noteLuaError(const std::string& message) {
     // loses them. Rewriting on a repeat would put a file write inside an
     // OnUpdate that raises every frame, so repeats only bump the count and the
     // shutdown pass writes the final tally.
-    if (inserted) writeLuaErrorReport();
+    if (inserted) write();
 }
 
-void LuaEngine::writeLuaErrorReport() const {
-    if (luaErrors_.empty()) return;
+void LuaErrorReport::write() const {
+    if (errors_.empty()) return;
     const std::string path = core::getConfigRoot() + "/lua_errors.txt";
     std::ofstream out(path);
     if (!out) return;
@@ -9593,8 +9608,8 @@ void LuaEngine::writeLuaErrorReport() const {
            "-- panel that is present and does nothing rather than an error on\n"
            "-- screen. The traceback names the file and line.\n\n";
     std::vector<std::pair<uint64_t, const std::string*>> byCount;
-    byCount.reserve(luaErrors_.size());
-    for (const auto& [msg, count] : luaErrors_) byCount.emplace_back(count, &msg);
+    byCount.reserve(errors_.size());
+    for (const auto& [msg, count] : errors_) byCount.emplace_back(count, &msg);
     std::sort(byCount.begin(), byCount.end(),
               [](const auto& a, const auto& b) {
                   if (a.first != b.first) return a.first > b.first;
@@ -10602,10 +10617,9 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
     // reaches the widget tree at all is otherwise invisible: a frame that never
     // lights up looks the same whether the dispatch is not running, the
     // coordinates are wrong, or the frame is not taking the mouse.
-    static double lastReport = 0.0;
     const double now = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count()) / 1000.0;
-    if (now - lastReport >= 1.0) {
+    if (now - inputReportAt_ >= 1.0) {
         size_t mouseFrames = 0;
         for (uint32_t id = 1; id < widgets_.size(); ++id) {
             const auto* w = widgets_.get(id);
@@ -10623,7 +10637,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
             if (w && w->visible) ++visibleFrames;
         }
         if (visibleFrames > 0) {
-            lastReport = now;
+            inputReportAt_ = now;
             LOG_INFO("WidgetInput: mouse=(", x, ",", y, ") hit=", hit,
                      " hover=", hoverWid_, " mouseEnabled=", mouseFrames,
                      " visible=", visibleFrames);
@@ -10638,16 +10652,14 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
     // answer every time. A minute of ordinary play wrote 27 of these, all of
     // them "hit nothing", which is one fact.
     if (buttons.left) {
-        static double lastPress = 0.0;
-        static std::string lastAnswer;
         const double now = core::appTimeSeconds();
         const auto* w = widgets_.get(hit);
         const std::string answer =
             hit == 0 ? "nothing"
                      : (w && !w->name.empty() ? w->name : std::string("(unnamed)"));
-        if (answer != lastAnswer && now - lastPress > 1.0) {
-            lastPress = now;
-            lastAnswer = answer;
+        if (answer != lastPressAnswer_ && now - lastPressAt_ > 1.0) {
+            lastPressAt_ = now;
+            lastPressAnswer_ = answer;
             // Debug: one line per click in ordinary play. A click that lands
             // and is refused still says so at warning, from the release below.
             LOG_DEBUG("WidgetInput: press at (", x, ",", y, ") hit ", answer);
@@ -11108,7 +11120,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
                         // back. An item off an action bar has no such prompt -
                         // the bar held a reference, not the item - so it still
                         // clears here, which is what takes it off the bar.
-                        if (onWorld && !cursorItemCameFromInventory()) {
+                        if (onWorld && !cursorItemCameFromInventory(L_)) {
                             lua_getglobal(L_, "ClearCursor");
                             if (lua_isfunction(L_, -1)) {
                                 if (checkedLuaCall(L_, 0, 0, 0) != 0) lua_pop(L_, 1);

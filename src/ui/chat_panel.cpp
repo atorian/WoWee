@@ -223,7 +223,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
         // /run <lua code>
         if ((cmdLower == "run" || cmdLower == "script") && spacePos != std::string::npos) {
             std::string luaCode = command.substr(spacePos + 1);
-            auto* am = services_.addonManager;
+            auto* am = services_.characterAddons();
             if (am) {
                 am->runScript(luaCode);
             } else {
@@ -236,7 +236,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
         // /dump <expression>
         if ((cmdLower == "dump" || cmdLower == "print") && spacePos != std::string::npos) {
             std::string expr = command.substr(spacePos + 1);
-            auto* am = services_.addonManager;
+            auto* am = services_.characterAddons();
             if (am && am->isInitialized()) {
                 std::string wrapped = "local __v = " + expr +
                     "; if type(__v) == 'table' then "
@@ -258,7 +258,7 @@ void ChatPanel::sendChatMessage(game::GameHandler& gameHandler) {
 
         // Addon slash commands (SlashCmdList)
         {
-            auto* am = services_.addonManager;
+            auto* am = services_.characterAddons();
             if (am && am->isInitialized()) {
                 std::string slashCmd = "/" + cmdLower;
                 std::string slashArgs;

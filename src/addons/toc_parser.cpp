@@ -90,6 +90,15 @@ std::vector<std::string> TocFile::getSavedVariablesPerCharacter() const {
     return (it != directives.end()) ? parseVarList(it->second) : std::vector<std::string>{};
 }
 
+std::string TocFile::savedVariablesPath() const {
+    return basePath + "/" + addonName + ".lua.saved";
+}
+
+std::string TocFile::savedVariablesPerCharacterPath(const std::string& characterName) const {
+    if (characterName.empty()) return {};
+    return basePath + "/" + addonName + "." + characterName + ".lua.saved";
+}
+
 std::optional<TocFile> parseTocFile(const std::string& tocPath) {
     std::ifstream f(tocPath);
     if (!f.is_open()) return std::nullopt;

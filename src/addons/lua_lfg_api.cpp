@@ -91,14 +91,13 @@ bool isRaidSide(const game::LfgDungeon& d) {
 /// Which dungeons the player has ticked, and which headers are folded up.
 /// Both are the panel's own state - FrameXML says so in a comment, "we
 /// maintain this list in Lua" - and the only reason they are here is that it
-/// asks the client for the starting value.
-std::unordered_map<int, bool>& enabledDungeons() {
-    static std::unordered_map<int, bool> enabled;
-    return enabled;
+/// asks the client for the starting value. The character's, in
+/// InterfaceState::lfg: the next character starts with nothing ticked.
+std::unordered_map<int, bool>& enabledDungeons(lua_State* L) {
+    return interfaceState(L).lfg.enabledDungeons;
 }
-std::unordered_map<int, bool>& collapsedHeaders() {
-    static std::unordered_map<int, bool> collapsed;
-    return collapsed;
+std::unordered_map<int, bool>& collapsedHeaders(lua_State* L) {
+    return interfaceState(L).lfg.collapsedHeaders;
 }
 
 int luaReturnTrue(lua_State* L)    { lua_pushboolean(L, 1); return 1; }
@@ -212,7 +211,7 @@ void registerLfgLuaAPI(lua_State* L) {
 
     {"GetLFDChoiceEnabledState", [](lua_State* L) -> int {
         lua_newtable(L);
-        for (const auto& [id, on] : enabledDungeons()) {
+        for (const auto& [id, on] : enabledDungeons(L)) {
             lua_pushboolean(L, on ? 1 : 0);
             lua_rawseti(L, -2, id);
         }
@@ -220,7 +219,7 @@ void registerLfgLuaAPI(lua_State* L) {
     }},
     {"GetLFDChoiceCollapseState", [](lua_State* L) -> int {
         lua_newtable(L);
-        for (const auto& [id, folded] : collapsedHeaders()) {
+        for (const auto& [id, folded] : collapsedHeaders(L)) {
             lua_pushboolean(L, folded ? 1 : 0);
             lua_rawseti(L, -2, id);
         }
@@ -274,24 +273,23 @@ void registerLfgLuaAPI(lua_State* L) {
 
     {"SetLFGDungeonEnabled", [](lua_State* L) -> int {
         const int id = static_cast<int>(luaL_optinteger(L, 1, 0));
-        if (id != 0) enabledDungeons()[id] = lua_toboolean(L, 2) != 0;
+        if (id != 0) enabledDungeons(L)[id] = lua_toboolean(L, 2) != 0;
         return 0;
     }},
     {"SetLFGHeaderCollapsed", [](lua_State* L) -> int {
         const int id = static_cast<int>(luaL_optinteger(L, 1, 0));
-        if (id != 0) collapsedHeaders()[id] = lua_toboolean(L, 2) != 0;
+        if (id != 0) collapsedHeaders(L)[id] = lua_toboolean(L, 2) != 0;
         return 0;
     }},
     {"ClearAllLFGDungeons", [](lua_State* L) -> int {
-        (void)L;
-        enabledDungeons().clear();
+        enabledDungeons(L).clear();
         return 0;
     }},
     // Picking the single dungeon a "specific" queue is for.
     {"SetLFGDungeon", [](lua_State* L) -> int {
         const int id = static_cast<int>(luaL_optinteger(L, 1, 0));
-        enabledDungeons().clear();
-        if (id != 0) enabledDungeons()[id] = true;
+        enabledDungeons(L).clear();
+        if (id != 0) enabledDungeons(L)[id] = true;
         return 0;
     }},
 
@@ -367,7 +365,7 @@ void registerLfgLuaAPI(lua_State* L) {
         // is not the first dungeon the player picked - it is whichever one the
         // container happened to hand back, and a different one between runs.
         std::vector<uint32_t> chosen;
-        for (const auto& [id, on] : enabledDungeons()) {
+        for (const auto& [id, on] : enabledDungeons(L)) {
             if (on && id > 0) chosen.push_back(static_cast<uint32_t>(id));
         }
         std::sort(chosen.begin(), chosen.end());

@@ -40,24 +40,16 @@ namespace wowee::addons {
 // window puts one there on every left-click - PickupMerchantItem - and buying
 // is what happens when it is dropped into a bag, so without it a left-click at
 // a vendor did nothing at all and only right-click bought.
-enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK };
-static CursorType s_cursorType = CursorType::NONE;
-static uint32_t   s_cursorId   = 0;    // spellId, itemId, or action slot
-static int        s_cursorSlot = 0;    // source slot for placement
-/// Which container the cursor's item came out of, and one of the four values
-/// game::slots documents: 0 the backpack, 1-4 a worn bag, -1 the paperdoll,
-/// kCursorNoSource the action bar. See cursorSourceIsInventory.
-static int        s_cursorBag  = -1;
-static uint64_t   s_cursorMoney = 0;   // copper, when the cursor carries money
-/// How much of a guild bank stack the cursor took, or zero for all of it. The
-/// wire carries the split on the *withdrawal*, not on the pickup, so the amount
-/// has to wait on the cursor until the drop says where it is going.
-static uint32_t   s_cursorSplit = 0;
+//
+// The cursor is the character's: InterfaceState::Cursor, reached through the
+// Lua state. A guild bank split rides on it between the pickup and the drop,
+// because the wire carries the split on the *withdrawal*.
+static InterfaceState::Cursor& cursor(lua_State* L) { return interfaceState(L).cursor; }
 static void setCursorType(lua_State* L, CursorType type);
 /// Where the cursor's item came from, in wire bag/slot space. Declared here
 /// because the guild bank pickup above needs it and it is defined further down
 /// with the other cursor helpers.
-static bool cursorWireSlot(uint8_t& bag, uint8_t& slot);
+static bool cursorWireSlot(lua_State* L, uint8_t& bag, uint8_t& slot);
 /// Whether a drop on an inventory slot is a move at all, and puts the cursor
 /// down when it is not. See kCursorNoSource: an item off the action bar has
 /// nowhere to be moved from, so dropping it in a bag or on the paperdoll does
@@ -66,41 +58,19 @@ static bool droppedItemFromNowhere(lua_State* L);
 /// Sell what the cursor is holding. Defined below, beside the buy it mirrors.
 static void soldHeldItem(lua_State* L);
 
-uint64_t cursorMoney() {
-    return s_cursorType == CursorType::MONEY ? s_cursorMoney : 0;
-}
-
 void setCursorMoney(lua_State* L, uint64_t copper) {
     // Through setCursorType rather than by assignment: it is what fires
     // CURSOR_UPDATE and what shows the action bars' empty slots. Setting the
     // type by hand would put money on the cursor with nothing told about it.
-    s_cursorMoney = copper;
+    cursor(L).money = copper;
     if (copper == 0) {
-        if (s_cursorType == CursorType::MONEY) setCursorType(L, CursorType::NONE);
+        if (cursor(L).type == CursorType::MONEY) setCursorType(L, CursorType::NONE);
         return;
     }
-    s_cursorId = 0;
-    s_cursorSlot = 0;
-    s_cursorBag = -1;
+    cursor(L).id = 0;
+    cursor(L).slot = 0;
+    cursor(L).bag = -1;
     setCursorType(L, CursorType::MONEY);
-}
-
-uint32_t cursorItemId() {
-    return s_cursorType == CursorType::ITEM ? s_cursorId : 0;
-}
-
-int cursorEquipSlot() {
-    // s_cursorBag is -1 only for a pickup off the paperdoll, where s_cursorSlot
-    // is the one-based slot the item came out of.
-    return (s_cursorType == CursorType::ITEM && s_cursorBag == -1) ? s_cursorSlot : 0;
-}
-
-bool cursorItemCameFromInventory() {
-    // The same test cursorWireSlot makes before it will name a source, because
-    // it is the same question: an item the wire can point at is an item that
-    // can be destroyed.
-    return s_cursorType == CursorType::ITEM &&
-           game::slots::cursorSourceIsInventory(s_cursorBag);
 }
 
 /// PickupPetAction(slot) - pick a pet ability up off the pet bar.
@@ -136,14 +106,14 @@ static int lua_PickupPetAction(lua_State* L) { (void)L; return 0; }
 static void clearCursorItem(lua_State* L);
 
 static void setCursorType(lua_State* L, CursorType type) {
-    if (s_cursorType == type) return;
+    if (cursor(L).type == type) return;
     // Putting anything down forgets the guild bank split. It rides on the
     // cursor between the pickup and the drop, and a leftover would be applied
     // to the next withdrawal - a stack the player never asked to divide.
-    if (type != CursorType::GUILDBANK) s_cursorSplit = 0;
-    const bool wasCarrying = (s_cursorType != CursorType::NONE);
+    if (type != CursorType::GUILDBANK) cursor(L).split = 0;
+    const bool wasCarrying = (cursor(L).type != CursorType::NONE);
     const bool nowCarrying = (type != CursorType::NONE);
-    s_cursorType = type;
+    cursor(L).type = type;
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
     auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
@@ -454,12 +424,12 @@ static int lua_ClearCursor(lua_State* L) {
 }
 
 static int lua_GetCursorInfo(lua_State* L) {
-    switch (s_cursorType) {
+    switch (cursor(L).type) {
         case CursorType::SPELL:
             lua_pushstring(L, "spell");
             lua_pushnumber(L, 0);          // bookSlotIndex
             lua_pushstring(L, "spell");    // bookType
-            lua_pushnumber(L, s_cursorId); // spellId
+            lua_pushnumber(L, cursor(L).id); // spellId
             return 4;
         case CursorType::ITEM:
         // An item out of the guild bank is an item. Where it came from is this
@@ -468,23 +438,23 @@ static int lua_GetCursorInfo(lua_State* L) {
         // interface a kind it has no branch for.
         case CursorType::GUILDBANK:
             lua_pushstring(L, "item");
-            lua_pushnumber(L, s_cursorId);
+            lua_pushnumber(L, cursor(L).id);
             return 2;
         case CursorType::MACRO:
             lua_pushstring(L, "macro");
-            lua_pushnumber(L, s_cursorId);
+            lua_pushnumber(L, cursor(L).id);
             return 2;
         case CursorType::MONEY:
             // containerframe.lua branches on this exact string to decide that
             // a click in a bag is money being put back.
             lua_pushstring(L, "money");
-            lua_pushnumber(L, static_cast<lua_Number>(s_cursorMoney));
+            lua_pushnumber(L, static_cast<lua_Number>(cursor(L).money));
             return 2;
         case CursorType::MERCHANT:
             // containerframe.lua branches on this exact string to decide
             // whether a click in a bag is a purchase.
             lua_pushstring(L, "merchant");
-            lua_pushnumber(L, s_cursorId);   // the vendor's list index
+            lua_pushnumber(L, cursor(L).id);   // the vendor's list index
             return 2;
         default:
             return 0;
@@ -495,13 +465,13 @@ static int lua_CursorHasItem(lua_State* L) {
     // A guild bank item counts. The bank frame's own OnClick tests this before
     // deciding a click is a drop, so answering no for one would have left the
     // item stuck on the cursor with nowhere that would take it.
-    lua_pushboolean(L, (s_cursorType == CursorType::ITEM ||
-                        s_cursorType == CursorType::GUILDBANK) ? 1 : 0);
+    lua_pushboolean(L, (cursor(L).type == CursorType::ITEM ||
+                        cursor(L).type == CursorType::GUILDBANK) ? 1 : 0);
     return 1;
 }
 
 static int lua_CursorHasSpell(lua_State* L) {
-    lua_pushboolean(L, s_cursorType == CursorType::SPELL ? 1 : 0);
+    lua_pushboolean(L, cursor(L).type == CursorType::SPELL ? 1 : 0);
     return 1;
 }
 
@@ -530,8 +500,8 @@ static int lua_PickupAction(lua_State* L) {
     // this would otherwise still be pointing at.
     const auto existing = bar[slot - 1];
     const bool hadAction = !existing.isEmpty();
-    const CursorType held = s_cursorType;
-    const uint32_t heldId = s_cursorId;
+    const CursorType held = cursor(L).type;
+    const uint32_t heldId = cursor(L).id;
 
     const auto typeForCursor = [](CursorType c) {
         return c == CursorType::SPELL ? game::ActionBarSlot::SPELL
@@ -561,20 +531,20 @@ static int lua_PickupAction(lua_State* L) {
         setCursorType(L, (existing.type == game::ActionBarSlot::SPELL) ? CursorType::SPELL :
                        (existing.type == game::ActionBarSlot::ITEM)  ? CursorType::ITEM :
                        CursorType::MACRO);
-        s_cursorId = existing.id;
-        s_cursorSlot = slot;
+        cursor(L).id = existing.id;
+        cursor(L).slot = slot;
         // Which button, not which slot of which bag - a fourth numbering, and
         // the reason the source has to say so. An item action carries a real
         // itemId, so without this the cursor was indistinguishable from one
         // lifted off the paperdoll and the button number was spent as an
         // equipment slot. See kCursorNoSource.
-        s_cursorBag = game::slots::kCursorNoSource;
+        cursor(L).bag = game::slots::kCursorNoSource;
         // The shared cursor as well, which is a separate record of the same
         // thing and would otherwise still be naming wherever the *previous*
         // pickup came from: clicking a button while carrying a bag item swaps
         // the two, and the bag slot it left behind stayed on this cursor as
         // the source PutItemInBag would have moved from.
-        cursorItemSlot() = {};
+        cursor(L).item = {};
         // And on the pointer, or the drag reads as not having started.
         if (existing.type == game::ActionBarSlot::SPELL) {
             wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(existing.id));
@@ -605,10 +575,10 @@ static int lua_PickupAction(lua_State* L) {
 // PickupAction while holding something is exactly that swap, so this is it.
 // With nothing placeable held it does nothing, and leaves the cursor alone.
 static int lua_PlaceAction(lua_State* L) {
-    const bool holding = s_cursorId != 0 &&
-                         (s_cursorType == CursorType::SPELL ||
-                          s_cursorType == CursorType::ITEM ||
-                          s_cursorType == CursorType::MACRO);
+    const bool holding = cursor(L).id != 0 &&
+                         (cursor(L).type == CursorType::SPELL ||
+                          cursor(L).type == CursorType::ITEM ||
+                          cursor(L).type == CursorType::MACRO);
     if (!holding) return 0;
     return lua_PickupAction(L);
 }
@@ -623,11 +593,11 @@ static int lua_PickupSpell(lua_State* L) {
     const uint32_t picked = spellIdForCall(L, gh);
     if (picked == 0) return 0;
     setCursorType(L, CursorType::SPELL);
-    s_cursorId = picked;
+    cursor(L).id = picked;
     // On the pointer as well as in the state, the way every other pickup here
     // does it. Dragging a spell out of the book carried nothing visible, so
     // the drag read as not having started.
-    wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(s_cursorId));
+    wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(cursor(L).id));
     return 0;
 }
 
@@ -644,7 +614,7 @@ static int lua_PlaceGlyphInSocket(lua_State* L) {
     const int socket = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || socket < 1 || socket > game::GameHandler::MAX_GLYPH_SLOTS) return 0;
     uint8_t bag = 0, slot = 0;
-    if (!cursorWireSlot(bag, slot)) return 0;   // nothing held: nothing to place
+    if (!cursorWireSlot(L, bag, slot)) return 0;   // nothing held: nothing to place
     gh->placeGlyphFromBag(bag, slot, static_cast<uint32_t>(socket - 1));
     setCursorType(L, CursorType::NONE);
     return 0;
@@ -670,7 +640,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
 
     // Carrying a bag item, so this is the deposit.
     uint8_t srcBag = 0, srcSlot = 0;
-    if (cursorWireSlot(srcBag, srcSlot)) {
+    if (cursorWireSlot(L, srcBag, srcSlot)) {
         gh->guildBankDepositItem(static_cast<uint8_t>(tab - 1),
                                  static_cast<uint8_t>(slot - 1), srcBag, srcSlot);
         setCursorType(L, CursorType::NONE);
@@ -680,7 +650,7 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     // request builder says plainly that it does not write that path. Dropping
     // the cursor is better than sending something the server will read as a
     // withdrawal to nowhere.
-    if (s_cursorType == CursorType::GUILDBANK) {
+    if (cursor(L).type == CursorType::GUILDBANK) {
         setCursorType(L, CursorType::NONE);
         return 0;
     }
@@ -690,10 +660,10 @@ static int lua_PickupGuildBankItem(lua_State* L) {
     for (const auto& it : bank.tabItems) {
         if (it.slotId != slot - 1 || it.itemEntry == 0) continue;
         setCursorType(L, CursorType::GUILDBANK);
-        s_cursorId = it.itemEntry;
-        s_cursorBag = tab;
-        s_cursorSlot = slot;
-        s_cursorSplit = 0;   // the whole stack, unless SplitGuildBankItem says otherwise
+        cursor(L).id = it.itemEntry;
+        cursor(L).bag = tab;
+        cursor(L).slot = slot;
+        cursor(L).split = 0;   // the whole stack, unless SplitGuildBankItem says otherwise
         const auto* info = gh->getItemInfo(it.itemEntry);
         wowee::ui::frameXmlSetCursorItem(
             info ? gh->getItemIconPath(info->displayInfoId) : std::string());
@@ -712,8 +682,8 @@ static int lua_SplitGuildBankItem(lua_State* L) {
     const int amount = static_cast<int>(luaL_optnumber(L, 3, 0));
     lua_settop(L, 2);
     lua_PickupGuildBankItem(L);
-    if (s_cursorType == CursorType::GUILDBANK && amount > 0)
-        s_cursorSplit = static_cast<uint32_t>(amount);
+    if (cursor(L).type == CursorType::GUILDBANK && amount > 0)
+        cursor(L).split = static_cast<uint32_t>(amount);
     return 0;
 }
 
@@ -739,7 +709,7 @@ static int lua_PickupCompanion(lua_State* L) {
     const uint32_t spellId = list[static_cast<size_t>(index) - 1].spellId;
     if (spellId == 0) return 0;
     setCursorType(L, CursorType::SPELL);
-    s_cursorId = spellId;
+    cursor(L).id = spellId;
     wowee::ui::frameXmlSetCursorItem(gh->getSpellIconPath(spellId));
     return 0;
 }
@@ -758,12 +728,12 @@ static int lua_PickupSpellBookItem(lua_State* L) {
 /// equipment slot together with an index inside it. FrameXML counts bags 0 to 4
 /// with 1-based slots instead, so the two have to be translated - the same
 /// translation this client's own bag window does before sending a swap.
-static bool cursorWireSlot(uint8_t& bag, uint8_t& slot) {
-    if (s_cursorType != CursorType::ITEM) return false;
+static bool cursorWireSlot(lua_State* L, uint8_t& bag, uint8_t& slot) {
+    if (cursor(L).type != CursorType::ITEM) return false;
     // Nowhere to move it from. This used to fall into the equipped branch
     // below, because everything negative was the paperdoll - see
     // kCursorNoSource for what that cost.
-    if (!game::slots::cursorSourceIsInventory(s_cursorBag)) return false;
+    if (!game::slots::cursorSourceIsInventory(cursor(L).bag)) return false;
 
     // Minus one is two different places. The paperdoll picks an item up with
     // it, and the interface numbers the bank's own slots BANK_CONTAINER, which
@@ -771,34 +741,34 @@ static bool cursorWireSlot(uint8_t& bag, uint8_t& slot) {
     // and the move that followed named an equipment slot: bank slot five went
     // out as equipment slot four. The flag the cursor already carries is the
     // only thing that tells the two apart, and it was not being read.
-    if (cursorItemSlot().equipped) {
+    if (cursor(L).item.equipped) {
         bag = 0xFF;
-        slot = static_cast<uint8_t>(s_cursorSlot - 1);
+        slot = static_cast<uint8_t>(cursor(L).slot - 1);
         return true;
     }
     // Everything else through the shared pair, which knows the backpack, the
     // keyring, the bank, its bags and the worn bags. Written out here it knew
     // three of them.
-    bag = containerWireBag(s_cursorBag);
-    slot = containerWireSlot(s_cursorBag, s_cursorSlot);
+    bag = containerWireBag(cursor(L).bag);
+    slot = containerWireSlot(cursor(L).bag, cursor(L).slot);
     return true;
 }
 
 /// Put the cursor down.
 static void clearCursorItem(lua_State* L) {
-    s_cursorMoney = 0;
-    s_cursorSplit = 0;
+    cursor(L).money = 0;
+    cursor(L).split = 0;
     setCursorType(L, CursorType::NONE);
-    s_cursorId = 0;
-    s_cursorSlot = 0;
-    s_cursorBag = -1;
+    cursor(L).id = 0;
+    cursor(L).slot = 0;
+    cursor(L).bag = -1;
     wowee::ui::frameXmlSetCursorItem(std::string());
-    cursorItemSlot() = {};
+    cursor(L).item = {};
 }
 
 static bool droppedItemFromNowhere(lua_State* L) {
-    if (s_cursorType != CursorType::ITEM) return false;
-    if (game::slots::cursorSourceIsInventory(s_cursorBag)) return false;
+    if (cursor(L).type != CursorType::ITEM) return false;
+    if (game::slots::cursorSourceIsInventory(cursor(L).bag)) return false;
     clearCursorItem(L);
     return true;
 }
@@ -819,9 +789,9 @@ void pickupMerchantItem(lua_State* L, int index) {
         return;
     }
     setCursorType(L, CursorType::MERCHANT);
-    s_cursorId = static_cast<uint32_t>(index);
-    s_cursorSlot = 0;
-    s_cursorBag = -1;
+    cursor(L).id = static_cast<uint32_t>(index);
+    cursor(L).slot = 0;
+    cursor(L).bag = -1;
     // Show it on the pointer, as a bag pickup does. Without this the cursor
     // holds something invisible and the click reads as having done nothing.
     if (auto* gh = getGameHandler(L)) {
@@ -843,16 +813,16 @@ void pickupMerchantItem(lua_State* L, int index) {
 static void soldHeldItem(lua_State* L) {
     // A merchant item on the cursor was never taken out of anything, so there
     // is nothing to sell and nothing to put back.
-    if (s_cursorType == CursorType::MERCHANT) { clearCursorItem(L); return; }
-    if (s_cursorType != CursorType::ITEM) return;
+    if (cursor(L).type == CursorType::MERCHANT) { clearCursorItem(L); return; }
+    if (cursor(L).type != CursorType::ITEM) return;
     auto* gh = getGameHandler(L);
     if (!gh) return;
-    if (!game::slots::cursorSourceIsInventory(s_cursorBag)) return;
+    if (!game::slots::cursorSourceIsInventory(cursor(L).bag)) return;
 
-    if (s_cursorBag == 0) {
-        gh->sellItemBySlot(s_cursorSlot - 1);
-    } else if (s_cursorBag > 0) {
-        gh->sellItemInBag(s_cursorBag - 1, s_cursorSlot - 1);
+    if (cursor(L).bag == 0) {
+        gh->sellItemBySlot(cursor(L).slot - 1);
+    } else if (cursor(L).bag > 0) {
+        gh->sellItemInBag(cursor(L).bag - 1, cursor(L).slot - 1);
     } else {
         return;   // worn, and held rather than dropped on the floor
     }
@@ -860,9 +830,9 @@ static void soldHeldItem(lua_State* L) {
 }
 
 bool boughtHeldMerchantItem(lua_State* L) {
-    if (s_cursorType != CursorType::MERCHANT) return false;
+    if (cursor(L).type != CursorType::MERCHANT) return false;
     auto* gh = getGameHandler(L);
-    const int index = static_cast<int>(s_cursorId);
+    const int index = static_cast<int>(cursor(L).id);
     if (gh && index >= 1) {
         const auto& items = gh->getVendorItems().items;
         if (index <= static_cast<int>(items.size())) {
@@ -892,9 +862,9 @@ static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
     const game::ItemSlot* itemSlot = containerItemSlot(inv, bag, slot);
     if (itemSlot && !itemSlot->empty()) {
         setCursorType(L, CursorType::ITEM);
-        s_cursorId = itemSlot->item.itemId;
-        s_cursorBag = bag;
-        s_cursorSlot = slot;
+        cursor(L).id = itemSlot->item.itemId;
+        cursor(L).bag = bag;
+        cursor(L).slot = slot;
         uint32_t displayId = itemSlot->item.displayInfoId;
         if (displayId == 0) {
             if (const auto* info = gh->getItemInfo(itemSlot->item.itemId)) {
@@ -903,7 +873,7 @@ static void pickupFromContainerSlot(lua_State* L, game::GameHandler* gh,
         }
         wowee::ui::frameXmlSetCursorItem(
             displayId ? gh->getItemIconPath(displayId) : std::string());
-        cursorItemSlot() = {bag, slot, false};
+        cursor(L).item = {bag, slot, false};
         // The slot draws greyed while its item is on the cursor, which is how a
         // bag shows that something has been picked up out of it.
         gh->fireAddonEvent("ITEM_LOCK_CHANGED",
@@ -921,8 +891,8 @@ void pickupSplitFromContainer(lua_State* L, game::GameHandler* gh,
     pickupFromContainerSlot(L, gh, bag, slot);
     // Only if the pickup took: an empty slot leaves the cursor alone, and an
     // amount left on it would ride along with whatever is picked up next.
-    if (s_cursorType == CursorType::ITEM && count > 0) {
-        s_cursorSplit = static_cast<uint32_t>(count);
+    if (cursor(L).type == CursorType::ITEM && count > 0) {
+        cursor(L).split = static_cast<uint32_t>(count);
     }
 }
 
@@ -997,7 +967,7 @@ static int lua_PickupContainerItem(lua_State* L) {
     // With the repair cursor up, a click on an item is the repair. The real
     // client consumes the click in C for the same reason, which is why
     // containerframe.lua has no branch of its own for it.
-    if (repairedHeldItem(gh, containerSlotGuid(gh, bag, slot))) return 0;
+    if (repairedHeldItem(L, gh, containerSlotGuid(gh, bag, slot))) return 0;
 
     // A bag click while the cursor holds a vendor's item is the purchase.
     // containerframe.lua routes it here after checking GetCursorInfo.
@@ -1006,12 +976,12 @@ static int lua_PickupContainerItem(lua_State* L) {
     // Carrying something out of the guild bank, so this is the withdrawal.
     // The destination is this bag slot rather than the server's choice, which
     // is what dropping on a particular square means.
-    if (s_cursorType == CursorType::GUILDBANK) {
+    if (cursor(L).type == CursorType::GUILDBANK) {
         const uint8_t dstBag = containerWireBag(bag);
         const uint8_t dstSlot = containerWireSlot(bag, slot);
-        gh->guildBankWithdrawItem(static_cast<uint8_t>(s_cursorBag - 1),
-                                  static_cast<uint8_t>(s_cursorSlot - 1),
-                                  dstBag, dstSlot, s_cursorSplit);
+        gh->guildBankWithdrawItem(static_cast<uint8_t>(cursor(L).bag - 1),
+                                  static_cast<uint8_t>(cursor(L).slot - 1),
+                                  dstBag, dstSlot, cursor(L).split);
         setCursorType(L, CursorType::NONE);
         return 0;
     }
@@ -1026,7 +996,7 @@ static int lua_PickupContainerItem(lua_State* L) {
     // One function does both halves of a drag in WoW, and without this half a
     // dragged item was picked up and never put down anywhere.
     uint8_t srcBag = 0, srcSlot = 0;
-    if (cursorWireSlot(srcBag, srcSlot)) {
+    if (cursorWireSlot(L, srcBag, srcSlot)) {
         // Through the shared pair rather than written out here. This knew the
         // backpack and treated everything else as a worn bag, so a drop into
         // the bank - container -1 - asked wornBagContainer for container 17 and
@@ -1037,7 +1007,7 @@ static int lua_PickupContainerItem(lua_State* L) {
         // At warning level because it is the outcome of a drag and happens
         // once per drop, and because the log carries nothing below warning -
         // which is why "did the move go out" could not be answered at all.
-        LOG_WARNING("FrameXML drop: bag ", s_cursorBag, " slot ", s_cursorSlot,
+        LOG_WARNING("FrameXML drop: bag ", cursor(L).bag, " slot ", cursor(L).slot,
                     " (wire ", (int)srcBag, "/", (int)srcSlot, ") -> bag ", bag,
                     " slot ", slot, " (wire ", (int)dstBag, "/", (int)dstSlot, ")");
         // Back where it came from: put it down rather than asking the server to
@@ -1047,7 +1017,7 @@ static int lua_PickupContainerItem(lua_State* L) {
         // above: a worn item on the cursor carries bag minus one, and so does
         // the bank, so dropping the helm on bank slot one read as putting it
         // back where it came from and quietly did nothing.
-        if (s_cursorBag == bag && s_cursorSlot == slot && !cursorItemSlot().equipped) {
+        if (cursor(L).bag == bag && cursor(L).slot == slot && !cursor(L).item.equipped) {
             const int sameBag = bag, sameSlot = slot;
             clearCursorItem(L);
             gh->fireAddonEvent("ITEM_LOCK_CHANGED",
@@ -1055,12 +1025,12 @@ static int lua_PickupContainerItem(lua_State* L) {
             return 0;
         }
 
-        const int wasBag = s_cursorBag, wasSlot = s_cursorSlot;
+        const int wasBag = cursor(L).bag, wasSlot = cursor(L).slot;
         // Part of a stack moves as a split rather than a swap: a swap would
         // send the whole thing, which is not what was picked up.
-        if (s_cursorSplit > 0) {
+        if (cursor(L).split > 0) {
             gh->splitItemTo(srcBag, srcSlot, dstBag, dstSlot,
-                            static_cast<uint8_t>(s_cursorSplit));
+                            static_cast<uint8_t>(cursor(L).split));
         } else {
             gh->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
         }
@@ -1090,13 +1060,13 @@ static int lua_ClickSendMailItemButton(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
 
-    if (s_cursorType == CursorType::ITEM) {
+    if (cursor(L).type == CursorType::ITEM) {
         // The cursor counts the backpack as bag zero and the worn bags from
         // one, with slots from one; the attach functions count both from zero.
-        const bool attached = (s_cursorBag == 0)
-            ? gh->attachItemFromBackpack(s_cursorSlot - 1)
-            : (s_cursorBag > 0
-                   ? gh->attachItemFromBag(s_cursorBag - 1, s_cursorSlot - 1)
+        const bool attached = (cursor(L).bag == 0)
+            ? gh->attachItemFromBackpack(cursor(L).slot - 1)
+            : (cursor(L).bag > 0
+                   ? gh->attachItemFromBag(cursor(L).bag - 1, cursor(L).slot - 1)
                    : false);
         if (attached) clearCursorItem(L);
         return 0;
@@ -1145,9 +1115,9 @@ static int lua_PickupBagFromSlot(lua_State* L) {
 
     // Carrying something: this is the drop, into the bag slot.
     uint8_t srcBag = 0, srcSlot = 0;
-    if (cursorWireSlot(srcBag, srcSlot)) {
-        const int srcWorn = s_cursorSlot - kFirstWornBagInventorySlot;
-        const bool fromWorn = s_cursorBag == -1 &&
+    if (cursorWireSlot(L, srcBag, srcSlot)) {
+        const int srcWorn = cursor(L).slot - kFirstWornBagInventorySlot;
+        const bool fromWorn = cursor(L).bag == -1 &&
                               srcWorn >= 0 && srcWorn < game::Inventory::NUM_BAG_SLOTS;
         if (fromWorn && isWorn) {
             // Both are worn bags, which has its own verb: it swaps the bags'
@@ -1177,16 +1147,16 @@ static int lua_PickupBagFromSlot(lua_State* L) {
         return 0;
     }
     setCursorType(L, CursorType::ITEM);
-    s_cursorId = held.item.itemId;
-    s_cursorSlot = slot;
-    s_cursorBag = -1;
+    cursor(L).id = held.item.itemId;
+    cursor(L).slot = slot;
+    cursor(L).bag = -1;
     // The shared cursor as well as this file's own. Everything that receives a
-    // drop reads cursorItemSlot(), and a worn bag is an equipped item like any
+    // drop reads cursor(L).item, and a worn bag is an equipped item like any
     // other - PickupInventoryItem below sets exactly this. Without it the bag
     // lifted onto the pointer and then every drop target reported nothing
     // held: PutItemInBag returned false, so BagSlotButton_OnClick fell through
     // to ToggleBag and the bag opened instead of moving.
-    cursorItemSlot() = {-1, slot, true};
+    cursor(L).item = {-1, slot, true};
     // Same omission as the spell above: a bag dragged off its slot was held
     // invisibly. The display id falls back to the item's own, which is where
     // the equipped-item pickup below reads it from when the slot has none.
@@ -1200,7 +1170,7 @@ static int lua_PickupBagFromSlot(lua_State* L) {
         displayId ? gh->getItemIconPath(displayId) : std::string());
     // And say the slot is locked, as the equipped pickup below does.
     // IsInventoryItemLocked already answers true for it - cursorEquipSlot
-    // reads the same s_cursorSlot this just set - but nothing asks again
+    // reads the same cursor(L).slot this just set - but nothing asks again
     // without this, so the square greyed only on the next unrelated redraw.
     // One argument, because the paperdoll's handler tests `not arg2`.
     gh->fireAddonEvent("ITEM_LOCK_CHANGED", {std::to_string(slot)});
@@ -1220,13 +1190,13 @@ static int lua_PickupInventoryItem(lua_State* L) {
 
     // Worn gear is what usually needs repairing, and the paperdoll has no
     // branch of its own for it either.
-    if (slot <= 19 && repairedHeldItem(gh, gh->getEquipSlotGuid(slot - 1))) return 0;
+    if (slot <= 19 && repairedHeldItem(L, gh, gh->getEquipSlotGuid(slot - 1))) return 0;
 
     if (droppedItemFromNowhere(L)) return 0;
 
     // Carrying something: equip it here, which is the other half of the drag.
     uint8_t srcBag = 0, srcSlot = 0;
-    if (cursorWireSlot(srcBag, srcSlot)) {
+    if (cursorWireSlot(L, srcBag, srcSlot)) {
         gh->swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(slot - 1));
         clearCursorItem(L);
@@ -1237,14 +1207,14 @@ static int lua_PickupInventoryItem(lua_State* L) {
     const auto& eq = inv.getEquipSlot(static_cast<game::EquipSlot>(slot - 1));
     if (!eq.empty()) {
         setCursorType(L, CursorType::ITEM);
-        s_cursorId = eq.item.itemId;
-        s_cursorSlot = slot;
-        s_cursorBag = -1;
+        cursor(L).id = eq.item.itemId;
+        cursor(L).slot = slot;
+        cursor(L).bag = -1;
         // The same three things a container pickup does, which this had none
         // of: remember where it came from, put its icon on the pointer, and say
         // the slot is locked. Without them dragging off the character sheet
         // carried nothing visible and left the slot looking untouched.
-        cursorItemSlot() = {-1, slot, true};
+        cursor(L).item = {-1, slot, true};
         uint32_t displayId = eq.item.displayInfoId;
         if (displayId == 0) {
             if (const auto* info = gh->getItemInfo(eq.item.itemId)) {
@@ -1279,7 +1249,7 @@ static int lua_PickupInventoryItem(lua_State* L) {
 static int lua_DeleteCursorItem(lua_State* L) {
     auto* gh = getGameHandler(L);
     uint8_t bag = 0, slot = 0;
-    if (gh && cursorWireSlot(bag, slot)) {
+    if (gh && cursorWireSlot(L, bag, slot)) {
         // The whole stack: WoW asks about a partial stack before it gets here,
         // and the popup that calls this is the confirmation for all of it.
         gh->destroyItem(bag, slot, 0);
@@ -1291,8 +1261,8 @@ static int lua_DeleteCursorItem(lua_State* L) {
 // AutoEquipCursorItem() - equip item from cursor
 static int lua_AutoEquipCursorItem(lua_State* L) {
     auto* gh = getGameHandler(L);
-    if (gh && s_cursorType == CursorType::ITEM && s_cursorId != 0) {
-        gh->useItemById(s_cursorId);
+    if (gh && cursor(L).type == CursorType::ITEM && cursor(L).id != 0) {
+        gh->useItemById(cursor(L).id);
     }
     clearCursorItem(L);
     return 0;
@@ -1520,8 +1490,8 @@ static int lua_ClickTradeButton(lua_State* L) {
     // 255 with an absolute slot, or a worn bag's equipment slot with a 0-based
     // index inside it. The server finds no item at the slot it was given and
     // answers TRADE_STATUS_TRADE_CANCELED, so offering an item ended the trade.
-    if (s_cursorType == CursorType::ITEM && s_cursorBag >= 0 &&
-        cursorWireSlot(srcBag, srcSlot)) {
+    if (cursor(L).type == CursorType::ITEM && cursor(L).bag >= 0 &&
+        cursorWireSlot(L, srcBag, srcSlot)) {
         gh->setTradeItem(static_cast<uint8_t>(i - 1), srcBag, srcSlot);
         clearCursorItem(L);
     } else {
@@ -2171,7 +2141,7 @@ void registerActionLuaAPI(lua_State* L) {
             const uint32_t id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
             if (!gh || id == 0 || gh->getMacroText(id).empty()) return 0;
             setCursorType(L, CursorType::MACRO);
-            s_cursorId = id;
+            cursor(L).id = id;
             std::string icon = gh->getMacroIcon(id);
             if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
             wowee::ui::frameXmlSetCursorItem(icon);
@@ -2716,7 +2686,7 @@ void registerActionLuaAPI(lua_State* L) {
     // Lua state, so the captured pointer is the current one; LuaEngine::shutdown
     // takes the bridge back down again.
     ui::frameXmlSetCursorBridge(
-        [](uint8_t& bag, uint8_t& slot) { return cursorWireSlot(bag, slot); },
+        [L](uint8_t& bag, uint8_t& slot) { return cursorWireSlot(L, bag, slot); },
         [L]() { clearCursorItem(L); });
 }
 

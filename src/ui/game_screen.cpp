@@ -594,8 +594,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     gameHandler.setAutoLoot(settingsPanel_.pendingAutoLoot);
     gameHandler.setAutoFaceTarget(settingsPanel_.pendingAutoFaceTarget);
     // Pushed rather than applied once: a /reload makes a new engine.
-    if (services_.addonManager) {
-        if (auto* engine = services_.addonManager->getLuaEngine()) {
+    if (services_.characterAddons()) {
+        if (auto* engine = services_.characterAddons()->getLuaEngine()) {
             engine->setWheelSensitivity(settingsPanel_.pendingScrollSpeed);
         }
     }
@@ -1621,8 +1621,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             // that menu is only drawn while the element is not
                             // handed over - so with it handed over, Escape set
                             // a flag nobody read and nothing appeared.
-                            if (services_.addonManager)
-                                services_.addonManager->runInterfaceCommand("ToggleGameMenu()");
+                            if (services_.characterAddons())
+                                services_.characterAddons()->runInterfaceCommand("ToggleGameMenu()");
                             // And whether it worked, which the line above
                             // cannot say. Asked straight afterwards so the two
                             // faults separate: shown but not on screen is a
@@ -1643,7 +1643,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             // answered by the no-op object, whose IsShown
                             // returns another one, so this reported the menu
                             // shown whether or not the frame existed.
-                            if (services_.addonManager && services_.addonManager->interfaceCommandBoolean(
+                            if (services_.characterAddons() && services_.characterAddons()->interfaceCommandBoolean(
                                     "type(rawget(_G, 'GameMenuFrame')) == 'table' "
                                     "and GameMenuFrame:IsShown()")) {
                                 LOG_INFO("Escape: the interface's menu is now shown");
@@ -1812,8 +1812,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
     // Tested against the rects the last draw filed, which is the same list the
     // click itself is resolved against, so the pointer cannot promise a link
     // that clicking would miss.
-    if (services_.addonManager) {
-        if (auto* engine = services_.addonManager->getLuaEngine()) {
+    if (services_.characterAddons()) {
+        if (auto* engine = services_.characterAddons()->getLuaEngine()) {
             auto& widgets = engine->widgets();
             const glm::vec2 mouse = input.getMousePosition();
             float lx = mouse.x, ly = mouse.y;

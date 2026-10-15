@@ -46,8 +46,9 @@ and interface updates, then draws the loading overlay through the normal render
 submission. WorldLoader starts jobs and reports Pending/Ready/Failed with a reason;
 it never polls SDL, dispatches packets, updates the game or presents another frame.
 Application owns scene cleanup, player preparation and the final state change.
-Only the Transitions phase starts/cancels/commits world lifetimes. A world
-lifetime is a `MapScope`: ending it cancels its `JobGroup` and joins the work
+Only the Transitions phase starts/cancels/commits world lifetimes. A character's
+lifetime is a `CharacterSession` (interface, presenters, per-character state) and
+holds the map's. A world lifetime is a `MapScope`: ending it cancels its `JobGroup` and joins the work
 still running against it - preparation, terrain workers, spawn jobs - before its
 state goes. Workers check the token between steps, so the join waits for at most
 one read or parse, never for the remaining load.

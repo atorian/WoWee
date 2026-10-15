@@ -70,9 +70,10 @@ namespace wowee::addons {
 /// offset and CalendarGetMonth reads it back. Recomputing it from the clock on
 /// every call would answer correctly once and make the month buttons do
 /// nothing. Seeded from the local clock the first time it is asked, which is
-/// the month the calendar opens on.
-static std::pair<int, int>& calendarViewedMonthState() {
-    static std::pair<int, int> viewed{0, 0};
+/// the month the calendar opens on. The character's, with the draft and the
+/// context row below: InterfaceState::calendar.
+static std::pair<int, int>& calendarViewedMonthState(lua_State* L) {
+    auto& viewed = interfaceState(L).calendar.viewedMonth;
     if (viewed.first == 0) {
         const std::time_t now = std::time(nullptr);
         const std::tm t = core::localTime(now);
@@ -81,13 +82,13 @@ static std::pair<int, int>& calendarViewedMonthState() {
     return viewed;
 }
 
-static std::pair<int, int> calendarViewedMonth() {
-    return calendarViewedMonthState();
+static std::pair<int, int> calendarViewedMonth(lua_State* L) {
+    return calendarViewedMonthState(L);
 }
 
-static void calendarSetViewedMonth(int month, int year) {
+static void calendarSetViewedMonth(lua_State* L, int month, int year) {
     if (month < 1 || month > 12) return;
-    calendarViewedMonthState() = {month, year};
+    calendarViewedMonthState(L) = {month, year};
 }
 
 /// One end of the range the calendar offers, as weekday, month, day, year -
@@ -123,7 +124,7 @@ static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) 
     const int monthOffset = static_cast<int>(luaL_optnumber(L, 1, 0));
     const int day = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (day < 1) return {};
-    const auto viewed = calendarViewedMonth();
+    const auto viewed = calendarViewedMonth(L);
     const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
                                                    monthOffset);
     if (day > info.numDays) return {};
@@ -137,9 +138,8 @@ static std::vector<wowee::game::CalendarDayEntry> calendarDayRows(lua_State* L) 
 /// with another: CalendarNewEvent starts it, CalendarEventSetTitle and the
 /// rest fill it in, CalendarAddEvent sends it. Nothing is carried between
 /// those calls except this.
-static wowee::game::CalendarEventDraft& calendarDraft() {
-    static wowee::game::CalendarEventDraft draft;
-    return draft;
+static wowee::game::CalendarEventDraft& calendarDraft(lua_State* L) {
+    return interfaceState(L).calendar.draft;
 }
 
 /// The row a right-click menu is about: which month, which day, which entry.
@@ -148,18 +148,17 @@ static wowee::game::CalendarEventDraft& calendarDraft() {
 /// one call and runs the click in another, and nothing is carried between the
 /// two - so the row is named once by CalendarContextSelectEvent and every verb
 /// on the menu reads it back.
-struct CalendarContextRow { int monthOffset = 0; int day = 0; int index = 0; };
+using CalendarContextRow = InterfaceState::CalendarContextRow;
 
-static CalendarContextRow& calendarContextRow() {
-    static CalendarContextRow row;
-    return row;
+static CalendarContextRow& calendarContextRow(lua_State* L) {
+    return interfaceState(L).calendar.contextRow;
 }
 
 /// The rows of a day, for a caller that already has the handler and the day.
 static std::vector<wowee::game::CalendarDayEntry> calendarRowsFor(
-        wowee::game::GameHandler& gh, int monthOffset, int day) {
+        lua_State* L, wowee::game::GameHandler& gh, int monthOffset, int day) {
     if (day < 1) return {};
-    const auto viewed = calendarViewedMonth();
+    const auto viewed = calendarViewedMonth(L);
     const auto info = wowee::game::calendarMonthAt(viewed.first, viewed.second,
                                                    monthOffset);
     if (day > info.numDays) return {};
@@ -196,9 +195,9 @@ static const char* calendarModStatus(lua_State* L,
 /// sending a request the server would refuse.
 static int calendarRespondToContextInvite(lua_State* L, uint32_t status) {
     auto* gh = getGameHandler(L);
-    const auto& row = calendarContextRow();
+    const auto& row = calendarContextRow(L);
     if (!gh || row.day < 1) return 0;
-    const auto rows = calendarRowsFor(*gh, row.monthOffset, row.day);
+    const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
     if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
     const auto& entry = rows[static_cast<size_t>(row.index) - 1];
     if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
@@ -1961,9 +1960,10 @@ static int mapIdToContinent(uint32_t mapId) {
     }
 }
 
-// Internal tracked map state (which continent/zone the map UI is viewing)
-static int s_mapContinent = 0;
-static int s_mapZone = 0;
+// Which continent/zone the map UI is viewing: the character's, in
+// InterfaceState::worldMap.
+static int& mapContinent(lua_State* L) { return interfaceState(L).worldMap.continent; }
+static int& mapZone(lua_State* L) { return interfaceState(L).worldMap.zone; }
 
 /// The map view changed, so say so.
 ///
@@ -1990,8 +1990,8 @@ static int lua_SetMapToCurrentZone(lua_State* L) {
     }
     auto* gh = getGameHandler(L);
     if (gh) {
-        s_mapContinent = mapIdToContinent(gh->getCurrentMapId());
-        s_mapZone = static_cast<int>(gh->getWorldStateZoneId());
+        mapContinent(L) = mapIdToContinent(gh->getCurrentMapId());
+        mapZone(L) = static_cast<int>(gh->getWorldStateZoneId());
     }
     fireWorldMapUpdate(L);
     return 0;
@@ -2015,10 +2015,10 @@ static int lua_GetCurrentMapContinent(lua_State* L) {
             // that moved the number here but did not move the map leaves the
             // dropdown blank, which reads as the dropdown not working.
             static int lastReported = -1;
-            if (shown == 0 && s_mapContinent != 0 && lastReported != s_mapContinent) {
-                lastReported = s_mapContinent;
+            if (shown == 0 && mapContinent(L) != 0 && lastReported != mapContinent(L)) {
+                lastReported = mapContinent(L);
                 LOG_WARNING("GetCurrentMapContinent: asked for continent ",
-                            s_mapContinent, " and the map is showing none, so"
+                            mapContinent(L), " and the map is showing none, so"
                             " both dropdowns clear themselves");
             } else if (shown != 0) {
                 lastReported = -1;
@@ -2027,11 +2027,11 @@ static int lua_GetCurrentMapContinent(lua_State* L) {
             return 1;
         }
     }
-    if (s_mapContinent == 0) {
+    if (mapContinent(L) == 0) {
         auto* gh = getGameHandler(L);
-        if (gh) s_mapContinent = mapIdToContinent(gh->getCurrentMapId());
+        if (gh) mapContinent(L) = mapIdToContinent(gh->getCurrentMapId());
     }
-    lua_pushnumber(L, s_mapContinent);
+    lua_pushnumber(L, mapContinent(L));
     return 1;
 }
 
@@ -2048,18 +2048,18 @@ static int lua_GetCurrentMapZone(lua_State* L) {
             return 1;
         }
     }
-    if (s_mapZone == 0) {
+    if (mapZone(L) == 0) {
         auto* gh = getGameHandler(L);
-        if (gh) s_mapZone = static_cast<int>(gh->getWorldStateZoneId());
+        if (gh) mapZone(L) = static_cast<int>(gh->getWorldStateZoneId());
     }
-    lua_pushnumber(L, s_mapZone);
+    lua_pushnumber(L, mapZone(L));
     return 1;
 }
 
 // SetMapZoom(continent [, zone]) - sets map view to continent/zone
 static int lua_SetMapZoom(lua_State* L) {
-    s_mapContinent = static_cast<int>(luaL_checknumber(L, 1));
-    s_mapZone = static_cast<int>(luaL_optnumber(L, 2, 0));
+    mapContinent(L) = static_cast<int>(luaL_checknumber(L, 1));
+    mapZone(L) = static_cast<int>(luaL_optnumber(L, 2, 0));
     // Tell the map, which this never did. Every route out of a zone map runs
     // through here - the zone dropdown, the continent dropdown, and four of
     // the zoom-out button's six branches - so none of them changed what was
@@ -2071,11 +2071,11 @@ static int lua_SetMapZoom(lua_State* L) {
     // two ways in, and they are the two the dropdowns can produce.
     if (auto* svc = getLuaServices(L)) {
         if (!svc->setMapByIndex) {
-            LOG_WARNING("SetMapZoom(", s_mapContinent, ", ", s_mapZone,
+            LOG_WARNING("SetMapZoom(", mapContinent(L), ", ", mapZone(L),
                         "): no map to tell - the view number moved and nothing"
                         " drew from it");
-        } else if (!svc->setMapByIndex(s_mapContinent, s_mapZone)) {
-            LOG_WARNING("SetMapZoom(", s_mapContinent, ", ", s_mapZone,
+        } else if (!svc->setMapByIndex(mapContinent(L), mapZone(L))) {
+            LOG_WARNING("SetMapZoom(", mapContinent(L), ", ", mapZone(L),
                         "): the map refused the pair, so it stays where it was");
         }
     }
@@ -2630,12 +2630,14 @@ static int lua_ReturnZero(lua_State* L)  { lua_pushnumber(L, 0.0); return 1; }
 
 /// Which row the skill list has selected, which is UI state rather than
 /// anything the game knows. Same shape as selectedFriend and selectedIgnore.
-static int& selectedSkill() { static int v = 0; return v; }
+static int& selectedSkill(lua_State* L) { return interfaceState(L).selectedSkill; }
 static int lua_ReturnNothing(lua_State*) { return 0; }
 
 /// Which channel the channel-list panel has highlighted. Panel state with no
 /// counterpart in the game, kept here so the getter and setter agree.
-static int& selectedDisplayChannel() { static int selected = 0; return selected; }
+static int& selectedDisplayChannel(lua_State* L) {
+    return interfaceState(L).selectedDisplayChannel;
+}
 
 /// Which of the four extra action bars are switched on: bottom-left,
 /// bottom-right, right and the second right, in that order.
@@ -3325,22 +3327,23 @@ static int lua_ResetChatWindows(lua_State* L) {
 /// Whether a chat type colours player names by class. Stored per chat type
 /// rather than globally, which is how the chat options panel presents it -
 /// a row per type, each with its own tick.
-static std::set<std::string>& chatColorByClass() {
-    static std::set<std::string> types;
-    return types;
+///
+/// The character's (InterfaceState), and not saved, as it was not before.
+static std::set<std::string>& chatColorByClass(lua_State* L) {
+    return interfaceState(L).chatColorNameByClass;
 }
 static int lua_SetChatColorNameByClass(lua_State* L) {
     std::string type(luaL_optstring(L, 1, ""));
     toLowerInPlace(type);
     if (type.empty()) return 0;
-    if (lua_toboolean(L, 2)) chatColorByClass().insert(type);
-    else chatColorByClass().erase(type);
+    if (lua_toboolean(L, 2)) chatColorByClass(L).insert(type);
+    else chatColorByClass(L).erase(type);
     return 0;
 }
 static int lua_GetChatColorNameByClass(lua_State* L) {
     std::string type(luaL_optstring(L, 1, ""));
     toLowerInPlace(type);
-    lua_pushboolean(L, chatColorByClass().count(type) ? 1 : 0);
+    lua_pushboolean(L, chatColorByClass(L).count(type) ? 1 : 0);
     return 1;
 }
 
@@ -4304,7 +4307,9 @@ static int lua_GetBattlegroundInfo(lua_State* L) {
 /// type and updated in place, so its last entry is whichever battleground was
 /// looked at *first*: clicking Warsong Gulch, then Arathi Basin, then back to
 /// Warsong Gulch and pressing Join queued for Arathi Basin.
-static uint32_t& selectedBattlegroundTypeId() { static uint32_t typeId = 0; return typeId; }
+static uint32_t& selectedBattlegroundTypeId(lua_State* L) {
+    return interfaceState(L).battlefield.selectedTypeId;
+}
 
 // RequestBattlegroundInstanceInfo(index) - ask which instances are running.
 //
@@ -4317,8 +4322,8 @@ static int lua_RequestBattlegroundInstanceInfo(lua_State* L) {
     if (!gh) return 0;
     const auto& list = gh->getBattlegroundTypes();
     if (index < 1 || index > static_cast<int>(list.size())) return 0;
-    selectedBattlegroundTypeId() = list[static_cast<size_t>(index - 1)].id;
-    gh->requestBattlefieldList(selectedBattlegroundTypeId());
+    selectedBattlegroundTypeId(L) = list[static_cast<size_t>(index - 1)].id;
+    gh->requestBattlefieldList(selectedBattlegroundTypeId(L));
     return 0;
 }
 
@@ -4332,17 +4337,19 @@ static int lua_RequestBattlegroundInstanceInfo(lua_State* L) {
 // the server understands as no preference - the list opens on it, and nothing
 // here queues for a specific instance regardless. This is the selection the
 // interface is showing, not an instruction to the server.
-static int& selectedBattlefield() { static int selected = 0; return selected; }
+static int& selectedBattlefield(lua_State* L) {
+    return interfaceState(L).battlefield.selectedInstance;
+}
 
 static int lua_GetSelectedBattlefield(lua_State* L) {
-    lua_pushnumber(L, selectedBattlefield());
+    lua_pushnumber(L, selectedBattlefield(L));
     return 1;
 }
 
 // SetSelectedBattlefield(index) - called unguarded from two places, so it has
 // to exist before it has to do anything.
 static int lua_SetSelectedBattlefield(lua_State* L) {
-    selectedBattlefield() = static_cast<int>(luaL_optnumber(L, 1, 0));
+    selectedBattlefield(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
     return 0;
 }
 
@@ -4357,7 +4364,7 @@ static int lua_JoinBattlefield(lua_State* L) {
     const bool asGroup = lua_toboolean(L, 2) != 0;
 
     const auto& bgs = gh->getAvailableBgs();
-    uint32_t bgTypeId = selectedBattlegroundTypeId();
+    uint32_t bgTypeId = selectedBattlegroundTypeId(L);
     // Nothing selected can still happen - a queue asked for before the panel
     // has told anyone what it is showing - and one battleground on offer is
     // then not a guess.
@@ -5115,9 +5122,8 @@ static int lua_TaxiLegCoord(lua_State* L) {
 /// asks for each leg of the journey to it in turn. Kept here rather than asked
 /// for again per leg because getTaxiRouteTo searches, and the frame asks for the
 /// same route once per hop and again for every line it draws.
-static std::vector<uint32_t>& taxiRouteShown() {
-    static std::vector<uint32_t> route;
-    return route;
+static std::vector<uint32_t>& taxiRouteShown(lua_State* L) {
+    return interfaceState(L).taxiRouteShown;
 }
 
 void registerSystemLuaAPI(lua_State* L) {
@@ -6329,7 +6335,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // row against this to decide which border to light, so nothing
                 // ever looked selected however many times it was clicked.
                 {"GetSelectedSkill", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedSkill()); return 1; }},
+            lua_pushnumber(L, selectedSkill(L)); return 1; }},
                 {"DungeonUsesTerrainMap",    lua_ReturnFalse},
                 // GetChannelDisplayInfo(i) → name, header, collapsed,
                 //   channelNumber, count, active, category, voiceEnabled,
@@ -6493,7 +6499,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // reads it, so it lives here and round-trips. Answering nil
                 // for the getter meant the highlight never moved.
                 {"GetSelectedDisplayChannel", [](lua_State* L) -> int {
-            lua_pushnumber(L, selectedDisplayChannel());
+            lua_pushnumber(L, selectedDisplayChannel(L));
             return 1;
         }},
                 // Whether the player owns the channel that panel has selected.
@@ -6508,7 +6514,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // one-based one, the same GetChannelDisplayInfo reads.
                 {"IsDisplayChannelOwner", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const int sel = selectedDisplayChannel();
+            const int sel = selectedDisplayChannel(L);
             if (!gh || sel < 1) { lua_pushboolean(L, 0); return 1; }
             const auto& joined = gh->getJoinedChannels();
             if (sel > static_cast<int>(joined.size())) { lua_pushboolean(L, 0); return 1; }
@@ -6516,7 +6522,7 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"SetSelectedDisplayChannel", [](lua_State* L) -> int {
-            selectedDisplayChannel() = static_cast<int>(luaL_optnumber(L, 1, 0));
+            selectedDisplayChannel(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
             return 0;
         }},
                 // No categories exist to open or close - see the header note
@@ -6605,7 +6611,7 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"UpdateWorldMapArrowFrames",   lua_ReturnNothing},
                 {"SetSelectedSkill", [](lua_State* L) -> int {
-            selectedSkill() = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
+            selectedSkill(L) = static_cast<int>(luaL_optnumber(L, 1, 0)); return 0; }},
                 {"Sound_GameSystem_GetOutputDriverNameByIndex", lua_Sound_GetOutputDriverNameByIndex},
                 {"PlaySound",           lua_PlaySound},
                 {"PlaySoundFile",       lua_PlaySoundFile},
@@ -6961,7 +6967,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"TaxiNodeSetCurrent", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const uint32_t id = taxiNodeAt(gh, static_cast<int>(luaL_optnumber(L, 1, 0)));
-            taxiRouteShown() = (id != 0 && gh) ? gh->getTaxiRouteTo(id)
+            taxiRouteShown(L) = (id != 0 && gh) ? gh->getTaxiRouteTo(id)
                                                : std::vector<uint32_t>{};
             return 0;
         }},
@@ -7617,13 +7623,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 // without trace.
                 {"CalendarNewEvent", [](lua_State* L) -> int {
             (void)L;
-            calendarDraft() = wowee::game::CalendarEventDraft{};
+            calendarDraft(L) = wowee::game::CalendarEventDraft{};
             // Today, so an event committed without touching the date lands
             // somewhere real rather than on 1 January 2000.
-            const auto viewed = calendarViewedMonth();
+            const auto viewed = calendarViewedMonth(L);
             const std::time_t now = std::time(nullptr);
             const std::tm t = core::localTime(now);
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.month = viewed.first;
             d.eventTime.yearSince2000 = viewed.second - 2000;
             d.eventTime.day = t.tm_mday;
@@ -7632,10 +7638,10 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"CalendarNewGuildEvent", [](lua_State* L) -> int {
             (void)L;
-            calendarDraft() = wowee::game::CalendarEventDraft{};
+            calendarDraft(L) = wowee::game::CalendarEventDraft{};
             // CALENDAR_FLAG_GUILD_EVENT, which is what the server reads to
             // decide the event belongs to the guild rather than the player.
-            calendarDraft().flags |= 0x0400u;
+            calendarDraft(L).flags |= 0x0400u;
             return 0;
         }},
                 {"CalendarEventSetTitle", [](lua_State* L) -> int {
@@ -7644,13 +7650,13 @@ void registerSystemLuaAPI(lua_State* L) {
             // silently create nothing at all.
             std::string title(luaL_optstring(L, 1, ""));
             if (title.size() > 31) title.resize(31);
-            calendarDraft().title = std::move(title);
+            calendarDraft(L).title = std::move(title);
             return 0;
         }},
                 {"CalendarEventSetDescription", [](lua_State* L) -> int {
             std::string desc(luaL_optstring(L, 1, ""));
             if (desc.size() > 255) desc.resize(255);
-            calendarDraft().description = std::move(desc);
+            calendarDraft(L).description = std::move(desc);
             return 0;
         }},
                 // Interface types count from one and the wire counts from
@@ -7661,12 +7667,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // dungeon, with nothing to see but the wrong icon.
                 {"CalendarEventSetType", [](lua_State* L) -> int {
             const int uiType = static_cast<int>(luaL_optnumber(L, 1, 1));
-            calendarDraft().type =
+            calendarDraft(L).type =
                 static_cast<uint8_t>(uiType > 0 ? uiType - 1 : 0);
             return 0;
         }},
                 {"CalendarEventSetDate", [](lua_State* L) -> int {
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.month = static_cast<int>(luaL_optnumber(L, 1, d.eventTime.month));
             d.eventTime.day   = static_cast<int>(luaL_optnumber(L, 2, d.eventTime.day));
             const int year    = static_cast<int>(luaL_optnumber(L, 3, d.eventTime.fullYear()));
@@ -7678,7 +7684,7 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CalendarEventSetTime", [](lua_State* L) -> int {
-            auto& d = calendarDraft();
+            auto& d = calendarDraft(L);
             d.eventTime.hour   = static_cast<int>(luaL_optnumber(L, 1, d.eventTime.hour));
             d.eventTime.minute = static_cast<int>(luaL_optnumber(L, 2, d.eventTime.minute));
             return 0;
@@ -7689,12 +7695,12 @@ void registerSystemLuaAPI(lua_State* L) {
                 // been sent as "Weekly".
                 {"CalendarEventSetRepeatOption", [](lua_State* L) -> int {
             const int uiOption = static_cast<int>(luaL_optnumber(L, 1, 1));
-            calendarDraft().repeatOption =
+            calendarDraft(L).repeatOption =
                 static_cast<uint8_t>(uiOption > 0 ? uiOption - 1 : 0);
             return 0;
         }},
                 {"CalendarEventSetTextureID", [](lua_State* L) -> int {
-            calendarDraft().dungeonId =
+            calendarDraft(L).dungeonId =
                 static_cast<int32_t>(luaL_optnumber(L, 1, -1));
             return 0;
         }},
@@ -7710,7 +7716,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh) return 0;
             const auto& open = gh->getCalendarEventDetail();
             if (open.eventId == 0) return 0;
-            gh->updateCalendarEvent(open.eventId, 0, calendarDraft());
+            gh->updateCalendarEvent(open.eventId, 0, calendarDraft(L));
             return 0;
         }},
                 {"CalendarRemoveEvent", [](lua_State* L) -> int {
@@ -7728,7 +7734,7 @@ void registerSystemLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushboolean(L, 0); return 1; }
             const auto& open = gh->getCalendarEventDetail();
-            const auto& d = calendarDraft();
+            const auto& d = calendarDraft(L);
             const bool changed =
                 open.eventId != 0 &&
                 (d.title != open.title || d.description != open.description ||
@@ -7794,7 +7800,7 @@ void registerSystemLuaAPI(lua_State* L) {
             if (!gh || !name || !*name) return 0;
             const auto& open = gh->getCalendarEventDetail();
             const bool preInvite = (open.eventId == 0);
-            const uint32_t flags = preInvite ? calendarDraft().flags : open.flags;
+            const uint32_t flags = preInvite ? calendarDraft(L).flags : open.flags;
             gh->inviteToCalendarEvent(open.eventId, 0, name, preInvite,
                                       (flags & 0x0400u) != 0);
             return 0;
@@ -7814,7 +7820,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 // And the commit.
                 {"CalendarAddEvent", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) {
-                gh->createCalendarEvent(calendarDraft());
+                gh->createCalendarEvent(calendarDraft(L));
             }
             return 0;
         }},
@@ -7825,14 +7831,14 @@ void registerSystemLuaAPI(lua_State* L) {
                 // the menu asks for it back - the dropdown is built in one
                 // call and clicked in another, with nothing carried between.
                 {"CalendarContextSelectEvent", [](lua_State* L) -> int {
-            calendarContextRow() = {
+            calendarContextRow(L) = {
                 .monthOffset = static_cast<int>(luaL_optnumber(L, 1, 0)),
                 .day = static_cast<int>(luaL_optnumber(L, 2, 0)),
                 .index = static_cast<int>(luaL_optnumber(L, 3, 0))};
             return 0;
         }},
                 {"CalendarContextGetEventIndex", [](lua_State* L) -> int {
-            const auto& row = calendarContextRow();
+            const auto& row = calendarContextRow(L);
             if (row.day < 1 || row.index < 1) {
                 // Three nils rather than none: the interface unpacks this as a
                 // group, and a short answer is the shape framexml_short_returns
@@ -7895,8 +7901,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CalendarContextEventRemove", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto& row = calendarContextRow();
-            const auto rows = calendarRowsFor(*gh, row.monthOffset, row.day);
+            const auto& row = calendarContextRow(L);
+            const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
             if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) return 0;
             const auto& entry = rows[static_cast<size_t>(row.index) - 1];
             if (entry.kind != wowee::game::CalendarEntryKind::Event) return 0;
@@ -7913,13 +7919,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 // offer the right verbs. Read from the same day list the row
                 // was chosen out of.
                 {"CalendarContextEventGetCalendarType", [](lua_State* L) -> int {
-            const auto& row = calendarContextRow();
+            const auto& row = calendarContextRow(L);
             auto* gh = getGameHandler(L);
             // Nil rather than nothing, for the same reason as
             // CalendarContextGetEventIndex above: the arity belongs at the
             // binding rather than resting on Lua filling the gap.
             if (!gh || row.day < 1) { lua_pushnil(L); return 1; }
-            const auto rows = calendarRowsFor(*gh, row.monthOffset, row.day);
+            const auto rows = calendarRowsFor(L, *gh,row.monthOffset, row.day);
             if (row.index < 1 || static_cast<size_t>(row.index) > rows.size()) {
                 lua_pushnil(L);
                 return 1;
@@ -7985,7 +7991,7 @@ void registerSystemLuaAPI(lua_State* L) {
             // month, and the interface calls it that way and with -1 and 1 in
             // the same breath to fill the leading and trailing cells.
             const int offset = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto viewed = calendarViewedMonth();
+            const auto viewed = calendarViewedMonth(L);
             const auto info = wowee::game::calendarMonthAt(
                 viewed.first, viewed.second, offset);
             lua_pushnumber(L, info.month);
@@ -7996,14 +8002,14 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"CalendarSetMonth", [](lua_State* L) -> int {
             const int offset = static_cast<int>(luaL_checknumber(L, 1));
-            const auto viewed = calendarViewedMonth();
+            const auto viewed = calendarViewedMonth(L);
             const auto info = wowee::game::calendarMonthAt(
                 viewed.first, viewed.second, offset);
-            calendarSetViewedMonth(info.month, info.year);
+            calendarSetViewedMonth(L, info.month, info.year);
             return 0;
         }},
                 {"CalendarSetAbsMonth", [](lua_State* L) -> int {
-            calendarSetViewedMonth(static_cast<int>(luaL_checknumber(L, 1)),
+            calendarSetViewedMonth(L, static_cast<int>(luaL_checknumber(L, 1)),
                                    static_cast<int>(luaL_checknumber(L, 2)));
             return 0;
         }},

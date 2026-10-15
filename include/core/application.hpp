@@ -10,6 +10,8 @@
 #include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
 #include "core/map_scope.hpp"
+#include "core/character_session.hpp"
+#include "addons/lua_services.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
 #include "core/frame_plan.hpp"
@@ -54,7 +56,7 @@ namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class AudioCoordinator; }
-namespace addons { class AddonManager; }
+namespace addons { class AddonManager; class AddonCatalog; class LuaErrorReport; }
 
 namespace core {
 
@@ -112,7 +114,11 @@ public:
     auth::AuthHandler* getAuthHandler() { return authHandler.get(); }
     game::GameHandler* getGameHandler() { return gameHandler.get(); }
     pipeline::AssetManager* getAssetManager() { return assetManager.get(); }
-    addons::AddonManager* getAddonManager() { return addonManager_.get(); }
+    /// The interface of the character in the world, in whatever state it is;
+    /// null with no character in the world.
+    addons::AddonManager* getAddonManager() { return characterAddons(); }
+    /// The character in the world, if any - see CharacterSession.
+    CharacterSession* getCharacterSession() { return session_.get(); }
     game::ExpansionRegistry* getExpansionRegistry() { return expansionRegistry_.get(); }
 
     /// What assets were found at startup. Taken once, because it walks the
@@ -195,7 +201,6 @@ private:
     bool requireTransitions(const char* operation) const;
     void pumpInput(float deltaTime, const FramePlan& plan);
     void dispatchInterfaceInput();
-    void loadWorldInterface();
     void prepareFrame();
     void dispatchNetwork(float deltaTime, const FramePlan& plan);
     void updateGame(float deltaTime, const FramePlan& plan);
@@ -237,16 +242,19 @@ private:
     void performLogoutToLogin(bool keepConnection);
     void processWorldTransitions();
 
-    /// Take the interface down, because the character it belongs to is leaving.
-    ///
-    /// The frames hold that character - their bags, their spells, their saved
-    /// layout - and whoever logs in next must not find any of it still there.
-    /// Beyond the data, the widget tree appends rather than replaces, so an
-    /// interface left standing is one the next world entry builds a second
-    /// copy on top of: every frame twice over, one sitting exactly on the
-    /// other. Clearing addonsLoaded_ without this is what made a second login
-    /// in one session come up doubled.
-    void unloadInterface();
+    /// The character in the world's interface, in any state; null without one.
+    addons::AddonManager* characterAddons();
+    /// The same, only while it hears the world (CharacterSession::
+    /// interfaceHoldsWorld): what game events, input and drawing go to.
+    addons::AddonManager* worldInterface();
+    /// The current map, which the character in the world owns; null between.
+    MapScope* currentMap() { return session_ ? session_->map() : nullptr; }
+    /// Starts the session of the character the game has logged in, when none
+    /// stands. Transitions only.
+    void beginCharacterSession();
+    CharacterSession::Services characterSessionServices();
+    /// Tell the interface the character is leaving, while the world stands.
+    void leaveWorldInterface();
     /// Records how long one named stage of a frame took.
     ///
     /// The per-stage timings only ever spoke up above 50ms, which says which
@@ -305,8 +313,6 @@ private:
     game::GameServices gameServices_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
-    /// The pad family the interface's key names were written for.
-    core::Gamepad::Kind padKeyNamesFor_ = core::Gamepad::Kind::Unknown;
 
     std::unique_ptr<Window> window;
     std::unique_ptr<rendering::Renderer> renderer;
@@ -322,10 +328,18 @@ private:
     // The walls other players run into between their movement reports.
     std::unique_ptr<game::MovementCollision> movementCollision_;
     std::unique_ptr<pipeline::AssetManager> assetManager;
-    std::unique_ptr<addons::AddonManager> addonManager_;
-    // Set by ReloadUI() from inside Lua, acted on between frames - the reload
-    // destroys the state that asked for it.
-    bool reloadUiPending_ = false;
+    /// The addons on disk and which are switched on: the player's, not a
+    /// character's. Each character's interface loads from it.
+    std::unique_ptr<addons::AddonCatalog> addonCatalog_;
+    /// What every character's interface is handed to reach the client: the
+    /// settings, the map, the audio. Built once at startup; the closures name
+    /// process-wide objects or ask for the current session.
+    addons::LuaServices luaServices_;
+    /// The run's Lua errors, across every character's interface and reload.
+    std::unique_ptr<addons::LuaErrorReport> luaErrorReport_;
+    /// How much of an interface a character gets. Full, except for the offline
+    /// loading fixture's character, which has no unit fields for FrameXML.
+    CharacterSession::Interface sessionInterface_ = CharacterSession::Interface::Full;
     /// Draws the widget tree addons build through CreateFrame/CreateTexture.
     /// Holds the texture cache for Interface\ art, so it lives as long as the app.
     ui::WidgetRenderer widgetRenderer_;
@@ -394,7 +408,6 @@ private:
     /// last frame is turned.
     float paperdollFacing_ = 0.0f;
     uint32_t paperdollWidgetId_ = 0;
-    bool addonsLoaded_ = false;
     std::unique_ptr<game::ExpansionRegistry> expansionRegistry_;
     // Empty means assets follow the active protocol profile. "legacy" selects
     // the root WOW_DATA_PATH manifest; otherwise this is an expansion id.
@@ -403,9 +416,8 @@ private:
     std::unique_ptr<EntitySpawner> entitySpawner_;
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
-    /// Everything held while on one map - see MapScope. Created and destroyed
-    /// only in Transitions; declared after what it borrows so it goes first.
-    std::unique_ptr<MapScope> mapScope_;
+    /// The services a map scope borrows. The scope itself belongs to the
+    /// character in the world (session_).
     MapScope::Services mapScopeServices();
     std::unique_ptr<rendering::LoadingScreen> loadingScreen_;
 #ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
@@ -419,17 +431,12 @@ private:
     std::unique_ptr<rendering::PerformanceHUD> performanceHUD_;
     std::unique_ptr<rendering::WorldMap> worldMap_;
     bool spellVisualsAttached_ = false;
-    /// Whether the camera was inside a WMO last frame, for announcing the
-    /// crossing once.
-    bool cameraIndoors_ = false;
 
     // Callback handlers (extracted from setupUICallbacks)
     std::unique_ptr<NPCInteractionCallbackHandler> npcInteractionCallbacks_;
     std::unique_ptr<AudioCallbackHandler> audioCallbacks_;
     std::unique_ptr<EntitySpawnCallbackHandler> entitySpawnCallbacks_;
     std::unique_ptr<AnimationCallbackHandler> animationCallbacks_;
-    /// How spells look and sound, from what the game says happened to them.
-    std::unique_ptr<SpellPresentation> spellPresentation_;
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;
     std::unique_ptr<UIScreenCallbackHandler> uiScreenCallbacks_;
@@ -473,7 +480,6 @@ private:
     std::optional<AppState> requestedState_;
     struct InterfaceInputEvent { SDL_Event event; std::string text; };
     std::vector<InterfaceInputEvent> interfaceInput_;
-    bool worldInterfaceEntryPending_ = false;
     bool running = false;
     Phase currentPhase_ = Phase::Idle;
     std::chrono::steady_clock::time_point phaseStartedAt_{};
@@ -492,23 +498,21 @@ private:
     static inline const std::string emptyString_;
     static inline const std::vector<std::string> emptyStringVec_;
 
-    float facingSendCooldown_ = 0.0f;        // Rate-limits MSG_MOVE_SET_FACING
-    float lastSentCanonicalYaw_ = 1000.0f;   // Sentinel - triggers first send
-    bool idleYawned_ = false;
-
-    // Transport riding locks (M2 and WMO) and the pending deck floor live in
-    // MapScope::TransportRide: they name transports of the current map.
-
-    bool wasAutoAttacking_ = false;
-    /// Whether the player was swimming last frame, so weapons are put away
-    /// once on entering the water rather than every frame in it.
-    bool wasSwimmingForSheath_ = false;
+    // The facing send rate limit, the idle yawn and the auto-attack, swim and
+    // indoor edges are the character's: CharacterSession::PlayerSync. The
+    // transport riding locks and the pending deck floor are the map's:
+    // MapScope::TransportRide.
 
     // Quest marker billboard sprites (above NPCs)
     void loadQuestMarkerModels();  // Now loads BLP textures
     void updateQuestMarkers();     // Updates billboard positions
     void updateLootSparkles();     // The glitter over corpses with loot
     void updateCorpseBones();      // Players' bones, as their race's skeleton
+
+    /// The character in the world: their interface, presenters and map. Made
+    /// and ended only in Transitions. Last, so it goes before everything it
+    /// borrows; shutdown() ends it explicitly before any of those.
+    std::unique_ptr<CharacterSession> session_;
 };
 
 } // namespace core

@@ -640,14 +640,16 @@ void CharacterScreen::renderAddonsSheet(float screenW, float screenH) {
     }
     col.gap(px(34));
 
-    auto* am = services_.addonManager;
+    // The catalog, not a character's interface: no character is in the world
+    // here, and which addons are switched on is the player's choice.
+    auto* am = services_.addonCatalog;
     if (!am) {
         ui_.text(col.at(), "The addon system is not running.", px(kBodySize), theme.pencil);
         ui_.setLayer(PaperLayer::Page);
         return;
     }
 
-    const auto& addons = am->getAddons();
+    const auto& addons = am->addons();
     ui_.text(col.at(), "Enabled addons load when you enter the world, or on /reload.",
              smallSize, theme.pencil);
     col.gap(ui_.lineHeight(smallSize) + px(8));

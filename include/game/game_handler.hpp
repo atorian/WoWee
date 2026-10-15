@@ -4,6 +4,7 @@
 
 #include "game/quest_giver_status.hpp"
 #include "game/calendar_data.hpp"
+#include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/character.hpp"
@@ -3153,13 +3154,8 @@ public:
     void setAuctionActiveTab(int tab);
     float getAuctionSearchDelay() const;
 
-    /// One row of a profession's recipe list.
-    struct CraftRecipe {
-        uint32_t spellId = 0;
-        std::string name;
-        int difficulty = 0;   ///< 0 optimal, 1 medium, 2 easy, 3 trivial
-        int canMake = 0;      ///< how many the bags have reagents for
-    };
+    /// One row of a profession's recipe list (game/craft_recipe.hpp).
+    using CraftRecipe = game::CraftRecipe;
     /// The known recipes of the profession whose window is open.
     ///
     /// Shared with the interface rather than rebuilt there: the difficulty

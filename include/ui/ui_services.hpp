@@ -24,7 +24,7 @@ namespace game {
     class GameHandler;
     class ExpansionRegistry;
 }
-namespace addons { class AddonManager; }
+namespace addons { class AddonManager; class AddonCatalog; }
 namespace audio { class AudioCoordinator; }
 
 namespace ui {
@@ -46,7 +46,19 @@ struct UIServices {
     pipeline::AssetManager* assetManager = nullptr;
     game::GameHandler* gameHandler = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;
-    addons::AddonManager* addonManager = nullptr;
+    /// The interface of the character in the world, in whatever state it is;
+    /// null with no character in the world. Asked each time rather than held:
+    /// each character has its own, and a /reload replaces it.
+    std::function<addons::AddonManager*()> addonManager;
+    [[nodiscard]] addons::AddonManager* characterAddons() const {
+        return addonManager ? addonManager() : nullptr;
+    }
+    /// The addons on disk and which are switched on - the player's, for the
+    /// whole run. What the character screen's AddOns list shows and toggles.
+    addons::AddonCatalog* addonCatalog = nullptr;
+    /// Ask for the character's interface to be rebuilt between frames, as
+    /// ReloadUI() does. Performed by the session that owns the interface.
+    std::function<void()> requestInterfaceReload;
     audio::AudioCoordinator* audioCoordinator = nullptr;
     core::ZoneTracker* zoneTracker = nullptr;
     core::ScreenRecording* screenRecording = nullptr;

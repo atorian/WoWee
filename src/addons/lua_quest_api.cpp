@@ -48,10 +48,10 @@ struct QuestRow {
 
 /// Headers the player has collapsed, by group key. Interface state, so it lives
 /// here rather than in the model - and it is deliberately not persisted, which
-/// is what WoW does with a fresh session too.
-std::set<int32_t>& collapsedQuestGroups() {
-    static std::set<int32_t> collapsed;
-    return collapsed;
+/// is what WoW does with a fresh session too. The character's, in
+/// InterfaceState: the next character logs in with every group open.
+std::set<int32_t>& collapsedQuestGroups(lua_State* L) {
+    return interfaceState(L).questLog.collapsedGroups;
 }
 
 /// What a group's header row is called.
@@ -73,7 +73,7 @@ std::string questGroupTitle(game::GameHandler* gh, int32_t group) {
 /// header is collapsed. Rebuilt per call - the log holds tens of entries, and a
 /// cache here would have to be invalidated by every quest update, every query
 /// response and every collapse.
-std::vector<QuestRow> questRows(game::GameHandler* gh) {
+std::vector<QuestRow> questRows(lua_State* L, game::GameHandler* gh) {
     std::vector<QuestRow> rows;
     if (!gh) return rows;
     const auto& ql = gh->getQuestLog();
@@ -108,7 +108,7 @@ std::vector<QuestRow> questRows(game::GameHandler* gh) {
         header.group = g.key;
         header.headerTitle = g.title;
         rows.push_back(std::move(header));
-        if (collapsedQuestGroups().count(g.key)) continue;
+        if (collapsedQuestGroups(L).count(g.key)) continue;
         for (const auto* q : groups[g.key]) {
             QuestRow row;
             row.group = g.key;
@@ -137,9 +137,9 @@ std::string forPlayer(lua_State* L, const std::string& text) {
 
 // Declared in lua_api_helpers.hpp; defined here because questRows above is the
 // one list every quest log index is counted against.
-int questLogRowForQuest(game::GameHandler* gh, uint32_t questId) {
+int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId) {
     if (!gh || questId == 0) return 0;
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     for (size_t i = 0; i < rows.size(); ++i) {
         if (!rows[i].isHeader && rows[i].quest && rows[i].quest->questId == questId) {
             return static_cast<int>(i) + 1;  // the interface counts from one
@@ -149,12 +149,13 @@ int questLogRowForQuest(game::GameHandler* gh, uint32_t questId) {
 }
 
 void openInterfaceQuestLog(game::GameHandler& gh, uint32_t questId) {
-    const int row = questLogRowForQuest(&gh, questId);
-    if (row > 0) {
-        gh.runInterfaceCommand("QuestLog_OpenToQuest(" + std::to_string(row) + ")");
-    } else {
-        gh.runInterfaceCommand("ToggleFrame(QuestLogFrame)");
-    }
+    // The row is worked out inside the interface, by GetQuestLogIndexByID:
+    // which groups are collapsed is the interface's own state, and the
+    // character's, so only its Lua state can say what row a quest is on.
+    const std::string id = std::to_string(questId);
+    gh.runInterfaceCommand("local row = GetQuestLogIndexByID(" + id + ") "
+                           "if row and row > 0 then QuestLog_OpenToQuest(row) "
+                           "else ToggleFrame(QuestLogFrame) end");
 }
 
 namespace {
@@ -163,9 +164,9 @@ namespace {
 /// is off either end. This is what every "…(questLogIndex)" binding needs: a
 /// header row genuinely has no quest, and answering with the wrong one is how a
 /// log shows the details of a quest the player did not click.
-const game::GameHandler::QuestLogEntry* questAtRow(game::GameHandler* gh, int index) {
+const game::GameHandler::QuestLogEntry* questAtRow(lua_State* L, game::GameHandler* gh, int index) {
     if (index < 1) return nullptr;
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     if (index > static_cast<int>(rows.size())) return nullptr;
     return rows[index - 1].quest;
 }
@@ -174,8 +175,9 @@ const game::GameHandler::QuestLogEntry* questAtRow(game::GameHandler* gh, int in
 
 // The same mapping, reachable from the other binding files. Declared in
 // lua_api_helpers.hpp because anything holding a quest log index needs it.
-const game::GameHandler::QuestLogEntry* questAtLogRow(game::GameHandler* gh, int index) {
-    return questAtRow(gh, index);
+const game::GameHandler::QuestLogEntry* questAtLogRow(lua_State* L, game::GameHandler* gh,
+                                                     int index) {
+    return questAtRow(L, gh, index);
 }
 
 static int lua_GetNumQuestLogEntries(lua_State* L) {
@@ -184,7 +186,7 @@ static int lua_GetNumQuestLogEntries(lua_State* L) {
     // numEntries counts the rows the log displays - headers included, and the
     // quests under a collapsed header excluded, because that is what the frame
     // walks with GetQuestLogTitle.
-    lua_pushnumber(L, questRows(gh).size());
+    lua_pushnumber(L, questRows(L, gh).size());
     // numQuests is every quest held, whatever is collapsed: it is what
     // QuestLog_UpdateQuestCount prints against MAX_QUESTLOG_QUESTS, and
     // QuestLogFrame only picks a first selection when it is above zero.
@@ -219,7 +221,8 @@ static int lua_GetQuestLogTimeLeft(lua_State* L) {
 }
 
 // Defined further down, with the other quest-log readers.
-static const game::GameHandler::QuestLogEntry* selectedLogEntry(game::GameHandler* gh);
+static const game::GameHandler::QuestLogEntry* selectedLogEntry(lua_State* L,
+                                                               game::GameHandler* gh);
 
 // Whether the quest being looked at has been failed.
 //
@@ -228,7 +231,7 @@ static const game::GameHandler::QuestLogEntry* selectedLogEntry(game::GameHandle
 // already being read for the first of them.
 static int lua_IsCurrentQuestFailed(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* q = selectedLogEntry(gh);
+    const auto* q = selectedLogEntry(L, gh);
     lua_pushboolean(L, (q && q->failed) ? 1 : 0);
     return 1;
 }
@@ -468,7 +471,7 @@ static int lua_GetQuestIndexForTimer(lua_State* L) {
     if (idx > static_cast<int>(timers.size())) return luaReturnNil(L);
     const uint32_t questId = timers[static_cast<size_t>(idx) - 1].first;
     // A display index, since that is what every other quest binding takes.
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     for (size_t i = 0; i < rows.size(); ++i) {
         if (rows[i].quest && rows[i].quest->questId == questId) {
             lua_pushnumber(L, static_cast<double>(i + 1));
@@ -483,7 +486,7 @@ static int lua_GetQuestIndexForTimer(lua_State* L) {
 /// The reader's own state, not the client's: every page is already in hand by
 /// the time the frame draws one, so turning a page moves this and nothing else.
 /// Reset when a book is closed, which is the only moment it can be stale.
-static int& bookPage() { static int page = 0; return page; }
+static int& bookPage(lua_State* L) { return interfaceState(L).itemTextPage; }
 
 /// Tell the frame to redraw from whatever the page bindings now answer.
 static void fireItemTextReady(lua_State* L) {
@@ -497,7 +500,7 @@ static int lua_GetQuestLogTitle(lua_State* L) {
     // loses whatever asked rather than answering that there is no such quest.
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh) { return luaReturnNil(L); }
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     // A header row: the zone (or Epic/class/profession) the quests under it
     // belong to. isHeader is what tells QuestLog_Update to draw it as one and to
     // hang a collapse box off it, and isCollapsed is what that box reads.
@@ -508,7 +511,7 @@ static int lua_GetQuestLogTitle(lua_State* L) {
         lua_pushnil(L);                                                    // 3: questTag
         lua_pushnumber(L, 0);                                              // 4: suggestedGroup
         lua_pushboolean(L, 1);                                             // 5: isHeader
-        lua_pushboolean(L, collapsedQuestGroups().count(row.group) ? 1 : 0); // 6: isCollapsed
+        lua_pushboolean(L, collapsedQuestGroups(L).count(row.group) ? 1 : 0); // 6: isCollapsed
         lua_pushnil(L);                                                    // 7: isComplete
         lua_pushboolean(L, 0);                                             // 8: isDaily
         lua_pushnumber(L, 0);                                              // 9: questID
@@ -602,7 +605,7 @@ static int lua_GetQuestLogQuestText(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = questLogIndexOrSelected(L, 1);
     if (!gh || index < 1) { return luaReturnNil(L); }
-    const auto* qp = questAtRow(gh, index);
+    const auto* qp = questAtRow(L, gh,index);
     if (!qp) { return luaReturnNil(L); }
     const auto& q = *qp;
     // The quest giver's own text. It is the third string in the query
@@ -645,7 +648,7 @@ static int lua_SelectQuestLogEntry(lua_State* L) {
     // nothing had ever requested it, so every quest carried from a previous
     // session showed an empty description above its objectives. The query
     // answers with QUEST_LOG_UPDATE, which the panel already redraws on.
-    if (const auto* q = questAtRow(gh, index)) {
+    if (const auto* q = questAtRow(L, gh,index)) {
         if (q->description.empty() && q->questId != 0) {
             gh->requestQuestQuery(q->questId, false);
         }
@@ -733,7 +736,7 @@ static int lua_GetQuestIndexForWatch(lua_State* L) {
     // than by counting through getQuestLog(). Answering the raw log position
     // pointed the watch frame at whatever row happened to hold that number,
     // which after grouping is usually a different quest or a header.
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     const auto& tracked = gh->getTrackedQuestIds();
     int found = 0;
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -755,7 +758,7 @@ static int lua_AddQuestWatch(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) return 0;
-    if (const auto* q = questAtRow(gh, index)) {
+    if (const auto* q = questAtRow(L, gh,index)) {
         gh->setQuestTracked(q->questId, true);
     }
     return 0;
@@ -766,7 +769,7 @@ static int lua_RemoveQuestWatch(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) return 0;
-    if (const auto* q = questAtRow(gh, index)) {
+    if (const auto* q = questAtRow(L, gh,index)) {
         gh->setQuestTracked(q->questId, false);
     }
     return 0;
@@ -777,7 +780,7 @@ static int lua_IsQuestWatched(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnFalse(L); }
-    const auto* q = questAtRow(gh, index);
+    const auto* q = questAtRow(L, gh,index);
     lua_pushboolean(L, (q && gh->isQuestTracked(q->questId)) ? 1 : 0);
     return 1;
 }
@@ -787,7 +790,7 @@ static int lua_GetQuestLink(lua_State* L) {
     auto* gh = getGameHandler(L);
     int index = static_cast<int>(luaL_checknumber(L, 1));
     if (!gh || index < 1) { return luaReturnNil(L); }
-    const auto* qp = questAtRow(gh, index);
+    const auto* qp = questAtRow(L, gh,index);
     if (!qp) { return luaReturnNil(L); }
     const auto& q = *qp;
     // Yellow quest link format matching WoW
@@ -802,7 +805,7 @@ static int lua_GetNumQuestLeaderBoards(lua_State* L) {
     auto* gh = getGameHandler(L);
     const int index = questLogIndexOrSelected(L, 1);
     if (!gh || index < 1) { return luaReturnZero(L); }
-    const auto* qp = questAtRow(gh, index);
+    const auto* qp = questAtRow(L, gh,index);
     if (!qp) { return luaReturnZero(L); }
     lua_pushnumber(L, game::questObjectiveCount(*qp));
     return 1;
@@ -897,7 +900,7 @@ static int lua_QuestPOIGetQuestIDByVisibleIndex(lua_State* L) {
     // that is no longer held answers zero rather than a stale position.
     int logIndex = 0;
     if (gh) {
-        const auto rows = questRows(gh);
+        const auto rows = questRows(L, gh);
         for (size_t i = 0; i < rows.size(); ++i) {
             if (rows[i].quest && rows[i].quest->questId == questId) {
                 logIndex = static_cast<int>(i) + 1;
@@ -981,7 +984,7 @@ static int lua_GetQuestPOILeaderBoard(lua_State* L) {
     auto* gh = getGameHandler(L);
     const uint32_t questId = static_cast<uint32_t>(luaL_optnumber(L, 2, 0));
     if (!gh || questId == 0) { return luaReturnNil(L); }
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     int index = 0;
     for (size_t i = 0; i < rows.size(); ++i) {
         if (rows[i].quest && rows[i].quest->questId == questId) {
@@ -1005,7 +1008,7 @@ static int lua_GetQuestLogLeaderBoard(lua_State* L) {
     int questIdx = static_cast<int>(luaL_optnumber(L, 2,
         gh ? gh->getSelectedQuestLogIndex() : 0));
     if (!gh || questIdx < 1 || objIdx < 1) { return luaReturnNil(L); }
-    const auto* qp = questAtRow(gh, questIdx);
+    const auto* qp = questAtRow(L, gh,questIdx);
     if (!qp) { return luaReturnNil(L); }
     const std::vector<game::QuestObjective> lines = game::questObjectives(*gh, *qp);
     if (objIdx > static_cast<int>(lines.size())) {
@@ -1028,18 +1031,18 @@ static int setQuestHeaderCollapsed(lua_State* L, bool collapse) {
     auto* gh = getGameHandler(L);
     if (!gh) return 0;
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
-    const auto rows = questRows(gh);
+    const auto rows = questRows(L, gh);
     if (index == 0) {
-        collapsedQuestGroups().clear();
+        collapsedQuestGroups(L).clear();
         if (collapse) {
             for (const auto& row : rows) {
-                if (row.isHeader) collapsedQuestGroups().insert(row.group);
+                if (row.isHeader) collapsedQuestGroups(L).insert(row.group);
             }
         }
     } else if (index >= 1 && index <= static_cast<int>(rows.size()) &&
                rows[index - 1].isHeader) {
-        if (collapse) collapsedQuestGroups().insert(rows[index - 1].group);
-        else          collapsedQuestGroups().erase(rows[index - 1].group);
+        if (collapse) collapsedQuestGroups(L).insert(rows[index - 1].group);
+        else          collapsedQuestGroups(L).erase(rows[index - 1].group);
     }
     // The list the frame is walking just changed length underneath it, so it
     // has to be told to walk it again - nothing else fires for this.
@@ -1216,9 +1219,8 @@ const game::GameHandler::StabledPet* activePet(game::GameHandler* gh) {
 
 /// Which slot the player has clicked. Held here because it is a fact about the
 /// window rather than about the character, and the server is never told.
-int& selectedStableSlot() {
-    static int slot = 0;
-    return slot;
+int& selectedStableSlot(lua_State* L) {
+    return interfaceState(L).selectedStableSlot;
 }
 
 } // namespace
@@ -1270,12 +1272,12 @@ static int lua_GetNumStableSlots(lua_State* L) {
 }
 
 static int lua_GetSelectedStablePet(lua_State* L) {
-    lua_pushnumber(L, selectedStableSlot());
+    lua_pushnumber(L, selectedStableSlot(L));
     return 1;
 }
 
 static int lua_ClickStablePet(lua_State* L) {
-    selectedStableSlot() = static_cast<int>(luaL_optnumber(L, 1, 0));
+    selectedStableSlot(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
     // The model preview shows whichever pet is selected, so selecting a
     // different one is exactly when it has to be redrawn. Nothing else changes
     // it, and the frame will not redraw on its own.
@@ -1333,7 +1335,7 @@ static int lua_SetPetStablePaperdoll(lua_State* L) {
 
     // Slots count from one and the active pet is slot zero, which the stable
     // list carries as its own entry rather than as a slot.
-    const int slot = selectedStableSlot();
+    const int slot = selectedStableSlot(L);
     const auto& pets = gh->getStabledPets();
     w->modelDisplayId = 0;
     if (slot >= 1 && slot <= static_cast<int>(pets.size())) {
@@ -1590,7 +1592,7 @@ static int lua_GetNumTalentTabs(lua_State* L) {
 
 /// Points staged in the talent preview but not yet learned, defined below with
 /// the functions that change it.
-static std::unordered_map<uint32_t, int>& previewPoints();
+static std::unordered_map<uint32_t, int>& previewPoints(lua_State* L);
 
 // GetTalentTabInfo(tabIndex) → name, iconTexture, pointsSpent, background
 static int lua_GetTalentTabInfo(lua_State* L) {
@@ -1627,7 +1629,7 @@ static int lua_GetTalentTabInfo(lua_State* L) {
     // have no meaning on someone else's tree.
     int previewSpent = 0;
     if (!inspect) {
-        for (const auto& [talentId, staged] : previewPoints()) {
+        for (const auto& [talentId, staged] : previewPoints(L)) {
             const auto* entry = gh->getTalentEntry(talentId);
             if (entry && entry->tabId == tab->tabId) previewSpent += staged;
         }
@@ -1668,9 +1670,8 @@ static int lua_GetNumTalents(lua_State* L) {
 /// Which quest the confirmation is about. Set when the log asks to abandon one
 /// and read back by the popup that confirms it, because the two are separate
 /// calls with the player's answer in between.
-static uint32_t& pendingAbandonQuest() {
-    static uint32_t questId = 0;
-    return questId;
+static uint32_t& pendingAbandonQuest(lua_State* L) {
+    return interfaceState(L).questLog.pendingAbandon;
 }
 
 /// The talent at a tab and index, by the ordering every talent function has to
@@ -1710,7 +1711,7 @@ const game::TalentEntry* talentAt(game::GameHandler* gh,
 
 /// Whether every prerequisite of a talent is satisfied, optionally counting
 /// points staged in the preview but not yet learned.
-static bool talentPrereqsMet(game::GameHandler* gh,
+static bool talentPrereqsMet(lua_State* L, game::GameHandler* gh,
                              const game::GameHandler::TalentEntry* talent,
                              bool withPreview) {
     if (!gh || !talent) return false;
@@ -1721,8 +1722,8 @@ static bool talentPrereqsMet(game::GameHandler* gh,
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
         int have = gh->getTalentRank(prereqId);
         if (withPreview) {
-            const auto staged = previewPoints().find(prereqId);
-            if (staged != previewPoints().end()) have += staged->second;
+            const auto staged = previewPoints(L).find(prereqId);
+            if (staged != previewPoints(L).end()) have += staged->second;
         }
         if (have < needed) return false;
     }
@@ -1748,10 +1749,10 @@ static int lua_GetTalentInfo(lua_State* L) {
         return 10;
     }
     const int rank = talentRankFor(gh, inspect, talent->talentId);
-    const auto staged = previewPoints().find(talent->talentId);
+    const auto staged = previewPoints(L).find(talent->talentId);
     const int previewRank = inspect
         ? rank
-        : rank + (staged == previewPoints().end() ? 0 : staged->second);
+        : rank + (staged == previewPoints(L).end() ? 0 : staged->second);
 
     std::string name = gh->getSpellName(talent->rankSpells[0]);
     if (name.empty()) name = "Talent " + std::to_string(talent->talentId);
@@ -1769,19 +1770,20 @@ static int lua_GetTalentInfo(lua_State* L) {
     lua_pushboolean(L, 0);                     // 7: isExceptional
     // Was hardcoded true, which drew every talent as learnable however deep in
     // a chain it sat.
-    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/false) ? 1 : 0);
+    lua_pushboolean(L, talentPrereqsMet(L, gh, talent, /*withPreview=*/false) ? 1 : 0);
     lua_pushnumber(L, previewRank);            // 9: previewRank
-    lua_pushboolean(L, talentPrereqsMet(gh, talent, /*withPreview=*/true) ? 1 : 0);
+    lua_pushboolean(L, talentPrereqsMet(L, gh, talent, /*withPreview=*/true) ? 1 : 0);
     return 10;
 }
 
 /// The trainer panel's own selection and filters. The client has no opinion
 /// about either - they are what the player last clicked - so they live here
-/// rather than being invented on every read.
-static int& tradeSkillSelection() {
-    static int selected = 0;
-    return selected;
+/// rather than being invented on every read. All of the trade skill panel's
+/// state is the character's, in InterfaceState::tradeSkill.
+static InterfaceState::TradeSkill& tradeSkillState(lua_State* L) {
+    return interfaceState(L).tradeSkill;
 }
+static int& tradeSkillSelection(lua_State* L) { return tradeSkillState(L).selection; }
 
 /// The trade skill list's two filters, and the view every binding reads.
 ///
@@ -1791,14 +1793,8 @@ static int& tradeSkillSelection() {
 /// everything else by position in that same list, so a count filtered anywhere
 /// but here would have the rows describing different recipes than the ones
 /// counted.
-static std::string& tradeSkillNameFilter() {
-    static std::string filter;
-    return filter;
-}
-static bool& tradeSkillOnlyMakeable() {
-    static bool only = false;
-    return only;
-}
+static std::string& tradeSkillNameFilter(lua_State* L) { return tradeSkillState(L).nameFilter; }
+static bool& tradeSkillOnlyMakeable(lua_State* L) { return tradeSkillState(L).onlyMakeable; }
 
 /// The recipes the panel should show, in its order.
 ///
@@ -1822,17 +1818,16 @@ static const game::ItemQueryResponseData* craftedItem(game::GameHandler* gh,
 /// handler calls Set…Filter(id - 1, 1, 1) and nothing ever unchecks - so this
 /// is an index rather than a set, and zero is the "all" row the list opens
 /// with.
-static int& tradeSkillSubClassPick() { static int pick = 0; return pick; }
-static int& tradeSkillInvSlotPick()  { static int pick = 0; return pick; }
+static int& tradeSkillSubClassPick(lua_State* L) { return tradeSkillState(L).subClassPick; }
+static int& tradeSkillInvSlotPick(lua_State* L)  { return tradeSkillState(L).invSlotPick; }
 
 /// The item level range typed into the search box. The box does double duty:
 /// a number, a range "20-30" or an approximate "~25" filters by the level of
 /// what a recipe makes, and anything else filters by name - the panel decides
 /// which and calls one of the two, clearing the other. Both zero means no
 /// range, which is how it clears this one.
-static std::pair<int, int>& tradeSkillLevelRange() {
-    static std::pair<int, int> range{0, 0};
-    return range;
+static std::pair<int, int>& tradeSkillLevelRange(lua_State* L) {
+    return tradeSkillState(L).levelRange;
 }
 
 /// The two dropdown lists, built from every known recipe rather than from the
@@ -1873,18 +1868,18 @@ static std::vector<std::string> tradeSkillInvSlots(game::GameHandler* gh) {
 }
 
 static std::vector<game::GameHandler::CraftRecipe> visibleCraftingRecipes(
-        game::GameHandler* gh) {
+        lua_State* L, game::GameHandler* gh) {
     std::vector<game::GameHandler::CraftRecipe> out;
     if (!gh) return out;
-    std::string needle = tradeSkillNameFilter();
+    std::string needle = tradeSkillNameFilter(L);
     toLowerInPlace(needle);
-    const auto subs  = (tradeSkillSubClassPick() > 0) ? tradeSkillSubClasses(gh)
+    const auto subs  = (tradeSkillSubClassPick(L) > 0) ? tradeSkillSubClasses(gh)
                                                       : std::vector<std::string>{};
-    const auto slots = (tradeSkillInvSlotPick() > 0)  ? tradeSkillInvSlots(gh)
+    const auto slots = (tradeSkillInvSlotPick(L) > 0)  ? tradeSkillInvSlots(gh)
                                                       : std::vector<std::string>{};
-    const auto level = tradeSkillLevelRange();
+    const auto level = tradeSkillLevelRange(L);
     for (const auto& r : gh->getCraftingRecipes()) {
-        if (tradeSkillOnlyMakeable() && r.canMake <= 0) continue;
+        if (tradeSkillOnlyMakeable(L) && r.canMake <= 0) continue;
         if (!needle.empty()) {
             std::string name = r.name;
             toLowerInPlace(name);
@@ -1905,12 +1900,12 @@ static std::vector<game::GameHandler::CraftRecipe> visibleCraftingRecipes(
         if (!subs.empty() || !slots.empty()) {
             const auto* info = craftedItem(gh, r.spellId);
             if (info) {
-                const int si = tradeSkillSubClassPick();
+                const int si = tradeSkillSubClassPick(L);
                 if (si > 0 && si <= static_cast<int>(subs.size()) &&
                     info->subclassName != subs[static_cast<size_t>(si) - 1]) {
                     continue;
                 }
-                const int vi = tradeSkillInvSlotPick();
+                const int vi = tradeSkillInvSlotPick(L);
                 if (vi > 0 && vi <= static_cast<int>(slots.size())) {
                     std::string label;
                     for (int i = 1; i < game::kNumAuctionSlots; ++i) {
@@ -1939,33 +1934,27 @@ static std::vector<game::GameHandler::CraftRecipe> visibleCraftingRecipes(
 /// Those go last, under no heading, rather than being hidden: the details are
 /// asked for on demand, and hiding them would empty the list and refill it as
 /// the replies landed. They move under their heading once the reply arrives,
-/// which is the same churn the dropdown already has.
-struct TradeSkillRow {
-    game::GameHandler::CraftRecipe recipe;
-    std::string subclass;
-    bool isHeader = false;
-};
+/// which is the same churn the dropdown already has. (TradeSkillRow is
+/// declared in interface_state.hpp, which holds the character's drawn list.)
 
 /// Headings the player has closed, by subclass name. Not saved: the crafting
 /// window is opened against one profession at a time and the original client
 /// does not carry the state between openings either.
-static std::set<std::string>& collapsedTradeSkillSubClasses() {
-    static std::set<std::string> closed;
-    return closed;
+static std::set<std::string>& collapsedTradeSkillSubClasses(lua_State* L) {
+    return tradeSkillState(L).collapsedSubClasses;
 }
 
 /// Bumped whenever the list is allowed to change shape. See tradeSkillRows.
-static uint64_t& tradeSkillRowsGeneration() {
-    static uint64_t gen = 1;
-    return gen;
+static uint64_t& tradeSkillRowsGeneration(lua_State* L) {
+    return tradeSkillState(L).rowsGeneration;
 }
 
-static std::vector<TradeSkillRow> buildTradeSkillRows(game::GameHandler* gh) {
+static std::vector<TradeSkillRow> buildTradeSkillRows(lua_State* L, game::GameHandler* gh) {
     std::vector<TradeSkillRow> rows;
     if (!gh) return rows;
     std::map<std::string, std::vector<game::GameHandler::CraftRecipe>> grouped;
     std::vector<game::GameHandler::CraftRecipe> ungrouped;
-    for (const auto& r : visibleCraftingRecipes(gh)) {
+    for (const auto& r : visibleCraftingRecipes(L, gh)) {
         const auto* info = craftedItem(gh, r.spellId);
         if (info && !info->subclassName.empty()) grouped[info->subclassName].push_back(r);
         else                                     ungrouped.push_back(r);
@@ -1979,7 +1968,7 @@ static std::vector<TradeSkillRow> buildTradeSkillRows(game::GameHandler* gh) {
         // A closed heading takes its recipes out of the list rather than
         // hiding them in place: GetNumTradeSkills is what the scroll frame
         // counts and every other binding indexes into.
-        if (collapsedTradeSkillSubClasses().count(subclass)) continue;
+        if (collapsedTradeSkillSubClasses(L).count(subclass)) continue;
         for (const auto& r : recipes) rows.push_back({r, subclass, false});
     }
     for (const auto& r : ungrouped) rows.push_back({r, {}, false});
@@ -2011,7 +2000,7 @@ static std::vector<TradeSkillRow> buildTradeSkillRows(game::GameHandler* gh) {
 ///
 /// This returned by value, and every caller does
 ///
-///     const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+///     const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
 ///
 /// which takes a pointer into the temporary the call just made and reads it on
 /// the next line, after the temporary is gone. Reported as crafting doing
@@ -2023,18 +2012,23 @@ static std::vector<TradeSkillRow> buildTradeSkillRows(game::GameHandler* gh) {
 /// TRADE_SKILL_UPDATE and TRADE_SKILL_SHOW - see fireEvent, which invalidates
 /// it only there, precisely because the frame reads it many times to draw one
 /// selection. Nothing can rebuild it underneath a caller mid-read.
-static const std::vector<TradeSkillRow>& tradeSkillRows(game::GameHandler* gh) {
-    static std::vector<TradeSkillRow> cached;
-    static uint64_t cachedGen = 0;
-    static const game::GameHandler* cachedFor = nullptr;
-    if (cachedGen == tradeSkillRowsGeneration() && cachedFor == gh) return cached;
-    cached = buildTradeSkillRows(gh);
-    cachedGen = tradeSkillRowsGeneration();
-    cachedFor = gh;
-    return cached;
+///
+/// Held in the character's InterfaceState: the list is that character's
+/// recipes, and the next character's interface starts with none built.
+static const std::vector<TradeSkillRow>& tradeSkillRows(lua_State* L, game::GameHandler* gh) {
+    auto& state = tradeSkillState(L);
+    if (!gh) {
+        // Nothing to build from: answer empty and build on the next call that
+        // has a game, as the per-handler cache key used to.
+        state.rows.clear();
+        state.rowsBuiltAt = 0;
+        return state.rows;
+    }
+    if (state.rowsBuiltAt == state.rowsGeneration) return state.rows;
+    state.rows = buildTradeSkillRows(L, gh);
+    state.rowsBuiltAt = state.rowsGeneration;
+    return state.rows;
 }
-
-void invalidateTradeSkillRows() { ++tradeSkillRowsGeneration(); }
 
 /// The recipe at a drawn-row index, or null for a heading or no such row.
 /// Every binding taking a trade skill index goes through this, because an
@@ -2055,10 +2049,10 @@ static const game::GameHandler::CraftRecipe* tradeSkillRecipeAt(
 
 /// The same translation, for the one binding that lives in another file: the
 /// tooltip is a widget method and sits on the widget metatable in lua_engine.
-const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(game::GameHandler* gh,
+const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(lua_State* L, game::GameHandler* gh,
                                                             int index) {
     if (!gh) return nullptr;
-    return tradeSkillRecipeAt(tradeSkillRows(gh), index);
+    return tradeSkillRecipeAt(tradeSkillRows(L, gh), index);
 }
 
 /// Open or close the heading at a drawn-row index. A click on a recipe row is
@@ -2068,20 +2062,17 @@ static int tradeSkillHeaderSetCollapsed(lua_State* L, bool collapsed) {
     auto* gh = getGameHandler(L);
     const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
     if (!gh || index < 1) return 0;
-    const auto rows = tradeSkillRows(gh);
+    const auto rows = tradeSkillRows(L, gh);
     if (index > static_cast<int>(rows.size())) return 0;
     const auto& row = rows[static_cast<size_t>(index) - 1];
     if (!row.isHeader) return 0;
-    if (collapsed) collapsedTradeSkillSubClasses().insert(row.subclass);
-    else           collapsedTradeSkillSubClasses().erase(row.subclass);
-    ++tradeSkillRowsGeneration();
+    if (collapsed) collapsedTradeSkillSubClasses(L).insert(row.subclass);
+    else           collapsedTradeSkillSubClasses(L).erase(row.subclass);
+    ++tradeSkillRowsGeneration(L);
     return 0;
 }
 
-static int& trainerSelection() {
-    static int selected = 0;
-    return selected;
-}
+static int& trainerSelection(lua_State* L) { return interfaceState(L).trainer.selection; }
 /// The three type filters, seeded rather than empty.
 ///
 /// A trainer is walked up to to see what can be learned now, and the list that
@@ -2096,15 +2087,11 @@ static int& trainerSelection() {
 /// names always present there is no absent entry to disagree about, and an
 /// unknown name still reads as showing.
 ///
-/// The player's own changes outlive it - this is where the session's filter
-/// lives, so a tick turned on stays on until the client restarts.
-static std::unordered_map<std::string, bool>& trainerFilters() {
-    static std::unordered_map<std::string, bool> filters{
-        {"available", true},
-        {"unavailable", false},
-        {"used", false},
-    };
-    return filters;
+/// The player's own changes outlive the window - this is the character's
+/// filter (InterfaceState::trainer), so a tick turned on stays on until that
+/// character logs out.
+static std::unordered_map<std::string, bool>& trainerFilters(lua_State* L) {
+    return interfaceState(L).trainer.filters;
 }
 
 /// What the trainer panel's search box holds, folded to lower case.
@@ -2114,10 +2101,7 @@ static std::unordered_map<std::string, bool>& trainerFilters() {
 /// because every binding that takes a service index has to agree about which
 /// service index 3 is. 3.3.5's trainer has no search box; this client's has
 /// one, and shownTrainerServices is where the two filters meet.
-static std::string& trainerSearch() {
-    static std::string search;
-    return search;
-}
+static std::string& trainerSearch(lua_State* L) { return interfaceState(L).trainer.search; }
 
 /// Case-insensitively, because a player types "linen" and the spell is called
 /// "Brown Linen Robe".
@@ -2141,8 +2125,8 @@ static const char* trainerServiceCategory(game::GameHandler* gh,
 
 /// Whether the filter dropdown is currently letting this category through.
 /// The three the panel names are always in the map; anything else shows.
-static bool trainerCategoryShowing(const char* category) {
-    const auto& filters = trainerFilters();
+static bool trainerCategoryShowing(lua_State* L, const char* category) {
+    const auto& filters = trainerFilters(L);
     auto it = filters.find(category);
     return it == filters.end() || it->second;
 }
@@ -2155,12 +2139,13 @@ static bool trainerCategoryShowing(const char* category) {
 /// takes a service index has to agree about which service index 3 is: filtering
 /// in one of them and not the rest would train a different spell than the row
 /// that was clicked.
-static std::vector<const game::TrainerSpell*> shownTrainerServices(game::GameHandler* gh) {
+static std::vector<const game::TrainerSpell*> shownTrainerServices(lua_State* L,
+                                                                   game::GameHandler* gh) {
     std::vector<const game::TrainerSpell*> shown;
     if (!gh) return shown;
-    const std::string& search = trainerSearch();
+    const std::string& search = trainerSearch(L);
     for (const auto& sp : gh->getTrainerSpells().spells) {
-        if (!trainerCategoryShowing(trainerServiceCategory(gh, sp))) continue;
+        if (!trainerCategoryShowing(L, trainerServiceCategory(gh, sp))) continue;
         // The name only when there is something to match, so the common case
         // costs no lookups at all.
         if (!search.empty() &&
@@ -2174,8 +2159,9 @@ static std::vector<const game::TrainerSpell*> shownTrainerServices(game::GameHan
 }
 
 /// The nth shown service, counting from one, or null.
-static const game::TrainerSpell* shownTrainerService(game::GameHandler* gh, int index) {
-    const auto shown = shownTrainerServices(gh);
+static const game::TrainerSpell* shownTrainerService(lua_State* L, game::GameHandler* gh,
+                                                     int index) {
+    const auto shown = shownTrainerServices(L, gh);
     if (index < 1 || index > static_cast<int>(shown.size())) return nullptr;
     return shown[index - 1];
 }
@@ -2210,9 +2196,8 @@ static uint32_t resolveTalentId(game::GameHandler* gh, int tabIndex, int talentI
 /// pressed. Without somewhere to hold that, clicking a talent did nothing at
 /// all. Keyed by talent id so it survives a tab change, and cleared whenever
 /// the server confirms what was learned.
-static std::unordered_map<uint32_t, int>& previewPoints() {
-    static std::unordered_map<uint32_t, int> points;
-    return points;
+static std::unordered_map<uint32_t, int>& previewPoints(lua_State* L) {
+    return interfaceState(L).talentPreviewPoints;
 }
 
 // AddPreviewTalentPoints(tabIndex, talentIndex, delta, pet, group)
@@ -2232,7 +2217,7 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     for (const auto& [talentId, entry] : gh->getAllTalents()) {
         if (talentId == id) { maxRank = entry.maxRank; break; }
     }
-    int& staged = previewPoints()[id];
+    int& staged = previewPoints(L)[id];
     // Bounded by what is already learned and the talent's own cap: a preview
     // that goes past either is one the server will refuse, and the frame draws
     // straight from these numbers.
@@ -2249,14 +2234,14 @@ static int lua_AddPreviewTalentPoints(lua_State* L) {
     // staged point back is always allowed however far past the pool it went.
     if (delta > 0) {
         int stagedTotal = 0;
-        for (const auto& [tid, n] : previewPoints()) { (void)tid; stagedTotal += n; }
+        for (const auto& [tid, n] : previewPoints(L)) { (void)tid; stagedTotal += n; }
         const int unspent =
             gh->getUnspentTalentPoints(gh->getActiveTalentSpec()) - stagedTotal;
         upper = std::min(upper, staged + std::max(0, unspent));
     }
     const int wanted = std::clamp(staged + delta, 0, std::max(0, upper));
     staged = wanted;
-    if (staged == 0) previewPoints().erase(id);
+    if (staged == 0) previewPoints(L).erase(id);
     // What makes a staged point appear: the talent frame refreshes on this
     // event, and reads the rank back through GetTalentInfo's preview value.
     gh->fireAddonEvent("PREVIEW_TALENT_POINTS_CHANGED", {});
@@ -2288,8 +2273,8 @@ static int lua_GetTalentPrereqs(lua_State* L) {
         // is one more than the number stored beside it.
         const int needed = static_cast<int>(talent->prereqRank[p]) + 1;
         const int have = gh->getTalentRank(prereqId);
-        const auto staged = previewPoints().find(prereqId);
-        const int previewHave = have + (staged == previewPoints().end() ? 0 : staged->second);
+        const auto staged = previewPoints(L).find(prereqId);
+        const int previewHave = have + (staged == previewPoints(L).end() ? 0 : staged->second);
 
         lua_pushnumber(L, prereq->row + 1);
         lua_pushnumber(L, prereq->column + 1);
@@ -2303,14 +2288,14 @@ static int lua_GetTalentPrereqs(lua_State* L) {
 // GetGroupPreviewTalentPointsSpent(pet, group) → points staged
 static int lua_GetGroupPreviewTalentPointsSpent(lua_State* L) {
     int total = 0;
-    for (const auto& [id, n] : previewPoints()) { (void)id; total += n; }
+    for (const auto& [id, n] : previewPoints(L)) { (void)id; total += n; }
     lua_pushnumber(L, total);
     return 1;
 }
 
 // ResetGroupPreviewTalentPoints(pet, group)
 static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
-    previewPoints().clear();
+    previewPoints(L).clear();
     // The frame redraws on this and on nothing else, so clearing the staged
     // points without it leaves them on screen after they are gone.
     if (auto* gh = getGameHandler(L)) {
@@ -2325,14 +2310,14 @@ static int lua_LearnPreviewTalents(lua_State* L) {
     if (!gh) return 0;
     // A copy, because learnTalent goes to the server and what comes back
     // clears this map - iterating it while that happens is not safe.
-    const auto staged = previewPoints();
+    const auto staged = previewPoints(L);
     for (const auto& [id, n] : staged) {
         const uint8_t have = gh->getTalentRank(id);
         // One request per rank: the server counts them, and asking for the
         // final rank in one call is not how the protocol reads it.
         for (int r = 1; r <= n; ++r) gh->learnTalent(id, have + r);
     }
-    previewPoints().clear();
+    previewPoints(L).clear();
     return 0;
 }
 
@@ -2457,14 +2442,15 @@ int countRewards(const Container* v) {
 // these read the same fields out of the log entry the player has selected.
 
 /// The quest log entry the panel is showing, or null.
-static const game::GameHandler::QuestLogEntry* selectedLogEntry(game::GameHandler* gh) {
+static const game::GameHandler::QuestLogEntry* selectedLogEntry(lua_State* L,
+                                                               game::GameHandler* gh) {
     if (!gh) return nullptr;
     // The selected index is a display index - the log is grouped under zone
     // headers and those are rows too - so it is resolved through the row list
     // rather than subscripting getQuestLog(). Every reward binding reads the
     // selected quest through here, so getting it wrong shows one quest's
     // rewards beside another's text.
-    return questAtRow(gh, gh->getSelectedQuestLogIndex());
+    return questAtRow(L, gh, gh->getSelectedQuestLogIndex());
 }
 
 // GetQuestLogRewardSpell() → texture, name, isTradeskillSpell, isSpellLearned
@@ -2481,7 +2467,7 @@ static const game::GameHandler::QuestLogEntry* selectedLogEntry(game::GameHandle
 static int lua_GetQuestLogRewardSpell(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) return luaReturnNil(L);
-    const auto* q = selectedLogEntry(gh);
+    const auto* q = selectedLogEntry(L, gh);
     const uint32_t spellId = q ? q->rewardSpellId : 0u;
     if (spellId == 0) return luaReturnNil(L);
     const std::string name = gh->getSpellName(spellId);
@@ -2556,20 +2542,20 @@ static int lua_GetQuestLogGroupNum(lua_State* L) {
 }
 
 static int lua_GetNumQuestLogRewards(lua_State* L) {
-    const auto* q = selectedLogEntry(getGameHandler(L));
+    const auto* q = selectedLogEntry(L, getGameHandler(L));
     lua_pushnumber(L, q ? countRewards(&q->rewardItems) : 0);
     return 1;
 }
 
 static int lua_GetNumQuestLogChoices(lua_State* L) {
-    const auto* q = selectedLogEntry(getGameHandler(L));
+    const auto* q = selectedLogEntry(L, getGameHandler(L));
     lua_pushnumber(L, q ? countRewards(&q->rewardChoiceItems) : 0);
     return 1;
 }
 
 static int lua_GetQuestLogRewardInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* q = selectedLogEntry(gh);
+    const auto* q = selectedLogEntry(L, gh);
     if (!q) { return luaReturnNil(L); }
     return pushRewardAt(L, gh, q->rewardItems,
                         static_cast<int>(luaL_optnumber(L, 1, 0)));
@@ -2577,7 +2563,7 @@ static int lua_GetQuestLogRewardInfo(lua_State* L) {
 
 static int lua_GetQuestLogChoiceInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* q = selectedLogEntry(gh);
+    const auto* q = selectedLogEntry(L, gh);
     if (!q) { return luaReturnNil(L); }
     return pushRewardAt(L, gh, q->rewardChoiceItems,
                         static_cast<int>(luaL_optnumber(L, 1, 0)));
@@ -2590,7 +2576,7 @@ static int lua_GetQuestLogChoiceInfo(lua_State* L) {
 // reward in the log put nothing in chat before.
 static int lua_GetQuestLogItemLink(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* q = selectedLogEntry(gh);
+    const auto* q = selectedLogEntry(L, gh);
     const char* type = luaL_optstring(L, 1, "reward");
     const int index = static_cast<int>(luaL_optnumber(L, 2, 0));
     if (!gh || !q || index < 1) { return luaReturnNil(L); }
@@ -2628,7 +2614,7 @@ static int lua_GetQuestLogSpellLink(lua_State* L) {
 // quest that charges the player was answering this with a negative reward, and
 // the reward panel drew a money frame with a negative amount in it.
 static int lua_GetQuestLogRewardMoney(lua_State* L) {
-    const auto* q = selectedLogEntry(getGameHandler(L));
+    const auto* q = selectedLogEntry(L, getGameHandler(L));
     const int32_t money = q ? q->rewardMoney : 0;
     lua_pushnumber(L, money > 0 ? money : 0);
     return 1;
@@ -2643,9 +2629,9 @@ static int lua_GetQuestLogRequiredMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
     const game::GameHandler::QuestLogEntry* q = nullptr;
     if (gh && lua_isnumber(L, 1)) {
-        q = questAtRow(gh, static_cast<int>(lua_tonumber(L, 1)));
+        q = questAtRow(L, gh,static_cast<int>(lua_tonumber(L, 1)));
     } else {
-        q = selectedLogEntry(gh);
+        q = selectedLogEntry(L, gh);
     }
     const int32_t money = q ? q->rewardMoney : 0;
     lua_pushnumber(L, money < 0 ? -money : 0);
@@ -2896,6 +2882,15 @@ static int lua_GetQuestSpellLink(lua_State* L) {
 void registerQuestLuaAPI(lua_State* L) {
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"GetNumQuestLogEntries",   lua_GetNumQuestLogEntries},
+                // GetQuestLogIndexByID(questId) → the row the quest log shows
+                // it on, or 0. The row depends on which groups this character
+                // has collapsed, so a quest link opened from outside the
+                // interface asks through here rather than counting itself.
+                {"GetQuestLogIndexByID", [](lua_State* L) -> int {
+            const auto id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
+            lua_pushnumber(L, questLogRowForQuest(L, getGameHandler(L), id));
+            return 1;
+        }},
                 // Whether a quest has been finished, ever.
                 //
                 // The client asks the server for this list on entering the
@@ -2966,7 +2961,7 @@ void registerQuestLuaAPI(lua_State* L) {
             std::string u(uid);
             for (char& c : u) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (!gh || u != "player" || index < 1) { lua_pushboolean(L, 0); return 1; }
-            lua_pushboolean(L, questAtRow(gh, index) != nullptr ? 1 : 0);
+            lua_pushboolean(L, questAtRow(L, gh,index) != nullptr ? 1 : 0);
             return 1;
         }},
                 {"GetQuestLogQuestText",    lua_GetQuestLogQuestText},
@@ -3003,9 +2998,9 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const game::GameHandler::QuestLogEntry* q = nullptr;
             if (gh && lua_isnumber(L, 1)) {
-                q = questAtRow(gh, static_cast<int>(lua_tonumber(L, 1)));
+                q = questAtRow(L, gh,static_cast<int>(lua_tonumber(L, 1)));
             } else {
-                q = selectedLogEntry(gh);
+                q = selectedLogEntry(L, gh);
             }
             if (!q) { lua_pushstring(L, ""); return 1; }
             if (!q->completionText.empty()) {
@@ -3056,7 +3051,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // be open at the same time.
             const auto& pages = gh->getBookPages();
             if (!pages.empty()) {
-                const size_t page = static_cast<size_t>(bookPage());
+                const size_t page = static_cast<size_t>(bookPage(L));
                 lua_pushstring(L, page < pages.size() ? pages[page].text.c_str()
                                                       : pages.back().text.c_str());
                 return 1;
@@ -3110,24 +3105,24 @@ void registerQuestLuaAPI(lua_State* L) {
                 // request - and the frame redraws on ITEM_TEXT_READY, which is
                 // what makes the move visible.
                 {"ItemTextGetPage", [](lua_State* L) -> int {
-            lua_pushnumber(L, bookPage() + 1);
+            lua_pushnumber(L, bookPage(L) + 1);
             return 1;
         }},
                 {"ItemTextHasNextPage", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const size_t pages = gh ? gh->getBookPages().size() : 0;
-            lua_pushboolean(L, static_cast<size_t>(bookPage() + 1) < pages ? 1 : 0);
+            lua_pushboolean(L, static_cast<size_t>(bookPage(L) + 1) < pages ? 1 : 0);
             return 1;
         }},
                 {"ItemTextPrevPage", [](lua_State* L) -> int {
-            if (bookPage() > 0) { --bookPage(); fireItemTextReady(L); }
+            if (bookPage(L) > 0) { --bookPage(L); fireItemTextReady(L); }
             return 0;
         }},
                 {"ItemTextNextPage", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const size_t pages = gh ? gh->getBookPages().size() : 0;
-            if (static_cast<size_t>(bookPage() + 1) < pages) {
-                ++bookPage();
+            if (static_cast<size_t>(bookPage(L) + 1) < pages) {
+                ++bookPage(L);
                 fireItemTextReady(L);
             }
             return 0;
@@ -3142,7 +3137,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 // one was left on and shows nothing until it is paged back.
                 gh->clearBook();
             }
-            bookPage() = 0;
+            bookPage(L) = 0;
             return 0;
         }},
                 {"IsQuestComplete",         lua_IsQuestComplete},
@@ -3242,13 +3237,13 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"SetAbandonQuest", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
-            const auto* q = selectedLogEntry(gh);
-            pendingAbandonQuest() = q ? q->questId : 0;
+            const auto* q = selectedLogEntry(L, gh);
+            pendingAbandonQuest(L) = q ? q->questId : 0;
             return 0;
         }},
                 {"GetAbandonQuestName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const uint32_t id = pendingAbandonQuest();
+            const uint32_t id = pendingAbandonQuest(L);
             if (gh && id != 0) {
                 for (const auto& q : gh->getQuestLog()) {
                     if (q.questId == id) {
@@ -3278,7 +3273,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 // parse, and listing the wrong ones is worse than listing none.
                 {"GetAbandonQuestItems", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const uint32_t id = pendingAbandonQuest();
+            const uint32_t id = pendingAbandonQuest(L);
             if (!gh || id == 0) { lua_pushnil(L); return 1; }
             for (const auto& q : gh->getQuestLog()) {
                 if (q.questId != id) continue;
@@ -3295,10 +3290,10 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             if (!gh) return 0;
             const uint32_t questId = lua_isnoneornil(L, 1)
-                ? pendingAbandonQuest()
+                ? pendingAbandonQuest(L)
                 : static_cast<uint32_t>(luaL_checknumber(L, 1));
             if (questId != 0) gh->abandonQuest(questId);
-            pendingAbandonQuest() = 0;
+            pendingAbandonQuest(L) = 0;
             return 0;
         }},
                 // Both of these answer for the quest giver's dialog while one
@@ -3488,7 +3483,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetNumTradeSkills", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             lua_pushnumber(L, gh ? static_cast<double>(
-                tradeSkillRows(gh).size()) : 0.0);
+                tradeSkillRows(L, gh).size()) : 0.0);
             return 1;
         }},
                 // GetTradeSkillInfo(i) → name, type, numAvailable, isExpanded,
@@ -3497,7 +3492,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            const auto rows = tradeSkillRows(gh);
+            const auto rows = tradeSkillRows(L, gh);
             // The scroll frame asks past the end on every redraw - it walks a
             // fixed number of buttons and hides the ones that answer nil - so
             // this is routine and says nothing about anything being wrong.
@@ -3510,7 +3505,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 lua_pushstring(L, "header");
                 lua_pushnumber(L, 0);
                 lua_pushboolean(L,
-                    collapsedTradeSkillSubClasses().count(row.subclass) ? 0 : 1);
+                    collapsedTradeSkillSubClasses(L).count(row.subclass) ? 0 : 1);
                 lua_pushnil(L);         // altVerb
                 lua_pushnumber(L, 0);   // numSkillUps
                 return 6;
@@ -3530,7 +3525,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             // What the recipe makes, which is what this returns in WoW. A
             // recipe spell carries its profession's icon rather than its
@@ -3551,7 +3546,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             const uint32_t id = rec->spellId;
             lua_pushstring(L, gh->formatSpellDescription(
@@ -3563,7 +3558,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             int n = 0;
             if (gh) {
-                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
                 if (rec) {
                     auto it = gh->spellNameCacheRef().find(rec->spellId);
                     if (it != gh->spellNameCacheRef().end()) {
@@ -3582,7 +3577,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int n = static_cast<int>(luaL_optnumber(L, 2, 1));
             if (!gh) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             auto it = gh->spellNameCacheRef().find(rec->spellId);
             if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
@@ -3608,7 +3603,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             int lo = 1, hi = 1;
             if (gh) {
-                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
                 if (rec) {
                     auto it = gh->spellNameCacheRef().find(rec->spellId);
                     if (it != gh->spellNameCacheRef().end()) {
@@ -3665,7 +3660,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             int count = static_cast<int>(luaL_optnumber(L, 2, 1));
             if (!gh) return 0;
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             // Says what a press of Create resolved to, once per press. A craft
             // that does nothing is indistinguishable from a button that was
             // never wired: the row may be a heading, the index may be off the
@@ -3680,7 +3675,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // press at all. The same mistake the Escape chain made.
             if (!rec) {
                 LOG_WARNING("DoTradeSkill: no recipe at row ", i,
-                            " of ", tradeSkillRows(gh).size(),
+                            " of ", tradeSkillRows(L, gh).size(),
                             " - the row is a heading or the index is past the end");
                 return 0;
             }
@@ -3695,11 +3690,11 @@ void registerQuestLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"SelectTradeSkill", [](lua_State* L) -> int {
-            tradeSkillSelection() = static_cast<int>(luaL_optnumber(L, 1, 0));
+            tradeSkillSelection(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
             return 0;
         }},
                 {"GetTradeSkillSelectionIndex", [](lua_State* L) -> int {
-            lua_pushnumber(L, tradeSkillSelection());
+            lua_pushnumber(L, tradeSkillSelection(L));
             return 1;
         }},
                 {"GetFirstTradeSkill", [](lua_State* L) -> int {
@@ -3707,7 +3702,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // what the panel selects when it opens. One now that the list has
             // headings: row one is "Armor" or "Weapon", not something to make.
             auto* gh = getGameHandler(L);
-            const auto rows = gh ? tradeSkillRows(gh) : std::vector<TradeSkillRow>{};
+            const auto rows = gh ? tradeSkillRows(L, gh) : std::vector<TradeSkillRow>{};
             for (size_t n = 0; n < rows.size(); ++n) {
                 if (!rows[n].isHeader) { lua_pushnumber(L, static_cast<double>(n + 1)); return 1; }
             }
@@ -3724,7 +3719,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || i < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             const float left = gh->getSpellCooldown(rec->spellId);
             if (left <= 0.0f) return luaReturnNil(L);
@@ -3766,7 +3761,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh || i < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             auto it = gh->spellNameCacheRef().find(rec->spellId);
             if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
@@ -3787,7 +3782,7 @@ void registerQuestLuaAPI(lua_State* L) {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int n = static_cast<int>(luaL_optnumber(L, 2, 1));
             if (!gh || i < 1 || n < 1) return luaReturnNil(L);
-            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(gh), i);
+            const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
             auto it = gh->spellNameCacheRef().find(rec->spellId);
             if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
@@ -3831,30 +3826,30 @@ void registerQuestLuaAPI(lua_State* L) {
         }},
                 {"GetTradeSkillSubClassFilter", [](lua_State* L) -> int {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, i == tradeSkillSubClassPick() ? 1 : 0);
+            lua_pushboolean(L, i == tradeSkillSubClassPick(L) ? 1 : 0);
             return 1;
         }},
                 {"GetTradeSkillInvSlotFilter", [](lua_State* L) -> int {
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            lua_pushboolean(L, i == tradeSkillInvSlotPick() ? 1 : 0);
+            lua_pushboolean(L, i == tradeSkillInvSlotPick(L) ? 1 : 0);
             return 1;
         }},
                 {"SetTradeSkillSubClassFilter", [](lua_State* L) -> int {
-            tradeSkillSubClassPick() = static_cast<int>(luaL_optnumber(L, 1, 0));
-            ++tradeSkillRowsGeneration();
+            tradeSkillSubClassPick(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
+            ++tradeSkillRowsGeneration(L);
             return 0;
         }},
                 {"SetTradeSkillInvSlotFilter", [](lua_State* L) -> int {
-            tradeSkillInvSlotPick() = static_cast<int>(luaL_optnumber(L, 1, 0));
-            ++tradeSkillRowsGeneration();
+            tradeSkillInvSlotPick(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
+            ++tradeSkillRowsGeneration(L);
             return 0;
         }},
                 // The search box above the recipe list. It matched nothing
                 // because nothing read it; the panel calls TradeSkillFrame_Update
                 // straight after, so the list redraws against the new view.
                 {"SetTradeSkillItemNameFilter", [](lua_State* L) -> int {
-            tradeSkillNameFilter() = luaL_optstring(L, 1, "");
-            ++tradeSkillRowsGeneration();
+            tradeSkillNameFilter(L) = luaL_optstring(L, 1, "");
+            ++tradeSkillRowsGeneration(L);
             return 0;
         }},
                 // A number in the search box filters by the level of what the
@@ -3868,8 +3863,8 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"SetTradeSkillItemLevelFilter", [](lua_State* L) -> int {
             const int lo = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int hi = static_cast<int>(luaL_optnumber(L, 2, 0));
-            tradeSkillLevelRange() = {lo, hi};
-            ++tradeSkillRowsGeneration();
+            tradeSkillLevelRange(L) = {lo, hi};
+            ++tradeSkillRowsGeneration(L);
             return 0;
         }},
                 // The "Have Materials" checkbox, which had nothing behind it.
@@ -3882,9 +3877,9 @@ void registerQuestLuaAPI(lua_State* L) {
             // selection and before its own redraw. Raising the event there
             // would reselect the first recipe every time the window opened and
             // throw that restored selection away.
-            if (only == tradeSkillOnlyMakeable()) return 0;
-            tradeSkillOnlyMakeable() = only;
-            ++tradeSkillRowsGeneration();
+            if (only == tradeSkillOnlyMakeable(L)) return 0;
+            tradeSkillOnlyMakeable(L) = only;
+            ++tradeSkillRowsGeneration(L);
 
             // The panel is told, because the checkbox does not tell it.
             //
@@ -3939,7 +3934,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetNumTrainerServices", [](lua_State* L) -> int {
             // What the filters leave, not what the trainer sent.
             lua_pushnumber(L, static_cast<double>(
-                shownTrainerServices(getGameHandler(L)).size()));
+                shownTrainerServices(L, getGameHandler(L)).size()));
             return 1;
         }},
                 // GetTrainerServiceInfo(i) → name, rank, category, expanded
@@ -3947,7 +3942,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             if (!gh) return luaReturnNil(L);
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) return luaReturnNil(L);
             const auto& sp = *svc;
             std::string name = gh->getSpellName(sp.spellId);
@@ -3999,7 +3994,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceCost", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             lua_pushnumber(L, svc ? svc->spellCost  : 0);
             lua_pushnumber(L, svc ? svc->profDialog : 0);
             lua_pushnumber(L, svc ? svc->profButton : 0);
@@ -4008,7 +4003,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceLevelReq", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 lua_pushnumber(L, 0);
                 return 1;
@@ -4020,7 +4015,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceSkillReq", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 return luaReturnNil(L);
             }
@@ -4043,7 +4038,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceIcon", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 return luaReturnNil(L);
             }
@@ -4055,7 +4050,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceDescription", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 return luaReturnNil(L);
             }
@@ -4068,7 +4063,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceSkillLine", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 return luaReturnNil(L);
             }
@@ -4081,7 +4076,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetTrainerServiceNumAbilityReq", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 lua_pushnumber(L, 0);
                 return 1;
@@ -4099,7 +4094,7 @@ void registerQuestLuaAPI(lua_State* L) {
             auto* gh = getGameHandler(L);
             const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
             const int n = static_cast<int>(luaL_optnumber(L, 2, 1));
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (!svc) {
                 return luaReturnNil(L);
             }
@@ -4147,7 +4142,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // Through the filtered list like every other index, and this is
             // the one where getting it wrong buys a different spell than the
             // row that was clicked.
-            const auto* svc = shownTrainerService(gh, i);
+            const auto* svc = shownTrainerService(L, gh, i);
             if (svc) gh->trainSpell(svc->spellId);
             return 0;
         }},
@@ -4159,11 +4154,11 @@ void registerQuestLuaAPI(lua_State* L) {
                 // client has no opinion about either, so they are kept here
                 // rather than pretended away - the panel reads back what it set.
                 {"SelectTrainerService", [](lua_State* L) -> int {
-            trainerSelection() = static_cast<int>(luaL_optnumber(L, 1, 0));
+            trainerSelection(L) = static_cast<int>(luaL_optnumber(L, 1, 0));
             return 0;
         }},
                 {"GetTrainerSelectionIndex", [](lua_State* L) -> int {
-            lua_pushnumber(L, trainerSelection());
+            lua_pushnumber(L, trainerSelection(L));
             return 1;
         }},
                 {"SetTrainerServiceTypeFilter", [](lua_State* L) -> int {
@@ -4175,7 +4170,7 @@ void registerQuestLuaAPI(lua_State* L) {
             // panel had ever turned anything off.
             const bool show = lua_isnumber(L, 2) ? (lua_tonumber(L, 2) != 0)
                                                  : (lua_toboolean(L, 2) != 0);
-            auto& filters = trainerFilters();
+            auto& filters = trainerFilters(L);
             const auto it = filters.find(which);
             // Read back the same way GetTrainerServiceTypeFilter answers, so
             // "no change" here means the dropdown's tick would not move either.
@@ -4207,21 +4202,21 @@ void registerQuestLuaAPI(lua_State* L) {
                 // why the panel has to be told rather than left to notice.
                 {"SetTrainerServiceSearch", [](lua_State* L) -> int {
             std::string text = foldedForSearch(luaL_optstring(L, 1, ""));
-            if (text == trainerSearch()) return 0;
-            trainerSearch() = text;
+            if (text == trainerSearch(L)) return 0;
+            trainerSearch(L) = text;
             if (auto* gh = getGameHandler(L)) gh->fireAddonEvent("TRAINER_UPDATE", {});
             return 0;
         }},
                 {"GetTrainerServiceSearch", [](lua_State* L) -> int {
-            lua_pushstring(L, trainerSearch().c_str());
+            lua_pushstring(L, trainerSearch(L).c_str());
             return 1;
         }},
                 {"GetTrainerServiceTypeFilter", [](lua_State* L) -> int {
             const char* which = luaL_optstring(L, 1, "");
-            auto it = trainerFilters().find(which);
+            auto it = trainerFilters(L).find(which);
             // The three the panel asks about are always set; a name it does
             // not use reads as showing rather than as hidden.
-            lua_pushboolean(L, it == trainerFilters().end() ? 1 : (it->second ? 1 : 0));
+            lua_pushboolean(L, it == trainerFilters(L).end() ? 1 : (it->second ? 1 : 0));
             return 1;
         }},
                 // Inert, and this one really is - unlike the three other
@@ -4320,9 +4315,9 @@ void registerQuestLuaAPI(lua_State* L) {
                 // were stubs, so the button never latched and the per-item
                 // repair the bags and the paperdoll gate on it was dead.
                 {"ShowRepairCursor",       [](lua_State* L) -> int {
-            (void)L; repairCursorUp() = true; return 0; }},
+            repairCursorUp(L) = true; return 0; }},
                 {"HideRepairCursor",       [](lua_State* L) -> int {
-            (void)L; repairCursorUp() = false; return 0; }},
+            repairCursorUp(L) = false; return 0; }},
                 // GetNumCompletedAchievements() → total, completed.
                 //
                 // Two values, and the total comes first. This returned one -

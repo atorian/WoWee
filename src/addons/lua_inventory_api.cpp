@@ -735,7 +735,7 @@ static int lua_MoneyCursorNoop(lua_State* L) { (void)L; return 0; }
 /// trade did nothing, and there is no other way to offer money in this panel.
 static int lua_AddTradeMoney(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const uint64_t held = cursorMoney();
+    const uint64_t held = cursorMoney(L);
     if (!gh || held == 0) return 0;
     gh->setTradeGold(gh->getMyTradeGold() + held);
     setCursorMoney(L, 0);
@@ -1222,9 +1222,11 @@ static int lua_CheckInbox(lua_State* L) {
 // game state - the server is told it once, as an argument to the send. It is
 // cleared after a send and when the mailbox closes so that a figure typed and
 // then abandoned cannot attach itself to the next letter.
+//
+// The amounts are the character's: InterfaceState::sendMail.
 namespace {
-uint32_t s_sendMailMoney = 0;
-uint32_t s_sendMailCOD   = 0;
+uint32_t& sendMailMoney(lua_State* L) { return interfaceState(L).sendMail.money; }
+uint32_t& sendMailCOD(lua_State* L)   { return interfaceState(L).sendMail.cod; }
 
 /// Copper from Lua, refusing negatives rather than wrapping them into a huge
 /// unsigned amount.
@@ -1236,8 +1238,8 @@ uint32_t copperArg(lua_State* L, int index) {
 } // namespace
 
 static int lua_CloseMail(lua_State* L) {
-    s_sendMailMoney = 0;
-    s_sendMailCOD = 0;
+    sendMailMoney(L) = 0;
+    sendMailCOD(L) = 0;
     if (auto* gh = getGameHandler(L)) gh->closeMailbox();
     return 0;
 }
@@ -1262,13 +1264,13 @@ static int lua_CloseMail(lua_State* L) {
 /// being fixed - a dialog whose Accept silently does nothing - for anyone whose
 /// money had not finished syncing.
 static int lua_SetSendMailMoney(lua_State* L) {
-    s_sendMailMoney = copperArg(L, 1);
+    sendMailMoney(L) = copperArg(L, 1);
     lua_pushboolean(L, 1);
     return 1;
 }
 
 static int lua_SetSendMailCOD(lua_State* L) {
-    s_sendMailCOD = copperArg(L, 1);
+    sendMailCOD(L) = copperArg(L, 1);
     return 0;
 }
 
@@ -1279,10 +1281,10 @@ static int lua_SetSendMailCOD(lua_State* L) {
 // to, leaving dragged gold out of the letter without a word.
 static int lua_AddSendMailMoney(lua_State* L) {
     const uint32_t named = copperArg(L, 1);
-    if (named > 0) { s_sendMailMoney += named; return 0; }
-    const uint64_t held = cursorMoney();
+    if (named > 0) { sendMailMoney(L) += named; return 0; }
+    const uint64_t held = cursorMoney(L);
     if (held == 0) return 0;
-    s_sendMailMoney += static_cast<uint32_t>(held);
+    sendMailMoney(L) += static_cast<uint32_t>(held);
     setCursorMoney(L, 0);
     return 0;
 }
@@ -1290,25 +1292,25 @@ static int lua_AddSendMailMoney(lua_State* L) {
 /// Take the money back off the letter and onto the cursor.
 static int lua_PickupSendMailMoney(lua_State* L) {
     uint64_t take = static_cast<uint64_t>(luaL_optnumber(L, 1, 0));
-    if (s_sendMailMoney == 0) return 0;
-    if (take == 0 || take > s_sendMailMoney) take = s_sendMailMoney;
-    s_sendMailMoney -= static_cast<uint32_t>(take);
+    if (sendMailMoney(L) == 0) return 0;
+    if (take == 0 || take > sendMailMoney(L)) take = sendMailMoney(L);
+    sendMailMoney(L) -= static_cast<uint32_t>(take);
     setCursorMoney(L, take);
     return 0;
 }
 
 static int lua_AddSendMailCOD(lua_State* L) {
-    s_sendMailCOD += copperArg(L, 1);
+    sendMailCOD(L) += copperArg(L, 1);
     return 0;
 }
 
 static int lua_GetSendMailMoney(lua_State* L) {
-    lua_pushnumber(L, static_cast<double>(s_sendMailMoney));
+    lua_pushnumber(L, static_cast<double>(sendMailMoney(L)));
     return 1;
 }
 
 static int lua_GetSendMailCOD(lua_State* L) {
-    lua_pushnumber(L, static_cast<double>(s_sendMailCOD));
+    lua_pushnumber(L, static_cast<double>(sendMailCOD(L)));
     return 1;
 }
 
@@ -1319,11 +1321,11 @@ static int lua_SendMail(lua_State* L) {
     const char* to = luaL_optstring(L, 1, "");
     const char* subject = luaL_optstring(L, 2, "");
     const char* body = luaL_optstring(L, 3, "");
-    if (gh && to && *to) gh->sendMail(to, subject, body, s_sendMailMoney, s_sendMailCOD);
+    if (gh && to && *to) gh->sendMail(to, subject, body, sendMailMoney(L), sendMailCOD(L));
     // Whether or not it went, the next letter starts empty. Leaving the amount
     // set would attach it again to a letter nobody meant to put money in.
-    s_sendMailMoney = 0;
-    s_sendMailCOD = 0;
+    sendMailMoney(L) = 0;
+    sendMailCOD(L) = 0;
     return 0;
 }
 
@@ -1390,9 +1392,8 @@ SetTally tallySet(game::GameHandler* gh, const game::EquipmentSetInfo& set) {
 
 /// Slots the player marked to leave alone before the next save. A choice about
 /// the save to come rather than part of any set, so it is kept here.
-std::set<int>& pendingIgnoredSlots() {
-    static std::set<int> slots;
-    return slots;
+std::set<int>& pendingIgnoredSlots(lua_State* L) {
+    return interfaceState(L).equipmentSetIgnoredSlots;
 }
 
 }  // namespace
@@ -1513,16 +1514,16 @@ static int lua_EquipmentSetContainsLockedItems(lua_State* L) {
 }
 
 static int lua_EquipmentManagerIgnoreSlotForSave(lua_State* L) {
-    pendingIgnoredSlots().insert(static_cast<int>(luaL_optnumber(L, 1, 0)));
+    pendingIgnoredSlots(L).insert(static_cast<int>(luaL_optnumber(L, 1, 0)));
     return 0;
 }
 static int lua_EquipmentManagerUnignoreSlotForSave(lua_State* L) {
-    pendingIgnoredSlots().erase(static_cast<int>(luaL_optnumber(L, 1, 0)));
+    pendingIgnoredSlots(L).erase(static_cast<int>(luaL_optnumber(L, 1, 0)));
     return 0;
 }
 static int lua_EquipmentManagerClearIgnoredSlotsForSave(lua_State* L) {
     (void)L;
-    pendingIgnoredSlots().clear();
+    pendingIgnoredSlots(L).clear();
     return 0;
 }
 
@@ -1947,12 +1948,10 @@ static int lua_UseContainerItem(lua_State* L) {
 
 namespace {
 
-struct AuctionSortKey { std::string column; bool reverse = false; };
-
 /// Per list - "list", "owner", "bidder" - because each tab sorts on its own.
-std::unordered_map<std::string, std::vector<AuctionSortKey>>& auctionSortState() {
-    static std::unordered_map<std::string, std::vector<AuctionSortKey>> s;
-    return s;
+/// The character's, in InterfaceState: the next character sorts from scratch.
+std::unordered_map<std::string, std::vector<AuctionSortKey>>& auctionSortState(lua_State* L) {
+    return interfaceState(L).auction.sort;
 }
 
 /// The browse tab's ordering, as the wire wants it.
@@ -1966,7 +1965,7 @@ std::unordered_map<std::string, std::vector<AuctionSortKey>>& auctionSortState()
 /// Order is reversed on the way out. FrameXML pushes keys least significant
 /// first - GetAuctionSort(table, 1) is the one set *last* - and the server
 /// walks its vector from the front, taking the first as primary.
-std::vector<game::AuctionSortKey> wireAuctionSort(std::string_view which) {
+std::vector<game::AuctionSortKey> wireAuctionSort(lua_State* L, std::string_view which) {
     static const std::unordered_map<std::string, uint8_t> kColumns = {
         {"level",        0},   // AUCTION_SORT_MINLEVEL
         {"quality",      1},   // AUCTION_SORT_RARITY
@@ -1978,7 +1977,7 @@ std::vector<game::AuctionSortKey> wireAuctionSort(std::string_view which) {
         {"bid",          8},   // AUCTION_SORT_BID
         {"quantity",     9},   // AUCTION_SORT_STACK
     };
-    const auto& keys = auctionSortState()[std::string(which)];
+    const auto& keys = auctionSortState(L)[std::string(which)];
     std::vector<game::AuctionSortKey> out;
     out.reserve(keys.size());
     for (const auto& key : std::views::reverse(keys)) {
@@ -2361,7 +2360,7 @@ static int lua_GetContainerItemInfo(lua_State* L) {
     // Locked while its item is on the cursor: ContainerFrame_UpdateLockedItem
     // greys the slot from this, which is what shows the item has been picked up
     // out of it rather than still sitting there.
-    const auto& held = cursorItemSlot();
+    const auto& held = interfaceState(L).cursor.item;
     lua_pushboolean(L, (!held.equipped && held.bag == container && held.slot == slot) ? 1 : 0);
     lua_pushnumber(L, info ? info->quality : 0);  // quality
     lua_pushboolean(L, 0);  // readable
@@ -2514,18 +2513,15 @@ static const game::AuctionListResult& auctionListFor(game::GameHandler* gh,
 
 /// The panel's own state: which row is selected, and which bag slot is sitting
 /// in the sell box. Neither is anything the client has an opinion about.
-static int& auctionSelection() { static int sel = 0; return sel; }
+/// Both are the character's, in InterfaceState::auction.
+static int& auctionSelection(lua_State* L) { return interfaceState(L).auction.selection; }
 
 /// The item sitting in the sell box, as the flat (container, slot) pair the
 /// cursor speaks in. Kept in that form rather than as a backpack index so a
 /// worn bag can hold the item too - the send takes a guid, and every container
 /// can produce one.
-struct AuctionSellSlot {
-    bool    held = false;
-    uint8_t bag  = 0;
-    uint8_t slot = 0;
-};
-static AuctionSellSlot& auctionSellSlot() { static AuctionSellSlot s; return s; }
+using AuctionSellSlot = InterfaceState::AuctionSellSlot;
+static AuctionSellSlot& auctionSellSlot(lua_State* L) { return interfaceState(L).auction.sellSlot; }
 
 /// Say the sell slot changed.
 ///
@@ -2541,10 +2537,10 @@ static void fireAuctionSellUpdate(game::GameHandler* gh) {
 
 /// The item a wire (container, slot) pair names, and its guid. Null when the
 /// pair names nothing this client is holding.
-static const game::ItemSlot* auctionSellItemSlot(game::GameHandler* gh,
+static const game::ItemSlot* auctionSellItemSlot(lua_State* L, game::GameHandler* gh,
                                                  uint64_t* guidOut = nullptr) {
     if (guidOut) *guidOut = 0;
-    const AuctionSellSlot& sel = auctionSellSlot();
+    const AuctionSellSlot& sel = auctionSellSlot(L);
     if (!gh || !sel.held) return nullptr;
     const auto& inv = gh->getInventory();
     if (sel.bag == 0xFF) {
@@ -2811,8 +2807,8 @@ static int lua_SetBagPortraitTexture(lua_State* L) {
 /// Where the cursor's item sits, in the numbering the server uses. The same
 /// translation the pickup bindings do; here so the two "put it in a container"
 /// calls below can reach it.
-static bool heldWireSlot(uint8_t& bag, uint8_t& slot) {
-    const auto& held = cursorItemSlot();
+static bool heldWireSlot(lua_State* L, uint8_t& bag, uint8_t& slot) {
+    const auto& held = interfaceState(L).cursor.item;
     if (held.equipped) {
         bag = 0xFF;
         slot = static_cast<uint8_t>(held.slot - 1);
@@ -2880,7 +2876,7 @@ static int lua_PutItemInBag(lua_State* L) {
     const int bankIndex = inventoryId - game::slots::firstBankBagInventorySlot();  // 0-6
     const bool isWorn = wornIndex >= 0 && wornIndex < game::Inventory::NUM_BAG_SLOTS;
     const bool isBank = bankIndex >= 0 && bankIndex < game::slots::bankBagCount();
-    if (!gh || (!isWorn && !isBank) || !heldWireSlot(srcBag, srcSlot)) {
+    if (!gh || (!isWorn && !isBank) || !heldWireSlot(L, srcBag, srcSlot)) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -2892,7 +2888,7 @@ static int lua_PutItemInBag(lua_State* L) {
     // the target bag and posted the held bag into it, so replacing one bag
     // with another was not expressible: the only outcomes were equipping into
     // an empty slot or being swallowed by a full one.
-    const auto& cursor = cursorItemSlot();
+    const auto& cursor = interfaceState(L).cursor.item;
     // Both ends worn: that pair has its own verb, which moves the bags locally
     // as well as sending the swap. A worn bag onto a bank slot, or either way
     // round with the bank, is the ordinary item move below.
@@ -2902,7 +2898,7 @@ static int lua_PutItemInBag(lua_State* L) {
         if (fromIndex != bagIndex) {
             gh->swapBagSlots(fromIndex, bagIndex);
         }
-        cursorItemSlot() = {};
+        interfaceState(L).cursor.item = {};
         wowee::ui::frameXmlSetCursorItem(std::string());
         lua_pushboolean(L, 1);
         return 1;
@@ -2920,7 +2916,7 @@ static int lua_PutItemInBag(lua_State* L) {
     if (size == 0) {
         gh->swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(game::slots::toWireSlot(inventoryId)));
-        cursorItemSlot() = {};
+        interfaceState(L).cursor.item = {};
         wowee::ui::frameXmlSetCursorItem(std::string());
         lua_pushboolean(L, 1);
         return 1;
@@ -2934,7 +2930,7 @@ static int lua_PutItemInBag(lua_State* L) {
         gh->swapContainerItems(srcBag, srcSlot,
                                static_cast<uint8_t>(container),
                                static_cast<uint8_t>(i));
-        cursorItemSlot() = {};
+        interfaceState(L).cursor.item = {};
         wowee::ui::frameXmlSetCursorItem(std::string());
         lua_pushboolean(L, 1);
         return 1;
@@ -2949,7 +2945,7 @@ static int lua_PutItemInBag(lua_State* L) {
 static int lua_PutItemInBackpack(lua_State* L) {
     auto* gh = getGameHandler(L);
     uint8_t srcBag = 0, srcSlot = 0;
-    if (!gh || !heldWireSlot(srcBag, srcSlot)) {
+    if (!gh || !heldWireSlot(L, srcBag, srcSlot)) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -2957,7 +2953,7 @@ static int lua_PutItemInBackpack(lua_State* L) {
     if (free >= 0) {
         gh->swapContainerItems(srcBag, srcSlot, 0xFF,
                                static_cast<uint8_t>(game::slots::backpackWireSlot(free)));
-        cursorItemSlot() = {};
+        interfaceState(L).cursor.item = {};
         wowee::ui::frameXmlSetCursorItem(std::string());
     }
     lua_pushboolean(L, 1);
@@ -3414,7 +3410,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // could not be dragged into a mail, a trade, a guild bank
                 // deposit or an auction bid.
                 {"GetCursorMoney", [](lua_State* L) -> int {
-            lua_pushnumber(L, static_cast<lua_Number>(cursorMoney()));
+            lua_pushnumber(L, static_cast<lua_Number>(cursorMoney(L)));
             return 1;
         }},
                 {"DropCursorMoney", [](lua_State* L) -> int {
@@ -4329,7 +4325,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             // and a query that leaves the sort block empty leaves the headers
             // inert.
             gh->auctionSearch(name, lo, hi, quality, cls, sub, inv, usable,
-                              page * 50, wireAuctionSort("list"));
+                              page * 50, wireAuctionSort(L, "list"));
             return 0;
         }},
                 {"GetOwnerAuctionItems", [](lua_State* L) -> int {
@@ -4392,7 +4388,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const uint32_t dur = game::auctionDurationMinutes(
                 static_cast<uint32_t>(luaL_optnumber(L, 3, 1)));
             uint64_t guid = 0;
-            const auto* item = auctionSellItemSlot(gh, &guid);
+            const auto* item = auctionSellItemSlot(L, gh, &guid);
             if (!item || guid == 0) return 0;
             // The fourth argument is the size of one stack; the fifth is how
             // many such stacks to post, which this sends one of - the request
@@ -4401,7 +4397,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const uint32_t stack = static_cast<uint32_t>(
                 luaL_optnumber(L, 4, item->item.stackCount ? item->item.stackCount : 1));
             gh->auctionSellItemByGuid(guid, stack, bid, buy, dur);
-            auctionSellSlot() = AuctionSellSlot{};
+            auctionSellSlot(L) = AuctionSellSlot{};
             fireAuctionSellUpdate(gh);
             return 0;
         }},
@@ -4418,18 +4414,18 @@ void registerInventoryLuaAPI(lua_State* L) {
             uint8_t bag = 0, slot = 0;
             if (!wowee::ui::frameXmlCursorWireSlot(bag, slot)) {
                 // Nothing carried: a click takes the item back out.
-                auctionSellSlot() = AuctionSellSlot{};
+                auctionSellSlot(L) = AuctionSellSlot{};
                 fireAuctionSellUpdate(getGameHandler(L));
                 return 0;
             }
             auto* gh = getGameHandler(L);
             AuctionSellSlot candidate{.held = true, .bag = bag, .slot = slot};
-            AuctionSellSlot previous = auctionSellSlot();
-            auctionSellSlot() = candidate;
+            AuctionSellSlot previous = auctionSellSlot(L);
+            auctionSellSlot(L) = candidate;
             // Only if it names something. Equipment and the bank produce wire
             // pairs too, and neither can be auctioned from here.
-            if (!auctionSellItemSlot(gh)) {
-                auctionSellSlot() = previous;
+            if (!auctionSellItemSlot(L, gh)) {
+                auctionSellSlot(L) = previous;
                 return 0;
             }
             wowee::ui::frameXmlPutCursorDown();
@@ -4437,7 +4433,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"CancelSell", [](lua_State* L) -> int {
-            auctionSellSlot() = AuctionSellSlot{};
+            auctionSellSlot(L) = AuctionSellSlot{};
             fireAuctionSellUpdate(getGameHandler(L));
             return 0;
         }},
@@ -4453,8 +4449,8 @@ void registerInventoryLuaAPI(lua_State* L) {
             // UpdateMaximumButtons caps the stack size at min(totalCount,
             // stackCount) and the number of stacks at totalCount / stackSize.
             auto* gh = getGameHandler(L);
-            const auto* held = auctionSellItemSlot(gh);
-            if (!held) { auctionSellSlot() = AuctionSellSlot{}; return luaReturnNil(L); }
+            const auto* held = auctionSellItemSlot(L, gh);
+            if (!held) { auctionSellSlot(L) = AuctionSellSlot{}; return luaReturnNil(L); }
             const auto& s = *held;
             const auto* info = gh->getItemInfo(s.item.itemId);
             const uint32_t inStack = s.item.stackCount ? s.item.stackCount : 1;
@@ -4514,11 +4510,11 @@ void registerInventoryLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"SetSelectedAuctionItem", [](lua_State* L) -> int {
-            auctionSelection() = static_cast<int>(luaL_optnumber(L, 2, 0));
+            auctionSelection(L) = static_cast<int>(luaL_optnumber(L, 2, 0));
             return 0;
         }},
                 {"GetSelectedAuctionItem", [](lua_State* L) -> int {
-            lua_pushnumber(L, auctionSelection());
+            lua_pushnumber(L, auctionSelection(L));
             return 1;
         }},
                 // CalculateAuctionDeposit(minutes [, count]) → copper
@@ -4544,7 +4540,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             // length.
             const double minutes = static_cast<double>(game::auctionDurationMinutes(
                 static_cast<uint32_t>(luaL_optnumber(L, 1, 1))));
-            const auto* held = auctionSellItemSlot(gh);
+            const auto* held = auctionSellItemSlot(L, gh);
             if (!held || minutes <= 0) {
                 lua_pushnumber(L, 0);
                 return 1;
@@ -4574,11 +4570,11 @@ void registerInventoryLuaAPI(lua_State* L) {
             const std::string which = luaL_optstring(L, 1, "list");
             const char* column = luaL_optstring(L, 2, "");
             if (!column || !*column) return 0;
-            auctionSortState()[which].push_back({column, lua_toboolean(L, 3) != 0});
+            auctionSortState(L)[which].push_back({column, lua_toboolean(L, 3) != 0});
             return 0;
         }},
                 {"SortAuctionClearSort", [](lua_State* L) -> int {
-            auctionSortState()[luaL_optstring(L, 1, "list")].clear();
+            auctionSortState(L)[luaL_optstring(L, 1, "list")].clear();
             return 0;
         }},
                 // GetAuctionSort(table, index) → column, reverse.
@@ -4586,7 +4582,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // Index one is the primary, and the primary is the key set
                 // *last* - FrameXML pushes them least significant first.
                 {"GetAuctionSort", [](lua_State* L) -> int {
-            const auto& keys = auctionSortState()[luaL_optstring(L, 1, "list")];
+            const auto& keys = auctionSortState(L)[luaL_optstring(L, 1, "list")];
             const int index = static_cast<int>(luaL_optnumber(L, 2, 1));
             if (index < 1 || index > static_cast<int>(keys.size())) return 0;
             const auto& k = keys[keys.size() - static_cast<size_t>(index)];
@@ -4601,7 +4597,7 @@ void registerInventoryLuaAPI(lua_State* L) {
             const std::string which = luaL_optstring(L, 1, "list");
             auto* list = auctionListForSort(gh, which);
             if (!list) return 0;
-            for (const auto& key : auctionSortState()[which]) {
+            for (const auto& key : auctionSortState(L)[which]) {
                 std::stable_sort(list->auctions.begin(), list->auctions.end(),
                                  [&](const game::AuctionEntry& a,
                                      const game::AuctionEntry& b) {

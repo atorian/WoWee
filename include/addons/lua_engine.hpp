@@ -17,9 +17,35 @@ namespace wowee::addons {
 
 struct TocFile;  // forward declaration
 
+struct InterfaceState;
+
+/// The distinct Lua errors of a run and how often each fired, kept in
+/// ~/.wowee/lua_errors.txt.
+///
+/// The client's, for the whole run: each character's interface - and each
+/// /reload - is a new engine, and the errors from before a relog or a reload
+/// are as much what a report is for as the ones after. Handed to every engine
+/// through LuaServices::errorReport; an engine given none (a headless harness)
+/// keeps its own.
+class LuaErrorReport {
+public:
+    /// Count one occurrence. The file is rewritten on the first sighting of
+    /// each distinct error, not on repeats - see LuaEngine::noteLuaError.
+    void note(const std::string& message);
+    void write() const;
+    [[nodiscard]] size_t distinct() const { return errors_.size(); }
+
+private:
+    /// A handler that raises on every frame is one entry, not forty thousand.
+    std::map<std::string, uint64_t> errors_;
+};
+
 class LuaEngine {
 public:
-    LuaEngine();
+    /// The interface state of the character this engine's Lua state serves.
+    /// Bound into every Lua state the engine builds; it must outlive the
+    /// engine (core::CharacterSession declares it first).
+    explicit LuaEngine(InterfaceState& interfaceState);
     ~LuaEngine();
 
     /// Drop one-shot interface sounds while the interface is building itself.
@@ -283,13 +309,20 @@ public:
 
 private:
     lua_State* L_ = nullptr;
+    InterfaceState& interfaceState_;
     ui::WidgetTree widgets_;
     game::GameHandler* gameHandler_ = nullptr;
     LuaServices luaServices_;
     LuaErrorCallback luaErrorCallback_;
-    /// Distinct Lua errors this session and how often each fired. A handler
-    /// that raises on every frame is one entry, not forty thousand.
-    std::map<std::string, uint64_t> luaErrors_;
+    /// This engine's own error report, used only when the client handed it
+    /// none (LuaServices::errorReport).
+    LuaErrorReport ownErrorReport_;
+    [[nodiscard]] LuaErrorReport& errorReport() {
+        return luaServices_.errorReport ? *luaServices_.errorReport : ownErrorReport_;
+    }
+    [[nodiscard]] const LuaErrorReport& errorReport() const {
+        return luaServices_.errorReport ? *luaServices_.errorReport : ownErrorReport_;
+    }
     OpenSettingsCallback openSettingsCallback_;
     /// How many events are being dispatched inside one another right now.
     /// Guards against two handlers triggering each other without end.
@@ -364,6 +397,11 @@ public:
     [[nodiscard]] bool mouseOverFrameXml() const { return lastMouseHit_ != 0; }
 private:
     uint32_t lastMouseHit_ = 0;
+    /// The throttles of the two input diagnostics in dispatchMouse: when the
+    /// hit summary was last said, and the last press answer and when.
+    double inputReportAt_ = 0.0;
+    double lastPressAt_ = 0.0;
+    std::string lastPressAnswer_;
     /// Where the cursor last was, in interface units. Static so a widget
     /// method can reach it without a handle on the engine.
     static inline float sLastMouseX_ = 0.0f;

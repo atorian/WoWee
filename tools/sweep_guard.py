@@ -201,6 +201,20 @@ CHECKS = [
     ("game_dependency_check.py",
      r"^(\d+) includes of the client's presentation from the game", 0,
      "presentation includes in the game layer"),
+    # A static in a binding or a panel is state that outlives the character:
+    # the Lua state is rebuilt for the next one and the static is not, so the
+    # next character logged in with the last one's collapsed quest groups,
+    # ticked dungeons and auction sort. That state is the character's
+    # (addons::InterfaceState, owned by core::CharacterSession). What is left
+    # is process-wide by intent - logs said once, the key bindings and chat
+    # layout written to the config root, caches - and is held where it was
+    # left on 2026-10-15.
+    ("function_static_check.py",
+     r"^(\d+) of them in the addon bindings", 16,
+     "mutable function-local statics in the addon bindings"),
+    ("function_static_check.py",
+     r"^(\d+) of them in the interface", 85,
+     "mutable function-local statics in the interface"),
     ("redefined_macro_check.py",
      r"^(\d+) redefined without an #ifndef", 0,
      "macros the build defines, redefined unguarded"),

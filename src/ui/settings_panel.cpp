@@ -1219,8 +1219,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     // of what each one silences lives, so it stays the only copy.
     if (key == "soundinbackground" || key == "enablemusic" || key == "loopmusic" ||
         key == "enableambience" || key == "errorspeech" || key == "enablesoundeffects") {
-        if (services_.addonManager) {
-            if (auto* engine = services_.addonManager->getLuaEngine()) {
+        if (services_.characterAddons()) {
+            if (auto* engine = services_.characterAddons()->getLuaEngine()) {
                 if (auto* L = engine->getState()) addons::applySoundCVarSideEffects(L);
             }
         }
@@ -1483,8 +1483,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     // work when it is clicked, not at the next reload - and an addon has no way
     // to notice a value it is not told about. So every applied setting names
     // itself here, and anything that cares registers for it.
-    if (services_.addonManager) {
-        services_.addonManager->fireEvent("WOWEE_SETTING_CHANGED", {key});
+    if (services_.characterAddons()) {
+        services_.characterAddons()->fireEvent("WOWEE_SETTING_CHANGED", {key});
     }
 }
 

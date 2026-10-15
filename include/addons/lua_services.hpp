@@ -15,9 +15,14 @@ namespace wowee::game  { class ExpansionRegistry; }
 
 namespace wowee::addons {
 
+class LuaErrorReport;
+
 struct LuaServices {
     /// The client enforces its frame boundary before entering any Lua handler.
     std::function<core::Phase()> executionPhase;
+    /// The run's Lua error report, which outlives every engine; see
+    /// LuaErrorReport. Null in a harness, where each engine keeps its own.
+    LuaErrorReport* errorReport = nullptr;
     core::Window*            window            = nullptr;
     audio::AudioCoordinator* audioCoordinator  = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;

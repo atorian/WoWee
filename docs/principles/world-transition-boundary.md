@@ -23,6 +23,14 @@ Checklist when changing a transition:
   `MapScope` (cancelling and joining its preparation) and build the next one in
   Transitions; disconnect/logout/exit end it through the same queue. Nothing
   per-map is cleared by hand.
+- The map belongs to the character: `core::CharacterSession` (the interface,
+  its Lua state and `InterfaceState`, the spell presentation, the per-character
+  frame state, and the `MapScope`) is created at the first map entry after a
+  login and destroyed by logout/disconnect/exit, in Transitions. A map change
+  replaces only its `MapScope`. The interface hears `PLAYER_LEAVING_WORLD` in
+  the Interface phase before (`leaveWorldInterface`); the destructor writes the
+  saved variables under the character's name and closes the Lua state inside
+  an Interface scope. Nothing per-character is cleared by hand either.
   Never pump a second frame or apply a transition from `GameHandler::update`.
 - Test packet input through `GameHarness`: state survives `pump()` and changes
   only when the client issues the transition command afterward.

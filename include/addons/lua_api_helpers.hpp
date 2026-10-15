@@ -11,6 +11,7 @@
 
 #include "game/item_text.hpp"
 #include "addons/lua_services.hpp"
+#include "addons/interface_state_binding.hpp"
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
 #include "game/spell_classification.hpp"
@@ -30,7 +31,7 @@ namespace wowee::addons {
 /// the log can be row five of the display or absent from it. Everything that
 /// takes a quest log index goes through the same row list this does, which is
 /// the only reason the number means anything on the other side.
-int questLogRowForQuest(game::GameHandler* gh, uint32_t questId);
+int questLogRowForQuest(lua_State* L, game::GameHandler* gh, uint32_t questId);
 
 /// Put FrameXML's quest log in front of `questId`.
 ///
@@ -153,18 +154,6 @@ inline constexpr const char* kLuaClasses[] = {
     "","Warrior","Paladin","Hunter","Rogue","Priest",
     "Death Knight","Shaman","Mage","Warlock","","Druid"
 };
-/// What the cursor is carrying, if anything.
-///
-/// Shared because two sides need it: the bindings that pick an item up and put
-/// it down, and the ones that describe a slot to the interface. A slot whose
-/// item is on the cursor is "locked", which is what makes it draw greyed while
-/// it is being dragged - and without somewhere common to ask, the binding that
-/// answers that question had no way to know.
-struct CursorItemSlot {
-    int bag = -1;    ///< 0 for the backpack, 1-4 for a worn bag, -1 for none
-    int slot = 0;    ///< 1-based within the bag, or the equipment slot
-    bool equipped = false;
-};
 /// Which mouse button the click being dispatched right now belongs to -
 /// "LeftButton", "RightButton", or empty between clicks.
 ///
@@ -176,11 +165,6 @@ struct CursorItemSlot {
 inline std::string& currentClickButton() {
     static std::string button;
     return button;
-}
-
-inline CursorItemSlot& cursorItemSlot() {
-    static CursorItemSlot held;
-    return held;
 }
 
 /// The uppercase tokens WoW returns second from UnitClass, and the key every
@@ -630,9 +614,8 @@ inline bool completedItemTarget(lua_State* L, uint64_t targetGuid) {
 /// flat false. So the merchant's repair button never latched - every click
 /// took the "not in repair mode" branch and showed the cursor again - and the
 /// per-item repair the bags and the paperdoll gate on it was unreachable.
-inline bool& repairCursorUp() {
-    static bool up = false;
-    return up;
+inline bool& repairCursorUp(lua_State* L) {
+    return interfaceState(L).cursor.repairMode;
 }
 
 /// The repair click, when there is one: true when this item was repaired here
@@ -642,8 +625,8 @@ inline bool& repairCursorUp() {
 /// only called from the button itself, so closing the window while the cursor
 /// is up leaves the flag set - and a left-click in the bags afterwards would
 /// otherwise try to repair against a vendor that is no longer there.
-inline bool repairedHeldItem(game::GameHandler* gh, uint64_t itemGuid) {
-    if (!gh || !repairCursorUp() || !itemGuid) return false;
+inline bool repairedHeldItem(lua_State* L, game::GameHandler* gh, uint64_t itemGuid) {
+    if (!gh || !repairCursorUp(L) || !itemGuid) return false;
     const uint64_t vendor = gh->getVendorGuid();
     if (!vendor || !gh->isVendorWindowOpen()) return false;
     gh->repairItem(vendor, itemGuid);
@@ -877,11 +860,12 @@ const game::TalentEntry* talentAt(game::GameHandler* gh, int tabIndex, int talen
 
 /// The item id the cursor is carrying, or zero for anything else.
 ///
-/// The cursor state lives in lua_action_api.cpp, where everything that picks
-/// something up and puts it down again is. This is the one thing another file
-/// needs from it: CursorCanGoInSlot has to know what is being dragged before
-/// it can say which paperdoll slot should light up.
-uint32_t cursorItemId();
+/// The cursor is the character's (InterfaceState::Cursor); everything that
+/// picks something up and puts it down again is in lua_action_api.cpp. This is
+/// the one thing another file needs from it: CursorCanGoInSlot has to know
+/// what is being dragged before it can say which paperdoll slot should light
+/// up.
+inline uint32_t cursorItemId(lua_State* L) { return interfaceState(L).cursor.itemId(); }
 
 /// Money picked up onto the cursor, in copper, and zero when there is none.
 ///
@@ -892,12 +876,12 @@ uint32_t cursorItemId();
 ///
 /// Declared beside cursorItemId because it is the same cursor: picking money
 /// up has to displace an item and ClearCursor has to drop both.
-uint64_t cursorMoney();
+inline uint64_t cursorMoney(lua_State* L) { return interfaceState(L).cursor.heldMoney(); }
 void setCursorMoney(lua_State* L, uint64_t copper);
 
 /// The paperdoll slot an item on the cursor was picked up from, or zero when it
 /// came from a bag or nothing is held. One-based, as FrameXML numbers slots.
-int cursorEquipSlot();
+inline int cursorEquipSlot(lua_State* L) { return interfaceState(L).cursor.equipSlot(); }
 
 /// Whether the cursor is carrying an item that came out of the player's own
 /// inventory - a bag slot or a worn slot - rather than off an action bar.
@@ -908,7 +892,9 @@ int cursorEquipSlot();
 /// the world is how it is destroyed. Only the second raises the delete prompt,
 /// and the prompt reads the cursor - so the drag has to end with the item still
 /// on it.
-bool cursorItemCameFromInventory();
+inline bool cursorItemCameFromInventory(lua_State* L) {
+    return interfaceState(L).cursor.itemCameFromInventory();
+}
 
 /// Put a vendor's list entry on the cursor, which is what a left-click in
 /// FrameXML's merchant window does. Buying happens when it is dropped.
@@ -937,7 +923,8 @@ bool boughtHeldMerchantItem(lua_State* L);
 /// selected index, which the log sets from a row it drew - has to come through
 /// here rather than subscripting the log, or it answers about a different
 /// quest than the one asked about.
-const game::GameHandler::QuestLogEntry* questAtLogRow(game::GameHandler* gh, int index);
+const game::GameHandler::QuestLogEntry* questAtLogRow(lua_State* L, game::GameHandler* gh,
+                                                     int index);
 
 /// The recipe a drawn trade skill row stands for, or null for a heading, an
 /// index past the end, or no open profession.
@@ -950,7 +937,7 @@ const game::GameHandler::QuestLogEntry* questAtLogRow(game::GameHandler* gh, int
 /// recipe. The tooltip did exactly that: hovering "Enchant Bracer - Lesser
 /// Spirit" described "Enchant Bracer - Minor Deflection", three rows further
 /// down, because that is what index 4 is in a list with no heading in it.
-const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(game::GameHandler* gh,
+const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(lua_State* L, game::GameHandler* gh,
                                                             int index);
 
 /// Let the trade skill row list be rebuilt on the next read.
@@ -959,7 +946,9 @@ const game::GameHandler::CraftRecipe* recipeAtTradeSkillRow(game::GameHandler* g
 /// draw one selection, and its shape depends on item data that arrives while
 /// those reads run, so rebuilding per call changed what an index meant halfway
 /// through. Called when the game says the trade skill data moved.
-void invalidateTradeSkillRows();
+inline void invalidateTradeSkillRows(lua_State* L) {
+    ++interfaceState(L).tradeSkill.rowsGeneration;
+}
 
 /// The team id at an arena team index, or zero when the index is off the end.
 ///

@@ -120,15 +120,14 @@ void spawnInstancePortalVisuals(uint32_t mapId,
 void Application::beginWorldLoading(WorldLoader::Entry entry) {
     if (!requireTransitions("enter loading world")) return;
     const auto [mapId, x, y, z] = entry;
+    // The character entering: their session when this is the first map since
+    // they logged in, the one already standing on a map change.
+    beginCharacterSession();
     // The previous map - finished, or a load this entry supersedes, even on
     // the same map - ends here: its work is cancelled and joined, its streaming
     // stopped and its instances released before the next scope binds the
     // spawner and the renderers.
-    if (mapScope_) {
-        LOG_INFO("Map change: ending map ", mapScope_->mapId(), " before loading map ", mapId);
-        mapScope_.reset();
-    }
-    mapScope_ = std::make_unique<MapScope>(mapScopeServices(), *worldLoader_, entry);
+    session_->enterMap(mapScopeServices(), *worldLoader_, entry);
 
     if (gameHandler) {
         gameHandler->cancelFollow();
@@ -163,7 +162,7 @@ void Application::prepareWorldPlayer() {
     if (!requireTransitions("prepare loading player")) return;
     // The scene's renderers exist now - built by the first entry, found by
     // later ones - and this map's scope takes its instances and terrain.
-    mapScope_->adoptRenderers();
+    currentMap()->adoptRenderers();
     onWorldRenderersReady();
     setActiveMapName(worldLoader_->mapName());
     if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
@@ -182,7 +181,7 @@ void Application::prepareWorldPlayer() {
     if (gameHandler) {
         const game::Character* activeChar = gameHandler->getActiveCharacter();
         if (activeChar) {
-            if (!mapScope_->playerModel().spawned) {
+            if (!currentMap()->playerModel().spawned) {
                 playerRace_ = activeChar->race;
                 playerGender_ = activeChar->gender;
                 spawnSnapToGround = false;
@@ -246,7 +245,8 @@ void Application::completeWorldLoading() {
         camera->startIntroPan(2.8f, 140.0f);
     }
     setState(AppState::IN_GAME);
-    worldInterfaceEntryPending_ = true;
+    // The interface hears of it in the next Interface phase.
+    session_->noteMapReady();
 }
 
 } // namespace wowee::core

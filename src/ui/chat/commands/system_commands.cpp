@@ -21,7 +21,7 @@ class RunCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
-        auto* am = ctx.services.addonManager;
+        auto* am = ctx.services.characterAddons();
         if (am) {
             am->runScript(ctx.args);
         } else {
@@ -38,7 +38,7 @@ class DumpCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
-        auto* am = ctx.services.addonManager;
+        auto* am = ctx.services.characterAddons();
         if (am && am->isInitialized()) {
             // Wrap expression in print(tostring(...)) to display the value
             std::string wrapped = "local __v = " + ctx.args +
@@ -65,17 +65,13 @@ public:
 class ReloadCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        auto* am = ctx.services.addonManager;
-        if (am) {
-            am->reload();
-            am->fireEvent("VARIABLES_LOADED");
-            // The chat windows are rebuilt by the reload and come up with the
-            // defaults their XML carries, so they have to be told to read the
-            // settings back - same as at login, and the reason a /reload used
-            // to lose the chat layout.
-            am->fireEvent("UPDATE_CHAT_WINDOWS");
-            am->fireEvent("PLAYER_LOGIN");
-            am->fireEvent("PLAYER_ENTERING_WORLD");
+        auto* am = ctx.services.characterAddons();
+        if (am && ctx.services.requestInterfaceReload) {
+            // Asked for rather than done: the reload replaces the interface
+            // this command was reached through. The session performs it
+            // between frames, with the same events a world entry sends, so
+            // the chat windows read their settings back as they do at login.
+            ctx.services.requestInterfaceReload();
             game::MessageChatData rlMsg;
             rlMsg.type = game::ChatType::SYSTEM;
             rlMsg.language = game::ChatLanguage::UNIVERSAL;
@@ -107,7 +103,7 @@ public:
         // target and a fault with one, and from the tree alone they are the
         // same line. print() reaches the log, so the answer lands beside the
         // report it belongs to.
-        if (auto* am = ctx.services.addonManager) {
+        if (auto* am = ctx.services.characterAddons()) {
             am->runScript(
                 "local function yn(v) return v and 'yes' or 'no' end\n"
                 "local auras = 0\n"
