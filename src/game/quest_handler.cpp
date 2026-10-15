@@ -276,8 +276,9 @@ static QuestQueryTextCandidate pickBestQuestQueryTexts(const std::vector<uint8_t
     if (data.size() <= 9) return best;
 
     // Where the first string sits: straight after the numeric block. The
-    // WotLK count is itemized in quest_query_layout.hpp and pinned by a test
-    // that builds the block the way the server writes it.
+    // WotLK count is itemized in quest_query_layout.hpp, and test_quest_domain
+    // feeds a response built the way the server writes it and reads the title
+    // the quest log shows.
     //
     // This said fifty-seven fields, which lands thirty-two bytes inside the
     // reward block. The read there is not a string, the readability check drops

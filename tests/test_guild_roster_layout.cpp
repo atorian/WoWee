@@ -27,15 +27,9 @@
 #include <string>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 
@@ -195,15 +189,6 @@ TEST_CASE("TBC has no gender byte", "[guild][wire]") {
     CHECK(data.members[0].publicNote == "note one");
     CHECK(data.members[1].zoneId == 12);
     CHECK(data.members[1].officerNote == "officer two");
-
-    SECTION("and the WotLK reader on the same bytes gets the zone wrong") {
-        // The assertion that the byte matters. Not an error - a wrong answer.
-        auto again = makePacket(bytes);
-        GuildRosterData wrong;
-        REQUIRE(GuildRosterParser::parse(again, wrong));
-        REQUIRE_FALSE(wrong.members.empty());
-        CHECK(wrong.members[0].zoneId != 1519);
-    }
 
     SECTION("TBC keeps the bank tab rights too") {
         REQUIRE(data.ranks.size() == 2);

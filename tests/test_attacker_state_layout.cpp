@@ -18,14 +18,8 @@
 #include <cstring>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/packet_parsers.hpp"
 
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 

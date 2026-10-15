@@ -21,19 +21,10 @@
 #include <string>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/group_defines.hpp"
 #include "game/world_packets.hpp"
 #include "network/packet.hpp"
 
-namespace wowee {
-namespace core {
-// The packet layer reaches for the running application to ask which expansion
-// is active. There is none here, and the parse under test is told which
-// expansion it is reading for.
-Application* Application::instance = nullptr;
-}
-}
 
 using wowee::game::GroupListData;
 using wowee::game::GroupListParser;

@@ -26,14 +26,7 @@
 #include <cstring>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/spline_packet.hpp"
-
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 

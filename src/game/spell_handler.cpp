@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <unordered_set>
 
 namespace wowee {
 namespace game {
@@ -3864,7 +3865,18 @@ void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {
         uint8_t groupIndex = packet.readUInt8();
         uint8_t modOpRaw   = packet.readUInt8();
         int32_t value      = static_cast<int32_t>(packet.readUInt32());
-        if (groupIndex > 5 || modOpRaw >= GameHandler::SPELL_MOD_OP_COUNT) continue;
+        if (groupIndex > 5 || modOpRaw >= GameHandler::SPELL_MOD_OP_COUNT) {
+            // A modifier this client has nowhere to put: the talent behind it
+            // changes nothing shown. Once per op and group, not per packet.
+            static std::unordered_set<uint16_t> said;
+            if (said.insert(static_cast<uint16_t>((modOpRaw << 8) | groupIndex)).second) {
+                LOG_WARNING("Spell modifier dropped: op=", static_cast<int>(modOpRaw),
+                            " group=", static_cast<int>(groupIndex), " (", isFlat ? "flat" : "pct",
+                            ") is outside the ", GameHandler::SPELL_MOD_OP_COUNT,
+                            " ops and 6 groups this client keeps");
+            }
+            continue;
+        }
         GameHandler::SpellModKey key{ .op = static_cast<GameHandler::SpellModOp>(modOpRaw), .group = groupIndex };
         modMap[key] = value;
     }

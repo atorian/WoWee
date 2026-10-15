@@ -146,6 +146,62 @@ TEST_CASE("an invitation that could not be offered is not offered", "[social][ha
     CHECK(invites == 0);
 }
 
+TEST_CASE("a refused party command tells the player why, in the server's terms",
+          "[social][harness]") {
+    // SMSG_PARTY_COMMAND_RESULT: the operation, the name it was tried on, and
+    // the result as AzerothCore numbers it (PartyResult in SharedDefines.h).
+    // The codes step from 9 to 12, so a table off by those two reads every
+    // later refusal as the wrong one.
+    struct Case {
+        uint32_t result;
+        const char* said;
+    };
+    const Case cases[] = {
+        {1, "No player named \"Jaina\" is currently online."},
+        {7, "You are not the group leader."},
+        {9, "Jaina is ignoring you."},
+        {12, "You cannot do that while in a LFG queue."},
+        {13, "Target is not accepting group invites."},
+        {200, "Party command failed."},
+    };
+    for (const auto& c : cases) {
+        INFO("result " << c.result);
+        GameHarness h;
+        h.enterWorld();
+        h.receive(Opcode::SMSG_PARTY_COMMAND_RESULT, Body().u32(0 /* invite */).cstr("Jaina").u32(c.result));
+        h.pump();
+        const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+        REQUIRE(errors.size() == 1);
+        CHECK(errors[0].args.at(0) == c.said);
+    }
+
+    // Success says nothing.
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_PARTY_COMMAND_RESULT, Body().u32(0).cstr("Jaina").u32(0));
+    h.pump();
+    CHECK(h.addonEvents("UI_ERROR_MESSAGE").empty());
+}
+
+TEST_CASE("the guild bank's balance event is the bank's figure, not a chat line",
+          "[social][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    const size_t linesBefore = h.game().getChatHistory().size();
+
+    // Type 17, one string: the balance as sixteen zero-padded hex digits,
+    // broadcast to every member whenever anyone touches the bank. Unhandled,
+    // it reached guild chat as "Guild event 17: 000000000051451B".
+    h.receive(Opcode::SMSG_GUILD_EVENT, Body().u8(17).u8(1).cstr("000000000051451B"));
+    h.pump();
+
+    CHECK(h.game().getChatHistory().size() == linesBefore);
+    CHECK(h.addonEvents("CHAT_MSG_SYSTEM").empty());
+    CHECK(h.addonEvents("CHAT_MSG_GUILD").empty());
+    // 532g 61s 7c, read as hex.
+    CHECK(h.game().getGuildBankData().money == 5326107u);
+}
+
 TEST_CASE("a duel challenge names the challenger, and accepting names the flag", "[social][harness]") {
     GameHarness h;
     h.enterWorld();

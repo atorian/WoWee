@@ -16,13 +16,6 @@
 
 #include "test_support.hpp"
 #include "game/world_packets.hpp"
-#include "core/application.hpp"
-
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 

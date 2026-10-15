@@ -17,17 +17,9 @@
 // BuyCount that AzerothCore does not send, which the parser scores for.
 #include <catch_amalgamated.hpp>
 
-#include "core/application.hpp"
 #include "game/world_packets.hpp"
 #include "network/packet.hpp"
 
-// The parser's translation unit inlines isActiveExpansion(), which reaches
-// through the Application singleton. Nothing on this path calls it.
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 using wowee::network::Packet;

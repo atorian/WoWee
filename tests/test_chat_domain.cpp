@@ -21,10 +21,10 @@ constexpr uint64_t kJaina = 0x21;
 /// SMSG_MESSAGECHAT for a player's line, as 3.3.5a sends it: a guid and no
 /// name, which the game has to find out for itself.
 std::vector<uint8_t> playerLine(ChatType type, uint64_t sender, uint64_t receiver,
-                                const std::string& text) {
+                                const std::string& text, uint32_t language = 0 /* Universal */) {
     return Body()
         .u8(static_cast<uint8_t>(type))
-        .u32(0)                                   // Universal
+        .u32(language)
         .u64(sender)
         .u32(0)
         .u64(receiver)
@@ -130,6 +130,57 @@ TEST_CASE("while away, each whisperer is answered once and the player stays away
     // Typing is coming back, though: autoClearAFK takes the player out of it.
     h.game().sendChatMessage(ChatType::SAY, "I'm back");
     CHECK_FALSE(h.game().isAfk());
+}
+
+TEST_CASE("an addon's whisper goes to the addons and not into chat", "[chat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kJaina, "Jaina"));
+    h.pump();
+    const size_t linesBefore = h.game().getChatHistory().size();
+
+    SECTION("in LANG_ADDON") {
+        h.receive(Opcode::SMSG_MESSAGECHAT,
+                  playerLine(ChatType::WHISPER, kJaina, h.player().guid, "TRP3\tHI_NI\t1", 0xFFFFFFFFu));
+    }
+    SECTION("in a spoken language, as older addon libraries still send it") {
+        h.receive(Opcode::SMSG_MESSAGECHAT,
+                  playerLine(ChatType::WHISPER, kJaina, h.player().guid, "TRP3\tHI_NI\t1", 7 /* Common */));
+    }
+    h.pump();
+
+    const auto addon = h.addonEvents("CHAT_MSG_ADDON");
+    REQUIRE(addon.size() == 1);
+    CHECK(addon[0].args.at(0) == "TRP3");
+    CHECK(addon[0].args.at(1) == "HI_NI\t1");
+    CHECK(addon[0].args.at(2) == "WHISPER");
+    CHECK(addon[0].args.at(3) == "Jaina");
+
+    CHECK(h.addonEvents("CHAT_MSG_WHISPER").empty());
+    CHECK(h.game().getChatHistory().size() == linesBefore);
+    // Nor is the sender's addon taken for someone to /r.
+    CHECK(h.game().getLastWhisperSender().empty());
+}
+
+TEST_CASE("an ordinary line, tab or not, is chat and not an addon's", "[chat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kJaina, "Jaina"));
+    h.pump();
+
+    SECTION("a whisper") {
+        h.receive(Opcode::SMSG_MESSAGECHAT,
+                  playerLine(ChatType::WHISPER, kJaina, h.player().guid, "meet me at the tram", 7));
+        h.pump();
+        CHECK(h.addonEvents("CHAT_MSG_WHISPER").size() == 1);
+    }
+    SECTION("a say with a tab in it") {
+        h.receive(Opcode::SMSG_MESSAGECHAT,
+                  playerLine(ChatType::SAY, kJaina, 0, "hello\tthere", 7));
+        h.pump();
+        CHECK(h.addonEvents("CHAT_MSG_SAY").size() == 1);
+    }
+    CHECK(h.addonEvents("CHAT_MSG_ADDON").empty());
 }
 
 TEST_CASE("the server's echo of the player's own line is not a second line", "[chat][harness]") {

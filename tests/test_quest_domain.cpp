@@ -31,7 +31,61 @@ bool inLog(GameHarness& h, uint32_t questId) {
     return std::any_of(log.begin(), log.end(), [&](const auto& q) { return q.questId == questId; });
 }
 
+const wowee::game::QuestHandler::QuestLogEntry& logEntry(GameHarness& h, uint32_t questId) {
+    const auto& log = h.game().getQuestLog();
+    auto it = std::find_if(log.begin(), log.end(), [&](const auto& q) { return q.questId == questId; });
+    REQUIRE(it != log.end());
+    return *it;
+}
+
+/// SMSG_QUEST_QUERY_RESPONSE as AzerothCore's WorldSession::HandleQuestQueryOpcode
+/// writes it on 3.3.5a: sixty-five numeric fields, then the strings - title,
+/// objectives, details, area description, completion text.
+std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>& strings) {
+    Body b;
+    b.u32(questId).u32(2).u32(50).u32(45).u32(38);   // id, method, level, min level, zone
+    b.u32(0).u32(0);                                  // type, suggested players
+    b.u32(0).u32(0).u32(0).u32(0);                    // two reputation objectives
+    b.u32(0).u32(0);                                  // next in chain, xp id
+    b.u32(1000);                                      // money
+    b.u32(0).u32(0).u32(0);                           // money at max level, spell, spell cast
+    b.u32(0).u32(0);                                  // honour, honour multiplier
+    b.u32(0).u32(0).u32(0).u32(0).u32(0).u32(0).u32(0);  // source item .. rep show mask
+    b.zeros(4 * 2 * 4);                               // four reward items and counts
+    b.zeros(6 * 2 * 4);                               // six reward choices and counts
+    b.zeros(5 * 3 * 4);                               // five reputations: ids, values, overrides
+    b.u32(0).u32(0).u32(0).u32(0);                    // point of interest
+    for (const auto& s : strings) b.cstr(s);
+    return b.bytes();
+}
+
 }  // namespace
+
+TEST_CASE("a quest's query answer names it and states its objective", "[quest][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    // In the log as the server listed it before its text arrived: a number.
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS,
+              Body().u64(kMarshal).u64(0).u32(1712).cstr("Quest #1712").cstr("").cstr("").bytes());
+    h.pump();
+    h.game().acceptQuest();
+    REQUIRE(logEntry(h, 1712).title == "Quest #1712");
+
+    h.receive(Opcode::SMSG_QUEST_QUERY_RESPONSE,
+              questQuery(1712, {"Bath'rah the Windwatcher",
+                                "Bring Bath'rah's Parchment to Bath'rah the Windwatcher.",
+                                "The parchment is old and the ink has faded.",
+                                "",
+                                "Return to Bath'rah."}));
+    h.pump();
+
+    // The strings start after the sixty-five fields. Read from fifty-seven -
+    // which this did - the title came back empty out of the reward block and
+    // was guessed from the shape of whatever text came next.
+    CHECK(logEntry(h, 1712).title == "Bath'rah the Windwatcher");
+    CHECK(logEntry(h, 1712).objectives == "Bring Bath'rah's Parchment to Bath'rah the Windwatcher.");
+}
 
 TEST_CASE("a quest taken from its giver is in the log and told to the server", "[quest][harness]") {
     GameHarness h;

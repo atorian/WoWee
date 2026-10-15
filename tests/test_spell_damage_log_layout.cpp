@@ -15,15 +15,9 @@
 
 #include <cstdint>
 
-#include "core/application.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}  // namespace wowee
 
 using namespace wowee::game;
 
@@ -93,25 +87,27 @@ TEST_CASE("the crit bit is the second one of the flags", "[damage-log]") {
     CHECK_FALSE(plain.isCrit);
 }
 
-TEST_CASE("Classic and TBC read this packet identically", "[damage-log]") {
-    // Which is what lets one reader serve both. If an expansion ever needs its
-    // own, this is what says so.
-    ClassicPacketParsers classic;
-    TbcPacketParsers tbc;
-    SpellDamageLogData a, b;
-    auto pa = damageLogPacket(686, 999, 32, 7, 3, 0x02);
-    auto pb = damageLogPacket(686, 999, 32, 7, 3, 0x02);
-    REQUIRE(classic.parseSpellDamageLog(pa, a));
-    REQUIRE(tbc.parseSpellDamageLog(pb, b));
-    CHECK(a.targetGuid == b.targetGuid);
-    CHECK(a.attackerGuid == b.attackerGuid);
-    CHECK(a.spellId == b.spellId);
-    CHECK(a.damage == b.damage);
-    CHECK(a.overkill == b.overkill);
-    CHECK(a.schoolMask == b.schoolMask);
-    CHECK(a.absorbed == b.absorbed);
-    CHECK(a.resisted == b.resisted);
-    CHECK(a.isCrit == b.isCrit);
+TEST_CASE("TBC reads the same layout to the same values", "[damage-log]") {
+    // One reader serves both expansions; each is held to what the server
+    // wrote, not to the other's answer.
+    for (bool tbcReader : {false, true}) {
+        INFO((tbcReader ? "TBC" : "Classic"));
+        ClassicPacketParsers classic;
+        TbcPacketParsers tbc;
+        auto packet = damageLogPacket(686, 999, 32, 7, 3, 0x02);
+        SpellDamageLogData data;
+        REQUIRE((tbcReader ? tbc.parseSpellDamageLog(packet, data)
+                           : classic.parseSpellDamageLog(packet, data)));
+        CHECK(data.targetGuid == kTarget);
+        CHECK(data.attackerGuid == kAttacker);
+        CHECK(data.spellId == 686);
+        CHECK(data.damage == 999);
+        CHECK(data.overkill == 0);
+        CHECK(data.schoolMask == 32);
+        CHECK(data.absorbed == 7);
+        CHECK(data.resisted == 3);
+        CHECK(data.isCrit);
+    }
 }
 
 TEST_CASE("a short packet is refused rather than half read", "[damage-log]") {

@@ -7,50 +7,18 @@
 //
 // That string is the balance, written as sixteen zero-padded hex digits. The
 // figure is only right if it is read as hex, and a server that sends the plain
-// number must not be read as hex - which is what is pinned here.
+// number must not be read as hex - which is what is pinned here. That the event
+// sets the bank's figure and puts nothing in chat is test_social_domain's.
 #include <catch_amalgamated.hpp>
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/world_packets.hpp"
 
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
-
-namespace {
-
-/// type, string count, then the strings.
-GuildEventData parse(uint8_t type, const std::vector<std::string>& strings) {
-    std::vector<uint8_t> bytes;
-    bytes.push_back(type);
-    bytes.push_back(static_cast<uint8_t>(strings.size()));
-    for (const std::string& s : strings) {
-        bytes.insert(bytes.end(), s.begin(), s.end());
-        bytes.push_back(0);
-    }
-    wowee::network::Packet packet(0, std::move(bytes));
-    GuildEventData data;
-    REQUIRE(GuildEventParser::parse(packet, data));
-    return data;
-}
-
-}  // namespace
-
-TEST_CASE("the bank money event is a hex balance, not a chat line") {
-    const GuildEventData data = parse(GuildEvent::BANK_MONEY_SET, {"000000000051451B"});
-    CHECK(data.eventType == GuildEvent::BANK_MONEY_SET);
-    CHECK(data.numStrings == 1);
-    // 532g 61s 7c.
-    CHECK(guildEventMoney(data.strings[0]) == 5326107u);
-}
 
 TEST_CASE("a balance written without padding is still hex when it says so") {
     CHECK(guildEventMoney("51451B") == 5326107u);
@@ -68,7 +36,7 @@ TEST_CASE("a balance that is not a number reads as nothing") {
 }
 
 TEST_CASE("the event carries the trailing guid when one is there") {
-    std::vector<uint8_t> bytes{GuildEvent::SIGNED_ON, 1};
+    std::vector<uint8_t> bytes{12 /* signed on */, 1};
     const std::string name = "Whitecheddar";
     bytes.insert(bytes.end(), name.begin(), name.end());
     bytes.push_back(0);

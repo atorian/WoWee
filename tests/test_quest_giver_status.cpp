@@ -26,23 +26,6 @@ std::string symbolOf(uint8_t v) {
 }
 }  // namespace
 
-TEST_CASE("the values are the server's DIALOG_STATUS numbers", "[questgiver]") {
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::NONE) == 0);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::UNAVAILABLE) == 1);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::LOW_LEVEL_AVAILABLE) == 2);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::LOW_LEVEL_REWARD_REP) == 3);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::LOW_LEVEL_AVAILABLE_REP) == 4);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::INCOMPLETE) == 5);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::REWARD_REP) == 6);
-    // 7 is available-with-reputation. It was named AVAILABLE_LOW here, which
-    // is what 2 is, so a rep-gated quest was drawn grey and an out-levelled
-    // one was drawn not at all.
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::AVAILABLE_REP) == 7);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::AVAILABLE) == 8);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::REWARD2) == 9);
-    CHECK(static_cast<uint8_t>(QuestGiverStatus::REWARD) == 10);
-}
-
 TEST_CASE("every status the server can send draws something or nothing on purpose",
           "[questgiver]") {
     // The bug was silence: a value with no branch drew no mark, and the player

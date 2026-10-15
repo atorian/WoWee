@@ -14,16 +14,6 @@
 
 #include "test_support.hpp"
 #include "game/world_packets.hpp"
-#include "core/application.hpp"
-
-// The builders live in translation units that inline isActiveExpansion(), which
-// reaches through the Application singleton. The builder under test never calls
-// it, so a null instance satisfies the linker.
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 

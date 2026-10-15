@@ -6,16 +6,7 @@
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
 #include "game/packet_parsers.hpp"
-#include "core/application.hpp"
 
-// The packet builders live in translation units that inline isActiveExpansion(),
-// which reaches through the Application singleton. The builders under test never
-// call it, so a null instance is enough to satisfy the linker.
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 
@@ -113,9 +104,11 @@ TEST_CASE("SMSG_MESSAGECHAT whispers use the exact layout for every expansion", 
     const std::string message = "meet me at the tram";
 
     auto buildTbcOrWotlk = [&] {
+        // The server's numbers, not the enum's: CHAT_MSG_WHISPER is 7 and
+        // LANG_UNIVERSAL 0 from TBC on.
         wowee::network::Packet packet(0);
-        packet.writeUInt8(static_cast<uint8_t>(ChatType::WHISPER));
-        packet.writeUInt32(static_cast<uint32_t>(ChatLanguage::UNIVERSAL));
+        packet.writeUInt8(7);
+        packet.writeUInt32(0);
         packet.writeUInt64(kSenderGuid);
         packet.writeUInt32(0);
         packet.writeUInt64(kReceiverGuid);
@@ -180,8 +173,8 @@ TEST_CASE("WotLK guild achievement chat retains its trailing achievement ID",
     const std::string message = "%s has earned the achievement $a";
 
     wowee::network::Packet packet(0);
-    packet.writeUInt8(static_cast<uint8_t>(ChatType::GUILD_ACHIEVEMENT));
-    packet.writeUInt32(static_cast<uint32_t>(ChatLanguage::UNIVERSAL));
+    packet.writeUInt8(0x31);   // CHAT_MSG_GUILD_ACHIEVEMENT
+    packet.writeUInt32(0);     // LANG_UNIVERSAL
     packet.writeUInt64(kSenderGuid);
     packet.writeUInt32(0);
     packet.writeUInt64(kReceiverGuid);
@@ -199,50 +192,21 @@ TEST_CASE("WotLK guild achievement chat retains its trailing achievement ID",
     REQUIRE_FALSE(packet.hasData());
 }
 
-TEST_CASE("Addon chat is identified before it reaches visible whisper history", "[chat][addon]") {
-    MessageChatData addon;
-    addon.type = ChatType::WHISPER;
-    addon.language = ChatLanguage::ADDON;
-    addon.message = "TRP3\tHI_NI\t1";
-
-    std::string prefix;
-    std::string payload;
-    REQUIRE(decodeAddonChatPayload(addon, prefix, payload));
-    REQUIRE(prefix == "TRP3");
-    REQUIRE(payload == "HI_NI\t1");
-
-    SECTION("legacy spoken-language addon envelopes remain hidden") {
-        addon.language = ChatLanguage::COMMON;
-        REQUIRE(decodeAddonChatPayload(addon, prefix, payload));
-    }
-
-    SECTION("ordinary whispers remain player chat") {
-        addon.language = ChatLanguage::COMMON;
-        addon.message = "meet me at the tram";
-        REQUIRE_FALSE(decodeAddonChatPayload(addon, prefix, payload));
-    }
-
-    SECTION("tabs in ordinary say messages remain player chat") {
-        addon.type = ChatType::SAY;
-        addon.language = ChatLanguage::COMMON;
-        addon.message = "hello\tthere";
-        REQUIRE_FALSE(decodeAddonChatPayload(addon, prefix, payload));
-    }
-
-    SECTION("outgoing addon packets use LANG_ADDON") {
-        auto packet = MessageChatPacket::build(
-            ChatType::WHISPER, ChatLanguage::ADDON, "TRP3\tHI_NI\t1", "Frezha");
-        REQUIRE(packet.readUInt32() == static_cast<uint32_t>(ChatType::WHISPER));
-        // The literal, not the enum. Reading back the value the packet was
-        // built from is true whatever that value is, and the language matters
-        // here: the server treats a client message in LANG_UNIVERSAL as a
-        // hacking attempt and discards it, so an addon message sent in
-        // anything but 0xFFFFFFFF never arrives.
-        REQUIRE(packet.readUInt32() == 0xFFFFFFFFu);
-        REQUIRE(packet.readString() == "Frezha");
-        REQUIRE(packet.readString() == "TRP3\tHI_NI\t1");
-        REQUIRE_FALSE(packet.hasData());
-    }
+// Incoming addon messages, and ordinary lines that merely look like them, are
+// test_chat_domain's: what matters there is where the line ends up.
+TEST_CASE("outgoing addon packets use LANG_ADDON", "[chat][addon]") {
+    auto packet = MessageChatPacket::build(
+        ChatType::WHISPER, ChatLanguage::ADDON, "TRP3\tHI_NI\t1", "Frezha");
+    REQUIRE(packet.readUInt32() == 7);   // CHAT_MSG_WHISPER
+    // The literal, not the enum. Reading back the value the packet was
+    // built from is true whatever that value is, and the language matters
+    // here: the server treats a client message in LANG_UNIVERSAL as a
+    // hacking attempt and discards it, so an addon message sent in
+    // anything but 0xFFFFFFFF never arrives.
+    REQUIRE(packet.readUInt32() == 0xFFFFFFFFu);
+    REQUIRE(packet.readString() == "Frezha");
+    REQUIRE(packet.readString() == "TRP3\tHI_NI\t1");
+    REQUIRE_FALSE(packet.hasData());
 }
 
 // A monster line addressed to something that is neither a player nor a pet

@@ -9,19 +9,11 @@
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
 #include "game/packet_parsers.hpp"
-#include "core/application.hpp"
 
 #include <array>
 #include <cstring>
 #include <vector>
 
-// Parsers under test are era-parameterized or expansion-agnostic; none touch
-// the Application singleton, so a null instance satisfies the linker.
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 namespace network = wowee::network;

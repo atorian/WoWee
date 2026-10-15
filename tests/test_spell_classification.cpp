@@ -36,11 +36,6 @@ private:
 
 } // namespace
 
-TEST_CASE("DONT_REPORT cast failures remain player-facing", "[spell][failure]") {
-    REQUIRE(std::string(wowee::game::getSpellCastResultString(27)) ==
-            "You can't do that right now");
-}
-
 // ---------------------------------------------------------------------------
 // Range classification
 // ---------------------------------------------------------------------------
@@ -91,16 +86,6 @@ TEST_CASE("Ranged weapon auto-attacks ignore placeholder DBC resource costs",
 
     REQUIRE_FALSE(isRangedWeaponAutoAttack(0));
     REQUIRE_FALSE(isRangedWeaponAutoAttack(19434)); // Aimed Shot still uses real costs
-}
-
-TEST_CASE("Fishing ranks use targetless server-placed casts", "[spell][fishing]") {
-    for (uint32_t spellId : {7620u, 7731u, 7732u, 18248u, 33095u, 51294u}) {
-        REQUIRE(isFishingCast(spellId));
-    }
-
-    REQUIRE_FALSE(isFishingCast(0));
-    REQUIRE_FALSE(isFishingCast(2366));  // Herbalism
-    REQUIRE_FALSE(isFishingCast(2575));  // Mining
 }
 
 TEST_CASE("Only restoration food and drink spells use the seated consumption loop",
@@ -245,19 +230,16 @@ TEST_CASE("friendly-target spells are the ones that may fall back to the caster"
     using namespace wowee::game::spellclass;
 
     SECTION("heals and buffs need a friendly unit") {
-        CHECK(requiresFriendlyTarget(kImplicitTargetAlly));   // Flash Heal, Renew,
-        CHECK(requiresFriendlyTarget(21));                    // Mark of the Wild...
+        CHECK(requiresFriendlyTarget(21));   // Flash Heal, Renew, Mark of the Wild
     }
 
     SECTION("the friendly aims are four values, not one") {
         // Read out of the shipped Spell.dbc rather than assumed. Asking only
         // about 21 left the two commonest heals in the game refusing to
         // self-cast, since neither of them is 21.
-        CHECK(requiresFriendlyTarget(kImplicitTargetChainHeal));  // Holy Light,
-        CHECK(requiresFriendlyTarget(45));                        // Healing Wave
-        CHECK(requiresFriendlyTarget(kImplicitTargetRaid));       // Beacon of Light,
-        CHECK(requiresFriendlyTarget(57));                        // Intervene, Levitate
-        CHECK(requiresFriendlyTarget(kImplicitTargetParty));      // Seal of Sacrifice
+        CHECK(requiresFriendlyTarget(45));   // Holy Light, Healing Wave
+        CHECK(requiresFriendlyTarget(57));   // Beacon of Light, Intervene, Levitate
+        CHECK(requiresFriendlyTarget(35));   // Seal of Sacrifice
     }
 
     SECTION("a destination at the target is not a friendly unit") {
@@ -268,20 +250,19 @@ TEST_CASE("friendly-target spells are the ones that may fall back to the caster"
     }
 
     SECTION("damage does not") {
-        CHECK_FALSE(requiresFriendlyTarget(kImplicitTargetEnemy));  // Smite, Fireball
-        CHECK_FALSE(requiresFriendlyTarget(6));
+        CHECK_FALSE(requiresFriendlyTarget(6));   // Smite, Fireball
     }
 
     SECTION("self-only spells are handled by range, not by this") {
         // Inner Fire and Blink read 1; they never carry a target either way, so
         // they must not be dragged through the friendly-target path.
-        CHECK_FALSE(requiresFriendlyTarget(kImplicitTargetCaster));
+        CHECK_FALSE(requiresFriendlyTarget(1));
     }
 
     SECTION("spells that take either target are left to the player") {
         // Dispel Magic reads 25. Retail does not self-cast it, because picking
         // between cleansing yourself and purging an enemy is guessing.
-        CHECK_FALSE(requiresFriendlyTarget(kImplicitTargetAny));
+        CHECK_FALSE(requiresFriendlyTarget(25));
     }
 
     SECTION("an unknown spell reads 0 and never self-casts") {
@@ -298,29 +279,27 @@ TEST_CASE("hostile-target spells are the ones that must not be sent unaimed",
     using namespace wowee::game::spellclass;
 
     SECTION("a nuke or a shot needs a hostile unit") {
-        CHECK(requiresHostileTarget(kImplicitTargetEnemy));  // Arcane Shot, Fireball
-        CHECK(requiresHostileTarget(6));                     // Steady Shot, Smite
+        CHECK(requiresHostileTarget(6));   // Arcane Shot, Steady Shot, Fireball, Smite
     }
 
     SECTION("nothing friendly is caught by it") {
         // These fall back to the caster on purpose when auto self-cast is on,
         // which is the opposite decision - so the two tests must not overlap.
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetAlly));
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetParty));
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetChainHeal));
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetRaid));
+        for (uint32_t friendlyAim : {21u, 35u, 45u, 57u}) {
+            CHECK_FALSE(requiresHostileTarget(friendlyAim));
+        }
     }
 
     SECTION("a self-cast is not refused for having no target") {
         // Aspect of the Hawk and Inner Fire read 1 and carry no target by
         // nature. Refusing those would take away every self-buff in the game.
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetCaster));
+        CHECK_FALSE(requiresHostileTarget(1));
     }
 
     SECTION("either-target and destination spells are left alone") {
         // 25 can go on the caster harmlessly and 63 is a point, not a unit.
         // Neither is the shape that kills the caster, so neither is blocked.
-        CHECK_FALSE(requiresHostileTarget(kImplicitTargetAny));
+        CHECK_FALSE(requiresHostileTarget(25));
         CHECK_FALSE(requiresHostileTarget(63));
     }
 

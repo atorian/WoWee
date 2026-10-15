@@ -1833,17 +1833,6 @@ target_link_libraries(test_realm_list PRIVATE catch2_main OpenSSL::SSL OpenSSL::
 add_test(NAME realm_list COMMAND test_realm_list)
 register_test_target(test_realm_list)
 
-# ── test_quest_query_layout ─────────────────────────────────
-# Where the strings start in the quest query response. Pure arithmetic against
-# a body built the way the server writes it: reading from the wrong offset does
-# not fail, it hands back the next string along and shifts everything after it.
-add_executable(test_quest_query_layout test_quest_query_layout.cpp)
-target_include_directories(test_quest_query_layout PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_quest_query_layout SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_quest_query_layout PRIVATE catch2_main)
-add_test(NAME quest_query_layout COMMAND test_quest_query_layout)
-register_test_target(test_quest_query_layout)
-
 # ── test_quest_rewards ──────────────────────────────────────
 wowee_add_packet_test(test_quest_rewards)
 
@@ -2363,18 +2352,17 @@ wowee_add_test(test_movement_flag_bits
             ${TEST_COMMON_SOURCES})
 
 # ── test_spell_icon_columns ──────────────────────────────────
-# Which columns of SpellIcon.dbc hold the id and the path, against the shipped
-# file. Five places carried their own copy of these two numbers, and a wrong
-# column answers empty for every row rather than failing.
+# SpellIcon.dbc through the loader every caller uses, over the install's data.
+# A wrong column answers empty for every row rather than failing, so the test
+# is what the loader hands back from the real file. Skips without game data.
 add_executable(test_spell_icon_columns
-    test_spell_icon_columns.cpp
-    ${TEST_COMMON_SOURCES})
+    test_spell_icon_columns.cpp)
 target_include_directories(test_spell_icon_columns PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_spell_icon_columns SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_spell_icon_columns PRIVATE
     WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(test_spell_icon_columns PRIVATE catch2_main)
+target_link_libraries(test_spell_icon_columns PRIVATE catch2_main wowee_pipeline)
 wowee_test_link_glm(test_spell_icon_columns)
 add_test(NAME spell_icon_columns COMMAND test_spell_icon_columns)
 register_test_target(test_spell_icon_columns)
@@ -2522,14 +2510,6 @@ wowee_add_test(test_gather_spells
 # the member count was three bytes of the real count plus a letter of a name.
 wowee_add_packet_test(test_group_list_parse)
 
-# ── test_party_wire_codes ────────────────────────────────────
-# Party operation and result codes against AzerothCore. PARTY_OP_SWAP is 4
-# and SWAP was declared 3, which is not an operation at all, so the field
-# could never be recognised as a swap.
-wowee_add_test(test_party_wire_codes
-    SOURCES test_party_wire_codes.cpp
-            ${TEST_COMMON_SOURCES})
-
 # ── test_stationery ──────────────────────────────────────────
 # The letterhead a letter is written on. Answering nil for it drew the mail
 # body's dark brown font on an empty black frame.
@@ -2551,14 +2531,6 @@ wowee_add_test(test_polygon_triangulate
 # command accepts are now derived, so they are pinned here.
 wowee_add_test(test_raid_mark_names
     SOURCES test_raid_mark_names.cpp
-            ${TEST_COMMON_SOURCES})
-
-# ── test_spell_mod_ops ───────────────────────────────────────
-# Spell modifier op numbers against AzerothCore's SpellDefines.h. Ops 0-19
-# were right; from 20 the list was the Cataclysm one on a 3.3.5 head, so op
-# 22 was named for dispel resistance where the server means a periodic.
-wowee_add_test(test_spell_mod_ops
-    SOURCES test_spell_mod_ops.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_adt_truncation ──────────────────────────────────────

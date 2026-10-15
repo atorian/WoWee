@@ -12,16 +12,12 @@
 
 #include <catch_amalgamated.hpp>
 
-#include "core/application.hpp"
 #include "game/calendar_data.hpp"
 #include "network/packet.hpp"
 
 #include <ctime>
 #include "core/local_time.hpp"
 
-namespace wowee::core {
-Application* Application::instance = nullptr;
-}
 
 using namespace wowee::game;
 using wowee::network::Packet;

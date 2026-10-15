@@ -12,13 +12,6 @@
 // reads as "the realm sent nothing" rather than "we dropped what it sent".
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
-#include "core/application.hpp"
-
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 

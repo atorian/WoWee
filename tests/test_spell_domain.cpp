@@ -94,6 +94,76 @@ TEST_CASE("a refused cast is shown, said aloud, and ends the cast for the interf
     CHECK(h.addonEvents("UNIT_SPELLCAST_STOP").size() == 1);
 }
 
+TEST_CASE("a talent's modifier lands on the property the spellbook reads", "[spell][harness]") {
+    using Op = wowee::game::GameHandler::SpellModOp;
+    GameHarness h;
+    h.enterWorld();
+
+    // SMSG_SET_FLAT_SPELL_MODIFIER / _PCT_: group, op, value. The ops are
+    // AzerothCore's SPELLMOD_* numbers: 14 is a spell's cost, 10 its casting
+    // time and 11 its cooldown - which must not be read as either.
+    h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(0).u8(14).u32(static_cast<uint32_t>(-10)));
+    h.receive(Opcode::SMSG_SET_PCT_SPELL_MODIFIER, Body().u8(0).u8(10).u32(static_cast<uint32_t>(-20)));
+    h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(1).u8(11).u32(5000));
+    h.pump();
+
+    CHECK(h.game().getSpellFlatMod(Op::Cost) == -10);
+    CHECK(h.game().getSpellPctMod(Op::CastingTime) == -20);
+    CHECK(h.game().getSpellFlatMod(Op::CastingTime) == 0);
+    CHECK(h.game().getSpellPctMod(Op::Cost) == 0);
+}
+
+TEST_CASE("a modifier past the ops this client keeps changes nothing", "[spell][harness]") {
+    using Op = wowee::game::GameHandler::SpellModOp;
+    GameHarness h;
+    h.enterWorld();
+
+    // Op 40 has no slot; written anyway it would land past the end of the
+    // array the modifiers are kept in.
+    h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(0).u8(40).u32(99));
+    h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(0).u8(14).u32(7));
+    h.pump();
+
+    // The packet after it is still read.
+    CHECK(h.game().getSpellFlatMod(Op::Cost) == 7);
+}
+
+TEST_CASE("a cast the server will not explain is still refused on screen", "[spell][harness]") {
+    // Result 27 is DONT_REPORT: the server's way of refusing without a reason.
+    // The player still pressed the key and still needs to know it did nothing.
+    GameHarness h;
+    h.enterWorld();
+    h.receive(Opcode::SMSG_CAST_FAILED, castFailed(kFireball, 27));
+    h.pump();
+
+    const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].args.at(0) == "You can't do that right now");
+}
+
+TEST_CASE("a fishing cast with nowhere to land is not answered 'no target'", "[spell][harness]") {
+    // Fishing has no unit target: the server picks a point in the water. A
+    // "bad targets" refusal there means no water, and the character saying
+    // "I have no target" contradicts the fishing hint on screen. The same
+    // refusal for an aimed spell is said.
+    GameHarness h;
+    h.enterWorld();
+    std::vector<Refusal> spoken;
+    auto refusals = h.events().subscribe<ev::PlayerRefused>(
+        [&](const ev::PlayerRefused& e) { spoken.push_back(e.reason); });
+
+    for (uint32_t fishing : {7620u, 51294u}) {   // the first and the last rank
+        h.receive(Opcode::SMSG_CAST_FAILED, castFailed(fishing, 11 /* bad targets */));
+        h.pump();
+    }
+    CHECK(spoken.empty());
+    CHECK(h.addonEvents("UI_ERROR_MESSAGE").size() == 2);
+
+    h.receive(Opcode::SMSG_CAST_FAILED, castFailed(kFireball, 11));
+    h.pump();
+    CHECK(spoken == std::vector<Refusal>{Refusal::NoTarget});
+}
+
 TEST_CASE("a routine refusal is shown but not said", "[spell][harness]") {
     GameHarness h;
     h.enterWorld();

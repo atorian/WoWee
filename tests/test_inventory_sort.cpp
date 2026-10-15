@@ -113,8 +113,8 @@ TEST_CASE("computeSortSwaps never addresses special containers", "[inventory]") 
 
     auto swaps = inv.computeSortSwaps();
 
-    // Wire address of bag 0 is FIRST_BAG_EQUIP_SLOT + 0 = 19
-    const uint8_t quiverBag = static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT);
+    // The first worn bag is container 19 on the wire.
+    const uint8_t quiverBag = 19;
     for (const auto& op : swaps) {
         CHECK(op.srcBag != quiverBag);
         CHECK(op.dstBag != quiverBag);
@@ -177,15 +177,14 @@ TEST_CASE("computeBankSortSwaps addresses bank slots and bags correctly", "[inve
     auto swaps = inv.computeBankSortSwaps(28);
     CHECK(!swaps.empty());
 
-    // Every address is either the main bank (0xFF, slot >= BANK_SLOT_START) or a bank
-    // bag container (>= BANK_BAG_CONTAINER_START).
+    // As the server numbers them: the main bank is slots 39..66 of the player
+    // (container 0xFF), and the bank's bags are containers 67..73.
+    auto addressable = [](uint8_t bag, uint8_t slot) {
+        return (bag == 0xFF && slot >= 39 && slot <= 66) || (bag >= 67 && bag <= 73);
+    };
     for (const auto& op : swaps) {
-        bool srcOk = (op.srcBag == 0xFF && op.srcSlot >= Inventory::BANK_SLOT_START) ||
-                     (op.srcBag >= Inventory::BANK_BAG_CONTAINER_START);
-        bool dstOk = (op.dstBag == 0xFF && op.dstSlot >= Inventory::BANK_SLOT_START) ||
-                     (op.dstBag >= Inventory::BANK_BAG_CONTAINER_START);
-        CHECK(srcOk);
-        CHECK(dstOk);
+        CHECK(addressable(op.srcBag, op.srcSlot));
+        CHECK(addressable(op.dstBag, op.dstSlot));
     }
 }
 
@@ -223,8 +222,8 @@ TEST_CASE("computeBankBagSortSwaps stays inside the one bag", "[inventory]") {
     const auto swaps = inv.computeBankBagSortSwaps(2);
     CHECK(!swaps.empty());
 
-    const uint8_t expected =
-        static_cast<uint8_t>(Inventory::BANK_BAG_CONTAINER_START + 2);
+    // The third bank bag is container 69.
+    const uint8_t expected = 69;
     for (const auto& op : swaps) {
         CHECK(op.srcBag == expected);
         CHECK(op.dstBag == expected);
@@ -256,9 +255,10 @@ TEST_CASE("merging pours partial stacks together", "[inventory]") {
         CHECK(inv.getBackpackSlot(0).item.stackCount == 20);
         CHECK(inv.getBackpackSlot(3).empty());
         REQUIRE(ops.size() == 1);
-        // The later slot pours into the earlier one.
-        CHECK(ops[0].srcSlot == Inventory::NUM_EQUIP_SLOTS + 3);
-        CHECK(ops[0].dstSlot == Inventory::NUM_EQUIP_SLOTS + 0);
+        // The later slot pours into the earlier one. The backpack starts at
+        // player slot 23.
+        CHECK(ops[0].srcSlot == 26);
+        CHECK(ops[0].dstSlot == 23);
     }
 
     SECTION("an overflowing pour leaves the remainder behind") {
@@ -321,7 +321,7 @@ TEST_CASE("merging pours partial stacks together", "[inventory]") {
         CHECK(inv.getBankSlot(0).item.stackCount == 15);
         CHECK(inv.getBankBagSlot(0, 1).empty());
         REQUIRE(ops.size() == 1);
-        CHECK(ops[0].srcBag == Inventory::BANK_BAG_CONTAINER_START);
+        CHECK(ops[0].srcBag == 67);   // the first bank bag
         CHECK(ops[0].dstBag == 0xFF);
     }
 }

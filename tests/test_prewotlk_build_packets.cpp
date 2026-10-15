@@ -20,17 +20,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "core/application.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 
-// The packet layer reaches the Application singleton; nothing under test does,
-// so it stays null. Same stub the other packet-layout tests carry.
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}  // namespace wowee
 
 using wowee::game::ClassicPacketParsers;
 using wowee::game::LogicalOpcode;

@@ -14,15 +14,7 @@
 #include <catch_amalgamated.hpp>
 #include "game/world_packets.hpp"
 #include "game/packet_parsers.hpp"
-#include "core/application.hpp"
 
-// The builders under test never reach the singleton; a null instance satisfies
-// the linker for the translation units that inline isActiveExpansion().
-namespace wowee {
-namespace core {
-Application* Application::instance = nullptr;
-}
-}
 
 using namespace wowee::game;
 using Bytes = std::vector<uint8_t>;

@@ -1,12 +1,8 @@
 #include <catch_amalgamated.hpp>
 
-#include "core/application.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 
-namespace wowee::core {
-Application* Application::instance = nullptr;
-}
 
 using namespace wowee::game;
 
