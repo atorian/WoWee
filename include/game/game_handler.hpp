@@ -53,6 +53,7 @@ namespace wowee::game {
     class InventoryHandler;
     class SocialHandler;
     class WardenHandler;
+    class AccountDataHandler;
 }
 
 namespace wowee {
@@ -1249,19 +1250,6 @@ public:
     std::array<ActionBarSlot, ACTION_BAR_SLOTS>& getActionBar() { return actionBar; }
     const std::array<ActionBarSlot, ACTION_BAR_SLOTS>& getActionBar() const { return actionBar; }
     void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id);
-
-    // Client-side macro text storage (server sends only macro index; text is stored locally)
-    const std::string& getMacroText(uint32_t macroId) const;
-    void setMacroText(uint32_t macroId, const std::string& text);
-    /// A macro's name and icon, which the text alone never carried. Stored
-    /// beside it under their own keys, so a config written before this still
-    /// loads - the name simply comes back empty and is shown as "Macro".
-    const std::string& getMacroName(uint32_t macroId) const;
-    const std::string& getMacroIcon(uint32_t macroId) const;
-    void setMacroMeta(uint32_t macroId, const std::string& name,
-                      const std::string& icon);
-    /// Every macro id in use, ascending, so the interface can list them.
-    std::vector<uint32_t> getMacroIds() const;
 
     void saveCharacterConfig();
     void loadCharacterConfig();
@@ -3345,6 +3333,9 @@ public:
     QuestHandler* getQuestHandler() { return questHandler_.get(); }
     InventoryHandler* getInventoryHandler() { return inventoryHandler_.get(); }
     EntityController* getEntityController() { return entityController_.get(); }
+    /// Key bindings, macros and settings the server keeps for the account.
+    AccountDataHandler& accountData() { return *accountDataHandler_; }
+    const AccountDataHandler& accountData() const { return *accountDataHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3913,11 +3904,6 @@ private:
      */
 
     /**
-     * Handle SMSG_ACCOUNT_DATA_TIMES from server
-     */
-    void handleAccountDataTimes(network::Packet& packet);
-
-    /**
      * Handle SMSG_MOTD from server
      */
     void handleMotd(network::Packet& packet);
@@ -4001,6 +3987,7 @@ private:
     std::unique_ptr<SocialHandler>    socialHandler_;
     std::unique_ptr<QuestHandler>     questHandler_;
     std::unique_ptr<WardenHandler>    wardenHandler_;
+    std::unique_ptr<AccountDataHandler> accountDataHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -4246,9 +4233,6 @@ private:
     float craftCastGoGraceSec_ = 0.0f;
 
     std::array<ActionBarSlot, ACTION_BAR_SLOTS> actionBar{};
-    std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
-    std::unordered_map<uint32_t, std::string> macroNames_;
-    std::unordered_map<uint32_t, std::string> macroIcons_;
     uint64_t petGuid_ = 0;
     uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
     uint8_t  petCommand_ = 1;            // 0=stay,1=follow,2=attack,3=dismiss

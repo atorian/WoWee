@@ -395,6 +395,12 @@ private:
     float paperdollFacing_ = 0.0f;
     uint32_t paperdollWidgetId_ = 0;
     bool addonsLoaded_ = false;
+    /// The account data's key bindings changed and the interface has not yet
+    /// put them in force. Set when the game says so, which is outside the
+    /// Interface phase; acted on at the start of the next one.
+    bool keyBindingsStale_ = false;
+    /// The game's events Application answers itself, held for its lifetime.
+    std::vector<EventBus::Subscription> subscriptions_;
     std::unique_ptr<game::ExpansionRegistry> expansionRegistry_;
     // Empty means assets follow the active protocol profile. "legacy" selects
     // the root WOW_DATA_PATH manifest; otherwise this is an expansion id.

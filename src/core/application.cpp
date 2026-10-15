@@ -8,6 +8,8 @@
 #include "network/world_socket.hpp"
 #include "game/protocol_tables.hpp"
 #include "game/emote_table.hpp"
+#include "game/account_data.hpp"
+#include "game/game_events.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "core/zone_tracker.hpp"
 #include "core/frame_pacer.hpp"
@@ -469,6 +471,15 @@ bool Application::initialize() {
     gameServices_.events = &eventBus_;
     gameServices_.cvars = &cvars_;
     gameServices_.makeConnection = [] { return std::make_unique<network::WorldSocket>(); };
+    gameServices_.accountDataDir = core::getConfigRoot() + "/account_data";
+    subscriptions_.push_back(eventBus_.subscribe<game::events::AccountDataLoaded>(
+        [this](const game::events::AccountDataLoaded& e) {
+            const auto type = static_cast<game::AccountDataType>(e.type);
+            if (type == game::AccountDataType::GlobalBindings ||
+                type == game::AccountDataType::CharacterBindings) {
+                keyBindingsStale_ = true;
+            }
+        }));
     movementCollision_ =std::make_unique<RendererMovementCollision>(*renderer);
     gameServices_.movementCollision = movementCollision_.get();
 
@@ -2795,6 +2806,12 @@ void Application::loadWorldInterface() {
         }
         addonManager_->loadAllAddons();
         addonsLoaded_ = true;
+        // The bindings in force before anything asks for them, as the
+        // original client loads them: nothing in the interface calls
+        // LoadBindings at startup, so without this the saved set stayed on
+        // disk and every key answered to its default.
+        if (auto* engine = addonManager_->getLuaEngine()) engine->reloadKeyBindings();
+        keyBindingsStale_ = false;
         addonManager_->fireEvent("VARIABLES_LOADED");
         // After VARIABLES_LOADED, which is when the chat window
         // settings are available to be read. Every chat frame
@@ -4601,6 +4618,12 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
     if (worldInterfaceEntryPending_) {
         worldInterfaceEntryPending_ = false;
         if (!worldTransitions_.leaving()) loadWorldInterface();
+    }
+    // Before the events go out, so the UPDATE_BINDINGS LoadBindings raises
+    // reaches the buttons in this frame.
+    if (keyBindingsStale_ && addonsLoaded_ && addonManager_) {
+        keyBindingsStale_ = false;
+        if (auto* engine = addonManager_->getLuaEngine()) engine->reloadKeyBindings();
     }
     if (gameHandler) gameHandler->dispatchAddonEvents();
     dispatchInterfaceInput();

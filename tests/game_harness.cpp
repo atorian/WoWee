@@ -92,8 +92,11 @@ void useEmptyExtensionsDir() {
 
 } // namespace
 
-GameHarness::GameHarness() {
+GameHarness::GameHarness() : GameHarness(scratchDir("wowee_harness_account_data")) {}
+
+GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     useEmptyExtensionsDir();
+    services_.accountDataDir = accountDataDir.string();
 
     if (expansions_.initialize(sourceRoot() + "Data") == 0 || !expansions_.setActive("wotlk")) {
         fail("no wotlk profile under " + sourceRoot() + "Data/expansions");

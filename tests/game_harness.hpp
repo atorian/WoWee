@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -88,7 +89,12 @@ struct PlayerSpec {
 
 class GameHarness {
 public:
+    /// With an empty folder of its own for the account data the game keeps on
+    /// disk.
     GameHarness();
+    /// With the account data kept in this folder, as it is - for a test of
+    /// what one session leaves behind for the next.
+    explicit GameHarness(const std::filesystem::path& accountDataDir);
     ~GameHarness();
     GameHarness(const GameHarness&) = delete;
     GameHarness& operator=(const GameHarness&) = delete;

@@ -638,7 +638,11 @@ network::Packet SetActionButtonPacket::build(uint8_t button, uint8_t type, uint3
         // TBC/WotLK: type in bits 24–31, id in bits 0–23; packed=0 clears slot
         uint8_t packedType = 0x00; // spell
         if (type == 2 /* ITEM */)  packedType = 0x80;
-        if (type == 3 /* MACRO */) packedType = 0x40;
+        // A character's macro ids carry kCharacterMacroIdBase, which does not
+        // fit in 24 bits; the type says which half instead - 0x41 for the
+        // character's, 0x40 for the account's - and SMSG_ACTION_BUTTONS
+        // hands it back the same way.
+        if (type == 3 /* MACRO */) packedType = (id & 0x01000000u) ? 0x41 : 0x40;
         uint32_t packed = (id == 0) ? 0 : (static_cast<uint32_t>(packedType) << 24) | (id & 0x00FFFFFF);
         packet.writeUInt32(packed);
         LOG_DEBUG("Built CMSG_SET_ACTION_BUTTON (TBC/WotLK): button=", static_cast<int>(button),

@@ -767,48 +767,114 @@ bool LoginVerifyWorldParser::parse(network::Packet& packet, LoginVerifyWorldData
 }
 
 bool AccountDataTimesParser::parse(network::Packet& packet, AccountDataTimesData& data) {
-    // Common layouts seen in the wild:
-    // - WotLK-like: uint32 serverTime, uint8 unk, uint32 mask, uint32[up to 8] slotTimes
-    // - Older/variant: uint32 serverTime, uint8 unk, uint32[up to 8] slotTimes
-    // Some servers only send a subset of slots.
-    if (packet.getSize() < 5) {
-        LOG_ERROR("SMSG_ACCOUNT_DATA_TIMES packet too small: ", packet.getSize(),
-                  " bytes (need at least 5)");
+    // uint32 serverTime, uint8 unknown, uint32 mask, then a uint32 time for
+    // each slot whose bit is set - and only those. The account's mask is 0x15,
+    // so its three times belong to slots 0, 2 and 4, not 0, 1 and 2: reading
+    // them as a dense array filed the key bindings' time under a slot that
+    // was not in the packet at all.
+    data = AccountDataTimesData{};
+    if (!packet.hasRemaining(9)) {
+        LOG_WARNING("SMSG_ACCOUNT_DATA_TIMES: ", packet.getSize(),
+                    " bytes, too short for its header (9)");
         return false;
-    }
-
-    for (uint32_t& t : data.accountDataTimes) {
-        t = 0;
     }
     data.serverTime = packet.readUInt32();
     data.unknown = packet.readUInt8();
-
-    size_t remaining = packet.getRemainingSize();
-    uint32_t mask = 0xFF;
-    if (remaining >= 4 && ((remaining - 4) % 4) == 0) {
-        // Treat first dword as slot mask when payload shape matches.
-        mask = packet.readUInt32();
-    }
-    remaining = packet.getRemainingSize();
-    size_t slotWords = std::min<size_t>(8, remaining / 4);
-
-    LOG_DEBUG("Parsed SMSG_ACCOUNT_DATA_TIMES:");
-    LOG_DEBUG("  Server time: ", data.serverTime);
-    LOG_DEBUG("  Unknown: ", static_cast<int>(data.unknown));
-    LOG_DEBUG("  Mask: 0x", std::hex, mask, std::dec, " slotsInPacket=", slotWords);
-
-    for (size_t i = 0; i < slotWords; ++i) {
-        data.accountDataTimes[i] = packet.readUInt32();
-        if (data.accountDataTimes[i] != 0 || ((mask & (1u << i)) != 0)) {
-            LOG_DEBUG("  Data slot ", i, ": ", data.accountDataTimes[i]);
+    data.mask = packet.readUInt32();
+    for (uint32_t slot = 0; slot < 8; ++slot) {
+        if ((data.mask & (1u << slot)) == 0) continue;
+        if (!packet.hasRemaining(4)) {
+            LOG_WARNING("SMSG_ACCOUNT_DATA_TIMES: mask 0x", std::hex, data.mask, std::dec,
+                        " promises slot ", slot, " but the packet ends before its time");
+            return false;
         }
+        data.accountDataTimes[slot] = packet.readUInt32();
     }
-    if (packet.getReadPos() != packet.getSize()) {
-        LOG_DEBUG("  AccountDataTimes trailing bytes: ", packet.getRemainingSize());
+    if (packet.hasData()) {
+        LOG_WARNING("SMSG_ACCOUNT_DATA_TIMES: ", packet.getRemainingSize(),
+                    " bytes past the times the mask 0x", std::hex, data.mask, std::dec,
+                    " accounts for; ignored");
         packet.skipAll();
     }
-
     return true;
+}
+
+bool UpdateAccountDataParser::parse(network::Packet& packet, UpdateAccountDataData& data,
+                                    std::string& error) {
+    data = UpdateAccountDataData{};
+    if (!packet.hasRemaining(20)) {
+        error = std::to_string(packet.getSize()) + " bytes, too short for its header (20)";
+        return false;
+    }
+    data.guid = packet.readUInt64();
+    data.type = packet.readUInt32();
+    data.time = packet.readUInt32();
+    const uint32_t size = packet.readUInt32();
+    if (size == 0) {
+        // An empty slot: nothing follows.
+        packet.skipAll();
+        return true;
+    }
+    // The server refuses anything over 0xFFFF on the way in, so a length past
+    // that is a misread rather than a large macro list.
+    if (size > 0xFFFF) {
+        error = "decompressed length " + std::to_string(size) + " is past the 65535 the server stores";
+        packet.skipAll();
+        return false;
+    }
+    const auto& raw = packet.getData();
+    const size_t start = packet.getReadPos();
+    std::string text(size, '\0');
+    uLongf destLen = size;
+    const int ret = uncompress(reinterpret_cast<Bytef*>(text.data()), &destLen,
+                               raw.data() + start, static_cast<uLong>(raw.size() - start));
+    packet.skipAll();
+    if (ret != Z_OK) {
+        error = "zlib error " + std::to_string(ret) + " inflating " +
+                std::to_string(raw.size() - start) + " bytes to " + std::to_string(size);
+        return false;
+    }
+    text.resize(destLen);
+    // Some cores store the terminating NUL with the text.
+    while (!text.empty() && text.back() == '\0') text.pop_back();
+    data.text = std::move(text);
+    return true;
+}
+
+network::Packet ReadyForAccountDataTimesPacket::build() {
+    return network::Packet(wireOpcode(Opcode::CMSG_READY_FOR_ACCOUNT_DATA_TIMES));
+}
+
+network::Packet RequestAccountDataPacket::build(uint32_t type) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_REQUEST_ACCOUNT_DATA));
+    packet.writeUInt32(type);
+    return packet;
+}
+
+std::optional<network::Packet> UpdateAccountDataPacket::build(uint32_t type, uint32_t time,
+                                                              const std::string& text,
+                                                              std::string& error) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_UPDATE_ACCOUNT_DATA));
+    packet.writeUInt32(type);
+    packet.writeUInt32(time);
+    packet.writeUInt32(static_cast<uint32_t>(text.size()));
+    if (text.empty()) return packet;
+    if (text.size() > 0xFFFF) {
+        error = std::to_string(text.size()) + " bytes, past the 65535 the server stores";
+        return std::nullopt;
+    }
+    uLongf compressedLen = compressBound(static_cast<uLong>(text.size()));
+    std::vector<uint8_t> compressed(compressedLen);
+    const int ret = compress(compressed.data(), &compressedLen,
+                             reinterpret_cast<const Bytef*>(text.data()),
+                             static_cast<uLong>(text.size()));
+    if (ret != Z_OK) {
+        error = "zlib error " + std::to_string(ret) + " compressing " +
+                std::to_string(text.size()) + " bytes";
+        return std::nullopt;
+    }
+    packet.writeBytes(compressed.data(), compressedLen);
+    return packet;
 }
 
 bool MotdParser::parse(network::Packet& packet, MotdData& data) {

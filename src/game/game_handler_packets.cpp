@@ -12,6 +12,7 @@
 #include "game/spell_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
+#include "game/account_data_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -213,7 +214,6 @@ void GameHandler::registerCoreOpcodes() {
     registerHandler(Opcode::SMSG_LOGIN_SETTIMESPEED, &GameHandler::handleLoginSetTimeSpeed);
     registerHandler(Opcode::SMSG_CLIENTCACHE_VERSION, &GameHandler::handleClientCacheVersion);
     registerHandler(Opcode::SMSG_TUTORIAL_FLAGS, &GameHandler::handleTutorialFlags);
-    registerHandler(Opcode::SMSG_ACCOUNT_DATA_TIMES, &GameHandler::handleAccountDataTimes);
     registerHandler(Opcode::SMSG_MOTD, &GameHandler::handleMotd);
     registerHandler(Opcode::SMSG_NOTIFICATION, &GameHandler::handleNotification);
     registerHandler(Opcode::SMSG_PONG, &GameHandler::handlePong);
@@ -1320,6 +1320,13 @@ void GameHandler::registerCoreOpcodes() {
         //   Classic 1.12: no mode byte, 120 slots (480 bytes)
         //   TBC 2.4.3:    no mode byte, 132 slots (528 bytes)
         //   WotLK 3.3.5a: uint8 mode + 144 slots (577 bytes)
+        //
+        // The server's bar is the bar: every slot is set from the packet, an
+        // empty one included. This used to skip the zeros to spare a layout
+        // seeded here and one read from a local file, so a button the player
+        // had cleared - or moved, in another client - came back from that
+        // file at every login, and the bar never matched what the server and
+        // every other client showed.
         size_t rem = packet.getRemainingSize();
         const bool hasModeByteExp = isActiveExpansion("wotlk");
         int serverBarSlots;
@@ -1331,20 +1338,36 @@ void GameHandler::registerCoreOpcodes() {
             serverBarSlots = 144;
         }
         if (hasModeByteExp) {
-            if (rem < 1) return;
-            /*uint8_t mode =*/ packet.readUInt8();
-            rem--;
-        }
-        for (int i = 0; i < serverBarSlots; ++i) {
-            if (rem < 4) return;
-            uint32_t packed = packet.readUInt32();
-            rem -= 4;
-            if (i >= ACTION_BAR_SLOTS) continue;
-            if (packed == 0) {
-                // Empty slot - only clear if not already set to Attack/Hearthstone defaults
-                // so we don't wipe hardcoded fallbacks when the server sends zeros.
-                continue;
+            if (rem < 1) {
+                LOG_WARNING("SMSG_ACTION_BUTTONS: empty packet; the action bar is left as it was");
+                return;
             }
+            // 0 and 1 carry the whole bar (1 after a talent spec switch); 2
+            // carries nothing and clears it, sent before a spec's spells are
+            // unlearned and the next spec's bar follows.
+            const uint8_t mode = packet.readUInt8();
+            rem--;
+            if (mode == 2) {
+                actionBar = {};
+                LOG_INFO("SMSG_ACTION_BUTTONS: bar cleared by the server");
+                fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+                packet.skipAll();
+                return;
+            }
+        }
+        if (rem < static_cast<size_t>(serverBarSlots) * 4) {
+            LOG_WARNING("SMSG_ACTION_BUTTONS: ", rem, " bytes for ", serverBarSlots,
+                        " buttons; the action bar is left as it was");
+            packet.skipAll();
+            return;
+        }
+        // Said once per kind: an equipment set on the bar is a button this
+        // client cannot draw yet, and it is drawn empty every login.
+        static std::unordered_set<uint8_t> reportedTypes;
+        std::array<ActionBarSlot, ACTION_BAR_SLOTS> bar{};
+        for (int i = 0; i < serverBarSlots; ++i) {
+            uint32_t packed = packet.readUInt32();
+            if (i >= ACTION_BAR_SLOTS || packed == 0) continue;
             uint8_t type = 0;
             uint32_t id = 0;
             if (isClassicLikeExpansion()) {
@@ -1355,16 +1378,25 @@ void GameHandler::registerCoreOpcodes() {
                 id = packed & 0x00FFFFFFu;
             }
             if (id == 0) continue;
-            ActionBarSlot slot;
+            ActionBarSlot& slot = bar[i];
             switch (type) {
                 case 0x00: slot.type = ActionBarSlot::SPELL; slot.id = id; break;
                 case 0x01: slot.type = ActionBarSlot::ITEM;  slot.id = id; break;  // Classic item
                 case 0x80: slot.type = ActionBarSlot::ITEM;  slot.id = id; break;  // TBC/WotLK item
-                case 0x40: slot.type = ActionBarSlot::MACRO; slot.id = id; break;  // macro (all expansions)
-                default:   continue;  // unknown - leave as-is
+                case 0x40: slot.type = ActionBarSlot::MACRO; slot.id = id; break;  // the account's macro
+                // The character's macro: its id carries kCharacterMacroIdBase,
+                // which 24 bits cannot hold, so the type says which half.
+                case 0x41: slot.type = ActionBarSlot::MACRO; slot.id = kCharacterMacroIdBase | id; break;
+                default:
+                    if (reportedTypes.insert(type).second) {
+                        LOG_WARNING("SMSG_ACTION_BUTTONS: button ", i + 1, " holds action type 0x",
+                                    std::hex, static_cast<int>(type), std::dec, " (id ", id,
+                                    "), which this client does not draw; that button is shown empty");
+                    }
+                    break;
             }
-            actionBar[i] = slot;
         }
+        actionBar = bar;
         // Apply any pending cooldowns from spellHandler's cooldowns to newly populated slots.
         // SMSG_SPELL_COOLDOWN often arrives before SMSG_ACTION_BUTTONS during login,
         // so the per-slot cooldownRemaining would be 0 without this sync.
@@ -3326,8 +3358,6 @@ void GameHandler::registerRemainingOpcodes() {
         Opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS,
         Opcode::SMSG_STOP_DANCE,
         Opcode::SMSG_TEST_DROP_RATE_RESULT,
-        Opcode::SMSG_UPDATE_ACCOUNT_DATA,
-        Opcode::SMSG_UPDATE_ACCOUNT_DATA_COMPLETE,
         Opcode::SMSG_UPDATE_INSTANCE_OWNERSHIP,
         Opcode::SMSG_UPDATE_LAST_INSTANCE,
         Opcode::SMSG_VOICESESSION_FULL,
@@ -3357,6 +3387,7 @@ void GameHandler::registerDomainOpcodes() {
     socialHandler_->registerOpcodes(dispatchTable_);
     questHandler_->registerOpcodes(dispatchTable_);
     wardenHandler_->registerOpcodes(dispatchTable_);
+    accountDataHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {

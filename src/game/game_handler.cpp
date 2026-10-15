@@ -15,6 +15,7 @@
 #include "game/spell_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
+#include "game/account_data_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -46,6 +47,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <ranges>
 #include <sstream>
 #include <unordered_map>
@@ -115,12 +117,12 @@ GameHandler::GameHandler(GameServices& services)
     socialHandler_    = std::make_unique<SocialHandler>(*this);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
+    accountDataHandler_ = std::make_unique<AccountDataHandler>(*this);
 
-    // Default action bar layout
-    actionBar[0].type = ActionBarSlot::SPELL;
-    actionBar[0].id = game::SPELL_ID_ATTACK;   // Attack in slot 1
-    actionBar[11].type = ActionBarSlot::SPELL;
-    actionBar[11].id = game::SPELL_ID_HEARTHSTONE;  // Hearthstone in slot 12
+    // The action bar starts empty. What is on it is the server's to say -
+    // SMSG_ACTION_BUTTONS at every login, which for a new character carries
+    // the race and class defaults - and a layout guessed here only showed
+    // until that arrived, and then wherever it did not overwrite.
 
     // Build the opcode dispatch table (replaces switch(*logicalOp) in handlePacket)
     registerOpcodeHandlers();
@@ -171,6 +173,7 @@ bool GameHandler::connect(const std::string& host,
     this->accountName = accountName;
     this->build = build;
     this->realmId_ = realmId;
+    accountDataHandler_->beginSession(accountName, host);
 
     // The session key is the shared secret the world handshake proves knowledge
     // of and the header cipher is keyed from: anyone holding these 40 bytes can
@@ -1126,13 +1129,6 @@ std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
 }
 
-static const std::string EMPTY_MACRO_TEXT;
-
-const std::string& GameHandler::getMacroText(uint32_t macroId) const {
-    auto it = macros_.find(macroId);
-    return (it != macros_.end()) ? it->second : EMPTY_MACRO_TEXT;
-}
-
 int GameHandler::getRecipeDifficulty(uint32_t spellId) const {
     auto cit = spellNameCache_.find(spellId);
     if (cit == spellNameCache_.end()) return 0;
@@ -1193,42 +1189,6 @@ std::vector<GameHandler::CraftRecipe> GameHandler::getCraftingRecipes() const {
     return out;
 }
 
-const std::string& GameHandler::getMacroName(uint32_t macroId) const {
-    auto it = macroNames_.find(macroId);
-    return (it != macroNames_.end()) ? it->second : EMPTY_MACRO_TEXT;
-}
-
-const std::string& GameHandler::getMacroIcon(uint32_t macroId) const {
-    auto it = macroIcons_.find(macroId);
-    return (it != macroIcons_.end()) ? it->second : EMPTY_MACRO_TEXT;
-}
-
-void GameHandler::setMacroMeta(uint32_t macroId, const std::string& name,
-                               const std::string& icon) {
-    if (name.empty()) macroNames_.erase(macroId); else macroNames_[macroId] = name;
-    if (icon.empty()) macroIcons_.erase(macroId); else macroIcons_[macroId] = icon;
-    saveCharacterConfig();
-}
-
-std::vector<uint32_t> GameHandler::getMacroIds() const {
-    std::vector<uint32_t> ids;
-    ids.reserve(macros_.size());
-    for (const auto& [id, text] : macros_) { (void)text; ids.push_back(id); }
-    // Ascending, because the interface indexes macros by position in this list
-    // and an unordered_map hands them back in whatever order it likes - the
-    // same macro would answer to a different index each session.
-    std::sort(ids.begin(), ids.end());
-    return ids;
-}
-
-void GameHandler::setMacroText(uint32_t macroId, const std::string& text) {
-    if (text.empty())
-        macros_.erase(macroId);
-    else
-        macros_[macroId] = text;
-    saveCharacterConfig();
-}
-
 void GameHandler::saveCharacterConfig() {
     const Character* ch = getActiveCharacter();
     if (!ch || ch->name.empty()) return;
@@ -1250,31 +1210,11 @@ void GameHandler::saveCharacterConfig() {
     bool saveUseFemaleModel = (ch->gender == Gender::NONBINARY) ? ch->useFemaleModel
                                                                  : (ch->gender == Gender::FEMALE);
     out << "use_female_model=" << (saveUseFemaleModel ? 1 : 0) << "\n";
-    for (int i = 0; i < ACTION_BAR_SLOTS; i++) {
-        out << "action_bar_" << i << "_type=" << static_cast<int>(actionBar[i].type) << "\n";
-        out << "action_bar_" << i << "_id=" << actionBar[i].id << "\n";
-    }
 
-    // Save client-side macro text (escape newlines as \n literal)
-    for (const auto& [id, text] : macros_) {
-        if (!text.empty()) {
-            std::string escaped;
-            escaped.reserve(text.size());
-            for (char c : text) {
-                if (c == '\n') { escaped += "\\n"; }
-                else if (c == '\r') { /* skip CR */ }
-                else if (c == '\\') { escaped += "\\\\"; }
-                else { escaped += c; }
-            }
-            out << "macro_" << id << "_text=" << escaped << "\n";
-        }
-    }
-    for (const auto& [id, name] : macroNames_) {
-        if (!name.empty()) out << "macro_" << id << "_name=" << name << "\n";
-    }
-    for (const auto& [id, icon] : macroIcons_) {
-        if (!icon.empty()) out << "macro_" << id << "_icon=" << icon << "\n";
-    }
+    // The action bar and the macros are not here. The bar is the server's
+    // (SMSG_ACTION_BUTTONS), and the macros are account data; a copy here
+    // was a second answer that went on winning wherever the server's was
+    // empty, and was never the one another client saw.
 
     // The quest log itself is not saved: the server sends it on every login,
     // so a stored copy could only ever be staler than what arrives. What is
@@ -1326,9 +1266,8 @@ void GameHandler::loadCharacterConfig() {
     if (!in.is_open()) return;
 
     uint64_t savedGuid = 0;
-    std::array<int, ACTION_BAR_SLOTS> types{};
-    std::array<uint32_t, ACTION_BAR_SLOTS> ids{};
-    bool hasSlots = false;
+    // Macros an older build kept here, by the id it gave them.
+    std::map<uint32_t, Macro> legacyMacros;
     int savedGender = -1;
     int savedUseFemaleModel = -1;
 
@@ -1365,11 +1304,11 @@ void GameHandler::loadCharacterConfig() {
                         unescaped += val[i];
                     }
                 }
-                macros_[macroId] = std::move(unescaped);
+                legacyMacros[macroId].body = std::move(unescaped);
             } else if (key.substr(secondUnder + 1) == "name" && !val.empty()) {
-                macroNames_[macroId] = val;
+                legacyMacros[macroId].name = val;
             } else if (key.substr(secondUnder + 1) == "icon" && !val.empty()) {
-                macroIcons_[macroId] = val;
+                legacyMacros[macroId].icon = val;
             }
         } else if ((key == "tracked_quests" || key == "collapsed_factions" ||
                     key == "collapsed_skill_categories") && !val.empty()) {
@@ -1396,25 +1335,9 @@ void GameHandler::loadCharacterConfig() {
                 if (comma == std::string::npos) break;
                 tqPos = comma + 1;
             }
-        } else if (key.rfind("action_bar_", 0) == 0) {
-            // Parse action_bar_N_type or action_bar_N_id
-            size_t firstUnderscore = 11; // length of "action_bar_"
-            size_t secondUnderscore = key.find('_', firstUnderscore);
-            if (secondUnderscore == std::string::npos) continue;
-            int slot = -1;
-            try { slot = std::stoi(key.substr(firstUnderscore, secondUnderscore - firstUnderscore)); } catch (...) { continue; }
-            if (slot < 0 || slot >= ACTION_BAR_SLOTS) continue;
-            std::string suffix = key.substr(secondUnderscore + 1);
-            try {
-                if (suffix == "type") {
-                    types[slot] = std::stoi(val);
-                    hasSlots = true;
-                } else if (suffix == "id") {
-                    ids[slot] = static_cast<uint32_t>(std::stoul(val));
-                    hasSlots = true;
-                }
-            } catch (...) {}
         }
+        // action_bar_N_type / action_bar_N_id from an older build are not
+        // read: the bar is what SMSG_ACTION_BUTTONS says it is.
     }
 
     // Validate guid matches current character
@@ -1444,12 +1367,23 @@ void GameHandler::loadCharacterConfig() {
         }
     }
 
-    if (hasSlots) {
-        for (int i = 0; i < ACTION_BAR_SLOTS; i++) {
-            actionBar[i].type = static_cast<ActionBarSlot::Type>(types[i]);
-            actionBar[i].id = ids[i];
+    // An older build numbered the account's macros 1-36 and the character's
+    // 37-54 and kept both here. They go to the account data, where the
+    // character's carry the id bit the protocol gives them; the next save of
+    // this file no longer writes them.
+    if (!legacyMacros.empty()) {
+        std::vector<Macro> carried;
+        for (auto& [oldId, macro] : legacyMacros) {
+            if (macro.body.empty()) continue;
+            macro.id = oldId > static_cast<uint32_t>(kMaxAccountMacros)
+                           ? kCharacterMacroIdBase + (oldId - kMaxAccountMacros)
+                           : oldId;
+            if (macro.name.empty()) macro.name = "Macro " + std::to_string(oldId);
+            carried.push_back(std::move(macro));
         }
-        LOG_INFO("Character config loaded from ", path);
+        LOG_INFO("Character config ", path, " holds ", carried.size(),
+                 " macros from an older build; carrying them into the account data");
+        accountDataHandler_->adoptLegacyMacros(std::move(carried));
     }
 }
 

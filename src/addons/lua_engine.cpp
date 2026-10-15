@@ -8657,13 +8657,11 @@ void LuaEngine::registerCoreAPI() {
         // These names have real bindings, registered before this runs. A stub
         // here does not sit beside one - it replaces it, because the bootstrap
         // is later. GetPetActionInfo, GetNumShapeshiftForms and the rest had
-        // working implementations that never ran once.
+        // working implementations that never ran once - and so did
+        // GetCurrentBindingSet, GetMacroBody and GetMacroIndexByName, whose
+        // stubs here answered "the account's set" and "no such macro" over
+        // the account data's real answers.
         //
-        // Binding functions
-        "function GetCurrentBindingSet() return 1 end\n"
-        // Macro functions
-        "function GetMacroBody(id) return nil end\n"
-        "function GetMacroIndexByName(name) return 0 end\n"
         // Stance bar
         // Pet action bar
         "NUM_PET_ACTION_SLOTS = 10\n"
@@ -9829,6 +9827,24 @@ bool LuaEngine::dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl,
     // work" - running it as well would undo it.
     if (clientActsOnBinding(command)) return false;
     return runBindingScript(command, down);
+}
+
+void LuaEngine::reloadKeyBindings() {
+    if (!L_) return;
+    const int top = lua_gettop(L_);
+    lua_getglobal(L_, "LoadBindings");
+    lua_getglobal(L_, "GetCurrentBindingSet");
+    if (!lua_isfunction(L_, -2) || !lua_isfunction(L_, -1)) {
+        lua_settop(L_, top);
+        LOG_WARNING("Key bindings not loaded: LoadBindings or GetCurrentBindingSet is missing; "
+                    "the defaults stay in force");
+        return;
+    }
+    if (checkedLuaCall(L_, 0, 1, 0) != 0 || checkedLuaCall(L_, 1, 0, 0) != 0) {
+        LOG_WARNING("Key bindings not loaded: ", luaL_optstring(L_, -1, "?"),
+                    "; the bindings in force stay as they were");
+    }
+    lua_settop(L_, top);
 }
 
 bool LuaEngine::runBindingScript(const std::string& command, bool down) {

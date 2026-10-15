@@ -203,16 +203,26 @@ struct LoginVerifyWorldData {
 };
 
 /**
- * SMSG_ACCOUNT_DATA_TIMES data (from server)
+ * SMSG_ACCOUNT_DATA_TIMES data (from server, WotLK)
  *
- * Contains timestamps for account data (macros, keybindings, etc.)
+ * When the server last saw each account data slot change - macros, key
+ * bindings, settings. Only the slots in `mask` were sent; the others read 0.
  */
 struct AccountDataTimesData {
-    uint32_t serverTime;                // Current server time (Unix timestamp)
-    uint8_t unknown;                    // Unknown (always 1?)
-    uint32_t accountDataTimes[8];       // Timestamps for 8 account data slots
+    uint32_t serverTime = 0;            // Current server time (Unix timestamp)
+    uint8_t unknown = 0;                // Always 1 from TrinityCore and AzerothCore
+    uint32_t mask = 0;                  // Which slots the packet carries
+    uint32_t accountDataTimes[8] = {};  // Per slot, 0 where not in the mask
+};
 
-    [[nodiscard]] bool isValid() const { return true; }
+/**
+ * SMSG_UPDATE_ACCOUNT_DATA data (from server, WotLK): one slot's text.
+ */
+struct UpdateAccountDataData {
+    uint64_t guid = 0;      // The character it belongs to, 0 for the account's
+    uint32_t type = 0;      // AccountDataType
+    uint32_t time = 0;      // When it last changed (Unix timestamp)
+    std::string text;       // Decompressed
 };
 
 /**

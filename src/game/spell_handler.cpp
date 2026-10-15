@@ -1635,11 +1635,8 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
         }
     }
 
-    // Load saved action bar or use defaults
-    owner_.actionBarRef()[0].type = ActionBarSlot::SPELL;
-    owner_.actionBarRef()[0].id = SPELL_ID_ATTACK;
-    owner_.actionBarRef()[11].type = ActionBarSlot::SPELL;
-    owner_.actionBarRef()[11].id = 8690;  // Hearthstone
+    // The character's own settings. Not the action bar: that is
+    // SMSG_ACTION_BUTTONS, which follows this packet.
     owner_.loadCharacterConfig();
 
     // Sync login-time cooldowns into action bar slot overlays
@@ -2363,7 +2360,7 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
             barChanged = true;
         }
     }
-    if (barChanged) owner_.saveCharacterConfig();
+    if (barChanged && owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
 }
 
 void SpellHandler::handleSupercededSpell(network::Packet& packet) {
@@ -2393,7 +2390,6 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
         }
     }
     if (barChanged) {
-        owner_.saveCharacterConfig();
         // Zero, not nothing. The slot is the argument, and zero is how the
         // event says "all of them" - ActionButton_OnEvent reads
         // `arg1 == 0 or arg1 == tonumber(self.action)`, so an absent one
@@ -2428,7 +2424,7 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
             }
         }
     }
-    if (barChanged) owner_.saveCharacterConfig();
+    if (barChanged && owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
 
     if (spellCount > 0) {
         owner_.addSystemChatMessage("Unlearned " + std::to_string(spellCount) + " spells");

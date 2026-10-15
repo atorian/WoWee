@@ -18,6 +18,7 @@
 #include <fstream>
 #include <map>
 #include "game/pet_action.hpp"
+#include "game/account_data_handler.hpp"
 #include "imgui.h"
 #include <optional>
 #include <SDL3/SDL_keyboard.h>
@@ -93,6 +94,79 @@ int cursorEquipSlot() {
     // s_cursorBag is -1 only for a pickup off the paperdoll, where s_cursorSlot
     // is the one-based slot the item came out of.
     return (s_cursorType == CursorType::ITEM && s_cursorBag == -1) ? s_cursorSlot : 0;
+}
+
+// --- Macros ---
+//
+// The interface's number for a macro is its place in the macro frame: the
+// account's 1-36 and the character's 37-54, each half listed by name. The
+// account data keeps an id instead, which is what an action button holds.
+
+static constexpr const char* kQuestionMarkIcon = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The macro at a one-based place in the frame, or nullptr.
+static const game::Macro* macroAtIndex(game::GameHandler* gh, int index) {
+    if (!gh || index < 1 || index > game::kMaxAccountMacros + game::kMaxCharacterMacros) return nullptr;
+    const bool character = index > game::kMaxAccountMacros;
+    const auto& half = gh->accountData().macros(character);
+    const size_t pos = static_cast<size_t>(index - 1 - (character ? game::kMaxAccountMacros : 0));
+    return pos < half.size() ? &half[pos] : nullptr;
+}
+
+/// A macro's place in the frame, or 0 when it is not one.
+static int macroIndexOf(game::GameHandler* gh, uint32_t id) {
+    for (int c = 0; gh && c < 2; ++c) {
+        const auto& half = gh->accountData().macros(c == 1);
+        for (size_t i = 0; i < half.size(); ++i) {
+            if (half[i].id == id) return static_cast<int>(i) + 1 + (c == 1 ? game::kMaxAccountMacros : 0);
+        }
+    }
+    return 0;
+}
+
+/// The macro an argument names: a place in the frame, or a name - which is
+/// how a macro written inside another names it.
+static const game::Macro* macroFromArg(lua_State* L, int arg) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return nullptr;
+    if (lua_type(L, arg) == LUA_TNUMBER) {
+        return macroAtIndex(gh, static_cast<int>(lua_tonumber(L, arg)));
+    }
+    const char* name = lua_tostring(L, arg);
+    if (!name) return nullptr;
+    for (int c = 0; c < 2; ++c) {
+        for (const auto& macro : gh->accountData().macros(c == 1)) {
+            if (macro.name == name) return &macro;
+        }
+    }
+    return nullptr;
+}
+
+/// The texture an icon name is drawn from.
+static std::string macroTexture(const game::Macro& macro) {
+    return macro.icon.empty() ? std::string(kQuestionMarkIcon) : "Interface\\Icons\\" + macro.icon;
+}
+
+/// An icon argument as a texture path: the macro frame passes its picker's
+/// position in GetMacroIconInfo's list, an addon a path.
+static std::string macroIconArg(lua_State* L, int arg) {
+    if (lua_type(L, arg) == LUA_TNUMBER) {
+        lua_getglobal(L, "GetMacroIconInfo");
+        if (!lua_isfunction(L, -1)) { lua_pop(L, 1); return {}; }
+        lua_pushvalue(L, arg);
+        if (lua_pcall(L, 1, 1, 0) != 0) {
+            LOG_WARNING("GetMacroIconInfo(", lua_tonumber(L, arg), ") failed: ",
+                        lua_tostring(L, -1) ? lua_tostring(L, -1) : "?", "; the macro keeps no icon");
+            lua_pop(L, 1);
+            return {};
+        }
+        const char* path = lua_tostring(L, -1);
+        std::string out = path ? path : "";
+        lua_pop(L, 1);
+        return out;
+    }
+    const char* path = lua_tostring(L, arg);
+    return path ? path : "";
 }
 
 bool cursorItemCameFromInventory() {
@@ -203,6 +277,13 @@ static int lua_GetActionTexture(lua_State* L) {
                 return 1;
             }
         }
+    } else if (action.type == game::ActionBarSlot::MACRO) {
+        // The macro's own icon. Without this branch every macro button was
+        // drawn as an empty slot with only its name under it.
+        if (const auto* macro = gh->accountData().macro(action.id)) {
+            lua_pushstring(L, macroTexture(*macro).c_str());
+            return 1;
+        }
     }
     lua_pushnil(L);
     return 1;
@@ -310,8 +391,11 @@ static int lua_GetActionInfo(lua_State* L) {
             lua_pushstring(L, "item");
             return 3;
         case game::ActionBarSlot::MACRO:
+            // The macro's place in the macro frame, which is the number the
+            // interface hands back to GetMacroInfo - not the id the slot
+            // holds.
             lua_pushstring(L, "macro");
-            lua_pushnumber(L, action.id);
+            lua_pushnumber(L, macroIndexOf(gh, action.id));
             lua_pushstring(L, "macro");
             return 3;
         default:
@@ -472,7 +556,7 @@ static int lua_GetCursorInfo(lua_State* L) {
             return 2;
         case CursorType::MACRO:
             lua_pushstring(L, "macro");
-            lua_pushnumber(L, s_cursorId);
+            lua_pushnumber(L, macroIndexOf(getGameHandler(L), s_cursorId));
             return 2;
         case CursorType::MONEY:
             // containerframe.lua branches on this exact string to decide that
@@ -583,9 +667,8 @@ static int lua_PickupAction(lua_State* L) {
             wowee::ui::frameXmlSetCursorItem(
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         } else {
-            std::string icon = gh->getMacroIcon(existing.id);
-            if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
-            wowee::ui::frameXmlSetCursorItem(icon);
+            const auto* macro = gh->accountData().macro(existing.id);
+            wowee::ui::frameXmlSetCursorItem(macro ? macroTexture(*macro) : std::string(kQuestionMarkIcon));
         }
     } else {
         clearCursorItem(L);
@@ -1565,9 +1648,17 @@ std::map<std::string, std::array<std::string, 2>>& bindingKeys() {
     return keys;
 }
 
+/// Where an older build kept the bindings. Read while the account data has
+/// none; never written.
 std::string bindingsFilePath() {
     return core::getConfigRoot() + "/bindings.cfg";
 }
+
+/// The sets LoadBindings and SaveBindings take, numbered as the interface
+/// numbers them (DEFAULT_BINDINGS, ACCOUNT_BINDINGS, CHARACTER_BINDINGS).
+constexpr int kDefaultBindings   = 0;
+constexpr int kAccountBindings   = 1;
+constexpr int kCharacterBindings = 2;
 
 /// ImGui spells keys as "C" and "Space"; the interface expects "C" and "SPACE",
 /// and compares them as strings everywhere.
@@ -1653,13 +1744,30 @@ std::optional<std::string> liveKeyFor(const std::string& command) {
     return std::nullopt;
 }
 
+using BindingMap = std::map<std::string, std::array<std::string, 2>>;
+
+BindingMap buildDefaultBindings();
+
+/// What every set of bindings is a difference from - the bindings before any
+/// were loaded. Taken once, on first use: the keys the client's own actions
+/// answer to are read off its manager, and from then on loading a set moves
+/// them, so asking again would take a set's keys for the defaults.
+const BindingMap& defaultBindings() {
+    static const BindingMap defaults = buildDefaultBindings();
+    return defaults;
+}
+
+/// Start the bindings over from the defaults, if nothing has yet.
+void seedBindingDefaults() {
+    if (bindingKeys().empty()) bindingKeys() = defaultBindings();
+}
+
 /// The keys the client is actually listening for, asked of the manager that
 /// listens rather than restated here - a second copy would be wrong the moment
 /// either side moved. Commands the client has no action for keep their retail
 /// default, so the list reads correctly even where nothing acts on it yet.
-void seedBindingDefaults() {
-    auto& keys = bindingKeys();
-    if (!keys.empty()) return;
+BindingMap buildDefaultBindings() {
+    BindingMap keys;
 
     static const struct { const char* command; const char* key; } kDefaults[] = {
         {"MOVEFORWARD", "W"},   {"MOVEBACKWARD", "S"},
@@ -1716,6 +1824,123 @@ void seedBindingDefaults() {
     };
     seedPad(wowee::ui::padBindings());
     seedPad(wowee::ui::padExtraBindings());
+    return keys;
+}
+
+/// Give a key to a command, or to nothing. A key belongs to one command at a
+/// time, so it leaves the one that had it before it joins another - otherwise
+/// both claim it and which one answers depends on map order.
+void bindKey(const std::string& key, const char* command) {
+    for (auto& [existing, keys] : bindingKeys()) {
+        for (std::string& slot : keys) {
+            if (slot != key) continue;
+            slot.clear();
+            // The command that just lost the key has to be told, not only the
+            // one that gained it, or the client answers to both. What it
+            // answers to now is whichever slot still holds something, which is
+            // not always the first.
+            pushBindingToClient(existing, keys[0].empty() ? keys[1] : keys[0]);
+        }
+    }
+    if (command) {
+        auto& keys = bindingKeys()[command];
+        if (keys[0].empty()) keys[0] = key; else keys[1] = key;
+        pushBindingToClient(command, keys[0]);
+    }
+}
+
+/// Which set is in force: the character's when it has one of its own, the
+/// account's otherwise - GetCurrentBindingSet's answer.
+int currentBindingSet(game::GameHandler* gh) {
+    return (gh && !gh->accountData().text(game::AccountDataType::CharacterBindings).empty())
+               ? kCharacterBindings : kAccountBindings;
+}
+
+/// The bindings an older build kept in bindings.cfg, one "COMMAND=key1,key2"
+/// a line, read over the defaults. Only while the account data holds no
+/// bindings at all: the first SaveBindings writes them there.
+void readLegacyBindingsFile() {
+    std::ifstream in(bindingsFilePath());
+    if (!in) return;   // Nothing saved yet is not a failure.
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string command = line.substr(0, eq);
+        const std::string rest = line.substr(eq + 1);
+        const size_t comma = rest.find(',');
+        bindingKeys()[command] = {
+            rest.substr(0, comma),
+            comma == std::string::npos ? "" : rest.substr(comma + 1)
+        };
+        pushBindingToClient(command, bindingKeys()[command][0]);
+    }
+}
+
+/// Put the bindings of one set in force: the defaults, then the set's lines
+/// over them in order, as the original client applies bindings-cache.wtf.
+void loadBindingSet(game::GameHandler* gh, int which) {
+    bindingKeys() = defaultBindings();
+    // The client's own actions go back to their defaults too: a key the last
+    // set moved and this one does not mention is the default's again.
+    for (const auto& live : kLiveBindings) {
+        const auto it = defaultBindings().find(live.command);
+        pushBindingToClient(live.command, it == defaultBindings().end() ? "" : it->second[0]);
+    }
+    if (which == kDefaultBindings) return;
+
+    std::string text;
+    game::AccountDataType type = game::AccountDataType::GlobalBindings;
+    if (gh) {
+        if (which == kCharacterBindings) {
+            text = gh->accountData().text(game::AccountDataType::CharacterBindings);
+            type = game::AccountDataType::CharacterBindings;
+        }
+        if (text.empty()) {
+            text = gh->accountData().text(game::AccountDataType::GlobalBindings);
+            type = game::AccountDataType::GlobalBindings;
+        }
+    }
+    if (text.empty()) {
+        readLegacyBindingsFile();
+        return;
+    }
+    std::vector<std::string> problems;
+    const auto lines = game::parseBindingsCache(text, &problems);
+    for (const std::string& problem : problems) {
+        LOG_WARNING("Key bindings (", game::accountDataName(type), "): ", problem, "; skipped");
+    }
+    for (const auto& line : lines) {
+        bindKey(line.key, line.command == game::kUnboundCommand ? nullptr : line.command.c_str());
+    }
+    LOG_INFO("Key bindings: ", lines.size(), " lines of ", game::accountDataName(type), " applied");
+}
+
+/// The bindings in force, as the lines that make them from the defaults: each
+/// key bound other than by default, and NONE for each default key now bound to
+/// nothing. The original client writes the same difference, so either reads
+/// what the other saved.
+std::string writeBindingSet() {
+    const BindingMap& defaults = defaultBindings();
+    std::map<std::string, std::string> now;  // key -> command
+    for (const auto& [command, keys] : bindingKeys()) {
+        for (const std::string& key : keys) {
+            if (!key.empty()) now[key] = command;
+        }
+    }
+    std::vector<game::KeyBindingLine> lines;
+    for (const auto& [command, keys] : defaults) {
+        for (const std::string& key : keys) {
+            if (!key.empty() && !now.count(key)) lines.push_back({key, game::kUnboundCommand});
+        }
+    }
+    for (const auto& [key, command] : now) {
+        const auto it = defaults.find(command);
+        const bool isDefault = it != defaults.end() &&
+                               (it->second[0] == key || it->second[1] == key);
+        if (!isDefault) lines.push_back({key, command});
+    }
+    return game::writeBindingsCache(lines);
 }
 
 /// The command list the emitter built, or zero if bindings.xml never loaded.
@@ -1858,26 +2083,7 @@ static int lua_SetBinding(lua_State* L) {
     seedBindingDefaults();
     const std::string key = luaL_checkstring(L, 1);
     const char* command = lua_isnoneornil(L, 2) ? nullptr : luaL_checkstring(L, 2);
-
-    // A key belongs to one command at a time, so it leaves the one that had it
-    // before it joins another - otherwise both claim it and which one answers
-    // depends on map order.
-    for (auto& [existing, keys] : bindingKeys()) {
-        for (std::string& slot : keys) {
-            if (slot != key) continue;
-            slot.clear();
-            // The command that just lost the key has to be told, not only the
-            // one that gained it, or the client answers to both. What it
-            // answers to now is whichever slot still holds something, which is
-            // not always the first.
-            pushBindingToClient(existing, keys[0].empty() ? keys[1] : keys[0]);
-        }
-    }
-    if (command) {
-        auto& keys = bindingKeys()[command];
-        if (keys[0].empty()) keys[0] = key; else keys[1] = key;
-        pushBindingToClient(command, keys[0]);
-    }
+    bindKey(key, command);
     // Six frames wait on this, the action buttons among them: it is what
     // redraws the little key printed in the corner. Without it a rebind takes
     // effect while every button goes on showing the old key.
@@ -1886,48 +2092,44 @@ static int lua_SetBinding(lua_State* L) {
     return 1;
 }
 
-// SaveBindings(which) → writes what is bound where, for the next run
+// SaveBindings(which) - keep what is bound where, as the account's set (1) or
+// the character's (2).
+//
+// Into the account data, which the server keeps and every client of the
+// account reads - the same bindings-cache.wtf text the original client writes.
+// Saving the account's set ends the character's, as it does there: unticking
+// "Character Specific Key Bindings" is how a player goes back to the account's.
 static int lua_SaveBindings(lua_State* L) {
-    (void)L;
-    const std::string path = bindingsFilePath();
-    std::error_code ec;
-    std::filesystem::create_directories(
-        std::filesystem::path(path).parent_path(), ec);
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
-        LOG_WARNING("Could not write the key bindings to ", path);
+    seedBindingDefaults();
+    auto* gh = getGameHandler(L);
+    if (!gh) {
+        LOG_WARNING("SaveBindings: no game session to keep the key bindings in; "
+                    "they last until the client closes");
         return 0;
     }
-    for (const auto& [command, keys] : bindingKeys()) {
-        // Both slots on one line, the second empty when there is no second key,
-        // so a command that lost one is recorded as having lost it.
-        out << command << "=" << keys[0] << "," << keys[1] << "\n";
+    const int which = static_cast<int>(luaL_optnumber(L, 1, kAccountBindings));
+    if (which != kAccountBindings && which != kCharacterBindings) {
+        LOG_WARNING("SaveBindings(", which, "): not a set bindings are saved to; nothing saved");
+        return 0;
+    }
+    auto& data = gh->accountData();
+    const std::string text = writeBindingSet();
+    if (which == kCharacterBindings) {
+        data.store(game::AccountDataType::CharacterBindings, text);
+    } else {
+        data.store(game::AccountDataType::GlobalBindings, text);
+        if (!data.text(game::AccountDataType::CharacterBindings).empty()) {
+            data.store(game::AccountDataType::CharacterBindings, "");
+        }
     }
     return 0;
 }
 
-// LoadBindings(which) → what a previous run saved, over the defaults
+// LoadBindings(which) - put a set in force: the defaults (0), the account's
+// (1), or the character's (2, the account's when it has none of its own).
 static int lua_LoadBindings(lua_State* L) {
-    (void)L;
-    seedBindingDefaults();
-    std::ifstream in(bindingsFilePath());
-    if (!in) return 0;   // Nothing saved yet is not a failure.
-    std::string line;
-    while (std::getline(in, line)) {
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string command = line.substr(0, eq);
-        const std::string rest = line.substr(eq + 1);
-        const size_t comma = rest.find(',');
-        bindingKeys()[command] = {
-            rest.substr(0, comma),
-            comma == std::string::npos ? "" : rest.substr(comma + 1)
-        };
-        // What was saved is what the client should answer to, not what it
-        // started with - otherwise a rebind survives in the list and nowhere
-        // else, and only until the next save overwrites it.
-        pushBindingToClient(command, bindingKeys()[command][0]);
-    }
+    const int which = static_cast<int>(luaL_optnumber(L, 1, kAccountBindings));
+    loadBindingSet(getGameHandler(L), which);
     if (auto* gh = getGameHandler(L)) gh->fireAddonEvent("UPDATE_BINDINGS", {});
     return 0;
 }
@@ -1985,9 +2187,9 @@ void registerActionLuaAPI(lua_State* L) {
             if (slot >= static_cast<int>(bar.size())) { lua_pushnil(L); return 1; }
             const auto& action = bar[static_cast<size_t>(slot)];
             if (action.type != game::ActionBarSlot::MACRO) { lua_pushnil(L); return 1; }
-            const std::string name = gh->getMacroName(action.id);
-            if (name.empty()) { lua_pushnil(L); return 1; }
-            lua_pushstring(L, name.c_str());
+            const auto* macro = gh->accountData().macro(action.id);
+            if (!macro || macro->name.empty()) { lua_pushnil(L); return 1; }
+            lua_pushstring(L, macro->name.c_str());
             return 1;
         }},
                 // Whether the action has a range to be in or out of. Nothing
@@ -2041,140 +2243,103 @@ void registerActionLuaAPI(lua_State* L) {
                 {"IsModifiedClick",     lua_IsModifiedClick},
                 {"GetModifiedClick",    lua_GetModifiedClick},
                 {"SetModifiedClick",    lua_SetModifiedClick},
-                // Macros. The client has stored their text all along and
-                // persisted it per character; only the interface's way in was
-                // missing, so GetNumMacros answered zero and the panel opened
-                // empty over a full set.
+                // Macros - the account data's, two halves of them.
                 //
-                // WoW splits the ids: 1-36 are account-wide, 37 and up belong
-                // to the character. That split is what GetNumMacros reports and
-                // what CreateMacro's perCharacter flag chooses between.
+                // The interface numbers them as the macro frame lists them:
+                // the account's 1-36 and the character's 37-54, each half by
+                // name. That number is an index, not the macro's id - the id
+                // is what an action button and the account data carry, and it
+                // does not move when a macro is renamed or one before it is
+                // deleted. See macroAtIndex.
                 {"GetNumMacros",        [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            int global = 0, perChar = 0;
-            if (gh) {
-                for (uint32_t id : gh->getMacroIds()) {
-                    if (id <= 36) ++global; else ++perChar;
-                }
-            }
-            lua_pushnumber(L, global);
-            lua_pushnumber(L, perChar);
+            lua_pushnumber(L, gh ? static_cast<double>(gh->accountData().macros(false).size()) : 0.0);
+            lua_pushnumber(L, gh ? static_cast<double>(gh->accountData().macros(true).size()) : 0.0);
             return 2;
         }},
-                // GetMacroInfo(id) → name, icon, body
+                // GetMacroInfo(index or name) → name, texture, body, isLocal
                 {"GetMacroInfo",        [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (!gh || id == 0 || gh->getMacroText(id).empty()) {
-                return luaReturnNil(L);
-            }
-            std::string name = gh->getMacroName(id);
-            if (name.empty()) name = "Macro";
-            std::string icon = gh->getMacroIcon(id);
-            if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
-            lua_pushstring(L, name.c_str());
-            lua_pushstring(L, icon.c_str());
-            lua_pushstring(L, gh->getMacroText(id).c_str());
-            return 3;
+            const game::Macro* macro = macroFromArg(L, 1);
+            if (!macro) return luaReturnNil(L);
+            lua_pushstring(L, macro->name.c_str());
+            lua_pushstring(L, macroTexture(*macro).c_str());
+            lua_pushstring(L, macro->body.c_str());
+            lua_pushnil(L);
+            return 4;
         }},
-                // CreateMacro(name, icon, body, perCharacter) → id
+                // GetMacroBody(index or name) → body
+                {"GetMacroBody",        [](lua_State* L) -> int {
+            const game::Macro* macro = macroFromArg(L, 1);
+            if (!macro) return luaReturnNil(L);
+            lua_pushstring(L, macro->body.c_str());
+            return 1;
+        }},
+                // GetMacroIndexByName(name) → index, or 0
+                {"GetMacroIndexByName", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const game::Macro* macro = macroFromArg(L, 1);
+            lua_pushnumber(L, (gh && macro) ? macroIndexOf(gh, macro->id) : 0);
+            return 1;
+        }},
+                // CreateMacro(name, icon, body, perCharacter) → index
+                //
+                // The icon is what the macro frame's picker hands over: a
+                // position in GetMacroIconInfo's list. A texture path is taken
+                // too, as addons pass one.
                 {"CreateMacro",         [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) return luaReturnNil(L);
-            const char* name = luaL_optstring(L, 1, "Macro");
-            const char* icon = luaL_optstring(L, 2, "");
+            const char* name = luaL_optstring(L, 1, "");
+            const std::string icon = macroIconArg(L, 2);
             const char* body = luaL_optstring(L, 3, "");
             const bool perChar = lua_toboolean(L, 4) != 0;
-            // The first free id in the half that was asked for. WoW allows 18
-            // of each; refusing past that is what stops a full list growing
-            // ids the interface will not show.
-            const uint32_t first = perChar ? 37u : 1u;
-            const uint32_t last  = perChar ? 54u : 36u;
-            uint32_t id = 0;
-            for (uint32_t candidate = first; candidate <= last; ++candidate) {
-                if (gh->getMacroText(candidate).empty()) { id = candidate; break; }
-            }
+            const uint32_t id = gh->accountData().createMacro(
+                perChar, name, icon.empty() ? kQuestionMarkIcon : icon, body);
             if (id == 0) return luaReturnNil(L);
-            gh->setMacroText(id, body);
-            gh->setMacroMeta(id, name, icon);
-            lua_pushnumber(L, id);
+            lua_pushnumber(L, macroIndexOf(gh, id));
             return 1;
         }},
-                // EditMacro(id, name, icon, body) → id
+                // EditMacro(index, name, icon, body) → index
+                //
+                // Each part is optional and nil means "leave it": the frame
+                // renames with only a name and saves the text with only a body.
+                // The index that comes back is the macro's new place, which a
+                // rename can change.
                 {"EditMacro",           [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const uint32_t id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (!gh || id == 0) return luaReturnNil(L);
-            const char* name = luaL_optstring(L, 2, nullptr);
-            const char* icon = luaL_optstring(L, 3, nullptr);
-            const char* body = luaL_optstring(L, 4, nullptr);
-            // Each part is optional and nil means "leave it": EditMacro is
-            // called with only a name when a macro is renamed, and writing the
-            // other two as empty would erase the macro being renamed.
-            if (body) gh->setMacroText(id, body);
-            gh->setMacroMeta(id, name ? name : gh->getMacroName(id),
-                                 icon ? icon : gh->getMacroIcon(id));
-            lua_pushnumber(L, id);
+            const game::Macro* macro = macroFromArg(L, 1);
+            if (!gh || !macro) return luaReturnNil(L);
+            const uint32_t id = macro->id;
+            std::optional<std::string> name, icon, body;
+            if (lua_isstring(L, 2)) name = lua_tostring(L, 2);
+            if (!lua_isnoneornil(L, 3)) icon = macroIconArg(L, 3);
+            if (lua_isstring(L, 4)) body = lua_tostring(L, 4);
+            gh->accountData().editMacro(id, name ? &*name : nullptr,
+                                        (icon && !icon->empty()) ? &*icon : nullptr,
+                                        body ? &*body : nullptr);
+            lua_pushnumber(L, macroIndexOf(gh, id));
             return 1;
         }},
-                // DeleteMacro(index) - and the rest of the half shifts down.
-                //
-                // Every macro verb here takes what WoW calls an index and what
-                // this client stores as an id, and the two are the same number
-                // only while the slots are dense. CreateMacro fills the first
-                // free slot, so they start dense; this emptied one and left a
-                // hole, and from then on the two disagreed.
-                //
-                // What that costs: with macros in slots 1, 2 and 3, deleting
-                // the second leaves 1 and 3. GetNumMacros counts two, so the
-                // macro frame asks for slots 1 and 2 - one macro, one blank
-                // row, and the macro in slot 3 invisible and unreachable.
-                //
-                // Compacting is also what WoW does. Deleting a macro there
-                // shifts the ones after it down, which is why a macro on an
-                // action bar can move when an earlier one is deleted; matching
-                // that is more faithful than keeping a hole, and it is the
-                // assumption getMacroIds already documents.
+                // DeleteMacro(index or name) - the ones after it move up a
+                // place, as they do in the frame, and the buttons holding it
+                // are emptied.
                 {"DeleteMacro",         [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            const uint32_t id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (!gh || id == 0) return 0;
-            // Which half this slot belongs to; the two do not shift into
-            // each other.
-            const uint32_t first = (id >= 37u) ? 37u : 1u;
-            const uint32_t last  = (id >= 37u) ? 54u : 36u;
-            if (id < first || id > last) return 0;
-            for (uint32_t slot = id; slot < last; ++slot) {
-                const std::string next = gh->getMacroText(slot + 1);
-                if (next.empty()) {
-                    gh->setMacroText(slot, "");
-                    gh->setMacroMeta(slot, "", "");
-                    break;
-                }
-                gh->setMacroText(slot, next);
-                gh->setMacroMeta(slot, gh->getMacroName(slot + 1),
-                                       gh->getMacroIcon(slot + 1));
-            }
-            // The last slot in the half is never written by the loop above.
-            gh->setMacroText(last, "");
-            gh->setMacroMeta(last, "", "");
+            const game::Macro* macro = macroFromArg(L, 1);
+            if (gh && macro) gh->accountData().deleteMacro(macro->id);
             return 0;
         }},
                 // Saved as each change is made, so this has nothing to do.
                 {"SaveMacros",          [](lua_State* L) -> int { (void)L; return 0; }},
-                // PickupMacro(id) - onto the cursor, so it can be dropped on
-                // an action slot. The slot type already existed and the packet
-                // that sets it already went out for spells and items; a macro
-                // was simply never something the cursor could hold.
+                // PickupMacro(index or name) - onto the cursor, so it can be
+                // dropped on an action slot. What the cursor holds is the
+                // macro's id, which is what the slot will.
                 {"PickupMacro",         [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const uint32_t id = static_cast<uint32_t>(luaL_optnumber(L, 1, 0));
-            if (!gh || id == 0 || gh->getMacroText(id).empty()) return 0;
+            const game::Macro* macro = macroFromArg(L, 1);
+            if (!macro) return 0;
             setCursorType(L, CursorType::MACRO);
-            s_cursorId = id;
-            std::string icon = gh->getMacroIcon(id);
-            if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
-            wowee::ui::frameXmlSetCursorItem(icon);
+            s_cursorId = macro->id;
+            wowee::ui::frameXmlSetCursorItem(macroTexture(*macro));
             return 0;
         }},
                 {"GetTradePlayerItemInfo", lua_GetTradePlayerItemInfo},
@@ -2258,14 +2423,14 @@ void registerActionLuaAPI(lua_State* L) {
                 {"ConsoleAddMessage", [](lua_State* L) -> int { (void)L; return 0; }},
                 // GetCurrentBindingSet() - which set SaveBindings should write.
                 //
-                // 1 is account-wide and 2 is per character. This client keeps
-                // one set of bindings, so it is always the first. It was
-                // missing rather than stubbed, and interfaceoptionspanels.lua
-                // calls SaveBindings(GetCurrentBindingSet()) from three
-                // separate option handlers - so changing an option would have
-                // thrown rather than saved.
+                // 1 is account-wide and 2 is per character: the character's
+                // when its account data holds a set of its own. The key
+                // binding frame ticks "Character Specific Key Bindings" from
+                // this, and interfaceoptionspanels.lua calls
+                // SaveBindings(GetCurrentBindingSet()) from three option
+                // handlers.
                 {"GetCurrentBindingSet", [](lua_State* L) -> int {
-            lua_pushnumber(L, 1); return 1;
+            lua_pushnumber(L, currentBindingSet(getGameHandler(L))); return 1;
         }},
                 {"SaveBindings",        lua_SaveBindings},
                 {"LoadBindings",        lua_LoadBindings},
