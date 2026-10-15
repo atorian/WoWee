@@ -109,6 +109,9 @@ public:
     /// Run the game's frame until everything received has been handled.
     /// Fails the test if it never is.
     void pump();
+    /// Let this much game time pass, a frame at a time - for the timers the
+    /// game counts down by the frame's delta.
+    void advance(float seconds);
 
     /// What the game sent, as logical opcodes, in order.
     [[nodiscard]] std::vector<game::LogicalOpcode> sentOpcodes() const;

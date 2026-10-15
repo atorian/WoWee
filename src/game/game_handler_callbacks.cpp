@@ -850,8 +850,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
 
         questHandler_->pendingQuestAcceptTimeoutsRef().clear();
         questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
-        // QuestHandler's: this cleared a GameHandler copy nothing filled, so
-        // a quest whose query was in flight at logout was never asked again.
+        // QuestHandler's set (this cleared a GameHandler copy nothing filled).
+        // selectCharacter has already cleared it with the rest of the quest
+        // state, so this is the world entry saying the same thing again, not
+        // the only place a stale query is forgotten.
         questHandler_->clearPendingQuestQueries();
         pendingLoginQuestResync_ = true;
         pendingLoginQuestResyncTimeout_ = 10.0f;

@@ -146,6 +146,13 @@ void GameHarness::pump() {
     fail("packets still queued after 1000 frames");
 }
 
+void GameHarness::advance(float seconds) {
+    constexpr float kFrame = 1.0f / 60.0f;
+    for (float passed = 0.0f; passed < seconds; passed += kFrame) {
+        game_->update(kFrame);
+    }
+}
+
 std::vector<game::LogicalOpcode> GameHarness::sentOpcodes() const {
     std::vector<game::LogicalOpcode> out;
     if (!connection_) return out;
