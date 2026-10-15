@@ -11,6 +11,8 @@
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
+#include "core/frame_plan.hpp"
+#include "core/frame_pacer.hpp"
 #include "core/world_transition_queue.hpp"
 #include "core/cvar_store.hpp"
 #include "core/config_paths.hpp"
@@ -69,19 +71,6 @@ class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
 class RealmPatchSync;
-
-enum class AppState {
-    AUTHENTICATION,
-    REALM_SELECTION,
-    CHARACTER_CREATION,
-    CHARACTER_SELECTION,
-    IN_GAME,
-    DISCONNECTED,
-    /// Nothing extracted yet, so the asset builder is shown instead of a
-    /// login nobody can get through. Last rather than first because the log
-    /// prints these by number, and inserting one renumbers every old line.
-    FIRST_RUN
-};
 
 class Application {
     friend class WorldLoader;
@@ -208,7 +197,14 @@ public:
     void setActiveMapName(const std::string& name);
 
 private:
-    void update(float deltaTime);
+    void runFrame(std::chrono::steady_clock::time_point frameStart);
+    void beginPhase(Phase phase) { currentPhase_ = phase; }
+    void pumpInput(float deltaTime);
+    void prepareFrame();
+    void dispatchNetwork(float deltaTime, const FramePlan& plan);
+    void updateGame(float deltaTime, const FramePlan& plan);
+    void syncPresentation(float deltaTime, const FramePlan& plan);
+    void beginInterface(float deltaTime);
 
     /// Tell the renderer what the game knows about the world - the zone,
     /// the realm's clock and weather, the player's state - before it updates.
@@ -237,7 +233,7 @@ private:
     /// once at spawn and would otherwise stay there while its target circle
     /// follows the entity, which reads as a ring sliding off a still NPC.
     void syncRenderInstancesToEntities(float deltaTime);
-    void render();
+    void renderFrame(FrameView view);
     void performLogoutToLogin(bool keepConnection);
     void processWorldTransitions();
 
@@ -467,6 +463,8 @@ private:
 
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
+    Phase currentPhase_ = Phase::Idle;
+    FramePacer pacer_;
     /// Why the player is back at the login screen, when it was not their idea.
     std::string disconnectNotice_;
     bool playerCharacterSpawned = false;

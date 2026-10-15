@@ -387,7 +387,7 @@ void UIManager::update([[maybe_unused]] float deltaTime) {
     ImGui::NewFrame();
 }
 
-void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, game::GameHandler* gameHandler) {
+void UIManager::render(core::FrameView view, auth::AuthHandler* authHandler, game::GameHandler* gameHandler) {
     if (!imguiInitialized) return;
 
     // Two ~150-200ms spikes land here every launch, before login. Decoding the
@@ -397,20 +397,20 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
     const auto uiRenderStart = std::chrono::steady_clock::now();
     struct StateReport {
         std::chrono::steady_clock::time_point start;
-        core::AppState state;
+        core::FrameView view;
         ~StateReport() {
             const float ms = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - start).count();
             if (ms > 50.0f) {
-                LOG_WARNING("SLOW UI screen render: ", ms, "ms in appState=",
-                            static_cast<int>(state));
+                LOG_WARNING("SLOW UI screen render: ", ms, "ms in view=",
+                            static_cast<int>(view));
             }
         }
-    } stateReport{.start = uiRenderStart, .state = appState};
+    } stateReport{.start = uiRenderStart, .view = view};
 
     // Render appropriate screen based on application state
-    switch (appState) {
-        case core::AppState::FIRST_RUN:
+    switch (view) {
+        case core::FrameView::FirstRun:
 #ifdef WOWEE_HAVE_ASSET_PANEL
             // The same backdrop the other pre-game screens draw, so this does
             // not look like a different program.
@@ -418,13 +418,13 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             if (firstRunScreen) firstRunScreen->render();
 #endif
             break;
-        case core::AppState::AUTHENTICATION:
+        case core::FrameView::Login:
             if (authHandler) {
                 authScreen->render(*authHandler);
             }
             break;
 
-        case core::AppState::REALM_SELECTION:
+        case core::FrameView::Realms:
             authScreen->stopLoginMusic();
             // The realm and character screens are drawn on the same paper the
             // login screen is, so they keep its backdrop rather than dropping
@@ -435,7 +435,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             }
             break;
 
-        case core::AppState::CHARACTER_CREATION:
+        case core::FrameView::CharacterCreation:
             authScreen->stopLoginMusic();
             authScreen->drawBackdrop();
             if (gameHandler) {
@@ -443,7 +443,7 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             }
             break;
 
-        case core::AppState::CHARACTER_SELECTION:
+        case core::FrameView::Characters:
             authScreen->stopLoginMusic();
             authScreen->drawBackdrop();
             if (gameHandler) {
@@ -451,14 +451,14 @@ void UIManager::render(core::AppState appState, auth::AuthHandler* authHandler, 
             }
             break;
 
-        case core::AppState::IN_GAME:
+        case core::FrameView::World:
             authScreen->stopLoginMusic();
             if (gameHandler) {
                 gameScreen->render(*gameHandler);
             }
             break;
 
-        case core::AppState::DISCONNECTED:
+        case core::FrameView::Disconnected:
             // Nothing draws here, and nothing reaches here: no code sets this
             // state. A dropped world connection goes through
             // Application's transition phase, which tears the world down

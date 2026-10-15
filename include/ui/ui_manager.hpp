@@ -19,7 +19,7 @@ namespace wowee {
 namespace pipeline { class AssetManager; }
 
 // Forward declarations
-namespace core { class Window; class AppearanceComposer; enum class AppState; }
+namespace core { class Window; class AppearanceComposer; enum class AppState; enum class FrameView; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; }
 
@@ -82,7 +82,7 @@ public:
      * @param authHandler Authentication handler reference
      * @param gameHandler Game handler reference
      */
-    void render(core::AppState appState, auth::AuthHandler* authHandler, game::GameHandler* gameHandler);
+    void render(core::FrameView view, auth::AuthHandler* authHandler, game::GameHandler* gameHandler);
 
     /**
      * Process SDL event for ImGui
