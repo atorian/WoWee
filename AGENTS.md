@@ -60,6 +60,30 @@
   failure its own result, log it once, and stop retrying.
 - Log a failure once per id/path, not once per frame.
 
+## Tests test behaviour
+
+A test says what the code does in a situation: given this input or this state,
+the game sends this packet, a reader sees this value, the interface is told
+this, this is drawn. It must fail when that behaviour is wrong - and pass
+whatever the code looks like inside.
+
+- **No tests of constants.** Asserting that an enum value, a table entry, a
+  count or a define equals a number (`CHECK(SPELL_MOD_OP_COUNT == 32)`) copies
+  the source into the test. It fails only when someone edits the constant, and
+  then they edit the test too. If a value must agree with the server or the
+  data, test what the value does: feed the packet or the DBC row that carries
+  it and check the behaviour that follows.
+- **No tautologies.** No test that computes its expected value with the code
+  under test, sets a field and reads it back through a plain setter and
+  getter, restates the implementation line by line, or checks what the
+  compiler already guarantees (types, sizes, that a function exists).
+- **Through the front door.** Drive the code the way its callers do - packets
+  into the game (`GameHarness`), a scene into the renderer (`scene_render`), a
+  call on the public API - and read what its callers read. Not private fields,
+  not internal steps that could change while the behaviour stays right.
+- **A test for a bug fails first.** Run it against the bug before the fix and
+  see it fail; a test that never failed has not shown it can.
+
 ## Layers
 
 Dependencies point one way - who may include whom:
