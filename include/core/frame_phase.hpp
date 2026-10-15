@@ -3,7 +3,9 @@
 #include "core/frame_plan.hpp"
 #include "core/logger.hpp"
 
-#include <stdexcept>
+#include <cstdlib>
+#include <mutex>
+#include <set>
 #include <string>
 
 namespace wowee::core {
@@ -20,19 +22,21 @@ private:
     Phase previous_;
 };
 
-inline void requirePhase(Phase current, Phase expected, const char* operation) {
-    if (current == expected) return;
-    const std::string error = std::string(operation) + " requires phase " + phaseName(expected) +
-                              "; current phase is " + phaseName(current);
-    LOG_ERROR(error);
-    throw std::logic_error(error);
-}
-
-inline void requireLuaPhase(Phase current, const char* operation) {
-    if (current != Phase::Render) return;
-    const std::string error = std::string("Lua execution during Render: ") + operation;
-    LOG_ERROR(error);
-    throw std::logic_error(error);
+[[nodiscard]] inline bool requirePhase(Phase current, Phase expected, const char* operation) {
+    if (current == expected) return true;
+    static std::mutex mutex;
+    static std::set<std::pair<std::string, Phase>> reported;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (reported.emplace(operation, current).second) {
+            LOG_ERROR(operation, " requires phase ", phaseName(expected),
+                      "; current phase is ", phaseName(current));
+        }
+    }
+#if !defined(NDEBUG) || (defined(WOWEE_PHASE_CHECKS_FATAL) && WOWEE_PHASE_CHECKS_FATAL)
+    std::abort();
+#endif
+    return false;
 }
 
 } // namespace wowee::core

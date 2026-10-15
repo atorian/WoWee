@@ -21,6 +21,7 @@
 #include <SDL3/SDL.h>
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_handler_globals.hpp"
+#include "addons/lua_event_args.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "addons/toc_parser.hpp"
 #include "core/window.hpp"
@@ -5753,6 +5754,7 @@ bool LuaEngine::initialize() {
     lua_pushlightuserdata(L_, this);
     lua_setfield(L_, LUA_REGISTRYINDEX, "wowee_lua_engine");
 
+    setLuaServices(luaServices_);
     registerCoreAPI();
     registerEventAPI();
 
@@ -8852,50 +8854,6 @@ void LuaEngine::registerEventAPI() {
     lua_setglobal(L_, "__WoweeEvents");
 }
 
-namespace {
-/// Pushes an event argument with the type WoW gives it.
-///
-/// Every argument crosses this boundary as a string, and some of them are
-/// numbers on the other side: ChatFrame_MessageEventHandler does
-/// `if (arg8 > 0)`, and comparing a string with a number is not false in Lua,
-/// it is an error that takes the handler down - which for chat is every
-/// message. Only a plain integer converts, so a name, a unit id and a hex guid
-/// all stay strings.
-void pushEventArg(lua_State* L, const std::string& arg) {
-    // The one argument that is not text: see kEventNil. A false boolean has no
-    // spelling as a string, and Lua treats every string and every number as
-    // true, so without this an event could not carry one.
-    if (arg == wowee::game::kEventNil) { lua_pushnil(L); return; }
-    if (!arg.empty() && arg.size() < 12) {
-        size_t at = (arg[0] == '-') ? 1 : 0;
-        if (at < arg.size()) {
-            bool digits = true;
-            // One decimal point is still a number. UPDATE_TICKET carries ages
-            // and wait times measured in days, all of them fractions of one,
-            // and the help frame compares them against zero - as a string that
-            // is the same error this exists to avoid, not a wrong answer.
-            int points = 0;
-            for (size_t i = at; i < arg.size(); ++i) {
-                if (arg[i] == '.' && points == 0 && i != at && i + 1 < arg.size()) {
-                    ++points;
-                    continue;
-                }
-                if (arg[i] < '0' || arg[i] > '9') { digits = false; break; }
-            }
-            // "007" is not a number anyone meant; a leading zero is a string,
-            // except the one in front of a decimal point.
-            const bool canonical = digits &&
-                (arg.size() - at == 1 || arg[at] != '0' ||
-                 (points == 1 && arg[at + 1] == '.'));
-            if (canonical) {
-                lua_pushnumber(L, std::stod(arg));
-                return;
-            }
-        }
-    }
-    lua_pushstring(L, arg.c_str());
-}
-}  // namespace
 
 void LuaEngine::fireEvent(const std::string& eventName,
                            const std::vector<std::string>& args) {
@@ -11431,7 +11389,6 @@ void LuaEngine::drainPendingTextChanged() {
 }
 
 void LuaEngine::dispatchOnUpdate(float elapsed) {
-    if (L_) checkLuaExecution(L_, "OnUpdate");
     // Asked for by the check, and answered here because only this side can ask
     // the interface anything.
     if (ui::frameXmlTakeProbeRequest()) runInterfaceProbe();
@@ -11728,7 +11685,8 @@ bool LuaEngine::loadSavedVariables(const std::string& path) {
     if (!f.is_open()) return false; // No saved data yet - not an error
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (content.empty()) return true;
-    int err = luaL_dostring(L_, content.c_str());
+    int err = luaL_loadstring(L_, content.c_str());
+    if (err == 0) err = checkedLuaCall(L_, 0, LUA_MULTRET, 0, "saved variables");
     if (err != 0) {
         LOG_WARNING("LuaEngine: error loading saved variables from '", path, "': ",
                     lua_tostring(L_, -1));
@@ -11885,7 +11843,7 @@ struct BudgetGuard {
 } // namespace
 
 void LuaEngine::bootstrap(const char* code) {
-    if (luaL_dostring(L_, code) == 0) return;
+    if (luaL_loadstring(L_, code) == 0 && checkedLuaCall(L_, 0, LUA_MULTRET, 0, "interface diagnostics") == 0) return;
     const char* e = lua_tostring(L_, -1);
     const std::string head(code, std::min<size_t>(70, std::strlen(code)));
     LOG_ERROR("LuaEngine: bootstrap chunk failed: ", e ? e : "?",

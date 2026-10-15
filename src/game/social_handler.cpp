@@ -550,8 +550,8 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         inspectResult_.honorYesterdayContribution = packet.readUInt32();
         inspectResult_.honorLifetimeKills         = packet.readUInt32();
         inspectResult_.hasHonorData = true;
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("INSPECT_HONOR_UPDATE", {});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("INSPECT_HONOR_UPDATE", {});
     };
     table[Opcode::SMSG_INSPECT_RESULTS_UPDATE] = [this](network::Packet& packet) { handleInspectResults(packet); };
 
@@ -565,9 +565,9 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         partyData.leaderGuid = 0;
         owner_.addUIError("Your party has been disbanded.");
         owner_.addSystemChatMessage("Your party has been disbanded.");
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
-            owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("GROUP_ROSTER_UPDATE", {});
+            owner_.fireAddonEvent("PARTY_MEMBERS_CHANGED", {});
         }
     };
     table[Opcode::SMSG_GROUP_CANCEL] = [this](network::Packet& /*packet*/) {
@@ -599,8 +599,8 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         owner_.addSystemChatMessage(readyCheckInitiator_.empty()
             ? "Ready check initiated!"
             : readyCheckInitiator_ + " initiated a ready check!");
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("READY_CHECK", {readyCheckInitiator_});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("READY_CHECK", {readyCheckInitiator_});
     };
     table[Opcode::MSG_RAID_READY_CHECK_CONFIRM] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(9)) { packet.skipAll(); return; }
@@ -627,10 +627,10 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
             std::snprintf(rbuf, sizeof(rbuf), "%s is %s.", rname.c_str(), isReady ? "Ready" : "Not Ready");
             owner_.addSystemChatMessage(rbuf);
         }
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             char guidBuf[32];
             snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)respGuid);
-            owner_.addonEventCallbackRef()("READY_CHECK_CONFIRM", {guidBuf, isReady ? "1" : "0"});
+            owner_.fireAddonEvent("READY_CHECK_CONFIRM", {guidBuf, isReady ? "1" : "0"});
         }
     };
     table[Opcode::MSG_RAID_READY_CHECK_FINISHED] = [this](network::Packet& /*packet*/) {
@@ -642,7 +642,7 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         readyCheckReadyCount_ = 0;
         readyCheckNotReadyCount_ = 0;
         readyCheckResults_.clear();
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("READY_CHECK_FINISHED", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("READY_CHECK_FINISHED", {});
     };
     table[Opcode::SMSG_RAID_INSTANCE_INFO] = [this](network::Packet& packet) { handleRaidInstanceInfo(packet); };
 
@@ -655,12 +655,12 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         owner_.raiseUiError("You are out of the duel area!");
         // The interface runs the ten-second countdown to a forfeit off this
         // pair; the message alone says it once and never counts.
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_OUTOFBOUNDS", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("DUEL_OUTOFBOUNDS", {});
     };
     table[Opcode::SMSG_DUEL_INBOUNDS] = [this](network::Packet& /*packet*/) {
         // Stops that countdown. Handled as a no-op before, so a duellist who
         // stepped back inside kept a timer that was no longer true.
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_INBOUNDS", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("DUEL_INBOUNDS", {});
     };
     table[Opcode::SMSG_DUEL_COUNTDOWN] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
@@ -955,8 +955,8 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         std::string name = owner_.getLfgDungeonName(dungeonId);
         if (name.empty()) name = "your dungeon";
         owner_.addSystemChatMessage("Dungeon Finder: You may continue " + name + ".");
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("LFG_OFFER_CONTINUE",
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("LFG_OFFER_CONTINUE",
                                            {name, std::to_string(dungeonId),
                                             std::to_string(typeId)});
         }
@@ -984,8 +984,8 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
         //
         // Booleans through eventBool: "0" is a number and true in Lua, so a
         // false argument in front of a true one cannot be spelled as text.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("LFG_ROLE_CHECK_ROLE_CHOSEN", {
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("LFG_ROLE_CHECK_ROLE_CHOSEN", {
                 pName,
                 eventBool((roles & 0x02) != 0),
                 eventBool((roles & 0x04) != 0),
@@ -1154,10 +1154,10 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
             LOG_INFO("SMSG_INSPECT_RESULTS_UPDATE (TBC gear): ", playerName, " has gear in ",
                      std::count_if(items.begin(), items.end(),
                                    [](uint32_t e) { return e != 0; }), "/19 slots");
-            if (owner_.addonEventCallbackRef()) {
+            if (owner_.hasAddonEventListener()) {
                 char guidBuf[32];
                 snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)guid);
-                owner_.addonEventCallbackRef()("INSPECT_READY", {guidBuf});
+                owner_.fireAddonEvent("INSPECT_READY", {guidBuf});
                 // INSPECT_READY is a later expansion's name and nothing in this
                 // interface listens for it. The inspect paperdoll refreshes on
                 // UNIT_INVENTORY_CHANGED for the unit it is showing, so the gear
@@ -1167,7 +1167,7 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                 // the target has no token for the interface to match against.
                 const std::string inspectUnit = owner_.guidToUnitId(guid);
                 if (!inspectUnit.empty()) {
-                    owner_.addonEventCallbackRef()("UNIT_INVENTORY_CHANGED", {inspectUnit});
+                    owner_.fireAddonEvent("UNIT_INVENTORY_CHANGED", {inspectUnit});
                 }
             }
             return;
@@ -1224,13 +1224,13 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         LOG_INFO("SMSG_INSPECT_TALENT (TBC): ", playerName,
                  " gearCached=", (gearIt != owner_.inspectedPlayerItemEntriesRef().end() ? "yes" : "no"),
                  " payload bytes remaining=", packet.getRemainingSize());
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             char guidBuf[32];
             snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)guid);
-            owner_.addonEventCallbackRef()("INSPECT_READY", {guidBuf});
+            owner_.fireAddonEvent("INSPECT_READY", {guidBuf});
             const std::string inspectUnit = owner_.guidToUnitId(guid);
             if (!inspectUnit.empty()) {
-                owner_.addonEventCallbackRef()("UNIT_INVENTORY_CHANGED", {inspectUnit});
+                owner_.fireAddonEvent("UNIT_INVENTORY_CHANGED", {inspectUnit});
             }
         }
         return;
@@ -1390,19 +1390,19 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
 
     LOG_INFO("Inspect results for ", playerName, ": ", totalTalents, " talents, ",
              unspentTalents, " unspent, ", (int)talentGroupCount, " specs");
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         char guidBuf[32];
         snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)guid);
-        owner_.addonEventCallbackRef()("INSPECT_READY", {guidBuf});
+        owner_.fireAddonEvent("INSPECT_READY", {guidBuf});
         // The same packet carries the talents, and the talent tab of the
         // inspect window redraws on this event alone. Only INSPECT_READY was
         // fired, which is what the gear tab listens for - so inspecting anyone
         // filled the paperdoll and left the talent tab blank, however
         // completely the ranks above had been parsed.
-        owner_.addonEventCallbackRef()("INSPECT_TALENT_READY", {});
+        owner_.fireAddonEvent("INSPECT_TALENT_READY", {});
         const std::string inspectUnit = owner_.guidToUnitId(guid);
         if (!inspectUnit.empty()) {
-            owner_.addonEventCallbackRef()("UNIT_INVENTORY_CHANGED", {inspectUnit});
+            owner_.fireAddonEvent("UNIT_INVENTORY_CHANGED", {inspectUnit});
         }
     }
 }
@@ -1846,7 +1846,7 @@ void SocialHandler::handleDuelRequested(network::Packet& packet) {
     pendingDuelRequest_ = true;
     owner_.addSystemChatMessage(duelChallengerName_ + " challenges you to a duel!");
     owner_.eventBus().publish(events::DuelRequested{duelChallengerGuid_, duelChallengerName_});
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_REQUESTED", {duelChallengerName_});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("DUEL_REQUESTED", {duelChallengerName_});
 }
 
 void SocialHandler::handleDuelComplete(network::Packet& packet) {
@@ -1855,7 +1855,7 @@ void SocialHandler::handleDuelComplete(network::Packet& packet) {
     pendingDuelRequest_ = false;
     duelCountdownMs_ = 0;
     if (!started) owner_.addSystemChatMessage("The duel was cancelled.");
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("DUEL_FINISHED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("DUEL_FINISHED", {});
 }
 
 void SocialHandler::handleDuelWinner(network::Packet& packet) {
@@ -1973,9 +1973,9 @@ void SocialHandler::leaveGroup() {
     auto packet = GroupDisbandPacket::build();
     owner_.getSocket()->send(packet);
     partyData = GroupListData{};
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
-        owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("GROUP_ROSTER_UPDATE", {});
+        owner_.fireAddonEvent("PARTY_MEMBERS_CHANGED", {});
     }
 }
 
@@ -2235,8 +2235,8 @@ void SocialHandler::handleGroupInvite(network::Packet& packet) {
     owner_.addSystemChatMessage(data.inviterName + " has invited you to a group.");
     owner_.addUIError(data.inviterName + " has invited you to join a group.");
     owner_.eventBus().publish(events::GroupInviteReceived{data.inviterName});
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("PARTY_INVITE_REQUEST", {data.inviterName});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("PARTY_INVITE_REQUEST", {data.inviterName});
 }
 
 void SocialHandler::handleGroupDecline(network::Packet& packet) {
@@ -2283,29 +2283,29 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
         // the method to decide whether to offer the master-looter menu, and
         // they reread it on this - so the change was announced to the player
         // and not to the interface standing next to them.
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("PARTY_LOOT_METHOD_CHANGED", {});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("PARTY_LOOT_METHOD_CHANGED", {});
     }
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
-        owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("GROUP_ROSTER_UPDATE", {});
+        owner_.fireAddonEvent("PARTY_MEMBERS_CHANGED", {});
         // The roles came with this roster and UnitGroupRolesAssigned reads them
         // straight out of it. The player frame draws its tank or healer badge
         // on this event and nothing else, so the roles were parsed, readable,
         // and never shown.
-        owner_.addonEventCallbackRef()("PLAYER_ROLES_ASSIGNED", {});
+        owner_.fireAddonEvent("PLAYER_ROLES_ASSIGNED", {});
         if (groupIsRaid(partyData.groupType))
-            owner_.addonEventCallbackRef()("RAID_ROSTER_UPDATE", {});
+            owner_.fireAddonEvent("RAID_ROSTER_UPDATE", {});
     }
 }
 
 void SocialHandler::handleGroupUninvite(network::Packet& packet) {
     (void)packet;
     partyData = GroupListData{};
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
-        owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
-        owner_.addonEventCallbackRef()("RAID_ROSTER_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("GROUP_ROSTER_UPDATE", {});
+        owner_.fireAddonEvent("PARTY_MEMBERS_CHANGED", {});
+        owner_.fireAddonEvent("RAID_ROSTER_UPDATE", {});
     }
     owner_.addUIError("You have been removed from the group.");
     owner_.addSystemChatMessage("You have been removed from the group.");
@@ -2448,7 +2448,7 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
 
     member->hasPartyStats = true;
 
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         std::string unitId;
         if (groupIsRaid(partyData.groupType)) {
             for (size_t i = 0; i < partyData.members.size(); ++i) {
@@ -2463,12 +2463,12 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
             }
         }
         if (!unitId.empty()) {
-            if (updateFlags & (0x0002 | 0x0004)) owner_.addonEventCallbackRef()("UNIT_HEALTH", {unitId});
-            if (updateFlags & (0x0010 | 0x0020)) owner_.addonEventCallbackRef()("UNIT_POWER", {unitId});
+            if (updateFlags & (0x0002 | 0x0004)) owner_.fireAddonEvent("UNIT_HEALTH", {unitId});
+            if (updateFlags & (0x0010 | 0x0020)) owner_.fireAddonEvent("UNIT_POWER", {unitId});
             if (updateFlags & 0x0200) {
-                owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
+                owner_.fireAddonEvent("UNIT_AURA", {unitId});
                 // The 1.12 name, which carries no unit.
-                if (unitId == "player") owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
+                if (unitId == "player") owner_.fireAddonEvent("PLAYER_AURAS_CHANGED", {});
             }
         }
         // Fired without arguments, as the retail client does - the interface
@@ -2476,7 +2476,7 @@ void SocialHandler::handlePartyMemberStats(network::Packet& packet, bool isFull)
         // gated on unitId: the player's own stats resolve to no unit token,
         // and a member dropping is worth announcing either way.
         if (onlineChanged) {
-            owner_.addonEventCallbackRef()(
+            owner_.fireAddonEvent(
                 member->isOnline ? "PARTY_MEMBER_ENABLE" : "PARTY_MEMBER_DISABLE", {});
         }
     }
@@ -2533,18 +2533,18 @@ void SocialHandler::handleGuildRoster(network::Packet& packet) {
         // the id is on the player now that the server has moved them.
         if (const uint32_t id = ownGuildId()) queryGuildInfo(id);
     }
-    if (newlyIn && owner_.addonEventCallbackRef()) {
+    if (newlyIn && owner_.hasAddonEventListener()) {
         // What the social window listens for to rebuild its guild tab. Without
         // it the frame has a roster and no idea it is meant to draw one.
-        owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
+        owner_.fireAddonEvent("PLAYER_GUILD_UPDATE", {});
     }
     // False: the roster in hand is the fresh one, so nothing should ask again.
     // The argument is "you may request a roster", and every reader answers it
     // with `if arg1 then GuildRoster() end` - friendsframe, the guild bank and
     // the calendar all do exactly that. Sending true here would have each of
     // them request a roster, whose reply would fire this again, forever.
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("GUILD_ROSTER_UPDATE", {eventBool(false)});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("GUILD_ROSTER_UPDATE", {eventBool(false)});
 }
 
 // CMSG_GUILD_RANK rewrites the rank whole: id, rights, name, gold per day, then
@@ -2603,7 +2603,7 @@ void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
         for (const auto& rankName : data.rankNames) guildRankNames_.push_back(rankName);
         if (wasUnknown && !guildName_.empty()) {
             owner_.addSystemChatMessage("Guild: <" + guildName_ + ">");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PLAYER_GUILD_UPDATE", {});
         }
     }
 }
@@ -2669,7 +2669,7 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             guildRankNames_.clear();
             guildRoster_ = GuildRosterData{};
             hasGuildRoster_ = false;
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PLAYER_GUILD_UPDATE", {});
             break;
         case GuildEvent::SIGNED_ON:
             // Only announce a real offline→online transition. On login the server floods
@@ -2754,10 +2754,10 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
         data.eventType == GuildEvent::RANK_UPDATED ||
         data.eventType == GuildEvent::RANK_DELETED);
 
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         switch (data.eventType) {
             case GuildEvent::MOTD:
-                owner_.addonEventCallbackRef()("GUILD_MOTD", {data.numStrings >= 1 ? data.strings[0] : ""});
+                owner_.fireAddonEvent("GUILD_MOTD", {data.numStrings >= 1 ? data.strings[0] : ""});
                 break;
             case GuildEvent::SIGNED_ON: case GuildEvent::SIGNED_OFF:
             case GuildEvent::PROMOTION: case GuildEvent::DEMOTION:
@@ -2772,30 +2772,30 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
                 // covered: the switch below does not request for those, so a
                 // member who had just come online stayed grey until something
                 // else asked.
-                owner_.addonEventCallbackRef()("GUILD_ROSTER_UPDATE",
+                owner_.fireAddonEvent("GUILD_ROSTER_UPDATE",
                                                {eventBool(!clientWillRequest)});
                 break;
             // The bank panel's own events, which are what these types mean.
             // GuildBankFrame_OnEvent returns early unless the frame is
             // visible, so firing them while it is shut costs nothing.
             case GuildEvent::TABARD_CHANGED:
-                owner_.addonEventCallbackRef()("GUILDTABARD_UPDATE", {});
+                owner_.fireAddonEvent("GUILDTABARD_UPDATE", {});
                 break;
             case GuildEvent::BANK_BAG_SLOTS_CHANGED:
-                owner_.addonEventCallbackRef()("GUILDBANKBAGSLOTS_CHANGED", {});
+                owner_.fireAddonEvent("GUILDBANKBAGSLOTS_CHANGED", {});
                 break;
             case GuildEvent::BANK_TAB_PURCHASED:
             case GuildEvent::BANK_TAB_UPDATED:
             case GuildEvent::BANK_TAB_AND_MONEY:
                 // The money half of 18 went through setGuildBankMoney above,
                 // which fires GUILDBANK_UPDATE_MONEY when the figure moved.
-                owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_TABS", {});
+                owner_.fireAddonEvent("GUILDBANK_UPDATE_TABS", {});
                 break;
             case GuildEvent::BANK_TEXT_CHANGED:
                 // The tab, as the server counts them from zero and the panel
                 // counts them from one. It answers by querying the new text.
                 if (data.numStrings >= 1)
-                    owner_.addonEventCallbackRef()(
+                    owner_.fireAddonEvent(
                         "GUILDBANK_TEXT_CHANGED",
                         {std::to_string(std::strtol(data.strings[0].c_str(), nullptr, 10) + 1)});
                 break;
@@ -2819,8 +2819,8 @@ void SocialHandler::handleGuildInvite(network::Packet& packet) {
     pendingGuildInviterName_ = data.inviterName;
     pendingGuildInviteGuildName_ = data.guildName;
     owner_.addSystemChatMessage(data.inviterName + " has invited you to join " + data.guildName + ".");
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("GUILD_INVITE_REQUEST", {data.inviterName, data.guildName});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("GUILD_INVITE_REQUEST", {data.inviterName, data.guildName});
 }
 
 void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
@@ -2856,9 +2856,9 @@ void SocialHandler::handleGuildCommandResult(network::Packet& packet) {
         // The roster event carries false, which is the established contract
         // here: every reader answers a true with `if arg1 then GuildRoster()
         // end`, and the reply to that would fire this again without end.
-        if (membershipChanged && owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
-            owner_.addonEventCallbackRef()("GUILD_ROSTER_UPDATE", {eventBool(false)});
+        if (membershipChanged && owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("PLAYER_GUILD_UPDATE", {});
+            owner_.fireAddonEvent("GUILD_ROSTER_UPDATE", {eventBool(false)});
         }
         return;
     }
@@ -2907,8 +2907,8 @@ void SocialHandler::handlePetitionShowlist(network::Packet& packet) {
     // Two panels, one opcode: the guild registrar and the arena registrar are
     // told apart by which charter is on offer, not by what was sent. Firing
     // the arena event at a tabard designer put the wrong window on screen.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()(
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent(
             petitionIsGuildCharter_ ? "GUILD_REGISTRAR_SHOW" : "PETITION_VENDOR_SHOW", {});
     }
 }
@@ -2917,8 +2917,8 @@ void SocialHandler::closePetitionVendor() {
     if (!showPetitionDialog_) return;
     showPetitionDialog_ = false;
     petitionNpcGuid_ = 0;
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()(
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent(
             petitionIsGuildCharter_ ? "GUILD_REGISTRAR_CLOSED" : "PETITION_VENDOR_CLOSED", {});
     }
 }
@@ -2960,7 +2960,7 @@ void SocialHandler::handlePetitionQueryResponse(network::Packet& packet) {
     // everything above lands after it. Without this the charter keeps the
     // blank name and the placeholder count it opened with - the shape that
     // reads as "only right after reopening it".
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PETITION_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PETITION_SHOW", {});
 }
 
 void SocialHandler::handlePetitionShowSignatures(network::Packet& packet) {
@@ -2998,7 +2998,7 @@ void SocialHandler::handlePetitionShowSignatures(network::Packet& packet) {
     // stored above - showUI is what this client's own window reads - and the
     // interface's version was never told, so a charter could not be signed
     // through it.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PETITION_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PETITION_SHOW", {});
 }
 
 void SocialHandler::handlePetitionSignResults(network::Packet& packet) {
@@ -3145,7 +3145,7 @@ void SocialHandler::handleWho(network::Packet& packet) {
     // back. Every row was parsed and stored and only this client's own window
     // ever read them, so a /who through the interface filled a list nobody was
     // told about and the panel kept showing the previous search.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("WHO_LIST_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("WHO_LIST_UPDATE", {});
 }
 
 // ============================================================
@@ -3185,9 +3185,9 @@ void SocialHandler::handleFriendList(network::Packet& packet) {
     // "show" case as well as the "changed" case. SHOW additionally re-selects
     // the tab; UPDATE only refreshes the rows. A single friend going online
     // sends the status packet instead, and fires UPDATE alone.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("FRIENDLIST_UPDATE", {});
-        owner_.addonEventCallbackRef()("FRIENDLIST_SHOW", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("FRIENDLIST_UPDATE", {});
+        owner_.fireAddonEvent("FRIENDLIST_SHOW", {});
     }
 }
 
@@ -3221,10 +3221,10 @@ void SocialHandler::handleContactList(network::Packet& packet) {
         if (nit != owner_.getPlayerNameCache().end()) entry.name = nit->second;
         owner_.contactsRef().push_back(std::move(entry));
     }
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("FRIENDLIST_UPDATE", {});
-        owner_.addonEventCallbackRef()("FRIENDLIST_SHOW", {});
-        if (owner_.lastContactListMaskRef() & 0x2) owner_.addonEventCallbackRef()("IGNORELIST_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("FRIENDLIST_UPDATE", {});
+        owner_.fireAddonEvent("FRIENDLIST_SHOW", {});
+        if (owner_.lastContactListMaskRef() & 0x2) owner_.fireAddonEvent("IGNORELIST_UPDATE", {});
     }
 }
 
@@ -3308,7 +3308,7 @@ void SocialHandler::handleFriendStatus(network::Packet& packet) {
         case kEnemy:        owner_.addSystemChatMessage(playerName + " belongs to the other faction."); break;
         default: break;
     }
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("FRIENDLIST_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("FRIENDLIST_UPDATE", {});
 }
 
 void SocialHandler::handleRandomRoll(network::Packet& packet) {
@@ -3334,8 +3334,8 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
     if (data.result == 0) {
         if (data.instant) { owner_.addSystemChatMessage("Logging out..."); logoutCountdown_ = 0.0f; }
         else { owner_.addSystemChatMessage("Logging out in 20 seconds..."); logoutCountdown_ = 20.0f; }
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_LOGOUT", {});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("PLAYER_LOGOUT", {});
             // The timer the server just imposed, announced so the interface can
             // show it. UIParent answers PLAYER_CAMPING with the CAMP popup and
             // PLAYER_QUITING with QUIT, both of which count down and offer to
@@ -3346,7 +3346,7 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
             // Which of the two is the difference between /logout and /quit,
             // which this handler already keeps in exitAfterLogout_.
             if (!data.instant) {
-                owner_.addonEventCallbackRef()(
+                owner_.fireAddonEvent(
                     exitAfterLogout_ ? "PLAYER_QUITING" : "PLAYER_CAMPING", {});
             }
         }
@@ -3456,8 +3456,8 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
     // "enter battleground" prompt only for the queue it names - handed the
     // status, an invitation (2) to the first queue named the second, and the
     // prompt never came up however long the player had waited for it.
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(queueSlot + 1)});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("UPDATE_BATTLEFIELD_STATUS", {std::to_string(queueSlot + 1)});
 }
 
 void SocialHandler::handleBattlefieldList(network::Packet& packet) {
@@ -3577,8 +3577,8 @@ void SocialHandler::declineBattlefield(uint32_t queueSlot) {
                                           : "Left the queue for " + bgName + ".");
     // The minimap icon and the panel read the queues on this event; without
     // it they kept showing the queue until the server's next word.
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(clearSlot + 1)});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("UPDATE_BATTLEFIELD_STATUS", {std::to_string(clearSlot + 1)});
 }
 
 void SocialHandler::requestPvpLog() {
@@ -3629,9 +3629,9 @@ void SocialHandler::handleInstanceDifficulty(network::Packet& packet) {
         // minimap hangs a difficulty banner off its own corner and rereads
         // GetInstanceInfo on this, which answers from the value just stored,
         // so the banner was the one thing not told the difficulty had changed.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_DIFFICULTY_CHANGED", {});
-            owner_.addonEventCallbackRef()("UPDATE_INSTANCE_INFO", {});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("PLAYER_DIFFICULTY_CHANGED", {});
+            owner_.fireAddonEvent("UPDATE_INSTANCE_INFO", {});
         }
     }
 }
@@ -3665,7 +3665,7 @@ void SocialHandler::handleLfgJoinResult(network::Packet& packet) {
     // handleLfgUpdate fires for the same reason two handlers down. Without it
     // the state was right in this client and stale in the interface until some
     // other LFG packet happened along.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LFG_UPDATE", {});
 }
 
 // SMSG_LFG_PLAYER_INFO - what the random dungeons pay out, and what this
@@ -3714,9 +3714,9 @@ void SocialHandler::handleLfgPlayerInfo(network::Packet& packet) {
 
     LOG_INFO("SMSG_LFG_PLAYER_INFO: ", randomCount, " random dungeons, ",
              lfgLocks_.size(), " locked");
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LFG_LOCK_INFO_RECEIVED", {});
-        owner_.addonEventCallbackRef()("LFG_UPDATE_RANDOM_INFO", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LFG_LOCK_INFO_RECEIVED", {});
+        owner_.fireAddonEvent("LFG_UPDATE_RANDOM_INFO", {});
     }
 }
 
@@ -3756,8 +3756,8 @@ void SocialHandler::handleLfgQueueStatus(network::Packet& packet) {
     // counts up, and LFDSearchStatus_Update is reached from this event and no
     // other - so the numbers above changed every few seconds and the display
     // built on them never moved.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LFG_QUEUE_STATUS_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LFG_QUEUE_STATUS_UPDATE", {});
         // The queue state is set two lines above, and LFG_QUEUE_STATUS_UPDATE
         // is not the event that re-reads it: the minimap's dungeon eye is shown
         // by MiniMapLFG_UpdateIsShown, which asks GetLFGMode - which asks
@@ -3768,7 +3768,7 @@ void SocialHandler::handleLfgQueueStatus(network::Packet& packet) {
         // else behind it is a login or a reconnect already in the queue, where
         // this packet is what says so: the state was right and the eye was
         // never shown.
-        owner_.addonEventCallbackRef()("LFG_UPDATE", {});
+        owner_.fireAddonEvent("LFG_UPDATE", {});
     }
 }
 
@@ -3854,8 +3854,8 @@ void SocialHandler::handleLfgProposalUpdate(network::Packet& packet) {
     }
     // The proposal dialog is built from GetLFGProposal, which already answers
     // from this - it just had no way to know a proposal had arrived.
-    if (!owner_.addonEventCallbackRef()) return;
-    auto fire = owner_.addonEventCallbackRef();
+    if (!owner_.hasAddonEventListener()) return;
+    auto fire = [this](const std::string& event, const std::vector<std::string>& args) { owner_.fireAddonEvent(event, args); };
     fire("LFG_PROPOSAL_UPDATE", {});
 
     // UPDATE alone only refreshes a dialog already on screen.
@@ -3921,8 +3921,8 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
     else if (roleCheckState == 3) { lfgState_ = LfgState::None; owner_.addUIError("Dungeon Finder: Role check failed - missing required role."); owner_.addSystemChatMessage("Dungeon Finder: Role check failed - missing required role."); }
     else if (roleCheckState == 2) { lfgState_ = LfgState::RoleCheck; owner_.addSystemChatMessage("Dungeon Finder: Performing role check..."); }
     // Likewise GetLFGRoleUpdate, which reports the check in progress.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LFG_ROLE_CHECK_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LFG_ROLE_CHECK_UPDATE", {});
         // The role-check popup shows on one event and hides on another, and
         // neither was ever fired - so the interface's own popup could not
         // appear at all, whichever side is drawing it.
@@ -3931,7 +3931,7 @@ void SocialHandler::handleLfgRoleCheckUpdate(network::Packet& packet) {
         // Everything else is an ending: finished, missing a role, the wrong
         // roles between them, aborted, or someone picking none.
         constexpr uint32_t kRoleCheckBeginning = 2;
-        owner_.addonEventCallbackRef()(
+        owner_.fireAddonEvent(
             roleCheckState == kRoleCheckBeginning ? "LFG_ROLE_CHECK_SHOW"
                                                   : "LFG_ROLE_CHECK_HIDE", {});
     }
@@ -4118,7 +4118,7 @@ void SocialHandler::applyLfgUpdate(uint8_t updateType, bool extraInfo,
     }
 
     // Queue state changed - GetLFGInfoServer answers the new one.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LFG_UPDATE", {});
 }
 
 void SocialHandler::handleLfgPlayerReward(network::Packet& packet) {
@@ -4187,7 +4187,7 @@ void SocialHandler::handleLfgPlayerReward(network::Packet& packet) {
     // The reward toast. It carries no arguments - the frame reads the nine
     // values back through GetLFGCompletionReward - so the store above has to
     // be written before this fires.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_COMPLETION_REWARD", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LFG_COMPLETION_REWARD", {});
 
     // No hand-built chat line: FrameXML announces the reward its own way, in
     // a toast rather than a line, and printing both is two announcements of
@@ -4234,7 +4234,7 @@ void SocialHandler::handleLfgBootProposalUpdate(network::Packet& packet) {
         owner_.addSystemChatMessage(bootPassed ? "Dungeon Finder: Vote kick passed - member removed." : "Dungeon Finder: Vote kick failed.");
     }
     // The vote-to-kick dialog, whose countdown starts on this.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LFG_BOOT_PROPOSAL_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LFG_BOOT_PROPOSAL_UPDATE", {});
 }
 
 void SocialHandler::handleLfgTeleportDenied(network::Packet& packet) {
@@ -4279,8 +4279,8 @@ void SocialHandler::lfgSetRoles(uint8_t roles) {
     // firing it left whichever frame was clicked correct and the other two
     // showing what they were last drawn with, which is the shape that reads as
     // "it only takes after a relog".
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LFG_ROLE_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LFG_ROLE_UPDATE", {});
     }
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     const uint32_t wire = wireOpcode(Opcode::CMSG_LFG_SET_ROLES);
@@ -4382,8 +4382,8 @@ void SocialHandler::handleArenaTeamQueryResponse(network::Packet& packet) {
     // A team's name arriving is what the PvP panel redraws on. Without this the
     // arena tabs kept whatever they were built with, so a team queried after
     // the panel opened stayed nameless until it was closed and opened again.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("ARENA_TEAM_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("ARENA_TEAM_UPDATE", {});
     }
 }
 
@@ -4440,8 +4440,8 @@ void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
     // redraws from what arrived when arg1 is absent - so any argument at all
     // would answer this roster by requesting another one, forever. A zero
     // would do it too, zero being true in Lua.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("ARENA_TEAM_ROSTER_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("ARENA_TEAM_ROSTER_UPDATE", {});
     }
 }
 
@@ -4628,7 +4628,7 @@ void SocialHandler::handlePvpLogData(network::Packet& packet) {
     // RequestBattlefieldScoreData sends the query, UPDATE_BATTLEFIELD_SCORE is
     // the answer arriving. Every row, every column and the winner were parsed
     // and stored, and the frame that displays them was never told.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_SCORE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("UPDATE_BATTLEFIELD_SCORE", {});
 }
 
 void SocialHandler::updateLogoutCountdown(float deltaTime) {
@@ -5347,8 +5347,8 @@ void SocialHandler::handleGuildBankLog(network::Packet& packet) {
     packet.skipAll();
     LOG_INFO("MSG_GUILD_BANK_LOG_QUERY reply: tab ", static_cast<int>(tab),
              ", ", log.size(), " entries");
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("GUILDBANKLOG_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("GUILDBANKLOG_UPDATE", {});
     }
 }
 
@@ -5390,7 +5390,7 @@ void SocialHandler::handleGuildEventLog(network::Packet& packet) {
         guildEventLog_.push_back(e);
     }
     LOG_INFO("Guild event log: ", guildEventLog_.size(), " entries");
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GUILD_EVENT_LOG_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GUILD_EVENT_LOG_UPDATE", {});
 }
 
 // CMSG_GMTICKET_SYSTEMSTATUS: is the ticket queue open at all. The reply,

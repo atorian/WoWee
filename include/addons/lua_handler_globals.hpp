@@ -24,9 +24,9 @@ struct lua_State;
 
 namespace wowee::addons {
 
-/// Ask the client whether Lua may run in the current frame phase.
+/// Raise a Lua error on an invalid entry. Call only inside a protected Lua call.
 void checkLuaExecution(lua_State* L, const char* operation);
-int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc);
+int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc, const char* operation = "Lua call");
 
 /// Publish those globals around every script handler, or do not.
 ///

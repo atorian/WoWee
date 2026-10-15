@@ -53,6 +53,7 @@ bool AddonManager::initialize(game::GameHandler* gameHandler, const LuaServices&
     luaServices_.setAddOnEnabled = [this](const std::string& name, bool enabled) {
         setAddonEnabled(name, enabled);
     };
+    luaEngine_.setLuaServices(luaServices_);
     if (!luaEngine_.initialize()) return false;
     luaEngine_.setGameHandler(gameHandler);
     luaEngine_.setLuaServices(luaServices_);
@@ -1761,6 +1762,7 @@ bool AddonManager::unloadAll() {
     // left for the next load to build a second copy on top of.
     luaEngine_.shutdown();
 
+    luaEngine_.setLuaServices(luaServices_);
     if (!luaEngine_.initialize()) {
         LOG_ERROR("AddonManager: failed to reinitialize the Lua VM");
         return false;

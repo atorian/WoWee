@@ -1621,7 +1621,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             // that menu is only drawn while the element is not
                             // handed over - so with it handed over, Escape set
                             // a flag nobody read and nothing appeared.
-                            gameHandler.runInterfaceCommand("ToggleGameMenu()");
+                            if (services_.addonManager)
+                                services_.addonManager->runInterfaceCommand("ToggleGameMenu()");
                             // And whether it worked, which the line above
                             // cannot say. Asked straight afterwards so the two
                             // faults separate: shown but not on screen is a
@@ -1642,7 +1643,7 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             // answered by the no-op object, whose IsShown
                             // returns another one, so this reported the menu
                             // shown whether or not the frame existed.
-                            if (gameHandler.askInterface(
+                            if (services_.addonManager && services_.addonManager->interfaceCommandBoolean(
                                     "type(rawget(_G, 'GameMenuFrame')) == 'table' "
                                     "and GameMenuFrame:IsShown()")) {
                                 LOG_INFO("Escape: the interface's menu is now shown");

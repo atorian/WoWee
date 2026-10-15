@@ -23,6 +23,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
+!tests/check_frame_phase.cmake
 !CMakeLists.txt
 # Hand-written CMake modules live in cmake/ and are source, not build output.
 !cmake/*.cmake

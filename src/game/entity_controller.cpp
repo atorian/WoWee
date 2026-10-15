@@ -893,7 +893,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         // as its first argument, which is how a frame knows whether the change
         // was to the unit it is showing.
         auto emitForUnit = [&](const char* event) {
-            if (!owner_.addonEventCallbackRef()) return;
+            if (!owner_.hasAddonEventListener()) return;
             const auto uid = owner_.guidToUnitId(block.guid);
             if (!uid.empty()) pendingEvents_.emit(event, {uid});
         };
@@ -918,7 +918,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             emitForUnit("UNIT_LEVEL");
         } else if (key == ufi.faction) {
             unit->setFactionTemplate(val);
-            if (owner_.addonEventCallbackRef()) {
+            if (owner_.hasAddonEventListener()) {
                 auto uid = owner_.guidToUnitId(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_FACTION", {uid});
@@ -926,7 +926,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         }
         else if (key == ufi.flags) {
             unit->setUnitFlags(val);
-            if (owner_.addonEventCallbackRef()) {
+            if (owner_.hasAddonEventListener()) {
                 auto uid = owner_.guidToUnitId(block.guid);
                 if (!uid.empty())
                     pendingEvents_.emit("UNIT_FLAGS", {uid});
@@ -945,7 +945,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             unit->setCombatReach(bitsToFloat(val));
         } else if (key == ufi.displayId) {
             unit->setDisplayId(val);
-            if (owner_.addonEventCallbackRef()) {
+            if (owner_.hasAddonEventListener()) {
                 auto uid = owner_.guidToUnitId(block.guid);
                 if (!uid.empty()) {
                     pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
@@ -1367,13 +1367,13 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
     // The pet frame's experience bar reads GetPetExperience and redraws on
     // this; without it the bar was filled once when the pet was summoned and
     // never moved again.
-    if (petExperienceChanged && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("UNIT_PET_EXPERIENCE", {"pet"});
+    if (petExperienceChanged && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("UNIT_PET_EXPERIENCE", {"pet"});
     }
     // The pet tab redraws its stat block on these, named for the pet.
-    if (petStatsChanged && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("UNIT_STATS", {"pet"});
-        owner_.addonEventCallbackRef()("UNIT_RESISTANCES", {"pet"});
+    if (petStatsChanged && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("UNIT_STATS", {"pet"});
+        owner_.fireAddonEvent("UNIT_RESISTANCES", {"pet"});
     }
 
     return result;
@@ -2373,7 +2373,7 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
         unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags());
     dispatchEntitySpawn(block.guid, entity->getType(), entity, unit,
                         isDeadNow && !result.npcDeathNotified);
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         std::string uid;
         if (block.guid == owner_.getTargetGuid()) uid = "target";
         else if (block.guid == owner_.focusGuidRef()) uid = "focus";
@@ -3014,7 +3014,7 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
         }
 
         // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             std::string unitId;
             if (data.guid == owner_.getTargetGuid()) unitId = "target";
             else if (data.guid == owner_.focusGuidRef()) unitId = "focus";
@@ -3069,8 +3069,8 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
                     // anything else, and most of a zone is neither targeted nor
                     // focused.
                     const std::string unitId = owner_.guidToUnitId(guid);
-                    if (!unitId.empty() && owner_.addonEventCallbackRef()) {
-                        owner_.addonEventCallbackRef()("UNIT_CLASSIFICATION_CHANGED", {unitId});
+                    if (!unitId.empty() && owner_.hasAddonEventListener()) {
+                        owner_.fireAddonEvent("UNIT_CLASSIFICATION_CHANGED", {unitId});
                     }
                 }
             }
@@ -3085,13 +3085,13 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
         // list it names: a mount's answer announced as a critter's left the
         // mount tab holding the zero it started with.
         const std::string kind = owner_.companionKindForCreature(data.entry);
-        if (!kind.empty() && owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("COMPANION_UPDATE", {kind});
+        if (!kind.empty() && owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("COMPANION_UPDATE", {kind});
         }
         // An objective that had no name for what it is about now has one.
-        if (owner_.addonEventCallbackRef() &&
+        if (owner_.hasAddonEventListener() &&
             questObjectiveNames(owner_.getQuestLog(), data.entry, false)) {
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
         }
     }
 }
@@ -3142,9 +3142,9 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
 
         // And the same for an objective that names this one - a chest to open
         // rather than a creature to kill.
-        if (owner_.addonEventCallbackRef() &&
+        if (owner_.hasAddonEventListener() &&
             questObjectiveNames(owner_.getQuestLog(), data.entry, true)) {
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
         }
 
         // MO_TRANSPORT (type 15): assign TaxiPathNode path if available.
@@ -3292,11 +3292,11 @@ void EntityController::handlePageTextQueryResponse(network::Packet& packet) {
     // read. BEGIN on the first page - the frame clears itself and picks its
     // material on that - and READY on every page, since each one that lands is
     // another the reader can turn to.
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         if (owner_.bookPagesRef().size() == 1) {
-            owner_.addonEventCallbackRef()("ITEM_TEXT_BEGIN", {});
+            owner_.fireAddonEvent("ITEM_TEXT_BEGIN", {});
         }
-        owner_.addonEventCallbackRef()("ITEM_TEXT_READY", {});
+        owner_.fireAddonEvent("ITEM_TEXT_READY", {});
     }
     LOG_DEBUG("handlePageTextQueryResponse: pageId=", data.pageId,
               " nextPage=", data.nextPageId,

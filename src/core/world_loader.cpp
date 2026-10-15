@@ -28,7 +28,6 @@
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "rendering/loading_screen.hpp"
-#include "addons/addon_manager.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -152,8 +151,7 @@ WorldLoader::WorldLoader(Application& app,
                          EntitySpawner* entitySpawner,
                          AppearanceComposer* appearanceComposer,
                          Window* window,
-                         game::World* world,
-                         addons::AddonManager* addonManager)
+                         game::World* world)
     : app_(app)
     , renderer_(renderer)
     , assetManager_(assetManager)
@@ -162,7 +160,6 @@ WorldLoader::WorldLoader(Application& app,
     , appearanceComposer_(appearanceComposer)
     , window_(window)
     , world_(world)
-    , addonManager_(addonManager)
 {}
 
 WorldLoader::~WorldLoader() {
@@ -730,7 +727,7 @@ void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
 }
 
 void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float z) {
-    app_.requireTransitions("world terrain load");
+    if (!app_.requireTransitions("world terrain load")) return;
     if (!renderer_ || !assetManager_ || !assetManager_->isInitialized()) {
         LOG_WARNING("Cannot load online terrain: renderer or assets not ready");
         return;
@@ -1254,38 +1251,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     // Only enter IN_GAME when this is the final map (no deferred entry pending).
     app_.setState(AppState::IN_GAME);
 
-    // Load addons once per session on first world entry
-    if (addonManager_ && !app_.addonsLoaded_) {
-        // Set character name for per-character SavedVariables
-        if (gameHandler_) {
-            const std::string& charName = gameHandler_->lookupName(gameHandler_->getPlayerGuid());
-            if (!charName.empty()) {
-                addonManager_->setCharacterName(charName);
-            } else {
-                // Fallback: find name from character list
-                for (const auto& c : gameHandler_->getCharacters()) {
-                    if (c.guid == gameHandler_->getPlayerGuid()) {
-                        addonManager_->setCharacterName(c.name);
-                        break;
-                    }
-                }
-            }
-        }
-        addonManager_->loadAllAddons();
-        app_.addonsLoaded_ = true;
-        addonManager_->fireEvent("VARIABLES_LOADED");
-        // After VARIABLES_LOADED, which is when the chat window
-        // settings are available to be read. Every chat frame
-        // answers this by applying its saved font, colour, size
-        // and docked state; without it they keep the defaults
-        // they were built with however much was saved.
-        addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
-        addonManager_->fireEvent("PLAYER_LOGIN");
-        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-    } else if (addonManager_ && app_.addonsLoaded_) {
-        // Subsequent world entries (e.g. teleport, instance entry)
-        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
-    }
+    app_.worldInterfaceEntryPending_ = true;
 }
 
 void WorldLoader::startWorldPreload(uint32_t mapId, const std::string& mapName,

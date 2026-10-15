@@ -241,20 +241,21 @@ TEST_CASE("A handler that raises still gives the names back",
     CHECK(fx.global("arg1") == "kept");
 }
 
-TEST_CASE("a frame handler cannot mutate Lua state during Render", "[lua][frame]") {
+TEST_CASE("a frame handler outside Interface returns a protected Lua error", "[lua][frame]") {
     Fixture f;
     const char* script = GENERATE("OnUpdate", "OnEvent", "OnShow", "OnClick", "OnSizeChanged");
     setLegacyHandlerGlobals(GENERATE(false, true));
     f.handler(script, "called = (called or 0) + 1");
-    auto phase = wowee::core::Phase::Render;
+    auto phase = GENERATE(wowee::core::Phase::Idle, wowee::core::Phase::Input,
+        wowee::core::Phase::Network, wowee::core::Phase::Game, wowee::core::Phase::Events,
+        wowee::core::Phase::Present, wowee::core::Phase::Render,
+        wowee::core::Phase::Transitions, wowee::core::Phase::Pace);
     wowee::addons::LuaServices services;
-    services.checkExecutionPhase = [&](const char* operation) {
-        wowee::core::requireLuaPhase(phase, operation);
-    };
+    services.executionPhase = [&] { return phase; };
     lua_pushlightuserdata(f.L, &services);
     lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
 
-    CHECK_THROWS_AS(f.dispatch(script, {}), std::logic_error);
+    CHECK(f.dispatch(script, {}) != 0);
     lua_getglobal(f.L, "called");
     CHECK(lua_isnil(f.L, -1));
     lua_pop(f.L, 1);
@@ -270,29 +271,61 @@ TEST_CASE("a Lua chunk cannot bypass the frame boundary", "[lua][frame]") {
     Fixture f;
     auto phase = wowee::core::Phase::Render;
     wowee::addons::LuaServices services;
-    services.checkExecutionPhase = [&](const char* operation) {
-        wowee::core::requireLuaPhase(phase, operation);
-    };
+    services.executionPhase = [&] { return phase; };
     lua_pushlightuserdata(f.L, &services);
     lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
     REQUIRE(luaL_loadstring(f.L, "called = true") == 0);
-    CHECK_THROWS_AS(wowee::addons::checkedLuaCall(f.L, 0, 0, 0), std::logic_error);
+    CHECK(wowee::addons::checkedLuaCall(f.L, 0, 0, 0) != 0);
+    lua_pop(f.L, 1);
+    REQUIRE(luaL_loadstring(f.L, "called = true") == 0);
     phase = wowee::core::Phase::Interface;
     CHECK(wowee::addons::checkedLuaCall(f.L, 0, 0, 0) == 0);
     lua_getglobal(f.L, "called");
     CHECK(lua_toboolean(f.L, -1));
 }
 
-TEST_CASE("a loading network phase cannot release a world and restores its caller on failure",
-          "[frame]") {
-    using wowee::core::Phase;
-    auto phase = Phase::Transitions;
-    try {
-        wowee::core::ScopedPhase network(phase, Phase::Network);
-        wowee::core::requirePhase(phase, Phase::Transitions, "world logout");
-        FAIL("network dispatch released a world");
-    } catch (const std::logic_error& error) {
-        CHECK(std::string(error.what()).find("world logout") != std::string::npos);
-    }
-    CHECK_NOTHROW(wowee::core::requirePhase(phase, Phase::Transitions, "world logout"));
+TEST_CASE("phase errors reach the protected Lua error handler and preserve call results", "[lua][frame]") {
+    Fixture f;
+    auto phase = wowee::core::Phase::Network;
+    wowee::addons::LuaServices services;
+    services.executionPhase = [&] { return phase; };
+    lua_pushlightuserdata(f.L, &services);
+    lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
+    REQUIRE(luaL_dostring(f.L,
+        "function report(err) return 'caught: ' .. err end\n"
+        "function work(n) called = true; return n + 1, n + 2 end") == 0);
+    lua_getglobal(f.L, "report");
+    lua_getglobal(f.L, "work");
+    lua_pushnumber(f.L, 10);
+    CHECK(wowee::addons::checkedLuaCall(f.L, 1, 2, -3, "addon chunk") != 0);
+    CHECK(std::string(lua_tostring(f.L, -1)) ==
+          "caught: addon chunk requires phase Interface; current phase is Network");
+    lua_pop(f.L, 1);
+    CHECK(f.globalIsNil("called"));
+    phase = wowee::core::Phase::Interface;
+    lua_getglobal(f.L, "work");
+    lua_pushnumber(f.L, 10);
+    REQUIRE(wowee::addons::checkedLuaCall(f.L, 1, 2, 1) == 0);
+    CHECK(lua_tonumber(f.L, -2) == 11);
+    CHECK(lua_tonumber(f.L, -1) == 12);
+}
+
+TEST_CASE("the Lua OnLoad bridge enforces Interface inside its caller's protection", "[lua][frame]") {
+    Fixture f;
+    f.handler("OnLoad", "called = true");
+    auto phase = wowee::core::Phase::Transitions;
+    wowee::addons::LuaServices services;
+    services.executionPhase = [&] { return phase; };
+    lua_pushlightuserdata(f.L, &services);
+    lua_setfield(f.L, LUA_REGISTRYINDEX, "wowee_lua_services");
+    lua_pushcfunction(f.L, wowee::addons::lua_WoweeFireOnLoad);
+    lua_getglobal(f.L, "f");
+    CHECK(lua_pcall(f.L, 1, 0, 0) != 0);
+    lua_pop(f.L, 1);
+    CHECK(f.globalIsNil("called"));
+    phase = wowee::core::Phase::Interface;
+    lua_pushcfunction(f.L, wowee::addons::lua_WoweeFireOnLoad);
+    lua_getglobal(f.L, "f");
+    CHECK(lua_pcall(f.L, 1, 0, 0) == 0);
+    CHECK_FALSE(f.globalIsNil("called"));
 }

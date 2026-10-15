@@ -565,8 +565,8 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     std::string addonPrefix;
     std::string addonPayload;
     if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
-        if (owner_.addonEventCallbackRef() && !addonPrefix.empty()) {
-            owner_.addonEventCallbackRef()(
+        if (owner_.hasAddonEventListener() && !addonPrefix.empty()) {
+            owner_.fireAddonEvent(
                 "CHAT_MSG_ADDON",
                 {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});
         }
@@ -799,7 +799,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     LOG_DEBUG("[", getChatTypeString(data.type), "] ", channelInfo, senderInfo, ": ", data.message);
 
     // Fire CHAT_MSG_* addon events
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         std::string eventName = "CHAT_MSG_";
         eventName += getChatTypeString(data.type);
         // The language's *name*, not its id. ChatFrame_MessageEventHandler
@@ -886,7 +886,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             (data.type == ChatType::WHISPER_INFORM && !data.receiverName.empty())
                 ? data.receiverName
                 : data.senderName;
-        owner_.addonEventCallbackRef()(eventName, {
+        owner_.fireAddonEvent(eventName, {
             data.message,
             shownName,
             lang,
@@ -1250,7 +1250,7 @@ void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
 }
 
 void ChatHandler::fireChatEvent(const MessageChatData& msg) {
-    if (!owner_.addonEventCallbackRef()) return;
+    if (!owner_.hasAddonEventListener()) return;
     std::string eventName = "CHAT_MSG_";
     eventName += getChatTypeString(msg.type);
     const Character* ac = owner_.getActiveCharacter();
@@ -1286,7 +1286,7 @@ void ChatHandler::fireChatEvent(const MessageChatData& msg) {
         (msg.type == ChatType::WHISPER_INFORM && !msg.receiverName.empty())
             ? msg.receiverName
             : senderName;
-    owner_.addonEventCallbackRef()(eventName, {
+    owner_.fireAddonEvent(eventName, {
         msg.message, shownName,
         owner_.getLanguageName(static_cast<uint32_t>(msg.language)),
         msg.channelName, msg.receiverName, "", "0", std::to_string(channelIndex),

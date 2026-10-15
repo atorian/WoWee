@@ -267,9 +267,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // stored already; nothing was told it had come, so the menu never
         // opened. Both events: one opens it, one fills it, and they are the
         // same frame rather than two.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("OPEN_MASTER_LOOT_LIST", {});
-            owner_.addonEventCallbackRef()("UPDATE_MASTER_LOOT_LIST", {});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("OPEN_MASTER_LOOT_LIST", {});
+            owner_.fireAddonEvent("UPDATE_MASTER_LOOT_LIST", {});
         }
     };
 
@@ -287,7 +287,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         pendingLootMoneyAmount_ = 0;
         pendingLootMoneyNotifyTimer_ = 0.0f;
         announceLootMoney(notifyGuid, amount);
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PLAYER_MONEY", {});
         // Both packets report the same thing and a server may send either, so
         // the coin goes on whichever arrives first.
         //
@@ -361,12 +361,12 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // The roll id the interface will ask every later question by. Its own
         // number: the slot plus one was unique only while one roll was open,
         // and two corpses both rolling their first item shared it.
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             // ...and the time to roll in, which the packet carried all along
             // and this read past. GroupLootFrame_OpenNewFrame takes it as the
             // second argument and sizes the countdown bar from it; without one
             // the bar had no length and the window could not time out.
-            owner_.addonEventCallbackRef()("START_LOOT_ROLL",
+            owner_.fireAddonEvent("START_LOOT_ROLL",
                                            {std::to_string(roll.rollId),
                                             std::to_string(countdown)});
         }
@@ -435,8 +435,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             // make it redraw the wrong one.
             //
             // Slots are zero-based on the wire and one-based in the interface.
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("LOOT_SLOT_CHANGED",
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("LOOT_SLOT_CHANGED",
                                                {std::to_string(slotIdx + 1)});
             }
         }
@@ -485,7 +485,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         std::string msg = "Received item: " + link;
         if (count > 1) msg += " x" + std::to_string(count);
         owner_.addSystemChatMessage(msg);
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             fireBagUpdates();
             // ITEM_PUSH(bagSlot, icon), which is what the bag button's flash
             // animation reads: mainmenubarbagbuttons compares its own GetID
@@ -493,7 +493,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             // This sent the item id and the stack count instead - two numbers
             // where a bag id and a texture were meant - so the comparison
             // never matched and the animation has never once played.
-            owner_.addonEventCallbackRef()("ITEM_PUSH",
+            owner_.fireAddonEvent("ITEM_PUSH",
                     {std::to_string(bagButtonId),
                      owner_.getItemIconPath(info->displayInfoId)});
         }
@@ -527,9 +527,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                                 std::hex, itemGuid, std::dec);
                 }
                 owner_.eventBus().publish(events::ItemSold{itemGuid});
-                if (owner_.addonEventCallbackRef()) {
+                if (owner_.hasAddonEventListener()) {
                     fireBagUpdates();
-                    owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+                    owner_.fireAddonEvent("PLAYER_MONEY", {});
                 }
             } else {
                 auto it = pendingSellToBuyback_.find(itemGuid);
@@ -824,8 +824,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 pendingBuybackSlot_ = -1;
                 pendingBuybackWireSlot_ = 0;
                 owner_.eventBus().publish(events::ItemBought{boughtItemId, itemCount});
-                if (owner_.addonEventCallbackRef()) {
-                    owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
+                if (owner_.hasAddonEventListener()) {
+                    owner_.fireAddonEvent("MERCHANT_UPDATE", {});
                     fireBagUpdates();
                 }
                 return;
@@ -845,8 +845,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             }
             pendingBuyItemId_   = 0;
             pendingBuyItemSlot_ = 0;
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("MERCHANT_UPDATE", {});
                 fireBagUpdates();
             }
         }
@@ -878,8 +878,8 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // The panel asked for this text and was never told it arrived, so the
         // info box kept whatever it was drawn with. Its handler reads the tab
         // back with GetGuildBankText, counting tabs from one.
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_TEXT", {std::to_string(tabId + 1)});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("GUILDBANK_UPDATE_TEXT", {std::to_string(tabId + 1)});
     };
 
     // ---- Auction House ----
@@ -1029,7 +1029,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // the server knows it by. The equipment manager rebuilds its list only
         // on this event, so without it a set saved this session is missing
         // from the frame until the next login.
-        owner_.addonEventCallbackRef()("EQUIPMENT_SETS_CHANGED", {});
+        owner_.fireAddonEvent("EQUIPMENT_SETS_CHANGED", {});
     };
 
     table[Opcode::SMSG_EQUIPMENT_SET_USE_RESULT] = [this](network::Packet& packet) {
@@ -1080,8 +1080,8 @@ void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
             if (info && info->valid && info->bindType == 1) {
                 pendingLootActive_ = true;
                 pendingLootSlot_ = slotIndex;
-                if (owner_.addonEventCallbackRef())
-                    owner_.addonEventCallbackRef()("LOOT_BIND_CONFIRM",
+                if (owner_.hasAddonEventListener())
+                    owner_.fireAddonEvent("LOOT_BIND_CONFIRM",
                                                    {std::to_string(display)});
                 return;
             }
@@ -1125,8 +1125,8 @@ void InventoryHandler::clearLootMoney() {
     auto it = localLootState_.find(currentLoot_.lootGuid);
     if (it != localLootState_.end()) it->second.data.goldLooted = true;
     // Display slot one, which is where the coin sits whenever there is one.
-    if (lootWindowOpen_ && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {"1"});
+    if (lootWindowOpen_ && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LOOT_SLOT_CLEARED", {"1"});
     }
     // A corpse that held only money is empty now.
     if (lootWindowOpen_ && currentLoot_.nothingLeft()) closeLoot();
@@ -1141,7 +1141,7 @@ void InventoryHandler::closeLoot() {
     }
     lootWindowOpen_ = false;
     if (owner_.lootWindowCallbackRef()) owner_.lootWindowCallbackRef()(false);
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LOOT_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LOOT_CLOSED", {});
     // Do NOT locally despawn a gather node on loot-close. Node lifetime is
     // server-authoritative: a mineral vein / herb can still hold charges for another
     // gatherer, and the server sends SMSG_DESTROY_OBJECT when it is truly depleted.
@@ -1176,14 +1176,14 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
     }
     lootWindowOpen_ = true;
     if (owner_.lootWindowCallbackRef()) owner_.lootWindowCallbackRef()(true);
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         // Carries whether this loot is being taken automatically. The loot
         // frame reads it on the path where it could not show itself, and
         // closes with CloseLoot(autoLoot == 0) - so an absent argument
         // compares false and tells the server the window opened when it did
         // not.
-        owner_.addonEventCallbackRef()("LOOT_OPENED", {autoLoot_ ? "1" : "0"});
-        owner_.addonEventCallbackRef()("LOOT_READY", {});
+        owner_.fireAddonEvent("LOOT_OPENED", {autoLoot_ ? "1" : "0"});
+        owner_.fireAddonEvent("LOOT_READY", {});
     }
     if (currentLoot_.lootGuid == lastInteractedGoGuid) {
         lastInteractedGoGuid = 0;
@@ -1254,7 +1254,7 @@ void InventoryHandler::handleLootReleaseResponse(network::Packet& packet) {
     localLootState_.erase(lootGuid);
     lootWindowOpen_ = false;
     if (owner_.lootWindowCallbackRef()) owner_.lootWindowCallbackRef()(false);
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("LOOT_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("LOOT_CLOSED", {});
     // Node lifetime is server-authoritative - see closeLoot(). The server despawns a
     // depleted gather node via SMSG_DESTROY_OBJECT; don't predict it here or a node the
     // server keeps (still holding charges for another gatherer) disappears locally.
@@ -1270,8 +1270,8 @@ void InventoryHandler::handleLootRemoved(network::Packet& packet) {
             // updates the open loot window; announcing here duplicated chat and
             // the loot sound for the same item.
             it->looted = true;
-            if (owner_.addonEventCallbackRef())
-                owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
+            if (owner_.hasAddonEventListener())
+                owner_.fireAddonEvent("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
             break;
         }
     }
@@ -1337,8 +1337,8 @@ void InventoryHandler::endLootRoll(uint64_t objectGuid, uint32_t slot) {
         // Named, so the window that closes is the one this roll opened. It was
         // the slot plus one here as well, which closed a different roll's
         // window whenever two were up.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("CANCEL_LOOT_ROLL",
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("CANCEL_LOOT_ROLL",
                                            {std::to_string(rollId)});
         }
         return;
@@ -1455,7 +1455,7 @@ void InventoryHandler::closeVendor() {
     pendingBuybackWireSlot_ = 0;
     pendingBuyItemId_ = 0;
     pendingBuyItemSlot_ = 0;
-    if (wasOpen && owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MERCHANT_CLOSED", {});
+    if (wasOpen && owner_.hasAddonEventListener()) owner_.fireAddonEvent("MERCHANT_CLOSED", {});
 }
 
 void InventoryHandler::clearBuybackState() {
@@ -1470,8 +1470,8 @@ void InventoryHandler::notifyBuybackChanged() {
     // Only while the window is up. The ring lives on the player and outlives
     // any one vendor, so it changes at times nothing is drawing it.
     if (!vendorWindowOpen_) return;
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("MERCHANT_UPDATE", {});
     }
 }
 
@@ -1790,8 +1790,8 @@ void InventoryHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
         // than dropping it on a slot. FrameXML hides whichever of the two is
         // already up before showing the other, so firing the wrong one leaves
         // both on screen.
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("AUTOEQUIP_BIND_CONFIRM",
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("AUTOEQUIP_BIND_CONFIRM",
                                            {std::to_string(wireSlot)});
         return;
     }
@@ -1809,8 +1809,8 @@ void InventoryHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool conf
     if (!confirmed && equipWouldBindFromBag(bagIndex, slotIndex)) {
         pendingEquip_ = PendingEquip{.active = true, .fromBag = true, .bag = bagIndex, .slot = slotIndex,
                                      .wireSlot = static_cast<uint8_t>(slotIndex)};
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("AUTOEQUIP_BIND_CONFIRM",
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("AUTOEQUIP_BIND_CONFIRM",
                                            {std::to_string(slotIndex)});
         return;
     }
@@ -1855,8 +1855,8 @@ void InventoryHandler::dispatchUseItem(uint8_t wowBag, uint8_t wowSlot, uint64_t
     // step earlier: using the item is what binds it.
     if (!confirmed && item.bindType == 3 && !item.soulbound) {
         pendingUse_ = PendingUse{.active = true, .wowBag = wowBag, .wowSlot = wowSlot, .itemGuid = itemGuid, .item = item};
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("USE_BIND_CONFIRM", {});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("USE_BIND_CONFIRM", {});
         return;
     }
 
@@ -2093,8 +2093,8 @@ void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confi
 
         pendingItemTarget_.reset();
         pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()(
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent(
                 "WOWEE_DISENCHANT_CONFIRM",
                 {targetInfo && !targetInfo->name.empty() ? targetInfo->name
                                                          : std::string("that item")});
@@ -2119,8 +2119,8 @@ void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confi
             !owner_.isItemSoulbound(targetItemGuid)) {
             pendingItemTarget_.reset();
             pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
-            if (owner_.addonEventCallbackRef())
-                owner_.addonEventCallbackRef()("BIND_ENCHANT", {});
+            if (owner_.hasAddonEventListener())
+                owner_.fireAddonEvent("BIND_ENCHANT", {});
             return;
         }
 
@@ -2130,8 +2130,8 @@ void InventoryHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confi
             pendingItemTarget_.reset();
             pendingEnchant_ = PendingEnchant{.active = true, .targetItemGuid = targetItemGuid, .request = pending};
             const std::string existing = owner_.getEnchantName(enchants.first);
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()(
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent(
                     "REPLACE_ENCHANT",
                     {existing.empty() ? std::string("an enchantment") : existing,
                      pending.itemName});
@@ -2387,8 +2387,8 @@ void InventoryHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count)
 }
 
 void InventoryHandler::fireBagUpdates() {
-    auto& fire = owner_.addonEventCallbackRef();
-    if (!fire) return;
+    auto fire = [this](const std::string& event, const std::vector<std::string>& args) { owner_.fireAddonEvent(event, args); };
+    if (!owner_.hasAddonEventListener()) return;
     // Every bag, because the callers that reach here know the inventory changed
     // without always knowing which bag it was, and an interface that redraws a
     // bag it did not need to is cheaper than one that never redraws at all.
@@ -2532,8 +2532,8 @@ void InventoryHandler::swapBagSlots(int srcBagIndex, int dstBagIndex) {
     // was the only way to move anything again.
     //
     // The interface numbers a worn bag from one; these indices count from zero.
-    auto& fire = owner_.addonEventCallbackRef();
-    if (fire) {
+    auto fire = [this](const std::string& event, const std::vector<std::string>& args) { owner_.fireAddonEvent(event, args); };
+    if (owner_.hasAddonEventListener()) {
         fire("BAG_CLOSED", {std::to_string(srcBagIndex + 1)});
         fire("BAG_CLOSED", {std::to_string(dstBagIndex + 1)});
     }
@@ -2639,7 +2639,7 @@ void InventoryHandler::handleListInventory(network::Packet& packet) {
     }
     vendorWindowOpen_ = true;
     owner_.closeGossip();
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MERCHANT_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MERCHANT_SHOW", {});
 
     // Auto-sell grey items
     if (autoSellGrey_ && currentVendorItems_.vendorGuid != 0 && owner_.getState() == WorldState::IN_WORLD && owner_.getSocket()) {
@@ -2745,7 +2745,7 @@ void InventoryHandler::handleTrainerList(network::Packet& packet) {
     if (!TrainerListParser::parse(packet, currentTrainerList_, isClassic)) return;
     trainerWindowOpen_ = true;
     owner_.closeGossip();
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRAINER_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRAINER_SHOW", {});
 
     // At WARNING, and broken down by the three states the panel filters on,
     // because a trainer showing no rows looks the same whether it sent none,
@@ -2798,7 +2798,7 @@ void InventoryHandler::trainSpell(uint32_t spellId) {
 
 void InventoryHandler::closeTrainer() {
     trainerWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRAINER_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRAINER_CLOSED", {});
     currentTrainerList_ = TrainerListData{};
     trainerTabs_.clear();
 }
@@ -2870,13 +2870,13 @@ void InventoryHandler::openSocketing(uint64_t itemGuid) {
         owner_.ensureItemInfo(socketSession_.itemId);
     }
 
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SOCKET_INFO_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("SOCKET_INFO_UPDATE", {});
 }
 
 void InventoryHandler::closeSocketing() {
     if (!socketSession_.open) return;
     socketSession_ = SocketSession{};
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SOCKET_INFO_CLOSE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("SOCKET_INFO_CLOSE", {});
 }
 
 bool InventoryHandler::setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId) {
@@ -2895,7 +2895,7 @@ bool InventoryHandler::setSocketGem(int index, uint64_t gemGuid, uint32_t gemIte
     socketSession_.newGemGuid[index] = gemGuid;
     socketSession_.newGemItemId[index] = gemItemId;
 
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SOCKET_INFO_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("SOCKET_INFO_UPDATE", {});
     return true;
 }
 
@@ -2916,7 +2916,7 @@ void InventoryHandler::acceptSockets() {
     // update redraw it as an existing gem rather than a waiting one.
     socketSession_.newGemGuid = {};
     socketSession_.newGemItemId = {};
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SOCKET_INFO_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("SOCKET_INFO_UPDATE", {});
 }
 
 // ============================================================
@@ -2935,7 +2935,7 @@ void InventoryHandler::openMailbox(uint64_t guid) {
     selectedMailIndex_ = -1;
     showMailCompose_ = false;
     clearMailAttachments();
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MAIL_SHOW", {});
     selectDefaultStationery();
     refreshMailList();
 }
@@ -2961,7 +2961,7 @@ void InventoryHandler::closeMailbox() {
     mailboxGuid_ = 0;
     showMailCompose_ = false;
     clearMailAttachments();
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MAIL_CLOSED", {});
 }
 
 void InventoryHandler::refreshMailList() {
@@ -2999,10 +2999,10 @@ void InventoryHandler::refuseSend(const std::string& reason, const char* logLine
     // whatever was wrong the first time.
     LOG_WARNING("sendMail: ", logLine);
     owner_.addSystemChatMessage(reason);
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         // Zero is "internal error" in the server's own table, which is the
         // honest answer for a refusal that never reached it.
-        owner_.addonEventCallbackRef()("MAIL_FAILED", {"0"});
+        owner_.fireAddonEvent("MAIL_FAILED", {"0"});
     }
 }
 
@@ -3074,9 +3074,9 @@ void InventoryHandler::noteMailAttachRefundable(int attachIndex) {
     }
     constexpr uint32_t kRefundWindow = 2 * 60 * 60;
     if (refund->playedSincePurchase >= kRefundWindow) return;   // window is over
-    if (!owner_.addonEventCallbackRef()) return;
+    if (!owner_.hasAddonEventListener()) return;
     const auto* info = owner_.getItemInfo(att.item.itemId);
-    owner_.addonEventCallbackRef()(
+    owner_.fireAddonEvent(
         "MAIL_LOCK_SEND_ITEMS",
         {std::to_string(attachIndex + 1),
          info ? game::buildItemLink(att.item.itemId, info->quality, info->name)
@@ -3144,8 +3144,8 @@ void InventoryHandler::clearMailAttachments() {
 void InventoryHandler::notifyMailComposeChanged() {
     // The send frame recomputes its slots, its postage and its Send button from
     // this and from nothing else - there is no poll behind it.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("MAIL_SEND_INFO_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("MAIL_SEND_INFO_UPDATE", {});
     }
 }
 
@@ -3174,8 +3174,8 @@ void InventoryHandler::mailReturnToSender(uint32_t mailId) {
     owner_.getSocket()->send(packet);
     // Same as deleting: the letter being read is this one, and the view over it
     // hides when told which mail closed.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
     }
 }
 
@@ -3185,8 +3185,8 @@ void InventoryHandler::mailDelete(uint32_t mailId) {
     owner_.getSocket()->send(packet);
     // The letter being read is this one, so the view over it has to go: the
     // interface hides it when told which mail closed, and was never told.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("CLOSE_INBOX_ITEM", {std::to_string(mailId)});
     }
 }
 
@@ -3210,8 +3210,8 @@ void InventoryHandler::mailMarkAsRead(uint32_t mailId) {
         if (mail.messageId != mailId || mail.read) continue;
         mail.read = true;
         marked = true;
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("MAIL_INBOX_UPDATE", {});
         break;
     }
 
@@ -3235,14 +3235,14 @@ void InventoryHandler::handleShowMailbox(network::Packet& packet) {
     mailboxGuid_ = packet.readUInt64();
     mailboxOpen_ = true;
     selectedMailIndex_ = -1;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MAIL_SHOW", {});
     selectDefaultStationery();
     refreshMailList();
 }
 
 void InventoryHandler::handleMailListResult(network::Packet& packet) {
     if (!owner_.getPacketParsers()->parseMailList(packet, mailInbox_)) return;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MAIL_INBOX_UPDATE", {});
     for (const auto& mail : mailInbox_) {
         // Player mail carries a GUID, not a name. Ask for it once here; the UI
         // reads the name through GameHandler::getMailSenderName, so it appears
@@ -3292,9 +3292,9 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
             // The send frame waits on these before it will clear its fields and
             // re-enable the Send button. Without them a mail went out and the
             // frame sat there as though it had not.
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("MAIL_SEND_SUCCESS", {});
-                owner_.addonEventCallbackRef()("MAIL_SUCCESS", {});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("MAIL_SEND_SUCCESS", {});
+                owner_.fireAddonEvent("MAIL_SUCCESS", {});
             }
         } else {
             const char* why = mailResultText(error);
@@ -3302,14 +3302,14 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
                 why ? std::string("Mail not sent: ") + why
                     : "Failed to send mail (error " + std::to_string(error) + ").");
             // Carries the error so the frame can say which refusal it was.
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("MAIL_FAILED", {std::to_string(error)});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("MAIL_FAILED", {std::to_string(error)});
             }
         }
     } else if (action == MAIL_ITEM_TAKEN) {
         if (error == 0) {
             owner_.addSystemChatMessage("Item taken from mail.");
-            if (owner_.addonEventCallbackRef()) fireBagUpdates();
+            if (owner_.hasAddonEventListener()) fireBagUpdates();
         } else {
             owner_.addSystemChatMessage("Failed to take item (error " + std::to_string(error) + ").");
         }
@@ -3317,9 +3317,9 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
         if (error == 0) {
             if (mailIt != mailInbox_.end()) mailIt->money = 0;
             owner_.addSystemChatMessage("Money taken from mail.");
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
-                owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("PLAYER_MONEY", {});
+                owner_.fireAddonEvent("MAIL_INBOX_UPDATE", {});
             }
         } else {
             owner_.addSystemChatMessage("Failed to take money (error " + std::to_string(error) + ").");
@@ -3333,7 +3333,7 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
                 if (selectedMailIndex_ == erasedIndex) selectedMailIndex_ = -1;
                 else if (selectedMailIndex_ > erasedIndex) --selectedMailIndex_;
             }
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("MAIL_INBOX_UPDATE", {});
         }
     } else if (action == MAIL_MADE_PERMANENT && error == 0) {
         owner_.addSystemChatMessage("Mail text copied.");
@@ -3364,7 +3364,7 @@ void InventoryHandler::setHasNewMail(bool value) {
         owner_.eventBus().publish(events::MailArrived{});
     }
     hasNewMail_ = value;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_PENDING_MAIL", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("UPDATE_PENDING_MAIL", {});
 }
 
 // ============================================================
@@ -3381,13 +3381,13 @@ void InventoryHandler::openBank(uint64_t guid) {
         effectiveBankSlots_ = 28;
         effectiveBankBagSlots_ = 7;
     }
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("BANKFRAME_OPENED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("BANKFRAME_OPENED", {});
 }
 
 void InventoryHandler::closeBank() {
     bankOpen_ = false;
     bankerGuid_ = 0;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("BANKFRAME_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("BANKFRAME_CLOSED", {});
 }
 
 void InventoryHandler::buyBankSlot() {
@@ -3444,7 +3444,7 @@ void InventoryHandler::handleBuyBankSlotResult(network::Packet& packet) {
     uint32_t result = packet.readUInt32();
     if (result == 0) {
         owner_.addSystemChatMessage("Bank slot purchased.");
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYERBANKBAGSLOTS_CHANGED", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("PLAYERBANKBAGSLOTS_CHANGED", {});
     } else {
         owner_.addSystemChatMessage("Failed to purchase bank slot.");
     }
@@ -3487,7 +3487,7 @@ void InventoryHandler::openGuildBank(uint64_t guid) {
 void InventoryHandler::closeGuildBank() {
     guildBankOpen_ = false;
     guildBankerGuid_ = 0;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GUILDBANKFRAME_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GUILDBANKFRAME_CLOSED", {});
 }
 
 void InventoryHandler::queryGuildBankTab(uint8_t tabId) {
@@ -3588,8 +3588,8 @@ void InventoryHandler::guildBankDepositFromInventory(uint8_t srcBag, uint8_t src
 void InventoryHandler::setGuildBankMoney(uint64_t money) {
     if (guildBankData_.money == money) return;
     guildBankData_.money = money;
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_MONEY", {});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("GUILDBANK_UPDATE_MONEY", {});
 }
 
 void InventoryHandler::handleGuildBankList(network::Packet& packet) {
@@ -3599,14 +3599,14 @@ void InventoryHandler::handleGuildBankList(network::Packet& packet) {
     // refresh, or the banker guid arrived only with the list).
     if (guildBankerGuid_ != 0 && !guildBankOpen_) {
         guildBankOpen_ = true;
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GUILDBANKFRAME_OPENED", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GUILDBANKFRAME_OPENED", {});
     }
     // Each list is tagged with the tab it describes. Track it so the UI
     // highlights the right tab and item withdraw/deposit target the tab the
     // player is actually viewing (clicking a tab only sends a query - it never
     // updated the active tab, so operations defaulted to tab 0).
     guildBankActiveTab_ = guildBankData_.tabId;
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         // The three the panel listens for and this fired none of.
         //
         // GUILDBANK_UPDATE_TABS is the one that runs
@@ -3616,14 +3616,14 @@ void InventoryHandler::handleGuildBankList(network::Packet& packet) {
         // arrived: the event means the set of tabs changed, and a slot refresh
         // does not change it.
         if (guildBankData_.tabsIncluded && !guildBankData_.tabs.empty()) {
-            owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_TABS", {});
+            owner_.fireAddonEvent("GUILDBANK_UPDATE_TABS", {});
         }
-        owner_.addonEventCallbackRef()("GUILDBANKBAGSLOTS_CHANGED", {});
+        owner_.fireAddonEvent("GUILDBANKBAGSLOTS_CHANGED", {});
         // The money line and the withdraw allowance, which are read from
         // GetGuildBankMoney and GetGuildBankWithdrawMoney and were never asked
         // for again after the frame first drew.
-        owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_MONEY", {});
-        owner_.addonEventCallbackRef()("GUILDBANK_UPDATE_WITHDRAWMONEY", {});
+        owner_.fireAddonEvent("GUILDBANK_UPDATE_MONEY", {});
+        owner_.fireAddonEvent("GUILDBANK_UPDATE_WITHDRAWMONEY", {});
     }
     for (const auto& tab : guildBankData_.tabs) {
         for (const auto& item : tab.items) {
@@ -3640,13 +3640,13 @@ void InventoryHandler::openAuctionHouse(uint64_t guid) {
     auctioneerGuid_ = guid;
     auctionOpen_ = true;
     auctionActiveTab_ = 0;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("AUCTION_HOUSE_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("AUCTION_HOUSE_SHOW", {});
 }
 
 void InventoryHandler::closeAuctionHouse() {
     auctionOpen_ = false;
     auctioneerGuid_ = 0;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("AUCTION_HOUSE_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("AUCTION_HOUSE_CLOSED", {});
 }
 
 void InventoryHandler::auctionSearch(const std::string& name, uint8_t levelMin, uint8_t levelMax,
@@ -3775,13 +3775,13 @@ void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
 
     if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) {
         auctionOwnerResults_ = std::move(result);
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("AUCTION_OWNED_LIST_UPDATE", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("AUCTION_OWNED_LIST_UPDATE", {});
     } else if (pendingAuctionTarget_ == AuctionResultTarget::BIDDER) {
         auctionBidderResults_ = std::move(result);
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("AUCTION_BIDDER_LIST_UPDATE", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("AUCTION_BIDDER_LIST_UPDATE", {});
     } else {
         auctionBrowseResults_ = std::move(result);
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("AUCTION_ITEM_LIST_UPDATE", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("AUCTION_ITEM_LIST_UPDATE", {});
     }
 
     // Ensure item info for all entries
@@ -3819,8 +3819,8 @@ void InventoryHandler::handleAuctionCommandResult(network::Packet& packet) {
     if (error == 0) {
         std::string msg = std::string("Auction ") + actionStr + " successful.";
         owner_.addSystemChatMessage(msg);
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("PLAYER_MONEY", {});
             fireBagUpdates();
         }
         // Re-query after successful buy/bid so the list reflects the change.
@@ -3911,8 +3911,8 @@ void InventoryHandler::declineTradeRequest() {
 /// the same for the target's. Fired with neither, both read nil, the highlights
 /// stayed off and the trade button stayed enabled after accepting.
 void InventoryHandler::fireTradeAcceptUpdate() {
-    if (!owner_.addonEventCallbackRef()) return;
-    owner_.addonEventCallbackRef()("TRADE_ACCEPT_UPDATE",
+    if (!owner_.hasAddonEventListener()) return;
+    owner_.fireAddonEvent("TRADE_ACCEPT_UPDATE",
                                    {tradeSelfAccepted_ ? "1" : "0",
                                     tradePartnerAccepted_ ? "1" : "0"});
 }
@@ -4022,7 +4022,7 @@ void InventoryHandler::handleTradeStatus(network::Packet& packet) {
                 break;
             }
             owner_.addSystemChatMessage(tradePeerName_ + " wants to trade with you.");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_REQUEST", {tradePeerName_});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRADE_REQUEST", {tradePeerName_});
             break;
         }
         case 2:   // OPEN_WINDOW
@@ -4030,12 +4030,12 @@ void InventoryHandler::handleTradeStatus(network::Packet& packet) {
             tradeSelfAccepted_ = false;
             tradePartnerAccepted_ = false;
             owner_.addSystemChatMessage("Trade opened.");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_SHOW", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRADE_SHOW", {});
             break;
         case 3:   // TRADE_CANCELED
             resetTradeState();
             owner_.addSystemChatMessage("Trade cancelled.");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_CLOSED", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRADE_CLOSED", {});
             break;
         case 4:   // TRADE_ACCEPT - the other side pressed accept
             tradeStatus_ = TradeStatus::Accepted;
@@ -4061,16 +4061,16 @@ void InventoryHandler::handleTradeStatus(network::Packet& packet) {
             tradeSelfAccepted_ = false;
             tradePartnerAccepted_ = false;
             owner_.addSystemChatMessage("Trade complete.");
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("TRADE_CLOSED", {});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("TRADE_CLOSED", {});
                 fireBagUpdates();
-                owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+                owner_.fireAddonEvent("PLAYER_MONEY", {});
             }
             break;
         case 9:   // TRADE_REJECTED
             resetTradeState();
             owner_.addSystemChatMessage("Trade declined.");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_CLOSED", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRADE_CLOSED", {});
             break;
         case 10:  // TARGET_TO_FAR
             resetTradeState();
@@ -4082,7 +4082,7 @@ void InventoryHandler::handleTradeStatus(network::Packet& packet) {
             break;
         case 12:  // CLOSE_WINDOW
             resetTradeState();
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TRADE_CLOSED", {});
+            if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TRADE_CLOSED", {});
             break;
         case 14:  // IGNORE_YOU
             resetTradeState();
@@ -4197,8 +4197,8 @@ void InventoryHandler::handleTradeStatusExtended(network::Packet& packet) {
     const bool goldChanged = (side != gold);
     side = gold;
 
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("TRADE_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("TRADE_UPDATE", {});
         // The trade window's own refresh redraws the item slots and nothing
         // else; the two money frames listen for this and only this. Without it
         // the gold on the table stays at whatever it read when the window
@@ -4211,7 +4211,7 @@ void InventoryHandler::handleTradeStatusExtended(network::Packet& packet) {
         // their side when our own gold moved and never refreshed ours - so the
         // amount *this* player had put down never appeared.
         if (goldChanged) {
-            owner_.addonEventCallbackRef()(
+            owner_.fireAddonEvent(
                 ownSide ? "PLAYER_TRADE_MONEY" : "TRADE_MONEY_CHANGED", {});
         }
     }
@@ -4379,8 +4379,8 @@ void InventoryHandler::handleEquipmentSetList(network::Packet& packet) {
     // The manager redraws on this, and the list arriving is the only time it
     // has anything new to draw - including straight after a set is saved or
     // deleted, which is when the server sends it again.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("EQUIPMENT_SETS_CHANGED", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("EQUIPMENT_SETS_CHANGED", {});
     }
 }
 
@@ -4446,8 +4446,8 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         //
         // Named so a listener can tell whether the item it is showing is the
         // one that just arrived, rather than rebuilding on every reply.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("GET_ITEM_INFO_RECEIVED",
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("GET_ITEM_INFO_RECEIVED",
                                            {std::to_string(data.entry)});
         }
 
@@ -4459,11 +4459,11 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // after it has drawn - "Item #4606" against an empty square, kept for
         // as long as the corpse is open. LOOT_SLOT_CHANGED is the event the
         // loot frame redraws one button on.
-        if (lootWindowOpen_ && owner_.addonEventCallbackRef()) {
+        if (lootWindowOpen_ && owner_.hasAddonEventListener()) {
             const int coinSlots = currentLoot_.hasCoinSlot() ? 1 : 0;
             for (size_t i = 0; i < currentLoot_.items.size(); ++i) {
                 if (currentLoot_.items[i].itemId != data.entry) continue;
-                owner_.addonEventCallbackRef()(
+                owner_.fireAddonEvent(
                     "LOOT_SLOT_CHANGED",
                     {std::to_string(coinSlots + static_cast<int>(i) + 1)});
             }
@@ -4476,7 +4476,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // for a quest accepted while the tracker is on screen, always. Nothing
         // asked them to look again, so the number stayed for the life of the
         // quest. The same shape the creature and game object queries have.
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             bool wanted = false;
             for (const auto& quest : owner_.getQuestLog()) {
                 for (const auto& obj : quest.itemObjectives) {
@@ -4484,7 +4484,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 }
                 if (wanted) break;
             }
-            if (wanted) owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+            if (wanted) owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
         }
 
         // A quest's item icons are drawn before their items are known - the
@@ -4501,8 +4501,8 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // blank square for as long as the window stayed up.
         if (owner_.isQuestDetailsOpen() || owner_.isGossipWindowOpen() ||
             owner_.isQuestRequestItemsOpen() || owner_.isQuestOfferRewardOpen()) {
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("QUEST_ITEM_UPDATE", {});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("QUEST_ITEM_UPDATE", {});
             }
         }
 
@@ -4517,8 +4517,8 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 break;
             }
         }
-        if (resolvedAuctionSubject && owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+        if (resolvedAuctionSubject && owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("MAIL_INBOX_UPDATE", {});
         }
 
         // The auction list, for the same reason as the quest rewards above.
@@ -4531,7 +4531,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // keeps it. Only while the house is open, and only for a row that is
         // actually waiting on this entry: the query runs hundreds of times
         // over a login and the rest of them are nothing to do with auctions.
-        if (auctionOpen_ && owner_.addonEventCallbackRef()) {
+        if (auctionOpen_ && owner_.hasAddonEventListener()) {
             auto listWants = [&data](const AuctionListResult& r) {
                 for (const auto& e : r.auctions) {
                     if (e.itemEntry == data.entry) return true;
@@ -4539,13 +4539,13 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 return false;
             };
             if (listWants(auctionBrowseResults_)) {
-                owner_.addonEventCallbackRef()("AUCTION_ITEM_LIST_UPDATE", {});
+                owner_.fireAddonEvent("AUCTION_ITEM_LIST_UPDATE", {});
             }
             if (listWants(auctionOwnerResults_)) {
-                owner_.addonEventCallbackRef()("AUCTION_OWNED_LIST_UPDATE", {});
+                owner_.fireAddonEvent("AUCTION_OWNED_LIST_UPDATE", {});
             }
             if (listWants(auctionBidderResults_)) {
-                owner_.addonEventCallbackRef()("AUCTION_BIDDER_LIST_UPDATE", {});
+                owner_.fireAddonEvent("AUCTION_BIDDER_LIST_UPDATE", {});
             }
         }
 
@@ -4553,10 +4553,10 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // gives an item id and a price per row and nothing a player can read.
         // Same shape, same cause, same gate - the window has to be open and a
         // row has to be waiting on this entry.
-        if (vendorWindowOpen_ && owner_.addonEventCallbackRef()) {
+        if (vendorWindowOpen_ && owner_.hasAddonEventListener()) {
             for (const auto& v : currentVendorItems_.items) {
                 if (v.itemId != data.entry) continue;
-                owner_.addonEventCallbackRef()("MERCHANT_UPDATE", {});
+                owner_.fireAddonEvent("MERCHANT_UPDATE", {});
                 break;
             }
         }
@@ -4575,8 +4575,8 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
                 // first one of its kind the player picks up, so the interface
                 // heard nothing on precisely the pickups it most wanted to
                 // hear about - watchframe refreshes its objectives on this.
-                if (owner_.addonEventCallbackRef()) {
-                    owner_.addonEventCallbackRef()("ITEM_PUSH",
+                if (owner_.hasAddonEventListener()) {
+                    owner_.fireAddonEvent("ITEM_PUSH",
                             {std::to_string(it->bagButtonId),
                              owner_.getItemIconPath(data.displayInfoId)});
                 }
@@ -5267,9 +5267,9 @@ void InventoryHandler::fireBankSlotEvents() {
     slots.swap(pendingBankSlotEvents_);
     std::sort(slots.begin(), slots.end());
     slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
-    if (!owner_.addonEventCallbackRef()) return;
+    if (!owner_.hasAddonEventListener()) return;
     for (int slot : slots) {
-        owner_.addonEventCallbackRef()("PLAYERBANKSLOTS_CHANGED", {std::to_string(slot)});
+        owner_.fireAddonEvent("PLAYERBANKSLOTS_CHANGED", {std::to_string(slot)});
     }
 }
 

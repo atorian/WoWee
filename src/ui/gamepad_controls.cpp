@@ -383,7 +383,29 @@ void GamepadControls::applyButtons() {
     imguiKeysDown_ = std::move(imguiWanted);
 }
 
+void GamepadControls::dispatchBindings() {
+    if (!bindingsActive_) return;
+    routeButtons();
+    // Back switches the right stick between the view and the pointer. On its
+    // edge rather than while held: it is a mode, and a mode that lasted only
+    // as long as a thumb could hold a button would be no use for buying from
+    // a vendor.
+    const bool toggle = schemeHeld(SDL_GAMEPAD_BUTTON_BACK);
+    if (toggle && !pointerToggleWasDown_) {
+        setPointerMode(!pointerMode_);
+        // At warning, because the two modes look identical apart from the
+        // cursor, and a player wondering why the stick stopped turning the
+        // view has one place to look.
+        LOG_WARNING("Gamepad: the right stick now ",
+                    pointerMode_ ? "moves the pointer" : "turns the view");
+    }
+    pointerToggleWasDown_ = toggle;
+
+    applyButtons();
+}
+
 void GamepadControls::update(float deltaTime) {
+    bindingsActive_ = false;
     auto& pad = core::gamepad();
     ImGuiIO& io = ImGui::GetIO();
     // A pad is only read while the window has focus. SDL does not update a
@@ -461,6 +483,7 @@ void GamepadControls::update(float deltaTime) {
     // laptop this is being typed on, and at the login screen the box being
     // typed into is the very thing a pointer is needed to leave.
     const bool typing = io.WantTextInput;
+    bindingsActive_ = live && !typing;
 
     if (!live || typing) {
         releaseKeys();
@@ -469,24 +492,9 @@ void GamepadControls::update(float deltaTime) {
         return;
     }
 
-    // Bindings first. A button the player has bound is no longer the default
-    // scheme's, and that includes Back's pointer below and B's Escape.
-    routeButtons();
-
-    // Back switches the right stick between the view and the pointer. On its
-    // edge rather than while held: it is a mode, and a mode that lasted only
-    // as long as a thumb could hold a button would be no use for buying from
-    // a vendor.
-    const bool toggle = schemeHeld(SDL_GAMEPAD_BUTTON_BACK);
-    if (toggle && !pointerToggleWasDown_) {
-        setPointerMode(!pointerMode_);
-        // At warning, because the two modes look identical apart from the
-        // cursor, and a player wondering why the stick stopped turning the
-        // view has one place to look.
-        LOG_WARNING("Gamepad: the right stick now ",
-                    pointerMode_ ? "moves the pointer" : "turns the view");
-    }
-    pointerToggleWasDown_ = toggle;
+    // Analog motion is ready before Input::update. Buttons are staged only in
+    // Interface and stay latched until the next Input sample, even if released
+    // before it. Never clear them here: that would lose a one-frame tap.
 
     // Walking and zooming work in both modes. A pointer that stopped the
     // player from stepping back out of a fire would be worse than none.
@@ -499,7 +507,6 @@ void GamepadControls::update(float deltaTime) {
     }
     applyTouchpad();
     applyClicks();
-    applyButtons();
 }
 
 }  // namespace ui

@@ -19,6 +19,7 @@ set(ALL_TEST_TARGETS "")
 # (auth, socket code) whose symbols live in ws2_32 there rather than libc.
 # Linking it for every test keeps a new test from breaking the Windows build.
 macro(register_test_target _target)
+    target_compile_definitions(${_target} PRIVATE WOWEE_PHASE_CHECKS_FATAL=1)
     # A global property, not a list variable. This macro is called both at file
     # scope and from inside wowee_add_test, which is a function -- and
     # list(APPEND) inside a function writes to that function's scope and is
@@ -298,6 +299,25 @@ target_link_libraries(test_lua_handler_globals PRIVATE catch2_main lua51)
 wowee_test_link_glm(test_lua_handler_globals)
 add_test(NAME lua_handler_globals COMMAND test_lua_handler_globals)
 register_test_target(test_lua_handler_globals)
+
+# Verify process termination separately from Catch's signal handling, and the
+# shipping policy against interleaved errors (the logger's adjacent dedupe
+# alone must not make this test pass).
+foreach(policy IN ITEMS fatal release)
+    add_executable(frame_phase_${policy} frame_phase_probe.cpp ${TEST_COMMON_SOURCES})
+    target_include_directories(frame_phase_${policy} PRIVATE ${TEST_INCLUDE_DIRS})
+    wowee_test_link_glm(frame_phase_${policy})
+    if(policy STREQUAL "fatal")
+        target_compile_definitions(frame_phase_${policy} PRIVATE WOWEE_PHASE_CHECKS_FATAL=1)
+        set(fatal_checks ON)
+    else()
+        target_compile_definitions(frame_phase_${policy} PRIVATE NDEBUG)
+        set(fatal_checks OFF)
+    endif()
+    add_test(NAME frame_phase_${policy} COMMAND ${CMAKE_COMMAND}
+        -DPROBE=$<TARGET_FILE:frame_phase_${policy}> -DFATAL_CHECKS=${fatal_checks}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_frame_phase.cmake)
+endforeach()
 
 # ── test_lua_generic_for ────────────────────────────────────
 # `for k, v in t do` over a plain table - the Lua 5.0 form 1.12's FrameXML is
@@ -2780,6 +2800,13 @@ foreach(_domain chat spell inventory quest social session)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()
+
+wowee_add_test(test_addon_event_queue SOURCES test_addon_event_queue.cpp
+    ${CMAKE_SOURCE_DIR}/src/addons/lua_handler_globals.cpp
+    ${CMAKE_SOURCE_DIR}/src/addons/lua_event_args.cpp)
+target_include_directories(test_addon_event_queue SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_link_libraries(test_addon_event_queue PRIVATE wowee_game_harness lua51)
+target_compile_definitions(test_addon_event_queue PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── test_cvar_store ──────────────────────────────────────────
 # The CVars the game, the interface and the addons share: one name whatever

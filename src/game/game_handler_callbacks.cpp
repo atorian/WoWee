@@ -893,7 +893,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
 
     // Fire PLAYER_ENTERING_WORLD - THE most important event for addon initialization.
     // Fires on initial login, teleports, instance transitions, and zone changes.
-    if (addonEventCallback_) {
+    if (hasAddonEventListener()) {
         fireAddonEvent("PLAYER_ENTERING_WORLD", {initialWorldEntry ? "1" : "0"});
         // Also fire ZONE_CHANGED_NEW_AREA and UPDATE_WORLD_STATES so map/BG addons refresh
         fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});

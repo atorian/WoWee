@@ -68,18 +68,36 @@ void checkLuaExecution(lua_State* L, const char* operation) {
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_services");
     auto* services = static_cast<LuaServices*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
-    if (services && services->checkExecutionPhase) services->checkExecutionPhase(operation);
+    if (services && services->executionPhase) {
+        const auto phase = services->executionPhase();
+        if (phase != core::Phase::Interface)
+            luaL_error(L, "%s requires phase Interface; current phase is %s",
+                       operation, core::phaseName(phase));
+    }
 }
 
-int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc) {
-    checkLuaExecution(L, "Lua call");
-    return lua_pcall(L, nargs, nresults, errfunc);
+namespace {
+int guardedLuaEntry(lua_State* L) {
+    checkLuaExecution(L, lua_tostring(L, lua_upvalueindex(1)));
+    const int nargs = lua_gettop(L) - 1;
+    lua_call(L, nargs, LUA_MULTRET);
+    return lua_gettop(L);
+}
+} // namespace
+
+int checkedLuaCall(lua_State* L, int nargs, int nresults, int errfunc, const char* operation) {
+    const int function = lua_gettop(L) - nargs;
+    if (errfunc < 0 && errfunc > LUA_REGISTRYINDEX) errfunc = lua_gettop(L) + errfunc + 1;
+    lua_pushstring(L, operation);
+    lua_pushcclosure(L, guardedLuaEntry, 1);
+    lua_insert(L, function);
+    // The guard runs inside pcall, so luaL_error unwinds only this Lua call.
+    return lua_pcall(L, nargs + 1, nresults, errfunc);
 }
 
 int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
-    checkLuaExecution(L, script ? script : "frame handler");
     if (!gLegacyHandlerGlobals || nargs < 1)
-        return lua_pcall(L, nargs, 0, errfunc);
+        return checkedLuaCall(L, nargs, 0, errfunc, script ? script : "frame handler");
 
     const int selfIdx = lua_gettop(L) - nargs + 1;
     // OnEvent alone puts the event name before the payload; every other
@@ -126,7 +144,7 @@ int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
     }
 
     ++gHandlerDepth;
-    const int rc = lua_pcall(L, nargs, 0, errfunc);
+    const int rc = checkedLuaCall(L, nargs, 0, errfunc, script);
     --gHandlerDepth;
 
     // Above whatever pcall left - nothing on success, the error on failure -
@@ -148,6 +166,7 @@ int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
 }
 
 int lua_WoweeFireOnLoad(lua_State* L) {
+    checkLuaExecution(L, "OnLoad");
     if (!lua_istable(L, 1)) return 0;
     lua_getfield(L, 1, "__scripts");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }

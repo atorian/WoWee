@@ -150,7 +150,7 @@ static void precacheNearbyTiles(rendering::TerrainManager* terrainMgr,
 // ── callbacks ────────────────────────────────────────────────────
 
 void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, float z, bool isInitialEntry) {
-    requirePhase(currentPhase_, Phase::Transitions, "world entry");
+    if (!requirePhase(currentPhase_, Phase::Transitions, "world entry")) return;
     LOG_INFO("Online world entry: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")"
              " initial=", isInitialEntry);
     playerView_.resetCombatVisualState();

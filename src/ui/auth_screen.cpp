@@ -942,7 +942,7 @@ void AuthScreen::renderCard(auth::AuthHandler& authHandler, float screenW, float
             const char* label = "add or rebuild assets...";
             const float w = ui_.textWidth(label, smallSize);
             if (ui_.link("assets", ImVec2(centreX - w * 0.5f, col.y), label, smallSize)) {
-                core::Application::getInstance().setState(core::AppState::FIRST_RUN);
+                core::Application::getInstance().requestState(core::AppState::FIRST_RUN);
             }
             col.gap(smallRow + px(kRowGap));
         }

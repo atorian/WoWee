@@ -533,8 +533,8 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // button flashes for as long as they do. The stop half comes from the
     // server on SMSG_CANCEL_AUTO_REPEAT; this is the start.
     constexpr uint32_t kAutoShot = 75, kShoot = 5019;
-    if ((spellId == kAutoShot || spellId == kShoot) && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("START_AUTOREPEAT_SPELL", {});
+    if ((spellId == kAutoShot || spellId == kShoot) && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("START_AUTOREPEAT_SPELL", {});
     }
 
     // Food and water are server auras, but using any action interrupts them.
@@ -960,10 +960,10 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_INFO("Casting spell: ", spellId, " on 0x", std::hex, target, std::dec);
 
     // Fire UNIT_SPELLCAST_SENT for cast bar addons
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         std::string targetName;
         if (target != 0) targetName = owner_.lookupName(target);
-        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SENT", {"player", targetName, std::to_string(spellId)});
+        owner_.fireAddonEvent("UNIT_SPELLCAST_SENT", {"player", targetName, std::to_string(spellId)});
     }
 
     // Optimistically start GCD immediately on cast
@@ -1002,8 +1002,8 @@ void SpellHandler::cancelCast() {
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
     queuedSpellTarget_ = 0;
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", {"player"});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("UNIT_SPELLCAST_STOP", {"player"});
     owner_.eventBus().publish(events::PlayerCastStopped{.failed = false});
 }
 
@@ -1079,10 +1079,10 @@ void SpellHandler::seedCooldownFromSpellInfo(uint32_t spellId) {
     }
 
     LOG_DEBUG("Seeded cooldown from Spell.dbc: spell=", spellId, " ms=", cooldownMs);
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("SPELL_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("BAG_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_COOLDOWN", {});
     }
 }
 
@@ -1466,13 +1466,13 @@ void SpellHandler::syncPreWotlkTalentsFromKnownSpells() {
              " learned talent(s) from known spells; spent=", spentPoints,
              " unspent=", static_cast<int>(unspent));
 
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         // Two arguments, both zero: the interface reads the second as a count
         // of skill points just gained and compares it against zero, which is an
         // error against nothing. These fire on a full refresh rather than an
         // increment, so nothing was gained and nothing is announced.
-        owner_.addonEventCallbackRef()("CHARACTER_POINTS_CHANGED", {"0", "0"});
-        owner_.addonEventCallbackRef()("PLAYER_TALENT_UPDATE", {});
+        owner_.fireAddonEvent("CHARACTER_POINTS_CHANGED", {"0", "0"});
+        owner_.fireAddonEvent("PLAYER_TALENT_UPDATE", {});
     }
 }
 
@@ -1502,11 +1502,11 @@ void SpellHandler::updateTimers(float dt) {
     // button stayed dimmed until the next time mana happened to change - the
     // only other place these two are fired from. Said once for the frame
     // however many ended in it.
-    if (anyCooldownEnded && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_USABLE", {});
-        owner_.addonEventCallbackRef()("SPELL_UPDATE_USABLE", {});
-        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+    if (anyCooldownEnded && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_USABLE", {});
+        owner_.fireAddonEvent("SPELL_UPDATE_USABLE", {});
+        owner_.fireAddonEvent("SPELL_UPDATE_COOLDOWN", {});
     }
     // Tick down unit cast states
     for (auto it = unitCastStates_.begin(); it != unitCastStates_.end(); ) {
@@ -1534,8 +1534,8 @@ void SpellHandler::stopRestorationPresentation() {
     restorationSpellId_ = 0;
     restorationTimeRemaining_ = 0.0f;
     restorationTimeTotal_ = 0.0f;
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_CHANNEL_STOP",
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("UNIT_SPELLCAST_CHANNEL_STOP",
                                        {"player", std::to_string(stoppedSpell)});
     }
 }
@@ -1598,8 +1598,8 @@ void SpellHandler::refreshRestorationFromPlayerAuras() {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, true,
                                               SpellCastType::OMNI);
         }
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("UNIT_SPELLCAST_CHANNEL_START",
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("UNIT_SPELLCAST_CHANNEL_START",
                                            {"player", std::to_string(spellId)});
         }
     }
@@ -1676,11 +1676,11 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     // in the frame each spell is first cast.
     owner_.eventBus().publish(events::SpellsLearned{{knownSpells_.begin(), knownSpells_.end()}});
 
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("SPELLS_CHANGED", {});
         // A crafting window's recipes are the spells that just changed, and
         // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
+        if (craftingWindowOpen_) owner_.fireAddonEvent("TRADE_SKILL_UPDATE", {});
     }
 }
 
@@ -1755,9 +1755,9 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
             owner_.eventBus().publish(events::PlayerRefused{*refusal});
     }
 
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_FAILED", spellcastArgs("player", data.spellId));
-        owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("UNIT_SPELLCAST_FAILED", spellcastArgs("player", data.spellId));
+        owner_.fireAddonEvent("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
     }
 }
 
@@ -1811,7 +1811,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         currentCastSpellId_ = data.spellId;
         castTimeTotal_ = data.castTime / 1000.0f;
         castTimeRemaining_ = castTimeTotal_;
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("CURRENT_SPELL_CAST_CHANGED", {});
 
         if (owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, castType);
@@ -1826,10 +1826,10 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
     }
 
     // Fire UNIT_SPELLCAST_START
-    if (owner_.addonEventCallbackRef() && !rangedWeaponAttack) {
+    if (owner_.hasAddonEventListener() && !rangedWeaponAttack) {
         std::string unitId = owner_.guidToUnitId(data.casterUnit);
         if (!unitId.empty()) {
-            owner_.addonEventCallbackRef()("UNIT_SPELLCAST_START", spellcastArgs(unitId, data.spellId));
+            owner_.fireAddonEvent("UNIT_SPELLCAST_START", spellcastArgs(unitId, data.spellId));
             // Whether the cast can be kicked, which the cast bar draws as a
             // shield around itself. This client already worked it out for the
             // cast it is tracking and kept it - so a boss casting something
@@ -1838,7 +1838,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
             // After START, not before: the bar sets its shield up when the cast
             // begins and these only change the border, so arriving first would
             // be undone by the start it is describing.
-            owner_.addonEventCallbackRef()(
+            owner_.fireAddonEvent(
                 owner_.isSpellInterruptible(data.spellId)
                     ? "UNIT_SPELLCAST_INTERRUPTIBLE"
                     : "UNIT_SPELLCAST_NOT_INTERRUPTIBLE",
@@ -1970,8 +1970,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
         }
 
-        if (owner_.addonEventCallbackRef() && !rangedWeaponAttack)
-            owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
+        if (owner_.hasAddonEventListener() && !rangedWeaponAttack)
+            owner_.fireAddonEvent("UNIT_SPELLCAST_STOP", spellcastArgs("player", data.spellId));
 
         // Craft queue: re-cast if more crafts remaining
         if (craftQueueRemaining_ > 0 && craftQueueSpellId_ == data.spellId) {
@@ -1986,8 +1986,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             // The count changed, and the trade skill frame only reads it when
             // told to: UPDATE_TRADESKILL_RECAST is what makes its quantity box
             // count down instead of sitting at the number first asked for.
-            if (owner_.addonEventCallbackRef())
-                owner_.addonEventCallbackRef()("UPDATE_TRADESKILL_RECAST", {});
+            if (owner_.hasAddonEventListener())
+                owner_.fireAddonEvent("UPDATE_TRADESKILL_RECAST", {});
         }
         // Spell queue: fire the next queued spell
         else if (queuedSpellId_ != 0) {
@@ -2035,10 +2035,10 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
     }
 
     // Fire UNIT_SPELLCAST_SUCCEEDED
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         std::string unitId = owner_.guidToUnitId(data.casterUnit);
         if (!unitId.empty())
-            owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SUCCEEDED", spellcastArgs(unitId, data.spellId));
+            owner_.fireAddonEvent("UNIT_SPELLCAST_SUCCEEDED", spellcastArgs(unitId, data.spellId));
     }
 
     owner_.eventBus().publish(events::SpellCastSucceeded{
@@ -2106,10 +2106,10 @@ void SpellHandler::handleSpellCooldown(network::Packet& packet) {
     }
     LOG_DEBUG("handleSpellCooldown: parsed for ",
               isClassicFormat ? "Classic" : "TBC/WotLK", " format");
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("SPELL_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("BAG_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_COOLDOWN", {});
     }
 }
 
@@ -2125,10 +2125,10 @@ void SpellHandler::handleCooldownEvent(network::Packet& packet) {
             slot.cooldownRemaining = 0.0f;
         }
     }
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
-        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("SPELL_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("BAG_UPDATE_COOLDOWN", {});
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_COOLDOWN", {});
     }
 }
 
@@ -2189,19 +2189,19 @@ void SpellHandler::handleAuraUpdate(network::Packet& packet, bool isAll) {
         }
         mirrorAurasByGuid(data.guid, *auraList);
 
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             std::string unitId;
             if (data.guid == owner_.getPlayerGuid()) unitId = "player";
             else if (data.guid == owner_.getTargetGuid()) unitId = "target";
             else if (data.guid == owner_.focusGuidRef()) unitId = "focus";
             else if (data.guid == owner_.petGuidRef()) unitId = "pet";
             if (!unitId.empty()) {
-                owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
+                owner_.fireAddonEvent("UNIT_AURA", {unitId});
                 // A 1.12 interface listens for this rather than for
                 // UNIT_AURA, and it carries no unit: buffframe.lua
                 // re-reads the player's whole list when it arrives.
                 if (unitId == "player") {
-                    owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
+                    owner_.fireAddonEvent("PLAYER_AURAS_CHANGED", {});
                 }
             }
             // Outside that, and indented to say so. It reads the same name and
@@ -2272,9 +2272,9 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
                 LOG_INFO("Talent learned: id=", talentId, " rank=", (int)newRank,
                          " (spell ", spellId, ") in spec ", (int)activeTalentSpec_);
                 isTalentSpell = true;
-                if (owner_.addonEventCallbackRef()) {
-                    owner_.addonEventCallbackRef()("CHARACTER_POINTS_CHANGED", {"0", "0"});
-                    owner_.addonEventCallbackRef()("PLAYER_TALENT_UPDATE", {});
+                if (owner_.hasAddonEventListener()) {
+                    owner_.fireAddonEvent("CHARACTER_POINTS_CHANGED", {"0", "0"});
+                    owner_.fireAddonEvent("PLAYER_TALENT_UPDATE", {});
                 }
                 break;
             }
@@ -2282,16 +2282,16 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
         if (isTalentSpell) break;
     }
 
-    if (!alreadyKnown && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("LEARNED_SPELL_IN_TAB", {std::to_string(spellId)});
-        owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
+    if (!alreadyKnown && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("LEARNED_SPELL_IN_TAB", {std::to_string(spellId)});
+        owner_.fireAddonEvent("SPELLS_CHANGED", {});
         // The mounts and critters list is built from the spellbook, so a new
         // spell can add to it. petpaperdollframe refreshes on this and on
         // nothing else, which is why the tab stayed as it was first drawn.
-        owner_.addonEventCallbackRef()("COMPANION_LEARNED", {});
+        owner_.fireAddonEvent("COMPANION_LEARNED", {});
         // A crafting window's recipes are the spells that just changed, and
         // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
+        if (craftingWindowOpen_) owner_.fireAddonEvent("TRADE_SKILL_UPDATE", {});
     }
 
     if (isTalentSpell) return;
@@ -2318,16 +2318,16 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     // check above and did not - the first if has no body braces - so the
     // crafting refresh called the callback without testing it, and a null one
     // throws rather than doing nothing.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("SPELLS_CHANGED", {});
         // The mirror of COMPANION_LEARNED on the other side of this file. The
         // mounts and critters list is built from the spellbook, so losing a
         // spell can take one off it, and the pet tab refreshes on this and on
         // nothing else.
-        owner_.addonEventCallbackRef()("COMPANION_UNLEARNED", {});
+        owner_.fireAddonEvent("COMPANION_UNLEARNED", {});
         // A crafting window's recipes are the spells that just changed, and
         // it refreshes on its own event rather than on that one.
-        if (craftingWindowOpen_) owner_.addonEventCallbackRef()("TRADE_SKILL_UPDATE", {});
+        if (craftingWindowOpen_) owner_.fireAddonEvent("TRADE_SKILL_UPDATE", {});
     }
 
     // Learning a new talent rank legitimately removes/replaces its internal
@@ -2400,7 +2400,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
         // matches neither and not a single button redraws. Which slots a
         // rank upgrade touched is not tracked here, and every slot is the
         // honest answer as well as the working one.
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("ACTIONBAR_SLOT_CHANGED", {"0"});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
     }
 
     if (!newSpellAlreadyAnnounced) {
@@ -2482,14 +2482,14 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
              " groups=", (int)talentGroupCount, " active=", (int)activeTalentGroup,
              " learned=", learnedTalents_[activeTalentGroup].size());
 
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         // Two arguments, both zero: the interface reads the second as a count
         // of skill points just gained and compares it against zero, which is an
         // error against nothing. These fire on a full refresh rather than an
         // increment, so nothing was gained and nothing is announced.
-        owner_.addonEventCallbackRef()("CHARACTER_POINTS_CHANGED", {"0", "0"});
-        owner_.addonEventCallbackRef()("ACTIVE_TALENT_GROUP_CHANGED", {});
-        owner_.addonEventCallbackRef()("PLAYER_TALENT_UPDATE", {});
+        owner_.fireAddonEvent("CHARACTER_POINTS_CHANGED", {"0", "0"});
+        owner_.fireAddonEvent("ACTIVE_TALENT_GROUP_CHANGED", {});
+        owner_.fireAddonEvent("PLAYER_TALENT_UPDATE", {});
     }
 
     if (!talentsInitialized_) {
@@ -2536,8 +2536,8 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
         // separately and this client already handles. Fired for everyone, a
         // stranger turning in a quest nearby put their achievement badge on
         // this player's screen.
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("ACHIEVEMENT_EARNED",
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("ACHIEVEMENT_EARNED",
                                            {std::to_string(achievementId)});
     }
     // No line for somebody else's, because the server has already sent one.
@@ -2745,9 +2745,9 @@ void SpellHandler::handleListStabledPets(network::Packet& packet) {
     // This packet both opens the stable window and is the only thing that
     // refreshes it, so it carries both events. Neither was fired, which is why
     // the original interface's stable could not appear.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("PET_STABLE_SHOW", {});
-        owner_.addonEventCallbackRef()("PET_STABLE_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("PET_STABLE_SHOW", {});
+        owner_.fireAddonEvent("PET_STABLE_UPDATE", {});
     }
 }
 
@@ -3806,7 +3806,7 @@ void SpellHandler::handleSpellFailedOther(network::Packet& packet) {
         uint32_t failedSpellId = 0;
         if (const auto* st = getUnitCastState(failOtherGuid)) failedSpellId = st->spellId;
         unitCastStates_.erase(failOtherGuid);
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             std::string unitId;
             if (failOtherGuid == owner_.getTargetGuid())     unitId = "target";
             else if (failOtherGuid == owner_.focusGuidRef()) unitId = "focus";
@@ -4044,7 +4044,7 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         }
     }
     // Fire UNIT_SPELLCAST_INTERRUPTED for Lua addons
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         auto unitId = (failGuid == 0) ? std::string("player") : owner_.guidToUnitId(failGuid);
         if (!unitId.empty()) {
             uint32_t spellId = 0;
@@ -4120,8 +4120,8 @@ void SpellHandler::handleItemCooldown(network::Packet& packet) {
     // The bags redraw their cooldown swirls from this and nothing else, so a
     // potion or trinket put on cooldown showed none. This message is the item
     // cooldown, so it is the one place the event certainly belongs.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("BAG_UPDATE_COOLDOWN", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("BAG_UPDATE_COOLDOWN", {});
     }
 }
 
@@ -4186,8 +4186,8 @@ void SpellHandler::handleTotemCreated(network::Packet& packet) {
         // The totem bar draws each slot from its start and duration, and
         // refreshes on this alone - without it a totem is placed and the bar
         // goes on showing whatever was there before.
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("PLAYER_TOTEM_UPDATE",
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("PLAYER_TOTEM_UPDATE",
                                            {std::to_string(slot + 1)});
         }
     }
@@ -4373,16 +4373,16 @@ void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
         }
     }
     if (auraList) mirrorAurasByGuid(auraTargetGuid, *auraList);
-    if (auraList && owner_.addonEventCallbackRef()) {
+    if (auraList && owner_.hasAddonEventListener()) {
         std::string unitId;
         if (auraTargetGuid == owner_.getPlayerGuid()) unitId = "player";
         else if (auraTargetGuid == owner_.getTargetGuid()) unitId = "target";
         else if (auraTargetGuid == owner_.focusGuidRef()) unitId = "focus";
         else if (auraTargetGuid == owner_.petGuidRef()) unitId = "pet";
-        if (!unitId.empty()) owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
+        if (!unitId.empty()) owner_.fireAddonEvent("UNIT_AURA", {unitId});
         // The 1.12 name, which carries no unit. See the note at the
         // site that fires it with a comment in full.
-        if (unitId == "player") owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
+        if (unitId == "player") owner_.fireAddonEvent("PLAYER_AURAS_CHANGED", {});
         // Whether a companion is out is an aura on the player, so the tab's
         // "active" mark moves with one.
         if (unitId == "player") owner_.announceCompanionChange();
@@ -4850,16 +4850,16 @@ void SpellHandler::handleClearExtraAuraInfo(network::Packet& packet) {
             (*auraList)[slot] = AuraSlot{};
         }
         if (auraList) mirrorAurasByGuid(clearGuid, *auraList);
-        if (auraList && owner_.addonEventCallbackRef()) {
+        if (auraList && owner_.hasAddonEventListener()) {
             std::string unitId;
             if (clearGuid == owner_.getPlayerGuid()) unitId = "player";
             else if (clearGuid == owner_.getTargetGuid()) unitId = "target";
             else if (clearGuid == owner_.focusGuidRef()) unitId = "focus";
             else if (clearGuid == owner_.petGuidRef()) unitId = "pet";
-            if (!unitId.empty()) owner_.addonEventCallbackRef()("UNIT_AURA", {unitId});
+            if (!unitId.empty()) owner_.fireAddonEvent("UNIT_AURA", {unitId});
             // The 1.12 name, which carries no unit. See the note at the
             // site that fires it with a comment in full.
-            if (unitId == "player") owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
+            if (unitId == "player") owner_.fireAddonEvent("PLAYER_AURAS_CHANGED", {});
         }
         if (clearGuid == owner_.getPlayerGuid()) {
             refreshRestorationFromPlayerAuras();
@@ -5003,7 +5003,7 @@ void SpellHandler::handleChannelStart(network::Packet& packet) {
         }
 
         // Fire UNIT_SPELLCAST_CHANNEL_START for Lua addons
-        if (owner_.addonEventCallbackRef()) {
+        if (owner_.hasAddonEventListener()) {
             auto unitId = owner_.guidToUnitId(chanCaster);
             if (!unitId.empty())
                 owner_.fireAddonEvent("UNIT_SPELLCAST_CHANNEL_START", spellcastArgs(unitId, chanSpellId));

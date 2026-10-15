@@ -188,6 +188,7 @@ TEST_CASE("the server's echo of the player's own line is not a second line", "[c
     h.enterWorld();
 
     h.game().sendChatMessage(ChatType::SAY, "hello world");
+    h.pump(); // Interface delivers the optimistic local line before the echo.
     const size_t afterOwn = h.game().getChatHistory().size();
     const size_t saysAfterOwn = h.addonEvents("CHAT_MSG_SAY").size();
 

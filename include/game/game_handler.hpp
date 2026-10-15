@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/addon_event_queue.hpp"
+
 #include "game/quest_giver_status.hpp"
 #include "game/calendar_data.hpp"
 #include "game/game_interfaces.hpp"
@@ -408,21 +410,7 @@ public:
     void setInterfaceCommandCallback(InterfaceCommand cb) {
         interfaceCommand_ = std::move(cb);
     }
-    void runInterfaceCommand(const std::string& lua) const;
-
-    /// An interface command whose answer decides what happens next.
-    ///
-    /// Escape is the case: FrameXML knows whether it has a panel open and this
-    /// client does not, so whether the key closed something is its answer to
-    /// give. False when there is no interface, which is the right default -
-    /// the client's own handling then runs as it always did.
-    using InterfaceQuery = std::function<bool(const std::string&)>;
-    void setInterfaceQueryCallback(InterfaceQuery cb) {
-        interfaceQuery_ = std::move(cb);
-    }
-    bool askInterface(const std::string& expression) const {
-        return interfaceQuery_ ? interfaceQuery_(expression) : false;
-    }
+    void runInterfaceCommand(const std::string& lua);
 
     // Spell icon path resolver: spellId -> texture path string (e.g., "Interface\\Icons\\Spell_Fire_Fireball01")
     using SpellIconPathResolver = std::function<std::string(uint32_t)>;
@@ -1133,7 +1121,7 @@ public:
         const bool wasOpen = stableWindowOpen_;
         stableWindowOpen_ = false;
         // The stable window hides on this and nothing else.
-        if (wasOpen && addonEventCallback_) addonEventCallback_("PET_STABLE_CLOSED", {});
+        if (wasOpen) fireAddonEvent("PET_STABLE_CLOSED", {});
     }
     uint8_t  getStableSlots() const { return stableNumSlots_; }
     const std::vector<StabledPet>& getStabledPets() const { return stabledPets_; }
@@ -2804,8 +2792,11 @@ public:
     /// reports script errors somewhere else entirely.
     void addScriptError(const std::string& msg);
     void fireAddonEvent(const std::string& event, const std::vector<std::string>& args = {}) {
-        if (addonEventCallback_) addonEventCallback_(event, args);
+        if (addonEventCallback_) pendingAddonEvents_.event(event, args);
     }
+
+    /// Interface phase only. Notifications produced by handlers wait for the next drain.
+    void dispatchAddonEvents();
 
     // Reputation change toast: factionName, delta, new standing
     using RepChangeCallback = std::function<void(const std::string& factionName, int32_t delta, int32_t standing)>;
@@ -3600,7 +3591,7 @@ public:
     auto& tabCycleStaleRef() { return tabCycleStale; }
 
     // ── UI & Event Callbacks ─────────────────────────────────────────
-    auto& addonEventCallbackRef() { return addonEventCallback_; }
+    bool hasAddonEventListener() const { return static_cast<bool>(addonEventCallback_); }
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
@@ -4060,8 +4051,8 @@ private:
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
     ChatBubbleCallback chatBubbleCallback_;
     AddonEventCallback addonEventCallback_;
+    AddonEventQueue pendingAddonEvents_;
     InterfaceCommand   interfaceCommand_;
-    InterfaceQuery     interfaceQuery_;
     SpellIconPathResolver spellIconPathResolver_;
     IconPathResolver iconPathResolver_;
     ItemIconPathResolver itemIconPathResolver_;

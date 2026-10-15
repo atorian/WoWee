@@ -201,6 +201,10 @@ public:
     /// the default scheme.
     void setKeyRouter(PadKeyRouter router) { keyRouter_ = std::move(router); }
 
+    /// Interface phase: resolve new presses through Lua and stage their keys.
+    /// update() samples motion in Input without entering Lua.
+    void dispatchBindings();
+
     /// How far the pointer travels this frame for a given push of the stick.
     ///
     /// Squared, so the one stick does both jobs a pointer needs: a nudge
@@ -347,6 +351,7 @@ private:
     /// The ImGui keys routed buttons are holding, released as they let go.
     std::vector<int> imguiKeysDown_;
     PadKeyRouter keyRouter_;
+    bool bindingsActive_ = false;
 
     /// Whether the interface's Escape is currently down, so the press and the
     /// release are each sent once. ImGui counts repeats itself.

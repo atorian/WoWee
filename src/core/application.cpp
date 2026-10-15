@@ -818,9 +818,7 @@ bool Application::initialize() {
                 return engine != nullptr && engine->editBoxHasFocus();
             });
         addons::LuaServices luaSvc;
-        luaSvc.checkExecutionPhase = [this](const char* operation) {
-            requireLuaPhase(currentPhase_, operation);
-        };
+        luaSvc.executionPhase = [this] { return currentPhase_; };
         luaSvc.window            = window.get();
         luaSvc.audioCoordinator  = audioCoordinator_.get();
         luaSvc.expansionRegistry = expansionRegistry_.get();
@@ -1128,7 +1126,11 @@ bool Application::initialize() {
         // device to upload it; both exist by now.
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
-        if (addonManager_->initialize(gameHandler.get(), luaSvc)) {
+        const bool interfaceReady = [&] {
+            ScopedPhase interfaceInit(currentPhase_, Phase::Interface);
+            return addonManager_->initialize(gameHandler.get(), luaSvc);
+        }();
+        if (interfaceReady) {
             // FrameXML and the AddOns folder are loose directories on disk, not
             // assets reached through the manifest, and they belong to the
             // installation rather than to whichever expansion happens to supply
@@ -1192,11 +1194,6 @@ bool Application::initialize() {
                 if (addonManager_ && addonsLoaded_) {
                     addonManager_->runInterfaceCommand(lua);
                 }
-            });
-            // The same route, for a question rather than an instruction.
-            gameHandler->setInterfaceQueryCallback([this](const std::string& expr) {
-                if (!addonManager_ || !addonsLoaded_) return false;
-                return addonManager_->interfaceCommandBoolean(expr);
             });
             // Wire spell icon path resolver for Lua API (GetSpellInfo, UnitBuff icon, etc.)
             {
@@ -1540,7 +1537,7 @@ bool Application::initialize() {
         worldLoader_ = std::make_unique<WorldLoader>(
             *this, renderer.get(), assetManager.get(), gameHandler.get(),
             entitySpawner_.get(), appearanceComposer_.get(), window.get(),
-            world.get(), addonManager_.get());
+            world.get());
 
         // Re-wire UIServices now that all services (addonManager_, worldLoader_) are available
         if (uiManager) {
@@ -1666,22 +1663,22 @@ void Application::run() {
 }
 
 void Application::runFrame() {
+    const FramePlan plan = framePlanFor(state);
     ScopedPhase frameScope(currentPhase_, Phase::Idle);
     try {
         const float dt = FramePacer::toSeconds(pacer_.tickNs());
         FrameMark;
-        beginPhase(Phase::Input);       pumpInput(dt);
+        beginPhase(Phase::Input);       pumpInput(dt, plan);
         if (window->shouldClose()) return;
-        beginPhase(Phase::Network);     updateConnectionAndPatches(dt);
-        dispatchNetwork(dt, framePlanFor(state));
+        beginPhase(Phase::Network);     updateConnectionAndPatches(dt, plan);
+        dispatchNetwork(dt, plan);
         beginPhase(Phase::Game);        prepareFrame();
-        const FramePlan plan = framePlanFor(state);
         if (plan.game) updateGame(dt, plan);
         beginPhase(Phase::Events);      eventBus_.dispatchPosted();
-        beginPhase(Phase::Interface);   updateInterface(dt, plan.view);
+        beginPhase(Phase::Interface);   updateInterface(dt, plan);
         if (window->shouldClose()) return;
         beginPhase(Phase::Present);     syncPresentation(dt, plan);
-        beginPhase(Phase::Render);      renderFrame(plan.view);
+        beginPhase(Phase::Render);      renderFrame(plan);
         window->swapBuffers();
         beginPhase(Phase::Transitions); processWorldTransitions();
         if (renderer && renderer->getVkContext() && renderer->getVkContext()->isDeviceLost()) {
@@ -1712,11 +1709,11 @@ void Application::beginPhase(Phase phase) {
     phaseStartedAt_ = now;
 }
 
-void Application::requireTransitions(const char* operation) const {
-    requirePhase(currentPhase_, Phase::Transitions, operation);
+bool Application::requireTransitions(const char* operation) const {
+    return requirePhase(currentPhase_, Phase::Transitions, operation);
 }
 
-void Application::pumpInput(float deltaTime) {
+void Application::pumpInput(float deltaTime, const FramePlan& plan) {
     beatWatchdog();
     // What a burst of warnings left in the buffer. A warning no longer
     // writes itself to disk one line at a time - see Logger::flushIfStale -
@@ -1848,29 +1845,7 @@ void Application::pumpInput(float deltaTime) {
             else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 getCameraController()->processMouseButton(event.button);
             }
-            else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
-                // The interface gets first refusal, and only where a
-                // frame under the cursor asked for the wheel. Zooming
-                // the camera while scrolling a quest log is what
-                // happens without the check, and a frame that did not
-                // ask must not swallow it either.
-                bool takenByUi = false;
-                if (addonManager_ && addonManager_->getLuaEngine()) {
-                    // ImGui's cursor, not SDL's, because that is what
-                    // the rest of the widget dispatch is fed and the
-                    // two need not agree on a scaled display. Flipped
-                    // to bottom-origin for the same reason the button
-                    // dispatch is: the tree measures upward.
-                    const ImGuiIO& mio = ImGui::GetIO();
-                    takenByUi = addonManager_->getLuaEngine()->dispatchMouseWheel(
-                        mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y,
-                        wheelClicks(event.wheel.y, event.wheel.timestamp));
-                }
-                if (!takenByUi) {
-                    getCameraController()->processMouseWheel(
-                        static_cast<float>(event.wheel.y));
-                }
-            }
+
         }
 
         // Handle window events
@@ -1897,8 +1872,82 @@ void Application::pumpInput(float deltaTime) {
                     renderer->getCamera()->setAspectRatio(static_cast<float>(newWidth) / newHeight);
                 }
                 // Notify addons so UI layouts can adapt to the new size
-                if (addonManager_)
-                    addonManager_->fireEvent("DISPLAY_SIZE_CHANGED");
+                if (gameHandler) gameHandler->fireAddonEvent("DISPLAY_SIZE_CHANGED");
+            }
+        }
+        if (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN ||
+            event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_WHEEL) {
+            interfaceInput_.push_back({event, event.type == SDL_EVENT_TEXT_INPUT && event.text.text
+                                               ? event.text.text : ""});
+        }
+    }
+
+    if (window->shouldClose()) return;
+
+    // Physical pad state is sampled with SDL input. Lua binding dispatch runs
+    // in Interface; virtual gameplay keys it produces are sampled next frame.
+    core::gamepad().update();
+    ui::gamepadControls().setInWorld(plan.world);
+    ui::gamepadControls().setWindow(window ? window->getSDLWindow() : nullptr);
+    if (getCameraController()) {
+        auto* cam = getCameraController();
+        ui::gamepadControls().setCameraController(cam);
+        ui::gamepadControls().update(deltaTime);
+        cam->setSteering(ui::gamepadControls().isSteering());
+    } else {
+        ui::gamepadControls().setCameraController(nullptr);
+        ui::gamepadControls().update(deltaTime);
+    }
+
+    // Update input
+    Input::getInstance().update();
+#ifdef __ANDROID__
+    if (plan.world) {
+        ui::touchControls().update();
+        if (getCameraController()) {
+            auto* cam = getCameraController();
+            ui::touchControls().setCameraController(cam);
+            // The touch controls turn the view themselves, from whichever finger is
+            // doing it. SDL's own translation of the first finger must not turn it
+            // as well, or a drag counts twice and the stick swings the camera.
+            cam->setRotationSuppressed(true);
+            cam->setSteering(ui::touchControls().isSteering() ||
+                             ui::gamepadControls().isSteering());
+        }
+    }
+#endif
+
+}
+
+void Application::dispatchInterfaceInput() {
+    auto input = std::move(interfaceInput_);
+    interfaceInput_.clear();
+    for (auto& saved : input) {
+        SDL_Event event = saved.event;
+        if (event.type == SDL_EVENT_TEXT_INPUT) event.text.text = saved.text.c_str();
+        if (getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
+            if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                // The interface gets first refusal, and only where a
+                // frame under the cursor asked for the wheel. Zooming
+                // the camera while scrolling a quest log is what
+                // happens without the check, and a frame that did not
+                // ask must not swallow it either.
+                bool takenByUi = false;
+                if (addonManager_ && addonManager_->getLuaEngine()) {
+                    // ImGui's cursor, not SDL's, because that is what
+                    // the rest of the widget dispatch is fed and the
+                    // two need not agree on a scaled display. Flipped
+                    // to bottom-origin for the same reason the button
+                    // dispatch is: the tree measures upward.
+                    const ImGuiIO& mio = ImGui::GetIO();
+                    takenByUi = addonManager_->getLuaEngine()->dispatchMouseWheel(
+                        mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y,
+                        wheelClicks(event.wheel.y, event.wheel.timestamp));
+                }
+                if (!takenByUi) {
+                    getCameraController()->processMouseWheel(
+                        static_cast<float>(event.wheel.y));
+                }
             }
         }
         // Typed text, when an edit box is listening for it - or, when none
@@ -1908,7 +1957,7 @@ void Application::pumpInput(float deltaTime) {
         // StackSplitFrame's key handler passes numbers straight through on
         // purpose, so the amount could only be reached with the arrows and
         // typing "12" did nothing at all.
-        else if (event.type == SDL_EVENT_TEXT_INPUT) {
+        if (event.type == SDL_EVENT_TEXT_INPUT) {
             if (addonManager_ && addonsLoaded_) {
                 if (auto* engine = addonManager_->getLuaEngine()) {
                     if (engine->editBoxHasFocus()) {
@@ -2046,7 +2095,7 @@ void Application::pumpInput(float deltaTime) {
                 // the interface's own key-binding panel and then never
                 // honoured by any press.
                 if (auto* engine = addonManager_->getLuaEngine()) {
-                    const SDL_Keymod mods = SDL_GetModState();
+                    const SDL_Keymod mods = event.key.mod;
                     if (engine->dispatchBindingKey(
                             event.key.key,
                             (mods & SDL_KMOD_SHIFT) != 0,
@@ -2129,44 +2178,8 @@ void Application::pumpInput(float deltaTime) {
             }
         }
     }
-
-    if (window->shouldClose()) return;
-
-    // The pad, before the keyboard is sampled: it drives the client
-    // through core::Input's virtual keys, and Input::update is what turns
-    // those into a press. Applied after that read, every button would be
-    // one frame late and a tap of one could be missed entirely.
-    core::gamepad().update();
     namePadKeysForInterface();
-    ui::gamepadControls().setInWorld(state == AppState::IN_GAME);
-    ui::gamepadControls().setWindow(window ? window->getSDLWindow() : nullptr);
-    if (getCameraController()) {
-        auto* cam = getCameraController();
-        ui::gamepadControls().setCameraController(cam);
-        ui::gamepadControls().update(deltaTime);
-        cam->setSteering(ui::gamepadControls().isSteering());
-    } else {
-        ui::gamepadControls().setCameraController(nullptr);
-        ui::gamepadControls().update(deltaTime);
-    }
-
-    // Update input
-    Input::getInstance().update();
-#ifdef __ANDROID__
-    if (state == AppState::IN_GAME) {
-        ui::touchControls().update();
-        if (getCameraController()) {
-            auto* cam = getCameraController();
-            ui::touchControls().setCameraController(cam);
-            // The touch controls turn the view themselves, from whichever finger is
-            // doing it. SDL's own translation of the first finger must not turn it
-            // as well, or a drag counts twice and the stick swings the camera.
-            cam->setRotationSuppressed(true);
-            cam->setSteering(ui::touchControls().isSteering() ||
-                             ui::gamepadControls().isSteering());
-        }
-    }
-#endif
+    ui::gamepadControls().dispatchBindings();
 
 }
 
@@ -2210,7 +2223,7 @@ void Application::namePadKeysForInterface() {
     if (!code.empty()) engine->executeString(code);
 }
 
-void Application::updateMapWindow() {
+void Application::updateMapWindow(const FramePlan& plan) {
     if (!uiManager || !renderer || !window) return;
     auto& gameScreen = uiManager->getGameScreen();
     auto& settings = gameScreen.getSettingsPanel();
@@ -2224,7 +2237,7 @@ void Application::updateMapWindow() {
 
     // Only in the world. Logging out closes it, and it opens again where it
     // was left when the next character comes in.
-    const bool inWorld = (state == AppState::IN_GAME);
+    const bool inWorld = plan.world;
     const bool wanted = settings.showMapWindow_ && inWorld;
     const bool open = mapWindow_ && mapWindow_->isOpen();
     if (wanted && !open && !mapWindowFailed_) {
@@ -2248,6 +2261,12 @@ void Application::updateMapWindow() {
 void Application::shutdown() {
     ScopedPhase shuttingDown(currentPhase_, Phase::Transitions);
     LOG_DEBUG("Shutting down application...");
+    {
+        ScopedPhase interfaceShutdown(currentPhase_, Phase::Interface);
+        unloadInterface();
+        if (addonManager_) addonManager_->shutdown();
+        addonManager_.reset();
+    }
 
     // Before the window, whose destructor takes SDL down with it.
     ui::gamepadControls().setKeyRouter(nullptr);
@@ -2419,7 +2438,15 @@ void Application::shutdown() {
     LOG_DEBUG("Application shutdown complete");
 }
 
+void Application::requestState(AppState newState) {
+    requestedState_ = newState;
+}
+
 void Application::setState(AppState newState) {
+    if (!requireTransitions("application state change")) {
+        requestState(newState);
+        return;
+    }
     if (state == newState) {
         return;
     }
@@ -2451,7 +2478,7 @@ void Application::setState(AppState newState) {
             // which takes the interface down there; this catches any other way
             // of arriving here with it still standing, and does nothing when
             // it is already down.
-            unloadInterface();
+            // Interface teardown was completed before this transition.
             // Ensure no stale in-world player model leaks into the next login attempt.
             // If we reuse a previously spawned instance without forcing a respawn, appearance (notably hair) can desync.
             npcsSpawned = false;
@@ -2706,7 +2733,15 @@ void Application::logoutToLogin() {
 }
 
 void Application::processWorldTransitions() {
-    requireTransitions("apply world transitions");
+    if (!requireTransitions("apply world transitions")) return;
+    // Warmup can receive a leave after Interface has finished. Preserve it until
+    // the next Interface can deliver PLAYER_LEAVING_WORLD against the live world.
+    if (worldTransitions_.leaving() && addonsLoaded_) return;
+    if (requestedState_) {
+        const auto next = *requestedState_;
+        requestedState_.reset();
+        if (!worldTransitions_.leaving()) setState(next);
+    }
     // The only transition phase, called by run() after render and submit.
     // Applying NEW_WORLD may announce WorldEntered; consume it here too.
     using Destination = WorldTransitionQueue::Destination;
@@ -2751,7 +2786,44 @@ void Application::processWorldTransitions() {
         worldLoader_->processPendingEntry();
 }
 
+void Application::loadWorldInterface() {
+    if (!requirePhase(currentPhase_, Phase::Interface, "interface world entry")) return;
+    // Load addons once per session on first world entry
+    if (addonManager_ && !addonsLoaded_) {
+        // Set character name for per-character SavedVariables
+        if (gameHandler) {
+            const std::string& charName = gameHandler->lookupName(gameHandler->getPlayerGuid());
+            if (!charName.empty()) {
+                addonManager_->setCharacterName(charName);
+            } else {
+                // Fallback: find name from character list
+                for (const auto& c : gameHandler->getCharacters()) {
+                    if (c.guid == gameHandler->getPlayerGuid()) {
+                        addonManager_->setCharacterName(c.name);
+                        break;
+                    }
+                }
+            }
+        }
+        addonManager_->loadAllAddons();
+        addonsLoaded_ = true;
+        addonManager_->fireEvent("VARIABLES_LOADED");
+        // After VARIABLES_LOADED, which is when the chat window
+        // settings are available to be read. Every chat frame
+        // answers this by applying its saved font, colour, size
+        // and docked state; without it they keep the defaults
+        // they were built with however much was saved.
+        addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
+        addonManager_->fireEvent("PLAYER_LOGIN");
+        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
+    } else if (addonManager_ && addonsLoaded_) {
+        // Subsequent world entries (e.g. teleport, instance entry)
+        addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
+    }
+}
+
 void Application::unloadInterface() {
+    if (!requirePhase(currentPhase_, Phase::Interface, "interface teardown")) return;
     if (addonManager_ && addonsLoaded_) {
         addonManager_->fireEvent("PLAYER_LEAVING_WORLD");
         // Saves the saved variables on its way out, so this has to run while
@@ -2769,7 +2841,7 @@ void Application::unloadInterface() {
 }
 
 void Application::performLogoutToLogin(bool keepConnection) {
-    requireTransitions("world logout");
+    if (!requireTransitions("world logout")) return;
     LOG_INFO("Logout requested");
 
     // Back to the character list when the server completed a logout and the
@@ -2778,19 +2850,6 @@ void Application::performLogoutToLogin(bool keepConnection) {
     // kept open for the character list - and a new session asked for straight
     // after can be refused while the old one is still closing on the server.
     keepConnection = keepConnection && gameHandler && gameHandler->isConnected();
-
-    // The interface leaves the world with the character that was wearing it.
-    //
-    // Here rather than at character select, which is where this used to
-    // happen: leaving it standing until then meant the interface outlived the
-    // session it belonged to, dormant but intact, and another account or
-    // character logged in to would have found it.
-    //
-    // Before the disconnect below, so PLAYER_LEAVING_WORLD reaches handlers
-    // while there is still a world for them to ask about, which is what the
-    // event is for.
-    unloadInterface();
-
 
     if (gameHandler) {
         if (keepConnection) gameHandler->returnToCharacterSelect();
@@ -4554,7 +4613,7 @@ void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
     // default) of them over the frames before the screenshot, in steps of a
     // thirtieth of a second. Without it a probed candle never lit: the frame
     // was taken with one particle update behind it, at a delta of zero.
-    if (renderer && state != AppState::IN_GAME && std::getenv("WOWEE_MODEL_PROBE")) {
+    if (renderer && !plan.world && std::getenv("WOWEE_MODEL_PROBE")) {
         static const float probeSeconds = [] {
             const char* s = std::getenv("WOWEE_PROBE_SECONDS");
             return (s && *s) ? std::max(std::stof(s), 0.0f) : 6.0f;
@@ -4627,10 +4686,21 @@ void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
     }
 }
 
-void Application::updateInterface(float deltaTime, FrameView view) {
+void Application::updateInterface(float deltaTime, const FramePlan& plan) {
+    const FrameView view = plan.view;
+    if (worldInterfaceEntryPending_) {
+        worldInterfaceEntryPending_ = false;
+        if (!worldTransitions_.leaving()) loadWorldInterface();
+    }
+    if (gameHandler) gameHandler->dispatchAddonEvents();
+    dispatchInterfaceInput();
     // A lost mobile surface has no ImGui frame to build or submit. Network and
     // simulation still run, and the single Pace phase limits the background loop.
-    if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) return;
+    if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) {
+        if (worldTransitions_.leaving() ||
+            (requestedState_ && *requestedState_ != AppState::IN_GAME && plan.world)) unloadInterface();
+        return;
+    }
     // Update UI
     if (uiManager) {
         try {
@@ -5526,7 +5596,13 @@ void Application::updateInterface(float deltaTime, FrameView view) {
         // Only now is the draw data closed.
         uiManager->finishImGuiFrame();
 
-        runInterfaceStage("mapWindow", [&] { updateMapWindow(); });
+        runInterfaceStage("mapWindow", [&] { updateMapWindow(plan); });
+    }
+
+    if (gameHandler) gameHandler->dispatchAddonEvents();
+    if (worldTransitions_.leaving() ||
+        (requestedState_ && *requestedState_ != AppState::IN_GAME && plan.world)) {
+        unloadInterface();
     }
 
 }
@@ -5536,9 +5612,11 @@ void Application::beatWatchdog() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count(),
         std::memory_order_release);
+
 }
 
-void Application::renderFrame(FrameView view) {
+void Application::renderFrame(const FramePlan& plan) {
+    const FrameView view = plan.view;
     if (!renderer) return;
     if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) return;
     // Mirrors the IN_GAME update stages: a frame that blocks long enough to trip the
@@ -5755,7 +5833,7 @@ void Application::setupUICallbacks() {
     uiScreenCallbacks_ = std::make_unique<UIScreenCallbackHandler>(
         *uiManager, *gameHandler, *authHandler, expansionRegistry_.get(),
         assetManager.get(),
-        [this](AppState s) { setState(s); });
+        [this](AppState s) { requestState(s); });
     uiScreenCallbacks_->setupCallbacks();
 
     // ── Realm patch archives (EZWoW: list over world, files over login) ──
@@ -6580,14 +6658,14 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
     if (entitySpawner_) entitySpawner_->rebuildLookups();
 }
 
-void Application::updateConnectionAndPatches(float deltaTime) {
+void Application::updateConnectionAndPatches(float deltaTime, const FramePlan& plan) {
     const bool connecting = uiScreenCallbacks_ && uiScreenCallbacks_->connecting();
     const bool syncing = realmPatchSync_ && realmPatchSync_->busy();
     // The login and realm screens pump the auth connection themselves; past
     // them it carries the realm-list requests of a retry and the patch
     // transfer, and nothing else reads it.
     if ((connecting || syncing) && authHandler &&
-        state != AppState::AUTHENTICATION && state != AppState::REALM_SELECTION) {
+        !plan.authNetwork) {
         authHandler->update(0.0f);
     }
     if (uiScreenCallbacks_) uiScreenCallbacks_->update(deltaTime);

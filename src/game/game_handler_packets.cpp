@@ -276,8 +276,8 @@ void GameHandler::registerCoreOpcodes() {
             uint32_t serverTime = packet.readUInt32();
             // The world state timer bar counts from this and had nothing to
             // count from - it was read and logged and dropped.
-            if (addonEventCallback_)
-                addonEventCallback_("WORLD_STATE_UI_TIMER_UPDATE", {std::to_string(serverTime)});
+            if (hasAddonEventListener())
+                fireAddonEvent("WORLD_STATE_UI_TIMER_UPDATE", {std::to_string(serverTime)});
             LOG_DEBUG("SMSG_WORLD_STATE_UI_TIMER_UPDATE: serverTime=", serverTime);
         }
     };
@@ -1022,7 +1022,7 @@ void GameHandler::registerCoreOpcodes() {
             // chat line and an error line of its own too while it drew its own
             // chat; that window is gone, and the real client never puts this
             // on the error line at all.
-            if (addonEventCallback_) addonEventCallback_("ZONE_UNDER_ATTACK", {areaName});
+            if (hasAddonEventListener()) fireAddonEvent("ZONE_UNDER_ATTACK", {areaName});
         }
     };
 
@@ -1719,7 +1719,7 @@ void GameHandler::registerRemainingOpcodes() {
         addSystemChatMessage("Your talents have been reset by the server.");
         // The talent frame rebuilds from this; the cached state was cleared
         // above and nothing told it to redraw, so it kept the old trees.
-        if (addonEventCallback_) addonEventCallback_("TALENTS_INVOLUNTARILY_RESET", {});
+        if (hasAddonEventListener()) fireAddonEvent("TALENTS_INVOLUNTARILY_RESET", {});
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_SET_REST_START] = [](network::Packet& packet) {
@@ -2400,7 +2400,7 @@ void GameHandler::registerRemainingOpcodes() {
         petRenameablePending_ = true;
         // The naming dialog opens on this. The flag alone is read by this
         // client's own UI, so the interface's version never appeared.
-        if (addonEventCallback_) addonEventCallback_("PET_RENAMEABLE", {});
+        if (hasAddonEventListener()) fireAddonEvent("PET_RENAMEABLE", {});
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_PET_NAME_INVALID] = [this](network::Packet& packet) {
@@ -2455,7 +2455,7 @@ void GameHandler::registerRemainingOpcodes() {
         LOG_INFO("SMSG_INSPECT (Classic): ", playerName, " has gear in ",
                  std::count_if(items.begin(), items.end(),
                                [](uint32_t e) { return e != 0; }), "/19 slots");
-        if (addonEventCallback_) {
+        if (hasAddonEventListener()) {
             char guidBuf[32];
             snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)guid);
             fireAddonEvent("INSPECT_READY", {guidBuf});
@@ -2675,8 +2675,8 @@ void GameHandler::registerRemainingOpcodes() {
         // The zone id goes with it as the battle id: every handler in the group
         // opens `local battleID = ...` and passes it back when the player
         // answers, so a bare fire would answer for no battlefield.
-        if (addonEventCallback_)
-            addonEventCallback_("BATTLEFIELD_MGR_ENTRY_INVITE", {std::to_string(bfBattleId)});
+        if (hasAddonEventListener())
+            fireAddonEvent("BATTLEFIELD_MGR_ENTRY_INVITE", {std::to_string(bfBattleId)});
         LOG_INFO("SMSG_BATTLEFIELD_MGR_ENTRY_INVITE: zoneId=", bfZoneId);
     };
     dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_ENTERED] = [this](network::Packet& packet) {
@@ -2693,8 +2693,8 @@ void GameHandler::registerRemainingOpcodes() {
             addSystemChatMessage(isSafe ? "You are in the battlefield zone (safe area)."
                                         : "You have entered the battlefield!");
             if (onQueue) addSystemChatMessage("You are in the battlefield queue.");
-            if (addonEventCallback_)
-                addonEventCallback_("BATTLEFIELD_MGR_ENTERED", {std::to_string(bfMgrZoneId_)});
+            if (hasAddonEventListener())
+                fireAddonEvent("BATTLEFIELD_MGR_ENTERED", {std::to_string(bfMgrZoneId_)});
             LOG_INFO("SMSG_BATTLEFIELD_MGR_ENTERED: isSafe=", static_cast<int>(isSafe), " onQueue=", static_cast<int>(onQueue));
         }
         packet.skipAll();
@@ -2716,10 +2716,10 @@ void GameHandler::registerRemainingOpcodes() {
         std::snprintf(buf, sizeof(buf),
             "A spot has opened in the battlefield queue (battlefield %u).", bfId);
         addSystemChatMessage(buf);
-        if (addonEventCallback_)
+        if (hasAddonEventListener())
             // The warmup flag picks between two dialogs and was read off the
             // wire and thrown away, so the warmup one could never appear.
-            addonEventCallback_("BATTLEFIELD_MGR_QUEUE_INVITE",
+            fireAddonEvent("BATTLEFIELD_MGR_QUEUE_INVITE",
                                 {std::to_string(bfId), eventBool(warmup)});
         LOG_INFO("SMSG_BATTLEFIELD_MGR_QUEUE_INVITE: bfId=", bfId);
     };
@@ -2753,8 +2753,8 @@ void GameHandler::registerRemainingOpcodes() {
         }
         // The battle id and whether the queue took, in that order - the
         // interface reads both to say which battlefield answered and how.
-        if (addonEventCallback_) {
-            addonEventCallback_("BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE",
+        if (hasAddonEventListener()) {
+            fireAddonEvent("BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE",
                                 {std::to_string(bfId2), std::to_string(accepted)});
         }
         LOG_INFO("SMSG_BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE: accepted=", static_cast<int>(accepted),
@@ -2858,7 +2858,7 @@ void GameHandler::registerRemainingOpcodes() {
         calendarEventDetail_ = std::move(parsed);
         LOG_INFO("SMSG_CALENDAR_SEND_EVENT: '", calendarEventDetail_.title,
                  "' with ", calendarEventDetail_.invitees.size(), " invitee(s)");
-        if (addonEventCallback_) addonEventCallback_("CALENDAR_UPDATE_EVENT", {});
+        if (hasAddonEventListener()) fireAddonEvent("CALENDAR_UPDATE_EVENT", {});
         packet.skipAll();
     };
 
@@ -2884,7 +2884,7 @@ void GameHandler::registerRemainingOpcodes() {
                  calendarData_.holidays.size(), " holiday(s)");
         // The addon reads the whole thing on this event and nothing else
         // announces that it arrived.
-        if (addonEventCallback_) addonEventCallback_("CALENDAR_UPDATE_EVENT_LIST", {});
+        if (hasAddonEventListener()) fireAddonEvent("CALENDAR_UPDATE_EVENT_LIST", {});
         packet.skipAll();
     };
     // uint32 numPending - number of unacknowledged calendar invites
@@ -2899,8 +2899,8 @@ void GameHandler::registerRemainingOpcodes() {
             // hides it at zero, and it only ever asks on this event and on
             // PLAYER_ENTERING_WORLD. Firing nothing left it correct at login
             // and stale for the rest of the session.
-            if (countChanged && addonEventCallback_)
-                addonEventCallback_("CALENDAR_UPDATE_PENDING_INVITES", {});
+            if (countChanged && hasAddonEventListener())
+                fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
             if (numPending > 0) {
                 char buf[64];
                 std::snprintf(buf, sizeof(buf),
@@ -2980,8 +2980,8 @@ void GameHandler::registerRemainingOpcodes() {
         if (calendarPendingInvites_ < 255) ++calendarPendingInvites_;
         // Same indicator, and this is the path that matters most: an invite
         // arriving mid-session is exactly when the button has to light up.
-        if (addonEventCallback_)
-            addonEventCallback_("CALENDAR_UPDATE_PENDING_INVITES", {});
+        if (hasAddonEventListener())
+            fireAddonEvent("CALENDAR_UPDATE_PENDING_INVITES", {});
         LOG_INFO("SMSG_CALENDAR_EVENT_INVITE_ALERT: title='", title, "'");
     };
     // Sent when an event invite's RSVP status changes for the local player
@@ -3202,7 +3202,7 @@ void GameHandler::registerRemainingOpcodes() {
     // optimistically in cancelLogout(), so the ack changes no state here - it
     // is the only thing that tells the interface the countdown is over.
     dispatchTable_[Opcode::SMSG_LOGOUT_CANCEL_ACK] = [this](network::Packet& packet) {
-        if (addonEventCallback_) addonEventCallback_("LOGOUT_CANCEL", {});
+        if (hasAddonEventListener()) fireAddonEvent("LOGOUT_CANCEL", {});
         packet.skipAll();
     };
     // Someone has taken the player's insignia, so the corpse is gone and any
@@ -3211,7 +3211,7 @@ void GameHandler::registerRemainingOpcodes() {
     // parsed here - the message and the cancelled offers are the whole effect.
     dispatchTable_[Opcode::SMSG_PLAYER_SKINNED] = [this](network::Packet& packet) {
         addUIError("Insignia Taken - You can only resurrect at the graveyard");
-        if (addonEventCallback_) addonEventCallback_("PLAYER_SKINNED", {});
+        if (hasAddonEventListener()) fireAddonEvent("PLAYER_SKINNED", {});
         packet.skipAll();
     };
     // These packets are not damage-shield events. Consume them without

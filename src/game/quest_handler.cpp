@@ -76,16 +76,16 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
         }
     }
 
-    if (changedAny && owner_.addonEventCallbackRef()) {
+    if (changedAny && owner_.hasAddonEventListener()) {
         for (uint32_t moved : movedQuests) {
             const int index = questLogIndexOf(moved);
             if (index > 0) {
-                owner_.addonEventCallbackRef()("QUEST_WATCH_UPDATE",
+                owner_.fireAddonEvent("QUEST_WATCH_UPDATE",
                                                {std::to_string(index)});
             }
         }
-        owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-        owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+        owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+        owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
     }
     // Collecting the last item may have made a quest turn-in-able (! → ?),
     // so refresh nearby giver markers immediately.
@@ -105,13 +105,13 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
 /// the watch update carries the quest's position in the log, because that is
 /// what the interface auto-watches from.
 void QuestHandler::announceQuestLogChanged(uint32_t questId) {
-    if (!owner_.addonEventCallbackRef()) return;
+    if (!owner_.hasAddonEventListener()) return;
     const int index = questLogIndexOf(questId);
     if (index > 0) {
-        owner_.addonEventCallbackRef()("QUEST_WATCH_UPDATE", {std::to_string(index)});
+        owner_.fireAddonEvent("QUEST_WATCH_UPDATE", {std::to_string(index)});
     }
-    owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-    owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+    owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+    owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
 }
 
 void QuestHandler::requeryNearbyQuestGiverStatus() {
@@ -591,8 +591,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
         }
         pendingQuestAcceptTimeouts_.clear();
         pendingQuestAcceptNpcGuids_.clear();
-        if (removed && owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+        if (removed && owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
     };
 
     // ---- SMSG_QUESTGIVER_REQUEST_ITEMS ----
@@ -749,15 +749,15 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     questLog_.erase(it);
                     owner_.setQuestTracked(questId, false);
                     LOG_INFO("  Removed quest ", questId, " from quest log");
-                    if (owner_.addonEventCallbackRef())
-                        owner_.addonEventCallbackRef()("QUEST_TURNED_IN", {std::to_string(questId)});
+                    if (owner_.hasAddonEventListener())
+                        owner_.fireAddonEvent("QUEST_TURNED_IN", {std::to_string(questId)});
                     break;
                 }
             }
         }
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-            owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+            owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
         }
         // Re-query all nearby quest giver NPCs so markers refresh
         requeryNearbyQuestGiverStatus();
@@ -815,16 +815,16 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     if (owner_.questProgressCallbackRef()) {
                         owner_.questProgressCallbackRef()(quest.title, creatureName, count, reqCount);
                     }
-                    if (owner_.addonEventCallbackRef()) {
+                    if (owner_.hasAddonEventListener()) {
                         // The log INDEX, not the quest id. QuestLog_OnEvent
                         // hands arg1 straight to GetNumQuestLeaderBoards and
                         // AddQuestWatch, both of which count positions in the
                         // log - so a quest id addressed whichever quest
                         // happened to sit at that position, or none.
-                        owner_.addonEventCallbackRef()("QUEST_WATCH_UPDATE",
+                        owner_.fireAddonEvent("QUEST_WATCH_UPDATE",
                             {std::to_string(questLogIndexOf(questId))});
-                        owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-                        owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+                        owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+                        owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
                     }
 
                     LOG_INFO("Updated kill count for quest ", questId, ": ",
@@ -923,7 +923,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                 }
             }
 
-            if (owner_.addonEventCallbackRef() && updatedAny) {
+            if (owner_.hasAddonEventListener() && updatedAny) {
                 // Once per quest this item counts towards, each named by its
                 // position in the log - which is what the interface auto-watches
                 // from, and what it could not do with no argument at all.
@@ -932,12 +932,12 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     if (quest.itemCounts.count(itemId) == 0) continue;
                     const int index = questLogIndexOf(quest.questId);
                     if (index > 0) {
-                        owner_.addonEventCallbackRef()("QUEST_WATCH_UPDATE",
+                        owner_.fireAddonEvent("QUEST_WATCH_UPDATE",
                                                        {std::to_string(index)});
                     }
                 }
-                owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-                owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+                owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+                owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
             }
             // Refresh nearby giver markers now if collecting this item may have
             // made a quest turn-in-able (! → ?), rather than on leave/return.
@@ -1019,8 +1019,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                 owner_.isRestingRef() = nowResting;
                 owner_.addSystemChatMessage(owner_.isRestingRef() ? "You are now resting."
                                                               : "You are no longer resting.");
-                if (owner_.addonEventCallbackRef())
-                    owner_.addonEventCallbackRef()("PLAYER_UPDATE_RESTING", {});
+                if (owner_.hasAddonEventListener())
+                    owner_.fireAddonEvent("PLAYER_UPDATE_RESTING", {});
             }
             return;
         }
@@ -1066,10 +1066,10 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             } else {
                 owner_.addSystemChatMessage("Quest removed (ID " + std::to_string(questId) + ").");
             }
-            if (owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-                owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
-                owner_.addonEventCallbackRef()("QUEST_REMOVED", {std::to_string(questId)});
+            if (owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+                owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
+                owner_.fireAddonEvent("QUEST_REMOVED", {std::to_string(questId)});
             }
         }
     };
@@ -1256,7 +1256,7 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             // that just landed - without it a queried quest keeps its empty
             // description until the log is closed and reopened, which is the
             // "only after a relog" shape reported for the description panel.
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
             break;
         }
 
@@ -1569,8 +1569,8 @@ void QuestHandler::dismissQuestDetails(bool announce) {
     // an echo: the panel is told to close by its own closing. It is absorbed
     // today only because OnHide is deferred a frame, and it is the reason
     // OnHide cannot simply be made synchronous.
-    if (announce && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_FINISHED", {});
+    if (announce && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("QUEST_FINISHED", {});
     }
 }
 
@@ -1582,7 +1582,7 @@ void QuestHandler::declineQuest(bool announce) {
 
 void QuestHandler::closeGossip() {
     gossipWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GOSSIP_CLOSED", {});
     currentGossip_ = GossipMessageData{};
     questGreeting_.clear();
 }
@@ -1628,8 +1628,8 @@ void QuestHandler::closeQuestRequestItems(bool announce) {
     // QUEST_COMPLETE and hides on this, so without it the window would open and
     // stay open over whatever came next - unless the interface is the one
     // closing it, in which case see dismissQuestDetails.
-    if (announce && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_FINISHED", {});
+    if (announce && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("QUEST_FINISHED", {});
     }
 }
 
@@ -1662,8 +1662,8 @@ void QuestHandler::closeQuestOfferReward(bool announce) {
     pendingTurnInRewardRequest_ = false;
     questOfferRewardOpen_ = false;
     currentQuestOfferReward_ = QuestOfferRewardData{};
-    if (announce && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_FINISHED", {});
+    if (announce && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("QUEST_FINISHED", {});
     }
 }
 
@@ -1695,10 +1695,10 @@ void QuestHandler::abandonQuest(uint32_t questId) {
 
     if (localIndex >= 0) {
         questLog_.erase(questLog_.begin() + static_cast<ptrdiff_t>(localIndex));
-        if (owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-            owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
-            owner_.addonEventCallbackRef()("QUEST_REMOVED", {std::to_string(questId)});
+        if (owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+            owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
+            owner_.fireAddonEvent("QUEST_REMOVED", {std::to_string(questId)});
         }
     }
 
@@ -1920,10 +1920,10 @@ void QuestHandler::addQuestToLocalLogIfMissing(uint32_t questId, const std::stri
                                 : normalizeQuestText(title, true);
     entry.objectives = normalizeQuestText(objectives, false);
     questLog_.push_back(std::move(entry));
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_ACCEPTED", {std::to_string(questId)});
-        owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
-        owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("QUEST_ACCEPTED", {std::to_string(questId)});
+        owner_.fireAddonEvent("QUEST_LOG_UPDATE", {});
+        owner_.fireAddonEvent("UNIT_QUEST_LOG_CHANGED", {"player"});
     }
 }
 
@@ -2200,7 +2200,7 @@ void QuestHandler::handleGossipMessage(network::Packet& packet) {
         }
     }
 
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GOSSIP_SHOW", {});
     owner_.closeVendor(); // Close vendor if gossip opens
 
     // Classify gossip quests and update quest log + overhead NPC markers.
@@ -2270,7 +2270,7 @@ void QuestHandler::handleQuestgiverQuestList(network::Packet& packet) {
     // instead, so firing it here put the wrong panel over the list. Both would
     // be worse: each frame shows itself on its own event, so sending both shows
     // two.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_GREETING", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("QUEST_GREETING", {});
     owner_.closeVendor();
 
     classifyGossipQuests(false);
@@ -2379,7 +2379,7 @@ void QuestHandler::handleGossipComplete(network::Packet& packet) {
     }
 
     gossipWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("GOSSIP_CLOSED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("GOSSIP_CLOSED", {});
     currentGossip_ = GossipMessageData{};
     questGreeting_.clear();
 }
@@ -2415,8 +2415,8 @@ void QuestHandler::handleNpcTextUpdate(network::Packet& packet) {
     // GOSSIP_SHOW is the event the interface redraws the greeting on, and
     // firing it again is what a second look at an open window means.
     if (gossipWindowOpen_ && currentGossip_.titleTextId == textId &&
-        npcTextCache_.count(textId) && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("GOSSIP_SHOW", {});
+        npcTextCache_.count(textId) && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("GOSSIP_SHOW", {});
     }
 }
 
@@ -2514,8 +2514,8 @@ void QuestHandler::handleQuestPoiQueryResponse(network::Packet& packet) {
     // Fired for the tracker, not the map: this client owns the world map and
     // its POI layer, but the quest tracker is a separate frame and
     // QuestPOIGetIconInfo already answers it.
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("QUEST_POI_UPDATE", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("QUEST_POI_UPDATE", {});
     }
 }
 
@@ -2549,7 +2549,7 @@ void QuestHandler::handleQuestDetails(network::Packet& packet) {
     questDetailsOpen_ = true;
     questDetailsOpenTime_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     gossipWindowOpen_ = false;
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_DETAIL", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("QUEST_DETAIL", {});
 }
 
 void QuestHandler::handleQuestRequestItems(network::Packet& packet) {
@@ -2580,7 +2580,7 @@ void QuestHandler::handleQuestRequestItems(network::Packet& packet) {
     // when it asks for something in return. Its siblings QUEST_DETAIL and
     // QUEST_COMPLETE were both fired and this one was not, so the original
     // interface had the text for this step and no event to draw it on.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_PROGRESS", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("QUEST_PROGRESS", {});
 
     // Query item names for required items
     for (const auto& item : data.requiredItems) {
@@ -2637,7 +2637,7 @@ void QuestHandler::handleQuestOfferReward(network::Packet& packet) {
     gossipWindowOpen_ = false;
     questDetailsOpen_ = false;
     questDetailsOpenTime_ = std::chrono::steady_clock::time_point{};
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_COMPLETE", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("QUEST_COMPLETE", {});
 
     // Query item names for reward items
     for (const auto& item : data.choiceRewards)

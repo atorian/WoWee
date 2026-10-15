@@ -97,7 +97,7 @@ public:
 
     // State management
     [[nodiscard]] AppState getState() const { return state; }
-    void setState(AppState newState);
+    void requestState(AppState newState);
     /// Queue a return to login after the world connection dropped.
     void handleWorldDisconnect();
 
@@ -197,15 +197,18 @@ public:
     void setActiveMapName(const std::string& name);
 
 private:
+    void setState(AppState newState);
     void runFrame();
     void beginPhase(Phase phase);
-    void requireTransitions(const char* operation) const;
-    void pumpInput(float deltaTime);
+    bool requireTransitions(const char* operation) const;
+    void pumpInput(float deltaTime, const FramePlan& plan);
+    void dispatchInterfaceInput();
+    void loadWorldInterface();
     void prepareFrame();
     void dispatchNetwork(float deltaTime, const FramePlan& plan);
     void updateGame(float deltaTime, const FramePlan& plan);
     void syncPresentation(float deltaTime, const FramePlan& plan);
-    void updateInterface(float deltaTime, FrameView view);
+    void updateInterface(float deltaTime, const FramePlan& plan);
 
     /// Tell the renderer what the game knows about the world - the zone,
     /// the realm's clock and weather, the player's state - before it updates.
@@ -219,7 +222,7 @@ private:
     /// Opens or closes the map window to match its setting, and builds its
     /// frame. After the game's own interface frame, before the frame is
     /// submitted: the window draws into the same frame.
-    void updateMapWindow();
+    void updateMapWindow(const FramePlan& plan);
 
     /// In-world work in the Game phase. The checkpoint and local stage labels
     /// identify a failure without obscuring runFrame's phase order.
@@ -233,7 +236,7 @@ private:
     /// once at spawn and would otherwise stay there while its target circle
     /// follows the entity, which reads as a ring sliding off a still NPC.
     void syncRenderInstancesToEntities(float deltaTime);
-    void renderFrame(FrameView view);
+    void renderFrame(const FramePlan& plan);
     void performLogoutToLogin(bool keepConnection);
     void processWorldTransitions();
 
@@ -433,7 +436,7 @@ private:
     std::unique_ptr<RealmPatchSync> realmPatchSync_;
     std::string connectionStatus_;  // what the character screen was last told
     void startRealmPatchSync(const std::vector<game::EzWowPatch>& patches);
-    void updateConnectionAndPatches(float deltaTime);
+    void updateConnectionAndPatches(float deltaTime, const FramePlan& plan);
 
     // The archives of the realm connected to, read in place above the
     // extracted data once every one of them is on disk and checked. Each set
@@ -463,6 +466,10 @@ private:
     std::atomic<bool> watchdogRequestRelease_{false};
 
     AppState state = AppState::AUTHENTICATION;
+    std::optional<AppState> requestedState_;
+    struct InterfaceInputEvent { SDL_Event event; std::string text; };
+    std::vector<InterfaceInputEvent> interfaceInput_;
+    bool worldInterfaceEntryPending_ = false;
     bool running = false;
     Phase currentPhase_ = Phase::Idle;
     std::chrono::steady_clock::time_point phaseStartedAt_{};

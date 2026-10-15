@@ -1,5 +1,7 @@
 # Lessons
 
+- 2026-10-15 — Frame boundaries must be enforced at every Lua entry, including loading, input and teardown. Execute Lua only in Interface through protected Lua calls; queue game notifications and SDL input. Freeze one frame plan before Input and apply state changes only in Transitions. Lifecycle violations abort debug/tests; release reports each operation/phase pair once and keeps the client alive.
+
 - 2026-10-15 — A visible FPS test used a settings-only profile, so the user's Isengard realm disappeared from the running client's server list. Preserve the complete active profile (including realm/account selection) for interactive test launches; keep stripped profiles confined to unattended runs. Restore the user's full profile immediately after measurement and verify the requested realm is present before leaving the client open.
 
 - 2026-10-10 — WoWee with StormLib: verify suggested CMake option combinations before recommending them. `WOWEE_BUILD_TESTS=OFF` fails because `wowee_link_stormlib` is defined inside the test guard but called by asset targets outside it. Until that scope is fixed, configure with `WOWEE_BUILD_TESTS=ON`; build only the required application targets to avoid building all tests.

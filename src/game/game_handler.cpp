@@ -61,6 +61,15 @@
 namespace wowee {
 namespace game {
 
+void GameHandler::dispatchAddonEvents() {
+    pendingAddonEvents_.dispatch(
+        [this](const auto& name, const auto& args) {
+            if (addonEventCallback_) addonEventCallback_(name, args);
+        },
+        [this](const auto& code) {
+            if (interfaceCommand_) interfaceCommand_(code);
+        });
+}
 
 // Registration helpers for common dispatch table patterns
 void GameHandler::registerSkipHandler(LogicalOpcode op) {
@@ -2737,7 +2746,7 @@ void GameHandler::handleAllAchievementData(network::Packet& packet) {
     // The panel builds its whole tree on this, and it arrives once at login -
     // well before anything opens the panel - so without the event a panel
     // opened later showed the empty state it was built with.
-    if (addonEventCallback_) addonEventCallback_("RECEIVED_ACHIEVEMENT_LIST", {});
+    if (hasAddonEventListener()) fireAddonEvent("RECEIVED_ACHIEVEMENT_LIST", {});
 }
 
 // ---------------------------------------------------------------------------
@@ -3054,7 +3063,7 @@ void GameHandler::sendOptOutOfLoot(bool optOut) {
     LOG_INFO("CMSG_OPT_OUT_OF_LOOT: ", optOut ? "opting out" : "opting in");
 }
 
-void GameHandler::runInterfaceCommand(const std::string& lua) const {
+void GameHandler::runInterfaceCommand(const std::string& lua) {
     if (!interfaceCommand_) {
         // A key reaching here before the interface is up does nothing, and does
         // it silently. Said out loud, because "the window did not open" is
@@ -3068,7 +3077,7 @@ void GameHandler::runInterfaceCommand(const std::string& lua) const {
     // failed when it ran. WOWEE_LOG_LEVEL=debug separates "the key never
     // arrived" from "it arrived and the interface did nothing with it".
     LOG_DEBUG("interface command: ", lua);
-    interfaceCommand_(lua);
+    pendingAddonEvents_.command(lua);
 }
 
 void GameHandler::requestGuildBankLog(uint8_t tab) {
@@ -3357,7 +3366,7 @@ uint32_t GameHandler::getBonusActionBarOffset() const {
 }
 
 void GameHandler::announceCompanionChange() {
-    if (!addonEventCallback_) return;
+    if (!hasAddonEventListener()) return;
     for (bool mounts : {true, false}) {
         uint32_t active = 0;
         for (const auto& c : getCompanions(mounts)) {
@@ -3369,7 +3378,7 @@ void GameHandler::announceCompanionChange() {
         uint32_t& remembered = mounts ? activeMountSpell_ : activeCritterSpell_;
         if (remembered == active) continue;
         remembered = active;
-        addonEventCallback_("COMPANION_UPDATE", {mounts ? "MOUNT" : "CRITTER"});
+        fireAddonEvent("COMPANION_UPDATE", {mounts ? "MOUNT" : "CRITTER"});
     }
 }
 

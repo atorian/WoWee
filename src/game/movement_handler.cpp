@@ -715,10 +715,10 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // Fire PLAYER_STARTED/STOPPED_MOVING on movement state transitions
     {
         const bool isMoving = (movementInfo.flags & kMoveMask) != 0;
-        if (isMoving && !wasMoving && owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("PLAYER_STARTED_MOVING", {});
-        else if (!isMoving && wasMoving && owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("PLAYER_STOPPED_MOVING", {});
+        if (isMoving && !wasMoving && owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("PLAYER_STARTED_MOVING", {});
+        else if (!isMoving && wasMoving && owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("PLAYER_STOPPED_MOVING", {});
     }
 
     if (opcode == Opcode::MSG_MOVE_SET_FACING) {
@@ -2332,9 +2332,9 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
 
     owner_.eventBus().publish(events::WorldEntered{mapId, serverX, serverY, serverZ, false});
 
-    if (owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("PLAYER_ENTERING_WORLD", {"0"});
-        owner_.addonEventCallbackRef()("ZONE_CHANGED_NEW_AREA", {});
+    if (owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("PLAYER_ENTERING_WORLD", {"0"});
+        owner_.fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
     }
 }
 
@@ -2496,7 +2496,7 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
     // The flight map opens on this and closes on its pair. Neither was fired,
     // so the original interface's map could not appear however complete the
     // functions behind it were.
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TAXIMAP_OPENED", {});
+    if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("TAXIMAP_OPENED", {});
 }
 
 void MovementHandler::applyTaxiMountForCurrentNode() {
@@ -2994,8 +2994,8 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         // and setting the flag alone left FrameXML's open for the whole flight.
         const bool taxiWasOpen = taxiWindowOpen_;
         taxiWindowOpen_ = false;
-        if (taxiWasOpen && owner_.addonEventCallbackRef()) {
-            owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+        if (taxiWasOpen && owner_.hasAddonEventListener()) {
+            owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
         }
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
@@ -3038,8 +3038,8 @@ void MovementHandler::closeTaxi() {
     taxiWindowOpen_ = false;
     // Only when it was actually open: closeTaxi is also reached on paths that
     // never opened a window, and the flight map hides itself on this.
-    if (wasOpen && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+    if (wasOpen && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
     }
 
     if (taxiActivatePending_ || onTaxiFlight_ || taxiClientActive_) {
@@ -3212,8 +3212,8 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     // because its guard reads the flag this line has already cleared.
     const bool taxiWasOpen = taxiWindowOpen_;
     taxiWindowOpen_ = false;
-    if (taxiWasOpen && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+    if (taxiWasOpen && owner_.hasAddonEventListener()) {
+        owner_.fireAddonEvent("TAXIMAP_CLOSED", {});
     }
     taxiActivatePending_ = true;
     taxiActivateTimer_ = 0.0f;

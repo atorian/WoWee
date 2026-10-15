@@ -2,6 +2,8 @@
 // Replaces Application::getInstance() calls in domain API files (§5.2).
 #pragma once
 
+#include "core/frame_plan.hpp"
+
 #include <functional>
 #include <cstdint>
 #include <string>
@@ -15,7 +17,7 @@ namespace wowee::addons {
 
 struct LuaServices {
     /// The client enforces its frame boundary before entering any Lua handler.
-    std::function<void(const char*)> checkExecutionPhase;
+    std::function<core::Phase()> executionPhase;
     core::Window*            window            = nullptr;
     audio::AudioCoordinator* audioCoordinator  = nullptr;
     game::ExpansionRegistry* expansionRegistry = nullptr;

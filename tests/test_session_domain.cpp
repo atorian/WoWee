@@ -238,3 +238,19 @@ TEST_CASE("transfer pending announces its map without destroying the current wor
     CHECK(h.game().getCurrentMapId() == h.player().mapId);
     CHECK(h.game().getPlayerGuid() == h.player().guid);
 }
+
+TEST_CASE("game notifications wait for the interface and own their arguments", "[session][harness][addonqueue]") {
+    wowee::test::GameHarness h;
+    h.enterWorld();
+    std::vector<std::string> delivered;
+    h.game().setAddonEventCallback([&](const auto& event, const auto& args) {
+        delivered.push_back(event + ":" + args.at(0));
+    });
+    std::string argument = "player";
+    h.game().fireAddonEvent("UNIT_HEALTH", {argument});
+    argument = "target";
+    h.game().fireAddonEvent("UNIT_HEALTH", {argument});
+    CHECK(delivered.empty());
+    h.pump();
+    CHECK(delivered == std::vector<std::string>{"UNIT_HEALTH:player", "UNIT_HEALTH:target"});
+}

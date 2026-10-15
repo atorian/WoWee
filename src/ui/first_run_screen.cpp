@@ -133,7 +133,7 @@ bool FirstRunScreen::render() {
         // And a way back, which a first run neither needs nor should have:
         // there is nowhere for it to go.
         if (ImGui::Button("Back to login")) {
-            core::Application::getInstance().setState(core::AppState::AUTHENTICATION);
+            core::Application::getInstance().requestState(core::AppState::AUTHENTICATION);
         }
         ImGui::Spacing();
         ImGui::TextWrapped(

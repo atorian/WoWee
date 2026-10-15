@@ -50,7 +50,7 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
     };
     table[Opcode::SMSG_THREAT_CLEAR] = [this](network::Packet& /*packet*/) {
         threatLists_.clear();
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UNIT_THREAT_LIST_UPDATE", {});
+        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("UNIT_THREAT_LIST_UPDATE", {});
     };
     table[Opcode::SMSG_THREAT_REMOVE] = [this](network::Packet& packet) {
         if (!packet.hasRemaining(1)) return;
@@ -209,8 +209,8 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
             }
 
             threatLists_[unitGuid] = std::move(list);
-            if (!owner_.addonEventCallbackRef()) return;
-            auto fire = owner_.addonEventCallbackRef();
+            if (!owner_.hasAddonEventListener()) return;
+            auto fire = [this](const std::string& event, const std::vector<std::string>& args) { owner_.fireAddonEvent(event, args); };
             // The list changed, and separately: whether each unit on it is
             // tanking. They are different events and unit frames read the
             // second one - UnitFrameThreatIndicator_OnEvent is registered for
@@ -383,8 +383,8 @@ void CombatHandler::stopAutoAttack() {
         owner_.getSocket()->send(packet);
     }
     LOG_INFO("Stopping auto-attack");
-    if (owner_.addonEventCallbackRef())
-        owner_.addonEventCallbackRef()("PLAYER_LEAVE_COMBAT", {});
+    if (owner_.hasAddonEventListener())
+        owner_.fireAddonEvent("PLAYER_LEAVE_COMBAT", {});
 }
 
 // ============================================================
@@ -425,7 +425,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
     // ones it acts on, and everything else falls through its final else to a
     // blank. Only a unit the interface has a token for is worth announcing -
     // the frame compares the first argument against its own unit.
-    if (dstGuid != 0 && owner_.addonEventCallbackRef()) {
+    if (dstGuid != 0 && owner_.hasAddonEventListener()) {
         const std::string unitId = owner_.guidToUnitId(dstGuid);
         if (!unitId.empty()) {
             const char* action = nullptr;
@@ -451,7 +451,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
                 default: break;  // energize, xp, honour - not combat feedback
             }
             if (action) {
-                owner_.addonEventCallbackRef()(
+                owner_.fireAddonEvent(
                     "UNIT_COMBAT",
                     {unitId, action, flags, std::to_string(amount), "0"});
             }
@@ -487,7 +487,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
 
     // Fire COMBAT_LOG_EVENT_UNFILTERED for Lua addons
     // Args: subevent, sourceGUID, sourceName, 0 (sourceFlags), destGUID, destName, 0 (destFlags), spellId, spellName, amount
-    if (owner_.addonEventCallbackRef()) {
+    if (owner_.hasAddonEventListener()) {
         static const char* kSubevents[] = {
             "SWING_DAMAGE", "SPELL_DAMAGE", "SPELL_HEAL", "SWING_MISSED", "SWING_MISSED",
             "SWING_MISSED", "SWING_MISSED", "SWING_MISSED", "SPELL_DAMAGE", "SPELL_HEAL",
@@ -504,7 +504,7 @@ void CombatHandler::addCombatText(CombatTextEntry::Type type, int32_t amount, ui
         snprintf(dstBuf, sizeof(dstBuf), "0x%016llX", (unsigned long long)effectiveDst);
         std::string spellName = (spellId != 0) ? owner_.getSpellName(spellId) : std::string{};
         std::string timestamp = std::to_string(static_cast<double>(std::time(nullptr)));
-        owner_.addonEventCallbackRef()("COMBAT_LOG_EVENT_UNFILTERED", {
+        owner_.fireAddonEvent("COMBAT_LOG_EVENT_UNFILTERED", {
             timestamp, subevent,
             srcBuf, sourceName, "0",
             dstBuf, targetName, "0",
@@ -596,8 +596,8 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
         autoAttacking_ = true;
         autoAttackRetryPending_ = false;
         autoAttackTarget_ = data.victimGuid;
-        if (owner_.addonEventCallbackRef())
-            owner_.addonEventCallbackRef()("PLAYER_ENTER_COMBAT", {});
+        if (owner_.hasAddonEventListener())
+            owner_.fireAddonEvent("PLAYER_ENTER_COMBAT", {});
     } else if (data.victimGuid == owner_.getPlayerGuid() && data.attackerGuid != 0) {
         hostileAttackers_.insert(data.attackerGuid);
         autoTargetAttacker(data.attackerGuid);
@@ -1230,8 +1230,8 @@ void CombatHandler::handlePetMode(network::Packet& packet) {
             owner_.petCommandRef() = static_cast<uint8_t>(mode & 0xFF);
             owner_.petReactRef()   = static_cast<uint8_t>((mode >> 8) & 0xFF);
             const bool nowAttacking = owner_.petCommandRef() == kCommandAttack;
-            if (nowAttacking != wasAttacking && owner_.addonEventCallbackRef()) {
-                owner_.addonEventCallbackRef()(
+            if (nowAttacking != wasAttacking && owner_.hasAddonEventListener()) {
+                owner_.fireAddonEvent(
                     nowAttacking ? "PET_ATTACK_START" : "PET_ATTACK_STOP", {});
             }
             LOG_DEBUG("SMSG_PET_MODE: command=", static_cast<int>(owner_.petCommandRef()),

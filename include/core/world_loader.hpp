@@ -16,7 +16,6 @@ namespace wowee {
 namespace rendering { class Renderer; class LoadingScreen; }
 namespace pipeline { class AssetManager; class DBCLayout; }
 namespace game { class GameHandler; class World; }
-namespace addons { class AddonManager; }
 
 namespace core {
 
@@ -36,8 +35,7 @@ public:
                 EntitySpawner* entitySpawner,
                 AppearanceComposer* appearanceComposer,
                 Window* window,
-                game::World* world,
-                addons::AddonManager* addonManager);
+                game::World* world);
     ~WorldLoader();
 
     // Main terrain loading - drives loading screen, WMO/ADT detection, player spawn
@@ -122,7 +120,6 @@ private:
     AppearanceComposer* appearanceComposer_;
     Window* window_;
     game::World* world_;
-    addons::AddonManager* addonManager_;
 
     uint32_t loadedMapId_ = 0xFFFFFFFF;  // Map ID of currently loaded terrain (0xFFFFFFFF = none)
     bool loadingWorld_ = false;          // True while loadOnlineWorldTerrain is running
