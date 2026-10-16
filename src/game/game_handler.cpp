@@ -112,7 +112,7 @@ GameHandler::GameHandler(GameServices& services)
     chatHandler_      = std::make_unique<ChatHandler>(*this);
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
-    socialHandler_    = std::make_unique<SocialHandler>(*this);
+    socialHandler_    = std::make_unique<SocialHandler>(*this, *services_.events);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
@@ -187,6 +187,10 @@ bool GameHandler::connect(const std::string& host,
     this->accountName = accountName;
     this->build = build;
     this->realmId_ = realmId;
+    worldHost_ = host;
+    worldPort_ = port;
+    extensionHost_ = extensionServerHost;
+    extensionPort_ = extensionServerPort;
     accountDataHandler_->beginSession(accountName, host);
 
     // The session key is the shared secret the world handshake proves knowledge
@@ -215,6 +219,27 @@ bool GameHandler::connect(const std::string& host,
     setState(WorldState::CONNECTING);
     socket->beginConnect(host, port, 10);
     return true;
+}
+
+bool GameHandler::connect(const WorldLogin& login) {
+    return connect(login.host, login.port, login.sessionKey, login.account, login.build,
+                   login.realmId, login.extensionHost, login.extensionPort);
+}
+
+WorldLogin GameHandler::lastWorldLogin() const {
+    return WorldLogin{worldHost_, worldPort_, sessionKey, accountName, build, realmId_,
+                      extensionHost_, extensionPort_};
+}
+
+bool GameHandler::worldCommandAllowed(const char* command) {
+    if (isInWorld()) return true;
+    if (!worldConnectionLost_) return false;
+    addUIError("No connection to the server.");
+    if (refusalsLogged_.insert(command).second) {
+        LOG_WARNING("Refused ", command, ": the world connection is lost and being restored; "
+                    "nothing is kept to send when it is back");
+    }
+    return false;
 }
 
 void GameHandler::disconnect() {
@@ -518,21 +543,6 @@ void GameHandler::updateNetworking() {
         }
     }
 
-    // Detect RX silence (server stopped sending packets but TCP still open)
-    if (isInWorld() && socket->isConnected() &&
-        lastRxTime_.time_since_epoch().count() > 0) {
-        auto silenceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - lastRxTime_).count();
-        if (silenceMs > game::RX_SILENCE_WARNING_MS && !rxSilenceLogged_) {
-            rxSilenceLogged_ = true;
-            LOG_WARNING("RX SILENCE: No packets from server for ", silenceMs, "ms - possible soft disconnect");
-        }
-        if (silenceMs > game::RX_SILENCE_CRITICAL_MS && !rxSilence15sLogged_) {
-            rxSilence15sLogged_ = true;
-            LOG_WARNING("RX SILENCE: 15s - server appears to have stopped sending");
-        }
-    }
-
     // Detect server-side disconnect (socket closed during update)
     if (socket && !socket->isConnected() && state != WorldState::DISCONNECTED) {
         if (movementHandler_->hasPendingWorldTransfer() ||
@@ -540,14 +550,48 @@ void GameHandler::updateNetworking() {
             LOG_WARNING("Server closed connection in state: ", worldStateName(state));
             // The client releases the world after submitting the frame. Keep
             // entities and the closed connection alive until that command.
-            setState(WorldState::DISCONNECTED);
-            eventBus().publish(events::Disconnected{playerGuid});
+            loseWorldConnection();
             return;
         }
         LOG_DEBUG("World socket closed with ", pendingIncomingPackets_.size(),
                   " queued packet(s) and update-object batch(es) pending dispatch");
     }
 
+}
+
+void GameHandler::watchWorldSilence(float deltaTime) {
+    // Only where the server has reason to talk: in the world, and not between
+    // SMSG_NEW_WORLD and the client's acknowledgement, when it waits for us.
+    if (state != WorldState::IN_WORLD || !socket || !socket->isConnected() ||
+        movementHandler_->hasPendingWorldTransfer()) {
+        worldSilenceSeconds_ = 0.0f;
+        worldSilenceProbed_ = false;
+        return;
+    }
+    worldSilenceSeconds_ += std::clamp(deltaTime, 0.0f, game::WORLD_SILENCE_MAX_FRAME_SEC);
+    if (!worldSilenceProbed_ && worldSilenceSeconds_ >= game::WORLD_SILENCE_PROBE_SEC) {
+        // A quiet zone can be quiet this long; a ping is always answered.
+        worldSilenceProbed_ = true;
+        LOG_WARNING("World server silent for ", worldSilenceSeconds_,
+                    " s; asking with a ping whether the connection is still there");
+        sendPing();
+        return;
+    }
+    if (worldSilenceProbed_ &&
+        worldSilenceSeconds_ >= game::WORLD_SILENCE_PROBE_SEC + game::WORLD_SILENCE_ANSWER_SEC) {
+        LOG_ERROR("World connection lost: nothing from the server for ", worldSilenceSeconds_,
+                  " s, the ping asking about it unanswered; the socket never said so");
+        loseWorldConnection();
+    }
+}
+
+void GameHandler::loseWorldConnection() {
+    if (socket) socket->disconnect();
+    if (state == WorldState::IN_WORLD) worldConnectionLost_ = true;
+    setState(WorldState::DISCONNECTED);
+    worldSilenceSeconds_ = 0.0f;
+    worldSilenceProbed_ = false;
+    eventBus().publish(events::Disconnected{playerGuid});
 }
 
 void GameHandler::updateTaxiAndMountState(float deltaTime) {
@@ -746,6 +790,7 @@ void GameHandler::updateNetwork(float deltaTime) {
     }
 
     updateNetworking();
+    if (socket && state != WorldState::DISCONNECTED) watchWorldSilence(deltaTime);
     if (!socket || state == WorldState::DISCONNECTED ||
         movementHandler_->hasPendingWorldTransfer()) return;
 
@@ -1113,9 +1158,7 @@ void GameHandler::setState(WorldState newState) {
 void GameHandler::fail(const std::string& reason) {
     LOG_ERROR("World connection failed: ", reason);
     if (state == WorldState::IN_WORLD) {
-        if (socket) socket->disconnect();
-        setState(WorldState::DISCONNECTED);
-        eventBus().publish(events::Disconnected{playerGuid});
+        loseWorldConnection();
         return;
     }
     setState(WorldState::FAILED);

@@ -243,6 +243,38 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
     if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
 }
 
+void WorldEntryCallbackHandler::placeAfterReconnect(uint32_t mapId, float x, float y, float z) {
+    if (!requirePhase(currentPhase_, Phase::Transitions, "placement after a reconnect")) return;
+    const glm::vec3 renderPos = core::coords::canonicalToRender(core::coords::serverToCanonical(glm::vec3(x, y, z)));
+    auto* camera = playerView_.getCameraController();
+    const glm::vec3* local = camera ? camera->getFollowTarget() : nullptr;
+    if (!local && renderer_) local = &renderer_->getCharacterPosition();
+    if (!local) {
+        LOG_WARNING("Back in the world on map ", mapId, ": there is no character position to "
+                    "compare; placed where the server has it");
+    } else if (const float drift = glm::length(*local - renderPos); drift > 0.5f) {
+        LOG_WARNING("Back in the world on map ", mapId, ": the server has the character ", drift,
+                    " yd from where it walked while reconnecting; moved there");
+    } else {
+        LOG_INFO("Back in the world on map ", mapId, " where the character stood (", drift, " yd)");
+    }
+    playerView_.resetCombatVisualState();
+    if (renderer_) renderer_->getCharacterPosition() = renderPos;
+    if (camera) {
+        // Held keys start again from the new position: the server has the
+        // character standing, and is told of the next start.
+        camera->clearMovementInputs();
+        camera->teleportTo(renderPos);
+    }
+    worldEntryMovementGraceTimer_ = 2.0f;
+    taxiLandingClampTimer_ = 0.0f;
+    lastTaxiFlight_ = false;
+    if (renderer_ && renderer_->getTerrainManager()) {
+        renderer_->getTerrainManager()->processReadyTiles();
+        precacheNearbyTiles(renderer_->getTerrainManager(), renderPos, 8);
+    }
+}
+
 void WorldEntryCallbackHandler::setupCallbacks() {
     // /unstuck - nudge player forward and snap to floor at destination.
     gameHandler_.setUnstuckCallback([this]() {

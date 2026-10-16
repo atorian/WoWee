@@ -753,6 +753,9 @@ void EntitySpawner::reconcileRemotePlayerForms() {
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!spawns_) return;
+    // Held across a reconnect: the game forgot it with the lost connection,
+    // not because it left.
+    if (spawns_->held_.count(guid)) return;
     spawns_->pendingPlayerSpawnGuids_.erase(guid);
     spawns_->jobs_.cancel(JobGroup::Channel::Player, guid);
     spawns_->jobs_.cancel(JobGroup::Channel::Equipment, guid);

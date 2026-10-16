@@ -1,4 +1,5 @@
 #include "auth/auth_packets.hpp"
+#include "auth/crypto.hpp"
 #include "core/logger.hpp"
 #include "network/net_platform.hpp"
 #include <algorithm>
@@ -54,7 +55,10 @@ bool detectOutboundIPv4(std::array<uint8_t, 4>& outIp) {
 }
 } // namespace
 
-network::Packet LogonChallengePacket::build(const std::string& account, const ClientInfo& info) {
+namespace {
+// The logon and the reconnect challenge carry the same body under their own
+// command byte.
+network::Packet buildChallenge(AuthOpcode command, const std::string& account, const ClientInfo& info) {
     // Convert account to uppercase
     std::string upperAccount = account;
     std::transform(upperAccount.begin(), upperAccount.end(), upperAccount.begin(),
@@ -65,7 +69,7 @@ network::Packet LogonChallengePacket::build(const std::string& account, const Cl
     // timezone(4) + ip(4) + accountLen(1) + account(N)
     uint16_t payloadSize = 30 + upperAccount.length();
 
-    network::Packet packet(static_cast<uint16_t>(AuthOpcode::LOGON_CHALLENGE));
+    network::Packet packet(static_cast<uint16_t>(command));
 
     // Protocol version (e.g. 8 for WoW 3.3.5a build 12340)
     packet.writeUInt8(info.protocolVersion);
@@ -134,11 +138,69 @@ network::Packet LogonChallengePacket::build(const std::string& account, const Cl
     packet.writeBytes(reinterpret_cast<const uint8_t*>(upperAccount.c_str()),
                       upperAccount.length());
 
-    LOG_DEBUG("Built LOGON_CHALLENGE packet for account: ", upperAccount);
+    LOG_DEBUG("Built challenge 0x", std::hex, static_cast<int>(command), std::dec,
+              " for account: ", upperAccount);
     LOG_DEBUG("  Payload size: ", payloadSize, " bytes");
     LOG_DEBUG("  Total size: ", packet.getSize(), " bytes");
 
     return packet;
+}
+} // namespace
+
+network::Packet LogonChallengePacket::build(const std::string& account, const ClientInfo& info) {
+    return buildChallenge(AuthOpcode::LOGON_CHALLENGE, account, info);
+}
+
+network::Packet ReconnectChallengePacket::build(const std::string& account, const ClientInfo& info) {
+    return buildChallenge(AuthOpcode::RECONNECT_CHALLENGE, account, info);
+}
+
+bool ReconnectChallengeResponseParser::parse(network::Packet& packet, ReconnectChallengeResponse& response) {
+    // Opcode already consumed by handlePacket(): error, then on success the
+    // challenge and the version challenge.
+    if (packet.getRemainingSize() < 1) return false;
+    response.result = static_cast<AuthResult>(packet.readUInt8());
+    if (!response.isSuccess()) return true;
+    if (packet.getRemainingSize() < 32) return false;
+    for (auto& b : response.challenge) b = packet.readUInt8();
+    for (auto& b : response.versionChallenge) b = packet.readUInt8();
+    return true;
+}
+
+network::Packet ReconnectProofPacket::build(const std::array<uint8_t, 16>& r1,
+                                            const std::array<uint8_t, 20>& r2,
+                                            const std::array<uint8_t, 20>& r3) {
+    network::Packet packet(static_cast<uint16_t>(AuthOpcode::RECONNECT_PROOF));
+    packet.writeBytes(r1.data(), r1.size());
+    packet.writeBytes(r2.data(), r2.size());
+    packet.writeBytes(r3.data(), r3.size());
+    packet.writeUInt8(0);  // number of keys
+    return packet;
+}
+
+std::array<uint8_t, 20> ReconnectProofPacket::proof(const std::string& account,
+                                                    const std::array<uint8_t, 16>& r1,
+                                                    const std::array<uint8_t, 16>& challenge,
+                                                    const std::vector<uint8_t>& sessionKey) {
+    std::string upperAccount = account;
+    std::transform(upperAccount.begin(), upperAccount.end(), upperAccount.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    std::vector<uint8_t> data(upperAccount.begin(), upperAccount.end());
+    data.insert(data.end(), r1.begin(), r1.end());
+    data.insert(data.end(), challenge.begin(), challenge.end());
+    data.insert(data.end(), sessionKey.begin(), sessionKey.end());
+    const auto digest = Crypto::sha1(data);
+    std::array<uint8_t, 20> out{};
+    std::copy_n(digest.begin(), std::min(digest.size(), out.size()), out.begin());
+    return out;
+}
+
+bool ReconnectProofResponseParser::parse(network::Packet& packet, ReconnectProofResponse& response) {
+    // Opcode already consumed: the error byte, then (from TBC on) two bytes
+    // of login flags this client does not read.
+    if (packet.getRemainingSize() < 1) return false;
+    response.status = packet.readUInt8();
+    return true;
 }
 
 bool LogonChallengeResponseParser::parse(network::Packet& packet, LogonChallengeResponse& response) {

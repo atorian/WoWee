@@ -115,6 +115,13 @@ public:
                        WorldLoader::Entry entry);
     /// A scene with nothing to load (the offline probes).
     MapScope& enterScene(const MapScope::Services& services, uint32_t mapId);
+    /// The character logged in again, after a lost connection, on the map
+    /// this session stands on: the next session takes the map whole -
+    /// scene, models, streaming, held entities - and this one ends without
+    /// it. Null with no map.
+    [[nodiscard]] std::unique_ptr<MapScope> releaseMap();
+    /// The map a session for the same character handed over (releaseMap).
+    void adoptMap(std::unique_ptr<MapScope> map);
 
     // ---- The interface ----------------------------------------------------
 

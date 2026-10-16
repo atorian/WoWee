@@ -1130,7 +1130,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
 // ============================================================
 
 void InventoryHandler::lootTarget(uint64_t targetGuid) {
-    if (!sender_.characterInWorld()) return;
+    if (!sender_.worldCommandAllowed("loot")) return;
     currentLoot_.items.clear();
     LOG_INFO("Looting target 0x", std::hex, targetGuid, std::dec);
     auto packet = LootPacket::build(targetGuid);
@@ -1138,7 +1138,7 @@ void InventoryHandler::lootTarget(uint64_t targetGuid) {
 }
 
 void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
-    if (!sender_.characterInWorld()) return;
+    if (!sender_.worldCommandAllowed("loot")) return;
 
     if (!confirmed) {
         // Bind-on-pickup, and the warning neither interface gave. The slot the
@@ -1910,7 +1910,7 @@ void InventoryHandler::confirmBindOnUse() {
 void InventoryHandler::dispatchUseItem(uint8_t wowBag, uint8_t wowSlot, uint64_t itemGuid,
                                        const ItemDef& item, bool confirmed,
                                        uint64_t unitTarget) {
-    if (!sender_.characterInWorld()) return;
+    if (!sender_.worldCommandAllowed("item use")) return;
     if (queries_.restoring()) queries_.cancelCast();
 
     // Bind-on-use, and not yet bound. Same warning as the equip prompt, one
@@ -5889,7 +5889,7 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
 // ============================================================
 
 void InventoryHandler::initiateTrade(uint64_t targetGuid) {
-    if (!sender_.characterInWorld()) {
+    if (!sender_.worldCommandAllowed("trade")) {
         LOG_WARNING("Cannot initiate trade: not in world or not connected");
         return;
     }

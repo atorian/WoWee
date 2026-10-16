@@ -9,8 +9,10 @@
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 
 namespace wowee::test {
@@ -25,8 +27,15 @@ net::AsyncConnect::Status FakeWorldConnection::pollConnect() {
     if (connected_) return net::AsyncConnect::Status::Connected;
     if (!connecting_) return net::AsyncConnect::Status::Idle;
     connecting_ = false;
+    if (refused_) return net::AsyncConnect::Status::Failed;
     connected_ = true;
     return net::AsyncConnect::Status::Connected;
+}
+
+void FakeWorldConnection::send(const network::Packet& packet) {
+    sent_.push_back(packet);
+    if (!answer_ || !connected_) return;
+    if (auto reply = answer_(packet)) inbound_.push_back(std::move(*reply));
 }
 
 void FakeWorldConnection::update() {
@@ -110,7 +119,24 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     services_.events = &events_;
     services_.cvars = &cvars_;
     services_.makeConnection = [this] {
-        auto connection = std::make_unique<FakeWorldConnection>();
+        // What a live server says without being asked twice: CMSG_PING is
+        // answered with SMSG_PONG and the same sequence.
+        auto answer = [this](const network::Packet& sent) -> std::optional<network::Packet> {
+            if (!pingsAnswered_ || !game_) return std::nullopt;
+            if (game_->getOpcodeTable().fromWire(sent.getOpcode()) != game::Opcode::CMSG_PING)
+                return std::nullopt;
+            network::Packet ping = sent;
+            ping.setReadPos(0);
+            const uint32_t sequence = ping.readUInt32();
+            const uint16_t pong = game_->getOpcodeTable().toWire(game::Opcode::SMSG_PONG);
+            return network::Packet(pong, Body().u32(sequence).bytes());
+        };
+        // A connection the game lets go of is no server to play any more.
+        auto made = std::make_shared<FakeWorldConnection*>(nullptr);
+        auto connection = std::make_unique<FakeWorldConnection>(answer, connectionsRefused_, [this, made] {
+            if (connection_ == *made) connection_ = nullptr;
+        });
+        *made = connection.get();
         connection_ = connection.get();
         return connection;
     };
@@ -287,13 +313,19 @@ void GameHarness::playerInView() {
 
 void GameHarness::enterWorld(const PlayerSpec& player) {
     player_ = player;
-    using game::Opcode;
-    using game::WorldState;
-
     const std::vector<uint8_t> sessionKey(40, 0x5A);
     if (!game_->connect("harness.test", 8085, sessionKey, "HARNESS", 12340, 1)) {
         fail("connect refused");
     }
+    answerLogin(player);
+    game_->selectCharacter(player.guid);
+    answerPlayerLogin(player);
+    clearRecords();
+}
+
+void GameHarness::answerLogin(const PlayerSpec& player) {
+    using game::Opcode;
+    using game::WorldState;
     pump();
     if (game_->getState() != WorldState::CONNECTED) fail("did not connect");
 
@@ -308,15 +340,54 @@ void GameHarness::enterWorld(const PlayerSpec& player) {
     receive(Opcode::SMSG_CHAR_ENUM, charEnumBody(player));
     pump();
     if (game_->getState() != WorldState::CHAR_LIST_RECEIVED) fail("character list not taken");
+}
 
-    game_->selectCharacter(player.guid);
+void GameHarness::answerPlayerLogin(const PlayerSpec& player) {
+    using game::Opcode;
+    player_ = player;
     if (!lastSent(Opcode::CMSG_PLAYER_LOGIN)) fail("no CMSG_PLAYER_LOGIN");
-
     receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, loginVerifyWorldBody(player));
     pump();
-    if (game_->getState() != WorldState::IN_WORLD) fail("not in the world after LOGIN_VERIFY_WORLD");
+    if (game_->getState() != game::WorldState::IN_WORLD)
+        fail("not in the world after LOGIN_VERIFY_WORLD");
+}
 
-    clearRecords();
+std::vector<uint8_t> GameHarness::createObjectBody(uint64_t guid, game::ObjectType type,
+                                                   std::vector<std::pair<uint16_t, uint32_t>> fields,
+                                                   float x, float y, float z) {
+    for (const auto& [index, value] : fields) {
+        (void)value;
+        if (index == 0xFFFF) fail("an update field the active table does not have");
+    }
+    std::sort(fields.begin(), fields.end());
+    const int words = fields.empty() ? 1 : fields.back().first / 32 + 1;
+    std::vector<uint32_t> mask(static_cast<size_t>(words), 0);
+    for (const auto& [index, value] : fields) mask[index / 32] |= 1u << (index % 32);
+
+    const bool living = type == game::ObjectType::UNIT || type == game::ObjectType::PLAYER;
+    Body b;
+    b.u32(1);                                            // one block
+    b.u8(static_cast<uint8_t>(game::UpdateType::CREATE_OBJECT));
+    b.packedGuid(guid);
+    b.u8(static_cast<uint8_t>(type));
+    if (living) {
+        b.u8(0x20).u8(0x00);                             // update flags: living
+        b.u32(0).u8(0).u8(0);                            // movement flags, flags2
+        b.u32(0);                                        // time
+        b.f32(x).f32(y).f32(z).f32(0.0f);                // position, facing
+        b.u32(0);                                        // fall time
+        for (float speed : {2.5f, 7.0f, 4.5f, 4.72f, 2.5f, 7.0f, 4.5f, 3.14159f, 3.14159f})
+            b.f32(speed);                                // walk .. pitch rate
+    } else {
+        b.u8(0x00).u8(0x00);                             // update flags: none
+    }
+    b.u8(static_cast<uint8_t>(words));
+    for (uint32_t word : mask) b.u32(word);
+    for (const auto& [index, value] : fields) {
+        (void)index;
+        b.u32(value);
+    }
+    return b.bytes();
 }
 
 void GameHarness::relogAs(const PlayerSpec& next) {

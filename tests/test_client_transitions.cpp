@@ -12,7 +12,9 @@
 
 #include "client_harness.hpp"
 
+#include "core/coordinates.hpp"
 #include "core/map_scope.hpp"
+#include "core/world_reconnect.hpp"
 #include "game/movement_flags.hpp"
 #include "game/opcodes.hpp"
 #include "rendering/camera_controller.hpp"
@@ -22,6 +24,7 @@
 #include <vector>
 
 using wowee::core::AppState;
+using Renewal = wowee::core::WorldSessionRenewal::Result;
 using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::ClientHarness;
@@ -184,7 +187,8 @@ TEST_CASE("a map change ends the old map before the next is built, and the chara
     CHECK(std::count(heard.begin(), heard.end(), "PLAYER_LEAVING_WORLD") == 0);
 }
 
-TEST_CASE("logout and disconnect, while loading or in the world, leave nothing of the world",
+TEST_CASE("logout, and a disconnect that cannot be ridden out, while loading or in the world, "
+          "leave nothing of the world",
           "[client][harness][loading]") {
     const bool whileLoading = GENERATE(true, false);
     const bool disconnect = GENERATE(false, true);
@@ -201,6 +205,9 @@ TEST_CASE("logout and disconnect, while loading or in the world, leave nothing o
     h.server().clearRecords();
 
     if (disconnect) {
+        // The login server will not renew the session: nothing to ride it
+        // out with.
+        h.setRenewal(Renewal::Refused, "the login server holds no session for this key");
         h.server().server().disconnect();
     } else {
         h.game().requestLogout(false);
@@ -225,6 +232,7 @@ TEST_CASE("logout and disconnect, while loading or in the world, leave nothing o
     h.advance(3.0f);
     CHECK(h.state() == destination);
     requireNothingOfTheWorldStands(h);
+    CHECK(h.loop().reconnecting() == nullptr);
 }
 
 TEST_CASE("the interface answers what it is asked, false as well as true",
@@ -297,4 +305,217 @@ TEST_CASE("logging in another character carries none of the last one's interface
     const auto bobHeard = h.interfaceEventsOf("Bob");
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_ENTERING_WORLD") >= 1);
     CHECK(std::count(bobHeard.begin(), bobHeard.end(), "PLAYER_LEAVING_WORLD") == 0);
+}
+
+// ---- A world connection lost and restored --------------------------------------
+
+namespace {
+
+/// The server's end of the connection closes, as a dropped cable or a server
+/// restart closes it; frames until the client is reconnecting.
+void loseConnection(ClientHarness& h) {
+    h.server().server().disconnect();
+    h.frameUntil([&] { return h.loop().reconnecting() != nullptr; }, 60,
+                 "the client to begin reconnecting");
+}
+
+float horizontalDistance(const glm::vec3& a, const glm::vec3& b) {
+    return glm::length(glm::vec2(a.x - b.x, a.y - b.y));
+}
+
+/// Where the server puts the player, as the client draws it.
+glm::vec3 drawnAt(const PlayerSpec& p) {
+    namespace coords = wowee::core::coords;
+    return coords::canonicalToRender(coords::serverToCanonical(glm::vec3(p.x, p.y, p.z)));
+}
+
+}  // namespace
+
+TEST_CASE("a connection lost in the world is ridden out on the same map: the map and what it "
+          "shows stay, with no loading screen, and the interface starts again",
+          "[client][harness][reconnect]") {
+    constexpr uint64_t kWolf = 0xF130000001000061ULL;
+    constexpr uint64_t kBoar = 0xF130000001000062ULL;
+    ClientHarness h;
+    h.enterWorld();
+    const PlayerSpec player = h.player();
+    h.receiveCreature(kWolf, 4321, player.x + 4.0f, player.y, player.z);
+    h.receiveCreature(kBoar, 4322, player.x - 4.0f, player.y, player.z);
+    h.frameUntilHandled();
+    REQUIRE(h.presentsCreature(kWolf));
+    REQUIRE(h.presentsCreature(kBoar));
+    h.runInInterface("RECONNECT_MARK = 1");
+    const auto* map = h.map();
+
+    loseConnection(h);
+    // Still in the world it was in, saying what it is doing from the next
+    // Interface phase on.
+    h.frame();
+    CHECK(h.state() == AppState::IN_GAME);
+    CHECK(h.map() == map);
+    CHECK(h.reconnectStatus().find("Reconnecting") != std::string::npos);
+    CHECK(h.presentsCreature(kWolf));
+    CHECK(h.presentsCreature(kBoar));
+
+    // Every frame from here to the end of the hold: never a loading screen,
+    // and the wolf - which the server shows again - never gone.
+    const auto watch = [&] {
+        CHECK(h.state() == AppState::IN_GAME);
+        CHECK(h.presentsCreature(kWolf));
+    };
+    h.answerReconnect(player, [&] {
+        h.receiveCreature(kWolf, 4321, player.x + 4.0f, player.y, player.z);
+    });
+    for (int i = 0; i < 2; ++i) {
+        h.frame();
+        watch();
+    }
+    CHECK(h.loop().reconnecting() == nullptr);
+    CHECK(h.reconnectStatus().empty());
+    CHECK(h.map() == map);
+    // The interface is a new one, told of the world as at a login, with
+    // nothing of the last one's state.
+    CHECK(lastHeardBy(h, "Harness") == "PLAYER_ENTERING_WORLD");
+    const auto heard = h.interfaceEventsOf("Harness");
+    CHECK(std::count(heard.begin(), heard.end(), "PLAYER_LEAVING_WORLD") == 1);
+    CHECK(h.interfaceAnswers("RECONNECT_MARK == nil"));
+
+    // The boar, which the server did not show again, is gone once the
+    // login's first burst is in; the wolf stays.
+    for (int i = 0; i < 60 * 4; ++i) {
+        h.frame();
+        watch();
+    }
+    CHECK_FALSE(h.presentsCreature(kBoar));
+    CHECK(h.map() == map);
+}
+
+TEST_CASE("a reconnect that finds the character on another map is an ordinary map change",
+          "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    PlayerSpec elsewhere = h.player();
+    elsewhere.mapId = 1;
+    elsewhere.x = 1000.0f;
+    elsewhere.y = 2000.0f;
+    elsewhere.z = 300.0f;
+
+    loseConnection(h);
+    h.answerReconnect(elsewhere);
+    h.frameUntil([&] { return h.state() == AppState::LOADING_WORLD; }, 60, "the new map's load");
+    REQUIRE(h.map());
+    CHECK(h.map()->mapId() == 1);
+    CHECK(h.loop().reconnecting() == nullptr);
+    h.finishEnteringWorld();
+    CHECK(h.state() == AppState::IN_GAME);
+    CHECK(h.map()->mapId() == 1);
+    CHECK(lastHeardBy(h, "Harness") == "PLAYER_ENTERING_WORLD");
+}
+
+TEST_CASE("when every reconnect attempt fails the character leaves the world for the login screen",
+          "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    // The world server is down: every attempt's connection fails.
+    h.server().setConnectionsRefused(true);
+    loseConnection(h);
+
+    // Five attempts, the waits between them growing; then the login screen.
+    h.frameUntil([&] { return h.state() == AppState::AUTHENTICATION; }, 60 * 120,
+                 "the client to give up");
+    CHECK(h.renewalsBegun() == wowee::core::WorldReconnect::kMaxAttempts);
+    CHECK(lastHeardBy(h, "Harness") == "PLAYER_LEAVING_WORLD");
+    requireNothingOfTheWorldStands(h);
+    CHECK(h.loop().reconnecting() == nullptr);
+    CHECK(h.reconnectStatus().empty());
+}
+
+TEST_CASE("an attempt that timed out is followed by the next at once, not after another wait",
+          "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    // The login server does not answer: the first attempt runs out its time.
+    h.setRenewal(Renewal::Pending);
+    loseConnection(h);
+    h.frameUntil([&] { return h.renewalsBegun() == 2; }, 60 * 21, "the second attempt");
+    // It began as the first gave up - twenty seconds in, past the five the
+    // second may start after - and the network being back is all it needs.
+    h.setRenewal(Renewal::Renewed);
+    h.answerReconnect(h.player());
+    h.frame();
+    CHECK(h.loop().reconnecting() == nullptr);
+    CHECK(h.state() == AppState::IN_GAME);
+}
+
+TEST_CASE("a refused session ends the reconnect at once", "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.setRenewal(Renewal::Refused, "the login server holds no session for this key");
+    loseConnection(h);
+    h.frameUntil([&] { return h.state() == AppState::AUTHENTICATION; }, 60,
+                 "the client to give up");
+    CHECK(h.renewalsBegun() == 1);
+    requireNothingOfTheWorldStands(h);
+}
+
+TEST_CASE("a server gone silent, with the socket still open, is reconnected to",
+          "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    const auto* map = h.map();
+    h.server().setPingsAnswered(false);
+    // Nothing comes, and the ping asking about it is not answered.
+    h.frameUntil([&] { return h.loop().reconnecting() != nullptr; }, 60 * 30,
+                 "the silence to be taken for a lost connection");
+    CHECK(h.state() == AppState::IN_GAME);
+    CHECK(h.map() == map);
+}
+
+TEST_CASE("the character walks while the client reconnects, and stands where the server has it "
+          "once back", "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    const PlayerSpec player = h.player();
+    bindMoveForward(h);
+    loseConnection(h);
+    const glm::vec3 lostAt = h.characterPosition();
+
+    // W walks, with no world to tell: the character moves here all the same.
+    h.pressKey(SDLK_W);
+    h.advance(1.0f);
+    h.releaseKey(SDLK_W);
+    h.frame();
+    CHECK(horizontalDistance(h.characterPosition(), lostAt) > 2.0f);
+
+    // Back in, the server has the character where it last knew it.
+    h.answerReconnect(player);
+    h.frame();
+    REQUIRE(h.loop().reconnecting() == nullptr);
+    CHECK(horizontalDistance(h.characterPosition(), drawnAt(player)) < 0.01f);
+    const auto& moved = h.game().getMovementInfo();
+    const glm::vec3 serverCanonical =
+        wowee::core::coords::serverToCanonical(glm::vec3(player.x, player.y, player.z));
+    CHECK(glm::length(glm::vec2(moved.x - serverCanonical.x, moved.y - serverCanonical.y)) < 0.01f);
+}
+
+TEST_CASE("a cast while the client reconnects is refused at once and never sent",
+          "[client][harness][reconnect]") {
+    constexpr uint32_t kFireball = 133;
+    ClientHarness h;
+    h.enterWorld();
+    loseConnection(h);
+    h.runInInterface(
+        "ERRS = ''\n"
+        "local f = CreateFrame('Frame')\n"
+        "f:RegisterEvent('UI_ERROR_MESSAGE')\n"
+        "f:SetScript('OnEvent', function(_, _, msg) ERRS = ERRS .. msg end)\n");
+
+    h.game().castSpell(kFireball, 0);
+    h.frame();
+    CHECK(h.interfaceAnswers("ERRS == 'No connection to the server.'"));
+
+    h.answerReconnect(h.player());
+    h.advance(1.0f);
+    REQUIRE(h.loop().reconnecting() == nullptr);
+    CHECK(h.server().countSent(Opcode::CMSG_CAST_SPELL) == 0);
 }

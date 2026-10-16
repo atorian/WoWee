@@ -367,3 +367,163 @@ TEST_CASE("game notifications wait for the interface and own their arguments", "
     h.pump();
     CHECK(delivered == std::vector<std::string>{"UNIT_HEALTH:player", "UNIT_HEALTH:target"});
 }
+
+// ---- A lost world connection, and logging in again --------------------------
+
+namespace {
+
+/// Every Disconnected the game announces, while it lives.
+struct DisconnectsHeard {
+    explicit DisconnectsHeard(GameHarness& h)
+        : sub(h.events().subscribe<ev::Disconnected>(
+              [this](const ev::Disconnected& e) { seen.push_back(e); })) {}
+    std::vector<ev::Disconnected> seen;
+    wowee::core::EventBus::Subscription sub;
+};
+
+/// What a client does when the connection is lost: drop what is left of it
+/// and log the same character in again with the last login, on a new
+/// connection the test plays the server of.
+void reconnect(GameHarness& h) {
+    h.game().disconnect();
+    REQUIRE_FALSE(h.hasServer());
+    REQUIRE(h.game().connect(h.game().lastWorldLogin()));
+    h.answerLogin(h.player());
+    h.game().selectCharacter(h.player().guid);
+    h.answerPlayerLogin(h.player());
+}
+
+}  // namespace
+
+TEST_CASE("a world server silent past an unanswered ping is lost, once", "[session][harness][reconnect]") {
+    GameHarness h;
+    h.enterWorld();
+    DisconnectsHeard heard(h);
+    h.setPingsAnswered(false);
+
+    // Ten quiet seconds: asked about, not yet given up on.
+    h.advance(10.5f);
+    CHECK(h.countSent(Opcode::CMSG_PING) == 1);
+    CHECK(heard.seen.empty());
+
+    // Ten more with no answer: the connection is lost, though the socket
+    // never said so.
+    h.advance(10.0f);
+    REQUIRE(heard.seen.size() == 1);
+    CHECK(heard.seen[0].characterGuid == h.player().guid);
+    CHECK(h.game().getState() == wowee::game::WorldState::DISCONNECTED);
+    CHECK(h.game().worldConnectionLost());
+    h.advance(30.0f);
+    CHECK(heard.seen.size() == 1);
+}
+
+TEST_CASE("a quiet server that answers the ping, a long frame and a map change are not silence",
+          "[session][harness][reconnect]") {
+    GameHarness h;
+    h.enterWorld();
+    DisconnectsHeard heard(h);
+
+    SECTION("a quiet zone: the server answers when asked") {
+        h.advance(60.0f);
+        CHECK(h.countSent(Opcode::CMSG_PING) >= 1);
+    }
+    SECTION("a frame held for a long load is the client not listening") {
+        h.setPingsAnswered(false);
+        for (int i = 0; i < 3; ++i) h.game().update(30.0f);
+    }
+    SECTION("between NEW_WORLD and the client's acknowledgement the server waits for us") {
+        h.setPingsAnswered(false);
+        h.receive(Opcode::SMSG_NEW_WORLD, Body().u32(1).f32(1.0f).f32(2.0f).f32(3.0f).f32(0.0f));
+        h.pump();
+        REQUIRE(h.game().getMovementHandler()->hasPendingWorldTransfer());
+        h.advance(40.0f);
+    }
+    CHECK(heard.seen.empty());
+    CHECK_FALSE(h.game().worldConnectionLost());
+}
+
+TEST_CASE("while the world connection is lost, what needs the server is refused at once and not kept",
+          "[session][harness][reconnect]") {
+    GameHarness h;
+    h.enterWorld();
+    h.server().disconnect();
+    h.pump();
+    REQUIRE(h.game().worldConnectionLost());
+    h.clearRecords();
+
+    h.game().castSpell(133, 0);
+    h.game().sendChatMessage(wowee::game::ChatType::SAY, "anyone there?", "");
+    h.game().lootTarget(0xF130000001000001ull);
+    h.game().interactWithNpc(0xF130000001000002ull);
+    h.pump();
+    // Told, each time.
+    const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+    CHECK(errors.size() == 4);
+    for (const auto& e : errors) CHECK(e.args.back() == "No connection to the server.");
+
+    // Back in: none of it goes out after all.
+    reconnect(h);
+    h.advance(1.0f);
+    CHECK_FALSE(h.game().worldConnectionLost());
+    CHECK(h.countSent(Opcode::CMSG_CAST_SPELL) == 0);
+    CHECK(h.countSent(Opcode::CMSG_MESSAGECHAT) == 0);
+    CHECK(h.countSent(Opcode::CMSG_LOOT) == 0);
+    CHECK(h.countSent(Opcode::CMSG_GOSSIP_HELLO) == 0);
+    // And a command once in again goes.
+    h.game().castSpell(133, 0);
+    CHECK(h.countSent(Opcode::CMSG_CAST_SPELL) == 1);
+}
+
+TEST_CASE("logging in again after a lost connection keeps nothing of the last one",
+          "[session][harness][reconnect]") {
+    using wowee::game::ObjectType;
+    using wowee::game::UF;
+    using wowee::game::fieldIndex;
+    constexpr uint32_t kFireball = 133;
+    constexpr uint64_t kJaina = 0x21;
+    constexpr uint64_t kItem = 0x4000000000000101ull;
+
+    GameHarness h;
+    h.enterWorld();
+    const uint64_t me = h.player().guid;
+    // A cooldown, an aura, a party and a hearthstone in the backpack.
+    h.receive(Opcode::SMSG_SPELL_COOLDOWN, Body().u64(me).u8(0).u32(kFireball).u32(60000));
+    h.receive(Opcode::SMSG_AURA_UPDATE,
+              Body().packedGuid(me).u8(0).u32(1459).u8(0x08 /* no caster */).u8(10).u8(0));
+    {
+        Body party;
+        party.u8(0).u8(0).u8(0).u8(0).u64(0x1234).u32(1).u32(1);
+        party.cstr("Jaina").u64(kJaina).u8(1).u8(0).u8(0).u8(0);
+        party.u64(me).u8(2).u64(me).u8(2).u8(1).u8(0).u8(0);
+        h.receive(Opcode::SMSG_GROUP_LIST, party);
+    }
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kItem, ObjectType::ITEM,
+                                            {{fieldIndex(UF::OBJECT_FIELD_ENTRY), 6948},
+                                             {fieldIndex(UF::ITEM_FIELD_STACK_COUNT), 1}}));
+    const uint16_t pack = fieldIndex(UF::PLAYER_FIELD_PACK_SLOT_1);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(me, ObjectType::PLAYER,
+                                            {{fieldIndex(UF::UNIT_FIELD_HEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             {pack, static_cast<uint32_t>(kItem)},
+                                             {static_cast<uint16_t>(pack + 1),
+                                              static_cast<uint32_t>(kItem >> 32)}},
+                                            h.player().x, h.player().y, h.player().z));
+    h.pump();
+    REQUIRE(h.game().getSpellCooldown(kFireball) > 0.0f);
+    REQUIRE_FALSE(h.game().getPlayerAuras().empty());
+    REQUIRE(h.game().isInGroup());
+    REQUIRE_FALSE(h.game().getInventory().getBackpackSlot(0).empty());
+
+    h.server().disconnect();
+    h.pump();
+    reconnect(h);
+
+    // The new session is the server's to fill; nothing of the last is left.
+    CHECK(h.game().getSpellCooldown(kFireball) == 0.0f);
+    CHECK(h.game().getPlayerAuras().empty());
+    CHECK_FALSE(h.game().isInGroup());
+    CHECK(h.game().getInventory().getBackpackSlot(0).empty());
+    CHECK_FALSE(h.game().getEntityManager().hasEntity(kItem));
+}

@@ -531,7 +531,15 @@ void MovementHandler::stopInputMovement() {
 
 void MovementHandler::sendMovement(Opcode opcode) {
     if (owner_.getState() != WorldState::IN_WORLD) {
-        LOG_WARNING("Cannot send movement in state: ", (int)owner_.getState());
+        // Not in a world to send to - between connections while the client
+        // reconnects, the character walking on here. Once per stretch, like
+        // the holds below; the server is told where it stands once it is back.
+        static constexpr const char* kNoWorld = "there is no world to send to";
+        if (movementHeldReason_ != kNoWorld) {
+            movementHeldReason_ = kNoWorld;
+            LOG_WARNING("Movement: not sent while ", kNoWorld, " (world state ",
+                        static_cast<int>(owner_.getState()), ")");
+        }
         return;
     }
 

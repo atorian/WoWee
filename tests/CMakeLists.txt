@@ -1987,6 +1987,14 @@ target_link_libraries(test_realm_list PRIVATE catch2_main OpenSSL::SSL OpenSSL::
 add_test(NAME realm_list COMMAND test_realm_list)
 register_test_target(test_realm_list)
 
+# ── test_auth_reconnect ──────────────────────────────────────
+# The login server's reconnect handshake through the real AuthHandler and its
+# TCP socket, against a login server the test runs on the loopback interface.
+# The handler is a member of the client's archive; the linker takes it and
+# what it reaches.
+wowee_add_test(test_auth_reconnect SOURCES test_auth_reconnect.cpp)
+target_link_libraries(test_auth_reconnect PRIVATE wowee_client)
+
 # ── test_quest_rewards ──────────────────────────────────────
 wowee_add_packet_test(test_quest_rewards)
 

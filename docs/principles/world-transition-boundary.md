@@ -32,5 +32,18 @@ Checklist when changing a transition:
   saved variables under the character's name and closes the Lua state inside
   an Interface scope. Nothing per-character is cleared by hand either.
   Never pump a second frame or apply a transition from `GameHandler::update`.
+- A lost world connection (`Disconnected`: the socket closed, a failure in the
+  world, or the silence detector's unanswered ping) is ridden out when a
+  character stands on a map and the client can renew the session
+  (`ClientLoop::Services::renewal`): in Transitions the spawner holds what it
+  presents, `game.disconnect()` drops the connection and the game's world state
+  the way a logout does, and `core::WorldReconnect` logs the same character in
+  again through `selectCharacter`. The world, the scene and the interface stay
+  until the server puts the character back: on the same map the next
+  `CharacterSession` takes the `MapScope` (`releaseMap`/`adoptMap`), the old
+  interface having heard `PLAYER_LEAVING_WORLD`; on another map the entry is an
+  ordinary load. Giving up is a `Leave{Login}` like any disconnect. Nothing is
+  reset by hand for a reconnect: a domain that keeps state past a login ends it
+  on `CharacterLoggingIn`.
 - Test packet input through `GameHarness`: state survives `pump()` and changes
   only when the client issues the transition command afterward.

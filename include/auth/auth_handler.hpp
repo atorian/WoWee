@@ -30,7 +30,11 @@ enum class AuthState {
     FAILED,
     /// The TCP connection is being made off the main thread. Last, so the
     /// states logged by number keep their numbers.
-    CONNECTING
+    CONNECTING,
+    /// A reconnect: the challenge naming the account is out, then the proof
+    /// of the last session's key.
+    RECONNECT_CHALLENGE_SENT,
+    RECONNECT_PROOF_SENT
 };
 
 // Authentication callbacks
@@ -60,6 +64,13 @@ public:
     void authenticateWithHash(const std::string& username, const std::vector<uint8_t>& authHash, const std::string& pin);
     // Generic continuation for PIN / authenticator-required servers.
     void submitSecurityCode(const std::string& code);
+    /// Log in again for a session the login server still holds, with no
+    /// password: RECONNECT_CHALLENGE names the account and RECONNECT_PROOF
+    /// proves knowledge of that session's key. Call once CONNECTED.
+    /// AUTHENTICATED on success - the key is the session key again and the
+    /// realm list may be asked for - FAILED otherwise, the failure callback
+    /// told why and lastFailureWasRefusal() saying whether the server said no.
+    void reconnect(const std::string& username, const std::vector<uint8_t>& sessionKey);
 
     // Set client version info (call before authenticate)
     void setClientInfo(const ClientInfo& info) { clientInfo = info; }
@@ -80,6 +91,13 @@ public:
      *  (rather than bad credentials), so the caller may retry on another
      *  protocol version. See protocolFailureSuspected_. */
     [[nodiscard]] bool lastFailureWasProtocol() const { return protocolFailureSuspected_; }
+    /** True when the last failure was the login server refusing a reconnect
+     *  - an error answer, or the connection closed on the challenge or the
+     *  proof - rather than the server not being reached. Asking again gets
+     *  the same answer. */
+    [[nodiscard]] bool lastFailureWasRefusal() const { return refused_; }
+    /// What the last failure said, as the failure callback was told it.
+    [[nodiscard]] const std::string& lastFailureReason() const { return failureReason_; }
 
     /** Ask the server to stream one patch file over this authenticated
      *  connection, EZWoW-style: the file is named first, then accepted (offset
@@ -104,14 +122,17 @@ private:
     void handleLogonProofResponse(network::Packet& packet);
     void sendRealmListRequest();
     void handleRealmListResponse(network::Packet& packet);
+    void handleReconnectChallengeResponse(network::Packet& packet);
+    void handleReconnectProofResponse(network::Packet& packet);
     void handlePacket(network::Packet& packet);
 
     void setState(AuthState newState);
     /** protocolRelated: the failure is consistent with the server speaking a
      *  different auth protocol than clientInfo.protocolVersion (bad handshake
      *  parse, build/version rejection, mid-handshake drop) rather than the
-     *  credentials being wrong. Drives the caller's protocol fallback. */
-    void fail(const std::string& reason, bool protocolRelated = false);
+     *  credentials being wrong. Drives the caller's protocol fallback.
+     *  refusal: the server refused a reconnect (lastFailureWasRefusal). */
+    void fail(const std::string& reason, bool protocolRelated = false, bool refusal = false);
 
     std::unique_ptr<network::TCPSocket> socket;
     std::unique_ptr<SRP> srp;
@@ -127,8 +148,12 @@ private:
     // than a credential/account problem. Never set for wrong-password, banned,
     // suspended, or account-in-use results - retrying those risks lockouts.
     bool protocolFailureSuspected_ = false;
+    bool refused_ = false;
+    std::string failureReason_;
 
     std::vector<uint8_t> sessionKey;
+    /// The key a reconnect proves; the session key once the proof is taken.
+    std::vector<uint8_t> reconnectKey_;
     std::vector<Realm> realms;
 
     // Callbacks

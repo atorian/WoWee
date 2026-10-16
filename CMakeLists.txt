@@ -656,6 +656,9 @@ set(WOWEE_SOURCES
     src/core/application_world_loading.cpp
     src/core/client_main.cpp
     src/core/client_loop.cpp
+    src/core/world_reconnect.cpp
+    src/core/login_server_renewal.cpp
+    src/core/realm_address.cpp
     src/core/interface_input.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp

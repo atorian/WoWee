@@ -19,6 +19,7 @@
 #include "core/cvar_store.hpp"
 #include "core/event_bus.hpp"
 #include "game/emote_table.hpp"
+#include "game/entity.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
@@ -32,7 +33,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wowee::test {
@@ -42,12 +45,24 @@ namespace wowee::test {
 /// update - the same frame order a socket gives.
 class FakeWorldConnection final : public network::WorldConnection {
 public:
+    /// What the server answers by itself to a packet the game sent, if
+    /// anything: delivered on the next update like any other.
+    using Answer = std::function<std::optional<network::Packet>(const network::Packet&)>;
+    /// `refused`: the server is not there; the connect fails.
+    FakeWorldConnection(Answer answer, bool refused, std::function<void()> destroyed)
+        : answer_(std::move(answer)), refused_(refused), destroyed_(std::move(destroyed)) {}
+    ~FakeWorldConnection() override {
+        if (destroyed_) destroyed_();
+    }
+
     void beginConnect(const std::string& host, uint16_t port, int timeoutSeconds) override;
     net::AsyncConnect::Status pollConnect() override;
-    [[nodiscard]] std::string connectError() const override { return {}; }
+    [[nodiscard]] std::string connectError() const override {
+        return refused_ ? "connection refused (the test's server is down)" : std::string();
+    }
     void disconnect() override { connected_ = false; }
     [[nodiscard]] bool isConnected() const override { return connected_; }
-    void send(const network::Packet& packet) override { sent_.push_back(packet); }
+    void send(const network::Packet& packet) override;
     void update() override;
     void setPacketCallback(std::function<void(const network::Packet&)> callback) override {
         callback_ = std::move(callback);
@@ -63,6 +78,9 @@ public:
     [[nodiscard]] bool encrypted() const { return encrypted_; }
 
 private:
+    Answer answer_;
+    bool refused_ = false;
+    std::function<void()> destroyed_;
     bool connecting_ = false;
     bool connected_ = false;
     bool encrypted_ = false;
@@ -104,9 +122,19 @@ public:
     core::EventBus& events() { return events_; }
     core::CVarStore& cvars() { return cvars_; }
 
-    /// The server's side of the connection. Valid once connect() has run,
-    /// which enterWorld does.
+    /// The server's side of the connection: the one the game made last. Valid
+    /// once connect() has run, which enterWorld does, until the game lets go
+    /// of it.
     FakeWorldConnection& server();
+    /// Whether the game holds a connection the test can play the server of.
+    [[nodiscard]] bool hasServer() const { return connection_ != nullptr; }
+
+    /// A live server answers CMSG_PING with SMSG_PONG, and this one does
+    /// unless told not to: a server gone silent with the connection open.
+    void setPingsAnswered(bool answered) { pingsAnswered_ = answered; }
+    /// The connections the game makes from now on fail to connect: the
+    /// server is down.
+    void setConnectionsRefused(bool refused) { connectionsRefused_ = refused; }
 
     /// A packet from the server: the opcode, as the active table puts it on
     /// the wire, and the body.
@@ -140,6 +168,13 @@ public:
     /// Log out to the character list, on the same connection, and log the
     /// next character of the account in. Ends IN_WORLD with nothing recorded.
     void relogAs(const PlayerSpec& next);
+    /// The server's half of a login on the connection the game has just
+    /// begun: greet it, take its AUTH_SESSION, list `player`. Ends
+    /// CHAR_LIST_RECEIVED.
+    void answerLogin(const PlayerSpec& player);
+    /// The server takes the character the game asked for into the world.
+    /// Ends IN_WORLD.
+    void answerPlayerLogin(const PlayerSpec& player);
     [[nodiscard]] const PlayerSpec& player() const { return player_; }
 
     /// The server's packets the harness itself sends, for a test that wants
@@ -149,6 +184,12 @@ public:
     /// The list of an account with several characters, for a relog.
     static std::vector<uint8_t> charEnumBody(const std::vector<PlayerSpec>& characters);
     static std::vector<uint8_t> loginVerifyWorldBody(const PlayerSpec& player);
+    /// SMSG_UPDATE_OBJECT with one block creating an object of `type` with
+    /// these update fields (by index in the active table): a unit or a player
+    /// alive at the position, anything else with no movement block.
+    static std::vector<uint8_t> createObjectBody(uint64_t guid, game::ObjectType type,
+                                                 std::vector<std::pair<uint16_t, uint32_t>> fields,
+                                                 float x = 0.0f, float y = 0.0f, float z = 0.0f);
 
     /// Update fields by index, as an SMSG_UPDATE_OBJECT block carries them.
     using Fields = std::map<uint16_t, uint32_t>;
@@ -171,6 +212,8 @@ private:
     game::GameServices services_;
     std::unique_ptr<game::GameHandler> game_;
     FakeWorldConnection* connection_ = nullptr;  // owned by the game once made
+    bool pingsAnswered_ = true;
+    bool connectionsRefused_ = false;
     std::vector<AddonEvent> addonEvents_;
     PlayerSpec player_;
 };

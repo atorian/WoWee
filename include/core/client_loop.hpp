@@ -7,6 +7,7 @@
 #include "core/interface_input.hpp"
 #include "core/world_load_progress.hpp"
 #include "core/world_loader.hpp"
+#include "core/world_reconnect.hpp"
 #include "core/world_transition_queue.hpp"
 
 #include <chrono>
@@ -130,9 +131,10 @@ public:
     virtual void characterLeft(bool keptConnection) = 0;
     /// Why the player is back at the login screen, when it was not their idea.
     virtual void showDisconnectNotice(const std::string& notice) = 0;
-    /// After a disconnect: start reconnecting this character. False when the
-    /// client does not.
-    virtual bool beginReconnect(uint64_t characterGuid) = 0;
+    /// Interface, each frame: what to say over the world while the client
+    /// reconnects ("Connection lost. Reconnecting (attempt 2 of 5)..."), empty
+    /// when it is not.
+    virtual void showReconnectStatus(const std::string& status) = 0;
     /// The client is about to close after an exit the server confirmed.
     virtual void exiting() = 0;
 };
@@ -175,6 +177,9 @@ public:
         addons::AddonCatalog* addonCatalog = nullptr;
         /// What each character's interface is handed to reach the client.
         addons::LuaServices luaServices;
+        /// How a lost session is renewed without the player. Null: a lost
+        /// world connection ends the character, back at the login screen.
+        WorldSessionRenewal* renewal = nullptr;
         AppearanceComposer* appearance = nullptr;
         AnimationCallbackHandler* animationCallbacks = nullptr;
         /// How much of an interface each character gets.
@@ -209,8 +214,12 @@ public:
     /// The same, only while it hears the world.
     [[nodiscard]] addons::AddonManager* worldInterface();
     /// Whether the character is on their way out of the world: a logout,
-    /// disconnect or exit waits for the next Transitions.
-    [[nodiscard]] bool leavingWorld() const { return transitions_.leaving(); }
+    /// disconnect or exit waits for the next Transitions. A lost connection
+    /// the client rides out in the world is not one.
+    [[nodiscard]] bool leavingWorld() const { return worldEnding(); }
+    /// The world connection is being restored while the character stays in
+    /// the world: null when it is not.
+    [[nodiscard]] const WorldReconnect* reconnecting() const { return reconnect_.get(); }
 
     /// The kind of interface the next character gets (the offline loading
     /// fixture's character has no unit fields for FrameXML).
@@ -248,8 +257,29 @@ private:
     void beginCharacterSession();
     /// Tell the interface the character is leaving, while the world stands.
     void leaveWorldInterface();
-    /// Whether this frame's Interface phase is the last the world stands for.
+    /// Whether this frame's Interface phase is the last the character's
+    /// interface hears the world: the world ends, or the character is back
+    /// in it after a reconnect and gets an interface anew.
     [[nodiscard]] bool worldEndsThisFrame(const FramePlan& plan) const;
+    /// Whether a queued leave ends the world. A lost connection does not
+    /// while the client can reconnect with the character standing in it.
+    [[nodiscard]] bool worldEnding() const;
+    /// The character is back in the world after a reconnect and the entry
+    /// waits for Transitions.
+    [[nodiscard]] bool reentryPending() const;
+    /// Whether a lost connection can be ridden out in the world: a character
+    /// on a map, and a way to renew the session.
+    [[nodiscard]] bool keepsWorldThroughReconnect(uint64_t characterGuid) const;
+
+    /// The connection is lost in the world: the world stays, what is drawn of
+    /// it is held, and the game logs the character in again. Transitions only.
+    void beginReconnecting(uint64_t characterGuid);
+    /// Game: the attempts, and giving up on them.
+    void updateReconnect(float deltaTime);
+    /// The character is back in the world: on the same map the next character
+    /// session takes it; on another, the entry is an ordinary map load.
+    /// Transitions only.
+    void reenterWorld(const game::events::WorldEntered& entry);
 
     CharacterSession::Services characterSessionServices();
     MapScope::Services mapScopeServices();
@@ -266,6 +296,13 @@ private:
     std::string disconnectNotice_;
     /// A world entry refused for want of a loader is said once.
     bool reportedNoLoader_ = false;
+    /// While the world connection is restored, the character standing in the
+    /// world; null otherwise.
+    std::unique_ptr<WorldReconnect> reconnect_;
+    /// After a reconnect onto the same map: frame time left before the
+    /// entities the server did not show again are released; negative when
+    /// nothing is held.
+    float heldReleaseIn_ = -1.0f;
     /// The character in the world. Last, so it goes before everything else
     /// here; the destructor ends it explicitly.
     std::unique_ptr<CharacterSession> session_;

@@ -1,4 +1,5 @@
 #include "auth/auth_handler.hpp"
+#include "auth/big_num.hpp"
 #include "auth/pin_auth.hpp"
 #include "auth/integrity.hpp"
 #include "network/tcp_socket.hpp"
@@ -100,12 +101,13 @@ void AuthHandler::disconnect() {
         password.clear();
         password.shrink_to_fit();
     }
-    if (!sessionKey.empty()) {
-        volatile uint8_t* k = const_cast<volatile uint8_t*>(sessionKey.data());
-        for (size_t i = 0; i < sessionKey.size(); ++i)
+    for (auto* key : {&sessionKey, &reconnectKey_}) {
+        if (key->empty()) continue;
+        volatile uint8_t* k = const_cast<volatile uint8_t*>(key->data());
+        for (size_t i = 0; i < key->size(); ++i)
             k[i] = 0;
-        sessionKey.clear();
-        sessionKey.shrink_to_fit();
+        key->clear();
+        key->shrink_to_fit();
     }
     if (srp) {
         srp->clearCredentials();
@@ -209,6 +211,66 @@ void AuthHandler::authenticateWithHash(const std::string& user, const std::vecto
 
     // Send LOGON_CHALLENGE
     sendLogonChallenge();
+}
+
+void AuthHandler::reconnect(const std::string& user, const std::vector<uint8_t>& key) {
+    if (!isConnected() || state != AuthState::CONNECTED) {
+        fail("Cannot reconnect: not connected to the login server");
+        return;
+    }
+    if (key.empty()) {
+        // Said as a refusal: there is no session to prove, and asking again
+        // will not make one.
+        fail("Cannot reconnect '" + user + "': no session key from a previous login",
+             /*protocolRelated=*/false, /*refusal=*/true);
+        return;
+    }
+    LOG_INFO("Reconnecting account ", user, " with its last session key");
+    username = user;
+    password.clear();
+    reconnectKey_ = key;
+    protocolFailureSuspected_ = false;
+    refused_ = false;
+    socket->send(ReconnectChallengePacket::build(username, clientInfo));
+    setState(AuthState::RECONNECT_CHALLENGE_SENT);
+}
+
+void AuthHandler::handleReconnectChallengeResponse(network::Packet& packet) {
+    ReconnectChallengeResponse response;
+    if (!ReconnectChallengeResponseParser::parse(packet, response)) {
+        fail("The login server sent an unreadable reconnect challenge", /*protocolRelated=*/true);
+        return;
+    }
+    if (!response.isSuccess()) {
+        fail("The login server refused to reconnect " + username + ": " +
+                 getAuthResultString(response.result),
+             /*protocolRelated=*/false, /*refusal=*/true);
+        return;
+    }
+    std::array<uint8_t, 16> r1{};
+    const auto random = BigNum::fromRandom(static_cast<int>(r1.size())).toArray(true, static_cast<int>(r1.size()));
+    std::copy_n(random.begin(), std::min(random.size(), r1.size()), r1.begin());
+    const auto r2 = ReconnectProofPacket::proof(username, r1, response.challenge, reconnectKey_);
+    socket->send(ReconnectProofPacket::build(r1, r2, std::array<uint8_t, 20>{}));
+    setState(AuthState::RECONNECT_PROOF_SENT);
+}
+
+void AuthHandler::handleReconnectProofResponse(network::Packet& packet) {
+    ReconnectProofResponse response;
+    if (!ReconnectProofResponseParser::parse(packet, response)) {
+        fail("The login server sent an unreadable reconnect answer", /*protocolRelated=*/true);
+        return;
+    }
+    if (!response.isSuccess()) {
+        fail("The login server did not accept the reconnect proof for " + username + ": " +
+                 getAuthResultString(static_cast<AuthResult>(response.status)),
+             /*protocolRelated=*/false, /*refusal=*/true);
+        return;
+    }
+    sessionKey = reconnectKey_;
+    setState(AuthState::AUTHENTICATED);
+    LOG_INFO("Reconnected to the login server as ", username, " with the last session's key");
+    if (onSuccess) onSuccess(sessionKey);
 }
 
 void AuthHandler::sendLogonChallenge() {
@@ -621,6 +683,22 @@ void AuthHandler::handlePacket(network::Packet& packet) {
             }
             break;
 
+        case AuthOpcode::RECONNECT_CHALLENGE:
+            if (state == AuthState::RECONNECT_CHALLENGE_SENT) {
+                handleReconnectChallengeResponse(packet);
+            } else {
+                LOG_WARNING("Unexpected RECONNECT_CHALLENGE response in state: ", static_cast<int>(state));
+            }
+            break;
+
+        case AuthOpcode::RECONNECT_PROOF:
+            if (state == AuthState::RECONNECT_PROOF_SENT) {
+                handleReconnectProofResponse(packet);
+            } else {
+                LOG_WARNING("Unexpected RECONNECT_PROOF response in state: ", static_cast<int>(state));
+            }
+            break;
+
         case AuthOpcode::REALM_LIST:
             if (state == AuthState::REALM_LIST_REQUESTED) {
                 handleRealmListResponse(packet);
@@ -672,6 +750,18 @@ void AuthHandler::update(float /*deltaTime*/) {
             state != AuthState::FAILED &&
             state != AuthState::AUTHENTICATED &&
             state != AuthState::REALM_LIST_RECEIVED) {
+            // A login server that no longer holds the session answers a
+            // reconnect by closing the connection (TrinityCore does, on the
+            // challenge for an unknown account and on a proof that does not
+            // match): that is its answer, not a lost connection.
+            if (state == AuthState::RECONNECT_CHALLENGE_SENT ||
+                state == AuthState::RECONNECT_PROOF_SENT) {
+                fail("The login server closed the connection on the reconnect " +
+                         std::string(state == AuthState::RECONNECT_PROOF_SENT ? "proof" : "challenge") +
+                         " for " + username + ": it holds no session for this key",
+                     /*protocolRelated=*/false, /*refusal=*/true);
+                return;
+            }
             // A server that doesn't recognise the announced protocol version
             // frequently just closes the socket instead of replying, so treat a
             // drop during the challenge as a protocol candidate. Once we've sent
@@ -691,9 +781,11 @@ void AuthHandler::setState(AuthState newState) {
     }
 }
 
-void AuthHandler::fail(const std::string& reason, bool protocolRelated) {
+void AuthHandler::fail(const std::string& reason, bool protocolRelated, bool refusal) {
     LOG_ERROR("Authentication failed: ", reason);
     protocolFailureSuspected_ = protocolRelated;
+    refused_ = refusal;
+    failureReason_ = reason;
     setState(AuthState::FAILED);
 
     if (onFailure) {

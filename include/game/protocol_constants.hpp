@@ -136,8 +136,14 @@ constexpr uint32_t SPELL_SHADOWFORM      = 15473;
 // ---------------------------------------------------------------------------
 // Session / network timing
 // ---------------------------------------------------------------------------
-constexpr uint32_t RX_SILENCE_WARNING_MS       = 10000;  // 10 s
-constexpr uint32_t RX_SILENCE_CRITICAL_MS      = 15000;  // 15 s
+// A world server silent this long is asked, with a ping, whether it is still
+// there; one that answers nothing for this much longer is taken for gone.
+constexpr float    WORLD_SILENCE_PROBE_SEC     = 10.0f;
+constexpr float    WORLD_SILENCE_ANSWER_SEC    = 10.0f;
+// A frame counts towards the silence for at most this long: a stall - a
+// load holding the frame - is the client not listening, and what the server
+// sent meanwhile is waiting in the socket.
+constexpr float    WORLD_SILENCE_MAX_FRAME_SEC = 0.25f;
 constexpr float    WARDEN_GATE_LOG_INTERVAL_SEC = 30.0f;
 constexpr float    CLASSIC_PING_INTERVAL_SEC    = 10.0f;
 

@@ -5,6 +5,7 @@
 
 #include "addons/lua_engine.hpp"
 #include "core/character_session.hpp"
+#include "core/coordinates.hpp"
 #include "core/env.hpp"
 #include "core/frame_phase.hpp"
 #include "core/map_scope.hpp"
@@ -12,6 +13,7 @@
 #include "game/opcodes.hpp"
 #include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
+#include "rendering/camera_controller.hpp"
 
 #include <imgui.h>
 
@@ -96,9 +98,13 @@ private:
     ClientHarness& h_;
 };
 
-/// A client that draws nothing, plays nothing and shows no screens.
+/// A client that draws nothing, plays nothing and shows no screens. What it
+/// would draw the character at is the harness's characterPosition, the
+/// camera's follow target from the moment the map's renderers are up, as the
+/// renderer's character position is in the client.
 class ClientHarness::FrontEnd final : public core::ClientFrontEnd {
 public:
+    explicit FrontEnd(ClientHarness& h) : h_(h) {}
     void updateLogin(float, const core::FramePlan&) override {}
     void prepareFrame() override {}
     void updateWorld(float) override {}
@@ -118,15 +124,41 @@ public:
     void noteStageTime(const char*, float) override {}
     void frameFinished() override {}
     void mapEntryBegun(const core::WorldLoader::Entry&) override {}
-    void mapRenderersReady(const core::WorldLoader::Entry&, const std::string&) override {}
+    void mapRenderersReady(const core::WorldLoader::Entry& entry, const std::string&) override {
+        h_.characterPosition_ = core::coords::canonicalToRender(
+            core::coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
+        h_.camera().setFollowTarget(&h_.characterPosition_);
+    }
     void placeOnInstanceFloor(const core::WorldLoader::Entry&) override {}
     void mapGeometryReady(const core::WorldLoader::Entry&) override {}
     void enteredWorld() override {}
     void characterScreenShown() override {}
     void characterLeft(bool) override {}
     void showDisconnectNotice(const std::string&) override {}
-    bool beginReconnect(uint64_t) override { return false; }
+    void showReconnectStatus(const std::string& status) override { h_.reconnectStatus_ = status; }
     void exiting() override {}
+
+private:
+    ClientHarness& h_;
+};
+
+/// The login server, as far as renewing a lost session goes: it answers as
+/// the test says, and the world server is where it was.
+class ClientHarness::Renewal final : public core::WorldSessionRenewal {
+public:
+    void begin(const game::WorldLogin& last) override {
+        last_ = last;
+        ++begun_;
+    }
+    Result poll(float) override { return result_; }
+    [[nodiscard]] game::WorldLogin login() const override { return last_; }
+    [[nodiscard]] std::string failure() const override { return failure_; }
+    void cancel() override {}
+
+    Result result_ = Result::Renewed;
+    std::string failure_;
+    game::WorldLogin last_;
+    int begun_ = 0;
 };
 
 /// The harness's own view of the frames: each Interface phase, a character's
@@ -175,7 +207,8 @@ ClientHarness::ClientHarness()
 
     window_ = std::make_unique<Window>(*this);
     input_ = std::make_unique<Input>(*this);
-    frontEnd_ = std::make_unique<FrontEnd>();
+    frontEnd_ = std::make_unique<FrontEnd>(*this);
+    renewal_ = std::make_unique<Renewal>();
 
     addons::LuaServices luaServices;
     luaServices.executionPhase = [this] { return phase_; };
@@ -194,6 +227,7 @@ ClientHarness::ClientHarness()
         .worldEntry = worldEntry_.get(),
         .addonCatalog = catalog_.get(),
         .luaServices = luaServices,
+        .renewal = renewal_.get(),
         .sessionInterface = core::CharacterSession::Interface::EventsOnly,
     };
     loop_ = std::make_unique<core::ClientLoop>(std::move(services), core::AppState::AUTHENTICATION);
@@ -203,6 +237,12 @@ ClientHarness::ClientHarness()
 ClientHarness::~ClientHarness() {
     // The character and the loop before what they borrow.
     loop_.reset();
+    // Then the game's session, as Application ends it on the way out: its
+    // disconnect despawns what the game still holds through the callbacks
+    // into the spawner, which goes before the game does. Left to the game's
+    // destructor, those despawns reached a spawner already destroyed - with
+    // creatures in view at the end of a test, a crash one run in thirty.
+    game().disconnect();
     ImGui::DestroyContext(imgui_);
 }
 
@@ -299,38 +339,44 @@ void ClientHarness::receiveNewWorld(uint32_t mapId, float x, float y, float z) {
     game_.receive(game::Opcode::SMSG_NEW_WORLD, Body().u32(mapId).f32(x).f32(y).f32(z).f32(0.0f));
 }
 
-void ClientHarness::receiveCreature(uint64_t guid, uint32_t displayId, float x, float y, float z) {
-    const uint16_t health = game::fieldIndex(game::UF::UNIT_FIELD_HEALTH);
-    const uint16_t maxHealth = game::fieldIndex(game::UF::UNIT_FIELD_MAXHEALTH);
-    const uint16_t display = game::fieldIndex(game::UF::UNIT_FIELD_DISPLAYID);
-    if (health == 0xFFFF || maxHealth == 0xFFFF || display == 0xFFFF)
-        fail("the active update field table has no unit health or display");
-    std::vector<std::pair<uint16_t, uint32_t>> fields = {
-        {health, 100}, {maxHealth, 100}, {display, displayId}};
-    std::sort(fields.begin(), fields.end());
-    const int words = fields.back().first / 32 + 1;
-    std::vector<uint32_t> mask(static_cast<size_t>(words), 0);
-    for (const auto& [index, value] : fields) mask[index / 32] |= 1u << (index % 32);
+void ClientHarness::answerReconnect(const PlayerSpec& player, const WithLogin& withLogin) {
+    using game::Opcode;
+    using game::WorldState;
+    if (!loop_->reconnecting()) fail("the client is not reconnecting");
+    // The attempt renews the session and connects again on its own.
+    frameUntil([this] { return game_.hasServer() && game().getState() == WorldState::CONNECTED; },
+               60 * 30, "the reconnect attempt's connection");
+    game_.receive(Opcode::SMSG_AUTH_CHALLENGE, GameHarness::authChallengeBody(0xC0FFEE));
+    frameUntilHandled();
+    if (!game_.lastSent(Opcode::CMSG_AUTH_SESSION)) fail("no CMSG_AUTH_SESSION on the new connection");
+    game_.receive(Opcode::SMSG_AUTH_RESPONSE, Body().u8(0x0C));  // AUTH_OK
+    frameUntilHandled();
+    game_.receive(Opcode::SMSG_CHAR_ENUM, GameHarness::charEnumBody(player));
+    frameUntil([this] { return game_.lastSent(Opcode::CMSG_PLAYER_LOGIN) != nullptr; }, 60,
+               "the character's login");
+    player_ = player;
+    game_.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(player));
+    if (withLogin) withLogin();
+    frameUntilHandled();
+}
 
-    Body b;
-    b.u32(1);                                            // one block
-    b.u8(static_cast<uint8_t>(game::UpdateType::CREATE_OBJECT));
-    b.packedGuid(guid);
-    b.u8(static_cast<uint8_t>(game::ObjectType::UNIT));
-    b.u8(0x20).u8(0x00);                                 // update flags: living
-    b.u32(0).u8(0).u8(0);                                // movement flags, flags2
-    b.u32(0);                                            // time
-    b.f32(x).f32(y).f32(z).f32(0.0f);                    // position, facing
-    b.u32(0);                                            // fall time
-    for (float speed : {2.5f, 7.0f, 4.5f, 4.72f, 2.5f, 7.0f, 4.5f, 3.14159f, 3.14159f})
-        b.f32(speed);                                    // walk .. pitch rate
-    b.u8(static_cast<uint8_t>(words));
-    for (uint32_t word : mask) b.u32(word);
-    for (const auto& [index, value] : fields) {
-        (void)index;
-        b.u32(value);
-    }
-    game_.receive(game::Opcode::SMSG_UPDATE_OBJECT, b);
+void ClientHarness::setRenewal(core::WorldSessionRenewal::Result result, const std::string& failure) {
+    renewal_->result_ = result;
+    renewal_->failure_ = failure;
+}
+
+int ClientHarness::renewalsBegun() const {
+    return renewal_->begun_;
+}
+
+void ClientHarness::receiveCreature(uint64_t guid, uint32_t displayId, float x, float y, float z) {
+    game_.receive(game::Opcode::SMSG_UPDATE_OBJECT,
+                  GameHarness::createObjectBody(
+                      guid, game::ObjectType::UNIT,
+                      {{game::fieldIndex(game::UF::UNIT_FIELD_HEALTH), 100},
+                       {game::fieldIndex(game::UF::UNIT_FIELD_MAXHEALTH), 100},
+                       {game::fieldIndex(game::UF::UNIT_FIELD_DISPLAYID), displayId}},
+                      x, y, z));
 }
 
 void ClientHarness::closeWindow() {

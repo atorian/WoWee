@@ -632,6 +632,8 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     tabCycleStale = true;
     entityController_->clearAll();
     accountDataHandler_->characterSelected(characterGuid);
+    // The domains that keep what the server will send again end it on this.
+    eventBus().publish(events::CharacterLoggingIn{characterGuid});
 
     // Build CMSG_PLAYER_LOGIN packet
     auto packet = PlayerLoginPacket::build(characterGuid);
@@ -728,6 +730,11 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Successfully entered the world (or teleported)
     currentMapId_ = data.mapId;
     setState(WorldState::IN_WORLD);
+    if (worldConnectionLost_) {
+        LOG_INFO("World connection restored: in the world again on map ", data.mapId);
+        worldConnectionLost_ = false;
+        refusalsLogged_.clear();
+    }
     if (socket) {
         socket->tracePacketsFor(std::chrono::seconds(12), "login_verify_world");
     }
@@ -2547,7 +2554,7 @@ void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
 }
 
 void GameHandler::interactWithNpc(uint64_t guid) {
-    if (!isInWorld()) return;
+    if (!worldCommandAllowed("talking to an NPC")) return;
     // A dead player at an area spirit healer is a different conversation. The
     // battleground ones do not answer a gossip hello at all - they answer
     // CMSG_AREA_SPIRIT_HEALER_QUERY with the seconds to the next mass
@@ -2639,7 +2646,7 @@ void GameHandler::queueAreaSpiritHeal() {
 void GameHandler::interactWithGameObject(uint64_t guid) {
     LOG_DEBUG("[GO-DIAG] interactWithGameObject called: guid=0x", std::hex, guid, std::dec);
     if (guid == 0) { LOG_DEBUG("[GO-DIAG] BLOCKED: guid==0"); return; }
-    if (!isInWorld()) { LOG_DEBUG("[GO-DIAG] BLOCKED: not in world"); return; }
+    if (!worldCommandAllowed("using an object")) { LOG_DEBUG("[GO-DIAG] BLOCKED: not in world"); return; }
     // Do not overlap an actual spell cast. Reeling an owned fishing bobber is
     // the deliberate exception: the fishing spell remains channelled while the
     // bobber is in the water, and using the hooked bobber is what ends it.
