@@ -68,6 +68,7 @@ class PlayerView;
 class SpellPresentation;
 class RendererTransportScene;
 class ScreenRecording;
+class ResourceMonitor;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -453,6 +454,9 @@ private:
     std::unique_ptr<PlayerView> playerView_;
     std::unique_ptr<ScreenRecording> screenRecording_;
     std::unique_ptr<rendering::PerformanceHUD> performanceHUD_;
+    /// The process's memory, threads and caches over time: the HUD's graphs
+    /// and the resource log line. Built when the loop starts.
+    std::unique_ptr<ResourceMonitor> resourceMonitor_;
     std::unique_ptr<rendering::WorldMap> worldMap_;
     bool spellVisualsAttached_ = false;
 

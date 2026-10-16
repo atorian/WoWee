@@ -17,9 +17,12 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/camera.hpp"
 #include "core/client_shortcuts.hpp"
+#include "core/resource_telemetry.hpp"
 #include "ui/ui_colors.hpp"
 #include <imgui.h>
 #include <algorithm>
+#include <cstdio>
+#include <functional>
 #include <sstream>
 #include <iomanip>
 
@@ -31,6 +34,36 @@ namespace {
     constexpr ImVec4 kSectionHeader = {0.8f, 0.8f, 0.5f, 1.0f};
     const auto& kHelpText = colors::kGray;
     const auto& kTitle    = colors::kLightGray;
+
+    constexpr double kMiB = 1024.0 * 1024.0;
+
+    std::string megabytes(float mb) {
+        return core::formatBytes(static_cast<uint64_t>(std::max(0.0f, mb) * kMiB));
+    }
+    std::string whole(float value) {
+        char text[24];
+        std::snprintf(text, sizeof(text), "%.0f", value);
+        return text;
+    }
+
+    /// One figure over the history: its latest value, then a graph of the
+    /// samples that measured it with the lowest and highest written over it.
+    void plotSeries(const char* label, const core::SampleRing& ring,
+                    const std::function<std::string(float)>& format) {
+        const std::vector<float> values = ring.measured();
+        if (values.empty()) {
+            ImGui::TextColored(kHelpText, "%s: n/a", label);
+            return;
+        }
+        const auto [lo, hi] = std::minmax_element(values.begin(), values.end());
+        ImGui::Text("%s: %s", label, format(values.back()).c_str());
+        const std::string range = "min " + format(*lo) + "  max " + format(*hi);
+        // A flat line still shows, a little above the floor of the graph.
+        const float span = std::max(*hi - *lo, std::max(1.0f, *hi * 0.02f));
+        ImGui::PlotLines((std::string("##") + label).c_str(), values.data(),
+                         static_cast<int>(values.size()), 0, range.c_str(),
+                         *lo - span * 0.1f, *hi + span * 0.1f, ImVec2(280, 40));
+    }
 } // namespace
 
 PerformanceHUD::PerformanceHUD() {
@@ -239,6 +272,7 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
         }
 
         ImGui::Spacing();
+        renderResources();
     }
 
     // Renderer stats
@@ -503,6 +537,75 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
     }
 
     ImGui::End();
+}
+
+void PerformanceHUD::renderResources() const {
+    if (!resources_) return;
+    using core::ResourceSeries;
+    const core::ResourceSample* latest = resources_->latest();
+
+    const size_t seconds = resources_->series(ResourceSeries::Threads).size();
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), "RESOURCES (last %zu:%02zu)",
+                       seconds / 60, seconds % 60);
+    ImGui::Separator();
+    if (!latest) {
+        ImGui::TextColored(kHelpText, "First sample in a second");
+        ImGui::Spacing();
+        return;
+    }
+
+    const auto ms = [](float v) { return whole(v) + " ms"; };
+    plotSeries("Latency", resources_->series(ResourceSeries::LatencyMs), ms);
+    plotSeries("Working set", resources_->series(ResourceSeries::WorkingSetMB), megabytes);
+    plotSeries("Private commit", resources_->series(ResourceSeries::PrivateMB), megabytes);
+    plotSeries("System commit used", resources_->series(ResourceSeries::SystemCommitUsedMB), megabytes);
+    const auto& process = latest->process;
+    if (process.systemCommitUsedBytes && process.systemCommitLimitBytes) {
+        const uint64_t used = *process.systemCommitUsedBytes;
+        const uint64_t limit = *process.systemCommitLimitBytes;
+        ImGui::Text("  of %s limit, %s free", core::formatBytes(limit).c_str(),
+                    core::formatBytes(limit - std::min(used, limit)).c_str());
+    }
+    if (process.availablePhysicalBytes && process.totalPhysicalBytes) {
+        ImGui::Text("Physical free: %s of %s", core::formatBytes(*process.availablePhysicalBytes).c_str(),
+                    core::formatBytes(*process.totalPhysicalBytes).c_str());
+    }
+    plotSeries("Threads", resources_->series(ResourceSeries::Threads), whole);
+
+    if (!latest->caches.empty() &&
+        ImGui::BeginTable("##caches", 4, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Cache");
+        ImGui::TableSetupColumn("Entries");
+        ImGui::TableSetupColumn("Size");
+        ImGui::TableSetupColumn("Budget");
+        ImGui::TableHeadersRow();
+        for (const auto& cache : latest->caches) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(cache.name.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu", cache.stats.entries);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(core::formatBytes(cache.stats.bytes).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(cache.stats.budgetBytes > 0
+                                       ? core::formatBytes(cache.stats.budgetBytes).c_str()
+                                       : "-");
+        }
+        ImGui::EndTable();
+    }
+    if (!latest->counts.empty() &&
+        ImGui::BeginTable("##counts", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+        for (const auto& count : latest->counts) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(count.name.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%llu", static_cast<unsigned long long>(count.value));
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Spacing();
 }
 
 } // namespace rendering

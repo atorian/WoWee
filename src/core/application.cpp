@@ -61,6 +61,7 @@
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/performance_hud.hpp"
+#include "core/resource_monitor.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
@@ -1591,6 +1592,8 @@ void Application::run() {
         LOG_WARNING("Frame timing profile enabled (WOWEE_FRAME_PROFILE=1) - "
                     "the per-stage breakdown will be reported at warning");
     }
+    resourceMonitor_ = std::make_unique<ResourceMonitor>(frameProfileEnabled_);
+    performanceHUD_->setResourceTelemetry(&resourceMonitor_->telemetry());
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
     // platform will give for as long as the loop runs. See frame_pacer.hpp
@@ -1717,6 +1720,9 @@ void Application::pace() {
 void Application::frameFinished() {
     stageStatFrames_ += 1;
     reportStageTimes();
+    std::optional<uint32_t> latencyMs;
+    if (gameHandler && gameHandler->isInWorld()) latencyMs = gameHandler->getLatencyMs();
+    resourceMonitor_->frameFinished(renderer.get(), assetManager.get(), latencyMs);
 }
 
 void Application::afterTransitions() {
