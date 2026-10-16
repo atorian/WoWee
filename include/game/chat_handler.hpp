@@ -93,18 +93,18 @@ public:
     [[nodiscard]] std::string getChannelByIndex(int index) const;
     [[nodiscard]] int getChannelIndex(const std::string& channelName) const;
     [[nodiscard]] const std::vector<std::string>& getJoinedChannels() const {
-        return character_.joinedChannels;
+        return conversation_.joinedChannels;
     }
     /// Whether the player owns this channel - the one who created it, or who
     /// it passed to. SMSG_CHANNEL_NOTIFY says so with OWNER_CHANGED, which
     /// carries the new owner's guid: AzerothCore's Channel::MakeOwnerChanged
     /// writes _ownerGUID into it.
     [[nodiscard]] bool ownsChannel(const std::string& name) const {
-        return character_.ownedChannels.count(name) != 0;
+        return conversation_.ownedChannels.count(name) != 0;
     }
     /// Who sent the line with this id, or zero if it is not remembered.
     [[nodiscard]] uint64_t chatLineSender(uint32_t lineId) const {
-        for (const auto& [id, guid] : character_.lineSenders)
+        for (const auto& [id, guid] : conversation_.lineSenders)
             if (id == lineId) return guid;
         return 0;
     }
@@ -114,8 +114,8 @@ public:
     /// no members to show and reported every channel as having none.
     [[nodiscard]] const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const {
         static const std::vector<ChannelMember> empty;
-        auto it = character_.channelRosters.find(channel);
-        return (it != character_.channelRosters.end()) ? it->second : empty;
+        auto it = conversation_.channelRosters.find(channel);
+        return (it != conversation_.channelRosters.end()) ? it->second : empty;
     }
     void autoJoinDefaultChannels();
     void addLocalChatMessage(const MessageChatData& msg);
@@ -137,8 +137,8 @@ public:
     void toggleAfk(const std::string& message);
     void toggleDnd(const std::string& message);
     void replyToLastWhisper(const std::string& message);
-    [[nodiscard]] bool isAfk() const { return character_.afk; }
-    [[nodiscard]] bool isDnd() const { return character_.dnd; }
+    [[nodiscard]] bool isAfk() const { return conversation_.afk; }
+    [[nodiscard]] bool isDnd() const { return conversation_.dnd; }
     /// Who /r answers: the last player to whisper, by the name the whisper
     /// came with or, when it came with none, the one the name cache has for
     /// that guid since.
@@ -155,15 +155,15 @@ public:
     void handleMotd(network::Packet& packet);
 
     // --- State accessors ---
-    [[nodiscard]] const std::deque<MessageChatData>& getChatHistory() const { return character_.history; }
+    [[nodiscard]] const std::deque<MessageChatData>& getChatHistory() const { return conversation_.history; }
     /// /clear: the player emptying their own log.
-    void clearChatHistory() { character_.history.clear(); }
+    void clearChatHistory() { conversation_.history.clear(); }
     [[nodiscard]] size_t getMaxChatHistory() const { return maxChatHistory_; }
     void setMaxChatHistory(size_t n) { maxChatHistory_ = n; }
 
     /// SMSG_AREA_TRIGGER_MESSAGE texts not yet shown as a notice, oldest
     /// first; the notice takes them.
-    [[nodiscard]] bool hasAreaTriggerMessage() const { return !character_.areaTriggerMessages.empty(); }
+    [[nodiscard]] bool hasAreaTriggerMessage() const { return !conversation_.areaTriggerMessages.empty(); }
     std::string takeAreaTriggerMessage();
 
     // Chat auto-join settings (aliased from handler_types.hpp)
@@ -259,7 +259,7 @@ private:
         uint64_t lastWhisperSenderGuid = 0;
         std::deque<std::string> areaTriggerMessages;
     };
-    Conversation character_;
+    Conversation conversation_;
 
     size_t maxChatHistory_ = 100;
     /// Monotonic across characters: the interface tells new lines by it.

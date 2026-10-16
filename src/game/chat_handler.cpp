@@ -39,14 +39,14 @@ ChatHandler::ChatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::E
     // A character's conversation begins with their login. What the last one
     // had - their whisperers, their channels, being away - is not theirs.
     subscriptions_.push_back(events_.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) { character_ = {}; }));
+        [this](const events::CharacterLoggingIn&) { conversation_ = {}; }));
     subscriptions_.push_back(events_.subscribe<events::PlayerNameKnown>(
         [this](const events::PlayerNameKnown& e) {
             // The lines held back for this name go out with it, and the ones
             // already kept without it get it. /r needs neither: it keeps the
             // whisperer's guid and asks for the name.
             flushChatAwaitingName(e.guid);
-            for (auto& line : character_.history) {
+            for (auto& line : conversation_.history) {
                 if (line.senderGuid == e.guid && line.senderName.empty()) line.senderName = e.name;
             }
         }));
@@ -61,9 +61,9 @@ TextSubject ChatHandler::readerSubject() const {
 }
 
 std::string ChatHandler::takeAreaTriggerMessage() {
-    if (character_.areaTriggerMessages.empty()) return {};
-    std::string message = std::move(character_.areaTriggerMessages.front());
-    character_.areaTriggerMessages.pop_front();
+    if (conversation_.areaTriggerMessages.empty()) return {};
+    std::string message = std::move(conversation_.areaTriggerMessages.front());
+    conversation_.areaTriggerMessages.pop_front();
     return message;
 }
 
@@ -325,7 +325,7 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
             if (!msg.empty()) {
                 raiseUiError(msg);
                 addSystemChatMessage(msg);
-                character_.areaTriggerMessages.push_back(msg);
+                conversation_.areaTriggerMessages.push_back(msg);
             }
         }
     };
@@ -353,7 +353,7 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     // takes - moving clears it too - but it is the one that matters, because
     // it is the one where the player is visibly present and being answered
     // for by a machine.
-    if (character_.afk && cvars_.get("autoClearAFK", "1") != "0") {
+    if (conversation_.afk && cvars_.get("autoClearAFK", "1") != "0") {
         toggleAfk("");
     }
 
@@ -455,7 +455,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     // Skip server echo of our own messages (we already added a local echo)
     if (data.senderGuid == queries_.characterGuid() && data.senderGuid != 0) {
         if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
-            character_.lastWhisperSender = data.senderName;
+            conversation_.lastWhisperSender = data.senderName;
         }
         return;
     }
@@ -515,7 +515,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             // drawn, so the name has to be there the first time.
             if (!alreadyWaited) {
                 const uint64_t waitingOn = data.senderGuid;
-                character_.awaitingName.push_back({std::move(data), waitingOn,
+                conversation_.awaitingName.push_back({std::move(data), waitingOn,
                                                    core::appTimeSeconds() + kNameWaitSeconds});
                 return;
             }
@@ -536,7 +536,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         queries_.requestPlayerName(data.receiverGuid);
         if (!alreadyWaited) {
             const uint64_t waitingOn = data.receiverGuid;
-            character_.awaitingName.push_back({std::move(data), waitingOn,
+            conversation_.awaitingName.push_back({std::move(data), waitingOn,
                                                core::appTimeSeconds() + kNameWaitSeconds});
             return;
         }
@@ -698,9 +698,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
 
     // Add to chat history
     data.uid = ++chatUidCounter_;
-    character_.history.push_back(data);
-    if (character_.history.size() > maxChatHistory_) {
-        character_.history.pop_front();
+    conversation_.history.push_back(data);
+    if (conversation_.history.size() > maxChatHistory_) {
+        conversation_.history.pop_front();
     }
     logChatMessage(data, "server");
     // No fireChatEvent here. This function announces the message itself,
@@ -720,9 +720,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // Always store GUID so getLastWhisperSender() can resolve the name
         // from the player name cache even if name wasn't available yet
         if (data.senderGuid != 0)
-            character_.lastWhisperSenderGuid = data.senderGuid;
+            conversation_.lastWhisperSenderGuid = data.senderGuid;
         if (!data.senderName.empty())
-            character_.lastWhisperSender = data.senderName;
+            conversation_.lastWhisperSender = data.senderName;
 
         if (!data.senderName.empty()) {
             // Only auto-reply once per sender per AFK/DND session to prevent loops.
@@ -731,7 +731,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             // takes the player out of AFK (autoClearAFK), so the first answer
             // given for them ended the absence it was announcing and the next
             // whisperer was answered by nobody.
-            auto& c = character_;
+            auto& c = conversation_;
             if (c.afk && c.autoRepliedSenders.insert(data.senderName).second) {
                 std::string reply = c.afkMessage.empty() ? "Away from Keyboard" : c.afkMessage;
                 sendLine(ChatType::WHISPER, "<AFK> " + reply, data.senderName);
@@ -759,7 +759,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     if (fromAPlayer) {
         // Disable Spam Filter, so the CVar being on means filtering happens.
         if (cvars_.get("spamFilter", "1") != "0") {
-            auto& recent = character_.recentLines;
+            auto& recent = conversation_.recentLines;
             const double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             if (repeatsRecentLine(recent, data.senderGuid, data.message, now)) {
@@ -839,9 +839,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // expected to know which message it was. Zero for every line is one id
         // shared by all of them, which is what made Report Spam unofferable:
         // CanComplainChat is asked about the id before the entry is shown.
-        const uint32_t lineId = character_.nextLineId++;
+        const uint32_t lineId = conversation_.nextLineId++;
         if (data.senderGuid != 0) {
-            auto& senders = character_.lineSenders;
+            auto& senders = conversation_.lineSenders;
             senders.emplace_back(lineId, data.senderGuid);
             // Recent lines only. A session's chat has no end, and a message old
             // enough to have fallen out of this is old enough not to be
@@ -960,7 +960,7 @@ TextSubject ChatHandler::monsterLineSubject(const MessageChatData& data) {
 }
 
 void ChatHandler::flushChatAwaitingName(uint64_t guid) {
-    auto& awaiting = character_.awaitingName;
+    auto& awaiting = conversation_.awaitingName;
     if (awaiting.empty() || guid == 0) return;
     std::vector<MessageChatData> ready;
     for (auto it = awaiting.begin(); it != awaiting.end();) {
@@ -977,7 +977,7 @@ void ChatHandler::flushChatAwaitingName(uint64_t guid) {
 }
 
 void ChatHandler::expireChatAwaitingName() {
-    auto& awaiting = character_.awaitingName;
+    auto& awaiting = conversation_.awaitingName;
     if (awaiting.empty()) return;
     const double now = core::appTimeSeconds();
     std::vector<MessageChatData> ready;
@@ -1071,13 +1071,13 @@ void ChatHandler::leaveChannel(const std::string& channelName) {
 }
 
 std::string ChatHandler::getChannelByIndex(int index) const {
-    const auto& joined = character_.joinedChannels;
+    const auto& joined = conversation_.joinedChannels;
     if (index < 1 || index > static_cast<int>(joined.size())) return "";
     return joined[index - 1];
 }
 
 int ChatHandler::getChannelIndex(const std::string& channelName) const {
-    const auto& joined = character_.joinedChannels;
+    const auto& joined = conversation_.joinedChannels;
     for (int i = 0; i < static_cast<int>(joined.size()); ++i) {
         if (joined[i] == channelName) return i + 1;
     }
@@ -1093,8 +1093,8 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
 
     switch (data.notifyType) {
         case ChannelNotifyType::YOU_JOINED: {
-            if (std::find(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName) == character_.joinedChannels.end()) {
-                character_.joinedChannels.push_back(data.channelName);
+            if (std::find(conversation_.joinedChannels.begin(), conversation_.joinedChannels.end(), data.channelName) == conversation_.joinedChannels.end()) {
+                conversation_.joinedChannels.push_back(data.channelName);
             }
             MessageChatData msg;
             msg.type = ChatType::SYSTEM;
@@ -1104,10 +1104,10 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             break;
         }
         case ChannelNotifyType::YOU_LEFT: {
-            character_.ownedChannels.erase(data.channelName);
-            character_.joinedChannels.erase(
-                std::remove(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName),
-                character_.joinedChannels.end());
+            conversation_.ownedChannels.erase(data.channelName);
+            conversation_.joinedChannels.erase(
+                std::remove(conversation_.joinedChannels.begin(), conversation_.joinedChannels.end(), data.channelName),
+                conversation_.joinedChannels.end());
             MessageChatData msg;
             msg.type = ChatType::SYSTEM;
             msg.message = "Left channel: " + data.channelName;
@@ -1118,8 +1118,8 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
         case ChannelNotifyType::PLAYER_ALREADY_MEMBER: {
             // Server confirms we're in this channel but our local list doesn't have it yet -
             // can happen after reconnect or if the join notification was missed.
-            if (std::find(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName) == character_.joinedChannels.end()) {
-                character_.joinedChannels.push_back(data.channelName);
+            if (std::find(conversation_.joinedChannels.begin(), conversation_.joinedChannels.end(), data.channelName) == conversation_.joinedChannels.end()) {
+                conversation_.joinedChannels.push_back(data.channelName);
                 LOG_INFO("Already in channel: ", data.channelName);
             }
             break;
@@ -1162,9 +1162,9 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             // behind IsDisplayChannelOwner: the verbs behind them were built
             // and could not be reached.
             if (data.senderGuid != 0 && data.senderGuid == queries_.characterGuid()) {
-                character_.ownedChannels.insert(data.channelName);
+                conversation_.ownedChannels.insert(data.channelName);
             } else {
-                character_.ownedChannels.erase(data.channelName);
+                conversation_.ownedChannels.erase(data.channelName);
             }
             addSystemChatMessage("Owner of '" + data.channelName + "' changed.");
             break;
@@ -1244,7 +1244,7 @@ void ChatHandler::autoJoinDefaultChannels() {
 }
 
 void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
-    auto& history = character_.history;
+    auto& history = conversation_.history;
     history.push_back(msg);
     history.back().uid = ++chatUidCounter_;
     if (history.size() > maxChatHistory_) {
@@ -1314,7 +1314,7 @@ void ChatHandler::addSystemChatMessage(const std::string& message) {
 }
 
 void ChatHandler::toggleAfk(const std::string& message) {
-    auto& c = character_;
+    auto& c = conversation_;
     c.afk = !c.afk;
     c.afkMessage = message;
 
@@ -1339,7 +1339,7 @@ void ChatHandler::toggleAfk(const std::string& message) {
 }
 
 void ChatHandler::toggleDnd(const std::string& message) {
-    auto& c = character_;
+    auto& c = conversation_;
     c.dnd = !c.dnd;
     c.dndMessage = message;
 
@@ -1388,9 +1388,9 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
 }
 
 std::string ChatHandler::getLastWhisperSender() const {
-    if (!character_.lastWhisperSender.empty()) return character_.lastWhisperSender;
-    if (character_.lastWhisperSenderGuid != 0) {
-        return queries_.playerName(character_.lastWhisperSenderGuid);
+    if (!conversation_.lastWhisperSender.empty()) return conversation_.lastWhisperSender;
+    if (conversation_.lastWhisperSenderGuid != 0) {
+        return queries_.playerName(conversation_.lastWhisperSenderGuid);
     }
     return {};
 }
@@ -1450,7 +1450,7 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
         roster.push_back(std::move(m));
     }
 
-    character_.channelRosters[chanName] = std::move(roster);
+    conversation_.channelRosters[chanName] = std::move(roster);
     // Both, because the panel redraws its member list on the first and its
     // member count on the second, and it registers for each separately.
     //
@@ -1465,7 +1465,7 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
         const std::string idx = std::to_string(displayIndex);
         frameXml_.fireFrameXmlEvent("CHANNEL_ROSTER_UPDATE", {idx});
         frameXml_.fireFrameXmlEvent("CHANNEL_COUNT_UPDATE",
-                                    {idx, std::to_string(character_.channelRosters[chanName].size())});
+                                    {idx, std::to_string(conversation_.channelRosters[chanName].size())});
     }
 }
 
@@ -1490,7 +1490,7 @@ void ChatHandler::applyUserlistChange(const std::string& chanName, uint64_t guid
     // The same bits the full list reads, and the same trap: 0x01 is the owner
     // and 0x02 the moderator, not the other way round.
     constexpr uint8_t kOwner = 0x01, kModerator = 0x02, kMuted = 0x08;
-    auto& roster = character_.channelRosters[chanName];
+    auto& roster = conversation_.channelRosters[chanName];
     auto it = std::find_if(roster.begin(), roster.end(),
                            [&](const ChannelMember& m) { return m.guid == guid; });
 

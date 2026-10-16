@@ -50,7 +50,7 @@ private:
 
     static constexpr size_t kMaxBubbles = 10;
 
-    core::EventBus::Subscription saidAloud_;
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace ui
