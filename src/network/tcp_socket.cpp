@@ -282,6 +282,18 @@ size_t TCPSocket::getExpectedPacketSize(const uint8_t* data, size_t size) {
             }
             return 0;  // Need more data
 
+        case 0x02:  // RECONNECT_CHALLENGE response
+            // Success: opcode(1) + error(1) + challenge(16) + versionChallenge(16).
+            // Failure: opcode(1) + error(1).
+            if (size >= 2) return data[1] == 0x00 ? 34 : 2;
+            return 0;
+
+        case 0x03:  // RECONNECT_PROOF response
+            // Success: opcode(1) + error(1) + loginFlags(2), as TBC and WotLK
+            // login servers send it. Failure: opcode(1) + error(1).
+            if (size >= 2) return data[1] == 0x00 ? 4 : 2;
+            return 0;
+
         case 0x30:  // XFER_INITIATE: opcode(1) + nameLen(1) + name + size(8) + md5(16)
             if (size >= 2) return 2 + data[1] + 8 + 16;
             return 0;

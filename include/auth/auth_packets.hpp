@@ -31,6 +31,57 @@ public:
     static network::Packet build(const std::string& account, const ClientInfo& info = ClientInfo());
 };
 
+// RECONNECT_CHALLENGE: the logon challenge's body under its own command. It
+// names an account whose last session the login server still holds.
+class ReconnectChallengePacket {
+public:
+    static network::Packet build(const std::string& account, const ClientInfo& info = ClientInfo());
+};
+
+// RECONNECT_CHALLENGE response: on success, the 16 random bytes the proof is
+// computed over and 16 bytes of version challenge.
+struct ReconnectChallengeResponse {
+    AuthResult result = AuthResult::DISCONNECTED;
+    std::array<uint8_t, 16> challenge{};
+    std::array<uint8_t, 16> versionChallenge{};
+
+    [[nodiscard]] bool isSuccess() const { return result == AuthResult::SUCCESS; }
+};
+
+class ReconnectChallengeResponseParser {
+public:
+    [[nodiscard]] static bool parse(network::Packet& packet, ReconnectChallengeResponse& response);
+};
+
+// RECONNECT_PROOF: R1, the client's own 16 random bytes; R2, the proof that
+// the client holds the session key; R3, the client's integrity hash, which
+// the login servers this client meets do not check (sent as zeros); and no
+// security keys.
+class ReconnectProofPacket {
+public:
+    static network::Packet build(const std::array<uint8_t, 16>& r1,
+                                 const std::array<uint8_t, 20>& r2,
+                                 const std::array<uint8_t, 20>& r3);
+    /// R2 = SHA1(account, R1, the server's challenge, session key), the
+    /// account upper-cased as the challenge sent it.
+    static std::array<uint8_t, 20> proof(const std::string& account,
+                                         const std::array<uint8_t, 16>& r1,
+                                         const std::array<uint8_t, 16>& challenge,
+                                         const std::vector<uint8_t>& sessionKey);
+};
+
+// RECONNECT_PROOF response: success, or why not.
+struct ReconnectProofResponse {
+    uint8_t status = 0xFF;
+
+    [[nodiscard]] bool isSuccess() const { return status == 0; }
+};
+
+class ReconnectProofResponseParser {
+public:
+    [[nodiscard]] static bool parse(network::Packet& packet, ReconnectProofResponse& response);
+};
+
 // LOGON_CHALLENGE response data
 struct LogonChallengeResponse {
     AuthResult result;
