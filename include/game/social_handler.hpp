@@ -25,7 +25,8 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit SocialHandler(GameHandler& owner);
+    /// `events`: what it hears of the session (the login that ends the party).
+    SocialHandler(GameHandler& owner, core::EventBus& events);
 
     void registerOpcodes(DispatchTable& table);
 

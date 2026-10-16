@@ -112,7 +112,7 @@ GameHandler::GameHandler(GameServices& services)
     chatHandler_      = std::make_unique<ChatHandler>(*this);
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
-    socialHandler_    = std::make_unique<SocialHandler>(*this);
+    socialHandler_    = std::make_unique<SocialHandler>(*this, *services_.events);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
