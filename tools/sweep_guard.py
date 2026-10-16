@@ -206,21 +206,22 @@ CHECKS = [
     # whole GameHandler (AGENTS.md, "A new domain handler"). Held where they
     # stood on 2026-10-16, when AccountDataHandler and ActionBarHandler were
     # the first built that way; each handler moved lowers both. InventoryHandler
-    # was next: 9 -> 8 handlers, 4213 -> 3184 reaches.
+    # was next: 9 -> 8 handlers, 4213 -> 3184 reaches; then the pet moved out
+    # of three handlers into PetHandler, 3184 -> 3041.
     ("domain_shape_check.py",
      r"^(\d+) domain handlers built from GameHandler&", 8,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 3184,
+     r"^(\d+) reaches through owner_ in src/game", 3041,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
     # and 65 before the inventory's state moved to InventoryHandler.
     ("domain_shape_check.py",
-     r"^(\d+) xxxRef\(\) accessors in GameHandler", 186,
+     r"^(\d+) xxxRef\(\) accessors in GameHandler", 169,
      "writable accessors to GameHandler's state"),
     ("domain_shape_check.py",
-     r"^(\d+) calls to them through owner_ in src/game", 962,
+     r"^(\d+) calls to them through owner_ in src/game", 862,
      "domain handlers editing GameHandler's state through its accessors"),
     ("domain_shape_check.py",
      r"^(\d+) set\*Callback setters in GameHandler", 62,

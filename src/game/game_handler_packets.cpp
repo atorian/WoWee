@@ -349,31 +349,7 @@ void GameHandler::registerCoreOpcodes() {
     // (SMSG_PROCRESIST → moved to CombatHandler)
     // -----------------------------------------------------------------------
 
-    // -----------------------------------------------------------------------
-    // Pet stable
-    // -----------------------------------------------------------------------
-    dispatchTable_[Opcode::MSG_LIST_STABLED_PETS] = [this](network::Packet& packet) {
-        if (state == WorldState::IN_WORLD) handleListStabledPets(packet);
-    };
-    dispatchTable_[Opcode::SMSG_STABLE_RESULT] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(1)) return;
-        uint8_t result = packet.readUInt8();
-        const char* msg = nullptr;
-        switch (result) {
-            case 0x01: msg = "Pet stored in stable."; break;
-            case 0x06: msg = "Pet retrieved from stable."; break;
-            case 0x07: msg = "Stable slot purchased."; break;
-            case 0x08: msg = "Stable list updated."; break;
-            case 0x09: msg = "Stable failed: not enough money or other error."; addUIError(msg); break;
-            default: break;
-        }
-        if (msg) addSystemChatMessage(msg);
-        LOG_INFO("SMSG_STABLE_RESULT: result=", static_cast<int>(result));
-        if (stableWindowOpen_ && stableMasterGuid_ != 0 && socket && result <= 0x08) {
-            auto refreshPkt = ListStabledPetsPacket::build(stableMasterGuid_);
-            socket->send(refreshPkt);
-        }
-    };
+    // The pet stable is PetHandler's.
 
     // -----------------------------------------------------------------------
     // Titles / achievements / character services
@@ -861,7 +837,6 @@ void GameHandler::registerCoreOpcodes() {
     // ---- Batch 4: Ready check, duels, guild, loot/gossip/vendor, factions, spell mods ----
 
     // Guild
-    registerHandler(Opcode::SMSG_PET_SPELLS, &GameHandler::handlePetSpells);
 
     // Loot/gossip/vendor delegates
     registerHandler(Opcode::SMSG_SUMMON_REQUEST, &GameHandler::handleSummonRequest);
@@ -2282,20 +2257,6 @@ void GameHandler::registerRemainingOpcodes() {
                      Opcode::SMSG_PET_ACTION_SOUND }) {
         dispatchTable_[op] = [](network::Packet& packet) { packet.skipAll(); };
     }
-    // Server signals that the pet can now be named (first tame)
-    dispatchTable_[Opcode::SMSG_PET_RENAMEABLE] = [this](network::Packet& packet) {
-        // Server signals that the pet can now be named (first tame)
-        petRenameablePending_ = true;
-        // The naming dialog opens on this. The flag alone is read by this
-        // client's own UI, so the interface's version never appeared.
-        if (hasAddonEventListener()) fireAddonEvent("PET_RENAMEABLE", {});
-        packet.skipAll();
-    };
-    dispatchTable_[Opcode::SMSG_PET_NAME_INVALID] = [this](network::Packet& packet) {
-        addUIError("That pet name is invalid. Please choose a different name.");
-        raiseUiError("That pet name is invalid. Please choose a different name.");
-        packet.skipAll();
-    };
     // Classic 1.12: PackedGUID + 19×uint32 itemEntries (EQUIPMENT_SLOT_END=19)
     // This opcode is only reachable on Classic servers; TBC/WotLK wire 0x115 maps to
     // SMSG_INSPECT_RESULTS_UPDATE which is handled separately.
@@ -3217,6 +3178,7 @@ void GameHandler::registerDomainOpcodes() {
     wardenHandler_->registerOpcodes(dispatchTable_);
     accountDataHandler_->registerOpcodes(dispatchTable_);
     actionBarHandler_->registerOpcodes(dispatchTable_);
+    petHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {

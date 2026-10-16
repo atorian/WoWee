@@ -181,13 +181,6 @@ private:
     void handleSpellDamageShield(network::Packet& packet);
     void handleSpellOrDamageImmune(network::Packet& packet);
     void handleResistLog(network::Packet& packet);
-    void handlePetTameFailure(network::Packet& packet);
-    void handlePetActionFeedback(network::Packet& packet);
-    void handlePetCastFailed(network::Packet& packet);
-    void handlePetBroken(network::Packet& packet);
-    void handlePetLearnedSpell(network::Packet& packet);
-    void handlePetUnlearnedSpell(network::Packet& packet);
-    void handlePetMode(network::Packet& packet);
     void handleResurrectFailed(network::Packet& packet);
 
     void autoTargetAttacker(uint64_t attackerGuid);

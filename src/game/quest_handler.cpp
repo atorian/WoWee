@@ -1398,8 +1398,7 @@ void QuestHandler::selectGossipOption(uint32_t optionId, const std::string& code
         if (text == "GOSSIP_OPTION_STABLE" ||
             textLower.find("stable") != std::string::npos ||
             textLower.find("my pet") != std::string::npos) {
-            owner_.stableMasterGuidRef() = currentGossip_.npcGuid;
-            owner_.stableWindowOpenRef() = false;
+            owner_.pet().setStableMaster(currentGossip_.npcGuid);
             auto listPkt = ListStabledPetsPacket::build(currentGossip_.npcGuid);
             owner_.getSocket()->send(listPkt);
             LOG_INFO("Sent MSG_LIST_STABLED_PETS (gossip) to npc=0x",

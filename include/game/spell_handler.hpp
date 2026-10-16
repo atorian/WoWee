@@ -248,23 +248,6 @@ public:
     void confirmTalentWipe();
     void cancelTalentWipe() { talentWipePending_ = false; }
 
-    // Pet talent respec confirm
-    [[nodiscard]] bool showPetUnlearnDialog() const { return petUnlearnPending_; }
-    [[nodiscard]] uint32_t getPetUnlearnCost() const { return petUnlearnCost_; }
-    void confirmPetUnlearn();
-    void cancelPetUnlearn() { petUnlearnPending_ = false; }
-
-    // Item use
-
-    // Equipment sets - canonical data owned by InventoryHandler;
-    // GameHandler::getEquipmentSets() delegates to inventoryHandler_.
-
-    // Pet spells
-    void sendPetAction(uint32_t action, uint64_t targetGuid = 0);
-    void dismissPet();
-    void togglePetSpellAutocast(uint32_t spellId);
-    void renamePet(const std::string& newName);
-
     // Spell DBC accessors
     [[nodiscard]] const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
     [[nodiscard]] float getSpellDuration(uint32_t spellId) const;
@@ -320,35 +303,10 @@ public:
     void updateTimers(float dt);
     void refreshRestorationState() { refreshRestorationFromPlayerAuras(); }
 
-    // Packet handlers dispatched from GameHandler's opcode table
-    void handlePetSpells(network::Packet& packet);
-    void handleListStabledPets(network::Packet& packet);
-
-    // Pet stable commands (called via GameHandler delegation)
-    void requestStabledPetList();
-    void stablePet(uint8_t slot);
-    void unstablePet(uint32_t petNumber);
-
     // DBC cache loading (called from GameHandler during login)
     void loadSpellNameCache() const;
     void loadSkillLineAbilityDbc();
 
-    /// Ask the server what the pet is called.
-    ///
-    /// The name a player gave a pet arrives only in answer to
-    /// CMSG_PET_NAME_QUERY. Without it a pet wears its creature template's
-    /// name - "Voidwalker" where the player wrote something else - which is
-    /// what the pet frame, its nameplate and the pet bar's tooltip all show.
-    ///
-    /// The pet number in that request is a key the server echoes back and does
-    /// not look anything up with: SendPetNameQuery finds the pet by guid. So
-    /// this sends a number of its own making and uses it to match the reply to
-    /// the pet it asked about, which is what the field would have been for.
-    void requestPetName(uint64_t petGuid);
-
-    /// Give a hunter's pet up for good. The interface asks first - this is the
-    /// other side of the ABANDON_PET dialog, whose accept called an unbound
-    /// name and raised.
     /// The five values every UNIT_SPELLCAST_* event carries.
     ///
     /// unit, spell name, rank, cast id, spell id - in that order, which is what
@@ -357,15 +315,7 @@ public:
     [[nodiscard]] std::vector<std::string> spellcastArgs(const std::string& unitId,
                                            uint32_t spellId) const;
 
-    void abandonPet();
-
-    /// Buy the next stable slot from the stable master currently open.
-    void buyStableSlot();
-
 private:
-    std::unordered_map<uint32_t, uint64_t> pendingPetNameQueries_;
-    uint32_t nextPetNameQueryKey_ = 1;
-
     // --- Packet handlers ---
     void handleInitialSpells(network::Packet& packet);
     void handleCastFailed(network::Packet& packet);
@@ -510,10 +460,6 @@ private:
     bool talentWipePending_ = false;
     uint64_t talentWipeNpcGuid_ = 0;
     uint32_t talentWipeCost_ = 0;
-
-    // Pet talent respec confirm dialog
-    bool petUnlearnPending_ = false;
-    uint32_t petUnlearnCost_ = 0;
 
     /// Last, so it goes first: its handlers write the spell book.
     std::vector<core::EventBus::Subscription> subscriptions_;

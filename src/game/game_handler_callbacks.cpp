@@ -607,11 +607,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     spellFlatMods_.clear();
     spellPctMods_.clear();
     actionBarHandler_->clear();
-    petGuid_ = 0;
-    stableWindowOpen_  = false;
-    stableMasterGuid_  = 0;
-    stableNumSlots_    = 0;
-    stabledPets_.clear();
+    petHandler_->beginCharacter();
     playerXp_ = 0;
     playerNextLevelXp_ = 0;
     serverPlayerLevel_ = 1;
@@ -2213,14 +2209,6 @@ uint32_t GameHandler::getTempEnchantRemainingMs(uint32_t slot) const {
     return inventoryHandler_->getTempEnchantRemainingMs(slot);
 }
 
-void GameHandler::handlePetSpells(network::Packet& packet) {
-    spellHandler_->handlePetSpells(packet);
-}
-
-void GameHandler::sendPetAction(uint32_t action, uint64_t targetGuid) {
-    spellHandler_->sendPetAction(action, targetGuid);
-}
-
 void GameHandler::dismissCritter() {
     if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
     const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
@@ -2231,34 +2219,6 @@ void GameHandler::dismissCritter() {
              " summonedBy=", activeCritterSpellId_);
     // The server confirms by clearing the critter field; leave the local state
     // alone so a refused dismiss does not leave the client thinking it worked.
-}
-
-void GameHandler::dismissPet() {
-    spellHandler_->dismissPet();
-}
-
-void GameHandler::togglePetSpellAutocast(uint32_t spellId) {
-    spellHandler_->togglePetSpellAutocast(spellId);
-}
-
-void GameHandler::renamePet(const std::string& newName) {
-    spellHandler_->renamePet(newName);
-}
-
-void GameHandler::requestStabledPetList() {
-    spellHandler_->requestStabledPetList();
-}
-
-void GameHandler::stablePet(uint8_t slot) {
-    spellHandler_->stablePet(slot);
-}
-
-void GameHandler::buyStableSlot() {
-    spellHandler_->buyStableSlot();
-}
-
-void GameHandler::abandonPet() {
-    spellHandler_->abandonPet();
 }
 
 // CMSG_UNLEARN_SKILL carries the skill line and nothing else.
@@ -2280,14 +2240,6 @@ void GameHandler::resetInstances() {
     network::Packet pkt(wireOpcode(Opcode::CMSG_RESET_INSTANCES));
     getSocket()->send(pkt);
     LOG_INFO("Sent CMSG_RESET_INSTANCES");
-}
-
-void GameHandler::unstablePet(uint32_t petNumber) {
-    spellHandler_->unstablePet(petNumber);
-}
-
-void GameHandler::handleListStabledPets(network::Packet& packet) {
-    spellHandler_->handleListStabledPets(packet);
 }
 
 
@@ -2325,10 +2277,6 @@ void GameHandler::learnTalent(uint32_t talentId, uint32_t requestedRank) {
 
 void GameHandler::switchTalentSpec(uint8_t newSpec) {
     spellHandler_->switchTalentSpec(newSpec);
-}
-
-void GameHandler::confirmPetUnlearn() {
-    spellHandler_->confirmPetUnlearn();
 }
 
 void GameHandler::confirmTalentWipe() {
@@ -3045,7 +2993,7 @@ std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == playerGuid)      return "player";
     if (guid == targetGuid)      return "target";
     if (guid == focusGuid)       return "focus";
-    if (guid == petGuid_)        return "pet";
+    if (guid == petHandler_->guid()) return "pet";
     return {};
 }
 int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {

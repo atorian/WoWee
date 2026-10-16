@@ -124,6 +124,7 @@ GameHandler::GameHandler(GameServices& services)
     accountDataHandler_ = std::make_unique<AccountDataHandler>(
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
+    petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries
@@ -363,6 +364,13 @@ bool GameHandler::gameObjectLootOpened(uint64_t lootGuid) {
 bool GameHandler::npcDialogOpen() const {
     return questHandler_->isQuestDetailsOpen() || questHandler_->isGossipWindowOpen() ||
            questHandler_->isQuestRequestItemsOpen() || questHandler_->isQuestOfferRewardOpen();
+}
+
+bool GameHandler::nameUnitInView(uint64_t guid, const std::string& name) {
+    auto unit = std::dynamic_pointer_cast<Unit>(entityController_->getEntityManager().getEntity(guid));
+    if (!unit) return false;
+    unit->setName(name);
+    return true;
 }
 
 bool GameHandler::questWantsItem(uint32_t itemId) const {
@@ -3894,15 +3902,6 @@ uint32_t GameHandler::getTalentWipeCost() const {
 }
 void GameHandler::cancelTalentWipe() {
     spellHandler_->cancelTalentWipe();
-}
-bool GameHandler::showPetUnlearnDialog() const {
-    return spellHandler_->showPetUnlearnDialog();
-}
-uint32_t GameHandler::getPetUnlearnCost() const {
-    return spellHandler_->getPetUnlearnCost();
-}
-void GameHandler::cancelPetUnlearn() {
-    spellHandler_->cancelPetUnlearn();
 }
 
 // ---- QuestHandler delegating getters ----

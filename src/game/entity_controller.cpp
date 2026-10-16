@@ -1250,45 +1250,43 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
             unit->setMountDisplayId(val);
         } else if (ufi.attackPower != 0xFFFF && key == ufi.attackPower &&
-                   block.guid == owner_.petGuidRef()) {
-            owner_.petAttackPowerRef() = static_cast<int32_t>(val);
+                   block.guid == owner_.pet().guid()) {
+            owner_.pet().setAttackPower(static_cast<int32_t>(val));
             petStatsChanged = true;
         } else if (ufi.minDamage != 0xFFFF && key == ufi.minDamage &&
-                   block.guid == owner_.petGuidRef()) {
+                   block.guid == owner_.pet().guid()) {
             // A float, sent as its bits like every other float field.
-            std::memcpy(&owner_.petMinDamageRef(), &val, 4);
+            float damage = 0.0f;
+            std::memcpy(&damage, &val, 4);
+            owner_.pet().setMinDamage(damage);
             petStatsChanged = true;
         } else if (ufi.maxDamage != 0xFFFF && key == ufi.maxDamage &&
-                   block.guid == owner_.petGuidRef()) {
-            std::memcpy(&owner_.petMaxDamageRef(), &val, 4);
+                   block.guid == owner_.pet().guid()) {
+            float damage = 0.0f;
+            std::memcpy(&damage, &val, 4);
+            owner_.pet().setMaxDamage(damage);
             petStatsChanged = true;
         } else if (ufi.stat0 != 0xFFFF && key >= ufi.stat0 && key < ufi.stat0 + 5 &&
-                   block.guid == owner_.petGuidRef()) {
+                   block.guid == owner_.pet().guid()) {
             // The pet's own five, not the player's. The paperdoll's pet tab
             // reads them through UnitStat("pet"), which used to answer from the
             // player - so a hunter's pet listed its owner's Strength.
-            owner_.petStatsRef()[key - ufi.stat0] = static_cast<int32_t>(val);
+            owner_.pet().setStat(key - ufi.stat0, static_cast<int32_t>(val));
             petStatsChanged = true;
         } else if (ufi.resistances != 0xFFFF && key >= ufi.resistances &&
-                   key < ufi.resistances + 7 && block.guid == owner_.petGuidRef()) {
+                   key < ufi.resistances + 7 && block.guid == owner_.pet().guid()) {
             // Armor is index zero and the six schools follow it, the same shape
             // as the player's.
-            owner_.petResistancesRef()[key - ufi.resistances] = static_cast<int32_t>(val);
+            owner_.pet().setResistance(key - ufi.resistances, static_cast<int32_t>(val));
             petStatsChanged = true;
         } else if (ufi.petXp != 0xFFFF && key == ufi.petXp &&
-                   block.guid == owner_.petGuidRef()) {
+                   block.guid == owner_.pet().guid()) {
             // Only the player's own pet. Every unit carries these fields and
             // only one of them has an experience bar to draw.
-            if (owner_.petExperienceRef() != val) {
-                owner_.petExperienceRef() = val;
-                petExperienceChanged = true;
-            }
+            if (owner_.pet().setExperience(val)) petExperienceChanged = true;
         } else if (ufi.petNextLevelXp != 0xFFFF && key == ufi.petNextLevelXp &&
-                   block.guid == owner_.petGuidRef()) {
-            if (owner_.petNextLevelExpRef() != val) {
-                owner_.petNextLevelExpRef() = val;
-                petExperienceChanged = true;
-            }
+                   block.guid == owner_.pet().guid()) {
+            if (owner_.pet().setNextLevelExperience(val)) petExperienceChanged = true;
         } else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
         else if (key == ufi.npcEmoteState) {
             uint32_t oldEmote = unit->getNpcEmoteState();
@@ -2256,7 +2254,7 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
         std::string uid;
         if (block.guid == owner_.getTargetGuid()) uid = "target";
         else if (block.guid == owner_.focusGuidRef()) uid = "focus";
-        else if (block.guid == owner_.petGuidRef()) uid = "pet";
+        else if (block.guid == owner_.pet().guid()) uid = "pet";
         if (!uid.empty())
             pendingEvents_.emit("UNIT_MODEL_CHANGED", {uid});
     }

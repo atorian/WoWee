@@ -8,6 +8,7 @@
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
 #include "game/inventory_handler.hpp"
+#include "game/pet_handler.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/packet_sender.hpp"
 #include "game/world_packet_data.hpp"
@@ -174,7 +175,8 @@ class GameHandler : public IConnectionState,
                      public PacketSender,
                      public FrameXmlEvents,
                      public ActionBarQueries,
-                     public InventoryQueries {
+                     public InventoryQueries,
+                     public PetQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -293,6 +295,9 @@ public:
     bool questWantsItem(uint32_t itemId) const override;
     // cancelCast, dismount, closeGossip and runInterfaceCommand are
     // InventoryQueries' too, declared with the rest of their kind below.
+
+    // PetQueries (spellName is InventoryQueries' too)
+    bool nameUnitInView(uint64_t guid, const std::string& name) override;
 
     /**
      * Get current connection state
@@ -1108,58 +1113,32 @@ public:
     void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
     void cancelCast() override;
     void cancelAura(uint32_t spellId);
-    void dismissPet();
-    void renamePet(const std::string& newName);
-    bool hasPet() const { return petGuid_ != 0; }
+
+    // ---- The pet - PetHandler's; these forward for the old callers ----
+    void dismissPet() { petHandler_->dismiss(); }
+    void renamePet(const std::string& newName) { petHandler_->rename(newName); }
+    bool hasPet() const { return petHandler_->hasPet(); }
     /// The same flag without taking it. The unit menu asks whether a rename is
-    /// offered every time it is built, and consuming there would spend the one
-    /// answer this client's own naming dialog is waiting for.
-    bool isPetRenameable() const { return petRenameablePending_; }
-    uint64_t getPetGuid() const { return petGuid_; }
-
-    // ---- Pet state (populated by SMSG_PET_SPELLS / SMSG_PET_MODE) ----
-    // 10 action bar slots; each entry is a packed uint32:
-    //   bits 0-23  = spell ID (or 0 for empty)
-    //   bits 24-31 = action type (0x00=cast, 0xC0=autocast on, 0x40=autocast off)
-    static constexpr int PET_ACTION_BAR_SLOTS = 10;
-    uint32_t getPetActionSlot(int idx) const {
-        if (idx < 0 || idx >= PET_ACTION_BAR_SLOTS) return 0;
-        return petActionSlots_[idx];
+    /// offered every time it is built.
+    bool isPetRenameable() const { return petHandler_->renameable(); }
+    uint64_t getPetGuid() const { return petHandler_->guid(); }
+    static constexpr int PET_ACTION_BAR_SLOTS = PetHandler::kActionBarSlots;
+    uint32_t getPetActionSlot(int idx) const { return petHandler_->actionSlot(idx); }
+    uint8_t getPetCommand() const { return petHandler_->command(); }   // 0=stay,1=follow,2=attack,3=dismiss
+    uint8_t getPetReact()   const { return petHandler_->react(); }     // 0=passive,1=defensive,2=aggressive
+    const std::array<int32_t, 5>& getPetStats() const { return petHandler_->stats(); }
+    const std::array<int32_t, 7>& getPetResistances() const { return petHandler_->resistances(); }
+    int32_t getPetAttackPower() const { return petHandler_->attackPower(); }
+    float getPetMinDamage() const { return petHandler_->minDamage(); }
+    float getPetMaxDamage() const { return petHandler_->maxDamage(); }
+    uint32_t getPetExperience() const { return petHandler_->experience(); }
+    uint32_t getPetNextLevelExp() const { return petHandler_->nextLevelExperience(); }
+    const std::vector<uint32_t>& getPetSpells() const { return petHandler_->spells(); }
+    bool isPetSpellAutocast(uint32_t spellId) const { return petHandler_->isAutocast(spellId); }
+    void sendPetAction(uint32_t action, uint64_t targetGuid = 0) {
+        petHandler_->sendAction(action, targetGuid);
     }
-    // Pet command/react state from SMSG_PET_MODE or SMSG_PET_SPELLS
-    uint8_t getPetCommand() const { return petCommand_; }   // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t getPetReact()   const { return petReact_; }     // 0=passive,1=defensive,2=aggressive
-    // A pet's own stats and resistances, off the pet unit's fields. Armor is
-    // resistance index 0, as it is for the player.
-    const std::array<int32_t, 5>& getPetStats() const { return petStats_; }
-    const std::array<int32_t, 7>& getPetResistances() const { return petResistances_; }
-    std::array<int32_t, 5>& petStatsRef() { return petStats_; }
-    std::array<int32_t, 7>& petResistancesRef() { return petResistances_; }
-
-    // What the pet hits for, and with how much attack power.
-    int32_t getPetAttackPower() const { return petAttackPower_; }
-    float getPetMinDamage() const { return petMinDamage_; }
-    float getPetMaxDamage() const { return petMaxDamage_; }
-    int32_t& petAttackPowerRef() { return petAttackPower_; }
-    float& petMinDamageRef() { return petMinDamage_; }
-    float& petMaxDamageRef() { return petMaxDamage_; }
-
-    // A hunter pet's experience, off the pet unit's own fields.
-    uint32_t getPetExperience() const { return petExperience_; }
-    uint32_t getPetNextLevelExp() const { return petNextLevelExp_; }
-    uint32_t& petExperienceRef() { return petExperience_; }
-    uint32_t& petNextLevelExpRef() { return petNextLevelExp_; }
-
-    // Spells the pet knows (from SMSG_PET_SPELLS spell list)
-    const std::vector<uint32_t>& getPetSpells() const { return petSpellList_; }
-    // Pet autocast set (spellIds that have autocast enabled)
-    bool isPetSpellAutocast(uint32_t spellId) const {
-        return petAutocastSpells_.count(spellId) != 0;
-    }
-    // Send CMSG_PET_ACTION to issue a pet command
-    void sendPetAction(uint32_t action, uint64_t targetGuid = 0);
-    // Toggle autocast for a pet spell via CMSG_PET_SPELL_AUTOCAST
-    void togglePetSpellAutocast(uint32_t spellId);
+    void togglePetSpellAutocast(uint32_t spellId) { petHandler_->toggleAutocast(spellId); }
     const std::unordered_set<uint32_t>& getKnownSpells() const {
         static const std::unordered_set<uint32_t> empty;
         return spellHandler_->getKnownSpells();
@@ -1169,32 +1148,17 @@ public:
     using SpellBookTab = SpellHandler::SpellBookTab;
     const std::vector<SpellBookTab>& getSpellBookTabs();
 
-    // ---- Pet Stable ----
-    struct StabledPet {
-        uint32_t petNumber  = 0;   // server-side pet number (used for unstable/swap)
-        uint32_t entry      = 0;   // creature entry ID
-        uint32_t level      = 0;
-        std::string name;
-        // No display id: MSG_LIST_STABLED_PETS carries only the entry, and a
-        // model frame wants a display id. SetPetStablePaperdoll resolves it
-        // from `entry` at the moment it draws, so a query still in flight
-        // answers on the next read rather than being frozen at zero.
-        bool     isActive   = false;  // true = the pet that is out, not stabled
-    };
-    bool isStableWindowOpen() const { return stableWindowOpen_; }
-    void closeStableWindow() {
-        const bool wasOpen = stableWindowOpen_;
-        stableWindowOpen_ = false;
-        // The stable window hides on this and nothing else.
-        if (wasOpen) fireAddonEvent("PET_STABLE_CLOSED", {});
-    }
-    uint8_t  getStableSlots() const { return stableNumSlots_; }
-    const std::vector<StabledPet>& getStabledPets() const { return stabledPets_; }
-    void requestStabledPetList();          // CMSG MSG_LIST_STABLED_PETS
-    void stablePet(uint8_t slot);          // CMSG_STABLE_PET (store active pet in slot)
-    void unstablePet(uint32_t petNumber);  // CMSG_UNSTABLE_PET (retrieve to active)
-    void buyStableSlot();                  // CMSG_BUY_STABLE_SLOT (next slot from the open stable master)
-    void abandonPet();                     // CMSG_PET_ABANDON (give a hunter pet up for good)
+    // ---- Pet Stable - PetHandler's ----
+    using StabledPet = game::StabledPet;
+    bool isStableWindowOpen() const { return petHandler_->isStableWindowOpen(); }
+    void closeStableWindow() { petHandler_->closeStableWindow(); }
+    uint8_t  getStableSlots() const { return petHandler_->stableSlots(); }
+    const std::vector<StabledPet>& getStabledPets() const { return petHandler_->stabledPets(); }
+    void requestStabledPetList() { petHandler_->requestStabledPetList(); }
+    void stablePet(uint8_t slot) { petHandler_->stablePet(slot); }
+    void unstablePet(uint32_t petNumber) { petHandler_->unstablePet(petNumber); }
+    void buyStableSlot() { petHandler_->buyStableSlot(); }
+    void abandonPet() { petHandler_->abandon(); }
     /// Forget a primary profession. The server refuses anything that is not
     /// one, so the skill panel's unlearn button is the only sensible caller.
     void unlearnSkill(uint32_t skillId);
@@ -1764,10 +1728,10 @@ public:
     void confirmTalentWipe();
     void cancelTalentWipe();
     // Pet talent respec confirm
-    bool showPetUnlearnDialog() const;
-    uint32_t getPetUnlearnCost() const;
-    void confirmPetUnlearn();
-    void cancelPetUnlearn();
+    bool showPetUnlearnDialog() const { return petHandler_->showUnlearnDialog(); }
+    uint32_t getPetUnlearnCost() const { return petHandler_->unlearnCost(); }
+    void confirmPetUnlearn() { petHandler_->confirmUnlearn(); }
+    void cancelPetUnlearn() { petHandler_->cancelUnlearn(); }
 
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
@@ -3308,6 +3272,9 @@ public:
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
+    /// The player's pet and the stable.
+    PetHandler& pet() { return *petHandler_; }
+    const PetHandler& pet() const { return *petHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -3509,18 +3476,6 @@ public:
     auto& summonerNameRef() { return summonerName_; }
     auto& summonTimeoutSecRef() { return summonTimeoutSec_; }
     auto& bfMgrInvitePendingRef() { return bfMgrInvitePending_; }
-
-    // ── Pet & Stable ─────────────────────────────────────────────────
-    auto& petActionSlotsRef() { return petActionSlots_; }
-    auto& petAutocastSpellsRef() { return petAutocastSpells_; }
-    auto& petCommandRef() { return petCommand_; }
-    auto& petGuidRef() { return petGuid_; }
-    auto& petReactRef() { return petReact_; }
-    auto& petSpellListRef() { return petSpellList_; }
-    auto& stabledPetsRef() { return stabledPets_; }
-    auto& stableMasterGuidRef() { return stableMasterGuid_; }
-    auto& stableNumSlotsRef() { return stableNumSlots_; }
-    auto& stableWindowOpenRef() { return stableWindowOpen_; }
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
     auto& gmTicketActiveRef() { return gmTicketActive_; }
@@ -3864,8 +3819,6 @@ private:
     void handleUpdateAuraDuration(uint8_t slot, uint32_t durationMs);
     // handleSetForcedReactions - dispatched via CombatHandler
 
-    // ---- Guild handlers ----
-    void handlePetSpells(network::Packet& packet);
 
     // ---- Character creation handler ----
     void handleCharCreateResponse(network::Packet& packet);
@@ -3927,6 +3880,7 @@ private:
     std::unique_ptr<WardenHandler>    wardenHandler_;
     std::unique_ptr<AccountDataHandler> accountDataHandler_;
     std::unique_ptr<ActionBarHandler> actionBarHandler_;
+    std::unique_ptr<PetHandler> petHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -4116,28 +4070,7 @@ private:
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
 
-    uint64_t petGuid_ = 0;
-    uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
-    uint8_t  petCommand_ = 1;            // 0=stay,1=follow,2=attack,3=dismiss
-    uint8_t  petReact_   = 1;            // 0=passive,1=defensive,2=aggressive
-    bool     petRenameablePending_ = false;  // set by SMSG_PET_RENAMEABLE, consumed by UI
-    std::vector<uint32_t> petSpellList_; // known pet spells
-    std::unordered_set<uint32_t> petAutocastSpells_;  // spells with autocast on
-    std::array<int32_t, 5> petStats_{};
-    int32_t petAttackPower_ = 0;
-    float petMinDamage_ = 0.0f;
-    float petMaxDamage_ = 0.0f;
-    std::array<int32_t, 7> petResistances_{};
-    uint32_t petExperience_ = 0;
-    uint32_t petNextLevelExp_ = 0;
-
-    // ---- Pet Stable ----
-    bool stableWindowOpen_    = false;
-    uint64_t stableMasterGuid_ = 0;
-    uint8_t  stableNumSlots_   = 0;
-    std::vector<StabledPet> stabledPets_;
-    void handleListStabledPets(network::Packet& packet);
-
+    // The pet and the stable are PetHandler's.
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];

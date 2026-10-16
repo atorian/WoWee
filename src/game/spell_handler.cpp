@@ -361,52 +361,7 @@ std::vector<std::string> SpellHandler::spellcastArgs(const std::string& unitId,
     return {unitId, name, rank, std::to_string(spellId), std::to_string(spellId)};
 }
 
-void SpellHandler::requestPetName(uint64_t petGuid) {
-    if (petGuid == 0 || !owner_.getSocket()) return;
-    if (owner_.getState() != WorldState::IN_WORLD) return;
-    const uint32_t key = nextPetNameQueryKey_++;
-    pendingPetNameQueries_[key] = petGuid;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_NAME_QUERY));
-    pkt.writeUInt32(key);
-    pkt.writeUInt64(petGuid);
-    owner_.getSocket()->send(pkt);
-}
-
 void SpellHandler::registerOpcodes(DispatchTable& table) {
-    // The reply, which was read to the end and thrown away - a skip handler
-    // for a message nothing had asked for, since nothing sent the request.
-    //
-    // Shape from AzerothCore's SendPetNameQuery: the key back, the name, and
-    // the timestamp the name was set. A pet it could not find answers a zero
-    // byte where the name would be, which is the empty string and means "keep
-    // what you have" rather than "the pet has no name".
-    table[Opcode::SMSG_PET_NAME_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
-        const uint32_t key = packet.readUInt32();
-        const std::string name = packet.readString();
-        packet.skipAll();
-
-        auto it = pendingPetNameQueries_.find(key);
-        if (it == pendingPetNameQueries_.end()) return;
-        const uint64_t guid = it->second;
-        pendingPetNameQueries_.erase(it);
-        if (name.empty()) return;
-
-        auto entity = owner_.getEntityManager().getEntity(guid);
-        if (!entity) return;
-        auto unit = std::dynamic_pointer_cast<Unit>(entity);
-        if (!unit) return;
-        unit->setName(name);
-        LOG_INFO("Pet name: 0x", std::hex, guid, std::dec, " is '", name, "'");
-        // Both, because the two frames listen for different ones: the pet
-        // frame redraws its name from UNIT_NAME_UPDATE, and the pet bar and
-        // anything else keyed on the pet rebuild from PET_UI_UPDATE.
-        if (guid == owner_.petGuidRef()) {
-            owner_.fireAddonEvent("UNIT_NAME_UPDATE", {"pet"});
-            owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        }
-    };
-
     table[Opcode::SMSG_INITIAL_SPELLS] = [this](network::Packet& packet) { handleInitialSpells(packet); };
     table[Opcode::SMSG_CAST_FAILED] = [this](network::Packet& packet) { handleCastFailed(packet); };
     table[Opcode::SMSG_SPELL_START] = [this](network::Packet& packet) { handleSpellStart(packet); };
@@ -435,17 +390,6 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
         LOG_INFO("MSG_TALENT_WIPE_CONFIRM: npc=0x", std::hex, talentWipeNpcGuid_, std::dec,
                  " cost=", talentWipeCost_);
         owner_.fireAddonEvent("CONFIRM_TALENT_WIPE", {std::to_string(talentWipeCost_)});
-    };
-    // SMSG_PET_UNLEARN_CONFIRM: uint64 petGuid + uint32 cost (copper). Handled
-    // here for the same reason - this handler owns the pending-unlearn state.
-    // The other pet opcodes have different formats and must NOT set unlearn state.
-    table[Opcode::SMSG_PET_UNLEARN_CONFIRM] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(12)) {
-            packet.readUInt64();   // the pet's guid; the cost is what is asked for
-            petUnlearnCost_ = packet.readUInt32();
-            petUnlearnPending_ = true;
-        }
-        packet.skipAll();
     };
     table[Opcode::SMSG_ACHIEVEMENT_EARNED] = [this](network::Packet& packet) {
         handleAchievementEarned(packet);
@@ -1175,32 +1119,6 @@ void SpellHandler::confirmTalentWipe() {
     owner_.addSystemChatMessage("Talent reset confirmed. The server will update your talents.");
     talentWipeNpcGuid_ = 0;
     talentWipeCost_ = 0;
-}
-
-void SpellHandler::confirmPetUnlearn() {
-    if (!petUnlearnPending_) return;
-    petUnlearnPending_ = false;
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-
-    // Sent, and this server throws it away: CMSG_PET_UNLEARN_TALENTS is
-    // Handle_NULL in AzerothCore's opcode table, and pet talents are only ever
-    // reset there through the AT_LOGIN_RESET_PET_TALENTS flag at the next
-    // login. Kept rather than dropped, because the request is correct and a
-    // server that implements it would act on it - but the line that followed
-    // said "Pet talent reset confirmed", which is a claim about what happened
-    // rather than about what was asked, and nothing was going to happen.
-    //
-    // The talent reset beside this one is the contrast worth keeping: it goes
-    // out on MSG_TALENT_WIPE_CONFIRM, which the server does implement, and its
-    // line already says the server will update the talents rather than that it
-    // has.
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_UNLEARN_TALENTS));
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("confirmPetUnlearn: sent CMSG_PET_UNLEARN_TALENTS");
-    owner_.addSystemChatMessage(
-        "Pet talent reset requested. This server resets pet talents at the "
-        "next login rather than on request.");
-    petUnlearnCost_ = 0;
 }
 
 const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() {
@@ -2196,7 +2114,7 @@ void SpellHandler::handleAuraUpdate(network::Packet& packet, bool isAll) {
             if (data.guid == owner_.getPlayerGuid()) unitId = "player";
             else if (data.guid == owner_.getTargetGuid()) unitId = "target";
             else if (data.guid == owner_.focusGuidRef()) unitId = "focus";
-            else if (data.guid == owner_.petGuidRef()) unitId = "pet";
+            else if (data.guid == owner_.pet().guid()) unitId = "pet";
             if (!unitId.empty()) {
                 owner_.fireAddonEvent("UNIT_AURA", {unitId});
                 // A 1.12 interface listens for this rather than for
@@ -2554,203 +2472,8 @@ void SpellHandler::handleAchievementEarned(network::Packet& packet) {
 }
 
 // SMSG_EQUIPMENT_SET_LIST - moved to InventoryHandler
+// The pet, its spells and the stable are PetHandler's.
 
-// ============================================================
-// Pet spell methods (moved from GameHandler)
-// ============================================================
-
-void SpellHandler::handlePetSpells(network::Packet& packet) {
-    const size_t remaining = packet.getRemainingSize();
-    if (remaining < 8) {
-        owner_.petGuidRef() = 0;
-        owner_.petSpellListRef().clear();
-        owner_.petAutocastSpellsRef().clear();
-        memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-        LOG_INFO("SMSG_PET_SPELLS: pet cleared");
-        owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
-        owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        return;
-    }
-
-    owner_.petGuidRef() = packet.readUInt64();
-    // Ask what it is called. Nothing else does, and the name a player gave a
-    // pet comes back in answer to this and nothing else.
-    if (owner_.petGuidRef() != 0) requestPetName(owner_.petGuidRef());
-    if (owner_.petGuidRef() == 0) {
-        owner_.petSpellListRef().clear();
-        owner_.petAutocastSpellsRef().clear();
-        memset(owner_.petActionSlotsRef(), 0, sizeof(owner_.petActionSlotsRef()));
-        LOG_INFO("SMSG_PET_SPELLS: pet cleared (guid=0)");
-        owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
-        owner_.fireAddonEvent("PET_UI_UPDATE", {});
-        return;
-    }
-
-    // Verified against AzerothCore's Player::PetSpellInitialize, which writes
-    //   guid(8) family(2) duration(4) react(1) command(1) flags(2)
-    // and then one uint32 per action-bar slot, a uint8 spell count, and one
-    // packed uint32 per spell.
-    //
-    // This read the duration as a uint16 and never read the flags, so the
-    // action bar started four bytes early: every slot held the one before it,
-    // the first held the react and command bytes, and the last was lost. The
-    // react and command themselves came out of the duration's upper half -
-    // zero for a permanent pet, which is why they looked plausible.
-    //
-    // The family field is what a WotLK server sends for pet talents. Before
-    // that the packet is the same one without it.
-    do {
-        if (!isPreWotlk()) {
-            if (!packet.hasRemaining(2)) break;
-            packet.readUInt16();  // creature family
-        }
-        if (!packet.hasRemaining(4)) break;
-        packet.readUInt32();      // duration in ms; zero for a permanent pet
-
-        if (!packet.hasRemaining(4)) break;
-        owner_.petReactRef()   = packet.readUInt8();
-        owner_.petCommandRef() = packet.readUInt8();
-        packet.readUInt16();      // flags, unused by the server too
-
-        if (!packet.hasRemaining(GameHandler::PET_ACTION_BAR_SLOTS * 4u)) break;
-        for (int i = 0; i < GameHandler::PET_ACTION_BAR_SLOTS; ++i) {
-            owner_.petActionSlotsRef()[i] = packet.readUInt32();
-        }
-
-        if (!packet.hasRemaining(1)) break;
-        uint8_t spellCount = packet.readUInt8();
-        owner_.petSpellListRef().clear();
-        owner_.petAutocastSpellsRef().clear();
-        for (uint8_t i = 0; i < spellCount; ++i) {
-            // One uint32, not six bytes: MAKE_UNIT_ACTION_BUTTON puts the spell
-            // in the low twenty-four bits and the state in the top byte, the
-            // same packing the action-bar slots above use and that
-            // GetPetActionInfo already masks for. Read as four plus two, the
-            // spell id carried the state and the autocast flag was two bytes of
-            // the next spell - and every spell after the first was misaligned.
-            if (!packet.hasRemaining(4)) break;
-            const uint32_t packed  = packet.readUInt32();
-            const uint32_t spellId = packed & 0x00FFFFFFu;
-            const uint8_t  state   = static_cast<uint8_t>(packed >> 24);
-            if (spellId == 0) continue;
-            owner_.petSpellListRef().push_back(spellId);
-            // ACT_ENABLED is 0xC1 and ACT_DISABLED 0x81 - 0x40 is the autocast
-            // bit. The old test was & 0x0001, which is ACT_PASSIVE's bit.
-            if (state & 0x40) {
-                owner_.petAutocastSpellsRef().insert(spellId);
-            }
-        }
-    } while (false);
-
-    LOG_INFO("SMSG_PET_SPELLS: petGuid=0x", std::hex, owner_.petGuidRef(), std::dec,
-             " react=", static_cast<int>(owner_.petReactRef()), " command=", static_cast<int>(owner_.petCommandRef()),
-             " spells=", owner_.petSpellListRef().size());
-    owner_.fireAddonEvent("UNIT_PET", {"player"});
-        // The pet frame and the pet action bar both rebuild from this one;
-        // UNIT_PET alone tells them the pet changed but not that its interface
-        // should be redrawn.
-        owner_.fireAddonEvent("PET_UI_UPDATE", {});
-    owner_.fireAddonEvent("PET_BAR_UPDATE", {});
-}
-
-void SpellHandler::sendPetAction(uint32_t action, uint64_t targetGuid) {
-    if (!owner_.hasPet() || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto pkt = PetActionPacket::build(owner_.petGuidRef(), action, targetGuid);
-    owner_.getSocket()->send(pkt);
-    LOG_DEBUG("sendPetAction: petGuid=0x", std::hex, owner_.petGuidRef(),
-              " action=0x", action, " target=0x", targetGuid, std::dec);
-}
-
-void SpellHandler::dismissPet() {
-    if (owner_.petGuidRef() == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    // Dismiss is COMMAND_ABANDON. Packing action 0 here sent COMMAND_STAY, so
-    // the pet planted itself instead of leaving.
-    auto packet = PetActionPacket::build(
-        owner_.petGuidRef(), pet::packPetAction(pet::ActionType::Command, pet::kAbandon));
-    owner_.getSocket()->send(packet);
-}
-
-void SpellHandler::togglePetSpellAutocast(uint32_t spellId) {
-    if (owner_.petGuidRef() == 0 || spellId == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    bool currentlyOn = owner_.petAutocastSpellsRef().count(spellId) != 0;
-    uint8_t newState = currentlyOn ? 0 : 1;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_SPELL_AUTOCAST));
-    pkt.writeUInt64(owner_.petGuidRef());
-    pkt.writeUInt32(spellId);
-    pkt.writeUInt8(newState);
-    owner_.getSocket()->send(pkt);
-    if (newState)
-        owner_.petAutocastSpellsRef().insert(spellId);
-    else
-        owner_.petAutocastSpellsRef().erase(spellId);
-    LOG_DEBUG("togglePetSpellAutocast: spellId=", spellId, " autocast=", static_cast<int>(newState));
-}
-
-void SpellHandler::renamePet(const std::string& newName) {
-    if (owner_.petGuidRef() == 0 || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    if (newName.empty() || newName.size() > 12) return;
-    auto packet = PetRenamePacket::build(owner_.petGuidRef(), newName, 0);
-    owner_.getSocket()->send(packet);
-    LOG_INFO("Sent CMSG_PET_RENAME: petGuid=0x", std::hex, owner_.petGuidRef(), std::dec, " name='", newName, "'");
-}
-
-void SpellHandler::handleListStabledPets(network::Packet& packet) {
-    constexpr size_t kMinHeader = 8 + 1 + 1;
-    if (!packet.hasRemaining(kMinHeader)) {
-        LOG_WARNING("MSG_LIST_STABLED_PETS: packet too short (", packet.getSize(), ")");
-        return;
-    }
-    owner_.stableMasterGuidRef() = packet.readUInt64();
-    uint8_t petCount  = packet.readUInt8();
-    owner_.stableNumSlotsRef()   = packet.readUInt8();
-
-    owner_.stabledPetsRef().clear();
-    owner_.stabledPetsRef().reserve(petCount);
-
-    for (uint8_t i = 0; i < petCount; ++i) {
-        // petNumber(4) + entry(4) + level(4) = 12 bytes before the name string
-        if (!packet.hasRemaining(12)) break;
-        GameHandler::StabledPet pet;
-        pet.petNumber = packet.readUInt32();
-        pet.entry     = packet.readUInt32();
-        pet.level     = packet.readUInt32();
-        pet.name      = packet.readString();
-        // One byte after the name, and one only: SendStablePet writes
-        // uint32 PetNumber, uint32 CreatureId, uint32 Level, the name, then
-        // `uint8(1)` for the pet that is out and `uint8(2)` for one in a stable
-        // slot. There is no display id on the wire.
-        //
-        // This read four bytes for one and then a fifth for the flag, so the
-        // display id swallowed the flag plus three bytes of the next pet's
-        // number, the flag came from that number's fourth byte, and every pet
-        // after the first was read at the wrong offset - with the last dropped
-        // for want of five bytes that were never there.
-        if (!packet.hasRemaining(1)) break;
-        pet.isActive  = (packet.readUInt8() == 1);
-        owner_.stabledPetsRef().push_back(std::move(pet));
-    }
-
-    owner_.stableWindowOpenRef() = true;
-    LOG_INFO("MSG_LIST_STABLED_PETS: stableMasterGuid=0x", std::hex, owner_.stableMasterGuidRef(), std::dec,
-             " petCount=", static_cast<int>(petCount), " numSlots=", static_cast<int>(owner_.stableNumSlotsRef()));
-    for (const auto& p : owner_.stabledPetsRef()) {
-        LOG_DEBUG("  Pet: number=", p.petNumber, " entry=", p.entry,
-                  " level=", p.level, " name='", p.name, "' active=", p.isActive);
-    }
-    // This packet both opens the stable window and is the only thing that
-    // refreshes it, so it carries both events. Neither was fired, which is why
-    // the original interface's stable could not appear.
-    if (owner_.hasAddonEventListener()) {
-        owner_.fireAddonEvent("PET_STABLE_SHOW", {});
-        owner_.fireAddonEvent("PET_STABLE_UPDATE", {});
-    }
-}
 
 // ============================================================
 // Cast state methods (moved from GameHandler)
@@ -4377,7 +4100,7 @@ void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
         if (auraTargetGuid == owner_.getPlayerGuid()) unitId = "player";
         else if (auraTargetGuid == owner_.getTargetGuid()) unitId = "target";
         else if (auraTargetGuid == owner_.focusGuidRef()) unitId = "focus";
-        else if (auraTargetGuid == owner_.petGuidRef()) unitId = "pet";
+        else if (auraTargetGuid == owner_.pet().guid()) unitId = "pet";
         if (!unitId.empty()) owner_.fireAddonEvent("UNIT_AURA", {unitId});
         // The 1.12 name, which carries no unit. See the note at the
         // site that fires it with a comment in full.
@@ -4854,7 +4577,7 @@ void SpellHandler::handleClearExtraAuraInfo(network::Packet& packet) {
             if (clearGuid == owner_.getPlayerGuid()) unitId = "player";
             else if (clearGuid == owner_.getTargetGuid()) unitId = "target";
             else if (clearGuid == owner_.focusGuidRef()) unitId = "focus";
-            else if (clearGuid == owner_.petGuidRef()) unitId = "pet";
+            else if (clearGuid == owner_.pet().guid()) unitId = "pet";
             if (!unitId.empty()) owner_.fireAddonEvent("UNIT_AURA", {unitId});
             // The 1.12 name, which carries no unit. See the note at the
             // site that fires it with a comment in full.
@@ -4986,61 +4709,6 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
         if (!unitId.empty())
             owner_.fireAddonEvent("UNIT_SPELLCAST_CHANNEL_STOP", {unitId});
     }
-}
-
-// ============================================================
-// Pet Stable
-// ============================================================
-
-void SpellHandler::requestStabledPetList() {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() || owner_.stableMasterGuidRef() == 0) return;
-    auto pkt = ListStabledPetsPacket::build(owner_.stableMasterGuidRef());
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("Sent MSG_LIST_STABLED_PETS to npc=0x", std::hex, owner_.stableMasterGuidRef(), std::dec);
-}
-
-void SpellHandler::stablePet(uint8_t slot) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() || owner_.stableMasterGuidRef() == 0) return;
-    if (owner_.petGuidRef() == 0) {
-        owner_.raiseUiError("You do not have an active pet to stable.");
-        return;
-    }
-    auto pkt = StablePetPacket::build(owner_.stableMasterGuidRef(), slot);
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("Sent CMSG_STABLE_PET: slot=", static_cast<int>(slot));
-}
-
-// The stable master sells a fourth, fifth and sixth slot; the panel's buy
-// button asks for one at a time and the server bills for whichever is next.
-// CMSG_BUY_STABLE_SLOT carries nothing but who is being asked - HandleBuyStableSlot
-// reads a guid and checks it is a stable master, and works the price out itself.
-void SpellHandler::buyStableSlot() {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() ||
-        owner_.stableMasterGuidRef() == 0) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_BUY_STABLE_SLOT));
-    pkt.writeUInt64(owner_.stableMasterGuidRef());
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("Sent CMSG_BUY_STABLE_SLOT to npc=0x", std::hex,
-             owner_.stableMasterGuidRef(), std::dec);
-}
-
-// Abandoning is not dismissing. Dismiss puts a hunter's pet away and it can be
-// called back; abandon gives it up for good, which is why the interface asks
-// first and why this is its own message rather than another pet action.
-void SpellHandler::abandonPet() {
-    if (owner_.petGuidRef() == 0 || owner_.getState() != WorldState::IN_WORLD ||
-        !owner_.getSocket()) return;
-    network::Packet pkt(wireOpcode(Opcode::CMSG_PET_ABANDON));
-    pkt.writeUInt64(owner_.petGuidRef());
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("Sent CMSG_PET_ABANDON for pet=0x", std::hex, owner_.petGuidRef(), std::dec);
-}
-
-void SpellHandler::unstablePet(uint32_t petNumber) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket() || owner_.stableMasterGuidRef() == 0 || petNumber == 0) return;
-    auto pkt = UnstablePetPacket::build(owner_.stableMasterGuidRef(), petNumber);
-    owner_.getSocket()->send(pkt);
-    LOG_INFO("Sent CMSG_UNSTABLE_PET: petNumber=", petNumber);
 }
 
 } // namespace game
