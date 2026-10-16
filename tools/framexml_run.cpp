@@ -185,6 +185,18 @@ int main(int argc, char** argv) {
                     held ? "held" : "let go");
         moving[static_cast<size_t>(command)] = held;
     };
+    // How far the camera was asked to zoom and how often walking was toggled,
+    // since the last --zoomed / --walk-toggles.
+    static float zoomed = 0.0f;
+    static int walkToggles = 0;
+    settingServices.zoomCamera = [](float notches) {
+        std::printf("   zoomCamera: %+.1f\n", notches);
+        zoomed += notches;
+    };
+    settingServices.toggleRun = [] {
+        std::printf("   toggleRun\n");
+        ++walkToggles;
+    };
     settingServices.getClientSetting = [](const std::string& key) -> std::string {
         return gameScreen.getSettingsPanel().settingValue(key);
     };
@@ -991,6 +1003,22 @@ int main(int argc, char** argv) {
             // looks like, and that would mean the run proved nothing.
             std::printf("   %d unsized, of %d carrying something\n",
                         found, carrying);
+            continue;
+        }
+        // --zoomed:N says the camera was asked to zoom N notches in all since
+        // the last check (negative is out); --walk-toggles:N that walking was
+        // toggled N times. Either fails the run when it is not so.
+        const bool zoomCheck = std::strncmp(argv[i], "--zoomed:", 9) == 0;
+        if (zoomCheck || std::strncmp(argv[i], "--walk-toggles:", 15) == 0) {
+            const float want = std::strtof(argv[i] + (zoomCheck ? 9 : 15), nullptr);
+            const float got = zoomCheck ? zoomed : static_cast<float>(walkToggles);
+            if (std::abs(got - want) < 0.01f) {
+                std::printf("   as expected\n");
+            } else {
+                ++raised;
+                std::printf("   expected %.1f, got %.1f\n", want, got);
+            }
+            if (zoomCheck) zoomed = 0.0f; else walkToggles = 0;
             continue;
         }
         // --release-all lets go of every key a binding holds, as the client

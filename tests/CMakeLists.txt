@@ -529,6 +529,34 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         "--bind:Q"
         "--moving:"
         "--bindup:Q")
+
+    # The mouse is bound like a keyboard: the wheel zooms because CAMERAZOOMIN
+    # and CAMERAZOOMOUT are bound to it, and an account that gives the wheel
+    # and the side buttons to the action bar casts with them and zooms on what
+    # it moved zoom to. Walking is TOGGLERUN's, on numpad divide by default.
+    wowee_framexml_test(framexml_binding_mouse_and_walk
+        "--bind:MOUSEWHEELUP"
+        "--bindup:MOUSEWHEELUP"
+        "--bind:MOUSEWHEELDOWN"
+        "--bindup:MOUSEWHEELDOWN"
+        "--bind:MOUSEWHEELDOWN"
+        "--bindup:MOUSEWHEELDOWN"
+        "--zoomed:-1"
+        "--lua:SetBinding('MOUSEWHEELUP', 'ACTIONBUTTON10') SetBinding('PAGEUP', 'CAMERAZOOMIN') SetBinding('BUTTON4', 'ACTIONBUTTON7')"
+        "--bind:MOUSEWHEELUP"
+        "--lua:assert(ActionButton10:GetButtonState() == 'PUSHED', 'the wheel did not push action button 10')"
+        "--bindup:MOUSEWHEELUP"
+        "--zoomed:0"
+        "--bind:PAGEUP"
+        "--bindup:PAGEUP"
+        "--zoomed:1"
+        "--bind:BUTTON4"
+        "--lua:assert(ActionButton7:GetButtonState() == 'PUSHED', 'BUTTON4 did not push action button 7')"
+        "--bindup:BUTTON4"
+        "--lua:assert(ActionButton7:GetButtonState() == 'NORMAL', 'releasing BUTTON4 did not release action button 7')"
+        "--bind:NUMPADDIVIDE"
+        "--bindup:NUMPADDIVIDE"
+        "--walk-toggles:1")
 endif()
 
 # ── test_taxi_map_projection ────────────────────────────────

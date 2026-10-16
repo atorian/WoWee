@@ -2728,8 +2728,10 @@ void CameraController::update(float deltaTime) {
     bool wantStrafeRight = wants(MovementCommand::StrafeRight);
     bool shiftDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LSHIFT) || input.isKeyPressed(SDL_SCANCODE_RSHIFT));
     bool ctrlDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LCTRL) || input.isKeyPressed(SDL_SCANCODE_RCTRL));
-    // Walking, by Ctrl held or by TOGGLERUN.
-    const bool walking = ctrlDown || walkToggled_;
+    // Walking is TOGGLERUN's, on whatever key the account gives it - not a
+    // modifier held, which the original client never walked on and which
+    // every Ctrl binding would have slowed the character for.
+    const bool walking = walkToggled_;
     bool nowJump = canMove && jumpPressed;
     // Swimming and flying need the held state, not the press edge: on land
     // the jump is one-shot, but in water and in the air it is continuous
@@ -2897,7 +2899,7 @@ void CameraController::update(float deltaTime) {
     // Calculate movement speed based on direction and modifiers
     float speed;
     if (useWoWSpeed) {
-        // Movement speeds (WoW-like: Ctrl or TOGGLERUN walk, default run, backpedal slower)
+        // Movement speeds (WoW-like: TOGGLERUN walks, default run, backpedal slower)
         if (nowBackward && !nowForward) {
             speed = (runBackSpeedOverride_ > 0.0f && runBackSpeedOverride_ < 100.0f
                      && !std::isnan(runBackSpeedOverride_))

@@ -290,6 +290,27 @@ float wheelClicks(float delta, uint64_t timestampNs) {
 #endif
 }
 
+/// WoW's name for a mouse button a key binding can be given to: the middle
+/// button and the two side buttons. The left and right buttons are the
+/// camera's and the interface's, and are not bound on their own.
+std::string mouseBindingName(uint8_t sdlButton) {
+    switch (sdlButton) {
+        case SDL_BUTTON_MIDDLE: return "BUTTON3";
+        case SDL_BUTTON_X1:     return "BUTTON4";
+        case SDL_BUTTON_X2:     return "BUTTON5";
+        default:                return {};
+    }
+}
+
+/// The modifiers held now, as the binding tables read them.
+struct HeldModifiers {
+    bool shift = false, ctrl = false, alt = false;
+};
+HeldModifiers heldModifiers() {
+    const SDL_Keymod mods = SDL_GetModState();
+    return {(mods & SDL_KMOD_SHIFT) != 0, (mods & SDL_KMOD_CTRL) != 0, (mods & SDL_KMOD_ALT) != 0};
+}
+
 } // namespace
 
 Application* Application::instance = nullptr;
@@ -964,6 +985,9 @@ bool Application::initialize() {
         };
         luaSvc.toggleRun = [this]() {
             if (auto* camera = getCameraController()) camera->toggleRun();
+        };
+        luaSvc.zoomCamera = [this](float notches) {
+            if (auto* camera = getCameraController()) camera->processMouseWheel(notches);
         };
         luaSvc.clientChatCommandNames = [uim = uiManager.get()]() {
             std::vector<std::string> out;
@@ -1981,9 +2005,14 @@ void Application::pumpInput(float deltaTime, const FramePlan& plan) {
         // Focus lost too: the keys held when it went will send no release, and
         // letting go of their bindings runs Lua, which waits for the Interface
         // phase.
+        // And the mouse buttons a key binding can name - BUTTON3 to BUTTON5 -
+        // which run their bindings there too.
+        const bool bindableMouseButton =
+            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+            !mouseBindingName(event.button.button).empty();
         if (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN ||
             event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_WHEEL ||
-            event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+            event.type == SDL_EVENT_WINDOW_FOCUS_LOST || bindableMouseButton) {
             interfaceInput_.push_back({event, event.type == SDL_EVENT_TEXT_INPUT && event.text.text
                                                ? event.text.text : ""});
         }
@@ -2049,6 +2078,25 @@ void Application::dispatchInterfaceInput() {
                 }
             }
         }
+        // The middle and side mouse buttons are keys to the bindings, as in
+        // the original client: an account that puts action buttons on BUTTON4
+        // and BUTTON5 casts with them. The middle button is a frame's when it
+        // is over one that takes the mouse; the side buttons no frame takes.
+        // The release goes back like a key's.
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            auto* addons = worldInterface();
+            auto* engine = addons ? addons->getLuaEngine() : nullptr;
+            const std::string name = mouseBindingName(event.button.button);
+            if (engine && !name.empty()) {
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                    engine->dispatchBindingKey(name, false, false, false, false);
+                } else if (!ImGui::GetIO().WantCaptureMouse &&
+                           !(event.button.button == SDL_BUTTON_MIDDLE && engine->mouseOverFrameXml())) {
+                    const HeldModifiers mods = heldModifiers();
+                    engine->dispatchBindingKey(name, mods.shift, mods.ctrl, mods.alt, true);
+                }
+            }
+        }
         if (getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
             if (event.type == SDL_EVENT_MOUSE_WHEEL) {
                 // The interface gets first refusal, and only where a
@@ -2057,6 +2105,7 @@ void Application::dispatchInterfaceInput() {
                 // happens without the check, and a frame that did not
                 // ask must not swallow it either.
                 bool takenByUi = false;
+                const float clicks = wheelClicks(event.wheel.y, event.wheel.timestamp);
                 if (auto* addons = characterAddons()) {
                     // ImGui's cursor, not SDL's, because that is what
                     // the rest of the widget dispatch is fed and the
@@ -2065,10 +2114,26 @@ void Application::dispatchInterfaceInput() {
                     // dispatch is: the tree measures upward.
                     const ImGuiIO& mio = ImGui::GetIO();
                     takenByUi = addons->getLuaEngine()->dispatchMouseWheel(
-                        mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y,
-                        wheelClicks(event.wheel.y, event.wheel.timestamp));
+                        mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y, clicks);
                 }
-                if (!takenByUi) {
+                auto* world = worldInterface();
+                auto* engine = world ? world->getLuaEngine() : nullptr;
+                if (!takenByUi && engine) {
+                    // Then the wheel's binding, one press and release a
+                    // click: CAMERAZOOMIN and CAMERAZOOMOUT by default, an
+                    // action button on an account that moved zoom to Page Up.
+                    // A trackpad's fractions carry over to the next event.
+                    wheelBindingRemainder_ += clicks;
+                    const HeldModifiers mods = heldModifiers();
+                    while (std::abs(wheelBindingRemainder_) >= 1.0f) {
+                        const bool up = wheelBindingRemainder_ > 0.0f;
+                        wheelBindingRemainder_ += up ? -1.0f : 1.0f;
+                        const std::string name = up ? "MOUSEWHEELUP" : "MOUSEWHEELDOWN";
+                        engine->dispatchBindingKey(name, mods.shift, mods.ctrl, mods.alt, true);
+                        engine->dispatchBindingKey(name, false, false, false, false);
+                    }
+                } else if (!takenByUi) {
+                    // No interface to ask: the camera's own zoom.
                     getCameraController()->processMouseWheel(
                         static_cast<float>(event.wheel.y));
                 }

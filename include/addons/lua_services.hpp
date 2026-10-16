@@ -39,6 +39,10 @@ struct LuaServices {
     /// ToggleAutoRun() and ToggleRun().
     std::function<void()> toggleAutoRun;
     std::function<void()> toggleRun;
+    /// CameraZoomIn and CameraZoomOut, in notches of the wheel: positive is
+    /// closer. The wheel zooms through them, as CAMERAZOOMIN and CAMERAZOOMOUT
+    /// are what the original client binds it to.
+    std::function<void(float)> zoomCamera;
 
     /// This client's own slash commands, and a way to run one.
     ///

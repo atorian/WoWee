@@ -1769,7 +1769,10 @@ BindingMap buildDefaultBindings() {
         {"TURNLEFT", "A", "LEFT"},      {"TURNRIGHT", "D", "RIGHT"},
         {"STRAFELEFT", "Q", ""},        {"STRAFERIGHT", "E", ""},
         {"JUMP", "SPACE", ""},          {"TOGGLEAUTORUN", "NUMLOCK", ""},
-        {"SITORSTAND", "X", ""},
+        {"SITORSTAND", "X", ""},        {"TOGGLERUN", "NUMPADDIVIDE", ""},
+        // The wheel zooms because it is bound to, so an account that gives it
+        // to the action bar casts with it instead.
+        {"CAMERAZOOMIN", "MOUSEWHEELUP", ""}, {"CAMERAZOOMOUT", "MOUSEWHEELDOWN", ""},
         // Tab targets, and has since the client was written; the panel said
         // this one was unbound because nothing had ever told it.
         {"TARGETNEARESTENEMY", "TAB", ""},

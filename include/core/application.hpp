@@ -480,6 +480,9 @@ private:
     std::optional<AppState> requestedState_;
     struct InterfaceInputEvent { SDL_Event event; std::string text; };
     std::vector<InterfaceInputEvent> interfaceInput_;
+    /// The part of a wheel turn that has not yet made a whole click of the
+    /// wheel's binding - a trackpad reports fractions.
+    float wheelBindingRemainder_ = 0.0f;
     bool running = false;
     Phase currentPhase_ = Phase::Idle;
     std::chrono::steady_clock::time_point phaseStartedAt_{};

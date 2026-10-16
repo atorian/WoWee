@@ -1,4 +1,4 @@
-// lua_movement_api.cpp - the movement functions bindings.xml calls.
+// lua_movement_api.cpp - the movement and camera functions bindings.xml calls.
 //
 // The original client's key bindings move the character through these:
 // MOVEFORWARD runs MoveForwardStart() on the press and MoveForwardStop() on the
@@ -59,6 +59,19 @@ int lua_ToggleRun(lua_State* L) {
     return 0;
 }
 
+/// CameraZoomIn(increment) and CameraZoomOut(increment), in notches.
+template <int Direction>
+int lua_zoom(lua_State* L) {
+    const float notches = static_cast<float>(luaL_optnumber(L, 1, 1.0));
+    auto* svc = getLuaServices(L);
+    if (svc && svc->zoomCamera) {
+        svc->zoomCamera(static_cast<float>(Direction) * notches);
+    } else if (interfaceState(L).firstReport("camera zoom")) {
+        LOG_WARNING("CameraZoomIn/Out: this client has no camera to zoom; the key does nothing");
+    }
+    return 0;
+}
+
 } // namespace
 
 void registerMovementLuaAPI(lua_State* L) {
@@ -81,6 +94,8 @@ void registerMovementLuaAPI(lua_State* L) {
         {"DescendStop",            lua_hold<MovementCommand::SitOrDescend, false>},
         {"ToggleAutoRun",          lua_ToggleAutoRun},
         {"ToggleRun",              lua_ToggleRun},
+        {"CameraZoomIn",           lua_zoom<1>},
+        {"CameraZoomOut",          lua_zoom<-1>},
     };
     for (const auto& [name, func] : api) {
         lua_pushcfunction(L, func);
