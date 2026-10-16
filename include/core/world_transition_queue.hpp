@@ -11,7 +11,7 @@
 
 namespace wowee::core {
 
-/// Event subscribers only record requests. Application consumes them once,
+/// Event subscribers only record requests. ClientLoop consumes them once,
 /// after submitting the frame. A leave supersedes any queued world entry.
 class WorldTransitionQueue {
 public:

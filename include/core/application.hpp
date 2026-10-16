@@ -11,12 +11,12 @@
 #include "core/world_loader.hpp"
 #include "core/map_scope.hpp"
 #include "core/character_session.hpp"
+#include "core/client_loop.hpp"
 #include "addons/lua_services.hpp"
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
 #include "core/frame_plan.hpp"
 #include "core/frame_pacer.hpp"
-#include "core/world_transition_queue.hpp"
 #include "core/cvar_store.hpp"
 #include "core/config_paths.hpp"
 #include "game/game_services.hpp"
@@ -74,15 +74,19 @@ class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
 class RealmPatchSync;
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-class LoadingFrameProbe;
-#endif
+class FrameObserver;
 
-class Application {
+/// The client: the window, the renderer, the screens, the sound and the game,
+/// and the frame that runs them (ClientLoop).
+///
+/// ClientLoop owns the frame's order and the world transitions; this is what
+/// it drives - the window it runs in, the platform input it reads and the
+/// front end it presents through - and everything those need.
+class Application final : private ClientWindow, private ClientInput, private ClientFrontEnd {
 
 public:
     Application();
-    ~Application();
+    ~Application() override;
 
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
@@ -90,6 +94,12 @@ public:
     bool initialize();
     void run();
     void shutdown();
+
+    /// What watches the frames, for a program that is a fixture: set after
+    /// initialize, before run. The ordinary client sets none.
+    void observeFrames(std::unique_ptr<FrameObserver> observer);
+    /// What the game announces, for anything in the client to hear.
+    EventBus& getEventBus() { return eventBus_; }
 
     /// Tells the interface what the connected pad calls its own buttons, so
     /// the Key Bindings panel reads Square rather than PAD3. Once per pad.
@@ -101,7 +111,7 @@ public:
     void beatWatchdog();
 
     // State management
-    [[nodiscard]] AppState getState() const { return state; }
+    [[nodiscard]] AppState getState() const { return loop_ ? loop_->state() : initialState_; }
     void requestState(AppState newState);
 
     // Accessors
@@ -118,7 +128,7 @@ public:
     /// null with no character in the world.
     addons::AddonManager* getAddonManager() { return characterAddons(); }
     /// The character in the world, if any - see CharacterSession.
-    CharacterSession* getCharacterSession() { return session_.get(); }
+    CharacterSession* getCharacterSession() { return session(); }
     game::ExpansionRegistry* getExpansionRegistry() { return expansionRegistry_.get(); }
 
     /// What assets were found at startup. Taken once, because it walks the
@@ -195,22 +205,46 @@ public:
     void setActiveMapName(const std::string& name);
 
 private:
-    void setState(AppState newState);
-    void runFrame();
-    void beginPhase(Phase phase);
-    bool requireTransitions(const char* operation) const;
-    void pumpInput(float deltaTime, const FramePlan& plan);
-    void dispatchInterfaceInput();
-    void prepareFrame();
-    void dispatchNetwork(float deltaTime, const FramePlan& plan);
-    void updateGame(float deltaTime, const FramePlan& plan);
-    void updateStreaming(float deltaTime, const FramePlan& plan);
-    void beginWorldLoading(WorldLoader::Entry entry);
-    void prepareWorldPlayer();
-    void finishWorldGeometry();
-    void completeWorldLoading();
-    void syncPresentation(float deltaTime, const FramePlan& plan);
-    void updateInterface(float deltaTime, const FramePlan& plan);
+    // ---- ClientWindow ---------------------------------------------------------
+    [[nodiscard]] bool shouldClose() const override;
+    void requestClose() override;
+    float beginFrame() override;
+    void pace() override;
+
+    // ---- ClientInput: SDL's queue, the pad, the touch controls ---------------
+    void pump(float deltaTime, const FramePlan& plan, InterfaceInput& forInterface) override;
+
+    // ---- ClientFrontEnd --------------------------------------------------------
+    void updateLogin(float deltaTime, const FramePlan& plan) override;
+    void prepareFrame() override;
+    void updateWorld(float deltaTime) override;
+    void streamScene(float deltaTime, const FramePlan& plan) override;
+    void showLoadProgress(const WorldLoadStatus& status) override;
+    void afterInterfaceInput() override;
+    [[nodiscard]] bool canDrawInterface() const override;
+    void updateScreens(float deltaTime) override;
+    void drawInterface(float deltaTime, const FramePlan& plan) override;
+    void keyForClient(const SDL_Event& event) override;
+    void present(float deltaTime, const FramePlan& plan) override;
+    [[nodiscard]] bool scenePending() const override;
+    void render(const FramePlan& plan) override;
+    void afterTransitions() override;
+    [[nodiscard]] bool profilingStages() const override { return frameProfileEnabled_; }
+    void frameFinished() override;
+    void mapEntryBegun(const WorldLoader::Entry& entry) override;
+    void mapRenderersReady(const WorldLoader::Entry& entry, const std::string& mapName) override;
+    void placeOnInstanceFloor(const WorldLoader::Entry& entry) override;
+    void mapGeometryReady(const WorldLoader::Entry& entry) override;
+    void enteredWorld() override;
+    void characterScreenShown() override;
+    void characterLeft(bool keptConnection) override;
+    void showDisconnectNotice(const std::string& notice) override;
+    bool beginReconnect(uint64_t characterGuid) override;
+    void exiting() override;
+
+    /// The frame and the world transitions, built once initialize has made
+    /// everything they drive.
+    void buildClientLoop();
 
     /// Tell the renderer what the game knows about the world - the zone,
     /// the realm's clock and weather, the player's state - before it updates.
@@ -239,22 +273,16 @@ private:
     /// follows the entity, which reads as a ring sliding off a still NPC.
     void syncRenderInstancesToEntities(float deltaTime);
     void renderFrame(const FramePlan& plan);
-    void performLogoutToLogin(bool keepConnection);
-    void processWorldTransitions();
 
+    /// The character in the world - see ClientLoop; null without one.
+    CharacterSession* session() { return loop_ ? loop_->session() : nullptr; }
     /// The character in the world's interface, in any state; null without one.
-    addons::AddonManager* characterAddons();
+    addons::AddonManager* characterAddons() { return loop_ ? loop_->characterAddons() : nullptr; }
     /// The same, only while it hears the world (CharacterSession::
     /// interfaceHoldsWorld): what game events, input and drawing go to.
-    addons::AddonManager* worldInterface();
+    addons::AddonManager* worldInterface() { return loop_ ? loop_->worldInterface() : nullptr; }
     /// The current map, which the character in the world owns; null between.
-    MapScope* currentMap() { return session_ ? session_->map() : nullptr; }
-    /// Starts the session of the character the game has logged in, when none
-    /// stands. Transitions only.
-    void beginCharacterSession();
-    CharacterSession::Services characterSessionServices();
-    /// Tell the interface the character is leaving, while the world stands.
-    void leaveWorldInterface();
+    MapScope* currentMap() { return loop_ ? loop_->currentMap() : nullptr; }
     /// Records how long one named stage of a frame took.
     ///
     /// The per-stage timings only ever spoke up above 50ms, which says which
@@ -262,7 +290,7 @@ private:
     /// a phone the whole budget is 33ms, so every stage was silent and the
     /// client was slow for reasons nothing reported. This keeps a running
     /// average and worst case per stage and prints the breakdown periodically.
-    void noteStageTime(const char* stage, float milliseconds);
+    void noteStageTime(const char* stage, float milliseconds) override;
     void reportStageTimes();
 
     struct StageStat {
@@ -309,7 +337,6 @@ private:
     /// What the game announces, for anything in the client to hear. Declared
     /// before everything that subscribes, so it is destroyed after them.
     core::EventBus eventBus_;
-    WorldTransitionQueue worldTransitions_{eventBus_};
     game::GameServices gameServices_;
     /// What the emotes are, for the game, the interface and the animation.
     std::unique_ptr<game::EmoteTable> emoteTable_;
@@ -337,9 +364,6 @@ private:
     addons::LuaServices luaServices_;
     /// The run's Lua errors, across every character's interface and reload.
     std::unique_ptr<addons::LuaErrorReport> luaErrorReport_;
-    /// How much of an interface a character gets. Full, except for the offline
-    /// loading fixture's character, which has no unit fields for FrameXML.
-    CharacterSession::Interface sessionInterface_ = CharacterSession::Interface::Full;
     /// Draws the widget tree addons build through CreateFrame/CreateTexture.
     /// Holds the texture cache for Interface\ art, so it lives as long as the app.
     ui::WidgetRenderer widgetRenderer_;
@@ -416,13 +440,7 @@ private:
     std::unique_ptr<EntitySpawner> entitySpawner_;
     std::unique_ptr<AppearanceComposer> appearanceComposer_;
     std::unique_ptr<WorldLoader> worldLoader_;
-    /// The services a map scope borrows. The scope itself belongs to the
-    /// character in the world (session_).
-    MapScope::Services mapScopeServices();
     std::unique_ptr<rendering::LoadingScreen> loadingScreen_;
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    std::unique_ptr<LoadingFrameProbe> loadingProbe_;
-#endif
     std::unique_ptr<audio::AudioCoordinator> audioCoordinator_;
     std::unique_ptr<ZoneTracker> zoneTracker_;
     std::unique_ptr<rendering::SpellVisualSystem> spellVisualSystem_;
@@ -476,20 +494,12 @@ private:
     std::atomic<int64_t> watchdogHeartbeatMs_{0};
     std::atomic<bool> watchdogRequestRelease_{false};
 
-    AppState state = AppState::AUTHENTICATION;
-    std::optional<AppState> requestedState_;
-    struct InterfaceInputEvent { SDL_Event event; std::string text; };
-    std::vector<InterfaceInputEvent> interfaceInput_;
-    /// The part of a wheel turn that has not yet made a whole click of the
-    /// wheel's binding - a trackpad reports fractions.
-    float wheelBindingRemainder_ = 0.0f;
+    /// The state the client starts in: the login screen, or the asset
+    /// builder when nothing is installed. The loop holds it from then on.
+    AppState initialState_ = AppState::AUTHENTICATION;
     bool running = false;
     Phase currentPhase_ = Phase::Idle;
-    std::chrono::steady_clock::time_point phaseStartedAt_{};
     FramePacer pacer_;
-    float networkUpdateMs_ = 0.0f;
-    /// Why the player is back at the login screen, when it was not their idea.
-    std::string disconnectNotice_;
     bool spawnSnapToGround = true;
     float lastFrameTime = 0.0f;
 
@@ -512,10 +522,10 @@ private:
     void updateLootSparkles();     // The glitter over corpses with loot
     void updateCorpseBones();      // Players' bones, as their race's skeleton
 
-    /// The character in the world: their interface, presenters and map. Made
-    /// and ended only in Transitions. Last, so it goes before everything it
-    /// borrows; shutdown() ends it explicitly before any of those.
-    std::unique_ptr<CharacterSession> session_;
+    /// The frame and the world transitions, and with them the character in
+    /// the world. Last, so it goes before everything it borrows; shutdown()
+    /// ends the character explicitly before any of those.
+    std::unique_ptr<ClientLoop> loop_;
 };
 
 } // namespace core

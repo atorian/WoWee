@@ -19,13 +19,14 @@ CharacterSession::CharacterSession(const Services& services, Identity identity, 
     : services_(services), identity_(std::move(identity)), interfaceKind_(kind) {
     LOG_INFO("Character session started: guid=0x", std::hex, identity_.guid, std::dec,
              " name='", identity_.name, "'");
-    if (services_.renderer) {
+    if (services_.renderer && services_.assets) {
         spellPresentation_ = std::make_unique<SpellPresentation>(
             services_.events, services_.game, *services_.renderer, services_.spawner,
-            services_.spellVisuals, services_.audio, services_.assets);
+            services_.spellVisuals, services_.audio, *services_.assets);
     } else {
-        LOG_WARNING("Character session '", identity_.name,
-                    "': no renderer, so spells are neither shown nor heard");
+        LOG_WARNING("Character session '", identity_.name, "': no ",
+                    services_.renderer ? "game data" : "renderer",
+                    ", so spells are neither shown nor heard");
     }
     subscriptions_.push_back(services_.events.subscribe<game::events::AccountDataLoaded>(
         [this](const game::events::AccountDataLoaded& e) {

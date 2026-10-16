@@ -50,9 +50,7 @@
 #include "core/memory_monitor.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/loading_screen.hpp"
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-#include "loading_frame_probe.hpp"
-#endif
+#include "core/frame_observer.hpp"
 #include "rendering/loot_sparkles.hpp"
 #include "rendering/corpse_bones.hpp"
 #include "rendering/vk_context.hpp"
@@ -260,57 +258,6 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
     return best;
 }
 
-/// A wheel event's travel in clicks of a clicking wheel, which is what the
-/// interface scrolls by.
-///
-/// macOS reports a trackpad or a Magic Mouse in pixels, and SDL passes those
-/// on at a tenth - a "line" per ten pixels - while a clicking wheel comes
-/// through as whole clicks. A two-finger swipe with its momentum runs to a
-/// hundred of those lines, and a scroll frame moves half a page per notch, so
-/// even at a quarter of the scroll speed one swipe went through the quest log
-/// ten pages at a time. Elsewhere a trackpad already reports in clicks.
-///
-/// A precise delta is one with a fraction, which a click never has: SDL rounds
-/// those away from zero. Pixels that happen to come to a whole ten do not have
-/// one either, so a gesture stays precise for half a second after its last
-/// fraction, and momentum keeps it going well past that.
-float wheelClicks(float delta, uint64_t timestampNs) {
-#if defined(__APPLE__)
-    constexpr float kLinesPerClick = 20.0f;
-    constexpr uint64_t kGestureGapNs = 500'000'000ull;
-    static uint64_t lastPreciseNs = 0;
-    const bool fractional = delta != std::trunc(delta);
-    if (fractional) lastPreciseNs = timestampNs;
-    const bool precise = fractional ||
-        (lastPreciseNs != 0 && timestampNs - lastPreciseNs < kGestureGapNs);
-    return precise ? delta / kLinesPerClick : delta;
-#else
-    (void)timestampNs;
-    return delta;
-#endif
-}
-
-/// WoW's name for a mouse button a key binding can be given to: the middle
-/// button and the two side buttons. The left and right buttons are the
-/// camera's and the interface's, and are not bound on their own.
-std::string mouseBindingName(uint8_t sdlButton) {
-    switch (sdlButton) {
-        case SDL_BUTTON_MIDDLE: return "BUTTON3";
-        case SDL_BUTTON_X1:     return "BUTTON4";
-        case SDL_BUTTON_X2:     return "BUTTON5";
-        default:                return {};
-    }
-}
-
-/// The modifiers held now, as the binding tables read them.
-struct HeldModifiers {
-    bool shift = false, ctrl = false, alt = false;
-};
-HeldModifiers heldModifiers() {
-    const SDL_Keymod mods = SDL_GetModState();
-    return {(mods & SDL_KMOD_SHIFT) != 0, (mods & SDL_KMOD_CTRL) != 0, (mods & SDL_KMOD_ALT) != 0};
-}
-
 } // namespace
 
 Application* Application::instance = nullptr;
@@ -435,8 +382,9 @@ bool Application::initialize() {
     // The player as the client presents them, and the spell visuals; the
     // renderer draws what they decide.
     spellVisualSystem_ = std::make_unique<rendering::SpellVisualSystem>();
-    playerView_ = std::make_unique<PlayerView>(*renderer, audioCoordinator_.get(),
-                                               spellVisualSystem_.get(), eventBus_);
+    playerView_ = std::make_unique<PlayerView>(*renderer->getCamera(), renderer.get(),
+                                               audioCoordinator_.get(), spellVisualSystem_.get(),
+                                               eventBus_);
     screenRecording_ = std::make_unique<ScreenRecording>(*renderer);
     performanceHUD_ = std::make_unique<rendering::PerformanceHUD>();
     performanceHUD_->setPosition(rendering::PerformanceHUD::Position::TOP_LEFT);
@@ -560,7 +508,7 @@ bool Application::initialize() {
         // and setState returns early when the state is unchanged anyway.
         // The rest of initialize() still runs - it is all null-tolerant, and
         // the login screen is what comes after a build and a reopen.
-        state = AppState::FIRST_RUN;
+        initialState_ = AppState::FIRST_RUN;
         LOG_WARNING("No assets found - opening the asset builder instead of the login screen");
 #endif
     }
@@ -821,7 +769,7 @@ bool Application::initialize() {
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
             uiServices.requestInterfaceReload = [this] {
-                if (session_) session_->requestInterfaceReload();
+                if (auto* character = session()) character->requestInterfaceReload();
             };
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
@@ -870,7 +818,7 @@ bool Application::initialize() {
         luaSvc.expansionRegistry = expansionRegistry_.get();
         // Acted on between frames - the reload destroys the state that asked.
         luaSvc.requestReloadUI = [this]() {
-            if (session_) session_->requestInterfaceReload();
+            if (auto* character = session()) character->requestInterfaceReload();
         };
         luaSvc.openSettings = [uim = uiManager.get()](const std::string& tab) {
             if (uim) uim->getGameScreen().openSettings(tab.empty() ? nullptr : tab.c_str());
@@ -973,22 +921,8 @@ bool Application::initialize() {
         luaSvc.runMacroText = [uim = uiManager.get(), gh = gameHandler.get()](const std::string& body) {
             if (uim && gh) uim->getGameScreen().getChatPanel().executeMacroText(*gh, body);
         };
-        // The movement bindings.xml drives - MoveForwardStart and the rest -
-        // held for the key bindings, beside the sticks.
-        luaSvc.holdMovement = [this](rendering::MovementCommand command, bool held) {
-            if (auto* camera = getCameraController()) {
-                camera->holdMovement(command, rendering::MovementSource::Bindings, held);
-            }
-        };
-        luaSvc.toggleAutoRun = [this]() {
-            if (auto* camera = getCameraController()) camera->toggleAutoRun();
-        };
-        luaSvc.toggleRun = [this]() {
-            if (auto* camera = getCameraController()) camera->toggleRun();
-        };
-        luaSvc.zoomCamera = [this](float notches) {
-            if (auto* camera = getCameraController()) camera->processMouseWheel(notches);
-        };
+        // The movement bindings.xml drives - MoveForwardStart and the rest.
+        playerView_->bindMovementControls(luaSvc);
         luaSvc.clientChatCommandNames = [uim = uiManager.get()]() {
             std::vector<std::string> out;
             if (uim) out = uim->getGameScreen().getChatPanel().registryCommandNames();
@@ -1234,16 +1168,9 @@ bool Application::initialize() {
             //
             // What it did better, the channel's index, moved into the handler's
             // own firing.
-            // Wire generic game events to addon dispatch
-            // To the interface of the character in the world, while it hears it.
-            gameHandler->setAddonEventCallback([this](const std::string& event, const std::vector<std::string>& args) {
-                if (auto* addons = worldInterface()) addons->fireEvent(event, args);
-            });
-            // How a keybinding reaches the frame that replaced this client's own
-            // window. Without it, a key toggled a window nothing draws.
-            gameHandler->setInterfaceCommandCallback([this](const std::string& lua) {
-                if (auto* addons = worldInterface()) addons->runInterfaceCommand(lua);
-            });
+            // Game events and interface commands reach the interface of the
+            // character in the world through ClientLoop, which owns that
+            // character.
             // Wire spell icon path resolver for Lua API (GetSpellInfo, UnitBuff icon, etc.)
             {
                 auto spellIconPaths  = std::make_shared<std::unordered_map<uint32_t, std::string>>();
@@ -1582,10 +1509,6 @@ bool Application::initialize() {
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
         worldLoader_ = std::make_unique<WorldLoader>(
             currentPhase_, renderer.get(), assetManager.get());
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-        if (std::getenv("WOWEE_LOADING_TEST"))
-            loadingProbe_ = std::make_unique<LoadingFrameProbe>(*this, eventBus_);
-#endif
 
         // Re-wire UIServices now that all services (addonCatalog_, worldLoader_) are available
         if (uiManager) {
@@ -1598,7 +1521,7 @@ bool Application::initialize() {
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
             uiServices.requestInterfaceReload = [this] {
-                if (session_) session_->requestInterfaceReload();
+                if (auto* character = session()) character->requestInterfaceReload();
             };
             uiServices.audioCoordinator = audioCoordinator_.get();
             uiServices.zoneTracker = zoneTracker_.get();
@@ -1636,15 +1559,15 @@ bool Application::initialize() {
     // Set up UI callbacks
     setupUICallbacks();
 
+    // The frame and the transitions, now that everything they drive exists.
+    buildClientLoop();
+
     // The offline sky, fountain and glass probes place their models without
     // loading a map. Theirs is a scene like any other, owned the same way.
     // No character stands in it, so its session has no interface.
     if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && entitySpawner_ && renderer && gameHandler &&
         assetManager && playerView_) {
-        session_ = std::make_unique<CharacterSession>(characterSessionServices(),
-                                                      CharacterSession::Identity{},
-                                                      CharacterSession::Interface::None);
-        session_->enterScene(mapScopeServices(), 571).adoptRenderers();
+        loop_->enterScene(571);
     }
 
     LOG_INFO("Application initialized successfully");
@@ -1719,128 +1642,88 @@ void Application::run() {
     } watchdogStop{watchdogRunning, watchdogThread};
 
     while (running && !window->shouldClose()) {
-        runFrame();
+        loop_->runFrame();
     }
 
     LOG_INFO("Main loop ended");
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    if (loadingProbe_) loadingProbe_->loopEnded();
-#endif
+    loop_->loopEnded();
 }
 
-void Application::runFrame() {
-    const FramePlan plan = framePlanFor(state);
-    ScopedPhase frameScope(currentPhase_, Phase::Idle);
-    try {
-        const float dt = FramePacer::toSeconds(pacer_.tickNs());
-        FrameMark;
-        beginPhase(Phase::Input);       pumpInput(dt, plan);
-        if (window->shouldClose()) return;
-        beginPhase(Phase::Network);     updateConnectionAndPatches(dt, plan);
-        dispatchNetwork(dt, plan);
-        beginPhase(Phase::Game);        prepareFrame();
-        if (plan.game) updateGame(dt, plan);
-        beginPhase(Phase::Events);      eventBus_.dispatchPosted();
-        beginPhase(Phase::Streaming);   updateStreaming(dt, plan);
-        beginPhase(Phase::Interface);   updateInterface(dt, plan);
-        if (window->shouldClose()) return;
-        beginPhase(Phase::Present);     syncPresentation(dt, plan);
-        beginPhase(Phase::Render);      renderFrame(plan);
-        window->swapBuffers();
-        beginPhase(Phase::Transitions); processWorldTransitions();
-        if (renderer && renderer->getVkContext() && renderer->getVkContext()->isDeviceLost()) {
-            LOG_ERROR("GPU device lost - exiting application");
-            window->setShouldClose(true);
-        }
-        beginPhase(Phase::Pace);
-        const bool surfaceLost = window->getVkContext() && window->getVkContext()->isSurfaceLost();
-        const int cap = window->frameCap();
-        pacer_.waitForCap(surfaceLost ? (cap > 0 ? std::min(cap, 20) : 20) : cap);
-        beginPhase(Phase::Idle);
-        stageStatFrames_ += 1;
-        reportStageTimes();
-    } catch (const std::exception& e) {
-        LOG_ERROR("Frame failed in phase ", phaseName(currentPhase_),
-                  " (state=", static_cast<int>(state), "): ", e.what());
-        throw;
+void Application::observeFrames(std::unique_ptr<FrameObserver> observer) {
+    if (!loop_) {
+        LOG_ERROR("A frame observer was given before the client initialized; it watches nothing");
+        return;
     }
+    loop_->setObserver(std::move(observer));
 }
 
-void Application::beginPhase(Phase phase) {
-    const auto now = std::chrono::steady_clock::now();
-    if (frameProfileEnabled_ && currentPhase_ != Phase::Idle) {
-        noteStageTime(phaseName(currentPhase_), std::chrono::duration<float, std::milli>(
-            now - phaseStartedAt_).count());
-    }
-    currentPhase_ = phase;
-    phaseStartedAt_ = now;
-}
-
-bool Application::requireTransitions(const char* operation) const {
-    return requirePhase(currentPhase_, Phase::Transitions, operation);
-}
-
-MapScope::Services Application::mapScopeServices() {
-    return MapScope::Services{*entitySpawner_, renderer.get(), *gameHandler, *playerView_};
-}
-
-CharacterSession::Services Application::characterSessionServices() {
-    return CharacterSession::Services{
+void Application::buildClientLoop() {
+    ClientLoop::Services services{
         .phase = currentPhase_,
         .events = eventBus_,
         .game = *gameHandler,
+        .window = *this,
+        .input = *this,
+        .frontEnd = *this,
+        .playerView = *playerView_,
+        .loader = worldLoader_.get(),
+        .spawner = entitySpawner_.get(),
+        .worldEntry = worldEntryCallbacks_.get(),
         .renderer = renderer.get(),
-        .spawner = *entitySpawner_,
         .spellVisuals = spellVisualSystem_.get(),
         .audio = audioCoordinator_.get(),
-        .assets = *assetManager,
+        .assets = assetManager.get(),
         .addonCatalog = addonCatalog_.get(),
         .luaServices = luaServices_,
-        .playerView = *playerView_,
         .appearance = appearanceComposer_.get(),
         .animationCallbacks = animationCallbacks_.get(),
     };
+    loop_ = std::make_unique<ClientLoop>(std::move(services), initialState_);
 }
 
-addons::AddonManager* Application::characterAddons() {
-    return session_ ? session_->addonManager() : nullptr;
-}
-
-addons::AddonManager* Application::worldInterface() {
-    return session_ && session_->interfaceHoldsWorld() ? session_->addonManager() : nullptr;
-}
-
-void Application::beginCharacterSession() {
-    if (!requireTransitions("begin character session")) return;
-    const uint64_t guid = gameHandler->getPlayerGuid();
-    // A map change keeps the character. A character whose interface was
-    // already told it left the world is not in it any more, whatever the
-    // guid: it is entering again and gets a session of its own.
-    if (session_ && session_->identity().guid == guid && !session_->interfaceHasLeft()) return;
-    if (session_) {
-        // No logout in between - a different character, or the same one
-        // coming back after its interface was taken down.
-        LOG_WARNING("Character 0x", std::hex, guid, " entering the world while 0x",
-                    session_->identity().guid, std::dec,
-                    " still has a session; ending that one first");
-        session_.reset();
+void Application::requestState(AppState newState) {
+    if (!loop_) {
+        // Nothing asks before the first frame; a state asked for this early
+        // is the one the loop starts in.
+        LOG_WARNING("State ", static_cast<int>(newState), " asked for before the client's "
+                    "frame exists; starting in it");
+        initialState_ = newState;
+        return;
     }
-    // The name keys the per-character saved variables; see characterIdentityOf.
-    session_ = std::make_unique<CharacterSession>(
-        characterSessionServices(),
-        characterIdentityOf(guid, gameHandler->getCharacters(), gameHandler->lookupName(guid)),
-        sessionInterface_);
+    loop_->requestState(newState);
 }
 
-void Application::leaveWorldInterface() {
-    if (!session_) return;
-    session_->leaveWorldInterface();
+bool Application::shouldClose() const {
+    return window->shouldClose();
 }
 
-void Application::pumpInput(float deltaTime, const FramePlan& plan) {
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    if (loadingProbe_) loadingProbe_->beginFrame();
-#endif
+void Application::requestClose() {
+    window->setShouldClose(true);
+}
+
+float Application::beginFrame() {
+    return FramePacer::toSeconds(pacer_.tickNs());
+}
+
+void Application::pace() {
+    const bool surfaceLost = window->getVkContext() && window->getVkContext()->isSurfaceLost();
+    const int cap = window->frameCap();
+    pacer_.waitForCap(surfaceLost ? (cap > 0 ? std::min(cap, 20) : 20) : cap);
+}
+
+void Application::frameFinished() {
+    stageStatFrames_ += 1;
+    reportStageTimes();
+}
+
+void Application::afterTransitions() {
+    if (renderer && renderer->getVkContext() && renderer->getVkContext()->isDeviceLost()) {
+        LOG_ERROR("GPU device lost - exiting application");
+        window->setShouldClose(true);
+    }
+}
+
+void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& forInterface) {
     beatWatchdog();
     // What a burst of warnings left in the buffer. A warning no longer
     // writes itself to disk one line at a time - see Logger::flushIfStale -
@@ -2002,20 +1885,8 @@ void Application::pumpInput(float deltaTime, const FramePlan& plan) {
                 if (gameHandler) gameHandler->fireAddonEvent("DISPLAY_SIZE_CHANGED");
             }
         }
-        // Focus lost too: the keys held when it went will send no release, and
-        // letting go of their bindings runs Lua, which waits for the Interface
-        // phase.
-        // And the mouse buttons a key binding can name - BUTTON3 to BUTTON5 -
-        // which run their bindings there too.
-        const bool bindableMouseButton =
-            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-            !mouseBindingName(event.button.button).empty();
-        if (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN ||
-            event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_WHEEL ||
-            event.type == SDL_EVENT_WINDOW_FOCUS_LOST || bindableMouseButton) {
-            interfaceInput_.push_back({event, event.type == SDL_EVENT_TEXT_INPUT && event.text.text
-                                               ? event.text.text : ""});
-        }
+        // What the interface hears waits for the Interface phase, where Lua runs.
+        if (InterfaceInput::takes(event)) forInterface.push(event);
     }
 
     if (window->shouldClose()) return;
@@ -2055,327 +1926,45 @@ void Application::pumpInput(float deltaTime, const FramePlan& plan) {
 
 }
 
-void Application::dispatchInterfaceInput() {
-    auto input = std::move(interfaceInput_);
-    interfaceInput_.clear();
-    for (auto& saved : input) {
-        SDL_Event event = saved.event;
-        if (event.type == SDL_EVENT_TEXT_INPUT) event.text.text = saved.text.c_str();
-        // A key coming up goes back to the binding its press ran, before
-        // anything else looks at it and whatever has the keyboard now: the
-        // press of W walked, and an edit box opened since does not stop the
-        // release from stopping. A key whose press ran no binding has nothing
-        // to release, and passes on as before.
-        if (event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-            if (auto* addons = worldInterface()) {
-                if (auto* engine = addons->getLuaEngine()) {
-                    if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                        engine->releaseBindingKeys();
-                    } else {
-                        engine->dispatchBindingKey(addons::bindingKeyName(event.key.key),
-                                                   false, false, false, false);
-                    }
-                }
-            }
-        }
-        // The middle and side mouse buttons are keys to the bindings, as in
-        // the original client: an account that puts action buttons on BUTTON4
-        // and BUTTON5 casts with them. The middle button is a frame's when it
-        // is over one that takes the mouse; the side buttons no frame takes.
-        // The release goes back like a key's.
-        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-            auto* addons = worldInterface();
-            auto* engine = addons ? addons->getLuaEngine() : nullptr;
-            const std::string name = mouseBindingName(event.button.button);
-            if (engine && !name.empty()) {
-                if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                    engine->dispatchBindingKey(name, false, false, false, false);
-                } else if (!ImGui::GetIO().WantCaptureMouse &&
-                           !(event.button.button == SDL_BUTTON_MIDDLE && engine->mouseOverFrameXml())) {
-                    const HeldModifiers mods = heldModifiers();
-                    engine->dispatchBindingKey(name, mods.shift, mods.ctrl, mods.alt, true);
-                }
-            }
-        }
-        if (getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
-            if (event.type == SDL_EVENT_MOUSE_WHEEL) {
-                // The interface gets first refusal, and only where a
-                // frame under the cursor asked for the wheel. Zooming
-                // the camera while scrolling a quest log is what
-                // happens without the check, and a frame that did not
-                // ask must not swallow it either.
-                bool takenByUi = false;
-                const float clicks = wheelClicks(event.wheel.y, event.wheel.timestamp);
-                if (auto* addons = characterAddons()) {
-                    // ImGui's cursor, not SDL's, because that is what
-                    // the rest of the widget dispatch is fed and the
-                    // two need not agree on a scaled display. Flipped
-                    // to bottom-origin for the same reason the button
-                    // dispatch is: the tree measures upward.
-                    const ImGuiIO& mio = ImGui::GetIO();
-                    takenByUi = addons->getLuaEngine()->dispatchMouseWheel(
-                        mio.MousePos.x, mio.DisplaySize.y - mio.MousePos.y, clicks);
-                }
-                auto* world = worldInterface();
-                auto* engine = world ? world->getLuaEngine() : nullptr;
-                if (!takenByUi && engine) {
-                    // Then the wheel's binding, one press and release a
-                    // click: CAMERAZOOMIN and CAMERAZOOMOUT by default, an
-                    // action button on an account that moved zoom to Page Up.
-                    // A trackpad's fractions carry over to the next event.
-                    wheelBindingRemainder_ += clicks;
-                    const HeldModifiers mods = heldModifiers();
-                    while (std::abs(wheelBindingRemainder_) >= 1.0f) {
-                        const bool up = wheelBindingRemainder_ > 0.0f;
-                        wheelBindingRemainder_ += up ? -1.0f : 1.0f;
-                        const std::string name = up ? "MOUSEWHEELUP" : "MOUSEWHEELDOWN";
-                        engine->dispatchBindingKey(name, mods.shift, mods.ctrl, mods.alt, true);
-                        engine->dispatchBindingKey(name, false, false, false, false);
-                    }
-                } else if (!takenByUi) {
-                    // No interface to ask: the camera's own zoom.
-                    getCameraController()->processMouseWheel(
-                        static_cast<float>(event.wheel.y));
-                }
-            }
-        }
-        // Typed text, when an edit box is listening for it - or, when none
-        // is, whichever frame has asked for the keyboard.
-        //
-        // A dialog reads its digits from OnChar and not from OnKeyDown:
-        // StackSplitFrame's key handler passes numbers straight through on
-        // purpose, so the amount could only be reached with the arrows and
-        // typing "12" did nothing at all.
-        if (event.type == SDL_EVENT_TEXT_INPUT) {
-            if (auto* addons = worldInterface()) {
-                if (auto* engine = addons->getLuaEngine()) {
-                    if (engine->editBoxHasFocus()) {
-                        // Unless it is the slash that opened this box,
-                        // arriving after it took focus - see
-                        // noteChatOpenedBySlash.
-                        if (!ui::consumeChatSlashEcho(event.text.text)) {
-                            engine->dispatchText(event.text.text);
-                        }
-                    } else {
-                        engine->dispatchFrameChar(event.text.text);
-                    }
-                }
-            }
-        }
-        // Debug controls
-        else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
-            // Shift, control and alt announce themselves. The interface
-            // watches these to swap what a tooltip shows and what a
-            // click will do - item comparison appears on shift, and an
-            // action button's self-cast indicator on alt. Four frames
-            // listen and none had ever been told.
-            if (auto* addons = worldInterface()) {
-                const char* modName = nullptr;
-                switch (event.key.key) {
-                    case SDLK_LSHIFT: modName = "LSHIFT"; break;
-                    case SDLK_RSHIFT: modName = "RSHIFT"; break;
-                    case SDLK_LCTRL:  modName = "LCTRL";  break;
-                    case SDLK_RCTRL:  modName = "RCTRL";  break;
-                    case SDLK_LALT:   modName = "LALT";   break;
-                    case SDLK_RALT:   modName = "RALT";   break;
-                    default: break;
-                }
-                // Repeats are not changes: holding shift sends a stream
-                // of key-downs and the interface would rebuild every
-                // tooltip in the game for each one.
-                if (modName && event.key.repeat == 0) {
-                    // Said once for shift going down, upstream of any
-                    // tooltip. IsModifiedClick(COMPAREITEMS) answered false
-                    // through two runs in which the key was pressed, which
-                    // is either a key this client never sees or a question
-                    // nothing asks again once the tooltip is already up.
-                    // This separates them: a line here and no matching
-                    // true from the gate means the event arrives and
-                    // nothing acts on it.
-                    static bool saidShift = false;
-                    if (!saidShift && event.type == SDL_EVENT_KEY_DOWN &&
-                        (modName[1] == 'S')) {
-                        saidShift = true;
-                        LOG_WARNING("MODIFIER_STATE_CHANGED fired for ",
-                                    modName, " down - the client sees shift");
-                    }
-                    addons->fireEvent(
-                        "MODIFIER_STATE_CHANGED",
-                        {modName, event.type == SDL_EVENT_KEY_DOWN ? "1" : "0"});
-                }
-            }
-        }
-        if (event.type == SDL_EVENT_KEY_DOWN) {
-            // An addon's edit box takes the keystroke before anything
-            // else looks at it. Otherwise typing into one would also
-            // walk the character, and backspace would trip a keybind.
-            if (auto* addons = worldInterface()) {
-                if (auto* engine = addons->getLuaEngine();
-                    engine && engine->editBoxHasFocus()) {
-                    // Command counts as control here, because this is the
-                    // copy-and-paste modifier and on a Mac that is the one
-                    // every other program uses. Windows and Linux send
-                    // control; both are taken, so the gesture is the one
-                    // the player already knows on whichever they are on.
-                    const bool ctrl =
-                        (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
-                    // Said before the dispatch, because dispatching is
-                    // what lets go of the focus that the check above
-                    // just used - ask afterwards and the box no longer
-                    // admits to having taken anything.
-                    //
-                    // Only the three that let go. Every other key
-                    // leaves the box focused, so the poll's own typing
-                    // guard still answers for them.
-                    switch (event.key.key) {
-                        case SDLK_ESCAPE:
-                            ui::noteInterfaceConsumedKey(ImGuiKey_Escape);
-                            // The first of the three ways a press ends
-                            // early, and the correct one: an edit box
-                            // had the keyboard, so Escape closed the
-                            // box and means nothing further. WoW stops
-                            // here too.
-                            LOG_WARNING("Escape: taken in the pump by a "
-                                        "focused edit box; it closes the "
-                                        "box and stops");
-                            break;
-                        case SDLK_RETURN:
-                        case SDLK_KP_ENTER:
-                            ui::noteInterfaceConsumedKey(ImGuiKey_Enter);
-                            break;
-                        case SDLK_TAB:
-                            ui::noteInterfaceConsumedKey(ImGuiKey_Tab);
-                            break;
-                        default: break;
-                    }
-                    engine->dispatchKey(event.key.key, ctrl);
-                    continue;
-                }
-                // No edit box, but a dialog may still be listening -
-                // the colour picker, the stack splitter, the coin
-                // pickup. The key is only swallowed when one of them
-                // actually takes it, so with nothing up the movement
-                // keys and every binding carry on exactly as before.
-                if (auto* engine = addons->getLuaEngine()) {
-                    if (engine->dispatchFrameKey(event.key.key, true)) {
-                        // Escape says so, because "Escape does nothing"
-                        // is a live report and this is one of the three
-                        // ways the press can end before the chain that
-                        // decides what it means ever runs. At warning:
-                        // the default log carries nothing else, so an
-                        // info line here is a line nobody will ever
-                        // see. See the pair in GameScreen.
-                        if (event.key.key == SDLK_ESCAPE) {
-                            LOG_WARNING("Escape: taken in the pump by a "
-                                        "frame listening for keys; the "
-                                        "chain below never runs");
-                        }
-                        continue;
-                    }
-                }
-                // Then whatever the interface has bound to the key.
-                //
-                // Last of the three, because a focused edit box and an
-                // open dialog both outrank a binding - which is WoW's
-                // order too. It declines for anything this client
-                // performs itself, so the keys that already work are
-                // untouched; what it adds is every command the client
-                // has no path for, which until now could be bound in
-                // the interface's own key-binding panel and then never
-                // honoured by any press. Movement and the action bar are
-                // bindings like any other, so a key the account moves them
-                // to is the key that walks or casts.
-                //
-                // Not while one of this client's own text fields is typed
-                // into: the keystroke is a letter there.
-                if (auto* engine = addons->getLuaEngine();
-                    engine && !ImGui::GetIO().WantTextInput) {
-                    const SDL_Keymod mods = event.key.mod;
-                    if (engine->dispatchBindingKey(
-                            addons::bindingKeyName(event.key.key),
-                            (mods & SDL_KMOD_SHIFT) != 0,
-                            (mods & SDL_KMOD_CTRL) != 0,
-                            (mods & SDL_KMOD_ALT) != 0, true)) {
-                        // The fourth way a press can end in the pump - an
-                        // interface key binding claimed it - which had no
-                        // line. For the DEFAULT Escape this does not fire:
-                        // Escape binds to TOGGLEGAMEMENU, which
-                        // clientActsOnBinding lists, so dispatchBindingKey
-                        // yields (returns false) and the poll chain below
-                        // runs. It fires only if Escape has been rebound to
-                        // a FrameXML command a binding script handles - in
-                        // which case *that* is why the game menu never
-                        // opens, and this line names it. So it is a real
-                        // signal for a rebound Escape, not the default one.
-                        if (event.key.key == SDLK_ESCAPE) {
-                            LOG_WARNING("Escape: taken in the pump by an "
-                                        "interface key binding (rebound off "
-                                        "TOGGLEGAMEMENU); the game-menu chain "
-                                        "never runs");
-                        }
-                        continue;
-                    }
-                }
-            }
-            // The third way, and the ordinary one: nothing in the
-            // interface wanted it, so the poll further down decides.
-            // Said as well as the other two, because the whole value of
-            // these lines is that exactly one of them appears per
-            // press - silence would mean the key never arrived at all,
-            // and that is a different fault in a different place.
-            if (event.key.key == SDLK_ESCAPE) {
-                LOG_WARNING("Escape: through the pump untaken; the chain "
-                            "below decides");
-            }
-            // Skip non-function-key input when UI (chat) has keyboard focus
-            bool uiHasKeyboard = ImGui::GetIO().WantCaptureKeyboard ||
-                                 ui::interfaceTakingTypedInput();
-            auto sc = event.key.scancode;
-            bool isFKey = (sc >= SDL_SCANCODE_F1 && sc <= SDL_SCANCODE_F12);
-            if (uiHasKeyboard && !isFKey) {
-                continue;  // Let ImGui handle the keystroke
-            }
-
-            // The development keys are not built into a release.
-            //
-            // They are not bindings the player chose and not anything
-            // the interface knows about, so a stray F-key silently
-            // changing how the world is drawn is a bug report about
-            // rendering rather than about a keystroke. Independent ifs
-            // rather than a chain, so either can be compiled out on its
-            // own; the scancodes are mutually exclusive anyway.
+void Application::keyForClient(const SDL_Event& event) {
+    // The development keys are not built into a release.
+    //
+    // They are not bindings the player chose and not anything the interface
+    // knows about, so a stray F-key silently changing how the world is drawn
+    // is a bug report about rendering rather than about a keystroke.
+    // Independent ifs rather than a chain, so either can be compiled out on
+    // its own; the scancodes are mutually exclusive anyway.
 #ifndef NDEBUG
-            // F1: Toggle performance HUD
-            if (event.key.scancode == SDL_SCANCODE_F1) {
-                if (performanceHUD_) {
-                    performanceHUD_->toggle();
-                    bool enabled = performanceHUD_->isEnabled();
-                    LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
-                }
-            }
-            // No F4 shadow toggle.
-            //
-            // setShadowsEnabled ignores what it is passed and holds
-            // shadows on, because turning them off loses the device -
-            // which is why the settings panel has no control for it
-            // either. So the key did nothing, and said the opposite in
-            // the log every time: it read the flag back to decide what
-            // to print, the flag never moved, and every press logged
-            // "Shadows: OFF" while they stayed on.
-#endif
-            // F8: Debug WMO floor at current position
-            if (event.key.scancode == SDL_SCANCODE_F8 && event.key.repeat == 0) {
-                if (renderer && renderer->getWMORenderer()) {
-                    glm::vec3 pos = renderer->getCharacterPosition();
-                    LOG_WARNING("F8: WMO floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
-                    renderer->getWMORenderer()->debugDumpGroupsAtPosition(pos.x, pos.y, pos.z);
-                }
-            }
+    // F1: Toggle performance HUD
+    if (event.key.scancode == SDL_SCANCODE_F1) {
+        if (performanceHUD_) {
+            performanceHUD_->toggle();
+            bool enabled = performanceHUD_->isEnabled();
+            LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
         }
     }
+    // No F4 shadow toggle.
+    //
+    // setShadowsEnabled ignores what it is passed and holds shadows on,
+    // because turning them off loses the device - which is why the settings
+    // panel has no control for it either. So the key did nothing, and said
+    // the opposite in the log every time: it read the flag back to decide what
+    // to print, the flag never moved, and every press logged "Shadows: OFF"
+    // while they stayed on.
+#endif
+    // F8: Debug WMO floor at current position
+    if (event.key.scancode == SDL_SCANCODE_F8 && event.key.repeat == 0) {
+        if (renderer && renderer->getWMORenderer()) {
+            glm::vec3 pos = renderer->getCharacterPosition();
+            LOG_WARNING("F8: WMO floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
+            renderer->getWMORenderer()->debugDumpGroupsAtPosition(pos.x, pos.y, pos.z);
+        }
+    }
+}
+
+void Application::afterInterfaceInput() {
     namePadKeysForInterface();
     ui::gamepadControls().dispatchBindings();
-
 }
 
 void Application::namePadKeysForInterface() {
@@ -2400,7 +1989,7 @@ void Application::namePadKeysForInterface() {
     if (!engine || !engine->isInitialized()) return;
     auto& pad = core::gamepad();
     const auto kind = pad.isConnected() ? pad.kind() : core::Gamepad::Kind::Unknown;
-    int& written = session_->padKeyNamesWritten();
+    int& written = session()->padKeyNamesWritten();
     if (static_cast<int>(kind) == written) return;
     written = static_cast<int>(kind);
     if (!pad.isConnected()) return;
@@ -2460,14 +2049,12 @@ void Application::shutdown() {
     LOG_DEBUG("Shutting down application...");
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    loadingProbe_.reset();
-#endif
-    // The interface hears the character leave while the world still stands;
-    // the session itself ends below, with its map.
-    {
-        ScopedPhase interfaceShutdown(currentPhase_, Phase::Interface);
-        leaveWorldInterface();
+    // What watched the frames goes first, then the interface hears the
+    // character leave while the world still stands; the session itself ends
+    // below, with its map.
+    if (loop_) {
+        loop_->setObserver(nullptr);
+        loop_->leaveWorldForShutdown();
     }
 
     // Before the window, whose destructor takes SDL down with it.
@@ -2480,8 +2067,9 @@ void Application::shutdown() {
     // The window is already hidden. The character goes first, its map first of
     // all: the map's destruction joins its preparation, terrain and spawn
     // workers while the assets, the renderer and the loader they use still
-    // exist; then the interface writes the saved variables and closes.
-    session_.reset();
+    // exist; then the interface writes the saved variables and closes. The
+    // frame goes with it: nothing runs one after this.
+    loop_.reset();
     worldLoader_.reset();
     loadingScreen_.reset();
 
@@ -2630,175 +2218,92 @@ void Application::shutdown() {
     LOG_DEBUG("Application shutdown complete");
 }
 
-void Application::requestState(AppState newState) {
-    requestedState_ = newState;
+void Application::characterScreenShown() {
+    if (uiManager && assetManager) {
+        uiManager->getCharacterScreen().setAssetManager(assetManager.get());
+    }
 }
 
-void Application::setState(AppState newState) {
-    if (!requireTransitions("application state change")) {
-        requestState(newState);
-        return;
-    }
-    if (state == newState) {
-        return;
-    }
+void Application::enteredWorld() {
+    // The camera's own movement reaches the game through PlayerView (see
+    // ClientLoop::setState); this is what the presentation hangs on the game.
+    if (gameHandler) {
+        gameHandler->setFaceCameraProvider([this]() -> float {
+            // Turn the character to the camera's look direction and report it in
+            // canonical space (same camera-yaw→canonical mapping as the per-frame
+            // orientation sync). Lets a fishing cast drop the bobber in front of
+            // where the player is aiming even while standing still.
+            if (!renderer || !getCameraController())
+                return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
+            // Use the CAMERA's live look yaw (getYaw), not getFacingYaw: the latter is
+            // the character's facing, which is NOT updated by left-mouse orbit, so while
+            // aiming at the water standing still it is stale. Turn the character to the
+            // camera aim and use the same yaw→canonical mapping the (working) melee
+            // facing uses, so the bobber lands where the player is looking.
+            float camYawDeg = getCameraController()->getYaw();
+            renderer->setCharacterYaw(camYawDeg);
+            getCameraController()->setFacingYaw(camYawDeg);
+            // "Face land to fish" ⇒ the bobber landed 180° opposite the aim, so the
+            // canonical is a half-turn off here (getYaw's zero is opposite the look
+            // vector). Add the half-turn so the bobber lands where the camera looks.
+            float canon = core::coords::normalizeAngleRad(glm::radians(360.0f - camYawDeg));
+            LOG_WARNING("[FISH-AIM] getYaw=", camYawDeg,
+                        " getFacingYaw=", getCameraController()->getFacingYaw(),
+                        " charYaw=", renderer->getCharacterYaw(),
+                        " canonicalDeg=", canon * 57.29578f,
+                        " serverYawDeg=", core::coords::canonicalToServerYaw(canon) * 57.29578f);
+            return canon;
+        });
 
-    LOG_INFO("State transition: ", static_cast<int>(state), " -> ", static_cast<int>(newState));
-    state = newState;
-
-    // Handle state transitions
-    switch (newState) {
-        case AppState::LOADING_WORLD:
-            break;
-        case AppState::FIRST_RUN:
-            // Nothing to enter: the screen builds what is missing and the
-            // client is reopened afterwards.
-            break;
-        case AppState::AUTHENTICATION:
-            // Show auth screen
-            break;
-        case AppState::REALM_SELECTION:
-            // Show realm screen
-            break;
-        case AppState::CHARACTER_CREATION:
-            // Show character create screen
-            break;
-        case AppState::CHARACTER_SELECTION:
-            // Show character screen
-            if (uiManager && assetManager) {
-                uiManager->getCharacterScreen().setAssetManager(assetManager.get());
-            }
-            // The character screen has no character in the world. Leaving the
-            // world went through performLogoutToLogin, which ended the
-            // character's session and with it the map and the interface; this
-            // is the backstop for any other way here.
-            if (session_) {
-                LOG_WARNING("Character screen reached with '", session_->identity().name,
-                            "' still in the world (map ",
-                            session_->map() ? static_cast<int>(session_->map()->mapId()) : -1,
-                            "); ending that session now");
-                session_.reset();
-            }
-            if (worldLoader_) worldLoader_->discardPendingEntry();
-            break;
-        case AppState::IN_GAME: {
-            // Wire up movement opcodes from camera controller
-            if (getCameraController()) {
-                auto* cc = getCameraController();
-                cc->setMovementCallback([this](uint32_t opcode) {
-                    if (gameHandler) {
-                        gameHandler->sendMovement(static_cast<game::Opcode>(opcode));
-                    }
-                });
-                cc->setStandUpCallback([this]() {
-                    if (gameHandler) {
-                        gameHandler->setStandState(rendering::AnimationController::STAND_STATE_STAND);
-                    }
-                });
-                cc->setSitDownCallback([this]() {
-                    if (gameHandler) {
-                        gameHandler->setStandState(rendering::AnimationController::STAND_STATE_SIT);
-                    }
-                    if (renderer) {
-                        if (auto* ac = getAnimationController()) {
-                            ac->setStandState(rendering::AnimationController::STAND_STATE_SIT);
-                        }
-                    }
-                });
-                // The stand state is carried by AnimationCallbackHandler, which
-                // owns the one callback slot for it. A second registration here
-                // replaced or was replaced by that one depending on which was
-                // built last, which is how the seated flag stopped arriving.
-                cc->setAutoFollowCancelCallback([this]() {
-                    if (gameHandler) {
-                        gameHandler->cancelFollow();
-                    }
-                });
-                cc->setUseWoWSpeed(true);
-            }
-            if (gameHandler) {
-                gameHandler->setFaceCameraProvider([this]() -> float {
-                    // Turn the character to the camera's look direction and report it in
-                    // canonical space (same camera-yaw→canonical mapping as the per-frame
-                    // orientation sync). Lets a fishing cast drop the bobber in front of
-                    // where the player is aiming even while standing still.
-                    if (!renderer || !getCameraController())
-                        return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
-                    // Use the CAMERA's live look yaw (getYaw), not getFacingYaw: the latter is
-                    // the character's facing, which is NOT updated by left-mouse orbit, so while
-                    // aiming at the water standing still it is stale. Turn the character to the
-                    // camera aim and use the same yaw→canonical mapping the (working) melee
-                    // facing uses, so the bobber lands where the player is looking.
-                    float camYawDeg = getCameraController()->getYaw();
-                    renderer->setCharacterYaw(camYawDeg);
-                    getCameraController()->setFacingYaw(camYawDeg);
-                    // "Face land to fish" ⇒ the bobber landed 180° opposite the aim, so the
-                    // canonical is a half-turn off here (getYaw's zero is opposite the look
-                    // vector). Add the half-turn so the bobber lands where the camera looks.
-                    float canon = core::coords::normalizeAngleRad(glm::radians(360.0f - camYawDeg));
-                    LOG_WARNING("[FISH-AIM] getYaw=", camYawDeg,
-                                " getFacingYaw=", getCameraController()->getFacingYaw(),
-                                " charYaw=", renderer->getCharacterYaw(),
-                                " canonicalDeg=", canon * 57.29578f,
-                                " serverYawDeg=", core::coords::canonicalToServerYaw(canon) * 57.29578f);
-                    return canon;
-                });
-
-                gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
-                    if (renderer) {
-                        // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
-                        if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
-                            if (appearanceComposer_ && !appearanceComposer_->isShowingRanged())
-                                appearanceComposer_->showRangedWeapon(true);
-                            if (auto* ac = getAnimationController()) ac->triggerRangedShot();
-                        } else if (spellId != 0) {
-                            if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
-                                appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = getAnimationController()) ac->triggerSpecialAttack(spellId);
-                        } else {
-                            if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
-                                appearanceComposer_->showRangedWeapon(false);
-                            if (auto* ac = getAnimationController()) ac->triggerMeleeSwing();
-                        }
-                    }
-                });
-                if (getAnimationController()) {
-                    getAnimationController()->setRangedShotCompleteCallback([this]() {
-                        if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
-                    });
+        gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
+            if (renderer) {
+                // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
+                if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
+                    if (appearanceComposer_ && !appearanceComposer_->isShowingRanged())
+                        appearanceComposer_->showRangedWeapon(true);
+                    if (auto* ac = getAnimationController()) ac->triggerRangedShot();
+                } else if (spellId != 0) {
+                    if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
+                        appearanceComposer_->showRangedWeapon(false);
+                    if (auto* ac = getAnimationController()) ac->triggerSpecialAttack(spellId);
+                } else {
+                    if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
+                        appearanceComposer_->showRangedWeapon(false);
+                    if (auto* ac = getAnimationController()) ac->triggerMeleeSwing();
                 }
-                gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
-                    if (getCameraController()) {
-                        getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
-                    }
-                });
-                gameHandler->setCameraShakeCallback([this](float magnitude, float frequency, float duration) {
-                    if (getCameraController()) {
-                        getCameraController()->triggerShake(magnitude, frequency, duration);
-                    }
-                });
-                gameHandler->setAutoFollowCallback([this](const glm::vec3* renderPos) {
-                    if (getCameraController()) {
-                        if (renderPos) {
-                            getCameraController()->setAutoFollow(renderPos);
-                        } else {
-                            getCameraController()->cancelAutoFollow();
-                        }
-                    }
-                });
-                // Barber shop and other live appearance changes rebuild the model.
-                gameHandler->setPlayerModelRebuildCallback([this]() {
-                    refreshPlayerCharacterModel();
-                });
             }
-            // Load quest marker models
-            loadQuestMarkerModels();
-            break;
+        });
+        if (getAnimationController()) {
+            getAnimationController()->setRangedShotCompleteCallback([this]() {
+                if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
+            });
         }
-        case AppState::DISCONNECTED:
-            // Back to auth
-            break;
+        gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
+            if (getCameraController()) {
+                getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
+            }
+        });
+        gameHandler->setCameraShakeCallback([this](float magnitude, float frequency, float duration) {
+            if (getCameraController()) {
+                getCameraController()->triggerShake(magnitude, frequency, duration);
+            }
+        });
+        gameHandler->setAutoFollowCallback([this](const glm::vec3* renderPos) {
+            if (getCameraController()) {
+                if (renderPos) {
+                    getCameraController()->setAutoFollow(renderPos);
+                } else {
+                    getCameraController()->cancelAutoFollow();
+                }
+            }
+        });
+        // Barber shop and other live appearance changes rebuild the model.
+        gameHandler->setPlayerModelRebuildCallback([this]() {
+            refreshPlayerCharacterModel();
+        });
     }
+    // Load quest marker models
+    loadQuestMarkerModels();
 }
 
 bool Application::setAssetExpansionOverride(const std::string& id) {
@@ -2892,110 +2397,29 @@ void Application::reloadExpansionData() {
     if (entitySpawner_) entitySpawner_->rebuildLookups();
 }
 
-void Application::processWorldTransitions() {
-    if (!requireTransitions("apply world transitions")) return;
-    // Warmup can receive a leave after Interface has finished. Preserve it until
-    // the next Interface can deliver PLAYER_LEAVING_WORLD against the live world.
-    if (worldTransitions_.leaving() && session_ && session_->interfaceHoldsWorld()) return;
-    if (requestedState_) {
-        const auto next = *requestedState_;
-        requestedState_.reset();
-        if (!worldTransitions_.leaving()) setState(next);
-    }
-    // The only transition phase, called by run() after render and submit.
-    // Applying NEW_WORLD may announce WorldEntered; consume it here too.
-    using Destination = WorldTransitionQueue::Destination;
-    while (auto request = worldTransitions_.takeNext()) {
-        if (auto* leave = std::get_if<WorldTransitionQueue::Leave>(&*request)) {
-            if (leave->destination == Destination::Exit) {
-                LOG_INFO("Logout complete - quitting after frame submission");
-                if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr)
-                    music->stopMusic(0.0f);
-                if (window) window->setShouldClose(true);
-                return;
-            }
-            const bool reconnect = leave->destination == Destination::Reconnect;
-            if (reconnect) {
-                // Connection-screen failures have no world to release; its
-                // retry controller observes the disconnected session itself.
-                if (state != AppState::IN_GAME && state != AppState::LOADING_WORLD && !session_ && leave->characterGuid == 0)
-                    continue;
-                LOG_WARNING("Disconnected from the world server; returning to login after frame submission");
-                disconnectNotice_ = "You have been disconnected from the server.";
-            }
-            performLogoutToLogin(leave->destination == Destination::CharacterSelect);
-            if (reconnect && uiScreenCallbacks_ &&
-                uiScreenCallbacks_->beginReconnect(leave->characterGuid)) {
-                disconnectNotice_.clear();
-            }
-            return;
-        }
-        if (std::holds_alternative<game::events::WorldTransferStarted>(*request)) {
-            if (gameHandler && gameHandler->getMovementHandler()->hasPendingWorldTransfer())
-                gameHandler->getMovementHandler()->applyPendingWorldTransfer();
-        } else if (auto* entry = std::get_if<game::events::WorldEntered>(&*request)) {
-            if (worldEntryCallbacks_)
-                worldEntryCallbacks_->enterWorld(entry->mapId, entry->x, entry->y, entry->z,
-                                                 entry->isInitialEntry);
-        }
-    }
-    if (!worldLoader_) return;
-    if (auto entry = worldLoader_->takePendingEntry()) beginWorldLoading(*entry);
-    if (state == AppState::LOADING_WORLD) {
-        if (worldLoader_->stage() == WorldLoader::Stage::Prepared && worldLoader_->initializeScene())
-            prepareWorldPlayer();
-        if (worldLoader_->stage() == WorldLoader::Stage::GeometryReady) finishWorldGeometry();
-        if (worldLoader_->status().result == WorldLoadResult::Ready) completeWorldLoading();
-    }
+void Application::exiting() {
+    if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr)
+        music->stopMusic(0.0f);
 }
 
-void Application::performLogoutToLogin(bool keepConnection) {
-    if (!requireTransitions("world logout")) return;
-    LOG_INFO("Logout requested");
-
-    // Back to the character list when the server completed a logout and the
-    // connection is still there; to the login screen otherwise. This always
-    // went to the login screen, closing the connection the server had just
-    // kept open for the character list - and a new session asked for straight
-    // after can be refused while the old one is still closing on the server.
-    keepConnection = keepConnection && gameHandler && gameHandler->isConnected();
-
-    if (gameHandler) {
-        if (keepConnection) gameHandler->returnToCharacterSelect();
-        else gameHandler->disconnect();
-    }
-
-    // The character leaves: their map and everything drawn on it, their
-    // interface (which writes their saved variables on the way out), their
-    // presenters and frame state - all of it ends with their session, and
-    // nothing is left for the next character to find.
-    session_.reset();
-    if (worldLoader_) worldLoader_->discardPendingEntry();
-
+void Application::characterLeft(bool keptConnection) {
     if (auto* music = audioCoordinator_ ? audioCoordinator_->getMusicManager() : nullptr) {
         music->stopMusic(0.0f);
     }
-
-    if (keepConnection) {
-        // Same realm, same account: the character screen asks for the list
-        // again on its own once the handler is READY.
-        setState(AppState::CHARACTER_SELECTION);
-        return;
-    }
-
+    if (keptConnection) return;
     // Clear stale realm/character selection so switching servers starts fresh
     if (uiManager) {
         uiManager->getRealmScreen().reset();
         uiManager->getCharacterScreen().reset();
     }
-    setState(AppState::AUTHENTICATION);
+}
 
-    // Said on the screen the player lands on, because there is nowhere to say
-    // it on the way out: the world is being torn down as this runs.
-    if (!disconnectNotice_.empty() && uiManager) {
-        uiManager->getAuthScreen().setStatus(disconnectNotice_, true, /*prominent=*/true);
-        disconnectNotice_.clear();
-    }
+void Application::showDisconnectNotice(const std::string& notice) {
+    if (uiManager) uiManager->getAuthScreen().setStatus(notice, true, /*prominent=*/true);
+}
+
+bool Application::beginReconnect(uint64_t characterGuid) {
+    return uiScreenCallbacks_ && uiScreenCallbacks_->beginReconnect(characterGuid);
 }
 
 // One frame of being in the world.
@@ -3252,7 +2676,7 @@ void Application::applyServerMovementState(float deltaTime) {
         }
     }
     bool idleOrbit = getCameraController()->isIdleOrbit();
-    bool& idleYawned = session_->playerSync().idleYawned;
+    bool& idleYawned = session()->playerSync().idleYawned;
     if (idleOrbit && !idleYawned && renderer) {
         if (auto* ac = getAnimationController()) ac->playEmote("yawn");
         idleYawned = true;
@@ -3607,7 +3031,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // the old facing and position-corrects on the next heartbeat - the
         // micro-teleporting the GM observed.
         // Skip while keyboard-turning: the server tracks that via TURN_LEFT/RIGHT flags.
-        auto& sync = session_->playerSync();
+        auto& sync = session()->playerSync();
         sync.facingSendCooldown -= deltaTime;
         const auto& mi = gameHandler->getMovementInfo();
         constexpr uint32_t kTurnFlags =
@@ -4145,7 +3569,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
             appearanceComposer_->loadEquippedWeapons();
         }
         // Swap back to melee weapon when auto-attack stops
-        bool& wasAutoAttacking = session_->playerSync().wasAutoAttacking;
+        bool& wasAutoAttacking = session()->playerSync().wasAutoAttacking;
         if (!autoAttacking && wasAutoAttacking && appearanceComposer_ && appearanceComposer_->isShowingRanged()) {
             appearanceComposer_->showRangedWeapon(false);
         }
@@ -4159,7 +3583,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     {
         auto* cc = renderer ? getCameraController() : nullptr;
         const bool swimmingNow = cc && cc->isSwimming();
-        bool& wasSwimming = session_->playerSync().wasSwimmingForSheath;
+        bool& wasSwimming = session()->playerSync().wasSwimmingForSheath;
         if (swimmingNow && !wasSwimming && appearanceComposer_
             && !appearanceComposer_->isWeaponsSheathed()) {
             appearanceComposer_->setWeaponsSheathed(true);
@@ -4299,8 +3723,8 @@ void Application::followRendererUpdate(float deltaTime) {
     // ZONE_CHANGED - there is no outdoors counterpart.
     // The edge is the character's: the next one starts outdoors, as this did.
     const bool indoors = renderer->isPlayerIndoors();
-    if (session_) {
-        bool& wasIndoors = session_->playerSync().cameraIndoors;
+    if (auto* character = session()) {
+        bool& wasIndoors = character->playerSync().cameraIndoors;
         if (indoors != wasIndoors && gameHandler) {
             gameHandler->fireAddonEvent(indoors ? "ZONE_CHANGED_INDOORS" : "ZONE_CHANGED", {});
         }
@@ -4431,7 +3855,7 @@ void Application::prepareFrame() {
             // exercises world assets and appearance queues without those
             // packets: its character's interface hears events and OnUpdate from
             // the start and loads nothing.
-            sessionInterface_ = CharacterSession::Interface::EventsOnly;
+            loop_->setSessionInterface(CharacterSession::Interface::EventsOnly);
             LOG_INFO("Mulgore probe: starting world entry");
             worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
             LOG_INFO("Mulgore probe: world entry queued for the transition phase");
@@ -4583,38 +4007,17 @@ void Application::prepareFrame() {
 
 }
 
-void Application::dispatchNetwork(float deltaTime, const FramePlan& plan) {
+void Application::updateLogin(float deltaTime, const FramePlan& plan) {
+    updateConnectionAndPatches(deltaTime, plan);
     if (plan.authNetwork && authHandler) authHandler->update(deltaTime);
-    if (!plan.worldNetwork || !gameHandler) return;
-
-    const auto start = std::chrono::steady_clock::now();
-    gameHandler->updateNetwork(deltaTime);
-    networkUpdateMs_ = std::chrono::duration<float, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
 }
 
-void Application::updateGame(float deltaTime, const FramePlan& plan) {
-    if (plan.worldNetwork && gameHandler) {
-        const auto start = std::chrono::steady_clock::now();
-        gameHandler->updateGame(deltaTime);
-        if (plan.world || plan.loading) {
-            if (auto* spells = session_ ? session_->spellPresentation() : nullptr)
-                spells->update(deltaTime);
-        }
-        if (plan.world) {
-            const float ms = networkUpdateMs_ + std::chrono::duration<float, std::milli>(
-                std::chrono::steady_clock::now() - start).count();
-            noteStageTime("gameHandler->update", ms);
-            if (ms > 50.0f) LOG_WARNING("SLOW update stage 'gameHandler->update': ", ms, "ms");
-        }
-    }
-    if (plan.world) {
-        const char* checkpoint = "in_game: enter";
-        updateInGame(deltaTime, checkpoint);
-    }
+void Application::updateWorld(float deltaTime) {
+    const char* checkpoint = "in_game: enter";
+    updateInGame(deltaTime, checkpoint);
 }
 
-void Application::updateStreaming(float deltaTime, const FramePlan& plan) {
+void Application::streamScene(float /*deltaTime*/, const FramePlan& plan) {
     const auto stage = worldLoader_ ? worldLoader_->stage() : WorldLoader::Stage::Idle;
     const bool sceneReady = stage == WorldLoader::Stage::Geometry || stage == WorldLoader::Stage::Collision ||
                             stage == WorldLoader::Stage::GeometryReady || stage == WorldLoader::Stage::Warmup;
@@ -4623,24 +4026,20 @@ void Application::updateStreaming(float deltaTime, const FramePlan& plan) {
         renderer->getCharacterRenderer()->processPendingNormalMaps(4);
         updateQuestMarkers();
     }
-    if (!worldLoader_) return;
-    const auto& status = worldLoader_->update(deltaTime);
-    if (plan.loading) {
-        if (loadingScreen_) {
-            loadingScreen_->setStatus(status.reason);
-            loadingScreen_->setProgress(status.progress);
-        }
-        if (status.result == WorldLoadResult::Failed && !worldTransitions_.leaving()) {
-            disconnectNotice_ = status.reason;
-            worldTransitions_.leave(WorldTransitionQueue::Destination::Login);
-        }
-    }
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    if (loadingProbe_) loadingProbe_->streaming(plan);
-#endif
 }
 
-void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
+void Application::showLoadProgress(const WorldLoadStatus& status) {
+    if (loadingScreen_) {
+        loadingScreen_->setStatus(status.reason);
+        loadingScreen_->setProgress(status.progress);
+    }
+}
+
+bool Application::scenePending() const {
+    return entitySpawner_ && entitySpawner_->hasWorkPending();
+}
+
+void Application::present(float deltaTime, const FramePlan& plan) {
     // WOWEE_MODEL_PROBE has no world, so nothing else moves its model: its
     // animation plays and its particles fly here, WOWEE_PROBE_SECONDS (6 by
     // default) of them over the frames before the screenshot, in steps of a
@@ -4717,50 +4116,28 @@ void Application::syncPresentation(float deltaTime, const FramePlan& plan) {
             LOG_WARNING("SLOW update stage 'renderer->update': ", ruMs, "ms");
         }
     }
-    if (plan.loading && worldLoader_)
-        worldLoader_->observeReadiness(entitySpawner_ && entitySpawner_->hasWorkPending());
 }
 
-void Application::updateInterface(float deltaTime, const FramePlan& plan) {
+bool Application::canDrawInterface() const {
+    // A lost mobile surface has no ImGui frame to build or submit.
+    return !(window && window->getVkContext() && window->getVkContext()->isSurfaceLost());
+}
+
+void Application::updateScreens(float deltaTime) {
+    if (!uiManager) return;
+    try {
+        uiManager->update(deltaTime);
+    } catch (const std::bad_alloc& e) {
+        LOG_ERROR("OOM during Application::update stage 'uiManager->update': ", e.what());
+        throw;
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception during Application::update stage 'uiManager->update': ", e.what());
+        throw;
+    }
+}
+
+void Application::drawInterface(float deltaTime, const FramePlan& plan) {
     const FrameView view = plan.view;
-#ifdef WOWEE_LOADING_FRAME_TEST_CLIENT
-    if (loadingProbe_) loadingProbe_->interfaceFrame(plan);
-#endif
-    // A map finished loading: the character's interface is built at the first
-    // entry and told of every later one.
-    if (session_ && !worldTransitions_.leaving()) session_->enterWorldInterface();
-    // Before the events go out, so the UPDATE_BINDINGS LoadBindings raises
-    // reaches the buttons in this frame.
-    if (session_) session_->applyChangedKeyBindings();
-    if (gameHandler) gameHandler->dispatchAddonEvents();
-    dispatchInterfaceInput();
-    // A lost mobile surface has no ImGui frame to build or submit. Network and
-    // simulation still run, and the single Pace phase limits the background loop.
-    if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) {
-        if (worldTransitions_.leaving() ||
-            (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) leaveWorldInterface();
-        return;
-    }
-    // Update UI
-    if (uiManager) {
-        try {
-            uiManager->update(deltaTime);
-        } catch (const std::bad_alloc& e) {
-            LOG_ERROR("OOM during Application::update stage 'uiManager->update': ", e.what());
-            throw;
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception during Application::update stage 'uiManager->update': ", e.what());
-            throw;
-        }
-    }
-    // A reload asked for by the interface. Done here, between frames, because
-    // the request comes from inside the Lua state that the reload destroys -
-    // performing it at the call site would free the machinery mid-call. Both
-    // ReloadUI and this client's own /reload ask the session for it.
-    if (session_) session_->reloadInterfaceIfRequested();
-    if (plan.world || plan.loading) {
-        if (auto* addons = worldInterface()) addons->update(deltaTime);
-    }
     if (view == FrameView::CharacterCreation && uiManager)
         uiManager->getCharacterCreateScreen().update(deltaTime);
     if (!renderer) return;
@@ -5556,7 +4933,7 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
                 // above.
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
                     !engine->mouseOverFrameXml()) {
-                    const uint32_t carried = session_->interfaceState().cursor.itemId();
+                    const uint32_t carried = session()->interfaceState().cursor.itemId();
                     if (carried != 0 && gameHandler) {
                         const auto* info = gameHandler->getItemInfo(carried);
                         const std::string name = info ? info->name : std::string();
@@ -5615,13 +4992,6 @@ void Application::updateInterface(float deltaTime, const FramePlan& plan) {
 
         runInterfaceStage("mapWindow", [&] { updateMapWindow(plan); });
     }
-
-    if (gameHandler) gameHandler->dispatchAddonEvents();
-    if (worldTransitions_.leaving() ||
-        (requestedState_ && *requestedState_ != AppState::IN_GAME && *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading))) {
-        leaveWorldInterface();
-    }
-
 }
 
 void Application::beatWatchdog() {
@@ -5630,6 +5000,11 @@ void Application::beatWatchdog() {
             std::chrono::steady_clock::now().time_since_epoch()).count(),
         std::memory_order_release);
 
+}
+
+void Application::render(const FramePlan& plan) {
+    renderFrame(plan);
+    window->swapBuffers();
 }
 
 void Application::renderFrame(const FramePlan& plan) {
@@ -5758,7 +5133,7 @@ void Application::reportStageTimes() {
     // How much world there is to draw. The same city cost twice as much on
     // one visit as another, and without these the report could not say
     // whether the scene was larger or the work per object had grown.
-    if (renderer && state == AppState::IN_GAME) {
+    if (renderer && getState() == AppState::IN_GAME) {
         std::ostringstream scene;
         scene << "  scene:";
         if (auto* m2 = renderer->getM2Renderer())
@@ -5863,13 +5238,13 @@ void Application::setupUICallbacks() {
 
     // ── World entry, unstuck, hearthstone, bind point ──
     worldEntryCallbacks_ = std::make_unique<WorldEntryCallbackHandler>(
-        *renderer, *playerView_, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
+        renderer.get(), *playerView_, *gameHandler, worldLoader_.get(), entitySpawner_.get(),
         assetManager.get(), currentPhase_);
     worldEntryCallbacks_->setupCallbacks();
 
     // ── Entity spawn/despawn (creatures, players, game objects) ──
     entitySpawnCallbacks_ = std::make_unique<EntitySpawnCallbackHandler>(
-        *entitySpawner_, *renderer, *gameHandler,
+        *entitySpawner_, renderer.get(), *gameHandler,
         [this](uint64_t guid) {
             uint64_t localGuid = gameHandler ? gameHandler->getPlayerGuid() : 0;
             uint64_t activeGuid = gameHandler ? gameHandler->getActiveCharacterGuid() : 0;
@@ -6569,6 +5944,7 @@ void Application::updateRealmPatchMount() {
     if (!assetManager) return;
     // A map scope still standing may have work reading the archives; its end
     // joins that work.
+    const AppState state = getState();
     const bool worldInUse = state == AppState::IN_GAME || state == AppState::LOADING_WORLD ||
                             currentMap() != nullptr;
     const std::string realm = currentRealmPatchKey();

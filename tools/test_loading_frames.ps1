@@ -9,9 +9,11 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 $build = (Resolve-Path "$root\$BuildDirectory").Path
+# Built beside wowee.exe in every configuration with tests: the same client
+# objects with the fixture's own main (tests/loading_test_client_main.cpp).
 $executable = "$build\bin\wowee_loading_test_client.exe"
 if (-not (Test-Path $executable)) {
-    throw "Build the opt-in WOWEE_LOADING_FRAME_TEST_CLIENT configuration first; missing $executable"
+    throw "Build it first: ninja -C $BuildDirectory wowee_loading_test_client; missing $executable"
 }
 $source = (Resolve-Path $ProfileSource).Path
 $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH

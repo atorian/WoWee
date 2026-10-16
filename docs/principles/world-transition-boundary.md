@@ -6,7 +6,7 @@ Chosen for WoWee on 2026-10-15.
 Game handlers publish facts through `game_events.hpp`. Client subscribers
 record transition requests; they do not unload the interface, release world
 resources, load another map or start reconnecting from an event handler.
-`Application::runFrame` applies requests in its Transitions phase after rendering
+`ClientLoop::runFrame` applies requests in its Transitions phase after rendering
 and submission.
 
 The game and renderer may still hold references to the outgoing world while

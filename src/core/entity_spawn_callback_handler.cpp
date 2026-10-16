@@ -13,7 +13,7 @@ namespace wowee { namespace core {
 
 EntitySpawnCallbackHandler::EntitySpawnCallbackHandler(
     EntitySpawner& entitySpawner,
-    rendering::Renderer& renderer,
+    rendering::Renderer* renderer,
     game::GameHandler& gameHandler,
     std::function<bool(uint64_t)> isLocalPlayerGuid)
     : entitySpawner_(entitySpawner)
@@ -107,7 +107,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         if (it == goInstances.end()) return;
         auto& info = it->second;
         if (!info.isWmo) {
-            if (auto* m2r = renderer_.getM2Renderer()) {
+            if (auto* m2r = renderer_ ? renderer_->getM2Renderer() : nullptr) {
                 // Play the custom animation as a one-shot if model supports it
                 if (m2r->hasAnimation(info.instanceId, animId))
                     m2r->setInstanceAnimation(info.instanceId, animId, false);
@@ -132,7 +132,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     // animation follows its own reported movement in the frame sync.
     gameHandler_.setCreatureMoveCallback([this](uint64_t guid, float /*x*/, float /*y*/, float /*z*/,
                                                 uint32_t durationMs) {
-        auto* cr = renderer_.getCharacterRenderer();
+        auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!cr || durationMs == 0) return;
         const uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) return;
@@ -159,15 +159,16 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         }
         glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
         auto& info = it->second;
+        if (!renderer_) return;
         if (info.isWmo) {
-            if (auto* wr = renderer_.getWMORenderer()) {
+            if (auto* wr = renderer_->getWMORenderer()) {
                 glm::mat4 transform(1.0f);
                 transform = glm::translate(transform, renderPos);
                 transform = glm::rotate(transform, orientation, glm::vec3(0, 0, 1));
                 wr->setInstanceTransform(info.instanceId, transform);
             }
         } else {
-            if (auto* mr = renderer_.getM2Renderer()) {
+            if (auto* mr = renderer_->getM2Renderer()) {
                 glm::mat4 transform(1.0f);
                 transform = glm::translate(transform, renderPos);
                 mr->setInstanceTransform(info.instanceId, transform);

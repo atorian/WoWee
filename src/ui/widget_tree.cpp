@@ -803,6 +803,18 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     generationAtLastPass_ = layoutGeneration_;
 }
 
+bool WidgetTree::runs(uint32_t id) const {
+    // Bounded, so a parent cycle - which nothing should make - ends the walk
+    // rather than the client.
+    const Widget* w = get(id);
+    for (std::size_t depth = 0; w && depth <= widgets_.size(); ++depth) {
+        if (!w->shown) return false;
+        if (w->parent == 0 || w->parent == w->id) return true;
+        w = get(w->parent);
+    }
+    return w == nullptr;
+}
+
 void WidgetTree::markSubtreeHidden(uint32_t id) {
     const Widget* w = get(id);
     if (!w) return;

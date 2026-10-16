@@ -16,8 +16,8 @@
 namespace wowee::core {
 namespace { struct PostedLoadingProbe {}; }
 
-LoadingFrameProbe::LoadingFrameProbe(Application& app, EventBus& events)
-    : app_(app), events_(events), action_(std::getenv("WOWEE_LOADING_TEST")) {
+LoadingFrameProbe::LoadingFrameProbe(Application& app, EventBus& events, std::string action)
+    : app_(app), events_(events), action_(std::move(action)) {
     waitStage_ = std::getenv("WOWEE_LOADING_TEST_STAGE") ? std::getenv("WOWEE_LOADING_TEST_STAGE") : "warmup";
     if (!std::getenv("WOWEE_MULGORE_PROBE") ||
         (action_ != "close" && action_ != "disconnect" && action_ != "logout" &&
@@ -28,10 +28,23 @@ LoadingFrameProbe::LoadingFrameProbe(Application& app, EventBus& events)
     subscriptions_.push_back(events_.subscribe<PostedLoadingProbe>([this](const auto&) { posted_ = true; }));
 }
 
-void LoadingFrameProbe::beginFrame() { ++frame_; }
+void LoadingFrameProbe::frameBegan() { ++frame_; }
 
 void LoadingFrameProbe::pass(const char* detail) {
     if (done_) return;
+    // The action does not wait for this: a stage can end before the
+    // interface has had a frame to show it. An action that keeps the client
+    // loading must still have seen loading run OnUpdate, deliver the game's
+    // notifications in order and dispatch posted events by the time it
+    // succeeds. One that leaves at once (close, disconnect, logout) can end
+    // the session before the interface has a loading frame; that work is
+    // covered by the client_transitions ctest instead.
+    const bool leavesAtOnce = action_ == "close" || action_ == "disconnect" || action_ == "logout";
+    const bool needsInterfaceEvidence = !leavesAtOnce && action_ != "entry-spawn";
+    if (needsInterfaceEvidence && (!luaVerified_ || !posted_)) {
+        fail("interface/events work during loading was not observed");
+        return;
+    }
     done_ = true;
     const auto ms = std::chrono::duration<double, std::milli>(Clock::now() - actionAt_).count();
     LOG_WARNING("Loading probe PASS: ", action_, " ", detail, " frames=", frame_ - actionFrame_, " latency_ms=", ms);
@@ -45,7 +58,7 @@ void LoadingFrameProbe::fail(const char* detail) {
     app_.getWindow()->setShouldClose(true);
 }
 
-void LoadingFrameProbe::streaming(const FramePlan& plan) {
+void LoadingFrameProbe::streamingDone(const FramePlan& plan) {
     if (done_) return;
     auto* loader = app_.getWorldLoader();
     // A real network burst can contain the first create blocks before the
@@ -98,7 +111,7 @@ void LoadingFrameProbe::streaming(const FramePlan& plan) {
     const bool atStage = (waitStage_ == "warmup" && loader->stage() == WorldLoader::Stage::Warmup) ||
                          (waitStage_ == "preparing" && loader->stage() == WorldLoader::Stage::Preparing) ||
                          (waitStage_ == "geometry" && loader->stage() == WorldLoader::Stage::Geometry);
-    if (!fired_ && plan.loading && atStage && luaVerified_) {
+    if (!fired_ && plan.loading && atStage) {
         fired_ = true;
         actionFrame_ = frame_;
         actionAt_ = Clock::now();
@@ -137,8 +150,7 @@ void LoadingFrameProbe::streaming(const FramePlan& plan) {
         if (++loginFrames_ == 3) pass("returned to login");
     }
     if (fired_ && plan.world && action_ == "transfer") {
-        if (!luaVerified_ || !posted_) fail("lost interface/events work during loading");
-        else if (glm::length(glm::vec2(app_.getRenderer()->getCharacterPosition() - worldPosition_)) > 5)
+        if (glm::length(glm::vec2(app_.getRenderer()->getCharacterPosition() - worldPosition_)) > 5)
             fail("entered the stale destination");
         else pass("replacement destination entered");
     }
@@ -157,7 +169,7 @@ void LoadingFrameProbe::streaming(const FramePlan& plan) {
     }
 }
 
-void LoadingFrameProbe::interfaceFrame(const FramePlan& plan) {
+void LoadingFrameProbe::interfaceStarting(const FramePlan& plan) {
     if (done_ || !plan.loading) return;
     auto* addons = app_.getAddonManager();
     if (!addons || !addons->getLuaEngine()) { fail("no interface engine"); return; }

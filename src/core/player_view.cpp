@@ -1,14 +1,18 @@
 #include "core/player_view.hpp"
 
+#include "addons/lua_services.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "game/game_events.hpp"
+#include "game/game_handler.hpp"
+#include "game/opcodes.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/mount_dust.hpp"
+#include "rendering/movement_command.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/viewer_motion.hpp"
@@ -20,48 +24,86 @@
 namespace wowee {
 namespace core {
 
-PlayerView::PlayerView(rendering::Renderer& renderer, audio::AudioCoordinator* audio,
-                       rendering::SpellVisualSystem* spellVisuals, EventBus& events)
+PlayerView::PlayerView(rendering::Camera& camera, rendering::Renderer* renderer,
+                       audio::AudioCoordinator* audio, rendering::SpellVisualSystem* spellVisuals,
+                       EventBus& events)
     : renderer_(renderer),
       spellVisuals_(spellVisuals),
-      cameraController_(std::make_unique<rendering::CameraController>(renderer.getCamera())),
+      cameraController_(std::make_unique<rendering::CameraController>(&camera)),
       animationController_(std::make_unique<rendering::AnimationController>()) {
     cameraController_->setUseWoWSpeed(true);  // Use realistic WoW movement speed
     cameraController_->setMouseSensitivity(0.15f);
-    animationController_->initialize(&renderer_, cameraController_.get(), audio, spellVisuals_);
+    animationController_->initialize(renderer_, cameraController_.get(), audio, spellVisuals_);
 
     namespace ev = game::events;
     subscriptions_.push_back(events.subscribe<ev::PlayerIntoxicationChanged>(
         [this](const ev::PlayerIntoxicationChanged& e) {
             cameraController_->setIntoxication(e.amount);
-            if (auto* post = renderer_.getPostProcessPipeline()) post->setIntoxication(e.amount);
+            if (auto* post = renderer_ ? renderer_->getPostProcessPipeline() : nullptr)
+                post->setIntoxication(e.amount);
         }));
     subscriptions_.push_back(events.subscribe<ev::PlayerFacingSet>([this](const ev::PlayerFacingSet& e) {
-        // A one-shot check that the drawn facing round-trips to the yaw the game
-        // computed. If it does not, the per-frame resync replaces it with a
-        // different heading and the server checks the arc against that instead.
-        const float fromRender = coords::characterYawDegToCanonical(renderer_.getCharacterYaw());
-        const float delta = coords::normalizeAngleRad(fromRender - e.canonicalYaw);
-        if (std::abs(delta) > 0.2f) {
-            LOG_WARNING("Facing mismatch: computed canonical=", e.canonicalYaw,
-                        " but the character's ", renderer_.getCharacterYaw(),
-                        " deg maps to ", fromRender, " (off by ",
-                        delta * 57.2957795f, " deg) - the resync will undo this");
-        }
-        // The drawn character owns facing; the game reads it back every frame.
         const float facingDeg = coords::canonicalToCharacterYawDeg(e.canonicalYaw);
-        renderer_.setCharacterYaw(facingDeg);
+        if (renderer_) {
+            // A one-shot check that the drawn facing round-trips to the yaw the
+            // game computed. If it does not, the per-frame resync replaces it
+            // with a different heading and the server checks the arc against
+            // that instead.
+            const float fromRender = coords::characterYawDegToCanonical(renderer_->getCharacterYaw());
+            const float delta = coords::normalizeAngleRad(fromRender - e.canonicalYaw);
+            if (std::abs(delta) > 0.2f) {
+                LOG_WARNING("Facing mismatch: computed canonical=", e.canonicalYaw,
+                            " but the character's ", renderer_->getCharacterYaw(),
+                            " deg maps to ", fromRender, " (off by ",
+                            delta * 57.2957795f, " deg) - the resync will undo this");
+            }
+            // The drawn character owns facing; the game reads it back every frame.
+            renderer_->setCharacterYaw(facingDeg);
+        }
         cameraController_->setFacingYaw(facingDeg);
     }));
 }
 
 PlayerView::~PlayerView() = default;
 
+void PlayerView::bindMovementControls(addons::LuaServices& services) {
+    // The movement bindings.xml drives - MoveForwardStart and the rest -
+    // held for the key bindings, beside the sticks.
+    services.holdMovement = [this](rendering::MovementCommand command, bool held) {
+        cameraController_->holdMovement(command, rendering::MovementSource::Bindings, held);
+    };
+    services.toggleAutoRun = [this]() { cameraController_->toggleAutoRun(); };
+    services.toggleRun = [this]() { cameraController_->toggleRun(); };
+    services.zoomCamera = [this](float notches) { cameraController_->processMouseWheel(notches); };
+}
+
+void PlayerView::connectMovement(game::GameHandler& game) {
+    auto* cc = cameraController_.get();
+    cc->setMovementCallback([&game](uint32_t opcode) {
+        game.sendMovement(static_cast<game::Opcode>(opcode));
+    });
+    cc->setStandUpCallback([&game]() {
+        game.setStandState(rendering::AnimationController::STAND_STATE_STAND);
+    });
+    cc->setSitDownCallback([this, &game]() {
+        game.setStandState(rendering::AnimationController::STAND_STATE_SIT);
+        animationController_->setStandState(rendering::AnimationController::STAND_STATE_SIT);
+    });
+    // The stand state is carried by AnimationCallbackHandler, which owns the
+    // one callback slot for it. A second registration here replaced or was
+    // replaced by that one depending on which was built last, which is how
+    // the seated flag stopped arriving.
+    cc->setAutoFollowCancelCallback([&game]() { game.cancelFollow(); });
+    cc->setUseWoWSpeed(true);
+}
+
 void PlayerView::attachWorld() {
-    cameraController_->setTerrainManager(renderer_.getTerrainManager());
-    cameraController_->setWMORenderer(renderer_.getWMORenderer());
-    cameraController_->setM2Renderer(renderer_.getM2Renderer());
-    cameraController_->setWaterRenderer(renderer_.getWaterRenderer());
+    if (renderer_) {
+        cameraController_->setTerrainManager(renderer_->getTerrainManager());
+        cameraController_->setWMORenderer(renderer_->getWMORenderer());
+        cameraController_->setM2Renderer(renderer_->getM2Renderer());
+        cameraController_->setWaterRenderer(renderer_->getWaterRenderer());
+    }
     // Snap camera to ground
     cameraController_->reset();
 }
@@ -71,8 +113,12 @@ void PlayerView::detachWorld() {
 }
 
 void PlayerView::setCharacterFollow(uint32_t instanceId) {
-    renderer_.setCharacterFollow(instanceId);
-    if (instanceId > 0) cameraController_->setFollowTarget(&renderer_.getCharacterPosition());
+    // A character instance is a drawn one: without a renderer there is none to
+    // follow, and 0 is all a scene ever asks for.
+    if (renderer_) {
+        renderer_->setCharacterFollow(instanceId);
+        if (instanceId > 0) cameraController_->setFollowTarget(&renderer_->getCharacterPosition());
+    }
     animationController_->onCharacterFollow(instanceId);
 }
 
@@ -91,7 +137,7 @@ rendering::ViewerMotion PlayerView::viewerMotion() const {
     return motion;
 }
 
-void PlayerView::beforeRendererUpdate(float deltaTime) {
+void PlayerView::updateControls(float deltaTime) {
     const auto cameraStart = std::chrono::steady_clock::now();
     cameraController_->update(deltaTime);
     const double cameraMs = std::chrono::duration<double, std::milli>(
@@ -100,13 +146,16 @@ void PlayerView::beforeRendererUpdate(float deltaTime) {
         LOG_WARNING("SLOW cameraController->update: ", cameraMs, "ms");
     }
     lastCameraUpdateMs_ = cameraMs;
+}
 
-    renderer_.setViewerMotion(viewerMotion());
+void PlayerView::beforeRendererUpdate(float deltaTime) {
+    if (!renderer_) return;
+    renderer_->setViewerMotion(viewerMotion());
 
     // Visibility hardening: ensure player instance cannot stay hidden after
     // taxi/camera transitions, but preserve first-person self-hide.
-    auto* characterRenderer = renderer_.getCharacterRenderer();
-    const uint32_t characterInstanceId = renderer_.getCharacterInstanceId();
+    auto* characterRenderer = renderer_->getCharacterRenderer();
+    const uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     if (characterRenderer && characterInstanceId > 0) {
         if ((cameraController_->isThirdPerson() && !cameraController_->isFirstPersonView()) ||
             animationController_->isTaxiFlight()) {
@@ -128,12 +177,12 @@ void PlayerView::afterRendererUpdate(float deltaTime) {
 }
 
 void PlayerView::updateCharacterFacing(float deltaTime) {
-    auto* characterRenderer = renderer_.getCharacterRenderer();
-    const uint32_t characterInstanceId = renderer_.getCharacterInstanceId();
+    auto* characterRenderer = renderer_->getCharacterRenderer();
+    const uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     if (characterInstanceId == 0 || !characterRenderer) return;
 
-    const glm::vec3& characterPosition = renderer_.getCharacterPosition();
-    float characterYaw = renderer_.getCharacterYaw();
+    const glm::vec3& characterPosition = renderer_->getCharacterPosition();
+    float characterYaw = renderer_->getCharacterYaw();
     auto* cc = cameraController_.get();
     auto* anim = animationController_.get();
 
@@ -175,7 +224,7 @@ void PlayerView::updateCharacterFacing(float deltaTime) {
             }
         }
     }
-    renderer_.setCharacterYaw(characterYaw);
+    renderer_->setCharacterYaw(characterYaw);
     characterRenderer->setInstanceRotation(characterInstanceId,
                                            glm::vec3(0.0f, 0.0f, glm::radians(characterYaw)));
 
@@ -191,8 +240,8 @@ void PlayerView::updateCharacterFacing(float deltaTime) {
 
 void PlayerView::spawnMountDust() {
     // Dust when mounted and moving on the ground.
-    auto* mountDust = renderer_.getMountDust();
-    const auto* camera = renderer_.getCamera();
+    auto* mountDust = renderer_->getMountDust();
+    const auto* camera = renderer_->getCamera();
     auto* anim = animationController_.get();
     if (!mountDust || !camera || !anim->isMounted() || anim->isTaxiFlight()) return;
     if (!cameraController_->isMoving() || !cameraController_->isGrounded()) return;
@@ -201,7 +250,7 @@ void PlayerView::spawnMountDust() {
     glm::vec3 velocity = camera->getForward() * cameraController_->getMovementSpeed();
     velocity.z = 0.0f;
     // At the mount's feet, slightly below the character position.
-    const glm::vec3 dustPos = renderer_.getCharacterPosition() -
+    const glm::vec3 dustPos = renderer_->getCharacterPosition() -
                               glm::vec3(0.0f, 0.0f, anim->getMountHeightOffset() * 0.8f);
     mountDust->spawnDust(dustPos, velocity, true);
 }

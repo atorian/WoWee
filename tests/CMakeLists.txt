@@ -2958,6 +2958,43 @@ target_include_directories(test_character_session SYSTEM PRIVATE ${CMAKE_SOURCE_
 target_link_libraries(test_character_session PRIVATE wowee_game_harness lua51)
 target_compile_definitions(test_character_session PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# ── The client, end to end ───────────────────────────────────
+# ClientHarness: the client's own frame and world transitions (ClientLoop) over
+# GameHarness's game, with a window that is a flag, input from a queue and no
+# renderer. It links the client's archive, wowee_client, so nothing of the
+# client is compiled again: the linker takes the members the harness reaches -
+# the loop, the character's session and map, the spawner, the world loader and
+# entry, the player's view and the Lua interface - and what those reference,
+# ImGui included (the controls ask it who has the keyboard). No window is
+# opened and no Vulkan device is made.
+add_library(wowee_client_harness STATIC client_harness.cpp)
+target_include_directories(wowee_client_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(wowee_client_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(wowee_client_harness PUBLIC wowee_game_harness wowee_client)
+
+wowee_add_test(test_client_transitions SOURCES test_client_transitions.cpp)
+target_link_libraries(test_client_transitions PRIVATE wowee_client_harness)
+# The client's objects are built for a link-time-optimised link in Release.
+if(_ipo_supported AND WOWEE_ENABLE_LTO)
+    set_property(TARGET test_client_transitions PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
+# ── wowee_loading_test_client ────────────────────────────────
+# The native loading fixture: the client's own objects with a main of its own
+# that watches the frames (loading_frame_probe.cpp). Built with the client in
+# every build, so a client change compiles once and both programs link; the
+# ordinary wowee has none of this. Not a ctest: it needs a window, a GPU and a
+# copied profile - run it through tools/test_loading_frames.ps1.
+if(NOT ANDROID)
+    add_executable(wowee_loading_test_client
+        loading_test_client_main.cpp
+        loading_frame_probe.cpp)
+    target_include_directories(wowee_loading_test_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(wowee_loading_test_client PRIVATE wowee_client_objects)
+    wowee_test_link_glm(wowee_loading_test_client)
+    wowee_apply_client_flags(wowee_loading_test_client)
+endif()
+
 # ── test_cvar_store ──────────────────────────────────────────
 # The CVars the game, the interface and the addons share: one name whatever
 # its case, and a value that survives the client closing.

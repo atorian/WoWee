@@ -3,6 +3,9 @@
 #include "core/frame_plan.hpp"
 #include "core/world_load_progress.hpp"
 #include "core/job_group.hpp"
+#include <chrono>
+#include <filesystem>
+#include <functional>
 #include <future>
 #include <glm/glm.hpp>
 #include <string>
@@ -24,16 +27,30 @@ namespace core {
 
 /// Handles terrain streaming, map transitions, world preloading,
 /// and coordinate-aware tile management for online world entry.
+///
+/// Without a renderer - a client that draws nothing - a map has no geometry to
+/// build: a load still goes through every stage, with nothing to read, upload
+/// or stand on, and is ready when its warmup has run its course.
 class WorldLoader {
     struct Load;
 public:
-    WorldLoader(const Phase& phase, rendering::Renderer* renderer, pipeline::AssetManager* assetManager);
+    /// What the stages are timed by: the steady clock, or a test's own.
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+    /// `lastWorldFile` is where the last map entered is kept for the next
+    /// start's preload; `clock` times the stages.
+    WorldLoader(const Phase& phase, rendering::Renderer* renderer, pipeline::AssetManager* assetManager,
+                std::filesystem::path lastWorldFile = defaultLastWorldFile(),
+                Clock clock = &std::chrono::steady_clock::now);
     ~WorldLoader();
+
+    /// The per-user last_world.cfg the client keeps.
+    [[nodiscard]] static std::filesystem::path defaultLastWorldFile();
 
     struct Entry { uint32_t mapId; float x, y, z; };
     enum class Stage { Idle, Preparing, Prepared, Geometry, Collision, GeometryReady, Warmup, Finished, Failed };
 
-    /// Lifecycle commands are issued by Application in Transitions.
+    /// Lifecycle commands are issued by ClientLoop in Transitions.
     class Session {
     public:
         Session(WorldLoader& owner, std::unique_ptr<Load> load);
@@ -88,7 +105,7 @@ public:
         return (it != mapNameById_.end()) ? it->second : std::string{};
     }
 
-    // Application takes the last pending destination at its transition boundary.
+    // ClientLoop takes the last pending destination at its transition boundary.
     void setPendingEntry(uint32_t mapId, float x, float y, float z) {
         pendingWorldEntry_ = Entry{.mapId = mapId, .x = x, .y = y, .z = z};
     }
@@ -103,7 +120,11 @@ private:
     const Phase& phase_;
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;
+    std::filesystem::path lastWorldFile_;
+    bool reportedLastWorldFailure_ = false;
+    Clock clock_;
     Load* load_ = nullptr;  // Borrowed from MapScope's Session.
+    [[nodiscard]] float secondsSince(std::chrono::steady_clock::time_point start) const;
     void fail(const std::string& reason);
     std::string resolveMapName(uint32_t mapId);
     static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,

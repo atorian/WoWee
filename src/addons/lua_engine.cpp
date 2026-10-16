@@ -11502,9 +11502,10 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
         // for a screen nobody could see and advancing timers that should have
         // stopped.
         //
-        // The widget already carries the answer: layout() resolves `visible`
-        // for the whole tree each frame, so this costs a lookup rather than a
-        // walk up the parents.
+        // Asked of the tree as it stands (WidgetTree::runs), not read from the
+        // last layout pass: that pass is the drawing's, and a frame created
+        // while the map loads - when nothing is drawn over the world - never
+        // had one, so its OnUpdate never ran.
         // A frame with no widget behind it falls back to the field, so
         // anything built outside the tree keeps working rather than going
         // silently still.
@@ -11516,7 +11517,7 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
             // each a CreateFrame that is never positioned and carries nothing
             // but an OnUpdate - asking whether they would be drawn stops every
             // fade, flash and animation in the interface.
-            visible = uw->visibleChain;
+            visible = widgets_.runs(uw->id);
         } else {
             lua_getfield(L_, -1, "__visible");
             visible = lua_toboolean(L_, -1);
@@ -11841,8 +11842,12 @@ int luaTracebackHandler(lua_State* L) {
 }
 
 /// Loads and runs a chunk with the traceback handler in place. Returns the
-/// same non-zero-on-error convention as luaL_dostring.
-int runChunk(lua_State* L, const char* chunk, size_t len, const char* name) {
+/// same non-zero-on-error convention as luaL_dostring. On success the chunk's
+/// first `nresults` results are left on the stack: evaluateBoolean asks for
+/// one, and read whatever happened to be on top of the stack while the chunk
+/// was run for none - so the interface answered every question it was asked
+/// with the same stale value.
+int runChunk(lua_State* L, const char* chunk, size_t len, const char* name, int nresults = 0) {
     const int base = lua_gettop(L);
     lua_pushcfunction(L, luaTracebackHandler);
     if (luaL_loadbuffer(L, chunk, len, name) != 0) {
@@ -11851,7 +11856,7 @@ int runChunk(lua_State* L, const char* chunk, size_t len, const char* name) {
         lua_remove(L, base + 1);
         return 1;
     }
-    const int rc = checkedLuaCall(L, 0, 0, base + 1);
+    const int rc = checkedLuaCall(L, 0, nresults, base + 1);
     lua_remove(L, base + 1);
     return rc;
 }
@@ -11989,7 +11994,7 @@ bool LuaEngine::evaluateBoolean(const std::string& expression) {
     const std::string chunk = "return (" + expression + ")";
     const int base = lua_gettop(L_);
     BudgetGuard guard(L_, chunkTimeoutMs_);
-    if (runChunk(L_, chunk.c_str(), chunk.size(), chunk.c_str()) != 0) {
+    if (runChunk(L_, chunk.c_str(), chunk.size(), chunk.c_str(), 1) != 0) {
         const char* err = lua_tostring(L_, -1);
         LOG_WARNING("LuaEngine: ", expression, " - ", err ? err : "(unknown)");
         // Recorded, not only logged. This answers questions the client asks

@@ -24,13 +24,11 @@
 #include <cctype>
 #include <glm/gtc/quaternion.hpp>
 #include <unordered_set>
+#include <utility>
 
 namespace wowee::core {
 namespace {
-using Clock = std::chrono::steady_clock;
-float secondsSince(Clock::time_point start) {
-    return std::chrono::duration<float>(Clock::now() - start).count();
-}
+using TimePoint = std::chrono::steady_clock::time_point;
 std::string textureKey(std::string path) {
     if (auto nul = path.find('\0'); nul != std::string::npos) path.resize(nul);
     std::replace(path.begin(), path.end(), '/', '\\');
@@ -67,7 +65,7 @@ struct WorldLoader::Load {
     JobGroup::Token token;
     JobGroup::Future<std::shared_ptr<PreparedMap>> future;
     std::shared_ptr<PreparedMap> prepared;
-    Clock::time_point started = Clock::now(), stageStarted = started;
+    TimePoint started{}, stageStarted{};
     WorldTileProgress tiles;
     WorldWarmupProgress warmup;
     bool rootPlaced = false;
@@ -75,10 +73,16 @@ struct WorldLoader::Load {
 };
 
 WorldLoader::WorldLoader(const Phase& phase, rendering::Renderer* renderer,
-                         pipeline::AssetManager* assets)
-    : phase_(phase), renderer_(renderer), assetManager_(assets) {}
+                         pipeline::AssetManager* assets, std::filesystem::path lastWorldFile,
+                         Clock clock)
+    : phase_(phase), renderer_(renderer), assetManager_(assets),
+      lastWorldFile_(std::move(lastWorldFile)), clock_(std::move(clock)) {}
 
 WorldLoader::~WorldLoader() { cancelWorldPreload(); }
+
+float WorldLoader::secondsSince(TimePoint start) const {
+    return std::chrono::duration<float>(clock_() - start).count();
+}
 
 WorldLoader::Session::Session(WorldLoader& owner, std::unique_ptr<Load> load)
     : owner_(owner), load_(std::move(load)) {
@@ -119,7 +123,7 @@ void WorldLoader::fail(const std::string& reason) {
 std::string WorldLoader::resolveMapName(uint32_t mapId) {
     if (!mapNameCacheLoaded_) {
         mapNameCacheLoaded_ = true;
-        if (auto dbc = assetManager_->loadDBC("Map.dbc"); dbc && dbc->isLoaded()) {
+        if (auto dbc = assetManager_ ? assetManager_->loadDBC("Map.dbc") : nullptr; dbc && dbc->isLoaded()) {
             const auto* layout = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Map") : nullptr;
             for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
                 auto name = dbc->getString(row, layout ? (*layout)["InternalName"] : 1);
@@ -137,8 +141,11 @@ std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& 
     load_->token = jobs.token();
     load_->entry = entry;
     load_->spawn = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
-    if (!renderer_ || !assetManager_ || !assetManager_->isInitialized()) {
-        fail("Renderer or assets are unavailable");
+    load_->started = load_->stageStarted = clock_();
+    // A scene that is drawn is built from the game data; without it there is
+    // nothing to draw the map with.
+    if (renderer_ && (!assetManager_ || !assetManager_->isInitialized())) {
+        fail("Game data is unavailable, so the map cannot be built");
         return session;
     }
     load_->mapName = resolveMapName(entry.mapId);
@@ -146,7 +153,14 @@ std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& 
     cancelWorldPreload();
     saveLastWorldInfo(entry.mapId, load_->mapName, entry.x, entry.y);
     LOG_INFO("World load started: map=", entry.mapId, " name=", load_->mapName,
-             " server=(", entry.x, ",", entry.y, ",", entry.z, ")");
+             " server=(", entry.x, ",", entry.y, ",", entry.z, ")",
+             renderer_ ? "" : " (nothing is drawn: no scene to build)");
+    if (!renderer_) {
+        // Nothing to read for a scene nobody draws: the preparation is empty,
+        // and still goes through the same job and the same stages.
+        load_->future = jobs.submit([](const JobGroup::Token&) { return std::make_shared<PreparedMap>(); });
+        return session;
+    }
     auto* assets = assetManager_;
     load_->future = jobs.submit([assets, name = load_->mapName](const JobGroup::Token& token) {
         return prepareMap(*assets, name, token);
@@ -254,6 +268,12 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
 
 bool WorldLoader::initializeScene() {
     if (!requirePhase(phase_, Phase::Transitions, "initialize loading scene") || stage() != Stage::Prepared) return false;
+    if (!renderer_) {
+        load_->stage = Stage::Geometry;
+        load_->stageStarted = clock_();
+        load_->status = {WorldLoadResult::Pending, "No geometry to build: nothing is drawn", 0.35f};
+        return true;
+    }
     try {
         const auto& name = load_->mapName;
         bool ok = false;
@@ -275,7 +295,7 @@ bool WorldLoader::initializeScene() {
             }
         }
         load_->stage = Stage::Geometry;
-        load_->stageStarted = Clock::now();
+        load_->stageStarted = clock_();
         load_->status = {WorldLoadResult::Pending, isInstance() ? "Uploading instance geometry..." : "Streaming terrain tiles...", 0.35f};
         if (!isInstance()) {
             auto* terrain = renderer_->getTerrainManager();
@@ -303,7 +323,10 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
             load.status = {WorldLoadResult::Pending, "Preparing world renderers...", 0.2f};
         } else if (stage() == Stage::Geometry) {
             bool done = false;
-            if (isInstance()) {
+            if (!renderer_) {
+                // A scene nobody draws has no geometry to wait for.
+                done = true;
+            } else if (isInstance()) {
                 auto& prepared = *load.prepared;
                 auto* wmo = renderer_->getWMORenderer();
                 auto* m2 = renderer_->getM2Renderer();
@@ -328,7 +351,12 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                         if (ctx) ctx->endUploadBatch();
                     }
                 } uploads(ctx, wmo, m2, prepared);
-                const auto started = Clock::now();
+                // A budget of this frame's work, so the real clock rather than
+                // the one the stages are timed by.
+                const auto started = std::chrono::steady_clock::now();
+                const auto uploadSeconds = [&started] {
+                    return std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
+                };
                 if (!load.rootPlaced) {
                     const uint32_t modelId = 900000 + load.entry.mapId;
                     const auto result = wmo->loadModelIncremental(prepared.root, modelId, 2.0f);
@@ -342,7 +370,7 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                     }
                     load.rootPlaced = true;
                 }
-                while (load.doodad < prepared.doodads.size() && secondsSince(started) < 0.002f) {
+                while (load.doodad < prepared.doodads.size() && uploadSeconds() < 0.002f) {
                     const auto& d = prepared.doodads[load.doodad++];
                     if (!m2->loadModel(*d.model, d.modelId)) {
                         LOG_WARNING("Instance doodad upload failed: ", d.model->name, "; doodad omitted");
@@ -366,13 +394,13 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
             if (done) {
                 load.stage = Stage::Collision;
                 load.status = {WorldLoadResult::Pending, "Building collision cache...", 0.88f};
-                if (auto* wmo = renderer_->getWMORenderer()) {
+                if (auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr) {
                     wmo->loadFloorCache();
                     if (wmo->getFloorCacheSize() == 0) wmo->beginFloorCachePrecompute();
                 }
             }
         } else if (stage() == Stage::Collision) {
-            auto* wmo = renderer_->getWMORenderer();
+            auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr;
             if (!wmo || wmo->precomputeFloorCacheStep(256)) {
                 load.stage = Stage::GeometryReady;
                 load.status = {WorldLoadResult::Pending, "Preparing creatures...", 0.97f};
@@ -385,13 +413,14 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
 void WorldLoader::observeReadiness(bool spawnsPending) {
     if (!requirePhase(phase_, Phase::Present, "observe world readiness") || stage() != Stage::Warmup) return;
     auto& load = *load_;
-    auto* ctx = renderer_->getVkContext();
-    bool ground = false;
-    if (auto* wmo = renderer_->getWMORenderer()) {
+    auto* ctx = renderer_ ? renderer_->getVkContext() : nullptr;
+    // Nothing to fall through in a scene nobody draws.
+    bool ground = renderer_ == nullptr;
+    if (auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr) {
         const auto floor = wmo->getFloorHeight(load.spawn.x, load.spawn.y, load.spawn.z + 5);
         ground = floor && std::abs(*floor - load.spawn.z) < 15;
     }
-    auto* terrain = renderer_->getTerrainManager();
+    auto* terrain = renderer_ ? renderer_->getTerrainManager() : nullptr;
     if (!ground && terrain) {
         const auto height = terrain->getHeightAt(load.spawn.x, load.spawn.y);
         ground = height && std::abs(*height - load.spawn.z) < 15;
@@ -407,14 +436,14 @@ void WorldLoader::observeReadiness(bool spawnsPending) {
 void WorldLoader::beginWarmup() {
     if (!requirePhase(phase_, Phase::Transitions, "begin world warmup") || stage() != Stage::GeometryReady) return;
     load_->stage = Stage::Warmup;
-    load_->stageStarted = Clock::now();
+    load_->stageStarted = clock_();
     load_->status = {WorldLoadResult::Pending, "Finalizing world sync...", 0.97f};
     LOG_INFO("World geometry ready: map=", load_->entry.mapId, " elapsed_ms=", secondsSince(load_->started) * 1000);
 }
 
 bool WorldLoader::finish() {
     if (!requirePhase(phase_, Phase::Transitions, "finish world load") || status().result != WorldLoadResult::Ready) return false;
-    if (auto* ctx = renderer_->getVkContext()) {
+    if (auto* ctx = renderer_ ? renderer_->getVkContext() : nullptr) {
         ctx->pollUploadBatches();
         if (!ctx->uploadsComplete()) return false;
     }
@@ -606,8 +635,7 @@ void WorldLoader::cancelWorldPreload() {
     worldPreload_.reset();
 }
 
-void WorldLoader::saveLastWorldInfo(uint32_t mapId, const std::string& mapName,
-                                     float serverX, float serverY) {
+std::filesystem::path WorldLoader::defaultLastWorldFile() {
 #ifdef _WIN32
     const char* base = std::getenv("APPDATA");
     std::string dir = base ? std::string(base) + "\\wowee" : ".";
@@ -615,23 +643,25 @@ void WorldLoader::saveLastWorldInfo(uint32_t mapId, const std::string& mapName,
     const char* home = std::getenv("HOME");
     std::string dir = home ? std::string(home) + "/.wowee" : ".";
 #endif
-    std::filesystem::create_directories(dir);
-    std::ofstream f(dir + "/last_world.cfg");
+    return std::filesystem::path(dir) / "last_world.cfg";
+}
+
+void WorldLoader::saveLastWorldInfo(uint32_t mapId, const std::string& mapName,
+                                     float serverX, float serverY) {
+    std::error_code ec;
+    if (lastWorldFile_.has_parent_path()) std::filesystem::create_directories(lastWorldFile_.parent_path(), ec);
+    std::ofstream f(lastWorldFile_);
     if (f) {
         f << mapId << "\n" << mapName << "\n" << serverX << "\n" << serverY << "\n";
+    } else if (!std::exchange(reportedLastWorldFailure_, true)) {
+        LOG_WARNING("Could not write ", lastWorldFile_.string(),
+                    ": the next start will not preload the map last entered");
     }
 }
 
 WorldLoader::LastWorldInfo WorldLoader::loadLastWorldInfo() const {
-#ifdef _WIN32
-    const char* base = std::getenv("APPDATA");
-    std::string dir = base ? std::string(base) + "\\wowee" : ".";
-#else
-    const char* home = std::getenv("HOME");
-    std::string dir = home ? std::string(home) + "/.wowee" : ".";
-#endif
     LastWorldInfo info;
-    std::ifstream f(dir + "/last_world.cfg");
+    std::ifstream f(lastWorldFile_);
     if (!f) return info;
     std::string line;
     try {

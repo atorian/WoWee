@@ -23,7 +23,7 @@
 namespace wowee { namespace core {
 
 WorldEntryCallbackHandler::WorldEntryCallbackHandler(
-    rendering::Renderer& renderer,
+    rendering::Renderer* renderer,
     PlayerView& playerView,
     game::GameHandler& gameHandler,
     WorldLoader* worldLoader,
@@ -48,14 +48,15 @@ std::optional<float> WorldEntryCallbackHandler::sampleBestFloorAt(float x, float
     std::optional<float> wmoFloor;
     std::optional<float> m2Floor;
 
-    if (renderer_.getTerrainManager()) {
-        terrainFloor = renderer_.getTerrainManager()->getHeightAt(x, y);
+    if (!renderer_) return std::nullopt;
+    if (renderer_->getTerrainManager()) {
+        terrainFloor = renderer_->getTerrainManager()->getHeightAt(x, y);
     }
-    if (renderer_.getWMORenderer()) {
-        wmoFloor = renderer_.getWMORenderer()->getFloorHeight(x, y, probeZ);
+    if (renderer_->getWMORenderer()) {
+        wmoFloor = renderer_->getWMORenderer()->getFloorHeight(x, y, probeZ);
     }
-    if (renderer_.getM2Renderer()) {
-        m2Floor = renderer_.getM2Renderer()->getFloorHeight(x, y, probeZ);
+    if (renderer_->getM2Renderer()) {
+        m2Floor = renderer_->getM2Renderer()->getFloorHeight(x, y, probeZ);
     }
 
     std::optional<float> best;
@@ -176,10 +177,12 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
     // ended with its scope.
     const uint32_t currentLoadedMap = worldLoader_ ? worldLoader_->getLoadedMapId() : 0xFFFFFFFF;
 
-    // Same-map teleport (taxi landing, GM teleport, hearthstone on same continent):
-    if (!isInitialEntry && mapId == currentLoadedMap && renderer_.getTerrainManager()) {
+    // Same-map teleport (taxi landing, GM teleport, hearthstone on same continent).
+    // Only where terrain streams: without a renderer there is none to keep, and
+    // the destination is entered like any other map.
+    if (!isInitialEntry && mapId == currentLoadedMap && renderer_ && renderer_->getTerrainManager()) {
         // Check if teleport is far enough to need terrain loading (>500 render units)
-        glm::vec3 oldPos = renderer_.getCharacterPosition();
+        glm::vec3 oldPos = renderer_->getCharacterPosition();
         glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(x, y, z));
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
         float teleportDistSq = glm::dot(renderPos - oldPos, renderPos - oldPos);
@@ -191,7 +194,7 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
             LOG_WARNING("Far same-map teleport (dist=", std::sqrt(teleportDistSq),
                         "), deferring world reload to next frame");
             // Update position immediately so the player doesn't keep moving at old location
-            renderer_.getCharacterPosition() = renderPos;
+            renderer_->getCharacterPosition() = renderPos;
             if (playerView_.getCameraController()) {
                 auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
                 if (ft) *ft = renderPos;
@@ -205,7 +208,7 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
         }
         LOG_INFO("Same-map teleport (map ", mapId, "), skipping full world reload");
         // canonical and renderPos already computed above for distance check
-        renderer_.getCharacterPosition() = renderPos;
+        renderer_->getCharacterPosition() = renderPos;
         if (playerView_.getCameraController()) {
             auto* ft = playerView_.getCameraController()->getFollowTargetMutable();
             if (ft) *ft = renderPos;
@@ -222,14 +225,14 @@ void WorldEntryCallbackHandler::enterWorld(uint32_t mapId, float x, float y, flo
         // parsing. Bounded on purpose: finalizing every ready tile here
         // stalls the main thread for seconds when many are ready, and the
         // rest finalize over subsequent frames via the terrain update loop.
-        renderer_.getTerrainManager()->processReadyTiles();
+        renderer_->getTerrainManager()->processReadyTiles();
 
         // Queue all remaining tiles within the load radius (8 tiles = 17x17)
         // at the new position. precacheTiles skips already-loaded/pending tiles,
         // so this only enqueues tiles that aren't yet in the pipeline.
         // This ensures background workers immediately start loading everything
         // visible from the new position (hearthstone may land far from old location).
-        precacheNearbyTiles(renderer_.getTerrainManager(), renderPos, 8);
+        precacheNearbyTiles(renderer_->getTerrainManager(), renderPos, 8);
         return;
     }
 
@@ -402,7 +405,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     // the background streaming workers to bring tiles into the cache so the player
     // lands on solid ground instead of falling through un-loaded terrain.
     gameHandler_.setHearthstonePreloadCallback([this](uint32_t mapId, float x, float y, float z) {
-        auto* terrainMgr = renderer_.getTerrainManager();
+        auto* terrainMgr = renderer_ ? renderer_->getTerrainManager() : nullptr;
         if (!terrainMgr || !assetManager_) return;
 
         // Resolve map name from the cached Map.dbc table
@@ -444,9 +447,9 @@ void WorldEntryCallbackHandler::setupCallbacks() {
 
 void WorldEntryCallbackHandler::update(float deltaTime) {
     // Hearth teleport: keep player frozen until terrain loads at destination
-    if (hearthTeleportPending_ && renderer_.getTerrainManager()) {
+    if (hearthTeleportPending_ && renderer_ && renderer_->getTerrainManager()) {
         hearthTeleportTimer_ -= deltaTime;
-        auto terrainH = renderer_.getTerrainManager()->getHeightAt(
+        auto terrainH = renderer_->getTerrainManager()->getHeightAt(
             hearthTeleportPos_.x, hearthTeleportPos_.y);
         if (terrainH || hearthTeleportTimer_ <= 0.0f) {
             // Terrain loaded (or timeout) - snap to floor and release

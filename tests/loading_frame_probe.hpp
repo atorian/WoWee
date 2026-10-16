@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/event_bus.hpp"
+#include "core/frame_observer.hpp"
 #include "core/frame_plan.hpp"
 #include <chrono>
 #include <string>
@@ -10,15 +11,17 @@
 namespace wowee::core {
 class Application;
 
-/// Native integration fixture, enabled only with the existing offline world
-/// fixture and WOWEE_LOADING_TEST. Exercises the real loop and public inputs.
-class LoadingFrameProbe {
+/// Native integration fixture: watches the real client's frames through the
+/// offline world fixture (WOWEE_MULGORE_PROBE) and drives the scenario named
+/// by WOWEE_LOADING_TEST. Only wowee_loading_test_client builds one; the
+/// ordinary client has no observer.
+class LoadingFrameProbe final : public FrameObserver {
 public:
-    LoadingFrameProbe(Application& app, EventBus& events);
-    void beginFrame();
-    void streaming(const FramePlan& plan);
-    void interfaceFrame(const FramePlan& plan);
-    void loopEnded();
+    LoadingFrameProbe(Application& app, EventBus& events, std::string action);
+    void frameBegan() override;
+    void streamingDone(const FramePlan& plan) override;
+    void interfaceStarting(const FramePlan& plan) override;
+    void loopEnded() override;
 private:
     using Clock = std::chrono::steady_clock;
     void pass(const char* detail);

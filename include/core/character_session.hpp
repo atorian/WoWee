@@ -83,7 +83,9 @@ public:
         EntitySpawner& spawner;
         rendering::SpellVisualSystem* spellVisuals = nullptr;
         audio::AudioCoordinator* audio = nullptr;
-        pipeline::AssetManager& assets;
+        /// Null in a client without game data; spells then have nothing to
+        /// be shown with either.
+        pipeline::AssetManager* assets = nullptr;
         /// Null when the addon system could not start.
         addons::AddonCatalog* addonCatalog = nullptr;
         addons::LuaServices luaServices;

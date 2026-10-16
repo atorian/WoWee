@@ -2,12 +2,24 @@
 
 Chosen for WoWee on 2026-10-15. Applies when adding per-frame client work.
 
-`Application::runFrame` is the authoritative sequence: Input, Network, Game,
-Events, Streaming, Interface, Present, Render, Transitions, Pace. `framePlanFor(AppState)`
-chooses the connection, simulation, world presentation and view for the frame.
-Compute one const plan before Input and pass it through the phases. State setters
-require Transitions; other phases only request a state change.
-Keep this an ordinary function; do not introduce a phase registration system.
+`ClientLoop::runFrame` (`include/core/client_loop.hpp`) is the authoritative
+sequence: Input, Network, Game, Events, Streaming, Interface, Present, Render,
+Transitions, Pace. `framePlanFor(AppState)` chooses the connection, simulation,
+world presentation and view for the frame. Compute one const plan before Input
+and pass it through the phases. State setters require Transitions; other phases
+only request a state change. Keep this an ordinary function; do not introduce a
+phase registration system.
+
+ClientLoop is given the window, the platform input and the front end (what is
+drawn, played and shown) as interfaces - `ClientWindow`, `ClientInput`,
+`ClientFrontEnd` - and the renderer as a pointer that is null in a client that
+draws nothing. Application is the real implementation of all three; ClientHarness
+(`tests/client_harness.hpp`) runs the same frame with stand-ins. Work that needs
+the renderer, ImGui or SDL goes behind the front end, at the hook for its phase;
+work that decides what happens to the world - the state, the character's
+session, the map, the load - stays in ClientLoop, where the harness exercises it.
+A program that watches the frames (the native fixture, the harness) does so
+through `core::FrameObserver`, never through code compiled only for it.
 
 GameHandler exposes separate network and simulation steps. Its combined
 `update` remains available to callers such as GameHarness. Protocol polling
@@ -39,13 +51,18 @@ Checklist:
 - Keep Lua callbacks, UI buttons and widget mutation out of Render.
 - Keep loading work in its designated phases; restore phase scopes on exceptions.
 - Put lifecycle mutations after submit, and all cap waits in Pace.
-- Verify behavior with packet/Lua tests and compare frame profiles.
+- Verify behavior with packet/Lua tests and the client harness
+  (`client_transitions`), and compare frame profiles.
 
 `LOADING_WORLD` runs the same frame with network, simulation, streaming, events
 and interface updates, then draws the loading overlay through the normal render
 submission. WorldLoader starts jobs and reports Pending/Ready/Failed with a reason;
 it never polls SDL, dispatches packets, updates the game or presents another frame.
-Application owns scene cleanup, player preparation and the final state change.
+ClientLoop owns scene cleanup, player preparation and the final state change,
+and asks the front end for what only a drawn scene has (the player's model, an
+instance's floor, the loading screen). Without a renderer WorldLoader still
+runs every stage, with nothing to build, so the load and its warmup are the
+same in a test.
 Only the Transitions phase starts/cancels/commits world lifetimes. A character's
 lifetime is a `CharacterSession` (interface, presenters, per-character state) and
 holds the map's. A world lifetime is a `MapScope`: ending it cancels its `JobGroup` and joins the work

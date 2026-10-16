@@ -800,6 +800,17 @@ public:
     /// 1528-tall window and at double on a 384-tall one.
     void layout(float pixelW, float pixelH);
 
+    /// Whether this widget runs: shown, with every ancestor shown - what WoW's
+    /// IsVisible answers and what decides whether an OnUpdate is called.
+    ///
+    /// Asked of the tree as it stands rather than read from the last layout
+    /// pass, because that pass belongs to drawing: it runs only on a frame the
+    /// interface is drawn over the world. While a map loads - and in a client
+    /// that draws nothing - there was none, so a frame created then never
+    /// learned it was shown and its OnUpdate never ran. A walk up the parents
+    /// for the few frames that carry an OnUpdate.
+    [[nodiscard]] bool runs(uint32_t id) const;
+
     /// Resolve one widget's rect now, if anything has moved since it was last
     /// resolved.
     ///

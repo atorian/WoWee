@@ -117,35 +117,13 @@ void spawnInstancePortalVisuals(uint32_t mapId,
 } // namespace
 
 
-void Application::beginWorldLoading(WorldLoader::Entry entry) {
-    if (!requireTransitions("enter loading world")) return;
-    const auto [mapId, x, y, z] = entry;
-    // The character entering: their session when this is the first map since
-    // they logged in, the one already standing on a map change.
-    beginCharacterSession();
-    // The previous map - finished, or a load this entry supersedes, even on
-    // the same map - ends here: its work is cancelled and joined, its streaming
-    // stopped and its instances released before the next scope binds the
-    // spawner and the renderers.
-    session_->enterMap(mapScopeServices(), *worldLoader_, entry);
+// The presentation's part of a map's load. The order of the load - the
+// session, the map scope, the camera, the state - is ClientLoop's; these are
+// called from it at their points.
 
-    if (gameHandler) {
-        gameHandler->cancelFollow();
-        gameHandler->getMovementHandler()->stopInputMovement();
-    }
-    if (auto* camera = getCameraController()) {
-        const auto spawn = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(x, y, z)));
-        const auto yaw = gameHandler ? coords::canonicalToCharacterYawDeg(gameHandler->getMovementInfo().orientation) : 0;
-        camera->clearMovementInputs();
-        camera->releaseMouseCapture();
-        camera->setOnlineMode(true);
-        camera->setDefaultSpawn(spawn, yaw, -15.0f);
-        camera->reset();
-        camera->setEnabled(false);
-    }
+void Application::mapEntryBegun(const WorldLoader::Entry& entry) {
+    const auto [mapId, x, y, z] = entry;
     if (renderer) renderer->getCharacterPosition() = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(x, y, z)));
-    if (worldEntryCallbacks_) worldEntryCallbacks_->beginMapEntry();
-    setState(AppState::LOADING_WORLD);
     if (!loadingScreen_) {
         loadingScreen_ = std::make_unique<rendering::LoadingScreen>();
         loadingScreen_->setVkContext(window->getVkContext());
@@ -158,15 +136,10 @@ void Application::beginWorldLoading(WorldLoader::Entry entry) {
     loadingScreen_->setProgress(0);
 }
 
-void Application::prepareWorldPlayer() {
-    if (!requireTransitions("prepare loading player")) return;
-    // The scene's renderers exist now - built by the first entry, found by
-    // later ones - and this map's scope takes its instances and terrain.
-    currentMap()->adoptRenderers();
+void Application::mapRenderersReady(const WorldLoader::Entry& entry, const std::string& mapName) {
     onWorldRenderersReady();
-    setActiveMapName(worldLoader_->mapName());
+    setActiveMapName(mapName);
     if (audioCoordinator_) audioCoordinator_->loadWorldSounds(assetManager.get(), zoneTracker_ ? zoneTracker_->getZoneManager() : nullptr);
-    const auto entry = worldLoader_->entry();
     const glm::vec3 spawnRender = coords::canonicalToRender(coords::serverToCanonical(glm::vec3(entry.x, entry.y, entry.z)));
     // Build faction hostility map for this character's race
     if (gameHandler) {
@@ -195,58 +168,26 @@ void Application::prepareWorldPlayer() {
             LOG_WARNING("No active character found for player model spawning");
         }
     }
-
-
-    // The renderer may have created the camera's world dependencies just now.
-    if (auto* camera = getCameraController()) {
-        const float yaw = gameHandler ? coords::canonicalToCharacterYawDeg(gameHandler->getMovementInfo().orientation) : 0;
-        camera->setOnlineMode(true);
-        camera->setDefaultSpawn(spawnRender, yaw, -15.0f);
-        camera->reset();
-        camera->setEnabled(false);
-    }
-    // NPC death, respawn and swing are presented by AnimationCallbackHandler,
-    // which owns those callbacks from setup. Registering them again here for
-    // every map replaced its versions (and the rise animation) silently, and
-    // left the spawn presentation of a map scope's first objects without them.
 }
 
-void Application::finishWorldGeometry() {
-    if (!requireTransitions("finish loading geometry")) return;
-    if (worldLoader_->isInstance()) {
-        if (auto* wmo = renderer->getWMORenderer()) {
-            auto position = renderer->getCharacterPosition();
-            if (auto floor = wmo->getFloorHeight(position.x, position.y, position.z + 5)) {
-                position.z = *floor + 0.1f;
-                renderer->getCharacterPosition() = position;
-                if (gameHandler) {
-                    const auto canonical = coords::renderToCanonical(position);
-                    gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
-                }
-            } else LOG_WARNING("Instance spawn floor unavailable on map ", worldLoader_->entry().mapId,
-                               "; retaining server spawn height until warmup");
-        }
+void Application::placeOnInstanceFloor(const WorldLoader::Entry& entry) {
+    if (auto* wmo = renderer->getWMORenderer()) {
+        auto position = renderer->getCharacterPosition();
+        if (auto floor = wmo->getFloorHeight(position.x, position.y, position.z + 5)) {
+            position.z = *floor + 0.1f;
+            renderer->getCharacterPosition() = position;
+            if (gameHandler) {
+                const auto canonical = coords::renderToCanonical(position);
+                gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
+            }
+        } else LOG_WARNING("Instance spawn floor unavailable on map ", entry.mapId,
+                           "; retaining server spawn height until warmup");
     }
-    if (auto* camera = getCameraController()) camera->reset();
+}
+
+void Application::mapGeometryReady(const WorldLoader::Entry& entry) {
     renderer->setCharacterYaw(gameHandler ? coords::canonicalToCharacterYawDeg(gameHandler->getMovementInfo().orientation) : 0);
-    spawnInstancePortalVisuals(worldLoader_->entry().mapId, renderer.get(), assetManager.get());
-    worldLoader_->beginWarmup();
-}
-
-void Application::completeWorldLoading() {
-    if (!requireTransitions("complete loading world")) return;
-    if (!worldLoader_->finish()) return;
-    if (auto* camera = getCameraController()) {
-        camera->clearMovementInputs();
-        camera->suppressMovementFor(0);
-        // The old warmup advanced this ten-second entry grace with its frames.
-        camera->suspendGravityFor(std::max(0.0f, 10.0f - worldLoader_->warmupSeconds()));
-        camera->setEnabled(true);
-        camera->startIntroPan(2.8f, 140.0f);
-    }
-    setState(AppState::IN_GAME);
-    // The interface hears of it in the next Interface phase.
-    session_->noteMapReady();
+    spawnInstancePortalVisuals(entry.mapId, renderer.get(), assetManager.get());
 }
 
 } // namespace wowee::core

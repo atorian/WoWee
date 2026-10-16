@@ -21,7 +21,9 @@ class PlayerView;
 /// Owns hearth-teleport state and worldEntryMovementGraceTimer.
 class WorldEntryCallbackHandler {
 public:
-    WorldEntryCallbackHandler(rendering::Renderer& renderer,
+    /// `renderer` is null in a client that draws nothing: every entry is then
+    /// a map entry, there being no streamed terrain to keep across a teleport.
+    WorldEntryCallbackHandler(rendering::Renderer* renderer,
                               PlayerView& playerView,
                               game::GameHandler& gameHandler,
                               WorldLoader* worldLoader,
@@ -74,7 +76,7 @@ private:
     /// Force server-side teleport via GM command
     void forceServerTeleportCommand(const glm::vec3& renderPos);
 
-    rendering::Renderer& renderer_;
+    rendering::Renderer* renderer_;
 
     PlayerView& playerView_;
     game::GameHandler& gameHandler_;

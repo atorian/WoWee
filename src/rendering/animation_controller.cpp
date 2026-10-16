@@ -843,7 +843,7 @@ void AnimationController::clearMount() {
         cameraController->setMountHeightOffset(0.0f);
     }
 
-    if (audio_->getMountSoundManager()) {
+    if (audio_ && audio_->getMountSoundManager()) {
         audio_->getMountSoundManager()->onDismount();
     }
 }

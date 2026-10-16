@@ -27,31 +27,48 @@ The former readiness rules are retained:
   the scope before releasing AssetManager.
 
 Run unit/domain checks with `ctest --test-dir build-dev -R
-"world_load_progress|session_domain|lua_handler_globals" --output-on-failure`.
+"world_load_progress|session_domain|lua_handler_globals|client_transitions" --output-on-failure`.
 
-For native integration, use a complete copied profile on D: (no account/server is
-contacted by the offline fixture). The scenario lives under `tests/` and is
-compiled only in the explicit `WOWEE_LOADING_FRAME_TEST_CLIENT=ON` configuration,
-which emits `wowee_loading_test_client` and does not install the client target.
-The default `OFF` configuration has no fixture fields, calls, source or environment
-switch. Set `TMP`, `TEMP` and `TMPDIR` to `D:\games\WoWee\build-dev\tmp` first:
+The client's half of the transitions is a ctest of its own,
+`client_transitions` (`tests/test_client_transitions.cpp`): ClientLoop - the
+same frame and transitions as the client - over GameHarness's game, with a
+window that is a flag, input from a queue and no renderer
+(`tests/client_harness.hpp`). It covers closing the window during loading, a
+key released during loading, logout and disconnect during loading and in the
+world, a map change, the first creature of a login and a relog onto another
+character, with no window, GPU, server or special build.
+
+What only a real window and device can show stays native: the swapchain rebuilt
+on a resize, real map geometry and its timings, and the camera's collision
+against the terrain a map change takes away. For that, use a complete copied
+profile on D: (no account/server is contacted by the offline fixture). The
+scenario lives under `tests/` and is its own program, `wowee_loading_test_client`:
+the client's objects (`wowee_client_objects`) with the fixture's main
+(`tests/loading_test_client_main.cpp`), which hands the client a frame observer
+(`core::FrameObserver`, `tests/loading_frame_probe.cpp`). It is built with
+`wowee` in every configuration with tests and never installed; `wowee.exe` has no
+fixture code, observer or environment switch. Set `TMP`, `TEMP` and `TMPDIR` to
+`D:\games\WoWee\build-dev\tmp` first:
 
 ```powershell
-cmake --preset dev -DWOWEE_LOADING_FRAME_TEST_CLIENT=ON
-ninja -C build-dev wowee
+ninja -C build-dev wowee_loading_test_client
 tools/test_loading_frames.ps1 -ProfileSource D:\path\to\complete-profile
 tools/test_loading_frames.ps1 -ProfileSource D:\path\to\complete-profile -Cases ready `
     -MapId 34 -SpawnX 45.7492 -SpawnY 0.6882 -SpawnZ -16.1
 tools/test_loading_frames.ps1 -ProfileSource D:\path\to\complete-profile -Cases disconnect `
     -MapId 34 -Stage preparing
-cmake --preset dev -DWOWEE_LOADING_FRAME_TEST_CLIENT=OFF
-ninja -C build-dev wowee
 ```
 
 The fixture drives the actual client loop: SDL window close/resize, posted
 disconnect/logout/entry notifications, and a virtual movement key pressed and
 released while loading. It requires Lua OnUpdate, FIFO game notifications and
-posted-event dispatch to work during loading before it performs an action.
+posted-event dispatch to work during loading for the actions that keep the client
+loading (transfer, release, resize, ready), checked when the scenario succeeds
+rather than before its action: on a warm cache the preparing stage can end before
+the interface has had a frame, and an action gated on the check never fired.
+Actions that leave at once (close, disconnect, logout) can end the session before
+the interface gets a loading frame, so they do not require it; the
+`client_transitions` ctest covers OnUpdate during loading.
 Network publication itself is exercised separately by GameHarness.
 
 Each run reports `Loading probe PASS/FAIL`, frame distance and elapsed time, with
@@ -91,3 +108,13 @@ the fixture, and `wowee.exe` contains neither `LoadingFrameProbe`, its scenario
 messages nor `WOWEE_LOADING_TEST`. Guard/build logs are under
 `build-dev/scratch/loading-guard-fixes.*`, `loading-fixture-build.*` and
 `loading-shipping-build.*`.
+
+On 2026-10-16 the configuration switch went away: `wowee_loading_test_client`
+is its own program over the same client objects, built with `wowee` in one
+normal build, and the scenarios that need no window run as the
+`client_transitions` ctest (`tasks/client-harness-plan.md`). That ctest found
+that the fixture's precondition check ("OnUpdate, ordered game events and posted
+events delivered during loading") had been vacuous - `evaluateBoolean` answered
+true whatever it was asked - and that OnUpdate did not in fact run for a frame
+made during a load. Both are fixed; the native scenarios above have to be run
+again to be trusted.

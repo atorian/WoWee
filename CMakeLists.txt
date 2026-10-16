@@ -26,7 +26,6 @@ endif()
 # Options
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(WOWEE_BUILD_TESTS "Build tests" ON)
-option(WOWEE_LOADING_FRAME_TEST_CLIENT "Build the native loading integration client instead of the ordinary client" OFF)
 option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build configs; pairs well with Debug)" OFF)
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
 option(WOWEE_ENABLE_LTO "Link-time optimisation for the client in Release builds" ON)
@@ -655,6 +654,9 @@ set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
     src/core/application_world_loading.cpp
+    src/core/client_main.cpp
+    src/core/client_loop.cpp
+    src/core/interface_input.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
@@ -1143,10 +1145,9 @@ set(WOWEE_SOURCES
     src/addons/lua_action_api.cpp
     src/addons/lua_movement_api.cpp
     src/addons/toc_parser.cpp
-
-    # Main
-    src/main.cpp
 )
+# main() is each program's own: the ordinary client's below, the native loading
+# fixture's in tests/. Everything else in WOWEE_SOURCES is the client library.
 
 # Libraries carved out of the client, so the editor, the tools and the probes
 # link them instead of compiling the same files again. The editor alone used
@@ -1220,11 +1221,16 @@ set(WOWEE_PROTOCOL_SOURCES
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_PROTOCOL_SOURCES})
 # wowee_net: the connections the wire travels over. The TCP socket, the world
 # socket's framing and header encryption, and the one HTTPS GET the client
-# makes. On wowee_protocol, which it frames; nothing above it.
+# makes. On wowee_protocol, which it frames; nothing above it. The header
+# ciphers (RC4, and the vanilla one) are the world socket's own: left in the
+# client, wowee_net reached up into it, which a program linking the client as
+# an archive cannot resolve.
 set(WOWEE_NET_SOURCES
     src/network/socket.cpp
     src/network/tcp_socket.cpp
     src/network/world_socket.cpp
+    src/auth/rc4.cpp
+    src/auth/vanilla_crypt.cpp
     src/core/https_get.cpp
 )
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_NET_SOURCES})
@@ -1410,27 +1416,35 @@ if(ANDROID)
     target_compile_options(lua51 PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
 endif()
 
-# Create executable
+# The client, compiled once.
+#
+#   wowee_client_objects  every client source but main(), with the client's
+#                         flags, precompiled header and dependencies
+#   wowee_client          the same objects as a static archive, for the tests
+#                         that drive the client's frame without a window
+#                         (tests/client_harness.hpp): a test links only the
+#                         members it reaches
+#
+# Each program that is the client - the ordinary one below and the native
+# loading fixture in tests/ - is its own main() linked against the objects
+# directly. The objects rather than the archive, because an archive leaves out
+# every member nothing refers to, and a program has to be the same set of
+# objects whatever it reaches first. A change to the client compiles once and
+# every program relinks.
+add_library(wowee_client_objects OBJECT ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_MACOS_SOURCES})
+add_library(wowee_client STATIC $<TARGET_OBJECTS:wowee_client_objects>)
+target_link_libraries(wowee_client PUBLIC wowee_client_objects)
+
 # On Android the client is a shared library, not a program: SDLActivity loads
 # it and calls SDL_main, and SDL_main.h has already renamed main() to that - so
 # an executable link asks for a main that no longer exists.
 if(ANDROID)
-    add_library(wowee SHARED ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
+    add_library(wowee SHARED src/main.cpp ${WOWEE_PLATFORM_SOURCES})
+    set_target_properties(wowee_client_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
 else()
-    add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
+    add_executable(wowee src/main.cpp ${WOWEE_PLATFORM_SOURCES})
 endif()
-
-# Explicit test configuration only: no fixture code or environment switches
-# enter the ordinary client. A distinct output name prevents replacing it.
-if(WOWEE_LOADING_FRAME_TEST_CLIENT)
-    if(NOT WOWEE_BUILD_TESTS OR ANDROID)
-        message(FATAL_ERROR "The loading integration client requires desktop tests")
-    endif()
-    target_sources(wowee PRIVATE tests/loading_frame_probe.cpp)
-    target_include_directories(wowee PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    target_compile_definitions(wowee PRIVATE WOWEE_LOADING_FRAME_TEST_CLIENT=1)
-    set_target_properties(wowee PROPERTIES OUTPUT_NAME wowee_loading_test_client)
-endif()
+target_link_libraries(wowee PRIVATE wowee_client_objects)
 
 # Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF. Set up on
 # wowee_base, which the client and every tool linking the libraries share.
@@ -1439,12 +1453,13 @@ if(WOWEE_ENABLE_TRACY)
 endif()
 
 if(TARGET opcodes-generate)
-    add_dependencies(wowee opcodes-generate)
+    add_dependencies(wowee_client_objects opcodes-generate)
 endif()
 # macOS cross-compilation: MoltenVK is not available at link time.
-# Allow unresolved Vulkan symbols - resolved at runtime. Scoped to wowee only.
+# Allow unresolved Vulkan symbols - resolved at runtime. Scoped to the client's
+# programs only: carried by the objects to whatever links them.
 if(WOWEE_MACOS_CROSS_COMPILE)
-    target_link_options(wowee PRIVATE "-undefined" "dynamic_lookup")
+    target_link_options(wowee_client_objects INTERFACE "-undefined" "dynamic_lookup")
 endif()
 
 # FidelityFX-SDK headers can trigger compiler-specific pragma/unused-static noise
@@ -1478,10 +1493,11 @@ add_custom_target(wowee_version ALL
     COMMENT "Resolving version from git"
     VERBATIM
 )
-add_dependencies(wowee wowee_version)
+add_dependencies(wowee_client_objects wowee_version)
 
-# Include directories
-target_include_directories(wowee PRIVATE
+# Include directories. Public: each program's main() and the tests that drive
+# the client read the same headers the client is built from.
+target_include_directories(wowee_client_objects PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/generated
@@ -1530,22 +1546,25 @@ set(WOWEE_PCH_STD
     <future>
 )
 
-target_precompile_headers(wowee PRIVATE
+target_precompile_headers(wowee_client_objects PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
 # Vendored headers as SYSTEM to suppress third-party warnings
-target_include_directories(wowee SYSTEM PRIVATE
+target_include_directories(wowee_client_objects SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
     ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src
 )
 if(HAVE_FFMPEG)
-    target_include_directories(wowee PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_include_directories(wowee_client_objects PRIVATE ${FFMPEG_INCLUDE_DIRS})
 endif()
 
-# Link libraries
-target_link_libraries(wowee PRIVATE
+# Link libraries. Public: a program's main() and a test include the client's
+# headers, which include these. What only the objects use stays private, and
+# is still carried to whatever links them - CMake records an object library's
+# private dependencies as link-only ones.
+target_link_libraries(wowee_client_objects PUBLIC
     SDL3::SDL3
     Vulkan::Vulkan
     OpenSSL::SSL
@@ -1557,21 +1576,21 @@ target_link_libraries(wowee PRIVATE
 )
 
 if(HAVE_FFMPEG)
-    target_compile_definitions(wowee PRIVATE HAVE_FFMPEG)
-    target_link_libraries(wowee PRIVATE ${FFMPEG_LIBRARIES})
+    target_compile_definitions(wowee_client_objects PRIVATE HAVE_FFMPEG)
+    target_link_libraries(wowee_client_objects PRIVATE ${FFMPEG_LIBRARIES})
     if(FFMPEG_LIBRARY_DIRS)
-        target_link_directories(wowee PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_directories(wowee_client_objects PUBLIC ${FFMPEG_LIBRARY_DIRS})
     endif()
 endif()
 
 # Platform-specific libraries
-# Android is UNIX and not APPLE, and has no X11: the ungrab path in main.cpp is
-# compiled out there, so there is nothing to link.
+# Android is UNIX and not APPLE, and has no X11: the ungrab path in
+# client_main.cpp is compiled out there, so there is nothing to link.
 if(UNIX AND NOT APPLE AND NOT ANDROID)
-    target_link_libraries(wowee PRIVATE X11)
+    target_link_libraries(wowee_client_objects PRIVATE X11)
 endif()
 if(APPLE)
-    target_link_libraries(wowee PRIVATE "-framework Foundation")
+    target_link_libraries(wowee_client_objects PRIVATE "-framework Foundation")
 endif()
 if(WIN32)
     # winmm: timeBeginPeriod/timeEndPeriod, which the frame pacer uses to ask
@@ -1581,24 +1600,24 @@ if(WIN32)
     #
     # No SDL main library: SDL3 has none, its WinMain shim being header-only
     # in SDL_main.h, where SDL2 kept it in a separate SDL2main.
-    target_link_libraries(wowee PRIVATE ws2_32 winmm)
+    target_link_libraries(wowee_client_objects PRIVATE ws2_32 winmm)
 endif()
 
 # Link ImGui if available
 if(TARGET imgui)
-    target_link_libraries(wowee PRIVATE imgui)
+    target_link_libraries(wowee_client_objects PUBLIC imgui)
 endif()
 
 # Link vk-bootstrap
 if(TARGET vk-bootstrap)
-    target_link_libraries(wowee PRIVATE vk-bootstrap)
+    target_link_libraries(wowee_client_objects PRIVATE vk-bootstrap)
 endif()
 
 if(TARGET wowee_fsr2_amd_vk)
-    target_link_libraries(wowee PRIVATE wowee_fsr2_amd_vk)
+    target_link_libraries(wowee_client_objects PRIVATE wowee_fsr2_amd_vk)
 endif()
 if(TARGET wowee_fsr3_framegen_amd_vk_probe)
-    target_link_libraries(wowee PRIVATE wowee_fsr3_framegen_amd_vk_probe)
+    target_link_libraries(wowee_client_objects PRIVATE wowee_fsr3_framegen_amd_vk_probe)
 endif()
 if(TARGET wowee_fsr3_official_runtime_copy)
     # FSR3 Path A runtime is an opt-in artifact; build explicitly with:
@@ -1609,19 +1628,19 @@ endif()
 
 # Link Unicorn if available
 if(HAVE_UNICORN)
-    target_link_libraries(wowee PRIVATE ${UNICORN_LIBRARY})
-    target_include_directories(wowee PRIVATE ${UNICORN_INCLUDE_DIR})
-    target_compile_definitions(wowee PRIVATE HAVE_UNICORN)
+    target_link_libraries(wowee_client_objects PRIVATE ${UNICORN_LIBRARY})
+    target_include_directories(wowee_client_objects PRIVATE ${UNICORN_INCLUDE_DIR})
+    target_compile_definitions(wowee_client_objects PRIVATE HAVE_UNICORN)
 endif()
 
 # Prefer GLM's explicit header-only target. GLM 1.0 may build glm::glm as a
 # shared library, which creates an unnecessary runtime dependency in app bundles.
 if(TARGET glm::glm-header-only)
-    target_link_libraries(wowee PRIVATE glm::glm-header-only)
+    target_link_libraries(wowee_client_objects PUBLIC glm::glm-header-only)
 elseif(TARGET glm::glm)
-    target_link_libraries(wowee PRIVATE glm::glm)
+    target_link_libraries(wowee_client_objects PUBLIC glm::glm)
 elseif(glm_FOUND)
-    target_include_directories(wowee PRIVATE ${GLM_INCLUDE_DIRS})
+    target_include_directories(wowee_client_objects PUBLIC ${GLM_INCLUDE_DIRS})
 endif()
 
 # wowee_base and wowee_pipeline: see where their sources are split off
@@ -1720,7 +1739,7 @@ if(ANDROID)
                           PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee PRIVATE wowee_game wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
+target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
 
 # Compiler warnings.
 #
@@ -1854,7 +1873,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
@@ -1872,31 +1891,43 @@ endif()
 # was written out once per tool, so mpq_build linked what asset_extract needed
 # minus the Windows half and failed to link there with fifteen undefined
 # symbols - md5_init, ltc_mp, InternetOpenA - none of which name StormLib.
+#
+# Said once, as an imported target that carries them: a static archive's
+# dependencies have to follow it on the link line, and only a target that names
+# them as its own tells CMake so. Listed beside the archive instead, they were
+# placed wherever the same library first appeared - before StormLib, once the
+# client's objects were linked as a library - and adler32 went unresolved.
 function(wowee_link_stormlib target)
-    target_link_libraries(${target} PRIVATE ${STORMLIB_LIBRARY} ZLIB::ZLIB Threads::Threads)
-    if(NOT WIN32)
-        find_library(BZ2_LIB NAMES bz2 bzip2)
-        if(BZ2_LIB)
-            target_link_libraries(${target} PRIVATE ${BZ2_LIB})
-        endif()
-    else()
-        find_library(WININET_LIB wininet)
-        find_library(BZ2_LIB bz2)
-        find_library(TOMCRYPT_LIB NAMES tomcrypt libtomcrypt)
-        find_library(TOMMATH_LIB NAMES tommath libtommath)
-        if(WININET_LIB)
-            target_link_libraries(${target} PRIVATE ${WININET_LIB})
-        endif()
-        if(BZ2_LIB)
-            target_link_libraries(${target} PRIVATE ${BZ2_LIB})
-        endif()
-        if(TOMCRYPT_LIB AND TOMMATH_LIB)
-            target_link_libraries(${target} PRIVATE ${TOMCRYPT_LIB} ${TOMMATH_LIB})
+    if(NOT TARGET wowee_stormlib)
+        add_library(wowee_stormlib UNKNOWN IMPORTED GLOBAL)
+        set_target_properties(wowee_stormlib PROPERTIES IMPORTED_LOCATION ${STORMLIB_LIBRARY})
+        set(_storm_deps ZLIB::ZLIB Threads::Threads)
+        if(NOT WIN32)
+            find_library(BZ2_LIB NAMES bz2 bzip2)
+            if(BZ2_LIB)
+                list(APPEND _storm_deps ${BZ2_LIB})
+            endif()
         else()
-            message(FATAL_ERROR
-                "Static StormLib on Windows requires LibTomCrypt and LibTomMath")
+            find_library(WININET_LIB wininet)
+            find_library(BZ2_LIB bz2)
+            find_library(TOMCRYPT_LIB NAMES tomcrypt libtomcrypt)
+            find_library(TOMMATH_LIB NAMES tommath libtommath)
+            if(WININET_LIB)
+                list(APPEND _storm_deps ${WININET_LIB})
+            endif()
+            if(BZ2_LIB)
+                list(APPEND _storm_deps ${BZ2_LIB})
+            endif()
+            if(TOMCRYPT_LIB AND TOMMATH_LIB)
+                list(APPEND _storm_deps ${TOMCRYPT_LIB} ${TOMMATH_LIB})
+            else()
+                message(FATAL_ERROR
+                    "Static StormLib on Windows requires LibTomCrypt and LibTomMath")
+            endif()
         endif()
+        set_target_properties(wowee_stormlib PROPERTIES INTERFACE_LINK_LIBRARIES "${_storm_deps}")
     endif()
+    target_link_libraries(${target} PRIVATE wowee_stormlib)
 endfunction()
 
 # ── Unit tests (Catch2) ──────────────────────────────────────
@@ -1946,14 +1977,13 @@ if(WIN32)
     endif()
 endif()
 
-# Install targets
-if(NOT WOWEE_LOADING_FRAME_TEST_CLIENT)
-    install(TARGETS wowee
-        RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-    )
-endif()
+# Install targets. The client only: wowee_loading_test_client is a fixture
+# and is never installed.
+install(TARGETS wowee
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
 
 # Note: tool install rules are placed next to each target definition below.
 
@@ -2007,9 +2037,9 @@ endif()
 # decided to do nothing. This target is that run without the client - the real
 # emitter, the real bindings, no game behind them and no window.
 #
-# Off by default because it compiles the client a second time, which is a cost
-# only worth paying on the machine asking the question. Other platforms and CI
-# are untouched.
+# Off by default: it is only worth a link on the machine asking the question.
+# It is the client's objects with this main instead of the client's, so it
+# compiles one file of its own. Other platforms and CI are untouched.
 #
 #     cmake -S . -B build -DWOWEE_BUILD_FRAMEXML_RUN=ON
 #     cmake --build build --target framexml_run
@@ -2020,46 +2050,17 @@ endif()
 option(WOWEE_BUILD_FRAMEXML_RUN
        "Build the headless FrameXML runner (tools/framexml_run.cpp)" OFF)
 if(WOWEE_BUILD_FRAMEXML_RUN)
-    set(WOWEE_HEADLESS_SOURCES ${WOWEE_SOURCES})
-    list(REMOVE_ITEM WOWEE_HEADLESS_SOURCES src/main.cpp)
+    # The client's own objects and everything they link, so its answers are
+    # the client's by construction: a hand-kept list of the client's
+    # dependencies would drift the first time one moved.
     add_executable(framexml_run
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/framexml_run.cpp
-        ${WOWEE_HEADLESS_SOURCES}
         ${WOWEE_PLATFORM_SOURCES}
-        ${WOWEE_MACOS_SOURCES}
     )
-    # Copied from the client rather than written out again. This target is the
-    # client minus its main, so any answer that differs from wowee's is wrong
-    # by construction - and a hand-kept second list would drift the first time
-    # a dependency moved.
-    get_target_property(_wowee_libs wowee LINK_LIBRARIES)
-    get_target_property(_wowee_incs wowee INCLUDE_DIRECTORIES)
-    get_target_property(_wowee_defs wowee COMPILE_DEFINITIONS)
-    # And where to find them. Three of the four properties were copied and this
-    # one was not, so a dependency named by pkg-config as a bare library - which
-    # is every one of them on a Homebrew prefix - linked for wowee and not for
-    # this: "ld: library 'avformat' not found", from a target built out of the
-    # same sources. The tool that exists to answer questions about the running
-    # interface could not be built at all on that setup.
-    get_target_property(_wowee_libdirs wowee LINK_DIRECTORIES)
-    if(_wowee_libs)
-        target_link_libraries(framexml_run PRIVATE ${_wowee_libs})
-    endif()
-    if(_wowee_libdirs)
-        target_link_directories(framexml_run PRIVATE ${_wowee_libdirs})
-    endif()
-    if(_wowee_incs)
-        target_include_directories(framexml_run PRIVATE ${_wowee_incs})
-    endif()
-    if(_wowee_defs)
-        target_compile_definitions(framexml_run PRIVATE ${_wowee_defs})
-    endif()
-    target_include_directories(framexml_run SYSTEM PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src)
-    add_dependencies(framexml_run wowee_version)
-    if(TARGET opcodes-generate)
-        add_dependencies(framexml_run opcodes-generate)
+    target_link_libraries(framexml_run PRIVATE wowee_client_objects)
+    # The objects are built for a link-time-optimised link in Release.
+    if(_ipo_supported AND WOWEE_ENABLE_LTO)
+        set_property(TARGET framexml_run PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
 endif()
 
@@ -2080,36 +2081,18 @@ wowee_apply_client_flags(scene_render)
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer
 # on this machine's Vulkan device, without a realm to stand in. Built from the
-# client's own sources like framexml_run, for the same reason.
+# client's own objects like framexml_run, for the same reason.
 option(WOWEE_BUILD_RT_PROBE "Build the ray traced lighting probe (tools/rt_probe.cpp)" OFF)
 if(WOWEE_BUILD_RT_PROBE)
-    set(WOWEE_RT_PROBE_SOURCES ${WOWEE_SOURCES})
-    list(REMOVE_ITEM WOWEE_RT_PROBE_SOURCES src/main.cpp)
     add_executable(rt_probe
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_probe.cpp
-        ${WOWEE_RT_PROBE_SOURCES}
         ${WOWEE_PLATFORM_SOURCES}
-        ${WOWEE_MACOS_SOURCES}
     )
-    get_target_property(_rtp_libs wowee LINK_LIBRARIES)
-    get_target_property(_rtp_incs wowee INCLUDE_DIRECTORIES)
-    get_target_property(_rtp_defs wowee COMPILE_DEFINITIONS)
-    get_target_property(_rtp_libdirs wowee LINK_DIRECTORIES)
-    if(_rtp_libs)
-        target_link_libraries(rt_probe PRIVATE ${_rtp_libs})
+    target_link_libraries(rt_probe PRIVATE wowee_client_objects)
+    # The objects are built for a link-time-optimised link in Release.
+    if(_ipo_supported AND WOWEE_ENABLE_LTO)
+        set_property(TARGET rt_probe PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
-    if(_rtp_libdirs)
-        target_link_directories(rt_probe PRIVATE ${_rtp_libdirs})
-    endif()
-    if(_rtp_incs)
-        target_include_directories(rt_probe PRIVATE ${_rtp_incs})
-    endif()
-    if(_rtp_defs)
-        target_compile_definitions(rt_probe PRIVATE ${_rtp_defs})
-    endif()
-    target_include_directories(rt_probe SYSTEM PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src)
     if(GLSLC)
         set(RT_LOOKUP_SPV ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders/rt_lookup_probe.comp.spv)
         add_custom_command(OUTPUT ${RT_LOOKUP_SPV}
@@ -2121,10 +2104,7 @@ if(WOWEE_BUILD_RT_PROBE)
         add_custom_target(rt_lookup_probe_shader DEPENDS ${RT_LOOKUP_SPV})
         add_dependencies(rt_probe rt_lookup_probe_shader)
     endif()
-    add_dependencies(rt_probe wowee_version wowee_shaders)
-    if(TARGET opcodes-generate)
-        add_dependencies(rt_probe opcodes-generate)
-    endif()
+    add_dependencies(rt_probe wowee_shaders)
 endif()
 
 # ---- Tool: mpq_build (loose files → MPQ) ----
@@ -2291,8 +2271,8 @@ endif()
 # Gated on what the window is gated on. Without StormLib there is nothing to
 # extract with, and a client built without it should still be a client - the
 # screen is compiled out and the old behaviour stands.
-if(TARGET wowee AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND EXISTS ${IMGUI_DIR}/imgui.cpp)
-    target_sources(wowee PRIVATE
+if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND EXISTS ${IMGUI_DIR}/imgui.cpp)
+    target_sources(wowee_client_objects PRIVATE
         tools/asset_manager/panel.cpp
         tools/asset_manager/profiles.cpp
         tools/asset_manager/install_scan.cpp
@@ -2312,29 +2292,31 @@ if(TARGET wowee AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND EXISTS ${IMGUI
     )
     # The same per-platform choice the window makes, for the same reasons.
     if(APPLE)
-        target_sources(wowee PRIVATE tools/asset_manager/folder_picker_mac.mm)
+        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_mac.mm)
         # SKIP_PRECOMPILE_HEADERS: the client's objcxx PCH is built without
         # ARC and this file needs it on, which the compiler refuses to mix.
         set_source_files_properties(tools/asset_manager/folder_picker_mac.mm
             PROPERTIES COMPILE_FLAGS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
-        target_link_libraries(wowee PRIVATE
+        target_link_libraries(wowee_client_objects PRIVATE
             "-framework AppKit" "-framework UniformTypeIdentifiers")
     elseif(WIN32)
-        target_sources(wowee PRIVATE tools/asset_manager/folder_picker_win.cpp)
-        target_link_libraries(wowee PRIVATE ole32 shell32)
+        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_win.cpp)
+        target_link_libraries(wowee_client_objects PRIVATE ole32 shell32)
     else()
-        target_sources(wowee PRIVATE tools/asset_manager/folder_picker_none.cpp)
+        target_sources(wowee_client_objects PRIVATE tools/asset_manager/folder_picker_none.cpp)
     endif()
-    target_include_directories(wowee PRIVATE
+    target_include_directories(wowee_client_objects PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_manager
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
         ${STORMLIB_INCLUDE_DIR}
     )
+    # Public, because ui_manager.hpp has a member only when it is set: whatever
+    # includes the client's headers has to agree with the objects.
+    target_compile_definitions(wowee_client_objects PUBLIC WOWEE_HAVE_ASSET_PANEL)
     # renderer.cpp already compiles stb_image_write for its screenshots, and
     # open_format_emitter.cpp compiles it for every other binary it is in.
-    target_compile_definitions(wowee PRIVATE
-        WOWEE_HAVE_ASSET_PANEL WOWEE_STB_IMAGE_WRITE_PROVIDED)
-    wowee_link_stormlib(wowee)
+    target_compile_definitions(wowee_client_objects PRIVATE WOWEE_STB_IMAGE_WRITE_PROVIDED)
+    wowee_link_stormlib(wowee_client_objects)
     message(STATUS "  asset panel in the client: ENABLED")
 else()
     message(STATUS "  asset panel in the client: DISABLED (needs StormLib and extern/imgui)")
@@ -2347,15 +2329,15 @@ endif()
 # every src/pipeline file there goes into wowee_pipeline, which the tools link
 # without StormLib. A client built without it still runs, and says it cannot
 # mount a realm's archives when one sends them.
-if(TARGET wowee AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
-    target_sources(wowee PRIVATE src/pipeline/mpq_archive_layer.cpp)
-    target_include_directories(wowee PRIVATE ${STORMLIB_INCLUDE_DIR})
-    target_compile_definitions(wowee PRIVATE WOWEE_HAVE_STORMLIB)
+if(TARGET wowee_client_objects AND STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    target_sources(wowee_client_objects PRIVATE src/pipeline/mpq_archive_layer.cpp)
+    target_include_directories(wowee_client_objects PRIVATE ${STORMLIB_INCLUDE_DIR})
+    target_compile_definitions(wowee_client_objects PRIVATE WOWEE_HAVE_STORMLIB)
     if(WOWEE_STORMLIB_SERR)
         set_source_files_properties(src/pipeline/mpq_archive_layer.cpp
             PROPERTIES COMPILE_DEFINITIONS WOWEE_STORMLIB_SERR=1)
     endif()
-    wowee_link_stormlib(wowee)
+    wowee_link_stormlib(wowee_client_objects)
     message(STATUS "  realm patch archives: ENABLED")
 else()
     message(STATUS "  realm patch archives: DISABLED (needs StormLib)")
