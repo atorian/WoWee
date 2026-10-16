@@ -110,9 +110,10 @@ public:
 
     /// The player closes the window; the next frame's Input reads it.
     void closeWindow();
-    /// A key goes down or comes up; the next frame's Input reads it.
-    void pressKey(SDL_Keycode key);
-    void releaseKey(SDL_Keycode key);
+    /// A key goes down or comes up, with these modifiers held; the next
+    /// frame's Input reads it.
+    void pressKey(SDL_Keycode key, SDL_Keymod modifiers = SDL_KMOD_NONE);
+    void releaseKey(SDL_Keycode key, SDL_Keymod modifiers = SDL_KMOD_NONE);
 
     /// What Application does on the way out: the interface hears the
     /// character leave, then the character's session ends.
@@ -151,6 +152,11 @@ public:
     [[nodiscard]] const std::string& reconnectStatus() const { return reconnectStatus_; }
     /// What the last frame's Render phase was handed to draw.
     [[nodiscard]] core::FrameView renderedView() const { return renderedView_; }
+    /// Every one of the client's own shortcuts the front end was told of, in
+    /// order - what Application acts on (Ctrl+` shows the performance HUD).
+    [[nodiscard]] const std::vector<core::ClientShortcut>& clientShortcuts() const {
+        return clientShortcuts_;
+    }
 
     /// How the login server answers the client's renewals of a lost session
     /// from now on: renewed (the default), refused, or not reached.
@@ -193,6 +199,7 @@ private:
     glm::vec3 characterPosition_{0.0f};
     std::string reconnectStatus_;
     core::FrameView renderedView_ = core::FrameView::Login;
+    std::vector<core::ClientShortcut> clientShortcuts_;
 
     ImGuiContext* imgui_ = nullptr;
     rendering::Camera viewCamera_;

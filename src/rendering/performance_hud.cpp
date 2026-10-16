@@ -16,6 +16,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/camera.hpp"
+#include "core/client_shortcuts.hpp"
 #include "ui/ui_colors.hpp"
 #include <imgui.h>
 #include <algorithm>
@@ -494,7 +495,8 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
 
         ImGui::Spacing();
         ImGui::TextColored(kSectionHeader, "Debug");
-        ImGui::TextColored(kHelpText, "F1: Toggle this HUD");
+        ImGui::TextColored(kHelpText, "%s: Toggle this HUD",
+                           core::clientShortcutLabel(core::ClientShortcut::TogglePerformanceHud));
         ImGui::TextColored(kHelpText, "F4: Toggle shadows");
         ImGui::TextColored(kHelpText, "F7: Level-up FX");
         ImGui::TextColored(kHelpText, "Esc: Settings/Close");

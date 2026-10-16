@@ -469,14 +469,16 @@ Once connected and in-world, test client features:
 - **O** - Toggle guild roster
 
 **Debug Features:**
-- **F1** - Toggle performance HUD (debug builds only)
+- **Ctrl+`** - Toggle performance HUD
 - **F8** - Write the WMO floor data at your position to the log
 
 ### Performance Monitoring
 
-In a debug build, press **F1** to show/hide the performance HUD which displays:
+Press **Ctrl+`** (control and the key left of 1) to show/hide the performance HUD which displays:
 - **FPS** - Frames per second (color-coded: green=60+, yellow=30-60, red=<30)
 - **Frame time** - Milliseconds per frame
+- **Resources** - latency, working set, private commit, system commit and threads
+  as graphs over the last ten minutes, and the size of each cache
 - **Renderer stats** - Draw calls, triangles
 - **WMO stats** - Building models and instances
 - **Camera position** - X, Y, Z coordinates
@@ -539,7 +541,7 @@ Rate.Player.Haste = 1
 
 ### Client Performance
 
-- Keep performance HUD (F1, debug builds) enabled to monitor FPS
+- Keep performance HUD (Ctrl+`) enabled to monitor FPS
 - Reduce quality/effects from Settings (Escape → Video) if FPS drops
 
 ## Security Notes

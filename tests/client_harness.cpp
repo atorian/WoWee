@@ -115,6 +115,9 @@ public:
     void updateScreens(float) override {}
     void drawInterface(float, const core::FramePlan&) override {}
     void keyForClient(const SDL_Event&) override {}
+    void clientShortcut(core::ClientShortcut shortcut) override {
+        h_.clientShortcuts_.push_back(shortcut);
+    }
     void present(float, const core::FramePlan&) override {}
     /// Nothing is built for the scene, so nothing is ever still being built.
     [[nodiscard]] bool scenePending() const override { return false; }
@@ -385,18 +388,23 @@ void ClientHarness::closeWindow() {
     pendingInput_.push_back(event);
 }
 
-void ClientHarness::pressKey(SDL_Keycode key) {
+void ClientHarness::pressKey(SDL_Keycode key, SDL_Keymod modifiers) {
     SDL_Event event{};
     event.type = SDL_EVENT_KEY_DOWN;
     event.key.key = key;
+    // Where the key is on a US keyboard, as SDL reports it alongside the key.
+    event.key.scancode = SDL_GetScancodeFromKey(key, nullptr);
+    event.key.mod = modifiers;
     event.key.down = true;
     pendingInput_.push_back(event);
 }
 
-void ClientHarness::releaseKey(SDL_Keycode key) {
+void ClientHarness::releaseKey(SDL_Keycode key, SDL_Keymod modifiers) {
     SDL_Event event{};
     event.type = SDL_EVENT_KEY_UP;
     event.key.key = key;
+    event.key.scancode = SDL_GetScancodeFromKey(key, nullptr);
+    event.key.mod = modifiers;
     event.key.down = false;
     pendingInput_.push_back(event);
 }

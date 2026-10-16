@@ -1930,22 +1930,10 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
 }
 
 void Application::keyForClient(const SDL_Event& event) {
-    // The development keys are not built into a release.
+    // A key nothing in the interface took. The client's own shortcuts never
+    // get here: they are taken before the interface sees them
+    // (clientShortcut).
     //
-    // They are not bindings the player chose and not anything the interface
-    // knows about, so a stray F-key silently changing how the world is drawn
-    // is a bug report about rendering rather than about a keystroke.
-    // Independent ifs rather than a chain, so either can be compiled out on
-    // its own; the scancodes are mutually exclusive anyway.
-#ifndef NDEBUG
-    // F1: Toggle performance HUD
-    if (event.key.scancode == SDL_SCANCODE_F1) {
-        if (performanceHUD_) {
-            performanceHUD_->toggle();
-            bool enabled = performanceHUD_->isEnabled();
-            LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
-        }
-    }
     // No F4 shadow toggle.
     //
     // setShadowsEnabled ignores what it is passed and holds shadows on,
@@ -1954,7 +1942,7 @@ void Application::keyForClient(const SDL_Event& event) {
     // the opposite in the log every time: it read the flag back to decide what
     // to print, the flag never moved, and every press logged "Shadows: OFF"
     // while they stayed on.
-#endif
+    //
     // F8: Debug WMO floor at current position
     if (event.key.scancode == SDL_SCANCODE_F8 && event.key.repeat == 0) {
         if (renderer && renderer->getWMORenderer()) {
@@ -1962,6 +1950,17 @@ void Application::keyForClient(const SDL_Event& event) {
             LOG_WARNING("F8: WMO floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
             renderer->getWMORenderer()->debugDumpGroupsAtPosition(pos.x, pos.y, pos.z);
         }
+    }
+}
+
+void Application::clientShortcut(ClientShortcut shortcut) {
+    switch (shortcut) {
+        case ClientShortcut::TogglePerformanceHud:
+            performanceHUD_->toggle();
+            LOG_INFO("Performance HUD: ", performanceHUD_->isEnabled() ? "ON" : "OFF");
+            break;
+        case ClientShortcut::None:
+            break;
     }
 }
 

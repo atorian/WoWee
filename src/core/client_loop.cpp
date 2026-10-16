@@ -340,7 +340,8 @@ void ClientLoop::updateInterface(float deltaTime, const FramePlan& plan) {
     if (session_) session_->applyChangedKeyBindings();
     services_.game.dispatchAddonEvents();
     interfaceInput_.dispatch(session_.get(), services_.playerView.getCameraController(),
-                             [this](const SDL_Event& event) { services_.frontEnd.keyForClient(event); });
+                             [this](const SDL_Event& event) { services_.frontEnd.keyForClient(event); },
+                             [this](ClientShortcut shortcut) { services_.frontEnd.clientShortcut(shortcut); });
     services_.frontEnd.afterInterfaceInput();
     // A lost mobile surface has no frame to build the screens in. Network and
     // simulation still run, and the single Pace phase limits the background loop.

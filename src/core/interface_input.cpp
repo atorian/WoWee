@@ -89,7 +89,8 @@ void InterfaceInput::push(const SDL_Event& event) {
 }
 
 void InterfaceInput::dispatch(CharacterSession* session, rendering::CameraController* camera,
-                              const std::function<void(const SDL_Event&)>& unclaimedKey) {
+                              const std::function<void(const SDL_Event&)>& unclaimedKey,
+                              const std::function<void(ClientShortcut)>& shortcut) {
     // The character's interface in any state, and the same only while it
     // hears the world - what input goes to.
     const auto characterAddons = [session]() -> addons::AddonManager* {
@@ -103,6 +104,18 @@ void InterfaceInput::dispatch(CharacterSession* session, rendering::CameraContro
     for (auto& saved : input) {
         SDL_Event event = saved.event;
         if (event.type == SDL_EVENT_TEXT_INPUT) event.text.text = saved.text.c_str();
+        // The client's own shortcuts, before anything of the interface sees
+        // the press: not a binding, not an edit box's key, not chat's. Only
+        // the press - its release goes the ordinary way, and finds no
+        // binding of the press to let go. A key held repeats its press;
+        // the shortcut acts once.
+        if (event.type == SDL_EVENT_KEY_DOWN) {
+            if (const ClientShortcut taken = clientShortcutFor(event.key);
+                taken != ClientShortcut::None) {
+                if (!event.key.repeat && shortcut) shortcut(taken);
+                continue;
+            }
+        }
         // A key coming up goes back to the binding its press ran, before
         // anything else looks at it and whatever has the keyboard now: the
         // press of W walked, and an edit box opened since does not stop the
