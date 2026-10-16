@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -159,6 +160,18 @@ public:
     /// says so outside this phase, where Lua may not run.
     void applyChangedKeyBindings();
 
+    // ---- Leaving ------------------------------------------------------------
+
+    /// The character's logout is committed (events::LogoutCommitted): the
+    /// world is no longer drawn, though it stands until the logout completes.
+    [[nodiscard]] bool worldHidden() const { return logoutCommitted_.has_value(); }
+    /// Whether the committed logout ends the program rather than returning to
+    /// the character list.
+    [[nodiscard]] bool logoutExits() const { return logoutCommitted_.value_or(false); }
+    /// Frame time since the logout was committed, `deltaTime` added. Zero while
+    /// it is not.
+    float noteTimeSinceLogoutCommitted(float deltaTime);
+
     // ---- Presenters and per-character frame state --------------------------
 
     [[nodiscard]] SpellPresentation* spellPresentation() { return spellPresentation_.get(); }
@@ -217,6 +230,9 @@ private:
     /// The account data's key bindings changed since the interface loaded
     /// them.
     bool keyBindingsStale_ = false;
+    /// Set when the logout is committed: whether it exits the program.
+    std::optional<bool> logoutCommitted_;
+    float sinceLogoutCommitted_ = 0.0f;
     std::unique_ptr<MapScope> map_;
     /// Last, so it is the first to go: its handler writes this session.
     std::vector<EventBus::Subscription> subscriptions_;

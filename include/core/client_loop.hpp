@@ -240,6 +240,15 @@ private:
     bool requireTransitions(const char* operation) const;
     void setState(AppState state);
 
+    /// The state's plan, with the world hidden once the logout is committed.
+    [[nodiscard]] FramePlan framePlan() const;
+    /// A committed logout the server never completes would leave the player
+    /// before a hidden world for good: after this long the client leaves
+    /// without it.
+    static constexpr float kLogoutCompleteTimeoutSeconds = 10.0f;
+    /// Game phase: give up on a committed logout the server has not completed.
+    void watchCommittedLogout(float deltaTime);
+
     void dispatchNetwork(float deltaTime, const FramePlan& plan);
     void updateGame(float deltaTime, const FramePlan& plan);
     void updateStreaming(float deltaTime, const FramePlan& plan);

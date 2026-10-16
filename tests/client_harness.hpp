@@ -149,6 +149,8 @@ public:
     /// What the client says over the world while it reconnects; empty when
     /// it does not.
     [[nodiscard]] const std::string& reconnectStatus() const { return reconnectStatus_; }
+    /// What the last frame's Render phase was handed to draw.
+    [[nodiscard]] core::FrameView renderedView() const { return renderedView_; }
 
     /// How the login server answers the client's renewals of a lost session
     /// from now on: renewed (the default), refused, or not reached.
@@ -190,6 +192,7 @@ private:
     std::string recordedCharacter_;
     glm::vec3 characterPosition_{0.0f};
     std::string reconnectStatus_;
+    core::FrameView renderedView_ = core::FrameView::Login;
 
     ImGuiContext* imgui_ = nullptr;
     rendering::Camera viewCamera_;

@@ -118,7 +118,7 @@ public:
     void present(float, const core::FramePlan&) override {}
     /// Nothing is built for the scene, so nothing is ever still being built.
     [[nodiscard]] bool scenePending() const override { return false; }
-    void render(const core::FramePlan&) override {}
+    void render(const core::FramePlan& plan) override { h_.renderedView_ = plan.view; }
     void afterTransitions() override {}
     [[nodiscard]] bool profilingStages() const override { return false; }
     void noteStageTime(const char*, float) override {}

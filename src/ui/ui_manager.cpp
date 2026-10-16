@@ -461,6 +461,15 @@ void UIManager::render(core::FrameView view, auth::AuthHandler* authHandler, gam
             }
             break;
 
+        case core::FrameView::LeavingWorld:
+            // The logout is committed and the server is taking the world away
+            // around the character. The paper the character and login screens
+            // are drawn on, which is where the player is going, not the world
+            // emptying out.
+            authScreen->stopLoginMusic();
+            authScreen->drawBackdrop();
+            break;
+
         case core::FrameView::Disconnected:
             // Nothing draws here, and nothing reaches here: no code sets this
             // state. A dropped world connection goes through

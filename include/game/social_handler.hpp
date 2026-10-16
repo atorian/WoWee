@@ -603,6 +603,7 @@ private:
     void rememberGuildName(uint32_t guildId, const std::string& guildName);
 
     GameHandler& owner_;
+    core::EventBus& events_;
 
     // ---- State ----
 
@@ -613,6 +614,10 @@ private:
     bool  loggingOut_        = false;
     bool  exitAfterLogout_   = false;
     float logoutCountdown_   = 0.0f;
+    /// events::LogoutCommitted went out for this logout.
+    bool  logoutCommitted_   = false;
+    /// Announce, once per logout, that it can no longer be cancelled.
+    void commitLogout();
 
     // Time played
     uint32_t totalTimePlayed_ = 0;

@@ -22,6 +22,15 @@ enum class SpellCastType : uint8_t;
 /// changed), never for who should react to it.
 namespace wowee::game::events {
 
+/// The logout can no longer be cancelled: its countdown ran out, or the server
+/// logged the character out at once. The server now takes the world away -
+/// everything in view goes out of range, in packets the client works through
+/// over several frames - and then completes the logout. Nothing of that is the
+/// player's to watch.
+struct LogoutCommitted {
+    bool exiting = false;
+};
+
 /// The server completed /logout or /quit. The client leaves after the frame.
 struct LogoutCompleted {
     bool exiting = false;

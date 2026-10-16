@@ -235,6 +235,78 @@ TEST_CASE("logout, and a disconnect that cannot be ridden out, while loading or 
     CHECK(h.loop().reconnecting() == nullptr);
 }
 
+TEST_CASE("a committed logout stops drawing the world at once, while the world stands until "
+          "the server completes it",
+          "[client][harness][logout]") {
+    // The server answers the logout, then takes every object in view away -
+    // out of range, worked through over several frames - and only then sends
+    // LOGOUT_COMPLETE. The player is not to watch the world empty out.
+    const bool instant = GENERATE(true, false);
+    CAPTURE(instant);
+
+    ClientHarness h;
+    h.enterWorld();
+    REQUIRE(h.renderedView() == wowee::core::FrameView::World);
+
+    h.game().requestLogout(false);
+    h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(instant ? 1 : 0));
+    h.frameUntilHandled();
+    if (!instant) {
+        // Twenty seconds the player can still cancel in: the world is drawn.
+        h.advance(19.0f);
+        CHECK(h.renderedView() == wowee::core::FrameView::World);
+        h.advance(1.5f);
+    }
+    h.frame();
+
+    CHECK(h.renderedView() == wowee::core::FrameView::LeavingWorld);
+    // Only hidden: the server has not completed it, and the world stands.
+    CHECK(h.state() == AppState::IN_GAME);
+    CHECK(h.map() != nullptr);
+    CHECK(h.session() != nullptr);
+
+    h.server().receive(Opcode::SMSG_LOGOUT_COMPLETE);
+    h.frameUntil([&] { return h.state() == AppState::CHARACTER_SELECTION; }, 60,
+                 "the client to leave for the character list");
+    CHECK(lastHeardBy(h, "Harness") == "PLAYER_LEAVING_WORLD");
+    requireNothingOfTheWorldStands(h);
+    h.frame();
+    CHECK(h.renderedView() == wowee::core::FrameView::Characters);
+}
+
+TEST_CASE("a logout cancelled during its countdown keeps the world drawn",
+          "[client][harness][logout]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.game().requestLogout(false);
+    h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(0));
+    h.frameUntilHandled();
+    h.advance(5.0f);
+    h.game().cancelLogout();
+    // Past where the countdown would have run out.
+    h.advance(20.0f);
+
+    CHECK(h.renderedView() == wowee::core::FrameView::World);
+    CHECK(h.state() == AppState::IN_GAME);
+    CHECK(h.map() != nullptr);
+}
+
+TEST_CASE("a committed logout the server never completes ends at the login screen, "
+          "not before a hidden world",
+          "[client][harness][logout]") {
+    ClientHarness h;
+    h.enterWorld();
+    h.game().requestLogout(false);
+    h.server().receive(Opcode::SMSG_LOGOUT_RESPONSE, Body().u32(0).u8(1));
+    h.frameUntilHandled();
+
+    // Well past the client's ten seconds, and short of forever.
+    h.frameUntil([&] { return h.state() == AppState::AUTHENTICATION; }, 2000,
+                 "the client to give up on the logout and leave for the login screen");
+    requireNothingOfTheWorldStands(h);
+    CHECK_FALSE(h.game().isConnected());
+}
+
 TEST_CASE("the interface answers what it is asked, false as well as true",
           "[client][harness][lua]") {
     // The client asks the interface questions whose answer decides what it

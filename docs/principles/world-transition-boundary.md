@@ -45,5 +45,15 @@ Checklist when changing a transition:
   ordinary load. Giving up is a `Leave{Login}` like any disconnect. Nothing is
   reset by hand for a reconnect: a domain that keeps state past a login ends it
   on `CharacterLoggingIn`.
+- A logout is committed when it can no longer be cancelled: an instant
+  `SMSG_LOGOUT_RESPONSE`, or its countdown running out. The game publishes
+  `LogoutCommitted`; the character's session stops the world being drawn
+  (`FrameView::LeavingWorld`, the screen being left for) while the world still
+  stands. The server then takes every object in view away - out of range,
+  worked through over several frames - before `LOGOUT_COMPLETE`, and the player
+  does not watch it. The session still ends on `LogoutCompleted` in
+  Transitions; a committed logout the server never completes leaves for the
+  login screen (or closes, for Exit Game) after
+  `ClientLoop::kLogoutCompleteTimeoutSeconds`, with an error in the log.
 - Test packet input through `GameHarness`: state survives `pump()` and changes
   only when the client issues the transition command afterward.

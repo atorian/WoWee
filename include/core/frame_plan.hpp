@@ -8,7 +8,11 @@ enum class AppState {
 };
 
 enum class Phase { Idle, Input, Network, Game, Events, Streaming, Interface, Present, Render, Transitions, Pace };
-enum class FrameView { Login, Realms, CharacterCreation, Characters, World, Disconnected, FirstRun, Loading };
+/// LeavingWorld: still IN_GAME, but the character's logout is committed and the
+/// server is taking the world away; the client draws the screen it is leaving
+/// for, not the world coming apart.
+enum class FrameView { Login, Realms, CharacterCreation, Characters, World, Disconnected, FirstRun, Loading,
+                       LeavingWorld };
 
 struct FramePlan {
     bool authNetwork = false;

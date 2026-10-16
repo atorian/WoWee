@@ -36,6 +36,15 @@ CharacterSession::CharacterSession(const Services& services, Identity identity, 
                 keyBindingsStale_ = true;
             }
         }));
+    // The character is leaving and the server is taking the world apart: from
+    // here on the world is not drawn, while it stands until the logout
+    // completes and this session ends.
+    subscriptions_.push_back(services_.events.subscribe<game::events::LogoutCommitted>(
+        [this](const game::events::LogoutCommitted& e) {
+            if (logoutCommitted_) return;
+            logoutCommitted_ = e.exiting;
+            LOG_INFO("Character '", identity_.name, "' is leaving: the world is no longer drawn");
+        }));
     if (interfaceKind_ == Interface::None) return;
     if (!services_.addonCatalog) {
         LOG_WARNING("Character session '", identity_.name, "': the addon system did "
@@ -133,6 +142,12 @@ CharacterSession::BuiltInterface CharacterSession::buildInterface() {
 
 bool CharacterSession::interfaceHoldsWorld() const {
     return interface_.addons && interfaceEntered_ && !interfaceLeft_;
+}
+
+float CharacterSession::noteTimeSinceLogoutCommitted(float deltaTime) {
+    if (!logoutCommitted_) return 0.0f;
+    sinceLogoutCommitted_ += deltaTime;
+    return sinceLogoutCommitted_;
 }
 
 void CharacterSession::loadInterface() {

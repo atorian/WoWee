@@ -416,7 +416,7 @@ static bool parseTbcInspectTalentPayload(network::Packet& packet,
 static const std::string kEmptyString;
 
 SocialHandler::SocialHandler(GameHandler& owner, core::EventBus& events)
-    : owner_(owner) {
+    : owner_(owner), events_(events) {
     loadGuildNameCache();
     // The party is the server's to say at every login: SMSG_GROUP_LIST comes
     // with it for a character in one. Kept, the last session's party stood
@@ -1560,6 +1560,7 @@ void SocialHandler::cancelLogout() {
     loggingOut_ = false;
     exitAfterLogout_ = false;
     logoutCountdown_ = 0.0f;
+    logoutCommitted_ = false;
     owner_.addSystemChatMessage("Logout cancelled.");
     LOG_INFO("Cancelled logout");
 }
@@ -3342,6 +3343,9 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
     if (data.result == 0) {
         if (data.instant) { owner_.addSystemChatMessage("Logging out..."); logoutCountdown_ = 0.0f; }
         else { owner_.addSystemChatMessage("Logging out in 20 seconds..."); logoutCountdown_ = 20.0f; }
+        // An instant logout cannot be cancelled: the server is taking the
+        // world away from this packet on.
+        if (data.instant) commitLogout();
         if (owner_.hasAddonEventListener()) {
             owner_.fireAddonEvent("PLAYER_LOGOUT", {});
             // The timer the server just imposed, announced so the interface can
@@ -3369,9 +3373,10 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
         // the one thing a quit button must never do.
         const bool exiting = exitAfterLogout_;
         loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
+        logoutCommitted_ = false;
         if (exiting) {
             LOG_WARNING("Logout refused, but Exit Game was asked for - closing anyway");
-            owner_.eventBus().publish(events::ExitRequested{});
+            events_.publish(events::ExitRequested{});
         } else {
             owner_.raiseUiError("Cannot logout right now.");
         }
@@ -3385,8 +3390,16 @@ void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
     const bool exiting = exitAfterLogout_;
     owner_.addSystemChatMessage("Logout complete.");
     loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
+    logoutCommitted_ = false;
     LOG_WARNING("Logout complete (exiting=", exiting ? "yes" : "no", ")");  // temporary: visible at default log level
-    owner_.eventBus().publish(events::LogoutCompleted{exiting});
+    events_.publish(events::LogoutCompleted{exiting});
+}
+
+void SocialHandler::commitLogout() {
+    if (logoutCommitted_) return;
+    logoutCommitted_ = true;
+    LOG_INFO("Logout committed (exiting=", exitAfterLogout_ ? "yes" : "no", ")");
+    events_.publish(events::LogoutCommitted{exitAfterLogout_});
 }
 
 // ============================================================
@@ -4660,7 +4673,12 @@ void SocialHandler::updateLogoutCountdown(float deltaTime) {
     }
     if (loggingOut_ && logoutCountdown_ > 0.0f) {
         logoutCountdown_ -= deltaTime;
-        if (logoutCountdown_ < 0.0f) logoutCountdown_ = 0.0f;
+        if (logoutCountdown_ <= 0.0f) {
+            logoutCountdown_ = 0.0f;
+            // The countdown ran out: past the point a cancel could reach the
+            // server in time.
+            commitLogout();
+        }
     }
     // The bind prompt expires on its own; the server stops asking and the
     // pending bind lapses, so the dialog has to stop offering an answer.

@@ -61,8 +61,28 @@ void ClientLoop::loopEnded() {
     if (observer_) observer_->loopEnded();
 }
 
+FramePlan ClientLoop::framePlan() const {
+    FramePlan plan = framePlanFor(state_);
+    // A committed logout: the world stands until the server completes it,
+    // which it does after taking every object in view away over several
+    // frames. The screen being left for is drawn instead of that.
+    if (plan.world && session_ && session_->worldHidden()) plan.view = FrameView::LeavingWorld;
+    return plan;
+}
+
+void ClientLoop::watchCommittedLogout(float deltaTime) {
+    if (!session_ || !session_->worldHidden() || transitions_.leaving()) return;
+    const float waited = session_->noteTimeSinceLogoutCommitted(deltaTime);
+    if (waited < kLogoutCompleteTimeoutSeconds) return;
+    const bool exits = session_->logoutExits();
+    LOG_ERROR("The server has not completed a logout committed ", waited, " s ago; leaving the "
+              "world without it, ", exits ? "closing the game" : "for the login screen");
+    transitions_.leave(exits ? WorldTransitionQueue::Destination::Exit
+                             : WorldTransitionQueue::Destination::Login);
+}
+
 void ClientLoop::runFrame() {
-    const FramePlan plan = framePlanFor(state_);
+    const FramePlan plan = framePlan();
     ScopedPhase frameScope(services_.phase, Phase::Idle);
     try {
         const float dt = services_.window.beginFrame();
@@ -74,6 +94,7 @@ void ClientLoop::runFrame() {
         beginPhase(Phase::Network);     dispatchNetwork(dt, plan);
         beginPhase(Phase::Game);        services_.frontEnd.prepareFrame();
         if (plan.game) updateGame(dt, plan);
+        watchCommittedLogout(dt);
         beginPhase(Phase::Events);      services_.events.dispatchPosted();
         beginPhase(Phase::Streaming);   updateStreaming(dt, plan);
         beginPhase(Phase::Interface);   updateInterface(dt, plan);
