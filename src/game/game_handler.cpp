@@ -114,7 +114,8 @@ GameHandler::GameHandler(GameServices& services)
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *services_.events);
-    questHandler_     = std::make_unique<QuestHandler>(*this);
+    questHandler_     = std::make_unique<QuestHandler>(*this, *this, *services_.events, *chatHandler_,
+                                                       *this, services_.assetManager);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
@@ -133,6 +134,9 @@ GameHandler::GameHandler(GameServices& services)
     // first thing the realm sends of a character entering the world.
     subscriptions_.push_back(eventBus().subscribe<events::CharacterSpellsArrived>(
         [this](const events::CharacterSpellsArrived&) { loadCharacterConfig(); }));
+    // The tracked quests are kept with the character's settings.
+    subscriptions_.push_back(eventBus().subscribe<events::QuestTrackingChanged>(
+        [this](const events::QuestTrackingChanged&) { saveCharacterConfig(); }));
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries
@@ -662,25 +666,8 @@ void GameHandler::updateTimers(float deltaTime) {
     // and the equipment inspects - each with the state it counts down.
     inventoryHandler_->update(deltaTime);
 
-    // Tick QuestHandler's pending-accept timeouts (the authoritative maps -
-    // GameHandler previously ticked its own never-populated copies, so lost
-    // or rejected quest accepts were never resynced or unblocked).
-    questHandler_->tickQuestGiverStatusRequery(deltaTime);
-    auto& acceptTimeouts = questHandler_->pendingQuestAcceptTimeoutsRef();
-    auto& acceptNpcGuids = questHandler_->pendingQuestAcceptNpcGuidsRef();
-    for (auto it = acceptTimeouts.begin(); it != acceptTimeouts.end();) {
-        it->second -= deltaTime;
-        if (it->second <= 0.0f) {
-            const uint32_t questId = it->first;
-            auto guidIt = acceptNpcGuids.find(questId);
-            const uint64_t npcGuid = guidIt != acceptNpcGuids.end() ? guidIt->second : 0;
-            triggerQuestAcceptResync(questId, npcGuid, "timeout");
-            it = acceptTimeouts.erase(it);
-            acceptNpcGuids.erase(questId);
-        } else {
-            ++it;
-        }
-    }
+    // The quest giver marks' requery and unconfirmed accepts.
+    questHandler_->update(deltaTime);
 
     // Announce the corpse-proximity crossing. FrameXML answers CORPSE_IN_RANGE
     // with StaticPopup "RECOVER_CORPSE", whose button calls RetrieveCorpse;
@@ -1262,9 +1249,9 @@ void GameHandler::saveCharacterConfig() {
     // server knows nothing about.
 
     // Save tracked quest IDs so the quest tracker restores on login
-    if (!trackedQuestIds_.empty()) {
+    if (const auto& tracked = questHandler_->trackedQuests(); !tracked.empty()) {
         std::string ids;
-        for (uint32_t qid : trackedQuestIds_) {
+        for (uint32_t qid : tracked) {
             if (!ids.empty()) ids += ',';
             ids += std::to_string(qid);
         }
@@ -1297,10 +1284,6 @@ void GameHandler::loadCharacterConfig() {
     const Character* ch = getActiveCharacter();
     if (!ch || ch->name.empty()) return;
 
-    // These selections are per-character. Clear the previous character's
-    // values even when the new character has no saved config yet.
-    trackedQuestIds_.clear();
-
     std::string path = getCharacterConfigDir() + "/" + ch->name + ".cfg";
     std::ifstream in(path);
     if (!in.is_open()) return;
@@ -1310,6 +1293,8 @@ void GameHandler::loadCharacterConfig() {
     std::map<uint32_t, Macro> legacyMacros;
     int savedGender = -1;
     int savedUseFemaleModel = -1;
+    // The quest log's; handed to it once the file is read.
+    std::unordered_set<uint32_t> trackedQuests;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -1358,7 +1343,7 @@ void GameHandler::loadCharacterConfig() {
             // log and the ones being tracked. An old file still carrying the
             // key falls through to the unknown-key branch.
             auto& destination =
-                  key == "tracked_quests"    ? trackedQuestIds_
+                  key == "tracked_quests"    ? trackedQuests
                 : key == "collapsed_factions" ? collapsedFactionIds_
                                               : collapsedSkillCategories_;
             if (key == "collapsed_factions") reputationRowsDirty_ = true;
@@ -1379,6 +1364,8 @@ void GameHandler::loadCharacterConfig() {
         // action_bar_N_type / action_bar_N_id from an older build are not
         // read: the bar is what SMSG_ACTION_BUTTONS says it is.
     }
+
+    questHandler_->restoreTrackedQuests(std::move(trackedQuests));
 
     // Validate guid matches current character
     if (savedGuid != 0 && savedGuid != playerGuid) {
@@ -4243,7 +4230,14 @@ const std::string& GameHandler::getSharedQuestTitle() const {
     return questHandler_->getSharedQuestTitle();
 }
 const std::unordered_set<uint32_t>& GameHandler::getTrackedQuestIds() const {
-    return trackedQuestIds_;
+    return questHandler_->trackedQuests();
+}
+
+void GameHandler::setResting(bool resting) {
+    if (resting == isResting_) return;
+    isResting_ = resting;
+    addSystemChatMessage(resting ? "You are now resting." : "You are no longer resting.");
+    if (hasAddonEventListener()) fireAddonEvent("PLAYER_UPDATE_RESTING", {});
 }
 bool GameHandler::hasPendingSharedQuest() const {
     return questHandler_->hasPendingSharedQuest();

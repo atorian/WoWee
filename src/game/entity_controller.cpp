@@ -2755,7 +2755,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // QuestHandler's map, which is the one every reader forwards to.
     // GameHandler's same-named member is dead, so erasing there left a
     // despawned quest giver's mark behind on whatever took its place.
-    if (auto* qh = owner_.getQuestHandler()) qh->npcQuestStatusRef().erase(data.guid);
+    owner_.quests().forgetQuestGiver(data.guid);
 
     // Remove combat text entries referencing the destroyed entity so floating
     // damage numbers don't linger after the source/target despawns.

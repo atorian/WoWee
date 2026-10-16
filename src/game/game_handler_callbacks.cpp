@@ -609,14 +609,9 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     playerXp_ = 0;
     playerNextLevelXp_ = 0;
     serverPlayerLevel_ = 1;
-    // The handler's, not this class's same-named members - every reader
-    // forwards there, so clearing the copies here cleared nothing anyone
-    // looks at and the previous character's quests stayed in the log.
-    questHandler_->clearQuestStateForCharacterSwitch();
+    // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
-    questHandler_->pendingQuestAcceptTimeoutsRef().clear();
-    questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
     combatHandler_->resetAllCombatState();
     // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
@@ -833,16 +828,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
             LOG_INFO("Auto-queried guild info (guildId=", activeChar->guildId, ")");
         }
 
-        questHandler_->pendingQuestAcceptTimeoutsRef().clear();
-        questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
-        // QuestHandler's set (this cleared a GameHandler copy nothing filled).
-        // selectCharacter has already cleared it with the rest of the quest
-        // state, so this is the world entry saying the same thing again, not
-        // the only place a stale query is forgotten.
-        questHandler_->clearPendingQuestQueries();
+        // The quest log, its pending queries and the completed quests began
+        // empty with the login (CharacterLoggingIn); the server fills them.
         pendingLoginQuestResync_ = true;
         pendingLoginQuestResyncTimeout_ = 10.0f;
-        completedQuests_.clear();
         LOG_INFO("Queued quest log resync for login (from server quest slots)");
 
         // Request completed quest IDs when the expansion supports it. Classic-like

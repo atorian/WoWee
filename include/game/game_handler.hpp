@@ -171,7 +171,8 @@ class GameHandler : public IConnectionState,
                      public InventoryQueries,
                      public PetQueries,
                      public SpellQueries,
-                     public ChatQueries {
+                     public ChatQueries,
+                     public QuestQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -363,6 +364,16 @@ public:
     const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
     std::optional<uint32_t> guildRankRights() const override;
     std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
+
+    // QuestQueries (the shared ones are above; closeVendor is declared with
+    // the vendor's facade).
+    bool inGroup() const override { return isInGroup(); }
+    void setResting(bool resting) override;
+    std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
+    void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
+    void vendorCanRepair() override { setVendorCanRepair(true); }
+    void openedStableMaster(uint64_t npcGuid) override { petHandler_->setStableMaster(npcGuid); }
 
     /**
      * Get current connection state
@@ -1360,8 +1371,10 @@ public:
     }
 
     // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
-    bool isQuestCompleted(uint32_t questId) const { return completedQuests_.count(questId) > 0; }
-    const std::unordered_set<uint32_t>& getCompletedQuests() const { return completedQuests_; }
+    bool isQuestCompleted(uint32_t questId) const { return questHandler_->isQuestCompleted(questId); }
+    const std::unordered_set<uint32_t>& getCompletedQuests() const {
+        return questHandler_->completedQuests();
+    }
 
     // NPC death callback (for animations)
     using NpcDeathCallback = std::function<void(uint64_t guid)>;
@@ -1438,12 +1451,6 @@ public:
     using PlayerHealthCallback = std::function<void(uint32_t health, uint32_t maxHealth)>;
     void setPlayerHealthCallback(PlayerHealthCallback cb) { playerHealthCallback_ = std::move(cb); }
 
-    // NPC greeting callback (plays voice line when NPC is clicked)
-    using NpcGreetingCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcGreetingCallback(NpcGreetingCallback cb) { npcGreetingCallback_ = std::move(cb); }
-
-    using NpcFarewellCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcFarewellCallback(NpcFarewellCallback cb) { npcFarewellCallback_ = std::move(cb); }
 
     // XP tracking
     uint32_t getPlayerXp() const { return playerXp_; }
@@ -2103,19 +2110,8 @@ public:
     void abandonQuest(uint32_t questId);
     void shareQuestWithParty(uint32_t questId);  // CMSG_PUSHQUESTTOPARTY
     bool requestQuestQuery(uint32_t questId, bool force = false);
-    bool isQuestTracked(uint32_t questId) const { return trackedQuestIds_.count(questId) > 0; }
-    void setQuestTracked(uint32_t questId, bool tracked) {
-        const bool changed = tracked ? trackedQuestIds_.insert(questId).second
-                                     : trackedQuestIds_.erase(questId) > 0;
-        if (changed) {
-            saveCharacterConfig();
-            // WatchFrame is purely event-driven and never polls native state,
-            // so a change here is invisible to it until something else happens
-            // to fire QUEST_LOG_UPDATE (e.g. the quest log's own track/untrack
-            // button, which calls WatchFrame_Update() directly).
-            fireAddonEvent("QUEST_LOG_UPDATE", {});
-        }
-    }
+    bool isQuestTracked(uint32_t questId) const { return questHandler_->isQuestTracked(questId); }
+    void setQuestTracked(uint32_t questId, bool tracked) { questHandler_->setQuestTracked(questId, tracked); }
     const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
     /// The quests whose objective areas the world map shades.
     ///
@@ -2430,12 +2426,6 @@ public:
     using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
     void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
 
-    // Quest objective progress callback - fires on SMSG_QUESTUPDATE_ADD_KILL / ADD_ITEM
-    // questTitle: name of the quest; objectiveName: creature/item name; current/required counts
-    using QuestProgressCallback = std::function<void(const std::string& questTitle,
-                                                     const std::string& objectiveName,
-                                                     uint32_t current, uint32_t required)>;
-    void setQuestProgressCallback(QuestProgressCallback cb) { questProgressCallback_ = std::move(cb); }
     const std::unordered_map<uint32_t, uint64_t>& getCriteriaProgress() const { return criteriaProgress_; }
     /// Returns the WoW PackedTime earn date for an achievement, or 0 if unknown.
     uint32_t getAchievementDate(uint32_t id) const {
@@ -2838,7 +2828,7 @@ public:
 
     // Vendor
     void openVendor(uint64_t npcGuid);
-    void closeVendor();
+    void closeVendor() override;
     void buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count);
     void sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count);
     void sellItemBySlot(int backpackIndex);
@@ -3227,6 +3217,9 @@ public:
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
+    /// The character's quests, the quest givers' windows and their marks.
+    QuestHandler& quests() { return *questHandler_; }
+    const QuestHandler& quests() const { return *questHandler_; }
     /// The character's conversation: the chat log, channels, whispers, AFK.
     ChatHandler& chat() { return *chatHandler_; }
     const ChatHandler& chat() const { return *chatHandler_; }
@@ -3311,7 +3304,6 @@ public:
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
     auto& comboTargetRef() { return comboTarget_; }
-    auto& isRestingRef() { return isResting_; }
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
     auto& playerArmorRatingRef() { return playerArmorRating_; }
     auto& playerBlockPctRef() { return playerBlockPct_; }
@@ -3335,6 +3327,7 @@ public:
     auto* playerSpellDmgBonusArr() { return playerSpellDmgBonus_; }
     auto& playerStatsArr() { return playerStats_; }
     auto& playerXpRef() { return playerXp_; }
+    auto& isRestingRef() { return isResting_; }
 
     // ── Skills ───────────────────────────────────────────────────────
     const std::string& getSkillDescription(uint32_t skillId) const {
@@ -3342,7 +3335,6 @@ public:
     }
 
     // ── Quests & Achievements ────────────────────────────────────────
-    auto& completedQuestsRef() { return completedQuests_; }
     auto& achievementNameCacheRef() { return achievementNameCache_; }
 
     // ── Social, Chat & Contacts ──────────────────────────────────────
@@ -3438,8 +3430,6 @@ public:
     auto& mountCallbackRef() { return mountCallback_; }
     auto& npcAggroCallbackRef() { return npcAggroCallback_; }
     auto& npcDeathCallbackRef() { return npcDeathCallback_; }
-    auto& npcFarewellCallbackRef() { return npcFarewellCallback_; }
-    auto& npcGreetingCallbackRef() { return npcGreetingCallback_; }
     auto& npcRespawnCallbackRef() { return npcRespawnCallback_; }
     auto& npcSwingCallbackRef() { return npcSwingCallback_; }
     auto& openLfgCallbackRef() { return openLfgCallback_; }
@@ -3448,7 +3438,6 @@ public:
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
     auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
-    auto& questProgressCallbackRef() { return questProgressCallback_; }
     auto& repChangeCallbackRef() { return repChangeCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
@@ -4028,7 +4017,6 @@ private:
     // the GameHandler selection copy this comment used to describe was dead -
     // written by setSelectedQuestLogIndex, read by nobody, while the getter went
     // to the QuestHandler - and has been removed.
-    std::unordered_set<uint32_t> trackedQuestIds_;
     std::unordered_set<uint32_t> blobQuestIds_;
     bool pendingLoginQuestResync_ = false;
     float pendingLoginQuestResyncTimeout_ = 0.0f;
@@ -4273,8 +4261,6 @@ private:
     StunStateCallback stunStateCallback_;
     StealthStateCallback stealthStateCallback_;
     PlayerHealthCallback playerHealthCallback_;
-    NpcGreetingCallback npcGreetingCallback_;
-    NpcFarewellCallback npcFarewellCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
@@ -4285,7 +4271,6 @@ private:
     mutable bool languageNamesLoaded_ = false;
     OtherPlayerMountCallback otherPlayerMountCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
-    QuestProgressCallback questProgressCallback_;
     MountCallback mountCallback_;
     TaxiPrecacheCallback taxiPrecacheCallback_;
     TaxiOrientationCallback taxiOrientationCallback_;
@@ -4339,9 +4324,6 @@ private:
     std::string resurrectCasterName_;
     bool repopPending_ = false;
     uint64_t lastRepopRequestMs_ = 0;
-
-    // ---- Completed quest IDs (SMSG_QUERY_QUESTS_COMPLETED_RESPONSE) ----
-    std::unordered_set<uint32_t> completedQuests_;
 
     // ---- Equipment sets (SMSG_EQUIPMENT_SET_LIST) ----
     struct EquipmentSet {

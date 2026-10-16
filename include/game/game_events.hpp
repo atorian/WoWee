@@ -233,6 +233,31 @@ struct ItemBought {
 /// Unread mail arrived, where there was none.
 struct MailArrived {};
 
+/// A quest objective moved: a kill, an item, counted against what is needed.
+struct QuestObjectiveProgressed {
+    std::string questTitle;
+    std::string objective;
+    uint32_t count = 0;
+    uint32_t required = 0;
+};
+
+/// The quests the watch frame shows changed; the character config keeps them.
+struct QuestTrackingChanged {};
+
+/// A gossip window opened on an NPC in view, which greets the player.
+/// Canonical coordinates.
+struct GossipOpenedOnNpc {
+    uint64_t npcGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// The gossip window on a creature in view closed: it bids the player
+/// farewell. Canonical coordinates.
+struct GossipClosedOnNpc {
+    uint64_t npcGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
 /// The player accepted a quest into the log.
 struct QuestAccepted {
     uint32_t questId = 0;
