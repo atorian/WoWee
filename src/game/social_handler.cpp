@@ -418,12 +418,16 @@ static const std::string kEmptyString;
 SocialHandler::SocialHandler(GameHandler& owner, core::EventBus& events)
     : owner_(owner), events_(events) {
     loadGuildNameCache();
-    // The party is the server's to say at every login: SMSG_GROUP_LIST comes
-    // with it for a character in one. Kept, the last session's party stood
-    // for the next character, and for this one back from a lost connection
-    // after the group had gone on without it.
+    // The character's social state is the server's to say at every login:
+    // SMSG_GROUP_LIST comes with it for a character in a party, the guild
+    // and the queues with theirs. Kept, the last session's party stood for
+    // the next character (and for this one back from a lost connection after
+    // the group had gone on without it), its guild made a guildless one look
+    // guilded, and a duel or an invite put to it waited for the next one.
     subscriptions_.push_back(events.subscribe<events::CharacterLoggingIn>(
-        [this](const events::CharacterLoggingIn&) { partyData = GroupListData{}; }));
+        [this](const events::CharacterLoggingIn&) {
+            static_cast<SocialCharacterState&>(*this) = SocialCharacterState{};
+        }));
 }
 
 void SocialHandler::loadGuildNameCache() {

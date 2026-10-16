@@ -16,16 +16,149 @@
 #include <vector>
 
 namespace wowee {
+namespace core { class CVarStore; }
 namespace game {
 
 class GameHandler;
 
-class SocialHandler {
+/// What the social side of the game keeps for one character: its party and
+/// guild, the invitations and challenges put to it, its queues, its arena
+/// teams and its saved instances. SocialHandler is this and assigns it whole
+/// when a character logs in (events::CharacterLoggingIn): the server sends
+/// the next character's own, and a duel or an invite put to the last one is
+/// not the next one's to answer.
+struct SocialCharacterState {
+    // Inspect
+    InspectResult inspectResult_;
+
+    // Time played
+    uint32_t totalTimePlayed_ = 0;
+    uint32_t levelTimePlayed_ = 0;
+
+    // Who results
+    std::vector<WhoEntry> whoResults_;
+    uint32_t whoOnlineCount_ = 0;
+
+    // Duel
+    bool pendingDuelRequest_    = false;
+    uint64_t duelChallengerGuid_= 0;
+    uint64_t duelArbiterGuid_   = 0;   // the duel flag; both answers name it
+    std::string duelChallengerName_;
+    uint32_t duelCountdownMs_   = 0;
+    std::chrono::steady_clock::time_point duelCountdownStartedAt_{};
+
+    // A join the server has not answered yet, and how long it has left.
+    uint32_t bgJoinPendingType_ = 0;
+    float bgJoinWaitSec_        = 0.0f;
+
+    // Guild. The last character's is not the next one's: logging out of a
+    // guilded character into a guildless one used to leave the name, and
+    // everything that asks "am I in a guild" answered yes.
+    /// Membership the server has confirmed this session, for a guild joined
+    /// after login - which no record built at login can know about.
+    bool inGuild_ = false;
+    /// What the invite called it, kept until the guild names itself.
+    std::string joinedGuildName_;
+    std::string guildName_;
+    std::vector<std::string> guildRankNames_;
+    GuildRosterData guildRoster_;
+    GuildInfoData guildInfoData_;
+    GuildQueryResponseData guildQueryData_;
+    bool hasGuildRoster_ = false;
+    bool pendingGuildInvite_ = false;
+    std::string pendingGuildInviterName_;
+    std::string pendingGuildInviteGuildName_;
+    bool showPetitionDialog_ = false;
+    /// Which of the two registrar panels is open - the offer says, not the
+    /// opcode, and closing has to name the same one that opened.
+    bool petitionIsGuildCharter_ = false;
+    std::vector<PetitionShowlistData::Charter> petitionCharters_;
+    uint32_t petitionCost_ = 0;
+    uint64_t petitionNpcGuid_ = 0;
+    PetitionInfo petitionInfo_;
+
+    // Group
+    GroupListData partyData;
+    bool pendingGroupInvite = false;
+    std::string pendingInviterName;
+
+    // Ready check
+    bool        pendingReadyCheck_       = false;
+    uint32_t    readyCheckReadyCount_    = 0;
+    uint32_t    readyCheckNotReadyCount_ = 0;
+    std::string readyCheckInitiator_;
+    std::vector<ReadyCheckResult> readyCheckResults_;
+
+    // Instance
+    std::vector<InstanceLockout> instanceLockouts_;
+    std::vector<GuildEventLogEntry> guildEventLog_;
+    /// Six item tabs and the money log after them.
+    std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
+    uint32_t instanceDifficulty_ = 0;
+    bool instanceIsHeroic_ = false;
+
+    // Raid marks
+    std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
+
+    // Arena
+    std::vector<ArenaTeamStats>  arenaTeamStats_;
+    std::vector<ArenaTeamRoster> arenaTeamRosters_;
+
+    // Battleground
+    std::array<BgQueueSlot, 3> bgQueues_{};
+    std::vector<AvailableBgInfo> availableBgs_;
+    BgScoreboardData bgScoreboard_;
+    std::vector<BgPlayerPosition> bgPlayerPositions_;
+
+    // LFG / Dungeon Finder
+    LfgState lfgState_        = LfgState::None;
+    LfgCompletionReward lfgCompletionReward_;
+    uint32_t lfgDungeonId_    = 0;
+    uint32_t lfgProposalId_   = 0;
+    /// The proposal the ready dialog has already been opened for. The server
+    /// resends the update as each member answers, and opening again would
+    /// reset the countdown and the ticks beside every name.
+    uint32_t shownProposalId_ = 0;
+    uint8_t  lfgOfferedRoles_ = 0;
+    // The queue's own numbers, which never arrived while the length check was
+    // longer than the packet.
+    int32_t  lfgWaitTank_ = -1;
+    int32_t  lfgWaitHealer_ = -1;
+    int32_t  lfgWaitDps_ = -1;
+    uint8_t  lfgNeedTank_ = 0;
+    uint8_t  lfgNeedHealer_ = 0;
+    uint8_t  lfgNeedDps_ = 0;
+    uint64_t lfgBootVictimGuid_ = 0;
+    /// Why the server will not let this character queue for a dungeon, by
+    /// dungeon id. Empty means nothing is locked.
+    std::unordered_map<uint32_t, uint32_t> lfgLocks_;
+    std::vector<LfgReward> lfgRewards_;
+    /// The group a proposal is offering, in the order the server lists it.
+    std::vector<LfgProposalMember> lfgProposalMembers_;
+    int32_t  lfgAvgWaitSec_   = -1;
+    int32_t  lfgMyWaitSec_    = -1;
+    uint32_t lfgQueuedSeconds_= 0;
+    uint32_t lfgBootVotes_    = 0;
+    uint32_t lfgBootTotal_    = 0;
+    uint32_t lfgBootTimeLeft_ = 0;
+    uint32_t lfgBootNeeded_   = 0;
+    /// What the role check is for, and how many are answering it.
+    std::vector<LfgRoleCheckDungeon> lfgRoleCheckDungeons_;
+    uint8_t lfgRoleCheckMembers_ = 0;
+    bool lfgBootInProgress_ = false;
+    bool lfgBootDidVote_    = false;
+    bool lfgBootMyVote_     = false;
+    std::string lfgBootTargetName_;
+    std::string lfgBootReason_;
+};
+
+class SocialHandler : private SocialCharacterState {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    /// `events`: what it hears of the session (the login that ends the party).
+    /// `events`: what it hears of the session (the login that begins the
+    /// character's social state anew).
     SocialHandler(GameHandler& owner, core::EventBus& events);
 
     void registerOpcodes(DispatchTable& table);
@@ -210,12 +343,6 @@ public:
     [[nodiscard]] const GuildRosterData& getGuildRoster() const { return guildRoster_; }
     [[nodiscard]] bool hasGuildRoster() const { return hasGuildRoster_; }
 
-    /// Membership the server has confirmed this session, for a guild joined
-    /// after login - which no record built at login can know about.
-    bool inGuild_ = false;
-    /// What the invite called it, kept until the guild names itself.
-    std::string joinedGuildName_;
-
     /// The guild this character is in, by id, whichever record knows it.
     ///
     /// The character list is the record at login and goes stale the moment a
@@ -223,20 +350,6 @@ public:
     /// field is the one the server keeps current. Zero for a player in none.
     [[nodiscard]] uint32_t ownGuildId() const;
 
-    /// Forget which guild the player is in, for a character that is not them.
-    ///
-    /// Called as a character enters the world: the name, the ranks and the
-    /// roster all belong to whoever was played last, and isInGuild() reads the
-    /// name.
-    void clearGuildMembership() {
-        inGuild_ = false;
-        joinedGuildName_.clear();
-        guildName_.clear();
-        guildRankNames_.clear();
-        guildRoster_ = GuildRosterData{};
-        hasGuildRoster_ = false;
-        guildQueryData_ = GuildQueryResponseData{};
-    }
     [[nodiscard]] const std::vector<std::string>& getGuildRankNames() const { return guildRankNames_; }
     /// The rights bitmask of the player's own guild rank, or 0 when it is not
     /// known. The roster carries one per rank and the member row names which
@@ -605,10 +718,7 @@ private:
     GameHandler& owner_;
     core::EventBus& events_;
 
-    // ---- State ----
-
-    // Inspect
-    InspectResult inspectResult_;
+    // ---- State (the character's is SocialCharacterState) ----
 
     // Logout
     bool  loggingOut_        = false;
@@ -619,144 +729,36 @@ private:
     /// Announce, once per logout, that it can no longer be cancelled.
     void commitLogout();
 
-    // Time played
-    uint32_t totalTimePlayed_ = 0;
     /// SMSG_QUERY_TIME_RESPONSE's second word and when it landed. Zero means
     /// no answer yet, which is different from "the reset is now".
     uint32_t dailyResetOffset_ = 0;
     time_t   dailyResetReceivedAt_ = 0;
     bool     announceServerTime_ = false;
-    uint32_t levelTimePlayed_ = 0;
 
-    // Who results
-    std::vector<WhoEntry> whoResults_;
-    uint32_t whoOnlineCount_ = 0;
     /// Off until the interface asks otherwise, which is a stock client's
     /// default: with no panel open the results belong in the chat.
     bool whoToUI_ = false;
 
-    // Duel
-    bool pendingDuelRequest_    = false;
-    uint64_t duelChallengerGuid_= 0;
-    uint64_t duelArbiterGuid_   = 0;   // the duel flag; both answers name it
-
-    // A join the server has not answered yet, and how long it has left.
-    uint32_t bgJoinPendingType_ = 0;
-    float bgJoinWaitSec_        = 0.0f;
-    std::string duelChallengerName_;
-    uint32_t duelCountdownMs_   = 0;
-    std::chrono::steady_clock::time_point duelCountdownStartedAt_{};
-
-    // Guild
-    std::string guildName_;
-    std::vector<std::string> guildRankNames_;
-    GuildRosterData guildRoster_;
-    GuildInfoData guildInfoData_;
-    GuildQueryResponseData guildQueryData_;
-    bool hasGuildRoster_ = false;
+    // Guild names by id, which outlive any one character.
     std::unordered_map<uint32_t, std::string> guildNameCache_;
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> pendingGuildNameQueries_;
-    bool pendingGuildInvite_ = false;
-    std::string pendingGuildInviterName_;
-    std::string pendingGuildInviteGuildName_;
-    bool showPetitionDialog_ = false;
-    /// Which of the two registrar panels is open - the offer says, not the
-    /// opcode, and closing has to name the same one that opened.
-    bool petitionIsGuildCharter_ = false;
-    std::vector<PetitionShowlistData::Charter> petitionCharters_;
-    uint32_t petitionCost_ = 0;
-    uint64_t petitionNpcGuid_ = 0;
-    PetitionInfo petitionInfo_;
 
-    // Group
-    GroupListData partyData;
-    /// What this handler hears of the session: the party ends at each login
-    /// (events::CharacterLoggingIn). After it, so it goes first.
-    std::vector<core::EventBus::Subscription> subscriptions_;
-    bool pendingGroupInvite = false;
-    std::string pendingInviterName;
-
-    // Ready check
-    bool        pendingReadyCheck_       = false;
-    uint32_t    readyCheckReadyCount_    = 0;
-    uint32_t    readyCheckNotReadyCount_ = 0;
-    std::string readyCheckInitiator_;
-    std::vector<ReadyCheckResult> readyCheckResults_;
-
-    // Instance
-    std::vector<InstanceLockout> instanceLockouts_;
-    std::vector<GuildEventLogEntry> guildEventLog_;
-    /// Six item tabs and the money log after them.
-    std::array<std::vector<GuildBankLogEntry>, 7> guildBankLogs_;
-    uint32_t instanceDifficulty_ = 0;
-    bool instanceIsHeroic_ = false;
-
-    // Raid marks
-    std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
-
-    // Encounter units
+    // Encounter units and the instance's bind question: the map's, ended
+    // with it (resetTransferState).
     std::array<uint64_t, kMaxEncounterSlots> encounterUnitGuids_ = {};
     InstanceLockPrompt instanceLock_;
 
-    // Arena
-    std::vector<ArenaTeamStats>  arenaTeamStats_;
-    std::vector<ArenaTeamRoster> arenaTeamRosters_;
+    // How the arena roster is sorted - the interface's choice.
     std::string arenaSortKey_;
     bool arenaSortAscending_ = true;
 
-    // Battleground
-    std::array<BgQueueSlot, 3> bgQueues_{};
-    std::vector<AvailableBgInfo> availableBgs_;
-    BgScoreboardData bgScoreboard_;
-    std::vector<BgPlayerPosition> bgPlayerPositions_;
+    // When the last position and contact list requests went out.
     std::chrono::steady_clock::time_point lastBgPositionRequest_{};
     std::chrono::steady_clock::time_point lastContactListRequest_{};
 
-    // LFG / Dungeon Finder
-    LfgState lfgState_        = LfgState::None;
-    LfgCompletionReward lfgCompletionReward_;
-    uint32_t lfgDungeonId_    = 0;
-    uint32_t lfgProposalId_   = 0;
-    /// The proposal the ready dialog has already been opened for. The server
-    /// resends the update as each member answers, and opening again would
-    /// reset the countdown and the ticks beside every name.
-    uint32_t shownProposalId_ = 0;
-    uint8_t  lfgOfferedRoles_ = 0;
-    // The queue's own numbers, which never arrived while the length check was
-    // longer than the packet.
-    int32_t  lfgWaitTank_ = -1;
-    int32_t  lfgWaitHealer_ = -1;
-    int32_t  lfgWaitDps_ = -1;
-    uint8_t  lfgNeedTank_ = 0;
-    uint8_t  lfgNeedHealer_ = 0;
-    uint8_t  lfgNeedDps_ = 0;
-    uint64_t lfgBootVictimGuid_ = 0;
-    /// Why the server will not let this character queue for a dungeon, by
-    /// dungeon id. Empty means nothing is locked, which is also what it meant
-    /// while SMSG_LFG_PLAYER_INFO was being skipped - the difference is that
-    /// now it is an answer rather than an absence.
-    std::unordered_map<uint32_t, uint32_t> lfgLocks_;
-    std::vector<LfgReward> lfgRewards_;
-    /// The group a proposal is offering, in the order the server lists it.
-    std::vector<LfgProposalMember> lfgProposalMembers_;
-    int32_t  lfgAvgWaitSec_   = -1;
-    int32_t  lfgMyWaitSec_    = -1;
-    uint32_t lfgQueuedSeconds_= 0;
-    uint32_t lfgBootVotes_    = 0;
-    uint32_t lfgBootTotal_    = 0;
-    uint32_t lfgBootTimeLeft_ = 0;
-    uint32_t lfgBootNeeded_   = 0;
-    /// The three flags the proposal opens with. Read from the packet and
-    /// dropped until 2026-08-06; the vote dialog branches on all three.
-    /// What the role check is for, and how many are answering it. Read off
-    /// SMSG_LFG_ROLE_CHECK_UPDATE, which used to stop at the count.
-    std::vector<LfgRoleCheckDungeon> lfgRoleCheckDungeons_;
-    uint8_t lfgRoleCheckMembers_ = 0;
-    bool lfgBootInProgress_ = false;
-    bool lfgBootDidVote_    = false;
-    bool lfgBootMyVote_     = false;
-    std::string lfgBootTargetName_;
-    std::string lfgBootReason_;
+    /// What this handler hears of the session: the character's state begins
+    /// anew at each login (events::CharacterLoggingIn). Last, so it goes first.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace game

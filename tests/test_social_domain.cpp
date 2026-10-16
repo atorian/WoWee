@@ -221,3 +221,30 @@ TEST_CASE("a duel challenge names the challenger, and accepting names the flag",
     REQUIRE(accepted != nullptr);
     CHECK(accepted->readUInt64() == kDuelFlag);
 }
+
+TEST_CASE("the next character is not asked the last one's duel or invite", "[social][harness]") {
+    wowee::test::PlayerSpec alice;
+    alice.guid = 0x71;
+    alice.name = "Alice";
+    wowee::test::PlayerSpec bob;
+    bob.guid = 0x72;
+    bob.name = "Bob";
+
+    GameHarness h;
+    h.enterWorld(alice);
+    h.receive(Opcode::SMSG_DUEL_REQUESTED, Body().u64(kDuelFlag).u64(kThrall));
+    // SMSG_GROUP_INVITE, 3.3.5a: whether it can be accepted, then who asks.
+    h.receive(Opcode::SMSG_GROUP_INVITE, Body().u8(1).cstr("Thrall").u32(0).u8(0).u32(0));
+    h.pump();
+    REQUIRE(h.game().hasPendingDuelRequest());
+    REQUIRE(h.game().hasPendingGroupInvite());
+
+    h.relogAs(bob);
+
+    // Both were Alice's to answer: Bob was asked to accept a duel and a group
+    // nobody had offered him, and accepting would have sent Alice's flag.
+    CHECK_FALSE(h.game().hasPendingDuelRequest());
+    CHECK_FALSE(h.game().hasPendingGroupInvite());
+    h.game().acceptDuel();
+    CHECK(h.countSent(Opcode::CMSG_DUEL_ACCEPTED) == 0);
+}
