@@ -839,15 +839,7 @@ void GameHandler::registerCoreOpcodes() {
     // Guild
 
     // Loot/gossip/vendor delegates
-    registerHandler(Opcode::SMSG_SUMMON_REQUEST, &GameHandler::handleSummonRequest);
-    dispatchTable_[Opcode::SMSG_SUMMON_CANCEL] = [this](network::Packet& /*packet*/) {
-        pendingSummonRequest_ = false;
-        // social_handler raised the prompt with CONFIRM_SUMMON; uiparent.lua
-        // takes this one down again. Told only in chat, the dialog stays on
-        // screen offering a summon the server has already withdrawn.
-        fireAddonEvent("CANCEL_SUMMON", {});
-        addSystemChatMessage("Summon cancelled.");
-    };
+    // (SMSG_SUMMON_REQUEST, SMSG_SUMMON_CANCEL → SocialHandler)
 
     // Bind point
     dispatchTable_[Opcode::SMSG_BINDPOINTUPDATE] = [this](network::Packet& packet) {
@@ -947,39 +939,7 @@ void GameHandler::registerCoreOpcodes() {
 
     // (SMSG_TRAINER_BUY_SUCCEEDED, SMSG_TRAINER_BUY_FAILED → moved to InventoryHandler)
 
-    // Minimap ping
-    dispatchTable_[Opcode::MSG_MINIMAP_PING] = [this](network::Packet& packet) {
-        const bool mmTbcLike = isPreWotlk();
-        if (!packet.hasRemaining(mmTbcLike ? 8u : 1u) ) return;
-        uint64_t senderGuid = mmTbcLike
-            ? packet.readUInt64() : packet.readPackedGuid();
-        if (!packet.hasRemaining(8)) return;
-        float pingX = packet.readFloat();
-        float pingY = packet.readFloat();
-        MinimapPing ping;
-        ping.senderGuid = senderGuid;
-        ping.wowX = pingY;
-        ping.wowY = pingX;
-        ping.age  = 0.0f;
-        minimapPings_.push_back(ping);
-        if (senderGuid != playerGuid) {
-            eventBus().publish(events::MinimapPinged{senderGuid, ping.wowX, ping.wowY});
-        }
-        // The ping is drawn by this client from minimapPings_ and was never
-        // announced, so a handed-over minimap heard the sound and showed
-        // nothing. The interface wants the unit that pinged and the position,
-        // and marks the spot itself.
-        //
-        // x then y, in that order, which is the reverse of how they are stored
-        // above: the wire sends them the other way round and this client swaps
-        // them on the way in. Passing the stored pair straight through would
-        // put every ping at its own mirror image.
-        std::string unitId = guidToUnitId(senderGuid);
-        if (unitId.empty()) unitId = "player";
-        fireAddonEvent("MINIMAP_PING", {unitId,
-                                        std::to_string(ping.wowY),
-                                        std::to_string(ping.wowX)});
-    };
+    // (MSG_MINIMAP_PING → SocialHandler)
     dispatchTable_[Opcode::SMSG_ZONE_UNDER_ATTACK] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t areaId = packet.readUInt32();
@@ -1657,14 +1617,14 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_LFG_TIMEDOUT] = [this](network::Packet& packet) {
         // Server-side LFG invite timed out (no response within time limit)
         addSystemChatMessage("Dungeon Finder: Invite timed out.");
-        if (openLfgCallback_) openLfgCallback_();
+        eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
     // Another party member failed to respond to a LFG role-check in time
     dispatchTable_[Opcode::SMSG_LFG_OTHER_TIMEDOUT] = [this](network::Packet& packet) {
         // Another party member failed to respond to a LFG role-check in time
         addSystemChatMessage("Dungeon Finder: Another player's invite timed out.");
-        if (openLfgCallback_) openLfgCallback_();
+        eventBus().publish(events::DungeonFinderOpened{});
         packet.skipAll();
     };
     // uint32 result - LFG auto-join attempt failed (player selected auto-join at queue time)
@@ -1795,6 +1755,7 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_GMTICKET_DELETETICKET] = [this](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             const uint32_t res = packet.readUInt32();
+            if (res == kTicketDeleted) gmTicketText_.clear();
             addSystemChatMessage(res == kTicketDeleted ? "GM ticket deleted."
                                                        : "No ticket to delete.");
         }
@@ -1823,7 +1784,6 @@ void GameHandler::registerRemainingOpcodes() {
             /*uint32_t daysLeft =*/ (packet.hasRemaining(4)) ? packet.readUInt32() : 0;
             gmTicketWaitHours_ = (packet.hasRemaining(4))
                 ? packet.readFloat() : 0.0f;
-            gmTicketActive_ = true;
             char buf[256];
             if (ageSec < 60) {
                 std::snprintf(buf, sizeof(buf),
@@ -1863,7 +1823,6 @@ void GameHandler::registerRemainingOpcodes() {
                 "0",                                            // not opened by a GM
             });
         } else if (gmStatus == 3) {
-            gmTicketActive_ = false;
             gmTicketText_.clear();
             addSystemChatMessage("Your GM ticket has been closed.");
             LOG_INFO("SMSG_GMTICKET_GETTICKET: ticket closed");
@@ -1879,7 +1838,6 @@ void GameHandler::registerRemainingOpcodes() {
             // been suspended. 0x0A is GMTICKET_STATUS_DEFAULT, the answer a
             // server gives when the player has no ticket at all, which is why
             // it arrived every time and why nothing else ever followed it.
-            gmTicketActive_ = false;
             gmTicketText_.clear();
             LOG_DEBUG("SMSG_GMTICKET_GETTICKET: no open ticket (status=", static_cast<int>(gmStatus), ")");
             fireAddonEvent("UPDATE_TICKET", {});
@@ -2489,212 +2447,7 @@ void GameHandler::registerRemainingOpcodes() {
                   " displayId=", std::dec, displayId);
         packet.skipAll();
     };
-    // uint64 battlefieldGuid + uint32 zoneId + uint64 expireUnixTime (seconds)
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_ENTRY_INVITE] = [this](network::Packet& packet) {
-        // uint32 battleId + uint32 zoneId + uint32 acceptTime - twelve bytes.
-        //
-        // This required twenty and read a 64-bit guid and a 64-bit time that
-        // the server does not send, so it returned on the length check every
-        // time and the handler never ran once. The event was written down as
-        // never fired, which was true and was the symptom rather than the
-        // cause.
-        if (!packet.hasRemaining(12)) {
-            packet.skipAll(); return;
-        }
-        const uint32_t bfBattleId = packet.readUInt32();
-        const uint32_t bfZoneId   = packet.readUInt32();
-        const uint32_t expireTime = packet.readUInt32();
-        (void)expireTime;
-        bfMgrBattleId_ = bfBattleId;
-        // Store the invitation so the UI can show a prompt
-        bfMgrInvitePending_ = true;
-        bfMgrZoneId_        = bfZoneId;
-        char buf[128];
-        std::string bfZoneName = getAreaName(bfZoneId);
-        if (!bfZoneName.empty())
-            std::snprintf(buf, sizeof(buf),
-                "You are invited to the outdoor battlefield in %s. Click to enter.",
-                bfZoneName.c_str());
-        else
-            std::snprintf(buf, sizeof(buf),
-                "You are invited to the outdoor battlefield in zone %u. Click to enter.",
-                bfZoneId);
-        addSystemChatMessage(buf);
-        // The prompt to enter is a static popup the interface raises from this.
-        // The zone id goes with it as the battle id: every handler in the group
-        // opens `local battleID = ...` and passes it back when the player
-        // answers, so a bare fire would answer for no battlefield.
-        if (hasAddonEventListener())
-            fireAddonEvent("BATTLEFIELD_MGR_ENTRY_INVITE", {std::to_string(bfBattleId)});
-        LOG_INFO("SMSG_BATTLEFIELD_MGR_ENTRY_INVITE: zoneId=", bfZoneId);
-    };
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_ENTERED] = [this](network::Packet& packet) {
-        // uint32 battleId, then three flags - seven bytes. This read a 64-bit
-        // guid the server does not send and guarded eight, so on a seven-byte
-        // packet it never ran: entering Wintergrasp announced nothing.
-        if (packet.hasRemaining(7)) {
-            const uint32_t bfBattleId = packet.readUInt32();
-            bfMgrBattleId_ = bfBattleId;
-            packet.readUInt8();   // unk, always one
-            uint8_t isSafe  = packet.readUInt8();
-            uint8_t onQueue = packet.readUInt8();
-            bfMgrInvitePending_ = false;
-            addSystemChatMessage(isSafe ? "You are in the battlefield zone (safe area)."
-                                        : "You have entered the battlefield!");
-            if (onQueue) addSystemChatMessage("You are in the battlefield queue.");
-            if (hasAddonEventListener())
-                fireAddonEvent("BATTLEFIELD_MGR_ENTERED", {std::to_string(bfMgrZoneId_)});
-            LOG_INFO("SMSG_BATTLEFIELD_MGR_ENTERED: isSafe=", static_cast<int>(isSafe), " onQueue=", static_cast<int>(onQueue));
-        }
-        packet.skipAll();
-    };
-    // uint64 battlefieldGuid + uint32 battlefieldId + uint64 expireTime
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_QUEUE_INVITE] = [this](network::Packet& packet) {
-        // uint32 battleId + uint8 warmup - five bytes, and this required
-        // twenty. Same shape as the entry invite above: never ran, and the
-        // event it fires was recorded as one the server never sends.
-        if (!packet.hasRemaining(5)) {
-            packet.skipAll(); return;
-        }
-        const uint32_t bfId = packet.readUInt32();
-        const bool warmup = packet.readUInt8() != 0;
-        bfMgrBattleId_ = bfId;
-        bfMgrInvitePending_ = true;
-        bfMgrZoneId_        = bfId;
-        char buf[128];
-        std::snprintf(buf, sizeof(buf),
-            "A spot has opened in the battlefield queue (battlefield %u).", bfId);
-        addSystemChatMessage(buf);
-        if (hasAddonEventListener())
-            // The warmup flag picks between two dialogs and was read off the
-            // wire and thrown away, so the warmup one could never appear.
-            fireAddonEvent("BATTLEFIELD_MGR_QUEUE_INVITE",
-                                {std::to_string(bfId), eventBool(warmup)});
-        LOG_INFO("SMSG_BATTLEFIELD_MGR_QUEUE_INVITE: bfId=", bfId);
-    };
-    // uint32 battlefieldId + uint32 teamId + uint8 accepted + uint8 loggingEnabled + uint8 result
-    // result: 0=queued, 1=not_in_group, 2=too_high_level, 3=too_low_level,
-    //         4=in_cooldown, 5=queued_other_bf, 6=bf_full
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE] = [this](network::Packet& packet) {
-        // uint32 battlefieldId + uint32 teamId + uint8 accepted + uint8 loggingEnabled + uint8 result
-        // result: 0=queued, 1=not_in_group, 2=too_high_level, 3=too_low_level,
-        //         4=in_cooldown, 5=queued_other_bf, 6=bf_full
-        if (!packet.hasRemaining(11)) {
-            packet.skipAll(); return;
-        }
-        uint32_t bfId2    = packet.readUInt32();
-        /*uint32_t teamId =*/ packet.readUInt32();
-        uint8_t accepted  = packet.readUInt8();
-        /*uint8_t logging =*/ packet.readUInt8();
-        uint8_t result    = packet.readUInt8();
-        (void)bfId2;
-        if (accepted) {
-            addSystemChatMessage("You have joined the battlefield queue.");
-        } else {
-            static const char* kBfQueueErrors[] = {
-                "Queued for battlefield.", "Not in a group.", "Level too high.",
-                "Level too low.", "Battlefield in cooldown.", "Already queued for another battlefield.",
-                "Battlefield is full."
-            };
-            const char* msg = (result < 7) ? kBfQueueErrors[result]
-                                           : "Battlefield queue request failed.";
-            addSystemChatMessage(std::string("Battlefield: ") + msg);
-        }
-        // The battle id and whether the queue took, in that order - the
-        // interface reads both to say which battlefield answered and how.
-        if (hasAddonEventListener()) {
-            fireAddonEvent("BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE",
-                                {std::to_string(bfId2), std::to_string(accepted)});
-        }
-        LOG_INFO("SMSG_BATTLEFIELD_MGR_QUEUE_REQUEST_RESPONSE: accepted=", static_cast<int>(accepted),
-                 " result=", static_cast<int>(result));
-        packet.skipAll();
-    };
-    // uint64 battlefieldGuid + uint8 remove
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_EJECT_PENDING] = [this](network::Packet& packet) {
-        // A battle id and nothing else. This read a packed pair of a guid and a
-        // flag across nine bytes, so the guard alone kept it from running.
-        //
-        // AzerothCore declares this opcode and never sends it, so nothing here
-        // has been exercised - but a wrong reading is worse than an untested
-        // one, and the frame that answers it is live.
-        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
-        const uint32_t battleId = packet.readUInt32();
-        packet.skipAll();
-
-        addSystemChatMessage("You will be removed from the battlefield shortly.");
-        LOG_INFO("SMSG_BATTLEFIELD_MGR_EJECT_PENDING: battle ", battleId);
-        // The second argument picks between two dialogs and nothing here knows
-        // which; nil is the local one, which is what a player being ejected
-        // from the battlefield they are standing in should see.
-        fireAddonEvent("BATTLEFIELD_MGR_EJECT_PENDING",
-                       {std::to_string(battleId), kEventNil});
-    };
-    // uint64 battlefieldGuid + uint32 reason + uint32 battleStatus + uint8 relocated
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_EJECTED] = [this](network::Packet& packet) {
-        // Seven bytes: a battle id, then three single bytes. SendBfLeaveMessage
-        // writes exactly that.
-        //
-        // This guarded seventeen and read a guid, two thirty-two-bit fields and
-        // a flag, so it never ran once - and the reason it treated as a small
-        // enum is a bit mask, which would have named the wrong thing if it had.
-        if (!packet.hasRemaining(7)) { packet.skipAll(); return; }
-        const uint32_t battleId = packet.readUInt32();
-        const uint8_t reason = packet.readUInt8();
-        const uint8_t battleStatus = packet.readUInt8();
-        const uint8_t relocated = packet.readUInt8();
-        packet.skipAll();
-
-        constexpr uint8_t kClose = 0x01, kExited = 0x08, kLowLevel = 0x10;
-        const bool exited = (reason & kExited) != 0;
-        const bool lowLevel = (reason & kLowLevel) != 0;
-
-        if (lowLevel) {
-            raiseUiError("You are not high enough level for this battlefield.");
-        } else if (reason & kClose) {
-            addSystemChatMessage("The battlefield has closed.");
-        } else if (exited) {
-            addSystemChatMessage("You have left the battlefield.");
-        } else {
-            addSystemChatMessage("You have been removed from the battlefield.");
-        }
-
-        LOG_INFO("SMSG_BATTLEFIELD_MGR_EJECTED: battle ", battleId,
-                 " reason 0x", std::hex, static_cast<int>(reason), std::dec,
-                 " status ", static_cast<int>(battleStatus),
-                 relocated ? " (relocated)" : "");
-
-        bfMgrInvitePending_ = false;
-
-        // battleID, playerExited, relocated, battleActive, lowLevel. The four
-        // flags are booleans in the middle of the list, so they go through
-        // eventBool - a zero here would read as true and pick the wrong dialog.
-        fireAddonEvent("BATTLEFIELD_MGR_EJECTED",
-                       {std::to_string(battleId),
-                        eventBool(exited),
-                        eventBool(relocated != 0),
-                        eventBool(battleStatus != 0),
-                        eventBool(lowLevel)});
-    };
-    // uint32 oldState + uint32 newState
-    // States: 0=Waiting, 1=Starting, 2=InProgress, 3=Ending, 4=Cooldown
-    dispatchTable_[Opcode::SMSG_BATTLEFIELD_MGR_STATE_CHANGE] = [this](network::Packet& packet) {
-        // uint32 oldState + uint32 newState
-        // States: 0=Waiting, 1=Starting, 2=InProgress, 3=Ending, 4=Cooldown
-        if (packet.hasRemaining(8)) {
-            /*uint32_t oldState =*/ packet.readUInt32();
-            uint32_t newState   = packet.readUInt32();
-            static const char* kBfStates[] = {
-                "waiting", "starting", "in progress", "ending", "in cooldown"
-            };
-            const char* stateStr = (newState < 5) ? kBfStates[newState] : "unknown state";
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "Battlefield is now %s.", stateStr);
-            addSystemChatMessage(buf);
-            LOG_INFO("SMSG_BATTLEFIELD_MGR_STATE_CHANGE: newState=", newState);
-        }
-        packet.skipAll();
-    };
+    // (SMSG_BATTLEFIELD_MGR_* → SocialHandler)
     // One event in full, in answer to opening it.
     dispatchTable_[Opcode::SMSG_CALENDAR_SEND_EVENT] = [this](network::Packet& packet) {
         CalendarEventDetail parsed;
@@ -3179,6 +2932,7 @@ void GameHandler::registerDomainOpcodes() {
     accountDataHandler_->registerOpcodes(dispatchTable_);
     actionBarHandler_->registerOpcodes(dispatchTable_);
     petHandler_->registerOpcodes(dispatchTable_);
+    reputationHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {

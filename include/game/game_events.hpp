@@ -258,6 +258,20 @@ struct GossipClosedOnNpc {
     float x = 0, y = 0, z = 0;
 };
 
+/// The server asks the dungeon finder be opened (SMSG_OPEN_LFG_DUNGEON_FINDER).
+struct DungeonFinderOpened {};
+
+/// The character's standing with a faction moved.
+struct ReputationChanged {
+    std::string factionName;
+    int32_t delta = 0;
+    int32_t standing = 0;
+};
+
+/// Which factions the character has, or which are visible, changed: the
+/// reputation list is built again.
+struct FactionListChanged {};
+
 /// The player accepted a quest into the log.
 struct QuestAccepted {
     uint32_t questId = 0;

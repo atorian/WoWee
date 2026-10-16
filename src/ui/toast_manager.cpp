@@ -113,12 +113,15 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     }
 
     // Reputation change toast callback
-    if (!repChangeCallbackSet_) {
-        gameHandler.setRepChangeCallback([this](const std::string& name, int32_t delta, int32_t standing) {
+    if (!repChangeSub_) {
+        repChangeSub_ = gameHandler.eventBus().subscribe<game::events::ReputationChanged>(
+            [this](const game::events::ReputationChanged& e) {
+            const std::string& name = e.factionName;
+            const int32_t delta = e.delta;
+            const int32_t standing = e.standing;
             repToasts_.push_back({.factionName = name, .delta = delta, .standing = standing, .age = 0.0f});
             if (repToasts_.size() > 4) repToasts_.erase(repToasts_.begin());
         });
-        repChangeCallbackSet_ = true;
     }
 
     // Quest completion toasts

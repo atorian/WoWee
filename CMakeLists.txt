@@ -738,6 +738,7 @@ set(WOWEE_SOURCES
     src/game/pet_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
+    src/game/reputation_handler.cpp
     src/game/quest_objectives.cpp
     src/game/entity_controller.cpp
     src/game/warden_handler.cpp

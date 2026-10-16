@@ -141,7 +141,7 @@ private:
         float age = 0.0f;
     };
     std::vector<RepToastEntry> repToasts_;
-    bool repChangeCallbackSet_ = false;
+    core::EventBus::Subscription repChangeSub_;
     static constexpr float kRepToastLifetime = 3.5f;
     void renderRepToasts(float deltaTime);
 

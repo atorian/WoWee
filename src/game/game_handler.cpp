@@ -113,7 +113,8 @@ GameHandler::GameHandler(GameServices& services)
                                                       *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
-    socialHandler_    = std::make_unique<SocialHandler>(*this, *services_.events);
+    socialHandler_    = std::make_unique<SocialHandler>(*this, *this, *services_.events, *chatHandler_,
+                                                        *this, *services_.cvars);
     questHandler_     = std::make_unique<QuestHandler>(*this, *this, *services_.events, *chatHandler_,
                                                        *this, services_.assetManager);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
@@ -129,6 +130,16 @@ GameHandler::GameHandler(GameServices& services)
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
     petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
+    reputationHandler_ = std::make_unique<ReputationHandler>(*this, *services_.events, *chatHandler_,
+                                                             *this);
+    // The reputation list is built from the factions; it is built again when
+    // they change, and for the next character.
+    subscriptions_.push_back(eventBus().subscribe<events::FactionListChanged>(
+        [this](const events::FactionListChanged&) {
+            reputationListBuilt_ = false;
+            reputationList_.clear();
+            reputationRowsDirty_ = true;
+        }));
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.
@@ -275,8 +286,6 @@ void GameHandler::clearWorldState() {
     movementHandler_->cancelPendingWorldTransfer();
     activeCharacterGuid_ = 0;
     knownTitleBits_.clear();
-    friendGuids_.clear();
-    contacts_.clear();
     transportAttachments_.clear();
     pendingIncomingPackets_.clear();
     // Fire despawn callbacks so the renderer releases M2/character model resources.
@@ -2077,10 +2086,6 @@ void GameHandler::declineSharedQuest() {
 //   uint64 summonerGuid + uint32 zoneId + uint32 timeoutMs
 // ---------------------------------------------------------------------------
 
-void GameHandler::handleSummonRequest(network::Packet& packet) {
-    socialHandler_->handleSummonRequest(packet);
-}
-
 void GameHandler::acceptSummon() {
     socialHandler_->acceptSummon();
 }
@@ -2802,9 +2807,10 @@ void GameHandler::loadFactionNameCache() const {
 
 int GameHandler::unitReactionToPlayer(const Unit& unit) const {
     const uint32_t ft = unit.getFactionTemplate();
+    const auto& factions = reputationHandler_->factions();
     if (auto it = factionTemplateRepList_.find(ft);
-        it != factionTemplateRepList_.end() && it->second < initialFactions_.size()) {
-        const auto& standing = initialFactions_[it->second];
+        it != factionTemplateRepList_.end() && it->second < factions.size()) {
+        const auto& standing = factions[it->second];
         int rank = reputationStandingFor(standing.standing).id;
         if (standing.flags & FACTION_FLAG_AT_WAR) rank = std::min(rank, 4);
         return rank;
@@ -2857,7 +2863,7 @@ uint32_t GameHandler::getRepListIdByFactionId(uint32_t factionId) const {
 }
 
 void GameHandler::setWatchedFactionId(uint32_t factionId) {
-    watchedFactionId_ = factionId;
+    reputationHandler_->setWatchedFaction(factionId);
     if (!isInWorld()) return;
     // CMSG_SET_WATCHED_FACTION: int32 repListId (-1 = unwatch)
     int32_t repListId = -1;
@@ -2872,12 +2878,10 @@ void GameHandler::setWatchedFactionId(uint32_t factionId) {
 }
 
 void GameHandler::setFactionAtWar(uint32_t repListId, bool atWar) {
-    if (repListId >= initialFactions_.size()) return;
     // The server forbids declaring war on some factions; don't fight the flag.
     if (atWar && isFactionPeaceForced(repListId)) return;
     // Optimistic local update; the server echoes SMSG_SET_FACTION_ATWAR to confirm.
-    if (atWar) initialFactions_[repListId].flags |=  FACTION_FLAG_AT_WAR;
-    else       initialFactions_[repListId].flags &= ~FACTION_FLAG_AT_WAR;
+    if (!reputationHandler_->setFlag(repListId, kFactionFlagAtWar, atWar)) return;
     if (!isInWorld() || !socket) return;
     // CMSG_SET_FACTION_ATWAR: uint32 repListId + uint8 flag
     network::Packet pkt(wireOpcode(Opcode::CMSG_SET_FACTION_ATWAR));
@@ -2888,10 +2892,8 @@ void GameHandler::setFactionAtWar(uint32_t repListId, bool atWar) {
 }
 
 void GameHandler::setFactionInactive(uint32_t repListId, bool inactive) {
-    if (repListId >= initialFactions_.size()) return;
     // No SMSG confirmation is sent for inactive, so update the local flag directly.
-    if (inactive) initialFactions_[repListId].flags |=  FACTION_FLAG_INACTIVE;
-    else          initialFactions_[repListId].flags &= ~FACTION_FLAG_INACTIVE;
+    if (!reputationHandler_->setFlag(repListId, kFactionFlagInactive, inactive)) return;
     if (!isInWorld() || !socket) return;
     // CMSG_SET_FACTION_INACTIVE: uint32 repListId + uint8 flag
     network::Packet pkt(wireOpcode(Opcode::CMSG_SET_FACTION_INACTIVE));
@@ -3870,8 +3872,9 @@ const GossipMessageData& GameHandler::getCurrentGossip() const {
     return questHandler_->getCurrentGossip();
 }
 int32_t GameHandler::getFactionStanding(uint32_t factionId) const {
-    auto it = factionStandings_.find(factionId);
-    if (it != factionStandings_.end()) return it->second;
+    const auto& standings = reputationHandler_->standings();
+    auto it = standings.find(factionId);
+    if (it != standings.end()) return it->second;
     // Nothing in the by-faction map means nothing has *changed* since login:
     // SMSG_SET_FACTION_STANDING is what writes it, and it only arrives when
     // reputation moves. The standings the character logged in with come in
@@ -3880,16 +3883,16 @@ int32_t GameHandler::getFactionStanding(uint32_t factionId) const {
     // the reputation tab drew every bar empty at Neutral, whatever the
     // character had earned, until the next point of reputation with it.
     const uint32_t repListId = getRepListIdByFactionId(factionId);
-    if (repListId < initialFactions_.size()) {
-        return initialFactions_[repListId].standing;
-    }
+    const auto& factions = reputationHandler_->factions();
+    if (repListId < factions.size()) return factions[repListId].standing;
     return 0;
 }
 
 const std::vector<GameHandler::ReputationEntry>& GameHandler::getReputationList() const {
     // Nothing to resolve until the server has sent the standings, and building
     // an empty list once would keep it empty for the session.
-    if (reputationListBuilt_ || initialFactions_.empty()) return reputationList_;
+    const auto& factions = reputationHandler_->factions();
+    if (reputationListBuilt_ || factions.empty()) return reputationList_;
 
     // The reputation index to faction id mapping already exists: the faction
     // name cache reads it out of Faction.dbc and keeps both directions. Reading
@@ -3899,8 +3902,8 @@ const std::vector<GameHandler::ReputationEntry>& GameHandler::getReputationList(
     // is nothing to prime here.
     reputationListBuilt_ = true;
 
-    for (size_t repIndex = 0; repIndex < initialFactions_.size(); ++repIndex) {
-        const auto& standing = initialFactions_[repIndex];
+    for (size_t repIndex = 0; repIndex < factions.size(); ++repIndex) {
+        const auto& standing = factions[repIndex];
         // Hidden factions are never shown, and one the player has not met yet
         // is not visible either.
         if ((standing.flags & FACTION_FLAG_HIDDEN) != 0) continue;

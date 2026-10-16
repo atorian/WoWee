@@ -19,7 +19,67 @@ namespace wowee {
 namespace core { class CVarStore; }
 namespace game {
 
-class GameHandler;
+class PacketSender;
+class FrameXmlEvents;
+class ChatLog;
+class EntityManager;
+class PacketParsers;
+struct Character;
+
+/// What the social side asks of the rest of the game, and the few things it
+/// has another part of it do. Grouped by the owner of each answer.
+class SocialQueries {
+public:
+    virtual ~SocialQueries() = default;
+
+    // ---- The character and the world in view ----
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// The character logged in, or null between characters.
+    [[nodiscard]] virtual const Character* activeCharacter() const = 0;
+    [[nodiscard]] virtual uint64_t currentTargetGuid() const = 0;
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    [[nodiscard]] virtual bool battlegroundMap(uint32_t mapId) = 0;
+    /// "player", "target", "party2", ... - the unit id FrameXML knows a guid
+    /// by, or empty.
+    [[nodiscard]] virtual std::string unitIdFor(uint64_t guid) const = 0;
+
+    // ---- Other players ----
+    [[nodiscard]] virtual std::string playerName(uint64_t guid) const = 0;
+    virtual void requestPlayerName(uint64_t guid) = 0;
+    [[nodiscard]] virtual uint8_t playerClassOf(uint64_t guid) const = 0;
+
+    // ---- What the client's data says ----
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    [[nodiscard]] virtual std::string mapName(uint32_t mapId) const = 0;
+    [[nodiscard]] virtual std::string areaName(uint32_t areaId) const = 0;
+    [[nodiscard]] virtual std::string lfgDungeonName(uint32_t dungeonId) const = 0;
+    [[nodiscard]] virtual const ItemQueryResponseData* itemInfo(uint32_t itemId) const = 0;
+    virtual void ensureItemInfo(uint32_t itemId) = 0;
+    [[nodiscard]] virtual uint8_t spellDispelType(uint32_t spellId) const = 0;
+    /// Talent.dbc and TalentTab.dbc, read on the first ask - what an inspected
+    /// character's talent bitfield is decoded against.
+    [[nodiscard]] virtual const std::unordered_map<uint32_t, TalentTabEntry>& talentTabs() = 0;
+    [[nodiscard]] virtual const std::unordered_map<uint32_t, TalentEntry>& talents() = 0;
+
+    // ---- What another domain keeps ----
+    /// A party member's auras, for the frames that read every unit's.
+    virtual void mirrorAurasByGuid(uint64_t guid, const std::vector<AuraSlot>& auras) = 0;
+    virtual void cacheInspectedPlayerEquipment(uint64_t guid,
+                                               const std::array<uint32_t, 19>& itemEntries) = 0;
+    [[nodiscard]] virtual const std::unordered_map<uint64_t, std::array<uint32_t, 19>>&
+    inspectedPlayerItems() const = 0;
+    /// The player's own equipment is drawn again (the helm went on or off).
+    virtual void markOnlineEquipmentDirty() = 0;
+    virtual void setGuildBankMoney(uint64_t money) = 0;
+    virtual void addLocalChatMessage(const MessageChatData& message) = 0;
+
+    // ---- The appearance switches the realm keeps with the character ----
+    [[nodiscard]] virtual bool showingHelm() const = 0;
+    [[nodiscard]] virtual bool showingCloak() const = 0;
+    virtual void setShowingHelm(bool shown) = 0;
+    virtual void setShowingCloak(bool shown) = 0;
+};
 
 /// What the social side of the game keeps for one character: its party and
 /// guild, the invitations and challenges put to it, its queues, its arena
@@ -81,6 +141,29 @@ struct SocialCharacterState {
     GroupListData partyData;
     bool pendingGroupInvite = false;
     std::string pendingInviterName;
+    /// Points on the minimap the party pinged, while they last.
+    std::vector<MinimapPing> minimapPings_;
+
+    // Friends, ignores and mutes, as the server last listed them.
+    std::vector<ContactEntry> contacts_;
+    std::unordered_map<std::string, uint64_t> friendsCache_;  ///< name -> guid
+    /// Every friend's guid, so a name that arrives later finds its friend.
+    std::unordered_set<uint64_t> friendGuids_;
+    std::unordered_map<std::string, uint64_t> ignoreCache_;   ///< name -> guid
+    std::unordered_set<uint64_t> ignoreListGuids_;
+    uint32_t lastContactListMask_ = 0;
+    uint32_t lastContactListCount_ = 0;
+
+    // A summon put to the player, waiting for an answer.
+    bool        pendingSummonRequest_ = false;
+    uint64_t    summonerGuid_         = 0;
+    std::string summonerName_;
+    float       summonTimeoutSec_     = 0.0f;
+
+    // The outdoor battlefield (Wintergrasp) invitation and the battle it is for.
+    bool     bfMgrInvitePending_ = false;
+    uint32_t bfMgrZoneId_        = 0;
+    uint32_t bfMgrBattleId_      = 0;
 
     // Ready check
     bool        pendingReadyCheck_       = false;
@@ -157,9 +240,8 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    /// `events`: what it hears of the session (the login that begins the
-    /// character's social state anew).
-    SocialHandler(GameHandler& owner, core::EventBus& events);
+    SocialHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                  ChatLog& chat, SocialQueries& queries, const core::CVarStore& cvars);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -494,6 +576,17 @@ public:
 
     // Minimap ping
     void sendMinimapPing(float wowX, float wowY);
+    [[nodiscard]] const std::vector<MinimapPing>& minimapPings() const { return minimapPings_; }
+    /// Let pings age by a frame; the ones past their lifetime go.
+    void ageMinimapPings(float deltaTime);
+
+    [[nodiscard]] const std::vector<ContactEntry>& contacts() const { return contacts_; }
+    [[nodiscard]] const std::unordered_map<std::string, uint64_t>& ignoreCache() const {
+        return ignoreCache_;
+    }
+    [[nodiscard]] const std::string& summonerName() const { return summonerName_; }
+    [[nodiscard]] float summonTimeoutSec() const { return summonTimeoutSec_; }
+    [[nodiscard]] uint32_t bfMgrBattleId() const { return bfMgrBattleId_; }
 
     // Summon request
     void handleSummonRequest(network::Packet& packet);
@@ -705,18 +798,22 @@ private:
     void handleArenaTeamStats(network::Packet& packet);
     void handleArenaError(network::Packet& packet);
     void handlePvpLogData(network::Packet& packet);
-    void handleInitializeFactions(network::Packet& packet);
-    void handleSetFactionStanding(network::Packet& packet);
-    void handleSetFactionAtWar(network::Packet& packet);
-    void handleSetFactionVisible(network::Packet& packet);
     void handleGroupSetLeader(network::Packet& packet);
     void handleTalentsInfo(network::Packet& packet);
     void loadGuildNameCache();
     void saveGuildNameCache() const;
     void rememberGuildName(uint32_t guildId, const std::string& guildName);
 
-    GameHandler& owner_;
+    void raiseUiError(const std::string& message);
+    /// The outdoor battlefield opcodes (Wintergrasp), and the summon's cancel.
+    void registerBattlefieldOpcodes(DispatchTable& table);
+
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
     core::EventBus& events_;
+    ChatLog& chat_;
+    SocialQueries& queries_;
+    const core::CVarStore& cvars_;
 
     // ---- State (the character's is SocialCharacterState) ----
 

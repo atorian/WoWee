@@ -210,22 +210,22 @@ CHECKS = [
     # of three handlers into PetHandler, 3184 -> 3041, and the action bar
     # stopped keeping a copy of the spell cooldowns, -> 3027.
     ("domain_shape_check.py",
-     r"^(\d+) domain handlers built from GameHandler&", 5,
+     r"^(\d+) domain handlers built from GameHandler&", 4,
      "domain handlers whose constructor takes GameHandler&"),
     ("domain_shape_check.py",
-     r"^(\d+) reaches through owner_ in src/game", 2058,
+     r"^(\d+) reaches through owner_ in src/game", 1206,
      "reaches through owner_ into GameHandler from the domain handlers"),
     # State a domain should own, handed out of GameHandler writable, and the
     # notifications wired to a single listener instead of the bus. 218, 1324
     # and 65 before the inventory's state moved to InventoryHandler.
     ("domain_shape_check.py",
-     r"^(\d+) xxxRef\(\) accessors in GameHandler", 130,
+     r"^(\d+) xxxRef\(\) accessors in GameHandler", 110,
      "writable accessors to GameHandler's state"),
     ("domain_shape_check.py",
-     r"^(\d+) calls to them through owner_ in src/game", 605,
+     r"^(\d+) calls to them through owner_ in src/game", 505,
      "domain handlers editing GameHandler's state through its accessors"),
     ("domain_shape_check.py",
-     r"^(\d+) set\*Callback setters in GameHandler", 52,
+     r"^(\d+) set\*Callback setters in GameHandler", 50,
      "notifications wired to one listener instead of the event bus"),
     # A static in a binding or a panel is state that outlives the character:
     # the Lua state is rebuilt for the next one and the static is not, so the

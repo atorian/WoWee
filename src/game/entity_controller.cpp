@@ -2863,17 +2863,7 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             }
         }
 
-        // Backfill friend list: if this GUID came from a friend list packet,
-        // register the name in owner_.friendsCacheRef() now that we know it.
-        if (owner_.friendGuidsRef().count(data.guid)) {
-            owner_.friendsCacheRef()[data.name] = data.guid;
-        }
-
-        // Backfill ignore list: SMSG_IGNORE_LIST only contains GUIDs, so
-        // ignoreCache (name→guid for UI) is populated here once names resolve.
-        if (owner_.ignoreListGuidsRef().count(data.guid)) {
-            owner_.ignoreCacheRef()[data.name] = data.guid;
-        }
+        // The friend and ignore lists file the name themselves (PlayerNameKnown).
 
         // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
         if (owner_.hasAddonEventListener()) {
