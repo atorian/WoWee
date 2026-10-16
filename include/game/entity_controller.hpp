@@ -8,7 +8,6 @@
 #include <deque>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,18 +39,6 @@ public:
     /// and a create that arrived before the scene existed had nowhere to go.
     /// Sends nothing to the server.
     void announceObjectsInView();
-
-    // --- The player's own fields ---
-
-    /// Which of the four extra action bars the realm has shown for this
-    /// character - bottom left, bottom right, right and right 2 as bits 0 to 3
-    /// - which it keeps in byte 2 of PLAYER_FIELD_BYTES and sends with the
-    /// character. Empty when there is no character in the world yet, or this
-    /// expansion's field table does not name the field (said once).
-    [[nodiscard]] std::optional<uint8_t> actionBarToggles() const;
-    /// Show or hide them: CMSG_SET_ACTIONBAR_TOGGLES, and the field set here
-    /// so the answer is the new one before the realm's update echoes it.
-    void setActionBarToggles(uint8_t mask);
 
     // --- Name / info cache queries ---
     void queryPlayerName(uint64_t guid);
@@ -131,8 +118,6 @@ private:
 
     // --- Entity tracking ---
     EntityManager entityManager;              // Manages all entities in view
-    /// The missing PLAYER_FIELD_BYTES index has been reported.
-    mutable bool actionBarFieldMissingSaid_ = false;
 
     // ---- Name caches ----
     std::unordered_map<uint64_t, std::string> playerNameCache;

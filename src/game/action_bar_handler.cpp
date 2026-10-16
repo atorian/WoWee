@@ -45,8 +45,41 @@ void ActionBarHandler::setSlot(int slot, ActionBarSlot::Type type, uint32_t id) 
     }
 }
 
+std::optional<uint8_t> ActionBarHandler::extraBarsShown() const {
+    if (extraBarsSetHere_) return extraBarsSetHere_;
+    const auto bytes = queries_.playerFieldBytes();
+    if (!bytes) {
+        // The realm sends the field with the character, so in the world it
+        // is either here or this expansion's field table does not name it.
+        if (sender_.characterInWorld() && !extraBarsUnknownSaid_) {
+            extraBarsUnknownSaid_ = true;
+            LOG_WARNING("Action bars: the extra bars the realm keeps shown are not known - "
+                        "PLAYER_FIELD_BYTES is not in this expansion's update_fields.json, or "
+                        "was not sent; the interface uses what this client last saved");
+        }
+        return std::nullopt;
+    }
+    return static_cast<uint8_t>((*bytes >> 16) & 0x0Fu);
+}
+
+void ActionBarHandler::setExtraBarsShown(uint8_t mask) {
+    mask &= 0x0Fu;
+    extraBarsSetHere_ = mask;
+    // The realm keeps them with the character; told now, they are there at
+    // the next login and in every other client.
+    if (!sender_.characterInWorld()) {
+        LOG_WARNING("Action bars: extra bars 0x", std::hex, static_cast<int>(mask), std::dec,
+                    " shown with no character in the world; the realm keeps the ones it had");
+        return;
+    }
+    network::Packet packet(wireOpcode(Opcode::CMSG_SET_ACTIONBAR_TOGGLES));
+    packet.writeUInt8(mask);
+    sender_.send(packet);
+}
+
 void ActionBarHandler::clear() {
     bar_ = {};
+    extraBarsSetHere_.reset();
 }
 
 void ActionBarHandler::tickCooldowns(float deltaTime) {

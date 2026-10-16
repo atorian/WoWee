@@ -1,6 +1,6 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
-#include "game/entity_controller.hpp"
+#include "game/action_bar_handler.hpp"
 #include <array>
 #include <algorithm>
 #include <optional>
@@ -5499,13 +5499,13 @@ void registerSystemLuaAPI(lua_State* L) {
                 if (shown[i]) mask = static_cast<uint8_t>(mask | (1u << i));
             }
             saveInterfaceState();
-            if (auto* gh = getGameHandler(L)) gh->getEntityController()->setActionBarToggles(mask);
+            if (auto* gh = getGameHandler(L)) gh->actionBar().setExtraBarsShown(mask);
             return 0;
         }},
                 {"GetActionBarToggles", [](lua_State* L) -> int {
             auto shown = actionBarToggles();
             auto* gh = getGameHandler(L);
-            if (const auto mask = gh ? gh->getEntityController()->actionBarToggles() : std::nullopt) {
+            if (const auto mask = gh ? gh->actionBar().extraBarsShown() : std::nullopt) {
                 for (int i = 0; i < 4; ++i) shown[i] = (*mask & (1u << i)) != 0;
             }
             for (bool on : shown) lua_pushboolean(L, on ? 1 : 0);

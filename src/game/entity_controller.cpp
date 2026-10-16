@@ -1741,42 +1741,6 @@ void EntityController::announceUnit(uint64_t guid, ObjectType objectType,
     }
 }
 
-std::optional<uint8_t> EntityController::actionBarToggles() const {
-    const uint16_t index = fieldIndex(UF::PLAYER_FIELD_BYTES);
-    if (index == 0xFFFF) {
-        if (!actionBarFieldMissingSaid_) {
-            actionBarFieldMissingSaid_ = true;
-            LOG_WARNING("Action bar toggles: this expansion's update_fields.json does not name "
-                        "PLAYER_FIELD_BYTES, so the bars the realm keeps shown are not known; "
-                        "the interface falls back to what this client last saved");
-        }
-        return std::nullopt;
-    }
-    const auto player = entityManager.getEntity(owner_.getPlayerGuid());
-    if (!player || !player->hasField(index)) return std::nullopt;
-    return static_cast<uint8_t>((player->getField(index) >> 16) & 0x0Fu);
-}
-
-void EntityController::setActionBarToggles(uint8_t mask) {
-    mask &= 0x0Fu;
-    const uint16_t index = fieldIndex(UF::PLAYER_FIELD_BYTES);
-    if (index != 0xFFFF) {
-        if (const auto player = entityManager.getEntity(owner_.getPlayerGuid())) {
-            const uint32_t bytes = player->hasField(index) ? player->getField(index) : 0u;
-            player->setField(index, (bytes & ~0x00FF0000u) | (static_cast<uint32_t>(mask) << 16));
-        }
-    }
-    auto* socket = owner_.getSocket();
-    if (!socket || !owner_.isInWorld()) {
-        LOG_WARNING("Action bar toggles 0x", std::hex, static_cast<int>(mask), std::dec,
-                    " not sent: no character in the world; the realm keeps the old ones");
-        return;
-    }
-    network::Packet packet(wireOpcode(Opcode::CMSG_SET_ACTIONBAR_TOGGLES));
-    packet.writeUInt8(mask);
-    socket->send(packet);
-}
-
 void EntityController::announceObjectsInView() {
     size_t units = 0, players = 0, objects = 0, corpses = 0;
     for (const auto& [guid, entity] : entityManager.getEntities()) {

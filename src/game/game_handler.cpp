@@ -296,6 +296,14 @@ float GameHandler::spellCooldownRemaining(uint32_t spellId) const {
     return (it != cooldowns.end() && it->second > 0.0f) ? it->second : 0.0f;
 }
 
+std::optional<uint32_t> GameHandler::playerFieldBytes() const {
+    const uint16_t index = fieldIndex(UF::PLAYER_FIELD_BYTES);
+    if (index == 0xFFFF) return std::nullopt;
+    const auto player = entityController_->getEntityManager().getEntity(playerGuid);
+    if (!player || !player->hasField(index)) return std::nullopt;
+    return player->getField(index);
+}
+
 float GameHandler::itemCooldownRemaining(uint32_t itemId) const {
     // An item's cooldown is that of the spell it casts when used - a potion,
     // a trinket.

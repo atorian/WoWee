@@ -250,6 +250,7 @@ public:
     float spellCooldownRemaining(uint32_t spellId) const override;
     float itemCooldownRemaining(uint32_t itemId) const override;
     void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
+    std::optional<uint32_t> playerFieldBytes() const override;
 
     /**
      * Get current connection state

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -37,6 +38,10 @@ public:
     /// Ask for an item's description, so a button holding it can show its
     /// name and icon.
     virtual void requestItemInfo(uint32_t itemId) = 0;
+    /// The character's PLAYER_FIELD_BYTES as the realm last sent it. Empty
+    /// before it has, or when this expansion's field table does not name the
+    /// field.
+    [[nodiscard]] virtual std::optional<uint32_t> playerFieldBytes() const = 0;
 };
 
 /// The character's action bar: 144 buttons, twelve bars of twelve.
@@ -63,11 +68,20 @@ public:
 
     [[nodiscard]] const ActionBar& slots() const { return bar_; }
 
+    /// Which of the four extra bars are shown - bottom left, bottom right,
+    /// right and right 2, as bits 0 to 3. The realm keeps them in byte 2 of
+    /// the character's PLAYER_FIELD_BYTES and sends them with it, so the bars
+    /// another client turned on are on here. Empty while that is not known.
+    [[nodiscard]] std::optional<uint8_t> extraBarsShown() const;
+
     // --- Commands ------------------------------------------------------------
 
     /// Put an action on a button, or empty it (EMPTY, 0): drawn at once and
     /// sent to the server once a character is in the world.
     void setSlot(int slot, ActionBarSlot::Type type, uint32_t id);
+    /// Show or hide the extra bars: CMSG_SET_ACTIONBAR_TOGGLES, answered from
+    /// here until the next login rather than waiting for the realm's echo.
+    void setExtraBarsShown(uint8_t mask);
     /// A character is being logged in; its bar arrives from the server.
     void clear();
     /// Count the buttons' cooldown sweeps down by a frame.
@@ -89,6 +103,10 @@ private:
     FrameXmlEvents& frameXml_;
     ActionBarQueries& queries_;
     ActionBar bar_{};
+    /// The extra bars as this client last set them for this character.
+    std::optional<uint8_t> extraBarsSetHere_;
+    /// That the realm's extra bars could not be read has been said.
+    mutable bool extraBarsUnknownSaid_ = false;
     /// Action types already reported as not drawn, so each is said once.
     std::unordered_set<uint8_t> reportedTypes_;
     /// Last, so it goes first: its handler writes the bar.

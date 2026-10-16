@@ -4,8 +4,8 @@
 #include <catch_amalgamated.hpp>
 #include "game_harness.hpp"
 #include "test_support.hpp"
+#include "game/action_bar_handler.hpp"
 #include "game/entity.hpp"
-#include "game/entity_controller.hpp"
 #include "game/update_field_table.hpp"
 
 #include <memory>
@@ -50,10 +50,10 @@ TEST_CASE("the extra action bars the realm keeps shown are the ones the characte
     h.enterWorld();
     const uint64_t guid = h.player().guid;
     h.game().getEntityManager().addEntity(guid, std::make_shared<wowee::game::Player>(guid));
-    auto& entities = *h.game().getEntityController();
+    auto& bars = h.game().actionBar();
 
     // Before the realm has said: not known, rather than "none shown".
-    CHECK_FALSE(entities.actionBarToggles().has_value());
+    CHECK_FALSE(bars.extraBarsShown().has_value());
 
     // Bottom left and right shown - byte 2 of PLAYER_FIELD_BYTES, as the realm
     // sends it with the character.
@@ -61,14 +61,14 @@ TEST_CASE("the extra action bars the realm keeps shown are the ones the characte
     REQUIRE(field != 0xFFFF);
     h.receive(Opcode::SMSG_UPDATE_OBJECT, valuesUpdate(guid, field, 0x00050000u));
     h.pump();
-    REQUIRE(entities.actionBarToggles().has_value());
-    CHECK(*entities.actionBarToggles() == 0x05);
+    REQUIRE(bars.extraBarsShown().has_value());
+    CHECK(*bars.extraBarsShown() == 0x05);
 
     // The player shows the bottom right bar instead: the realm is told, and the
     // answer is the new one before it echoes it.
-    entities.setActionBarToggles(0x02);
+    bars.setExtraBarsShown(0x02);
     auto* sent = h.lastSent(Opcode::CMSG_SET_ACTIONBAR_TOGGLES);
     REQUIRE(sent);
     CHECK(sent->readUInt8() == 0x02);
-    CHECK(*entities.actionBarToggles() == 0x02);
+    CHECK(*bars.extraBarsShown() == 0x02);
 }
