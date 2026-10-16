@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "core/cache_stats.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
@@ -159,6 +160,11 @@ public:
     void clearShadowMap() {}
 
     [[nodiscard]] int getChunkCount() const { return static_cast<int>(chunks.size()); }
+    /// The ground's textures and alpha maps, in estimated GPU bytes, against
+    /// the budget eviction keeps them under. Main thread.
+    [[nodiscard]] core::CacheStats textureCacheStats() const {
+        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
+    }
     [[nodiscard]] int getRenderedChunkCount() const { return renderedChunks; }
     /// How far the furthest chunk drawn this frame was, for the diagnostic that
     /// compares it against the doodads. See Renderer::logViewDistanceDiag.

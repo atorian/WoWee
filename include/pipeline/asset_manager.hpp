@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cache_stats.hpp"
 #include "pipeline/archive_layer.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -170,6 +171,11 @@ public:
      * Get file cache stats
      */
     [[nodiscard]] size_t getFileCacheSize() const { return fileCacheTotalBytes; }
+    /// The files kept in memory once read, in bytes, against the budget the
+    /// least recently used are evicted to stay under. Any thread.
+    [[nodiscard]] core::CacheStats fileCacheStats() const;
+    /// The DBC tables kept parsed. Their bytes are not counted.
+    [[nodiscard]] size_t dbcCacheEntries() const;
     [[nodiscard]] size_t getFileCacheHits() const { return fileCacheHits; }
     [[nodiscard]] size_t getFileCacheMisses() const { return fileCacheMisses; }
 

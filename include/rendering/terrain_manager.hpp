@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include "core/cache_stats.hpp"
 #include "core/job_group.hpp"
 
 #include "core/coordinates.hpp"
@@ -364,6 +365,9 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
+    /// The prepared tiles kept in memory to be finalized again without
+    /// reading them from disk, against the budget they are kept under.
+    [[nodiscard]] core::CacheStats tileCacheStats() const;
     [[nodiscard]] int getPendingTileCount() const {
         std::lock_guard<std::mutex> lock(queueMutex);
         return static_cast<int>(pendingTiles.size());
@@ -514,7 +518,7 @@ private:
     std::unordered_map<TileCoord, CachedTile, TileCoord::Hash> tileCache_;
     std::list<TileCoord> tileCacheLru_;
     size_t tileCacheBudgetBytes_ = 8ull * 1024 * 1024 * 1024; // Dynamic, set at init based on RAM
-    std::mutex tileCacheMutex_;
+    mutable std::mutex tileCacheMutex_;
 
     std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
     void logMissingAdtOnce(const std::string& adtPath);

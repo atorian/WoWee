@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cache_stats.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/interior_light.hpp"
@@ -275,6 +276,17 @@ public:
     bool getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform);
 
     [[nodiscard]] size_t getInstanceCount() const { return scene_->instances.size(); }
+    [[nodiscard]] size_t getModelCount() const { return models.size(); }
+    /// The textures loaded and composited for characters, with their normal
+    /// maps, in estimated GPU bytes, against the budget eviction keeps them
+    /// under. Main thread.
+    [[nodiscard]] core::CacheStats textureCacheStats() const {
+        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
+    }
+    /// Normal maps being derived in the background and not yet finished.
+    [[nodiscard]] int pendingNormalMapJobs() const {
+        return pendingNormalMapCount_.load(std::memory_order_relaxed);
+    }
 
     // Normal mapping settings. There are no parallax settings: characters are
     // drawn without parallax whatever the world uses (see the material setup).

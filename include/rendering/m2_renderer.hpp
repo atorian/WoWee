@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cache_stats.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/spatial_grid.hpp"
@@ -807,6 +808,11 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
+    /// The textures loaded for models, in estimated GPU bytes, against the
+    /// budget eviction keeps them under. Main thread.
+    [[nodiscard]] core::CacheStats textureCacheStats() const {
+        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
+    }
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }

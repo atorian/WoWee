@@ -1642,6 +1642,15 @@ void TerrainManager::processOneReadyTile() {
     }
 }
 
+core::CacheStats TerrainManager::tileCacheStats() const {
+    std::lock_guard<std::mutex> lock(tileCacheMutex_);
+    core::CacheStats stats;
+    stats.entries = tileCache_.size();
+    for (const auto& [coord, cached] : tileCache_) stats.bytes += cached.bytes;
+    stats.budgetBytes = tileCacheBudgetBytes_;
+    return stats;
+}
+
 std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coord) {
     std::lock_guard<std::mutex> lock(tileCacheMutex_);
     auto it = tileCache_.find(coord);

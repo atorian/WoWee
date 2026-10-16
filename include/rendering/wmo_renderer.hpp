@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cache_stats.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
@@ -260,6 +261,12 @@ public:
                                 wowee::rendering::VkShaderModule& fragShader);
     bool isInitialized() const { return initialized_; }
     uint32_t getModelCount() const { return loadedModels.size(); }
+    /// The textures loaded for buildings, with their generated normal maps,
+    /// in estimated GPU bytes, against the budget eviction keeps them under.
+    /// Main thread.
+    [[nodiscard]] core::CacheStats textureCacheStats() const {
+        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
+    }
 
     /**
      * Get number of active instances

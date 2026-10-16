@@ -883,6 +883,16 @@ std::vector<uint8_t> AssetManager::readFileOptional(const std::string& path) con
     return readFile(path);
 }
 
+core::CacheStats AssetManager::fileCacheStats() const {
+    std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    return {fileCache.size(), fileCacheTotalBytes, fileCacheBudget};
+}
+
+size_t AssetManager::dbcCacheEntries() const {
+    std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    return dbcCache.size();
+}
+
 void AssetManager::clearDBCCache() {
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     dbcCache.clear();
