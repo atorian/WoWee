@@ -6,6 +6,9 @@
 #include "game/calendar_data.hpp"
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
+#include "game/action_bar_handler.hpp"
+#include "game/frame_xml_events.hpp"
+#include "game/packet_sender.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/character.hpp"
 #include "game/opcodes.hpp"
@@ -166,7 +169,10 @@ class GameHandler : public IConnectionState,
                      public ITargetingState,
                      public IEntityAccess,
                      public ISocialState,
-                     public IPvpState {
+                     public IPvpState,
+                     public PacketSender,
+                     public FrameXmlEvents,
+                     public ActionBarQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -229,6 +235,21 @@ public:
      */
     bool isConnected() const override;
     bool isInWorld() const override { return state == WorldState::IN_WORLD && socket; }
+
+    // What the domain handlers are handed instead of this class: the world
+    // connection to send on (PacketSender), the FrameXML event channel
+    // (FrameXmlEvents) and what the action bar asks about its actions
+    // (ActionBarQueries). See AGENTS.md, "A new domain handler".
+    bool connected() const override { return isConnected(); }
+    bool characterInWorld() const override { return isInWorld(); }
+    void send(const network::Packet& packet) override;
+    void fireFrameXmlEvent(const std::string& name,
+                           const std::vector<std::string>& args) override {
+        fireAddonEvent(name, args);
+    }
+    float spellCooldownRemaining(uint32_t spellId) const override;
+    float itemCooldownRemaining(uint32_t itemId) const override;
+    void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
 
     /**
      * Get current connection state
@@ -1240,17 +1261,16 @@ public:
     const std::unordered_map<uint32_t, TalentTabEntry>& getAllTalentTabs() const;
     void loadTalentDbc();
 
-    // Action bar - 12 pages × 12 slots = 144 total.
-    // The first 6 pages match FrameXML action pages:
-    // Page 1: main bar, pages 2-6: scrollable main pages / fixed multi-bars.
-    // TBC sends 132 slots; WotLK sends 144.  Keep the full WotLK-sized array so
-    // later pages are not discarded when loading server action buttons.
-    static constexpr int SLOTS_PER_BAR    = 12;
-    static constexpr int ACTION_BARS      = 12;
-    static constexpr int ACTION_BAR_SLOTS = SLOTS_PER_BAR * ACTION_BARS;   // 144
-    std::array<ActionBarSlot, ACTION_BAR_SLOTS>& getActionBar() { return actionBar; }
-    const std::array<ActionBarSlot, ACTION_BAR_SLOTS>& getActionBar() const { return actionBar; }
-    void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id);
+    // Action bar - ActionBarHandler's. A facade for the callers that have
+    // not moved; new code asks actionBar().
+    static constexpr int SLOTS_PER_BAR    = kActionBarSlotsPerBar;
+    static constexpr int ACTION_BARS      = kActionBars;
+    static constexpr int ACTION_BAR_SLOTS = kActionBarSlots;
+    ActionBar& getActionBar() { return actionBarHandler_->mutableSlots(); }
+    const ActionBar& getActionBar() const { return actionBarHandler_->slots(); }
+    void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id) {
+        actionBarHandler_->setSlot(slot, type, id);
+    }
 
     void saveCharacterConfig();
     void loadCharacterConfig();
@@ -3332,6 +3352,9 @@ public:
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
+    /// The character's action bar.
+    ActionBarHandler& actionBar() { return *actionBarHandler_; }
+    const ActionBarHandler& actionBar() const { return *actionBarHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3399,7 +3422,7 @@ public:
     auto& transportAttachmentsRef() { return transportAttachments_; }
 
     // ── Inventory & Equipment ────────────────────────────────────────
-    auto& actionBarRef() { return actionBar; }
+    ActionBar& actionBarRef() { return actionBarHandler_->mutableSlots(); }
     auto& backpackSlotGuidsRef() { return backpackSlotGuids_; }
     auto& equipSlotGuidsRef() { return equipSlotGuids_; }
     auto& keyringSlotGuidsRef() { return keyringSlotGuids_; }
@@ -3984,6 +4007,7 @@ private:
     std::unique_ptr<QuestHandler>     questHandler_;
     std::unique_ptr<WardenHandler>    wardenHandler_;
     std::unique_ptr<AccountDataHandler> accountDataHandler_;
+    std::unique_ptr<ActionBarHandler> actionBarHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -4228,7 +4252,6 @@ private:
     // (which re-casts the next queued item) before giving up
     float craftCastGoGraceSec_ = 0.0f;
 
-    std::array<ActionBarSlot, ACTION_BAR_SLOTS> actionBar{};
     uint64_t petGuid_ = 0;
     uint32_t petActionSlots_[10] = {};   // SMSG_PET_SPELLS action bar (10 slots)
     uint8_t  petCommand_ = 1;            // 0=stay,1=follow,2=attack,3=dismiss

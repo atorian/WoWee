@@ -201,6 +201,17 @@ CHECKS = [
     ("game_dependency_check.py",
      r"^(\d+) includes of the client's presentation from the game", 0,
      "presentation includes in the game layer"),
+    # A domain handler is built from what it uses - a PacketSender, the
+    # FrameXmlEvents channel, the bus, its query interfaces - not from the
+    # whole GameHandler (AGENTS.md, "A new domain handler"). Held where they
+    # stood on 2026-10-16, when AccountDataHandler and ActionBarHandler were
+    # the first built that way; each handler moved lowers both.
+    ("domain_shape_check.py",
+     r"^(\d+) domain handlers built from GameHandler&", 9,
+     "domain handlers whose constructor takes GameHandler&"),
+    ("domain_shape_check.py",
+     r"^(\d+) reaches through owner_ in src/game", 4213,
+     "reaches through owner_ into GameHandler from the domain handlers"),
     # A static in a binding or a panel is state that outlives the character:
     # the Lua state is rebuilt for the next one and the static is not, so the
     # next character logged in with the last one's collapsed quest groups,

@@ -117,7 +117,11 @@ GameHandler::GameHandler(GameServices& services)
     socialHandler_    = std::make_unique<SocialHandler>(*this);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
-    accountDataHandler_ = std::make_unique<AccountDataHandler>(*this);
+    // Built from what they use rather than from this class (AGENTS.md, "A new
+    // domain handler").
+    accountDataHandler_ = std::make_unique<AccountDataHandler>(
+        *this, *this, *services_.events, services_.accountDataDir);
+    actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries
@@ -280,6 +284,30 @@ void GameHandler::resetDbcCaches() {
 
 bool GameHandler::isConnected() const {
     return socket && socket->isConnected();
+}
+
+void GameHandler::send(const network::Packet& packet) {
+    if (socket) socket->send(packet);
+}
+
+float GameHandler::spellCooldownRemaining(uint32_t spellId) const {
+    const auto& cooldowns = spellHandler_->getSpellCooldowns();
+    const auto it = cooldowns.find(spellId);
+    return (it != cooldowns.end() && it->second > 0.0f) ? it->second : 0.0f;
+}
+
+float GameHandler::itemCooldownRemaining(uint32_t itemId) const {
+    // An item's cooldown is that of the spell it casts when used - a potion,
+    // a trinket.
+    const auto* info = getItemInfo(itemId);
+    if (!info || !info->valid) return 0.0f;
+    for (const auto& spell : info->spells) {
+        if (spell.spellId == 0) continue;
+        if (const float remaining = spellCooldownRemaining(spell.spellId); remaining > 0.0f) {
+            return remaining;
+        }
+    }
+    return 0.0f;
 }
 
 void GameHandler::sortBags() {
@@ -865,13 +893,7 @@ void GameHandler::updateGame(float deltaTime) {
         // Unit cast states and spell cooldowns are ticked by SpellHandler::updateTimers()
         // (called from GameHandler::updateTimers above). No duplicate tick-down here.
 
-        // Update action bar cooldowns
-        for (auto& slot : actionBar) {
-            if (slot.cooldownRemaining > 0.0f) {
-                slot.cooldownRemaining -= deltaTime;
-                if (slot.cooldownRemaining < 0.0f) slot.cooldownRemaining = 0.0f;
-            }
-        }
+        actionBarHandler_->tickCooldowns(deltaTime);
 
         // Update combat text (Phase 2)
         updateCombatText(deltaTime);
