@@ -2129,6 +2129,9 @@ void EntitySpawner::erasePendingGuidIfUnqueued(uint64_t guid) {
 
 void EntitySpawner::despawnCreature(uint64_t guid) {
     if (!spawns_) return;
+    // Held across a reconnect: the game forgot it with the lost connection,
+    // not because it left.
+    if (spawns_->held_.count(guid)) return;
     // If this guid is a PLAYER, it will be tracked in spawns_->playerInstances_.
     // Route to the correct despawn path so we don't leak instances.
     if (spawns_->playerInstances_.count(guid)) {
@@ -2276,6 +2279,9 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
 
 void EntitySpawner::despawnGameObject(uint64_t guid) {
     if (!spawns_) return;
+    // Held across a reconnect: the game forgot it with the lost connection,
+    // not because it left.
+    if (spawns_->held_.count(guid)) return;
     // A spawn still waiting, or still loading on a worker, is cancelled too:
     // otherwise it lands after the server has removed the object, and the
     // object stays in the world with nothing left to remove it.

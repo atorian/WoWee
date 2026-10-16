@@ -21,6 +21,10 @@
 /// The world loader is timed by a clock that advances a frame's time per
 /// frame, so a load's warmup takes its two seconds of frames and no wall time.
 ///
+/// The login server is a stand-in too: a lost session is renewed, refused or
+/// not reached as the test says (setRenewal), and the world server the client
+/// connects to again is GameHarness's, on the new connection.
+///
 /// The game's FrameXML channel belongs to the loop, which routes it to the
 /// character's interface: GameHarness::addonEvents records nothing here. What
 /// the interface heard is interfaceEvents().
@@ -94,6 +98,12 @@ public:
                                        const std::vector<PlayerSpec>& characters);
     /// The server takes the character to another map (SMSG_NEW_WORLD).
     void receiveNewWorld(uint32_t mapId, float x, float y, float z);
+    /// The server's half of a reconnect attempt, once the client has begun
+    /// it: greet the new connection, take its AUTH_SESSION, list `player`,
+    /// take the character's login and put it in the world where `player`
+    /// says. Ends with the login handled; the client applies the entry in
+    /// that frame's Transitions.
+    void answerReconnect(const PlayerSpec& player, const WithLogin& withLogin = {});
     /// A creature the server shows the client: SMSG_UPDATE_OBJECT with one
     /// create block, a unit with this display at this position.
     void receiveCreature(uint64_t guid, uint32_t displayId, float x, float y, float z);
@@ -132,6 +142,19 @@ public:
     /// Whether the client has asked the spawner to present this creature on
     /// the current map: queued to be built, or built.
     [[nodiscard]] bool presentsCreature(uint64_t guid) const;
+    /// Where the character is drawn: what the renderer's character position
+    /// is in the client - the camera's follow target, moved by the controls.
+    /// Render coordinates.
+    [[nodiscard]] const glm::vec3& characterPosition() const { return characterPosition_; }
+    /// What the client says over the world while it reconnects; empty when
+    /// it does not.
+    [[nodiscard]] const std::string& reconnectStatus() const { return reconnectStatus_; }
+
+    /// How the login server answers the client's renewals of a lost session
+    /// from now on: renewed (the default), refused, or not reached.
+    void setRenewal(core::WorldSessionRenewal::Result result, const std::string& failure = {});
+    /// How many renewals the client has begun.
+    [[nodiscard]] int renewalsBegun() const;
     /// Every event a character's interface heard, in order, across characters;
     /// each is "<character>:<event>".
     [[nodiscard]] const std::vector<std::string>& interfaceEvents() const { return interfaceEvents_; }
@@ -143,7 +166,9 @@ private:
     class Input;
     class FrontEnd;
     class Observer;
+    class Renewal;
     friend class Observer;
+    friend class FrontEnd;
 
     /// At the start of each Interface phase: a new character's interface gets
     /// the recorder that writes interfaceEvents().
@@ -163,6 +188,8 @@ private:
     /// The Lua state the recorder was put into, and whose it is.
     const void* recordedState_ = nullptr;
     std::string recordedCharacter_;
+    glm::vec3 characterPosition_{0.0f};
+    std::string reconnectStatus_;
 
     ImGuiContext* imgui_ = nullptr;
     rendering::Camera viewCamera_;
@@ -175,6 +202,7 @@ private:
     std::unique_ptr<Window> window_;
     std::unique_ptr<Input> input_;
     std::unique_ptr<FrontEnd> frontEnd_;
+    std::unique_ptr<Renewal> renewal_;
     std::unique_ptr<core::ClientLoop> loop_;
 };
 

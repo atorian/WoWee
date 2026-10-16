@@ -27,6 +27,7 @@
 #include "core/world_entry_callback_handler.hpp"
 #include "game/movement_handler.hpp"
 #include "core/ui_screen_callback_handler.hpp"
+#include "core/login_server_renewal.hpp"
 #include "core/realm_patch_sync.hpp"
 #include "core/realm_patches.hpp"
 #include "core/data_paths.hpp"
@@ -431,6 +432,7 @@ bool Application::initialize() {
 
     // Create subsystems
     authHandler = std::make_unique<auth::AuthHandler>();
+    sessionRenewal_ = std::make_unique<LoginServerRenewal>(*authHandler);
 
     // Create and initialize expansion registry
     expansionRegistry_ = std::make_unique<game::ExpansionRegistry>();
@@ -1675,6 +1677,7 @@ void Application::buildClientLoop() {
         .assets = assetManager.get(),
         .addonCatalog = addonCatalog_.get(),
         .luaServices = luaServices_,
+        .renewal = sessionRenewal_.get(),
         .appearance = appearanceComposer_.get(),
         .animationCallbacks = animationCallbacks_.get(),
     };
@@ -2205,6 +2208,7 @@ void Application::shutdown() {
     gameServices_ = {};
     // Its transport calls into the auth handler; release it first.
     realmPatchSync_.reset();
+    sessionRenewal_.reset();
     LOG_DEBUG("Resetting authHandler...");
     authHandler.reset();
     LOG_DEBUG("Resetting assetManager...");
@@ -2399,10 +2403,6 @@ void Application::characterLeft(bool keptConnection) {
 
 void Application::showDisconnectNotice(const std::string& notice) {
     if (uiManager) uiManager->getAuthScreen().setStatus(notice, true, /*prominent=*/true);
-}
-
-bool Application::beginReconnect(uint64_t characterGuid) {
-    return uiScreenCallbacks_ && uiScreenCallbacks_->beginReconnect(characterGuid);
 }
 
 // One frame of being in the world.
@@ -4969,6 +4969,17 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
             });
         }
 
+        // A reconnect: said over the world the player goes on walking in.
+        if (!reconnectStatus_.empty()) {
+            const ImGuiIO& uiIo = ImGui::GetIO();
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            const ImVec2 size = ImGui::CalcTextSize(reconnectStatus_.c_str());
+            const ImVec2 at((uiIo.DisplaySize.x - size.x) * 0.5f, uiIo.DisplaySize.y * 0.2f);
+            fg->AddRectFilled(ImVec2(at.x - 16.0f, at.y - 10.0f),
+                              ImVec2(at.x + size.x + 16.0f, at.y + size.y + 10.0f),
+                              IM_COL32(0, 0, 0, 170), 6.0f);
+            fg->AddText(at, IM_COL32(255, 210, 80, 255), reconnectStatus_.c_str());
+        }
         if (plan.loading && loadingScreen_) loadingScreen_->renderOverlay();
         // Only now is the draw data closed.
         uiManager->finishImGuiFrame();
@@ -5208,7 +5219,8 @@ void Application::setupUICallbacks() {
     uiScreenCallbacks_ = std::make_unique<UIScreenCallbackHandler>(
         *uiManager, *gameHandler, *authHandler, expansionRegistry_.get(),
         assetManager.get(),
-        [this](AppState s) { requestState(s); });
+        [this](AppState s) { requestState(s); },
+        [this] { return loop_ && loop_->reconnecting(); });
     uiScreenCallbacks_->setupCallbacks();
 
     // ── Realm patch archives (EZWoW: list over world, files over login) ──

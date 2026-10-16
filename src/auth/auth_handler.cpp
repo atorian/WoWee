@@ -785,6 +785,7 @@ void AuthHandler::fail(const std::string& reason, bool protocolRelated, bool ref
     LOG_ERROR("Authentication failed: ", reason);
     protocolFailureSuspected_ = protocolRelated;
     refused_ = refusal;
+    failureReason_ = reason;
     setState(AuthState::FAILED);
 
     if (onFailure) {

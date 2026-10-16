@@ -62,6 +62,7 @@ namespace core {
 
 // Handler forward declarations
 class NPCInteractionCallbackHandler;
+class LoginServerRenewal;
 class ZoneTracker;
 class PlayerView;
 class SpellPresentation;
@@ -239,7 +240,7 @@ private:
     void characterScreenShown() override;
     void characterLeft(bool keptConnection) override;
     void showDisconnectNotice(const std::string& notice) override;
-    bool beginReconnect(uint64_t characterGuid) override;
+    void showReconnectStatus(const std::string& status) override { reconnectStatus_ = status; }
     void exiting() override;
 
     /// The frame and the world transitions, built once initialize has made
@@ -349,6 +350,10 @@ private:
     /// and on again tries again.
     bool mapWindowFailed_ = false;
     std::unique_ptr<auth::AuthHandler> authHandler;
+    /// How the frame renews a session lost in the world, over authHandler.
+    std::unique_ptr<LoginServerRenewal> sessionRenewal_;
+    /// Said over the world while the client reconnects; empty otherwise.
+    std::string reconnectStatus_;
     std::unique_ptr<game::GameHandler> gameHandler;
     /// The renderer's side of the transports - see game::TransportScene.
     std::unique_ptr<RendererTransportScene> transportScene_;

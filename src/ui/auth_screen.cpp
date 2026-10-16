@@ -305,10 +305,6 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     const bool waitingForSecurityCode = (authState == auth::AuthState::PIN_REQUIRED ||
                                          authState == auth::AuthState::AUTHENTICATOR_REQUIRED);
 
-    if (reconnectRequested_ && !authenticating) {
-        reconnectRequested_ = false;
-        attemptAuth(authHandler);
-    }
     if (authenticating && connecting_) {
         authTimer += ImGui::GetIO().DeltaTime;
         updateConnect(authHandler, ImGui::GetIO().DeltaTime);
@@ -1234,12 +1230,6 @@ void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
     authHandler.beginConnect(hostname_.text(), static_cast<uint16_t>(port));
 }
 
-bool AuthScreen::hasCredentials() const {
-    if (username_.empty() || hostname_.empty()) return false;
-    const bool useHash = usingStoredHash && password_.text() == PASSWORD_PLACEHOLDER;
-    return useHash ? !savedPasswordHash.empty() : !password_.empty();
-}
-
 void AuthScreen::updateConnect(auth::AuthHandler& authHandler, float deltaTime) {
     const std::string where = hostname_.text() + ":" + std::to_string(port);
     const std::string of = connectAttempt_ > 1
@@ -1333,8 +1323,7 @@ void AuthScreen::finishConnect(auth::AuthHandler& authHandler) {
 }
 
 void AuthScreen::setStatus(const std::string& message, bool isError, bool prominent) {
-    statusMessage = statusContext_.empty() ? message : statusContext_ + "\n" + message;
-    if (!statusContext_.empty()) prominent = true;
+    statusMessage = message;
     statusIsError = isError;
     statusProminent = prominent;
 }

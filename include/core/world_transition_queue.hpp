@@ -52,6 +52,11 @@ public:
     [[nodiscard]] bool leaving() const {
         return !empty() && std::holds_alternative<Leave>(requests_.front());
     }
+    /// The queued leave; nothing when none is queued.
+    [[nodiscard]] std::optional<Leave> queuedLeave() const {
+        if (!leaving()) return std::nullopt;
+        return std::get<Leave>(requests_.front());
+    }
     [[nodiscard]] bool hasWorldChange() const {
         return std::any_of(requests_.begin(), requests_.end(), [](const auto& request) {
             return !std::holds_alternative<game::events::WorldTransferStarted>(request);

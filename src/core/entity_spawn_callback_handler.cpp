@@ -31,6 +31,8 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         // A VALUES update can change a creature's display in place (Westfall
         // lumberjacks alternate between the normal and log-carrying models).
         // Replace the old render instance instead of retaining stale geometry.
+        // One held across a reconnect is the same creature again.
+        entitySpawner_.shown(guid);
         if (entitySpawner_.isCreatureSpawned(guid)) {
             const auto& displayIds = entitySpawner_.getCreatureDisplayIds();
             auto it = displayIds.find(guid);
@@ -59,6 +61,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
                     " pos=(", x, ",", y, ",", z, ")");
         // Skip local player - already spawned as the main character
         if (isLocalPlayerGuid_(guid)) return;
+        entitySpawner_.shown(guid);
         if (entitySpawner_.isPlayerSpawned(guid)) return;
         if (entitySpawner_.isPlayerPending(guid)) return;
         entitySpawner_.queuePlayerSpawn(guid, raceId, genderId, appearanceBytes, facialFeatures, x, y, z, orientation);
@@ -89,6 +92,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
 
     // GameObject spawn callback (online mode) - spawn static models (mailboxes, etc.)
     gameHandler_.setGameObjectSpawnCallback([this](uint64_t guid, uint32_t entry, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
+        entitySpawner_.shown(guid);
         entitySpawner_.queueGameObjectSpawn(guid, entry, displayId, x, y, z, orientation, scale);
     });
 

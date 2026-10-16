@@ -1,6 +1,7 @@
 #include "core/ui_screen_callback_handler.hpp"
 #include "core/application.hpp"  // AppState
 #include "core/logger.hpp"
+#include "core/realm_address.hpp"
 #include "ui/ui_manager.hpp"
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
@@ -20,18 +21,23 @@ UIScreenCallbackHandler::UIScreenCallbackHandler(
     auth::AuthHandler& authHandler,
     game::ExpansionRegistry* expansionRegistry,
     pipeline::AssetManager* assetManager,
-    SetStateFn setState)
+    SetStateFn setState,
+    ReconnectingFn reconnecting)
     : uiManager_(uiManager)
     , gameHandler_(gameHandler)
     , authHandler_(authHandler)
     , expansionRegistry_(expansionRegistry)
     , assetManager_(assetManager)
     , setState_(std::move(setState))
+    , reconnecting_(std::move(reconnecting))
 {
 }
 
 void UIScreenCallbackHandler::setupCallbacks() {
     gameHandler_.setOnFailure([this](const std::string& reason) {
+        // A reconnect in the world counts and retries its own attempts, and
+        // the character is not at these screens to be sent back to them.
+        if (!attempt_.active && reconnecting_ && reconnecting_()) return;
         // While connecting, a transient failure is retried rather than shown:
         // Isengard answers a first attempt with REALM_LIST_REALM_NOT_FOUND, or
         // with nothing at all, and admits the next one.
@@ -52,18 +58,6 @@ void UIScreenCallbackHandler::setupCallbacks() {
     uiManager_.getAuthScreen().setOnSuccess([this]() {
         LOG_INFO("Authentication successful, transitioning to realm selection");
         setState_(AppState::REALM_SELECTION);
-        if (reconnect_.active) {
-            // Straight back to the realm that was lost, through the same
-            // watched attempt the realm screen starts: the realm list is asked
-            // for again and the realm connected to as soon as it is in.
-            attempt_ = {};
-            attempt_.active = true;
-            attempt_.number = 1;
-            attempt_.realm = lastRealm_;
-            attempt_.address = lastRealmAddress_;
-            retryRealmName_ = lastRealm_;
-            uiManager_.getCharacterScreen().enterWorldWhenListed(reconnect_.characterGuid);
-        }
     });
 
     authHandler_.setOnRealmList([this](const std::vector<auth::Realm>& realms) {
@@ -81,7 +75,6 @@ void UIScreenCallbackHandler::setupCallbacks() {
 
     // Realm selection callback
     uiManager_.getRealmScreen().setOnRealmSelected([this](const std::string& realmName, const std::string& realmAddress) {
-        cancelReconnect();
         retryRealmName_.clear();
         attempt_ = {};
         attempt_.number = 1;
@@ -90,7 +83,6 @@ void UIScreenCallbackHandler::setupCallbacks() {
 
     connectToRealm_ = [this](const std::string& realmName, const std::string& realmAddress) {
         LOG_INFO("Realm selected: ", realmName, " (", realmAddress, ")");
-        lastRealm_ = realmName;
         lastRealmAddress_ = realmAddress;
         attempt_.active = true;
         attempt_.realm = realmName;
@@ -98,27 +90,9 @@ void UIScreenCallbackHandler::setupCallbacks() {
         attempt_.lastState = -1;
         attempt_.phaseTime = 0.0f;
 
-        // Parse realm address (format: "hostname:port")
-        std::string host = realmAddress;
-        uint16_t port = 8085;  // Default world server port
-
-        size_t colonPos = realmAddress.find(':');
-        if (colonPos != std::string::npos) {
-            host = realmAddress.substr(0, colonPos);
-            try { port = static_cast<uint16_t>(std::stoi(realmAddress.substr(colonPos + 1))); }
-            catch (...) { LOG_WARNING("Invalid port in realm address: ", realmAddress); }
-        }
-
-        // LAN clients are often handed a public realm address by MaNGOS. On
-        // routers without NAT reflection that address cannot hairpin back to
-        // the local world server. Allow a client-side host override while
-        // retaining the realm-advertised port and authentication identity.
-        if (const char* overrideHost = std::getenv("WOWEE_REALM_HOST_OVERRIDE");
-            overrideHost && *overrideHost) {
-            LOG_WARNING("Overriding realm host '", host, "' with '", overrideHost,
-                        "' via WOWEE_REALM_HOST_OVERRIDE");
-            host = overrideHost;
-        }
+        const RealmAddress resolved = resolveRealmAddress(realmAddress);
+        const std::string& host = resolved.host;
+        const uint16_t port = resolved.port;
 
         // Connect to world server
         auto sessionKey = authHandler_.getSessionKey();
@@ -178,7 +152,6 @@ void UIScreenCallbackHandler::setupCallbacks() {
 
     // Realm screen back button - return to login
     uiManager_.getRealmScreen().setOnBack([this]() {
-        cancelReconnect();
         cancelAttempt();
         authHandler_.disconnect();
         uiManager_.getRealmScreen().reset();
@@ -242,7 +215,6 @@ void UIScreenCallbackHandler::setupCallbacks() {
     // "Back" button on character screen
     uiManager_.getCharacterScreen().setOnBack([this]() {
         // Disconnect from world server and reset UI state for fresh realm selection
-        cancelReconnect();
         cancelAttempt();
         gameHandler_.disconnect();
         uiManager_.getRealmScreen().resetForBack();
@@ -318,105 +290,7 @@ void UIScreenCallbackHandler::startRetry() {
     connectToRealm_(attempt_.realm, attempt_.address);
 }
 
-bool UIScreenCallbackHandler::beginReconnect(uint64_t characterGuid) {
-    if (lastRealm_.empty() || characterGuid == 0) return false;
-    if (!uiManager_.getAuthScreen().hasCredentials()) {
-        LOG_WARNING("Not reconnecting: no saved credentials to log in with");
-        return false;
-    }
-    reconnect_ = {};
-    reconnect_.active = true;
-    reconnect_.characterGuid = characterGuid;
-    LOG_WARNING("World connection lost; reconnecting to ", lastRealm_);
-    startReconnectRound();
-    return true;
-}
-
-void UIScreenCallbackHandler::cancelReconnect() {
-    if (!reconnect_.active) return;
-    LOG_INFO("Reconnect cancelled");
-    reconnect_ = {};
-    uiManager_.getAuthScreen().setStatusContext("");
-    uiManager_.getCharacterScreen().cancelAutoEnter();
-}
-
-void UIScreenCallbackHandler::startReconnectRound() {
-    ++reconnect_.round;
-    reconnect_.roundTime = 0.0f;
-    reconnect_.waiting = false;
-    const std::string context = "Connection to " + lastRealm_ + " lost. Reconnecting (try " +
-                                std::to_string(reconnect_.round) + " of " +
-                                std::to_string(kMaxReconnectRounds) + ")...";
-    LOG_WARNING(context);
-    uiManager_.getAuthScreen().requestReconnect(context);
-}
-
-void UIScreenCallbackHandler::updateReconnect(float deltaTime) {
-    auto& auth = uiManager_.getAuthScreen();
-    if (reconnect_.waiting) {
-        reconnect_.waitIn -= deltaTime;
-        const int wait = static_cast<int>(std::max(0.0f, reconnect_.waitIn) + 0.99f);
-        auth.setStatusContext("");
-        auth.setStatus("Could not reconnect to " + lastRealm_ + ": " + reconnect_.lastError +
-                           "\nTrying again in " + std::to_string(wait) + " s (try " +
-                           std::to_string(reconnect_.round + 1) + " of " +
-                           std::to_string(kMaxReconnectRounds) + "). Log In to try now.",
-                       false, true);
-        if (auth.isAuthenticating()) {
-            // The player pressed Log In: that is this round, started early.
-            reconnect_.waiting = false;
-            ++reconnect_.round;
-            reconnect_.roundTime = 0.0f;
-            return;
-        }
-        if (reconnect_.waitIn <= 0.0f) startReconnectRound();
-        return;
-    }
-
-    reconnect_.roundTime += deltaTime;
-    using game::WorldState;
-    const WorldState world = gameHandler_.getState();
-    if (world == WorldState::CHAR_LIST_RECEIVED || world == WorldState::ENTERING_WORLD ||
-        world == WorldState::IN_WORLD) {
-        // In: the character screen takes it from the list into the world.
-        LOG_INFO("Reconnected to ", lastRealm_, " on try ", reconnect_.round);
-        reconnect_ = {};
-        auth.setStatusContext("");
-        return;
-    }
-
-    // Still going: logging in, waiting for the realm list, or in the watched
-    // world connection, which shows its own steps on the character screen.
-    const bool worldConnecting = world != WorldState::DISCONNECTED && world != WorldState::FAILED;
-    if (auth.reconnectPending() || auth.isAuthenticating() || attempt_.active ||
-        !retryRealmName_.empty() || worldConnecting || reconnect_.roundTime < 1.0f) {
-        return;
-    }
-
-    // This round got nowhere: what it said last is on the login screen.
-    std::string why = auth.getStatusMessage();
-    if (const auto nl = why.rfind('\n'); nl != std::string::npos) why = why.substr(nl + 1);
-    reconnect_.lastError = why.empty() ? std::string("no answer") : why;
-    if (reconnect_.round >= kMaxReconnectRounds) {
-        LOG_ERROR("Could not reconnect to ", lastRealm_, " after ", kMaxReconnectRounds,
-                  " tries: ", reconnect_.lastError);
-        reconnect_ = {};
-        auth.setStatusContext("");
-        auth.setStatus("Could not reconnect to " + lastRealm_ + " after " +
-                           std::to_string(kMaxReconnectRounds) + " tries: " + why +
-                           "\nThe server may be down. Log In to try again.",
-                       true, true);
-        return;
-    }
-    reconnect_.waiting = true;
-    // Longer each time: a server restarting needs a minute, not a second.
-    reconnect_.waitIn = 5.0f * static_cast<float>(reconnect_.round);
-    LOG_WARNING("Reconnect try ", reconnect_.round, " failed (", reconnect_.lastError,
-                "); next in ", reconnect_.waitIn, " s");
-}
-
 void UIScreenCallbackHandler::update(float deltaTime) {
-    if (reconnect_.active) updateReconnect(deltaTime);
     if (!attempt_.active) return;
     const std::string of = attempt_.number > 1
         ? " (attempt " + std::to_string(attempt_.number) + " of " + std::to_string(kMaxAttempts) + ")"

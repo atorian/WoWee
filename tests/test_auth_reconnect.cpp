@@ -220,6 +220,7 @@ TEST_CASE("a login server that holds no session for the key refuses the reconnec
     CHECK(c.auth.lastFailureWasRefusal());
     REQUIRE(c.failures.size() == 1);
     CHECK(c.failures[0].find("Tester") != std::string::npos);
+    CHECK(c.auth.lastFailureReason() == c.failures[0]);
     CHECK(c.successes.empty());
     CHECK(c.auth.getSessionKey().empty());
 }

@@ -96,6 +96,8 @@ public:
      *  proof - rather than the server not being reached. Asking again gets
      *  the same answer. */
     [[nodiscard]] bool lastFailureWasRefusal() const { return refused_; }
+    /// What the last failure said, as the failure callback was told it.
+    [[nodiscard]] const std::string& lastFailureReason() const { return failureReason_; }
 
     /** Ask the server to stream one patch file over this authenticated
      *  connection, EZWoW-style: the file is named first, then accepted (offset
@@ -147,6 +149,7 @@ private:
     // suspended, or account-in-use results - retrying those risks lockouts.
     bool protocolFailureSuspected_ = false;
     bool refused_ = false;
+    std::string failureReason_;
 
     std::vector<uint8_t> sessionKey;
     /// The key a reconnect proves; the session key once the proof is taken.

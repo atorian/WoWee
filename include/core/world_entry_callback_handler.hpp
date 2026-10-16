@@ -37,6 +37,11 @@ public:
 
     /// Applied by Application after frame submission, never by a packet handler.
     void enterWorld(uint32_t mapId, float x, float y, float z, bool isInitialEntry);
+    /// Back in the world after a reconnect, on the map the client kept: the
+    /// server's position stands. The character is put there as a teleport
+    /// on the map puts it, and how far it had walked from there is said.
+    /// Transitions only.
+    void placeAfterReconnect(uint32_t mapId, float x, float y, float z);
 
     /// Called in the Game phase to manage hearth-teleport freeze/thaw.
     void update(float deltaTime);

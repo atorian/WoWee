@@ -67,6 +67,22 @@ public:
     void despawnPlayer(uint64_t guid);
     void despawnGameObject(uint64_t guid);
 
+    // ---- Across a reconnect --------------------------------------------------
+    /// The world connection is lost and the client logs in again on this
+    /// map: every creature, player and object presented now - built or still
+    /// queued - is held. A despawn leaves a held entity standing; the game
+    /// showing it again (shown) keeps its instance, with no vanishing and
+    /// reappearing; releaseHeld takes the rest.
+    void holdPresented();
+    /// The game shows this entity in view. One that was held is the same one
+    /// again and stays.
+    void shown(uint64_t guid);
+    /// The hold ends: what the server did not show again is despawned.
+    /// Answers how many were.
+    size_t releaseHeld();
+    /// How many presented entities are held and not yet shown again.
+    [[nodiscard]] size_t heldCount() const { return spawns_ ? spawns_->held_.size() : 0; }
+
     // Rebuild lookup tables (for reloadExpansionData after expansion change)
     void rebuildLookups();
 
@@ -747,6 +763,9 @@ public:
     struct SpawnState {
         explicit SpawnState(JobGroup& jobs) : jobs_(jobs) {}
         JobGroup& jobs_;
+    /// Presented entities held across a reconnect, not yet shown again
+    /// (holdPresented).
+    std::unordered_set<uint64_t> held_;
     std::unordered_map<uint64_t, uint32_t> creatureInstances_;  // guid → render instanceId
     std::unordered_map<uint64_t, uint32_t> creatureModelIds_;   // guid → loaded modelId
     std::unordered_map<uint64_t, uint32_t> creatureDisplayIds_; // guid → active displayId

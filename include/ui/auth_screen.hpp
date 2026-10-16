@@ -49,20 +49,6 @@ public:
      * Check if authentication is in progress
      */
     [[nodiscard]] bool isAuthenticating() const { return authenticating; }
-    /// Logs in again with what is filled in - the saved account and password
-    /// hash - as the Log In button would, under this status. For a reconnect.
-    void requestReconnect(const std::string& context) {
-        reconnectRequested_ = true;
-        setStatusContext(context);
-        setStatus("Starting...", false, true);
-    }
-    /// A line shown above every status while it is set - what a reconnect is
-    /// doing and which try this is - since the status itself changes each
-    /// step. Empty to clear.
-    void setStatusContext(const std::string& context) { statusContext_ = context; }
-    [[nodiscard]] bool reconnectPending() const { return reconnectRequested_; }
-    /// Whether there is enough filled in to log in without the player.
-    [[nodiscard]] bool hasCredentials() const;
 
     void stopLoginMusic();
 
@@ -120,8 +106,6 @@ private:
     int expansionIndex = 0;     // Index into expansion registry profiles
     std::string assetProfileId_; // Empty follows expansionIndex automatically
     bool authenticating = false;
-    bool reconnectRequested_ = false;
-    std::string statusContext_;
     bool showPassword = false;
     bool pinAutoSubmitted_ = false;
     bool securityPromptFocused_ = false;

@@ -20,6 +20,16 @@
 
 namespace wowee::core {
 
+namespace {
+
+/// After a reconnect onto the same map, how long the server has to show again
+/// what the client held: a login's objects in view arrive within a second of
+/// SMSG_LOGIN_VERIFY_WORLD, in the first map update after the character is
+/// added. What has not come by then has gone while the client was away.
+constexpr float kHeldReleaseSeconds = 3.0f;
+
+} // namespace
+
 ClientLoop::ClientLoop(Services services, AppState initialState)
     : services_(std::move(services)), state_(initialState), transitions_(services_.events) {
     // The game's FrameXML channel goes to the interface of the character in
@@ -183,6 +193,15 @@ void ClientLoop::dispatchNetwork(float deltaTime, const FramePlan& plan) {
 }
 
 void ClientLoop::updateGame(float deltaTime, const FramePlan& plan) {
+    if (reconnect_) updateReconnect(deltaTime);
+    if (heldReleaseIn_ >= 0.0f) {
+        heldReleaseIn_ -= deltaTime;
+        if (heldReleaseIn_ < 0.0f && services_.spawner) {
+            // The login's first burst is in: what it did not show is gone.
+            const size_t released = services_.spawner->releaseHeld();
+            LOG_INFO("Reconnect: ", released, " entities the server did not show again were removed");
+        }
+    }
     if (plan.worldNetwork) {
         const auto start = std::chrono::steady_clock::now();
         services_.game.updateGame(deltaTime);
@@ -215,16 +234,86 @@ void ClientLoop::updateStreaming(float deltaTime, const FramePlan& plan) {
 }
 
 bool ClientLoop::worldEndsThisFrame(const FramePlan& plan) const {
-    return transitions_.leaving() ||
+    return worldEnding() || reentryPending() ||
            (requestedState_ && *requestedState_ != AppState::IN_GAME &&
             *requestedState_ != AppState::LOADING_WORLD && (plan.world || plan.loading));
+}
+
+bool ClientLoop::worldEnding() const {
+    const auto leave = transitions_.queuedLeave();
+    if (!leave) return false;
+    if (leave->destination != WorldTransitionQueue::Destination::Reconnect) return true;
+    return !reconnect_ && !keepsWorldThroughReconnect(leave->characterGuid);
+}
+
+bool ClientLoop::reentryPending() const {
+    return reconnect_ && !transitions_.leaving() && transitions_.hasWorldChange();
+}
+
+bool ClientLoop::keepsWorldThroughReconnect(uint64_t characterGuid) const {
+    return services_.renewal && services_.spawner && characterGuid != 0 && session_ &&
+           session_->map() && !session_->interfaceHasLeft() &&
+           (state_ == AppState::IN_GAME || state_ == AppState::LOADING_WORLD);
+}
+
+void ClientLoop::beginReconnecting(uint64_t characterGuid) {
+    if (!requireTransitions("begin reconnecting")) return;
+    LOG_WARNING("World connection lost on map ", currentMap()->mapId(),
+                "; the character stays in the world while the client reconnects");
+    // What is drawn stays drawn until the server says otherwise.
+    services_.spawner->holdPresented();
+    // The connection, Warden and the game's world state go, as at a logout.
+    services_.game.disconnect();
+    reconnect_ = std::make_unique<WorldReconnect>(services_.game, *services_.renewal, characterGuid);
+}
+
+void ClientLoop::updateReconnect(float deltaTime) {
+    if (reconnect_->update(deltaTime) != WorldReconnect::Status::GaveUp) return;
+    disconnectNotice_ = "You have been disconnected from the server. Could not reconnect: " +
+                        reconnect_->failure();
+    reconnect_.reset();
+    // The world ends as a disconnect always ended it: the interface hears the
+    // character leave, then the login screen.
+    transitions_.leave(WorldTransitionQueue::Destination::Login);
+}
+
+void ClientLoop::reenterWorld(const game::events::WorldEntered& entry) {
+    if (!requireTransitions("re-enter the world")) return;
+    LOG_INFO("Reconnected after ", reconnect_->elapsed(), " s on attempt ", reconnect_->attempt(),
+             "; the server puts the character on map ", entry.mapId);
+    reconnect_.reset();
+    auto* map = currentMap();
+    if (!map || map->mapId() != entry.mapId || state_ != AppState::IN_GAME) {
+        // Somewhere else, or a load that never finished: the character's
+        // session ends with its map, and the entry is an ordinary one.
+        LOG_INFO("Reconnect: map ", map ? static_cast<int>(map->mapId()) : -1, " is not where the "
+                 "server has the character; entering map ", entry.mapId, " as at a login");
+        heldReleaseIn_ = -1.0f;
+        session_.reset();
+        if (services_.worldEntry && services_.loader && services_.spawner)
+            services_.worldEntry->enterWorld(entry.mapId, entry.x, entry.y, entry.z, true);
+        return;
+    }
+    // The same map: the next session takes it whole - no load, no loading
+    // screen - and the old one ends, writing its interface's saved variables.
+    auto kept = session_->releaseMap();
+    session_.reset();
+    beginCharacterSession();
+    session_->adoptMap(std::move(kept));
+    // The server's position stands.
+    if (services_.worldEntry)
+        services_.worldEntry->placeAfterReconnect(entry.mapId, entry.x, entry.y, entry.z);
+    // The new interface loads, and hears the login, in the next Interface phase.
+    session_->noteMapReady();
+    heldReleaseIn_ = kHeldReleaseSeconds;
 }
 
 void ClientLoop::updateInterface(float deltaTime, const FramePlan& plan) {
     if (observer_) observer_->interfaceStarting(plan);
     // A map finished loading: the character's interface is built at the first
     // entry and told of every later one.
-    if (session_ && !transitions_.leaving()) session_->enterWorldInterface();
+    if (session_ && !worldEnding()) session_->enterWorldInterface();
+    services_.frontEnd.showReconnectStatus(reconnect_ ? reconnect_->statusText() : std::string());
     // Before the events go out, so the UPDATE_BINDINGS LoadBindings raises
     // reaches the buttons in this frame.
     if (session_) session_->applyChangedKeyBindings();
@@ -315,7 +404,8 @@ void ClientLoop::processWorldTransitions() {
     if (!requireTransitions("apply world transitions")) return;
     // Warmup can receive a leave after Interface has finished. Preserve it until
     // the next Interface can deliver PLAYER_LEAVING_WORLD against the live world.
-    if (transitions_.leaving() && session_ && session_->interfaceHoldsWorld()) return;
+    // The same for a return after a reconnect, whose old interface leaves.
+    if ((worldEnding() || reentryPending()) && session_ && session_->interfaceHoldsWorld()) return;
     if (requestedState_) {
         const auto next = *requestedState_;
         requestedState_.reset();
@@ -332,8 +422,13 @@ void ClientLoop::processWorldTransitions() {
                 services_.window.requestClose();
                 return;
             }
-            const bool reconnect = leave->destination == Destination::Reconnect;
-            if (reconnect) {
+            if (leave->destination == Destination::Reconnect) {
+                // An attempt's own connection closing: the attempt sees it.
+                if (reconnect_) continue;
+                if (keepsWorldThroughReconnect(leave->characterGuid)) {
+                    beginReconnecting(leave->characterGuid);
+                    return;
+                }
                 // Connection-screen failures have no world to release; its
                 // retry controller observes the disconnected session itself.
                 if (state_ != AppState::IN_GAME && state_ != AppState::LOADING_WORLD && !session_ &&
@@ -343,16 +438,15 @@ void ClientLoop::processWorldTransitions() {
                 disconnectNotice_ = "You have been disconnected from the server.";
             }
             performLogoutToLogin(leave->destination == Destination::CharacterSelect);
-            if (reconnect && services_.frontEnd.beginReconnect(leave->characterGuid)) {
-                disconnectNotice_.clear();
-            }
             return;
         }
         if (std::holds_alternative<game::events::WorldTransferStarted>(*request)) {
             if (services_.game.getMovementHandler()->hasPendingWorldTransfer())
                 services_.game.getMovementHandler()->applyPendingWorldTransfer();
         } else if (auto* entry = std::get_if<game::events::WorldEntered>(&*request)) {
-            if (services_.worldEntry && services_.loader && services_.spawner) {
+            if (reconnect_) {
+                reenterWorld(*entry);
+            } else if (services_.worldEntry && services_.loader && services_.spawner) {
                 services_.worldEntry->enterWorld(entry->mapId, entry->x, entry->y, entry->z,
                                                  entry->isInitialEntry);
             } else if (!std::exchange(reportedNoLoader_, true)) {
@@ -386,6 +480,9 @@ void ClientLoop::performLogoutToLogin(bool keepConnection) {
 
     if (keepConnection) services_.game.returnToCharacterSelect();
     else services_.game.disconnect();
+    // A reconnect under way, or entities held after one, go with the world.
+    reconnect_.reset();
+    heldReleaseIn_ = -1.0f;
 
     // The character leaves: their map and everything drawn on it, their
     // interface (which writes their saved variables on the way out), their

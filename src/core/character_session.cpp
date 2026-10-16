@@ -96,6 +96,20 @@ MapScope& CharacterSession::enterScene(const MapScope::Services& services, uint3
     return *map_;
 }
 
+std::unique_ptr<MapScope> CharacterSession::releaseMap() {
+    return std::move(map_);
+}
+
+void CharacterSession::adoptMap(std::unique_ptr<MapScope> map) {
+    if (map_) {
+        LOG_ERROR("Character session '", identity_.name, "' handed map ",
+                  map ? static_cast<int>(map->mapId()) : -1, " while it stands on map ",
+                  map_->mapId(), "; its own map ends first");
+        map_.reset();
+    }
+    map_ = std::move(map);
+}
+
 CharacterSession::BuiltInterface CharacterSession::buildInterface() {
     // Lua starts in an Interface scope, as the client's startup does.
     ScopedPhase interfaceInit(services_.phase, Phase::Interface);

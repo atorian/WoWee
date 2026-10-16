@@ -312,6 +312,40 @@ void EntitySpawner::queuePlayerEquipment(uint64_t guid,
     spawns_->deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
 }
 
+// --- Across a reconnect ---
+
+void EntitySpawner::holdPresented() {
+    if (!spawns_) return;
+    auto& held = spawns_->held_;
+    for (const auto& [guid, instance] : spawns_->creatureInstances_) held.insert(guid);
+    held.insert(spawns_->pendingCreatureSpawnGuids_.begin(), spawns_->pendingCreatureSpawnGuids_.end());
+    for (const auto& [guid, instance] : spawns_->playerInstances_) held.insert(guid);
+    held.insert(spawns_->pendingPlayerSpawnGuids_.begin(), spawns_->pendingPlayerSpawnGuids_.end());
+    for (const auto& [guid, info] : spawns_->gameObjectInstances_) held.insert(guid);
+    for (const auto& pending : spawns_->pendingGameObjectSpawns_) held.insert(pending.guid);
+    LOG_INFO("Holding ", held.size(), " presented entities until the server shows them again");
+}
+
+void EntitySpawner::shown(uint64_t guid) {
+    if (spawns_) spawns_->held_.erase(guid);
+}
+
+size_t EntitySpawner::releaseHeld() {
+    if (!spawns_) return 0;
+    const auto held = std::exchange(spawns_->held_, {});
+    for (const uint64_t guid : held) {
+        if (spawns_->playerInstances_.count(guid) || spawns_->pendingPlayerSpawnGuids_.count(guid)) {
+            despawnPlayer(guid);
+        } else if (spawns_->creatureInstances_.count(guid) ||
+                   spawns_->pendingCreatureSpawnGuids_.count(guid)) {
+            despawnCreature(guid);
+        } else {
+            despawnGameObject(guid);
+        }
+    }
+    return held.size();
+}
+
 // --- Immediate despawn wrappers ---
 
 // --- Methods extracted from Application (with comments preserved) ---

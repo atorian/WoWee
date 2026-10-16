@@ -22,13 +22,18 @@ enum class AppState;
 class UIScreenCallbackHandler {
 public:
     using SetStateFn = std::function<void(AppState)>;
+    /// Whether the client is reconnecting with the character standing in the
+    /// world: the world connection's failures are then the reconnect's, not
+    /// the connection screens'.
+    using ReconnectingFn = std::function<bool()>;
 
     UIScreenCallbackHandler(ui::UIManager& uiManager,
                             game::GameHandler& gameHandler,
                             auth::AuthHandler& authHandler,
                             game::ExpansionRegistry* expansionRegistry,
                             pipeline::AssetManager* assetManager,
-                            SetStateFn setState);
+                            SetStateFn setState,
+                            ReconnectingFn reconnecting);
 
     void setupCallbacks();
 
@@ -45,14 +50,6 @@ public:
     /// empty before the first. A realm's patch archives are mounted for it.
     [[nodiscard]] const std::string& realmAddress() const { return lastRealmAddress_; }
 
-    /// After the world connection drops: log in again, connect to the same
-    /// realm and enter the world with this character, saying each step on
-    /// screen, a few times over before giving up. False when there is not
-    /// enough to do it with - no realm yet, or no saved credentials.
-    bool beginReconnect(uint64_t characterGuid);
-    [[nodiscard]] bool reconnecting() const { return reconnect_.active; }
-    void cancelReconnect();
-
 private:
     static constexpr int kMaxAttempts = 4;
     struct ConnectAttempt {
@@ -67,22 +64,8 @@ private:
         std::string lastError;
     };
     void scheduleRetry(const std::string& why);
-    void startReconnectRound();
-    void updateReconnect(float deltaTime);
 
-    static constexpr int kMaxReconnectRounds = 5;
-    struct Reconnect {
-        bool active = false;
-        uint64_t characterGuid = 0;
-        int round = 0;           // 1-based
-        float roundTime = 0.0f;
-        bool waiting = false;
-        float waitIn = 0.0f;
-        std::string lastError;
-    };
-    Reconnect reconnect_;
-    // The realm last connected to, for a reconnect.
-    std::string lastRealm_;
+    // The realm last connected to, whose patch archives are mounted.
     std::string lastRealmAddress_;
     void startRetry();
     void cancelAttempt();
@@ -94,6 +77,7 @@ private:
     game::ExpansionRegistry* expansionRegistry_;
     pipeline::AssetManager* assetManager_;
     SetStateFn setState_;
+    ReconnectingFn reconnecting_;
 
     std::string pendingCreatedCharacterName_;  // Auto-select after character creation
 
