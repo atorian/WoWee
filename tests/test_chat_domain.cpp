@@ -12,6 +12,7 @@ using wowee::game::ChatType;
 using wowee::game::Opcode;
 using wowee::test::Body;
 using wowee::test::GameHarness;
+using wowee::test::PlayerSpec;
 
 namespace {
 
@@ -181,6 +182,58 @@ TEST_CASE("an ordinary line, tab or not, is chat and not an addon's", "[chat][ha
         CHECK(h.addonEvents("CHAT_MSG_SAY").size() == 1);
     }
     CHECK(h.addonEvents("CHAT_MSG_ADDON").empty());
+}
+
+TEST_CASE("the next character hears none of the last one's conversation", "[chat][harness]") {
+    PlayerSpec alice;
+    alice.guid = 0x51;
+    alice.name = "Alice";
+    PlayerSpec bob;
+    bob.guid = 0x52;
+    bob.name = "Bob";
+
+    GameHarness h;
+    h.enterWorld(alice);
+    h.receive(Opcode::SMSG_NAME_QUERY_RESPONSE, nameResponse(kThrall, "Thrall"));
+    h.receive(Opcode::SMSG_MESSAGECHAT, playerLine(ChatType::WHISPER, kThrall, alice.guid, "for alice"));
+    // SMSG_CHANNEL_NOTIFY YOU_JOINED: the kind, then the channel.
+    h.receive(Opcode::SMSG_CHANNEL_NOTIFY, Body().u8(0x02).cstr("AliceGuild"));
+    h.pump();
+    h.game().toggleDnd("busy");
+    REQUIRE(h.game().getLastWhisperSender() == "Thrall");
+    REQUIRE(h.game().getChannelIndex("AliceGuild") == 1);
+
+    h.relogAs(bob);
+
+    // /r went to whoever had whispered the last character: Bob answered
+    // Thrall, who had never spoken to him.
+    CHECK(h.game().getLastWhisperSender().empty());
+    h.game().replyToLastWhisper("hello?");
+    CHECK(h.countSent(Opcode::CMSG_MESSAGECHAT) == 0);
+
+    bool alicesLine = false;
+    for (const auto& line : h.game().getChatHistory())
+        if (line.message == "for alice") alicesLine = true;
+    CHECK_FALSE(alicesLine);
+    CHECK_FALSE(h.game().isDnd());
+    CHECK_FALSE(h.game().isAfk());
+    // The server joins Bob to his own channels; Alice's are not his.
+    CHECK(h.game().getChannelIndex("AliceGuild") == 0);
+    CHECK(h.game().getJoinedChannels().empty());
+}
+
+TEST_CASE("a chat refusal is put on the error line once", "[chat][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    h.receive(Opcode::SMSG_CHAT_NOT_IN_PARTY);
+    h.receive(Opcode::SMSG_CHAT_WRONG_FACTION);
+    h.receive(Opcode::SMSG_CHAT_RESTRICTED);
+    h.pump();
+
+    const auto errors = h.addonEvents("UI_ERROR_MESSAGE");
+    REQUIRE(errors.size() == 3);
+    CHECK(errors[0].args.at(0) == "You are not in a party.");
 }
 
 TEST_CASE("the server's echo of the player's own line is not a second line", "[chat][harness]") {

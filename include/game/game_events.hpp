@@ -318,6 +318,31 @@ struct SpellSuperseded {
     uint32_t newSpellId = 0;
 };
 
+/// A player's name is known now (SMSG_NAME_QUERY_RESPONSE): what waited for
+/// it - a chat line, a mail's sender - can be finished.
+struct PlayerNameKnown {
+    uint64_t guid = 0;
+    std::string name;
+};
+
+/// A unit said or yelled a line that floats over its head as a bubble - a
+/// say, a yell, a monster's line, and party chat when the player wants that
+/// too.
+struct UnitSaidAloud {
+    uint64_t guid = 0;
+    std::string text;
+    bool yell = false;
+};
+
+/// A unit plays an emote's animation (SMSG_EMOTE, the emote state field, a
+/// drowning hit...). `looping` for a STATE_ emote that holds until another
+/// replaces it; animation 0 cancels a one-shot.
+struct UnitEmotePlayed {
+    uint64_t guid = 0;
+    uint32_t animationId = 0;
+    bool looping = false;
+};
+
 /// A macro was deleted from the account data. The action bar empties the
 /// buttons that held it.
 struct MacroDeleted {

@@ -352,7 +352,11 @@ void AnimationCallbackHandler::setupCallbacks() {
     // isState marks persistent STATE_ emotes (UNIT_NPC_EMOTESTATE or state-type
     // SMSG_EMOTE): they loop until cleared and are retained across model
     // reloads. One-shots play once and resume the retained state loop.
-    gameHandler_.setEmoteAnimCallback([this](uint64_t guid, uint32_t emoteAnim, bool isState) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitEmotePlayed>(
+        [this](const game::events::UnitEmotePlayed& e) {
+        const uint64_t guid = e.guid;
+        const uint32_t emoteAnim = e.animationId;
+        const bool isState = e.looping;
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr || !entitySpawner_.hasMap()) return;
         auto entity = gameHandler_.getEntityManager().getEntity(guid);
@@ -409,7 +413,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 cr->playAnimation(emoteInstanceId, emoteAnim, false);
             }
         }
-    });
+    }));
 
     // Spell cast animation callback - play cast animation on caster (player or NPC/other player)
     // WoW-accurate 3-phase spell animation sequence:

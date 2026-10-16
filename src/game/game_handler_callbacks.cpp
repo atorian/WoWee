@@ -1754,7 +1754,7 @@ const std::deque<MessageChatData>& GameHandler::getChatHistory() const {
 }
 
 void GameHandler::clearChatHistory() {
-    chatHandler_->getChatHistory().clear();
+    chatHandler_->clearChatHistory();
 }
 
 bool GameHandler::ownsChatChannel(const std::string& name) const {

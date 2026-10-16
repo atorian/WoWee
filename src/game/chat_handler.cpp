@@ -2,14 +2,17 @@
 #include "game/emote_table.hpp"
 
 #include <set>
+#include "game/character.hpp"
 #include "game/chat_filters.hpp"
+#include "game/frame_xml_events.hpp"
+#include "game/game_events.hpp"
+#include "game/packet_sender.hpp"
 #include "game/text_tokens.hpp"
-#include "game/game_handler.hpp"
+#include "game/ui_errors.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
-#include "network/world_connection.hpp"
 #include "core/logger.hpp"
 #include "core/app_clock.hpp"
 #include <algorithm>
@@ -27,9 +30,41 @@
 namespace wowee {
 namespace game {
 
-ChatHandler::ChatHandler(GameHandler& owner)
-    : owner_(owner) {
+ChatHandler::ChatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                         ChatQueries& queries, const core::CVarStore& cvars,
+                         const EmoteTable& emotes)
+    : sender_(sender), frameXml_(frameXml), events_(events), queries_(queries), cvars_(cvars),
+      emotes_(emotes) {
     initializeChatLog();
+    // A character's conversation begins with their login. What the last one
+    // had - their whisperers, their channels, being away - is not theirs.
+    subscriptions_.push_back(events_.subscribe<events::CharacterLoggingIn>(
+        [this](const events::CharacterLoggingIn&) { character_ = {}; }));
+    subscriptions_.push_back(events_.subscribe<events::PlayerNameKnown>(
+        [this](const events::PlayerNameKnown& e) {
+            // The lines held back for this name go out with it, and the ones
+            // already kept without it get it. /r needs neither: it keeps the
+            // whisperer's guid and asks for the name.
+            flushChatAwaitingName(e.guid);
+            for (auto& line : character_.history) {
+                if (line.senderGuid == e.guid && line.senderName.empty()) line.senderName = e.name;
+            }
+        }));
+}
+
+void ChatHandler::raiseUiError(const std::string& message) {
+    game::raiseUiError(events_, frameXml_, message);
+}
+
+TextSubject ChatHandler::readerSubject() const {
+    return textSubjectFor(queries_.activeCharacter());
+}
+
+std::string ChatHandler::takeAreaTriggerMessage() {
+    if (character_.areaTriggerMessages.empty()) return {};
+    std::string message = std::move(character_.areaTriggerMessages.front());
+    character_.areaTriggerMessages.pop_front();
+    return message;
 }
 
 namespace {
@@ -175,10 +210,10 @@ void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source)
 
 void ChatHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
-        if (owner_.getState() == WorldState::IN_WORLD) handleMessageChat(packet);
+        if (sender_.characterInWorld()) handleMessageChat(packet);
     };
     table[Opcode::SMSG_GM_MESSAGECHAT] = [this](network::Packet& packet) {
-        if (owner_.getState() != WorldState::IN_WORLD) return;
+        if (!sender_.characterInWorld()) return;
         // SMSG_GM_MESSAGECHAT has the same header as SMSG_MESSAGECHAT
         // (type[1]+lang[4]+senderGuid[8]+unk[4] = 17 bytes) followed by an
         // extra gmNameLen[4]+gmName[N] before the type-specific body.
@@ -205,29 +240,28 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
         handleMessageChat(regular);
     };
     table[Opcode::SMSG_TEXT_EMOTE] = [this](network::Packet& packet) {
-        if (owner_.getState() == WorldState::IN_WORLD) handleTextEmote(packet);
+        if (sender_.characterInWorld()) handleTextEmote(packet);
     };
     table[Opcode::SMSG_EMOTE] = [this](network::Packet& packet) {
-        if (owner_.getState() != WorldState::IN_WORLD) return;
+        if (!sender_.characterInWorld()) return;
         if (!packet.hasRemaining(12)) return;
         uint32_t emoteId    = packet.readUInt32();
         uint64_t sourceGuid = packet.readUInt64();
-        uint32_t animId = owner_.emotes().animByEmotesId(emoteId);
+        uint32_t animId = emotes_.animByEmotesId(emoteId);
         // Emotes.dbc EmoteSpecProc distinguishes persistent STATE_ emotes from
         // one-shots. Emote 0 (ONESHOT_NONE) cancels a one-shot but must not
         // clear a UNIT_NPC_EMOTESTATE work loop, so it is forwarded as non-state.
-        const bool isState = emoteId != 0 &&
-            owner_.emotes().isStateEmote(emoteId);
-        if (owner_.emoteAnimCallbackRef() && sourceGuid != 0 && (animId != 0 || emoteId == 0)) {
-            owner_.emoteAnimCallbackRef()(sourceGuid, animId, isState);
+        const bool isState = emoteId != 0 && emotes_.isStateEmote(emoteId);
+        if (sourceGuid != 0 && (animId != 0 || emoteId == 0)) {
+            events_.publish(events::UnitEmotePlayed{sourceGuid, animId, isState});
         } else if (emoteId != 0 && animId == 0) {
             LOG_DEBUG("SMSG_EMOTE emoteId=", emoteId, " had no Emotes.dbc animation mapping");
         }
     };
+    // Also while the character is entering the world: the server joins it to
+    // its channels as it logs in.
     table[Opcode::SMSG_CHANNEL_NOTIFY] = [this](network::Packet& packet) {
-        if (owner_.getState() == WorldState::IN_WORLD ||
-            owner_.getState() == WorldState::ENTERING_WORLD)
-            handleChannelNotify(packet);
+        if (sender_.connected()) handleChannelNotify(packet);
     };
     table[Opcode::SMSG_CHAT_PLAYER_NOT_FOUND] = [this](network::Packet& packet) {
         std::string name = packet.readString();
@@ -237,17 +271,16 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
         std::string name = packet.readString();
         if (!name.empty()) addSystemChatMessage("Player name '" + name + "' is ambiguous.");
     };
+    // Once each. Every one of these was raised twice, through two names for
+    // the same error line, and the interface printed it twice.
     table[Opcode::SMSG_CHAT_WRONG_FACTION] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You cannot send messages to members of that faction.");
-        owner_.raiseUiError("You cannot send messages to members of that faction.");
+        raiseUiError("You cannot send messages to members of that faction.");
     };
     table[Opcode::SMSG_CHAT_NOT_IN_PARTY] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You are not in a party.");
-        owner_.raiseUiError("You are not in a party.");
+        raiseUiError("You are not in a party.");
     };
     table[Opcode::SMSG_CHAT_RESTRICTED] = [this](network::Packet& /*packet*/) {
-        owner_.addUIError("You cannot send chat messages in this area.");
-        owner_.raiseUiError("You cannot send chat messages in this area.");
+        raiseUiError("You cannot send chat messages in this area.");
     };
 
     // ---- Channel list ----
@@ -268,8 +301,8 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
             if (!msg.empty()) {
                 std::string prefix;
                 switch (msgType) {
-                    case 1: prefix = "[Shutdown] ";   owner_.addUIError("Server shutdown: " + msg);  break;
-                    case 2: prefix = "[Restart] ";    owner_.addUIError("Server restart: " + msg);   break;
+                    case 1: prefix = "[Shutdown] ";   raiseUiError("Server shutdown: " + msg);  break;
+                    case 2: prefix = "[Restart] ";    raiseUiError("Server restart: " + msg);   break;
                     case 4: prefix = "[Shutdown cancelled] "; break;
                     case 5: prefix = "[Restart cancelled] ";  break;
                     default: prefix = "[Server] "; break;
@@ -290,9 +323,9 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
             /*uint32_t len =*/ packet.readUInt32();
             std::string msg = packet.readString();
             if (!msg.empty()) {
-                owner_.addUIError(msg);
+                raiseUiError(msg);
                 addSystemChatMessage(msg);
-                owner_.areaTriggerMsgsRef().push_back(msg);
+                character_.areaTriggerMessages.push_back(msg);
             }
         }
     };
@@ -306,8 +339,8 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
 }
 
 void ChatHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
-    if (!owner_.worldCommandAllowed("chat")) {
-        LOG_WARNING("Cannot send chat in state: ", static_cast<int>(owner_.getState()));
+    if (!sender_.worldCommandAllowed("chat")) {
+        LOG_WARNING("Chat not sent: no character in the world to say it");
         return;
     }
 
@@ -320,8 +353,7 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     // takes - moving clears it too - but it is the one that matters, because
     // it is the one where the player is visibly present and being answered
     // for by a machine.
-    if (afk_ &&
-        owner_.cvars().get("autoClearAFK", "1") != "0") {
+    if (character_.afk && cvars_.get("autoClearAFK", "1") != "0") {
         toggleAfk("");
     }
 
@@ -340,7 +372,8 @@ void ChatHandler::sendLine(ChatType type, const std::string& message, const std:
     // Use the player's faction language. AzerothCore rejects wrong language.
     // Alliance races: Human(1), Dwarf(3), NightElf(4), Gnome(7), Draenei(11) → COMMON (7)
     // Horde races: Orc(2), Undead(5), Tauren(6), Troll(8), BloodElf(10) → ORCISH (1)
-    uint8_t race = owner_.getPlayerRace();
+    const Character* active = queries_.activeCharacter();
+    const uint8_t race = active ? static_cast<uint8_t>(active->race) : 0;
     bool isHorde = (race == 2 || race == 5 || race == 6 || race == 8 || race == 10);
     ChatLanguage language = isHorde ? ChatLanguage::ORCISH : ChatLanguage::COMMON;
 
@@ -351,20 +384,15 @@ void ChatHandler::sendLine(ChatType type, const std::string& message, const std:
                     " target='", target, "' bytes=", raw.size(), " data=[",
                     raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
     }
-    owner_.getSocket()->send(packet);
+    sender_.send(packet);
 
     // Add local echo so the player sees their own message immediately
     MessageChatData echo;
-    echo.senderGuid = owner_.getPlayerGuid();
+    echo.senderGuid = queries_.characterGuid();
     echo.language = language;
     echo.message = message;
-
-    auto nameIt = owner_.getPlayerNameCache().find(owner_.getPlayerGuid());
-    if (nameIt != owner_.getPlayerNameCache().end()) {
-        echo.senderName = nameIt->second;
-    } else if (const Character* active = owner_.getActiveCharacter()) {
-        echo.senderName = active->name;
-    }
+    echo.senderName = queries_.playerName(echo.senderGuid);
+    if (echo.senderName.empty() && active) echo.senderName = active->name;
 
     if (type == ChatType::WHISPER) {
         echo.type = ChatType::WHISPER_INFORM;
@@ -381,7 +409,7 @@ void ChatHandler::sendLine(ChatType type, const std::string& message, const std:
 }
 
 void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
-    if (owner_.getState() != WorldState::IN_WORLD || message.empty()) return;
+    if (!sender_.characterInWorld() || message.empty()) return;
 
     auto packet = MessageChatPacket::build(type, ChatLanguage::ADDON, message, target);
     if (chatPacketDiagEnabled()) {
@@ -390,7 +418,7 @@ void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, co
                     " target='", target, "' bytes=", raw.size(), " data=[",
                     raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
     }
-    owner_.getSocket()->send(packet);
+    sender_.send(packet);
 }
 
 void ChatHandler::handleMessageChat(network::Packet& packet) {
@@ -402,7 +430,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     MessageChatData data;
-    if (!owner_.getPacketParsers()->parseMessageChat(packet, data)) {
+    if (!queries_.packetParsers().parseMessageChat(packet, data)) {
         const auto& raw = packet.getData();
         LOG_WARNING("Failed to parse SMSG_MESSAGECHAT, size=", packet.getSize(),
                     " data=[", raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
@@ -425,9 +453,9 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     // Skip server echo of our own messages (we already added a local echo)
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
+    if (data.senderGuid == queries_.characterGuid() && data.senderGuid != 0) {
         if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
-            lastWhisperSender_ = data.senderName;
+            character_.lastWhisperSender = data.senderName;
         }
         return;
     }
@@ -438,29 +466,11 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
 void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     // Resolve sender name from entity/cache if not already set by parser
     if (data.senderName.empty() && data.senderGuid != 0) {
-        auto nameIt = owner_.getPlayerNameCache().find(data.senderGuid);
-        if (nameIt != owner_.getPlayerNameCache().end()) {
-            data.senderName = nameIt->second;
-        } else {
-            auto entity = owner_.getEntityManager().getEntity(data.senderGuid);
-            if (entity) {
-                if (entity->getType() == ObjectType::PLAYER) {
-                    auto player = std::dynamic_pointer_cast<Player>(entity);
-                    if (player && !player->getName().empty()) {
-                        data.senderName = player->getName();
-                    }
-                } else if (entity->getType() == ObjectType::UNIT) {
-                    auto unit = std::dynamic_pointer_cast<Unit>(entity);
-                    if (unit && !unit->getName().empty()) {
-                        data.senderName = unit->getName();
-                    }
-                }
-            }
-        }
+        // The name cache, then whoever is in view by that guid.
+        data.senderName = queries_.playerName(data.senderGuid);
 
         if (data.senderName.empty()) {
-            const auto& partyData = owner_.getPartyData();
-            for (const auto& member : partyData.members) {
+            for (const auto& member : queries_.party().members) {
                 if (member.guid == data.senderGuid && !member.name.empty()) {
                     data.senderName = member.name;
                     break;
@@ -483,7 +493,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // been requested, so this is a source rather than a guarantee, and the
         // query below still runs when it misses.
         if (data.senderName.empty()) {
-            for (const auto& member : owner_.getGuildRoster().members) {
+            for (const auto& member : queries_.guildRoster().members) {
                 if (member.guid == data.senderGuid && !member.name.empty()) {
                     data.senderName = member.name;
                     break;
@@ -492,7 +502,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         }
 
         if (data.senderName.empty()) {
-            owner_.queryPlayerName(data.senderGuid);
+            queries_.requestPlayerName(data.senderGuid);
             // Hold the line rather than showing it with nobody's name on it.
             //
             // SMSG_MESSAGECHAT carries a guid and no name for a player line,
@@ -505,8 +515,8 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             // drawn, so the name has to be there the first time.
             if (!alreadyWaited) {
                 const uint64_t waitingOn = data.senderGuid;
-                chatAwaitingName_.push_back({std::move(data), waitingOn,
-                                             core::appTimeSeconds() + kNameWaitSeconds});
+                character_.awaitingName.push_back({std::move(data), waitingOn,
+                                                   core::appTimeSeconds() + kNameWaitSeconds});
                 return;
             }
         }
@@ -521,13 +531,13 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     // as a guid alone, so a name nothing holds yet is asked for and the line
     // waits for it, as a player's own line does.
     if (isMonsterChatType(data.type) && data.message.find('$') != std::string::npos &&
-        isPlayerGuid(data.receiverGuid) && data.receiverGuid != owner_.getPlayerGuid() &&
+        isPlayerGuid(data.receiverGuid) && data.receiverGuid != queries_.characterGuid() &&
         knownPlayerName(data.receiverGuid).empty()) {
-        owner_.queryPlayerName(data.receiverGuid);
+        queries_.requestPlayerName(data.receiverGuid);
         if (!alreadyWaited) {
             const uint64_t waitingOn = data.receiverGuid;
-            chatAwaitingName_.push_back({std::move(data), waitingOn,
-                                         core::appTimeSeconds() + kNameWaitSeconds});
+            character_.awaitingName.push_back({std::move(data), waitingOn,
+                                               core::appTimeSeconds() + kNameWaitSeconds});
             return;
         }
     }
@@ -548,8 +558,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         };
 
         if (data.achievementId != 0) {
-            owner_.ensureAchievementNamesLoaded();
-            std::string achievementName = owner_.getAchievementName(data.achievementId);
+            std::string achievementName = queries_.achievementName(data.achievementId);
             if (achievementName.empty()) {
                 achievementName = "Achievement #" + std::to_string(data.achievementId);
             }
@@ -565,8 +574,8 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     std::string addonPrefix;
     std::string addonPayload;
     if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
-        if (owner_.hasAddonEventListener() && !addonPrefix.empty()) {
-            owner_.fireAddonEvent(
+        if (frameXml_.frameXmlListening() && !addonPrefix.empty()) {
+            frameXml_.fireFrameXmlEvent(
                 "CHAT_MSG_ADDON",
                 {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});
         }
@@ -647,11 +656,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // has not arrived - the same "say nothing about it" this had before,
         // since the test below only hides chat when a rank is known and lacks
         // the bit.
-        const uint32_t idx = owner_.getPlayerGuildRankIndex();
-        if (idx != 0xFFFFFFFFu && idx < owner_.getGuildRoster().ranks.size()) {
-            if (!(owner_.getPlayerGuildRankRights() & 0x80)) { // GR_RIGHT_OFFCHATLISTEN
-                return; // Don't show officer chat to non-officers
-            }
+        if (const auto rights = queries_.guildRankRights();
+            rights && !(*rights & 0x80)) {  // GR_RIGHT_OFFCHATLISTEN
+            return; // Don't show officer chat to non-officers
         }
     }
 
@@ -691,9 +698,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
 
     // Add to chat history
     data.uid = ++chatUidCounter_;
-    chatHistory_.push_back(data);
-    if (chatHistory_.size() > maxChatHistory_) {
-        chatHistory_.erase(chatHistory_.begin());
+    character_.history.push_back(data);
+    if (character_.history.size() > maxChatHistory_) {
+        character_.history.pop_front();
     }
     logChatMessage(data, "server");
     // No fireChatEvent here. This function announces the message itself,
@@ -713,9 +720,9 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // Always store GUID so getLastWhisperSender() can resolve the name
         // from the player name cache even if name wasn't available yet
         if (data.senderGuid != 0)
-            lastWhisperSenderGuid_ = data.senderGuid;
+            character_.lastWhisperSenderGuid = data.senderGuid;
         if (!data.senderName.empty())
-            lastWhisperSender_ = data.senderName;
+            character_.lastWhisperSender = data.senderName;
 
         if (!data.senderName.empty()) {
             // Only auto-reply once per sender per AFK/DND session to prevent loops.
@@ -724,11 +731,12 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             // takes the player out of AFK (autoClearAFK), so the first answer
             // given for them ended the absence it was announcing and the next
             // whisperer was answered by nobody.
-            if (afk_ && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = afkMessage_.empty() ? "Away from Keyboard" : afkMessage_;
+            auto& c = character_;
+            if (c.afk && c.autoRepliedSenders.insert(data.senderName).second) {
+                std::string reply = c.afkMessage.empty() ? "Away from Keyboard" : c.afkMessage;
                 sendLine(ChatType::WHISPER, "<AFK> " + reply, data.senderName);
-            } else if (dnd_ && afkAutoRepliedSenders_.insert(data.senderName).second) {
-                std::string reply = dndMessage_.empty() ? "Do Not Disturb" : dndMessage_;
+            } else if (c.dnd && c.autoRepliedSenders.insert(data.senderName).second) {
+                std::string reply = c.dndMessage.empty() ? "Do Not Disturb" : c.dndMessage;
                 sendLine(ChatType::WHISPER, "<DND> " + reply, data.senderName);
             }
         }
@@ -750,21 +758,22 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
 
     if (fromAPlayer) {
         // Disable Spam Filter, so the CVar being on means filtering happens.
-        if (owner_.cvars().get("spamFilter", "1") != "0") {
+        if (cvars_.get("spamFilter", "1") != "0") {
+            auto& recent = character_.recentLines;
             const double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (repeatsRecentLine(recentChatLines_, data.senderGuid, data.message, now)) {
+            if (repeatsRecentLine(recent, data.senderGuid, data.message, now)) {
                 return;
             }
-            recentChatLines_.push_back({.senderGuid = data.senderGuid, .text = data.message, .at = now});
+            recent.push_back({.senderGuid = data.senderGuid, .text = data.message, .at = now});
             // A short memory is the point: this is looking for a line pasted
             // again a moment later, not keeping a record of the conversation.
-            while (recentChatLines_.size() > 64) recentChatLines_.pop_front();
+            while (recent.size() > 64) recent.pop_front();
         }
     }
 
     // Trigger chat bubble for SAY/YELL messages from others
-    if (owner_.chatBubbleCallbackRef() && data.senderGuid != 0) {
+    if (data.senderGuid != 0) {
         bool bubble = (data.type == ChatType::SAY || data.type == ChatType::YELL ||
                        data.type == ChatType::MONSTER_SAY || data.type == ChatType::MONSTER_YELL ||
                        data.type == ChatType::MONSTER_PARTY);
@@ -773,11 +782,11 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // whichever way it was set. Off unless asked for, as it ships, since a
         // five-person group talking is a lot of text over the fight.
         if (!bubble && (data.type == ChatType::PARTY || data.type == ChatType::RAID)) {
-            bubble = owner_.cvars().get("chatBubblesParty", "0") != "0";
+            bubble = cvars_.get("chatBubblesParty", "0") != "0";
         }
         if (bubble) {
-            bool isYell = (data.type == ChatType::YELL || data.type == ChatType::MONSTER_YELL);
-            owner_.chatBubbleCallbackRef()(data.senderGuid, data.message, isYell);
+            const bool isYell = (data.type == ChatType::YELL || data.type == ChatType::MONSTER_YELL);
+            events_.publish(events::UnitSaidAloud{data.senderGuid, data.message, isYell});
         }
     }
 
@@ -799,7 +808,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     LOG_DEBUG("[", getChatTypeString(data.type), "] ", channelInfo, senderInfo, ": ", data.message);
 
     // Fire CHAT_MSG_* addon events
-    if (owner_.hasAddonEventListener()) {
+    if (frameXml_.frameXmlListening()) {
         std::string eventName = "CHAT_MSG_";
         eventName += getChatTypeString(data.type);
         // The language's *name*, not its id. ChatFrame_MessageEventHandler
@@ -814,7 +823,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // printed with its id in front of it - guild chat in Common came out
         // as "[7] Name: hello". Universal is the id the file does not carry
         // and the word the test above looks for.
-        const std::string lang = owner_.getLanguageName(static_cast<uint32_t>(data.language));
+        const std::string lang = queries_.languageName(static_cast<uint32_t>(data.language));
         char guidBuf[32];
         snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)data.senderGuid);
         // arg8 is the channel's number and arg9 its name without the zone
@@ -830,15 +839,15 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
         // expected to know which message it was. Zero for every line is one id
         // shared by all of them, which is what made Report Spam unofferable:
         // CanComplainChat is asked about the id before the entry is shown.
-        const uint32_t lineId = nextChatLineId_++;
+        const uint32_t lineId = character_.nextLineId++;
         if (data.senderGuid != 0) {
-            chatLineSenders_.emplace_back(lineId, data.senderGuid);
+            auto& senders = character_.lineSenders;
+            senders.emplace_back(lineId, data.senderGuid);
             // Recent lines only. A session's chat has no end, and a message old
             // enough to have fallen out of this is old enough not to be
             // reportable.
             constexpr size_t kRememberedLines = 512;
-            while (chatLineSenders_.size() > kRememberedLines)
-                chatLineSenders_.pop_front();
+            while (senders.size() > kRememberedLines) senders.pop_front();
         }
         const int channelNumber = getChannelIndex(data.channelName);
         const size_t dash = data.channelName.find(" - ");
@@ -886,7 +895,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
             (data.type == ChatType::WHISPER_INFORM && !data.receiverName.empty())
                 ? data.receiverName
                 : data.senderName;
-        owner_.fireAddonEvent(eventName, {
+        frameXml_.fireFrameXmlEvent(eventName, {
             data.message,
             shownName,
             lang,
@@ -904,18 +913,17 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
 }
 
 void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = TextEmotePacket::build(textEmoteId, targetGuid);
-    owner_.getSocket()->send(packet);
+    if (!sender_.characterInWorld()) return;
+    sender_.send(TextEmotePacket::build(textEmoteId, targetGuid));
 }
 
 std::string ChatHandler::knownPlayerName(uint64_t guid) const {
     if (guid == 0) return {};
-    if (const std::string& name = owner_.lookupName(guid); !name.empty()) return name;
-    for (const auto& member : owner_.getPartyData().members) {
+    if (std::string name = queries_.playerName(guid); !name.empty()) return name;
+    for (const auto& member : queries_.party().members) {
         if (member.guid == guid && !member.name.empty()) return member.name;
     }
-    for (const auto& member : owner_.getGuildRoster().members) {
+    for (const auto& member : queries_.guildRoster().members) {
         if (member.guid == guid && !member.name.empty()) return member.name;
     }
     return {};
@@ -924,8 +932,8 @@ std::string ChatHandler::knownPlayerName(uint64_t guid) const {
 TextSubject ChatHandler::monsterLineSubject(const MessageChatData& data) {
     // Addressed to nobody, or to us: the reader, which is who a line with no
     // one else in it is for.
-    if (data.receiverGuid == 0 || data.receiverGuid == owner_.getPlayerGuid()) {
-        return textSubjectFor(owner_);
+    if (data.receiverGuid == 0 || data.receiverGuid == queries_.characterGuid()) {
+        return readerSubject();
     }
     TextSubject subject;
     if (isPlayerGuid(data.receiverGuid)) {
@@ -934,30 +942,31 @@ TextSubject ChatHandler::monsterLineSubject(const MessageChatData& data) {
         }
         // Class, race and gender come with the name query's answer. Unknown,
         // they stay neutral rather than borrowing the reader's.
-        if (const uint8_t cls = owner_.lookupPlayerClass(data.receiverGuid)) {
+        if (const uint8_t cls = queries_.playerClassOf(data.receiverGuid)) {
             subject.className = getClassName(static_cast<Class>(cls));
         }
-        if (const uint8_t race = owner_.lookupPlayerRace(data.receiverGuid)) {
+        if (const uint8_t race = queries_.playerRaceOf(data.receiverGuid)) {
             subject.raceName = getRaceName(static_cast<Race>(race));
         }
-        const uint8_t gender = owner_.lookupPlayerGender(data.receiverGuid);
+        const uint8_t gender = queries_.playerGenderOf(data.receiverGuid);
         if (gender == 0) subject.gender = Gender::MALE;
         else if (gender == 1) subject.gender = Gender::FEMALE;
     } else if (!data.receiverName.empty()) {
         subject.name = data.receiverName;
-    } else if (const std::string& name = owner_.lookupName(data.receiverGuid); !name.empty()) {
-        subject.name = name;
+    } else if (std::string name = queries_.playerName(data.receiverGuid); !name.empty()) {
+        subject.name = std::move(name);
     }
     return subject;
 }
 
 void ChatHandler::flushChatAwaitingName(uint64_t guid) {
-    if (chatAwaitingName_.empty() || guid == 0) return;
+    auto& awaiting = character_.awaitingName;
+    if (awaiting.empty() || guid == 0) return;
     std::vector<MessageChatData> ready;
-    for (auto it = chatAwaitingName_.begin(); it != chatAwaitingName_.end();) {
+    for (auto it = awaiting.begin(); it != awaiting.end();) {
         if (it->guid == guid) {
             ready.push_back(std::move(it->data));
-            it = chatAwaitingName_.erase(it);
+            it = awaiting.erase(it);
         } else {
             ++it;
         }
@@ -968,15 +977,16 @@ void ChatHandler::flushChatAwaitingName(uint64_t guid) {
 }
 
 void ChatHandler::expireChatAwaitingName() {
-    if (chatAwaitingName_.empty()) return;
+    auto& awaiting = character_.awaitingName;
+    if (awaiting.empty()) return;
     const double now = core::appTimeSeconds();
     std::vector<MessageChatData> ready;
-    for (auto it = chatAwaitingName_.begin(); it != chatAwaitingName_.end();) {
+    for (auto it = awaiting.begin(); it != awaiting.end();) {
         if (now >= it->deadline) {
             LOG_WARNING("Chat: no name for ", formatChatLogGuid(it->guid),
                         " within ", kNameWaitSeconds, "s - showing the line without one");
             ready.push_back(std::move(it->data));
-            it = chatAwaitingName_.erase(it);
+            it = awaiting.erase(it);
         } else {
             ++it;
         }
@@ -992,17 +1002,16 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         return;
     }
 
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
+    if (data.senderGuid == queries_.characterGuid() && data.senderGuid != 0) {
         return;
     }
 
-    std::string senderName = owner_.lookupName(data.senderGuid);
+    std::string senderName = queries_.playerName(data.senderGuid);
     // SMSG_TEXT_EMOTE is the narrated chat line. The server sends the actual
     // visual separately in SMSG_EMOTE; replaying an animation here restarts
     // one-shots and replaces correctly resolved STATE_* loops such as /dance.
     if (senderName.empty()) {
-        const auto& partyData = owner_.getPartyData();
-        for (const auto& member : partyData.members) {
+        for (const auto& member : queries_.party().members) {
             if (member.guid == data.senderGuid && !member.name.empty()) {
                 senderName = member.name;
                 break;
@@ -1011,7 +1020,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
 
     if (senderName.empty()) {
-        owner_.queryPlayerName(data.senderGuid);
+        queries_.requestPlayerName(data.senderGuid);
         LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
                   std::hex, data.senderGuid, std::dec,
                   " emoteId=", data.textEmoteId);
@@ -1019,7 +1028,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
 
     const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    std::string emoteText = owner_.emotes().textByDbcId(data.textEmoteId, senderName, targetPtr);
+    std::string emoteText = emotes_.textByDbcId(data.textEmoteId, senderName, targetPtr);
     if (emoteText.empty()) {
         emoteText = data.targetName.empty()
             ? senderName + " performs an emote."
@@ -1039,42 +1048,38 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = owner_.getPacketParsers()
-        ? owner_.getPacketParsers()->buildJoinChannel(channelName, password)
-        : JoinChannelPacket::build(channelName, password);
-    owner_.getSocket()->send(packet);
+    if (!sender_.characterInWorld()) return;
+    sender_.send(queries_.packetParsers().buildJoinChannel(channelName, password));
     LOG_INFO("Requesting to join channel: ", channelName);
 }
 
 void ChatHandler::requestChannelList(const std::string& channelName) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    if (!sender_.characterInWorld()) return;
     // The channel name and nothing else. SMSG_CHANNEL_LIST was parsed all
     // along and nothing ever asked for one, so the roster only existed in
     // theory.
     network::Packet packet(wireOpcode(Opcode::CMSG_CHANNEL_LIST));
     packet.writeString(channelName);
-    owner_.getSocket()->send(packet);
+    sender_.send(packet);
     LOG_INFO("Requesting member list for channel: ", channelName);
 }
 
 void ChatHandler::leaveChannel(const std::string& channelName) {
-    if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = owner_.getPacketParsers()
-        ? owner_.getPacketParsers()->buildLeaveChannel(channelName)
-        : LeaveChannelPacket::build(channelName);
-    owner_.getSocket()->send(packet);
+    if (!sender_.characterInWorld()) return;
+    sender_.send(queries_.packetParsers().buildLeaveChannel(channelName));
     LOG_INFO("Requesting to leave channel: ", channelName);
 }
 
 std::string ChatHandler::getChannelByIndex(int index) const {
-    if (index < 1 || index > static_cast<int>(joinedChannels_.size())) return "";
-    return joinedChannels_[index - 1];
+    const auto& joined = character_.joinedChannels;
+    if (index < 1 || index > static_cast<int>(joined.size())) return "";
+    return joined[index - 1];
 }
 
 int ChatHandler::getChannelIndex(const std::string& channelName) const {
-    for (int i = 0; i < static_cast<int>(joinedChannels_.size()); ++i) {
-        if (joinedChannels_[i] == channelName) return i + 1;
+    const auto& joined = character_.joinedChannels;
+    for (int i = 0; i < static_cast<int>(joined.size()); ++i) {
+        if (joined[i] == channelName) return i + 1;
     }
     return 0;
 }
@@ -1088,8 +1093,8 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
 
     switch (data.notifyType) {
         case ChannelNotifyType::YOU_JOINED: {
-            if (std::find(joinedChannels_.begin(), joinedChannels_.end(), data.channelName) == joinedChannels_.end()) {
-                joinedChannels_.push_back(data.channelName);
+            if (std::find(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName) == character_.joinedChannels.end()) {
+                character_.joinedChannels.push_back(data.channelName);
             }
             MessageChatData msg;
             msg.type = ChatType::SYSTEM;
@@ -1099,10 +1104,10 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             break;
         }
         case ChannelNotifyType::YOU_LEFT: {
-            ownedChannels_.erase(data.channelName);
-            joinedChannels_.erase(
-                std::remove(joinedChannels_.begin(), joinedChannels_.end(), data.channelName),
-                joinedChannels_.end());
+            character_.ownedChannels.erase(data.channelName);
+            character_.joinedChannels.erase(
+                std::remove(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName),
+                character_.joinedChannels.end());
             MessageChatData msg;
             msg.type = ChatType::SYSTEM;
             msg.message = "Left channel: " + data.channelName;
@@ -1113,8 +1118,8 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
         case ChannelNotifyType::PLAYER_ALREADY_MEMBER: {
             // Server confirms we're in this channel but our local list doesn't have it yet -
             // can happen after reconnect or if the join notification was missed.
-            if (std::find(joinedChannels_.begin(), joinedChannels_.end(), data.channelName) == joinedChannels_.end()) {
-                joinedChannels_.push_back(data.channelName);
+            if (std::find(character_.joinedChannels.begin(), character_.joinedChannels.end(), data.channelName) == character_.joinedChannels.end()) {
+                character_.joinedChannels.push_back(data.channelName);
                 LOG_INFO("Already in channel: ", data.channelName);
             }
             break;
@@ -1156,10 +1161,10 @@ void ChatHandler::handleChannelNotify(network::Packet& packet) {
             // unit menu can offer the moderator entries, which FrameXML hides
             // behind IsDisplayChannelOwner: the verbs behind them were built
             // and could not be reached.
-            if (data.senderGuid != 0 && data.senderGuid == owner_.getPlayerGuid()) {
-                ownedChannels_.insert(data.channelName);
+            if (data.senderGuid != 0 && data.senderGuid == queries_.characterGuid()) {
+                character_.ownedChannels.insert(data.channelName);
             } else {
-                ownedChannels_.erase(data.channelName);
+                character_.ownedChannels.erase(data.channelName);
             }
             addSystemChatMessage("Owner of '" + data.channelName + "' changed.");
             break;
@@ -1233,16 +1238,17 @@ void ChatHandler::autoJoinDefaultChannels() {
     // At world entry, like the rest of this function: the other five are
     // applied here too, so a channel joined by ticking a box arrives on the
     // next login, and this behaves the same way rather than differently.
-    if (owner_.cvars().get("guildRecruitmentChannel", "0") != "0") {
+    if (cvars_.get("guildRecruitmentChannel", "0") != "0") {
         joinChannel("GuildRecruitment");
     }
 }
 
 void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
-    chatHistory_.push_back(msg);
-    chatHistory_.back().uid = ++chatUidCounter_;
-    if (chatHistory_.size() > maxChatHistory_) {
-        chatHistory_.pop_front();
+    auto& history = character_.history;
+    history.push_back(msg);
+    history.back().uid = ++chatUidCounter_;
+    if (history.size() > maxChatHistory_) {
+        history.pop_front();
     }
     logChatMessage(msg, "local");
 
@@ -1250,15 +1256,15 @@ void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
 }
 
 void ChatHandler::fireChatEvent(const MessageChatData& msg) {
-    if (!owner_.hasAddonEventListener()) return;
+    if (!frameXml_.frameXmlListening()) return;
     std::string eventName = "CHAT_MSG_";
     eventName += getChatTypeString(msg.type);
-    const Character* ac = owner_.getActiveCharacter();
+    const Character* ac = queries_.activeCharacter();
     std::string senderName = msg.senderName.empty()
         ? (ac ? ac->name : std::string{}) : msg.senderName;
     char guidBuf[32];
     snprintf(guidBuf, sizeof(guidBuf), "0x%016llX",
-             (unsigned long long)(msg.senderGuid != 0 ? msg.senderGuid : owner_.getPlayerGuid()));
+             (unsigned long long)(msg.senderGuid != 0 ? msg.senderGuid : queries_.characterGuid()));
     // The name, for the reason handleMessageChat gives: a number here is
     // printed as a language header in front of every line.
     {
@@ -1286,9 +1292,9 @@ void ChatHandler::fireChatEvent(const MessageChatData& msg) {
         (msg.type == ChatType::WHISPER_INFORM && !msg.receiverName.empty())
             ? msg.receiverName
             : senderName;
-    owner_.fireAddonEvent(eventName, {
+    frameXml_.fireFrameXmlEvent(eventName, {
         msg.message, shownName,
-        owner_.getLanguageName(static_cast<uint32_t>(msg.language)),
+        queries_.languageName(static_cast<uint32_t>(msg.language)),
         msg.channelName, msg.receiverName, "", "0", std::to_string(channelIndex),
         msg.channelName, "0", "0", guidBuf
     });
@@ -1308,55 +1314,57 @@ void ChatHandler::addSystemChatMessage(const std::string& message) {
 }
 
 void ChatHandler::toggleAfk(const std::string& message) {
-    afk_ = !afk_;
-    afkMessage_ = message;
+    auto& c = character_;
+    c.afk = !c.afk;
+    c.afkMessage = message;
 
-    if (afk_) {
+    if (c.afk) {
         if (message.empty()) {
             addSystemChatMessage("You are now AFK.");
         } else {
             addSystemChatMessage("You are now AFK: " + message);
         }
         // If DND was active, turn it off
-        if (dnd_) {
-            dnd_ = false;
-            dndMessage_.clear();
+        if (c.dnd) {
+            c.dnd = false;
+            c.dndMessage.clear();
         }
     } else {
         addSystemChatMessage("You are no longer AFK.");
-        afkMessage_.clear();
-        afkAutoRepliedSenders_.clear();
+        c.afkMessage.clear();
+        c.autoRepliedSenders.clear();
     }
 
-    LOG_INFO("AFK status: ", afk_, ", message: ", message);
+    LOG_INFO("AFK status: ", c.afk, ", message: ", message);
 }
 
 void ChatHandler::toggleDnd(const std::string& message) {
-    dnd_ = !dnd_;
-    dndMessage_ = message;
+    auto& c = character_;
+    c.dnd = !c.dnd;
+    c.dndMessage = message;
 
-    if (dnd_) {
+    if (c.dnd) {
         if (message.empty()) {
             addSystemChatMessage("You are now DND (Do Not Disturb).");
         } else {
             addSystemChatMessage("You are now DND: " + message);
         }
         // If AFK was active, turn it off
-        if (afk_) {
-            afk_ = false;
-            afkMessage_.clear();
+        if (c.afk) {
+            c.afk = false;
+            c.afkMessage.clear();
         }
     } else {
         addSystemChatMessage("You are no longer DND.");
-        dndMessage_.clear();
-        afkAutoRepliedSenders_.clear();
+        c.dndMessage.clear();
+        c.autoRepliedSenders.clear();
     }
 
-    LOG_INFO("DND status: ", dnd_, ", message: ", message);
+    LOG_INFO("DND status: ", c.dnd, ", message: ", message);
 }
 
 void ChatHandler::replyToLastWhisper(const std::string& message) {
-    if (!owner_.isInWorld()) {
+    if (!sender_.characterInWorld()) {
         LOG_WARNING("Cannot send whisper: not in world or not connected");
         return;
     }
@@ -1370,7 +1378,7 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
     }
 
     if (message.empty()) {
-        owner_.raiseUiError("You must specify a message to send.");
+        raiseUiError("You must specify a message to send.");
         return;
     }
 
@@ -1380,10 +1388,9 @@ void ChatHandler::replyToLastWhisper(const std::string& message) {
 }
 
 std::string ChatHandler::getLastWhisperSender() const {
-    if (!lastWhisperSender_.empty()) return lastWhisperSender_;
-    if (lastWhisperSenderGuid_ != 0) {
-        const auto& cache = owner_.getPlayerNameCache();
-        if (auto it = cache.find(lastWhisperSenderGuid_); it != cache.end()) return it->second;
+    if (!character_.lastWhisperSender.empty()) return character_.lastWhisperSender;
+    if (character_.lastWhisperSenderGuid != 0) {
+        return queries_.playerName(character_.lastWhisperSenderGuid);
     }
     return {};
 }
@@ -1432,12 +1439,7 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
         m.moderator = (memberFlags & kModerator) != 0;
         m.muted     = (memberFlags & kMuted) != 0;
 
-        auto entity = owner_.getEntityManager().getEntity(m.guid);
-        if (entity) {
-            auto player = std::dynamic_pointer_cast<Player>(entity);
-            if (player && !player->getName().empty()) m.name = player->getName();
-        }
-        if (m.name.empty()) m.name = owner_.lookupName(m.guid);
+        m.name = queries_.playerName(m.guid);
         if (m.name.empty()) m.name = "(unknown)";
 
         std::string entry = "  " + m.name;
@@ -1448,7 +1450,7 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
         roster.push_back(std::move(m));
     }
 
-    channelRosters_[chanName] = std::move(roster);
+    character_.channelRosters[chanName] = std::move(roster);
     // Both, because the panel redraws its member list on the first and its
     // member count on the second, and it registers for each separately.
     //
@@ -1461,9 +1463,9 @@ void ChatHandler::handleChannelList(network::Packet& packet) {
     const int displayIndex = getChannelIndex(chanName);
     if (displayIndex > 0) {
         const std::string idx = std::to_string(displayIndex);
-        owner_.fireAddonEvent("CHANNEL_ROSTER_UPDATE", {idx});
-        owner_.fireAddonEvent("CHANNEL_COUNT_UPDATE",
-                              {idx, std::to_string(channelRosters_[chanName].size())});
+        frameXml_.fireFrameXmlEvent("CHANNEL_ROSTER_UPDATE", {idx});
+        frameXml_.fireFrameXmlEvent("CHANNEL_COUNT_UPDATE",
+                                    {idx, std::to_string(character_.channelRosters[chanName].size())});
     }
 }
 
@@ -1488,7 +1490,7 @@ void ChatHandler::applyUserlistChange(const std::string& chanName, uint64_t guid
     // The same bits the full list reads, and the same trap: 0x01 is the owner
     // and 0x02 the moderator, not the other way round.
     constexpr uint8_t kOwner = 0x01, kModerator = 0x02, kMuted = 0x08;
-    auto& roster = channelRosters_[chanName];
+    auto& roster = character_.channelRosters[chanName];
     auto it = std::find_if(roster.begin(), roster.end(),
                            [&](const ChannelMember& m) { return m.guid == guid; });
 
@@ -1498,7 +1500,7 @@ void ChatHandler::applyUserlistChange(const std::string& chanName, uint64_t guid
         if (it == roster.end()) {
             ChannelMember m;
             m.guid = guid;
-            m.name = owner_.lookupName(guid);
+            m.name = queries_.playerName(guid);
             if (m.name.empty()) m.name = "(unknown)";
             roster.push_back(std::move(m));
             it = roster.end() - 1;
@@ -1513,9 +1515,8 @@ void ChatHandler::applyUserlistChange(const std::string& chanName, uint64_t guid
     const int displayIndex = getChannelIndex(chanName);
     if (displayIndex > 0) {
         const std::string idx = std::to_string(displayIndex);
-        owner_.fireAddonEvent("CHANNEL_ROSTER_UPDATE", {idx});
-        owner_.fireAddonEvent("CHANNEL_COUNT_UPDATE",
-                              {idx, std::to_string(roster.size())});
+        frameXml_.fireFrameXmlEvent("CHANNEL_ROSTER_UPDATE", {idx});
+        frameXml_.fireFrameXmlEvent("CHANNEL_COUNT_UPDATE", {idx, std::to_string(roster.size())});
     }
 }
 
@@ -1541,18 +1542,18 @@ void ChatHandler::handleUserlistRemove(network::Packet& packet) {
 // ============================================================
 
 void ChatHandler::updateGmTicket(const std::string& text) {
-    if (!owner_.isInWorld() || !owner_.getSocket()) return;
+    if (!sender_.characterInWorld()) return;
     // CMSG_GMTICKET_UPDATETEXT (WotLK 3.3.5a): the new text and nothing else.
     // Creating carries the player's position because a new ticket records where
     // it was raised; editing one does not move it.
     network::Packet pkt(wireOpcode(Opcode::CMSG_GMTICKET_UPDATETEXT));
     pkt.writeString(text);
-    owner_.getSocket()->send(pkt);
+    sender_.send(pkt);
     LOG_INFO("Updated GM ticket text");
 }
 
 void ChatHandler::submitGmTicket(const std::string& text) {
-    if (!owner_.isInWorld()) return;
+    if (!sender_.characterInWorld()) return;
 
     // CMSG_GMTICKET_CREATE:
     //   uint32  mapId
@@ -1587,16 +1588,17 @@ void ChatHandler::submitGmTicket(const std::string& text) {
     // both of its lengths go across as zero, which is how the real client
     // sends a ticket raised outside a conversation.
     network::Packet pkt(wireOpcode(Opcode::CMSG_GMTICKET_CREATE));
-    pkt.writeUInt32(owner_.currentMapIdRef());
-    pkt.writeFloat(owner_.movementInfoRef().x);
-    pkt.writeFloat(owner_.movementInfoRef().y);
-    pkt.writeFloat(owner_.movementInfoRef().z);
+    const MovementInfo& at = queries_.playerMovement();
+    pkt.writeUInt32(queries_.currentMapId());
+    pkt.writeFloat(at.x);
+    pkt.writeFloat(at.y);
+    pkt.writeFloat(at.z);
     pkt.writeString(text);
     pkt.writeUInt32(1);  // needResponse = yes
     pkt.writeUInt8(0);   // needMoreHelp = no
     pkt.writeUInt32(0);  // no chat-log timestamps
     pkt.writeUInt32(0);  // and so no compressed chat log
-    owner_.getSocket()->send(pkt);
+    sender_.send(pkt);
     LOG_INFO("Submitted GM ticket: '", text, "'");
 }
 

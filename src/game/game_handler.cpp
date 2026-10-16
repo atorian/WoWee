@@ -109,7 +109,8 @@ GameHandler::GameHandler(GameServices& services)
 
     // Initialize domain handlers
     entityController_ = std::make_unique<EntityController>(*this);
-    chatHandler_      = std::make_unique<ChatHandler>(*this);
+    chatHandler_      = std::make_unique<ChatHandler>(*this, *this, *services_.events, *this,
+                                                      *services_.cvars, *services_.emotes);
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
     socialHandler_    = std::make_unique<SocialHandler>(*this, *services_.events);
@@ -343,6 +344,12 @@ uint32_t GameHandler::classSkillLineOf(uint32_t spellId) {
     const uint32_t line = spellHandler_->skillLineOfSpell(spellId);
     if (line == 0 || spellHandler_->skillCategory(line) != kSkillLineCategoryClass) return 0;
     return line;
+}
+
+std::optional<uint32_t> GameHandler::guildRankRights() const {
+    const uint32_t rank = getPlayerGuildRankIndex();
+    if (rank == 0xFFFFFFFFu || rank >= getGuildRoster().ranks.size()) return std::nullopt;
+    return getPlayerGuildRankRights();
 }
 
 void GameHandler::setFacing(float canonicalYaw) {

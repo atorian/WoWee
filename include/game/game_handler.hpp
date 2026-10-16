@@ -7,6 +7,7 @@
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
+#include "game/chat_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/pet_handler.hpp"
 #include "game/frame_xml_events.hpp"
@@ -169,7 +170,8 @@ class GameHandler : public IConnectionState,
                      public ActionBarQueries,
                      public InventoryQueries,
                      public PetQueries,
-                     public SpellQueries {
+                     public SpellQueries,
+                     public ChatQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -350,6 +352,18 @@ public:
     SpellDataInfo spellData(uint32_t spellId) const override { return getSpellData(spellId); }
     std::string iconPath(uint32_t iconId) const override { return getIconPath(iconId); }
 
+    // ChatQueries (characterGuid, playerName, requestPlayerName,
+    // packetParsers, playerMovement and achievementName are above).
+    const Character* activeCharacter() const override { return getActiveCharacter(); }
+    uint32_t currentMapId() const override { return currentMapId_; }
+    uint8_t playerClassOf(uint64_t guid) const override { return lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
+    const GroupListData& party() const override { return getPartyData(); }
+    const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
+    std::optional<uint32_t> guildRankRights() const override;
+    std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
+
     /**
      * Get current connection state
      */
@@ -511,10 +525,6 @@ public:
     ChatAutoJoin chatAutoJoin;
     void autoJoinDefaultChannels();
 
-    // Chat bubble callback: (senderGuid, message, isYell)
-    using ChatBubbleCallback = std::function<void(uint64_t, const std::string&, bool)>;
-    void setChatBubbleCallback(ChatBubbleCallback cb) { chatBubbleCallback_ = std::move(cb); }
-
     // Addon chat event callback: fires when any chat message is received (for Lua event dispatch)
 
     // Generic addon event callback: fires named events with string args
@@ -585,13 +595,6 @@ public:
         return randomStatResolver_ ? randomStatResolver_(id, suffixFactor)
                                    : std::vector<RandomStatBonus>{};
     }
-
-    // Emote animation callback: (entityGuid, animationId)
-    // guid, animId, isState. isState marks persistent STATE_ emotes (from
-    // UNIT_NPC_EMOTESTATE or state-type SMSG_EMOTE) that loop until cleared;
-    // one-shots play once and return to the prior state.
-    using EmoteAnimCallback = std::function<void(uint64_t, uint32_t, bool)>;
-    void setEmoteAnimCallback(EmoteAnimCallback cb) { emoteAnimCallback_ = std::move(cb); }
 
     /**
      * Get chat history (recent messages)
@@ -1148,13 +1151,8 @@ public:
     void clearCombatLog();
 
     // Area trigger messages (SMSG_AREA_TRIGGER_MESSAGE) - drained by UI each frame
-    bool hasAreaTriggerMsg() const { return !areaTriggerMsgs_.empty(); }
-    std::string popAreaTriggerMsg() {
-        if (areaTriggerMsgs_.empty()) return {};
-        std::string msg = areaTriggerMsgs_.front();
-        areaTriggerMsgs_.pop_front();
-        return msg;
-    }
+    bool hasAreaTriggerMsg() const { return chatHandler_->hasAreaTriggerMessage(); }
+    std::string popAreaTriggerMsg() { return chatHandler_->takeAreaTriggerMessage(); }
 
     // Threat
     using ThreatEntry = CombatHandler::ThreatEntry;
@@ -3229,6 +3227,9 @@ public:
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
+    /// The character's conversation: the chat log, channels, whispers, AFK.
+    ChatHandler& chat() { return *chatHandler_; }
+    const ChatHandler& chat() const { return *chatHandler_; }
     /// The player's pet and the stable.
     PetHandler& pet() { return *petHandler_; }
     const PetHandler& pet() const { return *petHandler_; }
@@ -3382,7 +3383,6 @@ public:
     auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
     auto& areaTriggerCheckTimerRef() { return areaTriggerCheckTimer_; }
     auto& areaTriggerDbcLoadedRef() { return areaTriggerDbcLoaded_; }
-    auto& areaTriggerMsgsRef() { return areaTriggerMsgs_; }
     auto& areaTriggersRef() { return areaTriggers_; }
     auto& areaTriggerSuppressFirstRef() { return areaTriggerSuppressFirst_; }
     auto& areaTriggerCooldownRef() { return areaTriggerCooldown_; }
@@ -3420,11 +3420,9 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& chatBubbleCallbackRef() { return chatBubbleCallback_; }
     auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
     auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
     auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
-    auto& emoteAnimCallbackRef() { return emoteAnimCallback_; }
     auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
@@ -3809,7 +3807,6 @@ private:
     std::unique_ptr<EntityController> entityController_;
 
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
-    ChatBubbleCallback chatBubbleCallback_;
     AddonEventCallback addonEventCallback_;
     AddonEventQueue pendingAddonEvents_;
     InterfaceCommand   interfaceCommand_;
@@ -3819,7 +3816,6 @@ private:
     SpellDataResolver spellDataResolver_;
     RandomPropertyNameResolver randomPropertyNameResolver_;
     RandomStatResolver randomStatResolver_;
-    EmoteAnimCallback emoteAnimCallback_;
 
     // Targeting
     uint64_t targetGuid = 0;
@@ -3887,8 +3883,6 @@ private:
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
 
-    // ---- Combat ----
-    std::deque<std::string>    areaTriggerMsgs_;
 
     KnockBackCallback knockBackCallback_;
     CameraShakeCallback cameraShakeCallback_;

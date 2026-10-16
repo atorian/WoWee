@@ -1292,12 +1292,12 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             uint32_t oldEmote = unit->getNpcEmoteState();
             unit->setNpcEmoteState(val);
             // Fire emote animation callback so entity_spawner can update the NPC's idle anim
-            if (val != oldEmote && owner_.emoteAnimCallbackRef()) {
+            if (val != oldEmote) {
                 uint32_t animId = val != 0 ? owner_.emotes().animByEmotesId(val) : 0;
                 if (val == 0 || animId != 0) {
                     // UNIT_NPC_EMOTESTATE is persistent by definition - a zero
                     // here genuinely clears the state loop.
-                    owner_.emoteAnimCallbackRef()(block.guid, animId, /*isState=*/true);
+                    owner_.eventBus().publish(events::UnitEmotePlayed{block.guid, animId, true});
                 } else {
                     LOG_DEBUG("UNIT_NPC_EMOTESTATE emoteId=", val, " had no Emotes.dbc animation mapping");
                 }
@@ -2846,27 +2846,15 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             playerClassRaceCache_[data.guid] = {.classId = data.classId, .raceId = data.race,
                                                 .gender = data.gender};
         }
-        // Chat lines held back for this name can go out now, with it on them.
-        // After the cache above, which a held NPC line reads for its $-tokens.
-        if (owner_.getChatHandler()) owner_.getChatHandler()->flushChatAwaitingName(data.guid);
+        // After the cache above: chat releases the lines it held back for this
+        // name, and a held NPC line reads the cache for its $-tokens.
+        owner_.eventBus().publish(events::PlayerNameKnown{data.guid, data.name});
         // Update entity name
         auto entity = entityManager.getEntity(data.guid);
         if (entity && entity->getType() == ObjectType::PLAYER) {
             auto player = std::static_pointer_cast<Player>(entity);
             player->setName(data.name);
         }
-
-        // Backfill chat history entries that arrived before we knew the name.
-        if (owner_.getChatHandler()) {
-            for (auto& msg : owner_.getChatHandler()->getChatHistory()) {
-                if (msg.senderGuid == data.guid && msg.senderName.empty()) {
-                    msg.senderName = data.name;
-                }
-            }
-        }
-
-        // The whisper reply target needs no backfill: ChatHandler keeps the
-        // whisperer's guid and finds the name in the cache this just filled.
 
         // Backfill mail inbox sender names
         for (auto& mail : owner_.inventory().mailInboxRef()) {
