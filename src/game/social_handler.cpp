@@ -2,6 +2,7 @@
 #include "core/local_time.hpp"
 #include "game/item_text.hpp"
 #include "game/social_handler.hpp"
+#include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
 #include "game/entity.hpp"
@@ -417,6 +418,12 @@ static const std::string kEmptyString;
 SocialHandler::SocialHandler(GameHandler& owner)
     : owner_(owner) {
     loadGuildNameCache();
+    // The party is the server's to say at every login: SMSG_GROUP_LIST comes
+    // with it for a character in one. Kept, the last session's party stood
+    // for the next character, and for this one back from a lost connection
+    // after the group had gone on without it.
+    subscriptions_.push_back(owner_.eventBus().subscribe<events::CharacterLoggingIn>(
+        [this](const events::CharacterLoggingIn&) { partyData = GroupListData{}; }));
 }
 
 void SocialHandler::loadGuildNameCache() {

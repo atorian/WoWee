@@ -3397,9 +3397,8 @@ void GameHandler::enqueueIncomingPacket(const network::Packet& packet) {
         pendingIncomingPackets_.pop_front();
     }
     pendingIncomingPackets_.push_back(packet);
-    lastRxTime_ = std::chrono::steady_clock::now();
-    rxSilenceLogged_ = false;
-    rxSilence15sLogged_ = false;
+    worldSilenceSeconds_ = 0.0f;
+    worldSilenceProbed_ = false;
 }
 
 void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {

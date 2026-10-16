@@ -306,7 +306,7 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
 }
 
 void ChatHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
-    if (owner_.getState() != WorldState::IN_WORLD) {
+    if (!owner_.worldCommandAllowed("chat")) {
         LOG_WARNING("Cannot send chat in state: ", static_cast<int>(owner_.getState()));
         return;
     }

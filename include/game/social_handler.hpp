@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcodes.hpp"
 #include "game/group_defines.hpp"
@@ -663,6 +664,9 @@ private:
 
     // Group
     GroupListData partyData;
+    /// What this handler hears of the session: the party ends at each login
+    /// (events::CharacterLoggingIn). After it, so it goes first.
+    std::vector<core::EventBus::Subscription> subscriptions_;
     bool pendingGroupInvite = false;
     std::string pendingInviterName;
 

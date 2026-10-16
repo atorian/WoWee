@@ -500,7 +500,7 @@ bool SpellHandler::isTargetCastInterruptible() const {
 
 void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
-    if (!sender_.characterInWorld()) return;
+    if (!sender_.worldCommandAllowed("a cast")) return;
 
     // Auto Shot and the wand's Shoot keep going once started, and the action
     // button flashes for as long as they do. The stop half comes from the
