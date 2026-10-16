@@ -736,6 +736,8 @@ set(WOWEE_SOURCES
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
     src/game/pet_handler.cpp
+    src/game/realm_clock.cpp
+    src/game/realm_time_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/quest_objectives.cpp

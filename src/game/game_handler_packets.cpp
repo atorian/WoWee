@@ -13,6 +13,7 @@
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -204,7 +205,6 @@ void GameHandler::registerCoreOpcodes() {
         else
             LOG_WARNING("Unexpected SMSG_LOGIN_VERIFY_WORLD in state: ", worldStateName(state));
     };
-    registerHandler(Opcode::SMSG_LOGIN_SETTIMESPEED, &GameHandler::handleLoginSetTimeSpeed);
     registerHandler(Opcode::SMSG_CLIENTCACHE_VERSION, &GameHandler::handleClientCacheVersion);
     registerHandler(Opcode::SMSG_TUTORIAL_FLAGS, &GameHandler::handleTutorialFlags);
     registerHandler(Opcode::SMSG_MOTD, &GameHandler::handleMotd);
@@ -642,32 +642,7 @@ void GameHandler::registerCoreOpcodes() {
             LOG_DEBUG("SMSG_CHANNEL_MEMBER_COUNT: channel=", chanName, " members=", count);
         }
     };
-    for (auto op : { Opcode::SMSG_GAMETIME_SET, Opcode::SMSG_GAMETIME_UPDATE }) {
-        dispatchTable_[op] = [this](network::Packet& packet) {
-            if (packet.hasRemaining(4)) {
-                const WowDate t = unpackWowPackedTime(packet.readUInt32());
-                gameClock_.setHours(static_cast<float>(t.hour) +
-                                    static_cast<float>(t.minute) / 60.0f);
-                // Said out loud, because this is where realm time actually
-                // comes from on servers that never send SMSG_LOGIN_SETTIMESPEED
-                // - which logged its arrival and so looked like the only
-                // source. Chasing a frozen sky through a log with no line for
-                // this in it led to exactly the wrong conclusion.
-                LOG_INFO("Realm time: ", t.hour, ":", t.minute);
-            }
-            packet.skipAll();
-        };
-    }
-    dispatchTable_[Opcode::SMSG_GAMESPEED_SET] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(8)) {
-            const WowDate t = unpackWowPackedTime(packet.readUInt32());
-            float timeSpeed = packet.readFloat();
-            gameClock_.set(static_cast<float>(t.hour) +
-                           static_cast<float>(t.minute) / 60.0f,
-                           timeSpeed);
-        }
-        packet.skipAll();
-    };
+    // SMSG_GAMETIME_SET/UPDATE and SMSG_GAMESPEED_SET are RealmTimeHandler's.
     dispatchTable_[Opcode::SMSG_GAMETIMEBIAS_SET] = [](network::Packet& packet) {
         packet.skipAll();
     };
@@ -2911,19 +2886,7 @@ void GameHandler::registerRemainingOpcodes() {
         }
         packet.skipAll();
     };
-    // uint32 unixTime - server's current unix timestamp; use to sync gameTime_
-    dispatchTable_[Opcode::SMSG_SERVERTIME] = [](network::Packet& packet) {
-        // uint32 unixTime - server's current unix timestamp; use to sync gameTime_
-        // A unix timestamp, which is not a time of day. It used to be stored
-        // in gameTime_ alongside values in three other units, so whichever
-        // packet arrived last decided what the sky thought the hour was.
-        // Logged and dropped: nothing here needs the server's wall clock, and
-        // the game clock has its own opcodes.
-        if (packet.hasRemaining(4)) {
-            const uint32_t srvTime = packet.readUInt32();
-            LOG_DEBUG("SMSG_SERVERTIME: serverTime=", srvTime);
-        }
-    };
+    // SMSG_SERVERTIME is RealmTimeHandler's: the realm clock keeps time from it.
     // uint64 kickerGuid + uint32 kickReasonType + null-terminated reason string
     // kickReasonType: 0=other, 1=afk, 2=vote kick
     dispatchTable_[Opcode::SMSG_KICK_REASON] = [this](network::Packet& packet) {
@@ -3179,6 +3142,7 @@ void GameHandler::registerDomainOpcodes() {
     accountDataHandler_->registerOpcodes(dispatchTable_);
     actionBarHandler_->registerOpcodes(dispatchTable_);
     petHandler_->registerOpcodes(dispatchTable_);
+    realmTimeHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {
