@@ -11,7 +11,26 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogColor;
     vec4 fogParams;
     vec4 shadowParams;
+    vec4 playerPos;
+    vec4 playerWake;
+    ivec4 localLightMeta;
+    vec4 volumetricParams;
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
+    vec4 windDirLean;  // wind.glsli
+    vec4 windPhases;
+    vec4 windTravel;
 };
+
+#define WIND_PER_FRAME
+#include "wind.glsli"
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -44,38 +63,15 @@ void main() {
     vLocalLights = push.localLights;
     vec3 pos = aPos;
 
-    // The same sway a banner doodad gets, in the building's own coordinates:
-    // held at the top edge, free at the hem, a slow swing with a smaller
-    // ripple across it. The phase comes from where the cloth hangs, so two
-    // banners on one gate are not in step.
+    // The same sway a banner doodad gets (wind.glsli), in the building's own
+    // coordinates: held at the top edge, free at the hem. The phase comes
+    // from where the cloth hangs, so two banners on one gate are not in step.
     if (push.cloth.y > 0.0) {
         float span = max(push.cloth.y, 0.01);
         float drop = clamp((push.cloth.x - pos.z) / span, 0.0, 1.0);
         drop *= drop;
         float amp = span * 0.05 * drop;
-        float phase = fogParams.z * 1.1 + dot(push.cloth.zw, vec2(0.21, 0.17));
-        vec3 sway = vec3(
-            (sin(phase) * 0.7 + sin(phase * 2.7 + pos.y * 1.9) * 0.25) * amp,
-            (cos(phase * 0.9) * 0.6 + cos(phase * 3.1 + pos.x * 1.7) * 0.2) * amp,
-            sin(phase * 1.6 + pos.x * 1.3) * 0.12 * amp);
-
-        // Away from the wall, never into it.
-        //
-        // A banner hangs flush against stone, so any motion toward its own
-        // back face goes through the masonry - a quarter of it was still
-        // enough to show. The whole perpendicular component is taken out and a
-        // third of it given back outward only: the cloth billows away from the
-        // wall and slides in its own plane, and the half-cycle that used to
-        // push it backwards now does nothing at all.
-        //
-        // Outward is each face's own normal, so a two-sided banner puffs
-        // slightly rather than parting - which is what a cloth in a draught
-        // does anyway.
-        vec3 clothN = normalize(aNormal);
-        float perp = dot(sway, clothN);
-        sway -= clothN * perp;
-        sway += clothN * max(perp, 0.0) * 0.35;
-        pos += sway;
+        pos += clothWindSway(perFrameClothWind(push.model), pos, aNormal, push.cloth.zw, amp);
     }
 
     vec4 worldPos = push.model * vec4(pos, 1.0);

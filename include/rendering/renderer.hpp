@@ -24,6 +24,8 @@
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
+#include "pipeline/wind_zones.hpp"
+#include "rendering/wind_field.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "pipeline/grass_population.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -695,6 +697,15 @@ private:
     // AreaTable parentage and runs per blade sample without it.
     pipeline::GrassBiomeSet grassBiomes_;
     bool grassBiomesLoaded_ = false;
+    // The wind over the player's zone (WindField), from assets/wind_zones.json
+    // read on the first update and the realm's clock in environment_.
+    WindField wind_;
+    pipeline::WindZoneTable windZones_;
+    bool windZonesLoaded_ = false;
+    /// That the world is drawn without the realm's clock has been said.
+    bool windUnsyncedSaid_ = false;
+    bool windRealmSynced_ = false;
+    void updateWind(float deltaTime);
     std::unordered_map<uint32_t, uint32_t> grassBiomeForArea_;
     // Session totals, reported once at shutdown. The log is bounded and the
     // per-rebuild lines rotate out of it whenever the player stands still for

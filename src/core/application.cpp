@@ -106,6 +106,7 @@
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/chat_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
 #include "core/map_scope.hpp"
@@ -3685,9 +3686,13 @@ void Application::presentWorldToRenderer(float deltaTime) {
 
     rendering::WorldEnvironment environment;
     environment.zoneId = zoneTracker_->zoneId();
+    environment.areaId = zoneTracker_->areaId();
     if (gameHandler) {
         environment.mapId = gameHandler->getCurrentMapId();
         environment.gameTime = gameHandler->getGameTime();
+        if (const auto realm = gameHandler->realmTime().realmSeconds()) {
+            environment.realmSeconds = *realm;
+        }
         environment.raining = gameHandler->isRaining();
         environment.weatherType = gameHandler->getWeatherType();
         environment.weatherIntensity = gameHandler->getWeatherIntensity();

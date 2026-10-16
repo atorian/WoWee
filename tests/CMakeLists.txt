@@ -2044,6 +2044,17 @@ endif()
 wowee_add_test(test_m2_sway
     SOURCES test_m2_sway.cpp)
 
+# ── test_wind_field ──────────────────────────────────────────
+# The one wind over the trees, their shadows, the cloth and the grass: two
+# clients reading the same realm clock in the same zone blow the same wind,
+# a change eases in without a tree jumping, and wind_zones.json's rows match
+# the places they name.
+wowee_add_test(test_wind_field
+    SOURCES test_wind_field.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/wind_field.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface

@@ -51,6 +51,12 @@ struct GPUPerFrameData {
     // (contact_shadows.glsli), as the client's 40-yard map.
     glm::mat4 contactSpaceMatrix{0.0f};
     glm::vec4 contactParams{0.0f}; // enabled, texel UV size, depth span in yards, unused
+    // The wind, as wind.glsli reads it (WindField::gpu): one field over the
+    // trees, the cloth and the grass. The reflection pass copies the whole
+    // block, so reflected foliage moves with the real.
+    glm::vec4 windDirLean{1.0f, 0.0f, 0.0f, 0.0f}; // xy toward (world, unit), z lean, w swing
+    glm::vec4 windPhases{0.0f};  // x trunk, y branch, z leaf phase, w branch/leaf scale
+    glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
 };
 
 // Push constants for the model matrix (most common case)
@@ -79,8 +85,9 @@ struct WMOPushConstants {
 struct ShadowPush {
     glm::mat4 lightSpaceModel;
     /// xy: the instance's world origin, which gives the wind its per-tree
-    /// phase. z: the height the bend is normalised against. w: its amplitude.
-    /// All zero for anything that does not sway.
+    /// phase. z: the height the bend is normalised against. w: its amplitude,
+    /// with the distance fade already applied. All zero for anything that
+    /// does not sway.
     glm::vec4 sway{0.0f};
     /// x: sample the texture. y: alpha-test it. z: bend in the wind.
     /// w: where the alpha test cuts, in 255ths; 0 is a half. A WMO's alpha
@@ -96,9 +103,15 @@ struct ShadowPush {
     /// canopy. Push constants are recorded into the command buffer with the
     /// draw, so there is nothing left to race.
     glm::ivec4 flags{0};
-    /// x: the wind clock the sway is sampled at.
+    /// The wind as foliageWindSway takes it (wind.glsli), the same numbers the
+    /// main pass reads from GPUPerFrameData: xy the direction it blows toward
+    /// in the model's own xy (windDirectionInModel), z the lean, w the swing.
     glm::vec4 wind{0.0f};
+    /// x trunk, y branch, z leaf phase; w the branch and leaf scale.
+    glm::vec4 windPhases{0.0f};
 };
+static_assert(sizeof(ShadowPush) == 128,
+              "ShadowPush is all the push constant space Vulkan guarantees");
 
 // Uniform buffer for shadow rendering parameters (matches shader std140 layout)
 struct ShadowParamsUBO {

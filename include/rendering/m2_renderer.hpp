@@ -16,6 +16,7 @@
 #include "rendering/game_object_animation.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/local_lights.hpp"
+#include "rendering/wind_field.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -641,9 +642,11 @@ public:
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
     /**
-     * Render depth-only pass for shadow casting
+     * Render depth-only pass for shadow casting. `wind` is the frame's wind,
+     * the same numbers the main pass reads from GPUPerFrameData, so a tree's
+     * shadow bends with the tree.
      */
-    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
+    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
                       bool resetDescriptors = true);
 
