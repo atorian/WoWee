@@ -49,10 +49,6 @@ void Input::setVirtualMouseButton(int button, bool held) {
     virtualMouseState[button] = held;
 }
 
-void Input::clearVirtualKeys() {
-    virtualKeyState.fill(false);
-}
-
 bool Input::isKeyPressed(SDL_Scancode key) const {
     if (key < 0 || key >= NUM_KEYS) return false;
     return currentKeyState[key];

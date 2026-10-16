@@ -492,16 +492,16 @@ static int lua_UseAction(lua_State* L) {
     } else if (action.type == game::ActionBarSlot::MACRO) {
         // Run as RunMacro runs one, through the client's macro runner: one
         // line at a time through the slash commands, /stopmacro honoured.
-        static std::set<uint32_t> said;
         const game::Macro* macro = gh->accountData().macro(action.id);
         auto* svc = getLuaServices(L);
+        const std::string failure = "UseAction macro " + std::to_string(action.id);
         if (!macro) {
-            if (said.insert(action.id).second) {
+            if (interfaceState(L).firstReport(failure)) {
                 LOG_WARNING("UseAction: slot ", slot + 1, " holds macro ", action.id,
                             ", which the account data does not have; nothing runs");
             }
         } else if (!svc || !svc->runMacroText) {
-            if (said.insert(action.id).second) {
+            if (interfaceState(L).firstReport(failure)) {
                 LOG_WARNING("UseAction: macro \"", macro->name,
                             "\" not run: this client has no macro runner");
             }
@@ -2242,8 +2242,7 @@ bool runBindingCommand(lua_State* L, const std::string& command, bool down) {
     if (lua_istable(L, -1)) lua_getfield(L, -1, command.c_str()); else lua_pushnil(L);
     if (!lua_isfunction(L, -1)) {
         lua_pop(L, 2);
-        static std::set<std::string> said;
-        if (said.insert(command).second) {
+        if (interfaceState(L).firstReport("key binding " + command)) {
             LOG_WARNING("Key binding ", command, ": nothing in the interface runs it; "
                         "the key does nothing");
         }

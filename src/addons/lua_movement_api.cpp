@@ -27,9 +27,7 @@ void holdMovement(lua_State* L, MovementCommand command, bool held) {
         return;
     }
     // Once: a binding script calls these on every press and release.
-    static bool said = false;
-    if (!said) {
-        said = true;
+    if (interfaceState(L).firstReport("movement")) {
         LOG_WARNING("Movement binding (", rendering::movementCommandName(command),
                     "): this client has nothing to move; the key does nothing");
     }
