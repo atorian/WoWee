@@ -1,4 +1,5 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "game/game_events.hpp"
 #include "core/frame_phase.hpp"
 #include "core/player_view.hpp"
 #include "core/coordinates.hpp"
@@ -404,7 +405,10 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     // the player starts casting Hearthstone.  The ~10 s cast gives enough time for
     // the background streaming workers to bring tiles into the cache so the player
     // lands on solid ground instead of falling through un-loaded terrain.
-    gameHandler_.setHearthstonePreloadCallback([this](uint32_t mapId, float x, float y, float z) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::HearthstoneCastStarted>(
+        [this](const game::events::HearthstoneCastStarted& e) {
+        const uint32_t mapId = e.mapId;
+        const float x = e.x, y = e.y, z = e.z;
         auto* terrainMgr = renderer_ ? renderer_->getTerrainManager() : nullptr;
         if (!terrainMgr || !assetManager_) return;
 
@@ -440,7 +444,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             LOG_INFO("Hearthstone preload: started file cache warm for map '", mapName,
                      "' (id=", mapId, ")");
         }
-    });
+    }));
 }
 
 // ── per-frame update ─────────────────────────────────────────────

@@ -653,7 +653,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         if (owner_.consumeSuppressMeleeSwingAnim()) {
             LOG_DEBUG("Suppressed melee swing anim - ranged shot already triggered");
         } else {
-            if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0);
+            owner_.eventBus().publish(events::PlayerMeleeSwing{0});
         }
     }
     if (!isPlayerAttacker && owner_.npcSwingCallbackRef()) {

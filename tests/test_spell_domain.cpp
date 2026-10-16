@@ -13,6 +13,7 @@ using wowee::game::Opcode;
 using wowee::game::Refusal;
 using wowee::test::Body;
 using wowee::test::GameHarness;
+using wowee::test::PlayerSpec;
 namespace ev = wowee::game::events;
 
 namespace {
@@ -32,7 +33,31 @@ std::vector<uint8_t> castFailed(uint32_t spellId, uint8_t result) {
     return Body().u8(1).u32(spellId).u8(result);
 }
 
+/// SMSG_SPELL_START as 3.3.5a writes it: the caster's item (here the caster
+/// itself) and the caster, packed; a cast count, the spell, the flags and the
+/// cast time; then the targets - a unit, or none.
+std::vector<uint8_t> spellStart(uint64_t caster, uint32_t spellId, uint32_t castMs,
+                                uint64_t target = 0) {
+    Body b;
+    b.packedGuid(caster).packedGuid(caster).u8(1).u32(spellId).u32(0).u32(castMs);
+    if (target != 0) b.u32(0x0002 /* unit */).packedGuid(target);
+    else b.u32(0);
+    return b.bytes();
+}
+
+/// SMSG_TOTEM_CREATED, 3.3.5a: the slot, the totem (packed), how long it
+/// stands in milliseconds, and the spell that put it down.
+std::vector<uint8_t> totemCreated(uint8_t slot, uint64_t totem, uint32_t ms, uint32_t spellId) {
+    return Body().u8(slot).packedGuid(totem).u32(ms).u32(spellId);
+}
+
 constexpr uint32_t kFireball = 133;
+constexpr uint32_t kHearthstone = 8690;
+constexpr uint32_t kSearingTotem = 3599;
+constexpr uint64_t kTotem = 0xF130000000001001ull;
+constexpr uint64_t kCultist = 0xF130000000002002ull;
+
+using Op = wowee::game::SpellModOp;
 
 }  // namespace
 
@@ -95,7 +120,6 @@ TEST_CASE("a refused cast is shown, said aloud, and ends the cast for the interf
 }
 
 TEST_CASE("a talent's modifier lands on the property the spellbook reads", "[spell][harness]") {
-    using Op = wowee::game::GameHandler::SpellModOp;
     GameHarness h;
     h.enterWorld();
 
@@ -107,14 +131,14 @@ TEST_CASE("a talent's modifier lands on the property the spellbook reads", "[spe
     h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(1).u8(11).u32(5000));
     h.pump();
 
-    CHECK(h.game().getSpellFlatMod(Op::Cost) == -10);
-    CHECK(h.game().getSpellPctMod(Op::CastingTime) == -20);
-    CHECK(h.game().getSpellFlatMod(Op::CastingTime) == 0);
-    CHECK(h.game().getSpellPctMod(Op::Cost) == 0);
+    const auto& spells = h.game().spells();
+    CHECK(spells.spellFlatMod(Op::Cost) == -10);
+    CHECK(spells.spellPctMod(Op::CastingTime) == -20);
+    CHECK(spells.spellFlatMod(Op::CastingTime) == 0);
+    CHECK(spells.spellPctMod(Op::Cost) == 0);
 }
 
 TEST_CASE("a modifier past the ops this client keeps changes nothing", "[spell][harness]") {
-    using Op = wowee::game::GameHandler::SpellModOp;
     GameHarness h;
     h.enterWorld();
 
@@ -125,7 +149,101 @@ TEST_CASE("a modifier past the ops this client keeps changes nothing", "[spell][
     h.pump();
 
     // The packet after it is still read.
-    CHECK(h.game().getSpellFlatMod(Op::Cost) == 7);
+    CHECK(h.game().spells().spellFlatMod(Op::Cost) == 7);
+}
+
+TEST_CASE("the next character has none of the last one's totems or talents", "[spell][harness]") {
+    PlayerSpec shaman;
+    shaman.guid = 0x41;
+    shaman.name = "Shaman";
+    shaman.classId = 7;
+    PlayerSpec warrior;
+    warrior.guid = 0x42;
+    warrior.name = "Warrior";
+
+    GameHarness h;
+    h.enterWorld(shaman);
+    h.receive(Opcode::SMSG_TOTEM_CREATED, totemCreated(1, kTotem, 60000, kSearingTotem));
+    h.receive(Opcode::SMSG_SET_FLAT_SPELL_MODIFIER, Body().u8(0).u8(14).u32(static_cast<uint32_t>(-10)));
+    h.pump();
+    REQUIRE(h.game().spells().totemSlot(1).active());
+    REQUIRE(h.game().spells().spellFlatMod(Op::Cost) == -10);
+
+    h.relogAs(warrior);
+
+    // The totem slots were the one part of this the character change did not
+    // clear: a warrior logged in within a minute had the shaman's Searing
+    // Totem standing on the totem bar.
+    CHECK_FALSE(h.game().spells().totemSlot(1).active());
+    CHECK(h.game().spells().totemSlot(1).spellId == 0);
+    CHECK(h.game().spells().spellFlatMod(Op::Cost) == 0);
+}
+
+TEST_CASE("the hearthstone's cast says where home is, once the realm has", "[spell][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::HearthstoneCastStarted> started;
+    auto sub = h.events().subscribe<ev::HearthstoneCastStarted>(
+        [&](const ev::HearthstoneCastStarted& e) { started.push_back(e); });
+
+    // No home yet: nothing to load ahead of the cast.
+    h.receive(Opcode::SMSG_SPELL_START, spellStart(h.player().guid, kHearthstone, 10000));
+    h.pump();
+    CHECK(started.empty());
+    CHECK(h.game().spells().isCasting());
+
+    // SMSG_BINDPOINTUPDATE: server x, y, z, then map and zone.
+    h.receive(Opcode::SMSG_BINDPOINTUPDATE,
+              Body().f32(1630.0f).f32(-4420.0f).f32(16.0f).u32(1).u32(1637));
+    h.receive(Opcode::SMSG_SPELL_START, spellStart(h.player().guid, kHearthstone, 10000));
+    h.pump();
+
+    REQUIRE(started.size() == 1);
+    CHECK(started[0].mapId == 1);
+    // Canonical: the server's x and y swapped.
+    CHECK_THAT(started[0].x, WithinAbs(-4420.0, 1e-3));
+    CHECK_THAT(started[0].y, WithinAbs(1630.0, 1e-3));
+    CHECK_THAT(started[0].z, WithinAbs(16.0, 1e-3));
+}
+
+TEST_CASE("another unit's cast is animated from start to its end", "[spell][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::CastAnimationChanged> seen;
+    auto sub = h.events().subscribe<ev::CastAnimationChanged>(
+        [&](const ev::CastAnimationChanged& e) { seen.push_back(e); });
+
+    h.receive(Opcode::SMSG_SPELL_START, spellStart(kCultist, kFireball, 3000, h.player().guid));
+    h.pump();
+
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].casterGuid == kCultist);
+    CHECK(seen[0].started);
+    CHECK_FALSE(seen[0].channel);
+    CHECK(seen[0].castType == wowee::game::SpellCastType::DIRECTED);
+    CHECK(h.game().spells().getUnitCastState(kCultist) != nullptr);
+}
+
+TEST_CASE("an achievement the player earns is kept and announced, another's is not",
+          "[spell][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    std::vector<ev::AchievementEarned> earned;
+    auto sub = h.events().subscribe<ev::AchievementEarned>(
+        [&](const ev::AchievementEarned& e) { earned.push_back(e); });
+
+    // SMSG_ACHIEVEMENT_EARNED: who (packed), the achievement, the packed date.
+    h.receive(Opcode::SMSG_ACHIEVEMENT_EARNED, Body().packedGuid(kCultist).u32(6).u32(0x0A1B2C3D));
+    h.receive(Opcode::SMSG_ACHIEVEMENT_EARNED,
+              Body().packedGuid(h.player().guid).u32(7).u32(0x0A1B2C3D));
+    h.pump();
+
+    REQUIRE(earned.size() == 1);
+    CHECK(earned[0].achievementId == 7);
+    CHECK(h.game().getEarnedAchievements().count(7) == 1);
+    CHECK(h.game().getEarnedAchievements().count(6) == 0);
+    CHECK(h.game().getAchievementDate(7) == 0x0A1B2C3D);
+    CHECK(h.addonEvents("ACHIEVEMENT_EARNED").size() == 1);
 }
 
 TEST_CASE("a cast the server will not explain is still refused on screen", "[spell][harness]") {

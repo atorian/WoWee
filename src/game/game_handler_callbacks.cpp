@@ -604,16 +604,11 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     std::fill(std::begin(playerCombatRatings_), std::end(playerCombatRatings_), -1);
     spellHandler_->resetAllState();
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
-    spellFlatMods_.clear();
-    spellPctMods_.clear();
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
     playerXp_ = 0;
     playerNextLevelXp_ = 0;
     serverPlayerLevel_ = 1;
-    std::fill(playerExploredZones_.begin(), playerExploredZones_.end(), 0u);
-    hasPlayerExploredZones_ = false;
-    playerSkills_.clear();
     // The handler's, not this class's same-named members - every reader
     // forwards there, so clearing the copies here cleared nothing anyone
     // looks at and the previous character's quests stayed in the log.
@@ -3453,15 +3448,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
                 const std::string name = raw.substr(i + 2, close - (i + 2));
                 i = close + 1;
 
-                const auto& cache = const_cast<GameHandler*>(this)->spellNameCacheRef();
-                const auto entry = cache.find(selfSpellId);
-                const std::string* decls = nullptr;
-                if (entry != cache.end() && entry->second.descriptionVariableId != 0) {
-                    auto& table = const_cast<GameHandler*>(this)->spellDescriptionVariablesRef();
-                    const auto row = table.find(entry->second.descriptionVariableId);
-                    if (row != table.end()) decls = &row->second;
-                }
-
+                const std::string* decls = descriptionDeclarations(selfSpellId);
                 const SpellDescriptionContext ctx = descriptionContext(selfSpellId, decls);
                 std::string decl;
                 double v = 0.0;
@@ -3484,14 +3471,7 @@ std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
         if (next == '{') {
             size_t close = raw.find('}', i + 2);
             if (close != std::string::npos) {
-                const auto& cache = const_cast<GameHandler*>(this)->spellNameCacheRef();
-                const auto entry = cache.find(selfSpellId);
-                const std::string* decls = nullptr;
-                if (entry != cache.end() && entry->second.descriptionVariableId != 0) {
-                    auto& table = const_cast<GameHandler*>(this)->spellDescriptionVariablesRef();
-                    const auto row = table.find(entry->second.descriptionVariableId);
-                    if (row != table.end()) decls = &row->second;
-                }
+                const std::string* decls = descriptionDeclarations(selfSpellId);
                 const SpellDescriptionContext ctx = descriptionContext(selfSpellId, decls);
                 double v = 0.0;
                 if (evaluateSpellExpression(raw.substr(i + 2, close - (i + 2)), ctx, v)) {

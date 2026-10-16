@@ -151,7 +151,7 @@ new code the way the target looks, not the way the old code does.
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
   `WardenHandler`, `EntityController`, `AccountDataHandler`,
-  `ActionBarHandler` — owns its state *and* the opcodes that
+  `ActionBarHandler`, `PetHandler` — owns its state *and* the opcodes that
   change it. A new opcode goes into that handler's `registerOpcodes`, never
   into `GameHandler::registerCoreOpcodes`/`registerRemainingOpcodes`. Domain
   handlers register last and overwrite the table, so a second registration in
@@ -195,8 +195,8 @@ new code the way the target looks, not the way the old code does.
 A new handler is built from what it uses, never from `GameHandler&`. The older
 handlers take `GameHandler& owner` and reach through `owner_.` for anything -
 the socket, another handler's state, the facade; do not copy them.
-`AccountDataHandler`, `ActionBarHandler` and `InventoryHandler` are the
-pattern:
+`AccountDataHandler`, `ActionBarHandler`, `InventoryHandler`, `PetHandler`
+and `SpellHandler` are the pattern:
 
 ```cpp
 AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
@@ -210,7 +210,8 @@ InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
 ```
 
 State a domain keeps for the character goes in one struct it assigns whole
-when a character is logged in (`InventoryHandler::Held`, `beginCharacter`),
+when a character is logged in (`InventoryHandler::Held`, `beginCharacter`;
+`SpellHandler::CharacterSpellState`),
 so a field added later cannot keep the last character's value; there is one
 such call per domain, from `GameHandler::selectCharacter`, and no reset for a
 particular scenario.

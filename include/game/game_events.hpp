@@ -8,6 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
+namespace wowee::game {
+/// handler_types.hpp: DIRECTED, OMNI or AREA.
+enum class SpellCastType : uint8_t;
+}
+
 /// What the game tells the rest of the client has happened, delivered through
 /// core::EventBus. Plain data only: an event names what changed and carries the
 /// values a subscriber needs, so a subscriber includes this header rather than
@@ -97,6 +102,43 @@ struct SpellCastSucceeded {
     std::vector<uint64_t> hitTargets;
     uint64_t projectileTarget = 0;
 };
+
+/// A unit began or ended a cast or a channel, for its animation. The cast
+/// type says how it is aimed: at a unit, at nothing, or at the ground.
+struct CastAnimationChanged {
+    uint64_t casterGuid = 0;
+    bool started = false;
+    bool channel = false;
+    SpellCastType castType{};
+};
+
+/// The player swung in melee: an auto attack (spellId 0) or a melee ability.
+struct PlayerMeleeSwing {
+    uint32_t spellId = 0;
+};
+
+/// Whether the player carries Sprint or a sprint-like aura, said with each
+/// update of the player's auras.
+struct SprintAuraChanged {
+    bool active = false;
+};
+
+/// The player began casting the hearthstone; the bind point's terrain can be
+/// loaded while the cast runs. Canonical coordinates.
+struct HearthstoneCastStarted {
+    uint32_t mapId = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// The player charged a target: where to, canonical coordinates.
+struct ChargeStarted {
+    uint64_t targetGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// The character's spells arrived (SMSG_INITIAL_SPELLS), the first thing the
+/// realm sends of a character entering the world.
+struct CharacterSpellsArrived {};
 
 /// The player's cast ended without going off.
 struct PlayerCastStopped {

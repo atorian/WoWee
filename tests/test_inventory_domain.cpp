@@ -56,21 +56,6 @@ Fields inMainHand(uint64_t item) {
     return fields;
 }
 
-/// Logout to the character list and the next character in.
-void relogAs(GameHarness& h, const PlayerSpec& previous, const PlayerSpec& next) {
-    h.game().requestLogout(false);
-    h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
-    h.pump();
-    h.game().returnToCharacterSelect();
-    h.receive(Opcode::SMSG_CHAR_ENUM, GameHarness::charEnumBody({previous, next}));
-    h.pump();
-    h.game().selectCharacter(next.guid);
-    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(next));
-    h.pump();
-    REQUIRE(h.game().isInWorld());
-    h.clearRecords();
-}
-
 /// SMSG_LOOT_RESPONSE for a corpse holding money and nothing else, as 3.3.5a
 /// writes it: the loot guid, the loot type, the money, no items and no quest
 /// items.
@@ -250,7 +235,7 @@ TEST_CASE("the next character holds nothing the last one held", "[inventory][har
     REQUIRE(h.game().getMoneyCopper() == 12345);
     REQUIRE(h.game().getTempEnchantRemainingMs(0) > 0);
 
-    relogAs(h, alice, bob);
+    h.relogAs(bob);
 
     // Bob's bags, coin and weapons are his own, and the realm has said
     // nothing of them yet.

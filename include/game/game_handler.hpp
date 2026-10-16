@@ -70,15 +70,6 @@ namespace game {
 
 struct EzWowPatch;
 
-struct PlayerSkill {
-    uint32_t skillId = 0;
-    uint16_t value = 0;        // base + permanent item bonuses
-    uint16_t maxValue = 0;
-    uint16_t bonusTemp = 0;    // temporary buff bonus (food, potions, etc.)
-    uint16_t bonusPerm = 0;    // permanent spec/misc bonus (rarely non-zero)
-    [[nodiscard]] uint16_t effectiveValue() const { return value + bonusTemp + bonusPerm; }
-};
-
 /**
  * Quest giver status values (WoW 3.3.5a)
  */
@@ -176,7 +167,8 @@ class GameHandler : public IConnectionState,
                      public FrameXmlEvents,
                      public ActionBarQueries,
                      public InventoryQueries,
-                     public PetQueries {
+                     public PetQueries,
+                     public SpellQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -299,6 +291,52 @@ public:
     // PetQueries (spellName is InventoryQueries' too)
     bool nameUnitInView(uint64_t guid, const std::string& name) override;
 
+    // SpellQueries. The ones InventoryQueries shares (characterGuid,
+    // entities, packetParsers, mounted, ...) are above; the ones this class
+    // already had under the same name (sendMovement, setStandState,
+    // startAutoAttack, lootTarget, addCombatText, ...) are marked override
+    // where they are declared.
+    uint64_t focusTargetGuid() const override { return focusGuid; }
+    uint64_t petGuid() const override { return getPetGuid(); }
+    std::string unitIdFor(uint64_t guid) const override { return guidToUnitId(guid); }
+    uint32_t playerLevel() const override { return getPlayerLevel(); }
+    const GameObjectQueryResponseData* gameObjectInfo(uint32_t entry) const override {
+        return getCachedGameObjectInfo(entry);
+    }
+    bool friendlyFaction(uint32_t factionTemplateId) const override {
+        return isFriendlyFaction(factionTemplateId);
+    }
+    bool aggressiveTowardPlayer(uint64_t guid) const override { return isAggressiveTowardPlayer(guid); }
+    const MovementInfo& playerMovement() const override { return movementInfo; }
+    void setFacing(float canonicalYaw) override;
+    void faceTowards(float canonicalYaw) override { faceCanonicalYaw(canonicalYaw); }
+    float faceCamera() override { return faceCameraDirection(); }
+    bool autoFaceTarget() const override { return isAutoFaceTarget(); }
+    bool autoSelfCast() const override { return isAutoSelfCast(); }
+    bool flying() const override { return isPlayerFlying(); }
+    uint32_t mountDisplayId() const override { return currentMountDisplayId_; }
+    void noteMountAura(uint32_t spellId) override { mountAuraSpellId_ = spellId; }
+    bool autoAttacking() const override { return isAutoAttacking(); }
+    bool inCombat() const override { return isInCombat(); }
+    const ItemQueryResponseData* itemInfo(uint32_t itemId) const override { return getItemInfo(itemId); }
+    const std::unordered_map<uint32_t, ItemQueryResponseData>& itemTemplates() const override {
+        return getItemInfoCache();
+    }
+    uint32_t itemEntryByGuid(uint64_t itemGuid) const override;
+    uint32_t itemCountInBags(uint32_t itemId) const override { return countItemInBags(itemId); }
+    bool awaitingItemTarget() const override { return isAwaitingItemTarget(); }
+    uint64_t pendingGameObjectInteraction() const override { return pendingGameObjectInteractGuid_; }
+    uint64_t lastInteractedGameObject() const override { return lastInteractedGoGuid_; }
+    void clearPendingGameObjectInteraction() override { pendingGameObjectInteractGuid_ = 0; }
+    void clearLastInteractedGameObject() override { lastInteractedGoGuid_ = 0; }
+    uint32_t activeCritterSpellId() const override { return getActiveCritterSpellId(); }
+    uint64_t activeCritterGuid() const override { return getActiveCritterGuid(); }
+    std::optional<HomeBind> homeBind() const override;
+    std::string achievementName(uint32_t achievementId) override;
+    void recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) override;
+    SpellDataInfo spellData(uint32_t spellId) const override { return getSpellData(spellId); }
+    std::string iconPath(uint32_t iconId) const override { return getIconPath(iconId); }
+
     /**
      * Get current connection state
      */
@@ -364,7 +402,7 @@ public:
      * Send a movement packet
      * @param opcode Movement opcode (MSG_MOVE_START_FORWARD, etc.)
      */
-    void sendMovement(Opcode opcode);
+    void sendMovement(Opcode opcode) override;
 
     /**
      * Update player position
@@ -500,7 +538,7 @@ public:
     }
 
     // Spell data resolver: spellId -> {castTimeMs, minRange, maxRange}
-    struct SpellDataInfo { uint32_t castTimeMs = 0; float minRange = 0; float maxRange = 0; uint32_t manaCost = 0; uint8_t powerType = 0; };
+    using SpellDataInfo = game::SpellDataInfo;
     using SpellDataResolver = std::function<SpellDataInfo(uint32_t)>;
     void setSpellDataResolver(SpellDataResolver r) { spellDataResolver_ = std::move(r); }
     SpellDataInfo getSpellData(uint32_t spellId) const {
@@ -553,7 +591,7 @@ public:
     /**
      * Add a locally-generated chat message (e.g., emote feedback)
      */
-    void addLocalChatMessage(const MessageChatData& msg);
+    void addLocalChatMessage(const MessageChatData& msg) override;
 
     // Money (copper)
     uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
@@ -779,7 +817,7 @@ public:
     float getLogoutCountdown() const;
 
     // Stand state
-    void setStandState(uint8_t state);  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
+    void setStandState(uint8_t state) override;  // 0=stand, 1=sit, 2=sit_chair, 3=sleep, 4=sit_low_chair, 5=sit_medium_chair, 6=sit_high_chair, 7=dead, 8=kneel, 9=submerged
     uint8_t getStandState() const { return standState_; }
     bool isSitting() const { return standState_ >= 1 && standState_ <= 6; }
     bool isDead() const { return standState_ == 7; }
@@ -1076,8 +1114,8 @@ public:
         return entityController_->getCreatureFamily(entry);
     }
 
-    void startAutoAttack(uint64_t targetGuid);
-    void stopAutoAttack();
+    void startAutoAttack(uint64_t targetGuid) override;
+    void stopAutoAttack() override;
     bool isAutoAttacking() const;
     bool hasAutoAttackIntent() const;
     bool isInCombat() const;
@@ -1341,11 +1379,6 @@ public:
     using PlayerModelRebuildCallback = std::function<void()>;
     void setPlayerModelRebuildCallback(PlayerModelRebuildCallback cb) { playerModelRebuildCallback_ = std::move(cb); }
 
-    // Melee swing callback (for driving animation/SFX)
-    // spellId: 0 = regular auto-attack swing, non-zero = melee ability (special attack)
-    using MeleeSwingCallback = std::function<void(uint32_t spellId)>;
-    void setMeleeSwingCallback(MeleeSwingCallback cb) { meleeSwingCallback_ = std::move(cb); }
-
     // Snap the character to face the camera's current look direction and return the
     // resulting canonical orientation. Used by fishing so the bobber lands in front of
     // where the player is looking: while standing still the character yaw does not track
@@ -1355,13 +1388,6 @@ public:
     float faceCameraDirection() {
         return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
     }
-
-    // Spell cast animation callbacks - true=start cast/channel, false=finish/cancel
-    // guid: caster (may be player or another unit), isChannel: channel vs regular cast
-    // castType: DIRECTED (unit target), OMNI (self/no target), AREA (ground AoE)
-    using SpellCastAnimCallback = std::function<void(uint64_t guid, bool start, bool isChannel,
-                                                      SpellCastType castType)>;
-    void setSpellCastAnimCallback(SpellCastAnimCallback cb) { spellCastAnimCallback_ = std::move(cb); }
 
     // Unit animation hint: signal jump (animId=38) for other players/NPCs
     using UnitAnimHintCallback = std::function<void(uint64_t guid, uint32_t animId)>;
@@ -1414,8 +1440,10 @@ public:
     uint32_t getPlayerRestedXp() const { return playerRestedXp_; }
     bool isPlayerResting() const { return isResting_; }
     uint32_t getPlayerLevel() const { return serverPlayerLevel_; }
-    const std::vector<uint32_t>& getPlayerExploredZoneMasks() const { return playerExploredZones_; }
-    bool hasPlayerExploredZoneMasks() const { return hasPlayerExploredZones_; }
+    const std::vector<uint32_t>& getPlayerExploredZoneMasks() const {
+        return spellHandler_->exploredZoneMasks();
+    }
+    bool hasPlayerExploredZoneMasks() const { return spellHandler_->hasExploredZoneMasks(); }
     static uint32_t killXp(uint32_t playerLevel, uint32_t victimLevel);
 
     // Server game time now, in HOURS since midnight (0.0-24.0), or -1 before
@@ -1440,7 +1468,9 @@ public:
     bool isRaining() const { return weatherType_ == 1 && weatherIntensity_ > 0.05f; }
 
     // Player skills
-    const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const { return playerSkills_; }
+    const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const {
+        return spellHandler_->playerSkills();
+    }
     const std::string& getSkillName(uint32_t skillId) const;
     /// The heading a skill is filed under, and that heading's name and place.
     /// Zero and empty for a skill the file does not categorise.
@@ -1481,12 +1511,6 @@ public:
     void unstuckHearth();
     using BindPointCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
     void setBindPointCallback(BindPointCallback cb) { bindPointCallback_ = std::move(cb); }
-
-    // Called when the player starts casting Hearthstone so terrain at the bind
-    // point can be pre-loaded during the cast time.
-    // Parameters: mapId and canonical (x, y, z) of the bind location.
-    using HearthstonePreloadCallback = std::function<void(uint32_t mapId, float x, float y, float z)>;
-    void setHearthstonePreloadCallback(HearthstonePreloadCallback cb) { hearthstonePreloadCallback_ = std::move(cb); }
 
     // Creature spawn callback (online mode - triggered when creature enters view)
     // Parameters: guid, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
@@ -1532,10 +1556,6 @@ public:
     // goState: 0=READY(closed), 1=OPEN, 2=DESTROYED
     using GameObjectStateCallback = std::function<void(uint64_t guid, uint8_t goState)>;
     void setGameObjectStateCallback(GameObjectStateCallback cb) { gameObjectStateCallback_ = std::move(cb); }
-
-    // Sprint aura callback - fired when sprint-type aura active state changes on player
-    using SprintAuraCallback = std::function<void(bool active)>;
-    void setSprintAuraCallback(SprintAuraCallback cb) { sprintAuraCallback_ = std::move(cb); }
 
     // Vehicle state callback - fired when player enters/exits a vehicle
     using VehicleStateCallback = std::function<void(bool entered, uint32_t vehicleId)>;
@@ -1944,7 +1964,7 @@ public:
     const ArenaTeamRoster* getArenaTeamRoster(uint32_t teamId) const;
 
     // ---- Loot ----
-    void lootTarget(uint64_t guid);
+    void lootTarget(uint64_t guid) override;
     void lootItem(uint8_t slotIndex, bool confirmed = false);
     void confirmPendingLoot();
     void confirmBindOnUse();
@@ -1961,7 +1981,7 @@ public:
     void clearPendingGameObjectLootOpen(uint64_t guid);
     bool hasPendingGameObjectLootOpen(uint64_t guid) const;
     bool isGatherGameObject(uint64_t guid) const;
-    void despawnGameObjectLocally(uint64_t guid);
+    void despawnGameObjectLocally(uint64_t guid) override;
     /// Remove a creature corpse client-side once it has been looted empty.
     void despawnCreatureLocally(uint64_t guid);
     void activateSpiritHealer(uint64_t npcGuid);
@@ -2114,7 +2134,7 @@ public:
     }
     /// Send the active companion away. No-op when none is out or the expansion
     /// has no opcode for it.
-    void dismissCritter();
+    void dismissCritter() override;
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     //
@@ -2211,80 +2231,11 @@ public:
     };
     const std::array<RuneSlot, 6>& getPlayerRunes() const { return playerRunes_; }
 
-    // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER / SMSG_SET_PCT_SPELL_MODIFIER)
-    // SpellModOp matches WotLK SpellModOp enum (server-side).
-    enum class SpellModOp : uint8_t {
-        Damage            =  0,
-        Duration          =  1,
-        Threat            =  2,
-        Effect1           =  3,
-        Charges           =  4,
-        Range             =  5,
-        Radius            =  6,
-        CritChance        =  7,
-        AllEffects        =  8,
-        NotLoseCastingTime =  9,
-        CastingTime       = 10,
-        Cooldown          = 11,
-        Effect2           = 12,
-        IgnoreArmor       = 13,
-        Cost              = 14,
-        CritDamageBonus   = 15,
-        ResistMissChance  = 16,
-        JumpTargets       = 17,
-        ChanceOfSuccess   = 18,
-        ActivationTime    = 19,
-        // From here the list was the modern one - Efficiency, MultipleValue,
-        // ResistPushback and the rest are Cataclysm names - grafted onto a
-        // 3.3.5 head. Nothing read them, because only Cost and CastingTime are
-        // consumed, but the numbers are what the server sends: a talent that
-        // modifies a periodic effect arrives as op 22, and a table calling
-        // that ResistDispelChance would have applied it to dispel resistance.
-        DamageMultiplier  = 20,
-        GlobalCooldown    = 21,
-        Dot               = 22,
-        Effect3           = 23,
-        BonusMultiplier   = 24,
-        // 25 is not used by this client version.
-        ProcPerMinute     = 26,
-        ValueMultiplier   = 27,
-        ResistDispelChance = 28,
-        CritDamageBonus2  = 29,
-        SpellCostRefundOnFail = 30,
-    };
-    static constexpr int SPELL_MOD_OP_COUNT = 32;
-
-    // Key: (SpellModOp, groupIndex) - value: accumulated flat or pct modifier
-    // pct values are stored in integer percent (e.g. -20 means -20% reduction).
-    struct SpellModKey {
-        SpellModOp op;
-        uint8_t    group;
-        bool operator==(const SpellModKey& o) const {
-            return op == o.op && group == o.group;
-        }
-    };
-    struct SpellModKeyHash {
-        std::size_t operator()(const SpellModKey& k) const {
-            return std::hash<uint32_t>()(
-                (static_cast<uint32_t>(static_cast<uint8_t>(k.op)) << 8) | k.group);
-        }
-    };
-
-    // Returns the sum of all flat modifiers for a given op across all groups.
-    // (Callers that need per-group resolution can use getSpellFlatMods() directly.)
-    int32_t getSpellFlatMod(SpellModOp op) const {
-        int32_t total = 0;
-        for (const auto& [k, v] : spellFlatMods_)
-            if (k.op == op) total += v;
-        return total;
-    }
-    // Returns the sum of all pct modifiers for a given op across all groups (in %).
-    int32_t getSpellPctMod(SpellModOp op) const {
-        int32_t total = 0;
-        for (const auto& [k, v] : spellPctMods_)
-            if (k.op == op) total += v;
-        return total;
-    }
+    // Talent-driven spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER /
+    // SMSG_SET_PCT_SPELL_MODIFIER), kept by the spell book.
+    using SpellModOp = game::SpellModOp;
+    int32_t getSpellFlatMod(SpellModOp op) const { return spellHandler_->spellFlatMod(op); }
+    int32_t getSpellPctMod(SpellModOp op) const { return spellHandler_->spellPctMod(op); }
 
     // Convenience: apply flat+pct modifier to a base value.
     // result = (base + flatMod) * (1.0 + pctMod/100.0), clamped to >= 0.
@@ -2384,28 +2335,14 @@ public:
     int32_t factionBaseReputation(uint32_t factionId) const;
     // Returns the repListId for a given faction ID (0xFFFFFFFF if not found)
     uint32_t getRepListIdByFactionId(uint32_t factionId) const;
-    // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air)
-    struct TotemSlot {
-        uint32_t spellId     = 0;
-        uint32_t durationMs  = 0;
-        std::chrono::steady_clock::time_point placedAt{};
-        [[nodiscard]] bool active() const { return spellId != 0 && remainingMs() > 0; }
-        [[nodiscard]] float remainingMs() const {
-            if (spellId == 0 || durationMs == 0) return 0.0f;
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - placedAt).count();
-            float rem = static_cast<float>(durationMs) - static_cast<float>(elapsed);
-            return rem > 0.0f ? rem : 0.0f;
-        }
-    };
-    static constexpr int NUM_TOTEM_SLOTS = 4;
+    // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air), kept by the
+    // spell book.
+    using TotemSlot = game::TotemSlot;
+    static constexpr int NUM_TOTEM_SLOTS = kTotemSlots;
     /// Pull down a totem by the slot it stands in.
     void destroyTotem(int slot);
 
-    const TotemSlot& getTotemSlot(int slot) const {
-        static TotemSlot empty;
-        return (slot >= 0 && slot < NUM_TOTEM_SLOTS) ? activeTotemSlots_[slot] : empty;
-    }
+    const TotemSlot& getTotemSlot(int slot) const { return spellHandler_->totemSlot(slot); }
 
     const std::string& getFactionNamePublic(uint32_t factionId) const;
     uint32_t getWatchedFactionId() const { return watchedFactionId_; }
@@ -2421,10 +2358,6 @@ public:
     QuestGiverStatus getQuestGiverStatus(uint64_t guid) const;
     const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const;
 
-    // Charge callback - fires when player casts a charge spell toward target
-    // Parameters: targetGuid, targetX, targetY, targetZ (canonical WoW coordinates)
-    using ChargeCallback = std::function<void(uint64_t targetGuid, float x, float y, float z)>;
-    void setChargeCallback(ChargeCallback cb) { chargeCallback_ = std::move(cb); }
 
 
     // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
@@ -2935,7 +2868,7 @@ public:
     void cancelUnitTargeting();
     void completeItemUseOnUnit(uint64_t targetUnitGuid);
     /// Arm the item-picking cursor for a spell that must be cast at an item.
-    void beginSpellItemTargeting(uint32_t spellId, const std::string& spellName);
+    void beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) override;
     uint32_t getPendingItemTargetSourceItemId() const;
     void cancelItemTargeting();
     void completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed = false);
@@ -3131,9 +3064,6 @@ public:
     /// would drift, and a recipe that is orange in one window and yellow in
     /// the other is a bug nobody can explain.
     std::vector<CraftRecipe> getCraftingRecipes() const;
-    /// Where a recipe sits against the player's skill, in the same bands the
-    /// crafting window colours by.
-    int getRecipeDifficulty(uint32_t spellId) const;
     /// How many of an item the backpack and equipped bags hold together.
     uint32_t countItemInBags(uint32_t itemId) const;
 
@@ -3153,6 +3083,13 @@ public:
     /// The evaluator's window onto this client, for $<name> and ${}.
     SpellDescriptionContext descriptionContext(uint32_t spellId,
                                                const std::string* declarations) const;
+    /// The $name=expression declarations a spell's description draws on, or
+    /// null for a spell that declares none.
+    const std::string* descriptionDeclarations(uint32_t spellId) const {
+        const SpellNameEntry* spell = spellHandler_->findSpell(spellId);
+        return spell ? spellHandler_->spellDescriptionVariables(spell->descriptionVariableId)
+                     : nullptr;
+    }
     std::string formatSpellDescription(uint32_t selfSpellId, const std::string& raw) const;
     // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
     // requires-spell-focus cast failures; empty if unknown.
@@ -3215,7 +3152,7 @@ public:
     const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const {
         return inventoryHandler_->getItemInfoCache();
     }
-    void ensureItemInfo(uint32_t entry) { inventoryHandler_->ensureItemInfo(entry); }
+    void ensureItemInfo(uint32_t entry) override { inventoryHandler_->ensureItemInfo(entry); }
     uint64_t getBackpackItemGuid(int index) const { return inventoryHandler_->getBackpackItemGuid(index); }
     uint64_t getEquipSlotGuid(int slot) const { return inventoryHandler_->getEquipSlotGuid(slot); }
     std::pair<uint32_t, uint32_t> getItemEnchantIds(uint64_t guid) const {
@@ -3274,6 +3211,10 @@ public:
     /// The player's pet and the stable.
     PetHandler& pet() { return *petHandler_; }
     const PetHandler& pet() const { return *petHandler_; }
+    /// The spell book: spells, casts, auras, talents, skills, and what
+    /// Spell.dbc and the skill tables say about them.
+    SpellHandler& spells() { return *spellHandler_; }
+    const SpellHandler& spells() const { return *spellHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -3345,9 +3286,6 @@ public:
     auto& playerTransportStickyTimerRef() { return playerTransportStickyTimer_; }
     auto& transportAttachmentsRef() { return transportAttachments_; }
 
-    // ── Inventory & Equipment ────────────────────────────────────────
-    auto& pendingGameObjectLootRetriesRef() { return pendingGameObjectLootRetries_; }
-
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
     auto& comboTargetRef() { return comboTarget_; }
@@ -3377,36 +3315,13 @@ public:
     auto& playerXpRef() { return playerXp_; }
 
     // ── Skills ───────────────────────────────────────────────────────
-    auto& playerSkillsRef() { return playerSkills_; }
-    auto& skillLineAbilityLoadedRef() { return skillLineAbilityLoaded_; }
-    auto& skillLineCategoriesRef() { return skillLineCategories_; }
-    auto& skillCategoryNamesRef() { return skillCategoryNames_; }
-    auto& skillCategorySortRef() { return skillCategorySort_; }
-    auto& skillLineIconsRef() { return skillLineIcons_; }
-    auto& skillLineDescriptionsRef() { return skillLineDescriptions_; }
     const std::string& getSkillDescription(uint32_t skillId) const {
-        static const std::string kNone;
-        auto it = skillLineDescriptions_.find(skillId);
-        return it != skillLineDescriptions_.end() ? it->second : kNone;
+        return spellHandler_->skillLineDescription(skillId);
     }
-    auto& skillLineDbcLoadedRef() { return skillLineDbcLoaded_; }
-    auto& skillLineNamesRef() { return skillLineNames_; }
-    auto& spellToSkillLineRef() { return spellToSkillLine_; }
-
-    // ── Spells & Talents ─────────────────────────────────────────────
-    auto& spellFlatModsRef() { return spellFlatMods_; }
-    auto& spellPctModsRef() { return spellPctMods_; }
-    auto& spellNameCacheRef() { return spellNameCache_; }
-    /// The $name=expression declarations a spell's description draws on, or
-    /// empty. Keyed by SpellDescriptionVariables.dbc id.
-    auto& spellDescriptionVariablesRef() { return spellDescriptionVariables_; }
-    auto& spellNameCacheLoadedRef() { return spellNameCacheLoaded_; }
 
     // ── Quests & Achievements ────────────────────────────────────────
     auto& completedQuestsRef() { return completedQuests_; }
-    auto& achievementDatesRef() { return achievementDates_; }
     auto& achievementNameCacheRef() { return achievementNameCache_; }
-    auto& earnedAchievementsRef() { return earnedAchievements_; }
 
     // ── Social, Chat & Contacts ──────────────────────────────────────
     auto& contactsRef() { return contacts_; }
@@ -3429,8 +3344,6 @@ public:
     /// forwards to QuestHandler, so clearing through the reference left
     /// the markers the map draws exactly where they were.
     void clearGossipPois();
-    auto& playerExploredZonesRef() { return playerExploredZones_; }
-    auto& hasPlayerExploredZonesRef() { return hasPlayerExploredZones_; }
     auto& factionStandingsRef() { return factionStandings_; }
     auto& initialFactionsRef() { return initialFactions_; }
     auto& watchedFactionIdRef() { return watchedFactionId_; }
@@ -3443,9 +3356,6 @@ public:
     auto& corpseXRef() { return corpseX_; }
     auto& corpseYRef() { return corpseY_; }
     auto& corpseZRef() { return corpseZ_; }
-    auto& hasHomeBindRef() { return hasHomeBind_; }
-    auto& homeBindMapIdRef() { return homeBindMapId_; }
-    auto& homeBindPosRef() { return homeBindPos_; }
 
     // ── Area Triggers ────────────────────────────────────────────────
     auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
@@ -3478,9 +3388,6 @@ public:
     // ── Trainer, GM & Misc ───────────────────────────────────────────
     auto& gmTicketActiveRef() { return gmTicketActive_; }
     auto& gmTicketTextRef() { return gmTicketText_; }
-    auto& activeTotemSlotsRef() { return activeTotemSlots_; }
-    auto& lastInteractedGoGuidRef() { return lastInteractedGoGuid_; }
-    auto& pendingGameObjectInteractGuidRef() { return pendingGameObjectInteractGuid_; }
 
     // ── Tab Cycling ──────────────────────────────────────────────────
     auto& tabCycleIndexRef() { return tabCycleIndex; }
@@ -3492,7 +3399,6 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& chargeCallbackRef() { return chargeCallback_; }
     auto& chatBubbleCallbackRef() { return chatBubbleCallback_; }
     auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
     auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
@@ -3502,11 +3408,9 @@ public:
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
     auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
-    auto& hearthstonePreloadCallbackRef() { return hearthstonePreloadCallback_; }
     auto& hitReactionCallbackRef() { return hitReactionCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
-    auto& meleeSwingCallbackRef() { return meleeSwingCallback_; }
-    void suppressNextMeleeSwingAnim() { suppressMeleeSwingAnim_ = true; }
+    void suppressNextMeleeSwingAnim() override { suppressMeleeSwingAnim_ = true; }
     bool consumeSuppressMeleeSwingAnim() {
         bool v = suppressMeleeSwingAnim_;
         suppressMeleeSwingAnim_ = false;
@@ -3527,8 +3431,6 @@ public:
     auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
     auto& questProgressCallbackRef() { return questProgressCallback_; }
     auto& repChangeCallbackRef() { return repChangeCallback_; }
-    auto& spellCastAnimCallbackRef() { return spellCastAnimCallback_; }
-    auto& sprintAuraCallbackRef() { return sprintAuraCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
     auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
@@ -3542,8 +3444,8 @@ public:
     // ── Methods moved from private (domain handler use) ──────────────
     void addCombatText(CombatTextEntry::Type type, int32_t amount, uint32_t spellId,
                        bool isPlayerSource, uint8_t powerType = 0,
-                       uint64_t srcGuid = 0, uint64_t dstGuid = 0);
-    bool shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGuid, uint32_t spellId);
+                       uint64_t srcGuid = 0, uint64_t dstGuid = 0) override;
+    bool shouldLogSpellstealAura(uint64_t casterGuid, uint64_t victimGuid, uint32_t spellId) override;
     void addSystemChatMessage(const std::string& message);
     /// A chat line of a given kind - money looted, experience gained, a
     /// reputation change. These are chat messages and must be added as such:
@@ -3606,7 +3508,7 @@ public:
     /// Called from every place the player's auras change, and it has to filter:
     /// a player's auras move constantly in combat and the pet tab cares about
     /// two of them.
-    void announceCompanionChange();
+    void announceCompanionChange() override;
 
     /// Every row of LFGDungeons.dbc worth offering, in the order it should be
     /// listed. Built once; the file does not change while the client runs.
@@ -3633,54 +3535,6 @@ public:
         float boxLength = 0, boxWidth = 0, boxHeight = 0;
         float boxYaw = 0;
     };
-    struct PendingLootRetry {
-        uint64_t guid = 0;
-        float timer = 0.0f;
-        uint8_t remainingRetries = 0;
-        bool sendLoot = false;
-    };
-    struct SpellReagent { uint32_t itemId = 0; uint32_t count = 0; };
-    struct SpellNameEntry {
-        std::string name; std::string rank; std::string description;
-        uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
-        /// Spell.dbc Attributes, the base word. Bit 6 (0x40) is passive.
-        uint32_t attr = 0;
-        // Spell.dbc Targets bitmask (SpellCastTargetFlags) - 0x10 = TARGET_FLAG_ITEM
-        uint32_t targetFlags = 0;
-        // Spell.dbc RangeIndex resolved against SpellRange.dbc. A max range of 0
-        // means "Self Only" (shouts, self-buffs); negative means SpellRange.dbc
-        // was unavailable, so callers should not infer anything from it.
-        float maxRange = -1.0f;
-        /// Spell.dbc SpellDescriptionVariableID: which row of
-        /// SpellDescriptionVariables.dbc defines the $<name> tokens this
-        /// spell's description uses. Zero for the great majority, which use
-        /// none.
-        uint32_t descriptionVariableId = 0;
-        int32_t effectBasePoints[3] = {0, 0, 0};
-        uint32_t effectIds[3] = {0, 0, 0};
-        // Spell.dbc EffectApplyAuraName - which aura an APPLY_AURA effect
-        // applies. The effect id above only says that one is applied; this
-        // says which, and it is the only thing that distinguishes a tracking
-        // spell (44 creatures, 45 resources) from any other buff.
-        uint32_t effectAuraIds[3] = {0, 0, 0};
-        // Spell.dbc EffectImplicitTargetA - what the spell expects to be aimed
-        // at. 21 means a friendly unit, which is how heals and buffs are told
-        // apart from damage that shares the same effect and school.
-        uint32_t implicitTargetA = 0;
-        float durationSec = 0.0f;
-        uint32_t spellVisualId = 0;
-        uint32_t recoveryMs = 0;
-        uint32_t categoryRecoveryMs = 0;
-        uint32_t createdItemId = 0;
-        SpellReagent reagents[8] = {};
-        uint32_t trivialSkillHigh = 0;
-        uint32_t trivialSkillLow = 0;
-        uint32_t minSkillRank = 0;
-        // Spell.dbc TargetAuraState: the aura state the target must be in for the spell
-        // to be castable (e.g. Execute → AURA_STATE_HEALTHLESS_20_PERCENT). 0 = none.
-        uint32_t targetAuraState = 0;
-    };
-    static constexpr size_t PLAYER_EXPLORED_ZONES_COUNT = 128;
     std::string getAreaName(uint32_t areaId) const;
 
     /// What GetZonePVPInfo answers for a zone: one of "sanctuary", "arena",
@@ -4013,7 +3867,6 @@ private:
     UnstuckCallback unstuckGyCallback_;
     UnstuckCallback unstuckHearthCallback_;
     BindPointCallback bindPointCallback_;
-    HearthstonePreloadCallback hearthstonePreloadCallback_;
     CreatureSpawnCallback creatureSpawnCallback_;
     CreatureDespawnCallback creatureDespawnCallback_;
     PlayerSpawnCallback playerSpawnCallback_;
@@ -4026,7 +3879,6 @@ private:
     GameObjectDespawnCallback gameObjectDespawnCallback_;
     GameObjectCustomAnimCallback gameObjectCustomAnimCallback_;
     GameObjectStateCallback gameObjectStateCallback_;
-    SprintAuraCallback sprintAuraCallback_;
     VehicleStateCallback vehicleStateCallback_;
 
     // Transport tracking
@@ -4099,9 +3951,6 @@ private:
     std::string summonerName_;
     float       summonTimeoutSec_     = 0.0f;
 
-    // Shaman totem state
-    TotemSlot activeTotemSlots_[NUM_TOTEM_SLOTS];
-
     // ---- Guild state ----
 
     uint64_t activeCharacterGuid_ = 0;
@@ -4114,7 +3963,6 @@ private:
     bool autoFaceTarget_ = false;
     bool autoSelfCast_ = true;
 
-    std::vector<PendingLootRetry> pendingGameObjectLootRetries_;
     struct PendingLootOpen {
         uint64_t guid = 0;
         float timer = 0.0f;
@@ -4187,11 +4035,6 @@ private:
     };
     // Routing: which result vector to populate from next SMSG_AUCTION_LIST_RESULT
     enum class AuctionResultTarget { BROWSE, OWNER, BIDDER };
-
-    // Trainer
-    mutable std::unordered_map<uint32_t, SpellNameEntry> spellNameCache_;
-    mutable std::unordered_map<uint32_t, std::string> spellDescriptionVariables_;
-    mutable bool spellNameCacheLoaded_ = false;
 
     // Title cache: maps titleBit → title string (lazy-loaded from CharTitles.dbc)
     // The strings use "%s" as a player-name placeholder (e.g. "Commander %s", "%s the Explorer").
@@ -4381,30 +4224,10 @@ private:
 
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
-    // ---- Player skills ----
-    std::unordered_map<uint32_t, PlayerSkill> playerSkills_;
-    std::unordered_map<uint32_t, std::string> skillLineNames_;
-    std::unordered_map<uint32_t, uint32_t> skillLineCategories_;
-    /// The headings the skills tab groups under, from SkillLineCategory.dbc,
-    /// with the display order the file itself gives.
-    std::unordered_map<uint32_t, std::string> skillCategoryNames_;
-    std::unordered_map<uint32_t, uint32_t> skillCategorySort_;
+    // ---- Player skills (the skills themselves are the spell book's) ----
     /// Headings the player has closed. Client-side, like the reputation ones,
     /// and saved with the rest of the character config for the same reason.
     std::unordered_set<uint32_t> collapsedSkillCategories_;
-    /// SkillLine.dbc's own icon, which is what gives each spellbook tab down
-    /// the side of the book its distinct picture. Read alongside the name
-    /// because they come out of the same row of the same file.
-    std::unordered_map<uint32_t, uint32_t> skillLineIcons_;
-    /// The sentence the skills window prints under a selected skill. Read from
-    /// the same row as the name and the icon.
-    std::unordered_map<uint32_t, std::string> skillLineDescriptions_;
-    std::unordered_map<uint32_t, uint32_t> spellToSkillLine_;      // spellID -> skillLineID
-    bool skillLineDbcLoaded_ = false;
-    bool skillLineAbilityLoaded_ = false;
-    std::vector<uint32_t> playerExploredZones_ =
-        std::vector<uint32_t>(PLAYER_EXPLORED_ZONES_COUNT, 0u);
-    bool hasPlayerExploredZones_ = false;
     // Apply packed kill counts from player update fields to a quest entry that has
     // already had its killObjectives populated from SMSG_QUEST_QUERY_RESPONSE.
     void applyPackedKillCountsFromFields(QuestLogEntry& quest);
@@ -4415,11 +4238,9 @@ private:
     StandStateCallback standStateCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     PlayerModelRebuildCallback playerModelRebuildCallback_;
-    MeleeSwingCallback meleeSwingCallback_;
     FaceCameraProvider faceCameraProvider_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
-    SpellCastAnimCallback spellCastAnimCallback_;
     UnitAnimHintCallback unitAnimHintCallback_;
     UnitMoveFlagsCallback unitMoveFlagsCallback_;
     NpcSwingCallback npcSwingCallback_;
@@ -4429,7 +4250,6 @@ private:
     PlayerHealthCallback playerHealthCallback_;
     NpcGreetingCallback npcGreetingCallback_;
     NpcFarewellCallback npcFarewellCallback_;
-    ChargeCallback chargeCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
@@ -4574,10 +4394,9 @@ private:
     /// One event in full, as of the last one opened.
     CalendarEventDetail calendarEventDetail_;
 
-    // ---- Spell modifiers (SMSG_SET_FLAT_SPELL_MODIFIER / SMSG_SET_PCT_SPELL_MODIFIER) ----
-    // Keyed by (SpellModOp, groupIndex); cleared on logout/character change.
-    std::unordered_map<SpellModKey, int32_t, SpellModKeyHash> spellFlatMods_;
-    std::unordered_map<SpellModKey, int32_t, SpellModKeyHash> spellPctMods_;
+    /// What this hears from its own domains. Last, so it ends before anything
+    /// a handler uses goes.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace game

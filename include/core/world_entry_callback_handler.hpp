@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
+#include "core/event_bus.hpp"
 #include "core/frame_plan.hpp"
 #include <glm/glm.hpp>
 
@@ -94,6 +96,8 @@ private:
     bool lastTaxiFlight_ = false;
     float taxiLandingClampTimer_ = 0.0f;
     float taxiLandingReferenceZ_ = 0.0f;
+
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

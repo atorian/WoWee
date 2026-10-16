@@ -2258,12 +2258,9 @@ static uint32_t possessAuraSpellId(wowee::game::GameHandler* gh) {
     constexpr uint32_t kAoeCharm = 177;
     for (const auto& aura : gh->getPlayerAuras()) {
         if (aura.isEmpty()) continue;
-        // Asking for the name is what fills the cache; the entry is not there
-        // to be read until something has.
-        gh->getSpellName(aura.spellId);
-        auto it = gh->spellNameCacheRef().find(aura.spellId);
-        if (it == gh->spellNameCacheRef().end()) continue;
-        for (uint32_t type : it->second.effectAuraIds) {
+        const auto* spell = gh->spells().findSpell(aura.spellId);
+        if (!spell) continue;
+        for (uint32_t type : spell->effectAuraIds) {
             if (type == kModPossess || type == kModCharm ||
                 type == kModPossessPet || type == kAoeCharm) {
                 return aura.spellId;
@@ -2285,12 +2282,9 @@ static std::vector<uint32_t> trackingSpells(game::GameHandler* gh) {
     std::vector<uint32_t> out;
     if (!gh) return out;
     for (uint32_t sid : gh->getKnownSpells()) {
-        // Asking for the name is what fills the cache; the entry is not there
-        // to be read until something has.
-        gh->getSpellName(sid);
-        auto it = gh->spellNameCacheRef().find(sid);
-        if (it == gh->spellNameCacheRef().end()) continue;
-        for (uint32_t aura : it->second.effectAuraIds) {
+        const auto* spell = gh->spells().findSpell(sid);
+        if (!spell) continue;
+        for (uint32_t aura : spell->effectAuraIds) {
             if (aura == kAuraTrackCreatures || aura == kAuraTrackResources) {
                 out.push_back(sid);
                 break;

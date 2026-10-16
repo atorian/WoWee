@@ -319,4 +319,23 @@ void GameHarness::enterWorld(const PlayerSpec& player) {
     clearRecords();
 }
 
+void GameHarness::relogAs(const PlayerSpec& next) {
+    using game::Opcode;
+    const PlayerSpec previous = player_;
+    player_ = next;
+
+    game_->requestLogout(false);
+    receive(Opcode::SMSG_LOGOUT_COMPLETE);
+    pump();
+    game_->returnToCharacterSelect();
+    receive(Opcode::SMSG_CHAR_ENUM, charEnumBody({previous, next}));
+    pump();
+    game_->selectCharacter(next.guid);
+    receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, loginVerifyWorldBody(next));
+    pump();
+    if (!game_->isInWorld()) fail("the next character is not in the world");
+
+    clearRecords();
+}
+
 } // namespace wowee::test

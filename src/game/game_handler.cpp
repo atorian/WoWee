@@ -112,12 +112,14 @@ GameHandler::GameHandler(GameServices& services)
     chatHandler_      = std::make_unique<ChatHandler>(*this);
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
-    spellHandler_     = std::make_unique<SpellHandler>(*this);
     socialHandler_    = std::make_unique<SocialHandler>(*this);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
+    spellHandler_ = std::make_unique<SpellHandler>(
+        *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
+        services_.assetManager);
     inventoryHandler_ = std::make_unique<InventoryHandler>(
         *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
         services_.assetManager);
@@ -125,6 +127,11 @@ GameHandler::GameHandler(GameServices& services)
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
     petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
+
+    // The character's own settings, read once its spells have arrived - the
+    // first thing the realm sends of a character entering the world.
+    subscriptions_.push_back(eventBus().subscribe<events::CharacterSpellsArrived>(
+        [this](const events::CharacterSpellsArrived&) { loadCharacterConfig(); }));
 
     // The action bar starts empty. What is on it is the server's to say -
     // SMSG_ACTION_BUTTONS at every login, which for a new character carries
@@ -260,18 +267,12 @@ void GameHandler::clearWorldState() {
 }
 
 void GameHandler::resetDbcCaches() {
-    spellNameCacheLoaded_ = false;
-    spellNameCache_.clear();
-    skillLineDbcLoaded_ = false;
-    skillLineNames_.clear();
-    skillLineCategories_.clear();
-    skillLineAbilityLoaded_ = false;
-    spellToSkillLine_.clear();
     areaTriggerDbcLoaded_ = false;
     areaTriggers_.clear();
     activeAreaTriggers_.clear();
-    // The talent and taxi tables live in the sub-handlers, and only there.
-    spellHandler_->resetTalentDbcCache();
+    // The spell, skill, talent and taxi tables live in the sub-handlers, and
+    // only there.
+    spellHandler_->resetSpellDbcCaches();
     movementHandler_->resetTaxiDbcCache();
     // Clear the AssetManager DBC file cache so that expansion-specific DBCs
     // (CharSections, ItemDisplayInfo, etc.) are reloaded from the new expansion's
@@ -306,22 +307,42 @@ std::optional<uint32_t> GameHandler::playerFieldBytes() const {
 }
 
 std::array<uint32_t, 3> GameHandler::spellEffects(uint32_t spellId) const {
-    loadSpellNameCache();
-    const auto it = spellNameCache_.find(spellId);
-    if (it == spellNameCache_.end()) return {};
-    return {it->second.effectIds[0], it->second.effectIds[1], it->second.effectIds[2]};
+    const SpellNameEntry* spell = spellHandler_->findSpell(spellId);
+    if (!spell) return {};
+    return {spell->effectIds[0], spell->effectIds[1], spell->effectIds[2]};
 }
 
 uint32_t GameHandler::classSkillLineOf(uint32_t spellId) {
     // SkillLine.dbc category 7 is a class's own lines - a talent tree, a spec.
     static constexpr uint32_t kSkillLineCategoryClass = 7;
-    loadSkillLineDbc();
-    loadSkillLineAbilityDbc();
-    const auto line = spellToSkillLine_.find(spellId);
-    if (line == spellToSkillLine_.end()) return 0;
-    const auto category = skillLineCategories_.find(line->second);
-    if (category == skillLineCategories_.end() || category->second != kSkillLineCategoryClass) return 0;
-    return line->second;
+    const uint32_t line = spellHandler_->skillLineOfSpell(spellId);
+    if (line == 0 || spellHandler_->skillCategory(line) != kSkillLineCategoryClass) return 0;
+    return line;
+}
+
+void GameHandler::setFacing(float canonicalYaw) {
+    setOrientation(canonicalYaw);
+    sendMovement(Opcode::MSG_MOVE_SET_FACING);
+}
+
+uint32_t GameHandler::itemEntryByGuid(uint64_t itemGuid) const {
+    return inventoryHandler_->getItemEntryByGuid(itemGuid);
+}
+
+std::optional<HomeBind> GameHandler::homeBind() const {
+    if (!hasHomeBind_) return std::nullopt;
+    return HomeBind{homeBindMapId_, homeBindPos_};
+}
+
+std::string GameHandler::achievementName(uint32_t achievementId) {
+    loadAchievementNameCache();
+    const auto it = achievementNameCache_.find(achievementId);
+    return it != achievementNameCache_.end() ? it->second : std::string();
+}
+
+void GameHandler::recordAchievementEarned(uint32_t achievementId, uint32_t packedDate) {
+    earnedAchievements_.insert(achievementId);
+    achievementDates_[achievementId] = packedDate;
 }
 
 void GameHandler::noteItemCastSpell(uint32_t spellId) {
@@ -639,29 +660,6 @@ void GameHandler::updateTimers(float deltaTime) {
             pendingLoginQuestResync_ = false;
             pendingLoginQuestResyncTimeout_ = 0.0f;
             LOG_WARNING("Quest login resync timed out waiting for player quest slot fields");
-        }
-    }
-
-    for (auto it = pendingGameObjectLootRetries_.begin(); it != pendingGameObjectLootRetries_.end();) {
-        it->timer -= deltaTime;
-        if (it->timer <= 0.0f) {
-            if (it->remainingRetries > 0 && isInWorld()) {
-                // Keep server-side position/facing fresh before retrying GO use.
-                sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
-                auto usePacket = GameObjectUsePacket::build(it->guid);
-                socket->send(usePacket);
-                if (it->sendLoot) {
-                    auto lootPacket = LootPacket::build(it->guid);
-                    socket->send(lootPacket);
-                }
-                --it->remainingRetries;
-                it->timer = 0.20f;
-            }
-        }
-        if (it->remainingRetries == 0) {
-            it = pendingGameObjectLootRetries_.erase(it);
-        } else {
-            ++it;
         }
     }
 
@@ -1131,40 +1129,20 @@ void GameHandler::fail(const std::string& reason) {
 // Player Skills
 // ============================================================
 
-static const std::string kEmptySkillName;
-
 const std::string& GameHandler::getSkillName(uint32_t skillId) const {
-    // Asked for a name is a reason to read the file. The load used to be
-    // driven only from the *write* paths - a player update block carrying
-    // skill fields, the spellbook building its tabs - so if every one of those
-    // ran before the assets were up, nothing ever went back for it and every
-    // skill stayed nameless. getSpellName has always done this; this did not.
-    loadSkillLineDbc();
-    auto it = skillLineNames_.find(skillId);
-    return (it != skillLineNames_.end()) ? it->second : kEmptySkillName;
+    return spellHandler_->getSkillLineName(skillId);
 }
 
 uint32_t GameHandler::getSkillCategory(uint32_t skillId) const {
-    // Loaded on the ask, like getSkillName above and for the same reason: the
-    // write paths can all have run before the assets were up, and then nothing
-    // goes back for the file.
-    loadSkillLineDbc();
-    auto it = skillLineCategories_.find(skillId);
-    return (it != skillLineCategories_.end()) ? it->second : 0;
+    return spellHandler_->skillCategory(skillId);
 }
 
 const std::string& GameHandler::getSkillCategoryName(uint32_t categoryId) const {
-    loadSkillLineDbc();
-    auto it = skillCategoryNames_.find(categoryId);
-    return (it != skillCategoryNames_.end()) ? it->second : kEmptySkillName;
+    return spellHandler_->skillCategoryName(categoryId);
 }
 
 uint32_t GameHandler::getSkillCategorySortIndex(uint32_t categoryId) const {
-    loadSkillLineDbc();
-    auto it = skillCategorySort_.find(categoryId);
-    // Unknown headings sort last rather than first, so a category this build's
-    // file does not name cannot displace the ones it does.
-    return (it != skillCategorySort_.end()) ? it->second : 0xFFFFFFFFu;
+    return spellHandler_->skillCategorySortIndex(categoryId);
 }
 
 void GameHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed) {
@@ -1174,12 +1152,7 @@ void GameHandler::setSkillCategoryCollapsed(uint32_t categoryId, bool collapsed)
 }
 
 bool GameHandler::isProfessionSpell(uint32_t spellId) const {
-    auto slIt = spellToSkillLine_.find(spellId);
-    if (slIt == spellToSkillLine_.end()) return false;
-    auto catIt = skillLineCategories_.find(slIt->second);
-    if (catIt == skillLineCategories_.end()) return false;
-    // Category 11 = profession (Blacksmithing, etc.), 9 = secondary (Cooking, First Aid, Fishing)
-    return catIt->second == 11 || catIt->second == 9;
+    return spellHandler_->isProfessionSpell(spellId);
 }
 
 void GameHandler::loadSkillLineDbc() const {
@@ -1198,64 +1171,12 @@ std::string GameHandler::getCharacterConfigDir() {
     return core::getConfigRoot() + "/characters";
 }
 
-int GameHandler::getRecipeDifficulty(uint32_t spellId) const {
-    auto cit = spellNameCache_.find(spellId);
-    if (cit == spellNameCache_.end()) return 0;
-    const auto& se = cit->second;
-    // No thresholds means the recipe never greys out.
-    if (se.trivialSkillHigh == 0 && se.trivialSkillLow == 0) return 0;
-    auto slIt = spellToSkillLine_.find(spellId);
-    if (slIt == spellToSkillLine_.end()) return 0;
-    auto skIt = getPlayerSkills().find(slIt->second);
-    if (skIt == getPlayerSkills().end()) return 0;
-    const uint32_t skill = skIt->second.effectiveValue();
-    if (skill >= se.trivialSkillHigh) return 3;
-    if (skill >= se.trivialSkillLow)  return 2;
-    const uint32_t yellow = se.minSkillRank +
-                            (se.trivialSkillLow - se.minSkillRank) / 2;
-    if (skill >= yellow) return 1;
-    return 0;
-}
-
 uint32_t GameHandler::countItemInBags(uint32_t itemId) const {
     return getInventory().countItem(itemId);
 }
 
 std::vector<GameHandler::CraftRecipe> GameHandler::getCraftingRecipes() const {
-    std::vector<CraftRecipe> out;
-    const uint32_t skillLine = getCraftingSkillLine();
-    if (skillLine == 0) return out;
-    for (uint32_t spellId : getKnownSpells()) {
-        auto slIt = spellToSkillLine_.find(spellId);
-        if (slIt == spellToSkillLine_.end() || slIt->second != skillLine) continue;
-        auto cit = spellNameCache_.find(spellId);
-        if (cit == spellNameCache_.end()) continue;
-        const auto& se = cit->second;
-
-        bool hasReagents = false;
-        for (const auto& r : se.reagents) {
-            if (r.itemId != 0) { hasReagents = true; break; }
-        }
-        // The window-opener spell and passive skill ranks are not recipes.
-        if (!hasReagents && se.createdItemId == 0) continue;
-
-        CraftRecipe row;
-        row.spellId = spellId;
-        row.name = se.name;
-        row.difficulty = getRecipeDifficulty(spellId);
-        row.canMake = hasReagents ? 999 : 0;
-        for (const auto& r : se.reagents) {
-            if (r.itemId == 0 || r.count == 0) continue;
-            row.canMake = std::min(row.canMake,
-                static_cast<int>(countItemInBags(r.itemId) / r.count));
-        }
-        out.push_back(std::move(row));
-    }
-    std::sort(out.begin(), out.end(),
-              [](const CraftRecipe& a, const CraftRecipe& b) {
-                  return a.name < b.name;
-              });
-    return out;
+    return spellHandler_->craftingRecipes();
 }
 
 void GameHandler::saveCharacterConfig() {

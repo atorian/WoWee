@@ -1805,9 +1805,9 @@ static bool& tradeSkillOnlyMakeable(lua_State* L) { return tradeSkillState(L).on
 static const game::ItemQueryResponseData* craftedItem(game::GameHandler* gh,
                                                       uint32_t spellId) {
     if (!gh || spellId == 0) return nullptr;
-    auto it = gh->spellNameCacheRef().find(spellId);
-    if (it == gh->spellNameCacheRef().end()) return nullptr;
-    const uint32_t made = it->second.createdItemId;
+    const auto* recipe = gh->spells().findSpell(spellId);
+    if (!recipe) return nullptr;
+    const uint32_t made = recipe->createdItemId;
     if (made == 0) return nullptr;
     gh->ensureItemInfo(made);
     const auto* info = gh->getItemInfo(made);
@@ -3560,9 +3560,8 @@ void registerQuestLuaAPI(lua_State* L) {
             if (gh) {
                 const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
                 if (rec) {
-                    auto it = gh->spellNameCacheRef().find(rec->spellId);
-                    if (it != gh->spellNameCacheRef().end()) {
-                        for (const auto& r : it->second.reagents) {
+                    if (const auto* recipe = gh->spells().findSpell(rec->spellId)) {
+                        for (const auto& r : recipe->reagents) {
                             if (r.itemId != 0) ++n;
                         }
                     }
@@ -3579,10 +3578,10 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!gh) return luaReturnNil(L);
             const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
+            const auto* recipe = gh->spells().findSpell(rec->spellId);
+            if (!recipe) return luaReturnNil(L);
             int seen = 0;
-            for (const auto& r : it->second.reagents) {
+            for (const auto& r : recipe->reagents) {
                 if (r.itemId == 0) continue;
                 if (++seen != n) continue;
                 gh->ensureItemInfo(r.itemId);
@@ -3599,23 +3598,11 @@ void registerQuestLuaAPI(lua_State* L) {
             return luaReturnNil(L);
         }},
                 {"GetTradeSkillNumMade", [](lua_State* L) -> int {
-            auto* gh = getGameHandler(L);
-            const int i = static_cast<int>(luaL_optnumber(L, 1, 0));
-            int lo = 1, hi = 1;
-            if (gh) {
-                const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
-                if (rec) {
-                    auto it = gh->spellNameCacheRef().find(rec->spellId);
-                    if (it != gh->spellNameCacheRef().end()) {
-                        // The count is not in what this client parses; one is
-                        // right for the great majority of recipes and wrong
-                        // only in the amount, never in the item.
-                        (void)it;
-                    }
-                }
-            }
-            lua_pushnumber(L, lo);
-            lua_pushnumber(L, hi);
+            // The count is not in what this client parses; one is right for
+            // the great majority of recipes and wrong only in the amount,
+            // never in the item.
+            lua_pushnumber(L, 1);
+            lua_pushnumber(L, 1);
             return 2;
         }},
                 // GetTradeSkillLine() → name, rank, maxRank
@@ -3763,9 +3750,9 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!gh || i < 1) return luaReturnNil(L);
             const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
-            const uint32_t made = it->second.createdItemId;
+            const auto* recipe = gh->spells().findSpell(rec->spellId);
+            if (!recipe) return luaReturnNil(L);
+            const uint32_t made = recipe->createdItemId;
             if (made == 0) return luaReturnNil(L);
             gh->ensureItemInfo(made);
             const auto* info = gh->getItemInfo(made);
@@ -3784,10 +3771,10 @@ void registerQuestLuaAPI(lua_State* L) {
             if (!gh || i < 1 || n < 1) return luaReturnNil(L);
             const auto* rec = tradeSkillRecipeAt(tradeSkillRows(L, gh), i);
             if (!rec) return luaReturnNil(L);
-            auto it = gh->spellNameCacheRef().find(rec->spellId);
-            if (it == gh->spellNameCacheRef().end()) return luaReturnNil(L);
+            const auto* recipe = gh->spells().findSpell(rec->spellId);
+            if (!recipe) return luaReturnNil(L);
             int seen = 0;
-            for (const auto& r : it->second.reagents) {
+            for (const auto& r : recipe->reagents) {
                 if (r.itemId == 0) continue;
                 if (++seen != n) continue;
                 gh->ensureItemInfo(r.itemId);

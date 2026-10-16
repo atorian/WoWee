@@ -2255,24 +2255,7 @@ void Application::enteredWorld() {
             return canon;
         });
 
-        gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
-            if (renderer) {
-                // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
-                if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
-                    if (appearanceComposer_ && !appearanceComposer_->isShowingRanged())
-                        appearanceComposer_->showRangedWeapon(true);
-                    if (auto* ac = getAnimationController()) ac->triggerRangedShot();
-                } else if (spellId != 0) {
-                    if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
-                        appearanceComposer_->showRangedWeapon(false);
-                    if (auto* ac = getAnimationController()) ac->triggerSpecialAttack(spellId);
-                } else {
-                    if (appearanceComposer_ && appearanceComposer_->isShowingRanged())
-                        appearanceComposer_->showRangedWeapon(false);
-                    if (auto* ac = getAnimationController()) ac->triggerMeleeSwing();
-                }
-            }
-        });
+        // The player's swings are AnimationCallbackHandler's (PlayerMeleeSwing).
         if (getAnimationController()) {
             getAnimationController()->setRangedShotCompleteCallback([this]() {
                 if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);

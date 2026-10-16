@@ -178,16 +178,7 @@ TEST_CASE("the next character has none of the last one's pet", "[pet][harness]")
     h.pump();
     REQUIRE(h.game().pet().hasPet());
 
-    h.game().requestLogout(false);
-    h.receive(Opcode::SMSG_LOGOUT_COMPLETE);
-    h.pump();
-    h.game().returnToCharacterSelect();
-    h.receive(Opcode::SMSG_CHAR_ENUM, GameHarness::charEnumBody({hunter, mage}));
-    h.pump();
-    h.game().selectCharacter(mage.guid);
-    h.receive(Opcode::SMSG_LOGIN_VERIFY_WORLD, GameHarness::loginVerifyWorldBody(mage));
-    h.pump();
-    REQUIRE(h.game().isInWorld());
+    h.relogAs(mage);
 
     const auto& pet = h.game().pet();
     CHECK_FALSE(pet.hasPet());

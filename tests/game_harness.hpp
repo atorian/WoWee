@@ -137,6 +137,9 @@ public:
     /// Connect, authenticate, list one character and log it into the world.
     /// Ends IN_WORLD with nothing recorded.
     void enterWorld(const PlayerSpec& player = {});
+    /// Log out to the character list, on the same connection, and log the
+    /// next character of the account in. Ends IN_WORLD with nothing recorded.
+    void relogAs(const PlayerSpec& next);
     [[nodiscard]] const PlayerSpec& player() const { return player_; }
 
     /// The server's packets the harness itself sends, for a test that wants

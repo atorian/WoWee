@@ -121,10 +121,24 @@ bool AnimationCallbackHandler::updateCharge(float deltaTime) {
 
 void AnimationCallbackHandler::setupCallbacks() {
     // Sprint aura callback - use SPRINT(143) animation when sprint-type buff is active
-    gameHandler_.setSprintAuraCallback([this](bool active) {
-        auto* ac = playerView_.getAnimationController();
-        if (ac) ac->setSprintAuraActive(active);
-    });
+    // The player's swing: an auto attack, a melee ability, or a ranged auto
+    // attack (Auto Shot, Shoot, Throw), which brings the ranged weapon out.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PlayerMeleeSwing>(
+        [this](const game::events::PlayerMeleeSwing& e) {
+            auto* ac = playerView_.getAnimationController();
+            const bool ranged = game::spellclass::isRangedWeaponAutoAttack(e.spellId);
+            if (appearanceComposer_.isShowingRanged() != ranged)
+                appearanceComposer_.showRangedWeapon(ranged);
+            if (!ac) return;
+            if (ranged) ac->triggerRangedShot();
+            else if (e.spellId != 0) ac->triggerSpecialAttack(e.spellId);
+            else ac->triggerMeleeSwing();
+        }));
+
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::SprintAuraChanged>(
+        [this](const game::events::SprintAuraChanged& e) {
+            if (auto* ac = playerView_.getAnimationController()) ac->setSprintAuraActive(e.active);
+        }));
 
     // Vehicle state callback - hide player character when inside a vehicle
     gameHandler_.setVehicleStateCallback([this](bool entered, uint32_t /*vehicleId*/) {
@@ -135,7 +149,10 @@ void AnimationCallbackHandler::setupCallbacks() {
     });
 
     // Charge callback - warrior rushes toward target
-    gameHandler_.setChargeCallback([this](uint64_t targetGuid, float tx, float ty, float tz) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::ChargeStarted>(
+        [this](const game::events::ChargeStarted& e) {
+        const uint64_t targetGuid = e.targetGuid;
+        const float tx = e.x, ty = e.y, tz = e.z;
         if (!playerView_.getCameraController()) return;
 
         // Get current player position in render coords
@@ -184,7 +201,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             // Fallback: weapon whoosh
             audio.playSound2D("Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge1.wav", 0.9f);
         }
-    });
+    }));
 
 
     // NPC/player death callback (online mode) - play death animation
@@ -404,8 +421,12 @@ void AnimationCallbackHandler::setupCallbacks() {
     //   DIRECTED - spell targets a specific unit  (Frostbolt, Heal)
     //   OMNI     - self-cast / no explicit target (Arcane Explosion, buffs)
     //   AREA     - ground-targeted AoE           (Blizzard, Rain of Fire)
-    gameHandler_.setSpellCastAnimCallback([this](uint64_t guid, bool start, bool isChannel,
-                                                  game::SpellCastType castType) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::CastAnimationChanged>(
+        [this](const game::events::CastAnimationChanged& e) {
+        const uint64_t guid = e.casterGuid;
+        const bool start = e.started;
+        const bool isChannel = e.channel;
+        const game::SpellCastType castType = e.castType;
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr) return;
 
@@ -443,15 +464,13 @@ void AnimationCallbackHandler::setupCallbacks() {
             game::spellclass::RestChannelKind restChannel =
                 game::spellclass::RestChannelKind::NONE;
             if (isLocalPlayer && currentSpell != 0) {
-                gameHandler_.loadSpellNameCache();
-                auto it = gameHandler_.spellNameCacheRef().find(currentSpell);
-                isBandage = (it != gameHandler_.spellNameCacheRef().end() &&
-                             it->second.name.find("Bandage") != std::string::npos);
-                if (it != gameHandler_.spellNameCacheRef().end()) {
-                    restChannel = game::spellclass::classifyRestChannel(it->second.name);
+                const auto* spell = gameHandler_.spells().findSpell(currentSpell);
+                isBandage = (spell && spell->name.find("Bandage") != std::string::npos);
+                if (spell) {
+                    restChannel = game::spellclass::classifyRestChannel(spell->name);
                 }
-                if (!isBandage && !isFishing && it != gameHandler_.spellNameCacheRef().end()) {
-                    const auto& nm = it->second.name;
+                if (!isBandage && !isFishing && spell) {
+                    const auto& nm = spell->name;
                     isMining = (nm == "Mining" || nm == "Smelting");
                     if (!isMining) {
                         isGathering = gameHandler_.isProfessionSpell(currentSpell);
@@ -667,7 +686,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 cr->playAnimation(instanceId, rendering::anim::STAND, true);
             }
         }
-    });
+    }));
 
     // Ghost state callback - make player semi-transparent when in spirit form
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GhostStateChanged>(
