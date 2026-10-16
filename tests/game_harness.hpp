@@ -27,6 +27,7 @@
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -145,7 +146,9 @@ public:
     /// Fails the test if it never is.
     void pump();
     /// Let this much game time pass, a frame at a time - for the timers the
-    /// game counts down by the frame's delta.
+    /// game counts down by the frame's delta. The game's monotonic clock
+    /// (GameServices::steadyNow) moves with every frame, here and in pump(),
+    /// so what it keeps running on real time sees the same seconds pass.
     void advance(float seconds);
 
     /// What the game sent, as logical opcodes, in order.
@@ -221,6 +224,11 @@ private:
     bool connectionsRefused_ = false;
     std::vector<AddonEvent> addonEvents_;
     PlayerSpec player_;
+    /// The game's monotonic clock, advanced a frame at a time.
+    std::chrono::steady_clock::time_point now_{std::chrono::hours(1)};
+
+    /// One frame of the game, and of its clock.
+    void frame(float seconds);
 };
 
 /// A body under construction, little-endian as the wire is.

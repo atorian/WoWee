@@ -3047,6 +3047,10 @@ void SocialHandler::handleQueryTimeResponse(network::Packet& packet) {
     QueryTimeResponseData data;
     if (!QueryTimeResponseParser::parse(packet, data)) return;
 
+    // The first word is the server's wall clock, to the second - what the
+    // realm clock keeps time from.
+    events_.publish(events::ServerTimeReceived{data.serverTime});
+
     // The second word is how long until the daily quests reset -
     // GetNextDailyQuestsResetTime() minus now, in AzerothCore's own terms. It
     // was parsed and dropped, and GetQuestResetTime answered the time until

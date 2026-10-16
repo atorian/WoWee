@@ -34,6 +34,9 @@ public:
 
     /// The zone the player is in; 0 when nothing knows.
     [[nodiscard]] uint32_t zoneId() const { return zoneId_; }
+    /// The area - the subzone - under the player, as the terrain last named
+    /// one on this map; 0 when nothing knows.
+    [[nodiscard]] uint32_t areaId() const { return areaId_; }
     /// The area under the player is a world PvP objective. Asked of the area
     /// rather than its zone: the flag is on the subzone.
     [[nodiscard]] bool isOnOutdoorPvpObjective() const { return onOutdoorPvpObjective_; }
@@ -45,6 +48,7 @@ public:
 private:
     std::unique_ptr<game::ZoneManager> zoneManager_;
     uint32_t zoneId_ = 0;
+    uint32_t areaId_ = 0;
     bool onOutdoorPvpObjective_ = false;
     /// The last zone a terrain chunk actually named. Many chunks carry an area
     /// id of zero, and a tile being loaded carries none at all, so the lookup

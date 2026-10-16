@@ -737,6 +737,8 @@ set(WOWEE_SOURCES
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
     src/game/pet_handler.cpp
+    src/game/realm_clock.cpp
+    src/game/realm_time_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/quest_objectives.cpp
@@ -1017,12 +1019,14 @@ set(WOWEE_SOURCES
     src/rendering/loot_sparkles.cpp
     src/rendering/corpse_bones.cpp
     src/rendering/grass_renderer.cpp
+    src/rendering/wind_field.cpp
     src/pipeline/adt_alpha.cpp
     src/pipeline/grass_terrain.cpp
     src/pipeline/grass_population.cpp
     src/pipeline/grass_profile.cpp
     src/pipeline/grass_biomes.cpp
     src/pipeline/grass_clearing.cpp
+    src/pipeline/wind_zones.cpp
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp

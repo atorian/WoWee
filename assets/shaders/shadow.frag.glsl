@@ -7,6 +7,7 @@ layout(push_constant) uniform Push {
     vec4 sway;
     ivec4 flags;            // x useTexture, y alphaTest, z foliageSway, w alpha ref in 255ths (0: a half)
     vec4 wind;
+    vec4 windPhases;
 } push;
 
 layout(location = 0) in vec2 TexCoord;

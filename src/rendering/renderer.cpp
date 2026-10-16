@@ -776,6 +776,10 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.projection = camera->getProjectionMatrix();
     currentFrameData.viewPos = glm::vec4(camera->getPosition(), 1.0f);
     currentFrameData.fogParams.z = globalTime;
+    const WindGpu wind = wind_.gpu();
+    currentFrameData.windDirLean = wind.dirLean;
+    currentFrameData.windPhases = wind.phases;
+    currentFrameData.windTravel = wind.travel;
 
     currentFrameData.fogSkyTop.w = 0.0f;
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
@@ -2144,6 +2148,8 @@ void Renderer::update(float deltaTime) {
         }
     }
 
+    updateWind(deltaTime);
+
     endPhase("weather/character anim");
     // Update terrain streaming
     if (terrainManager && camera) {
@@ -2424,6 +2430,42 @@ void Renderer::setGrassDistance(float yards) {
     // matches it any more.
     grassBuilder_ = pipeline::GrassPopulationBuilder{};
     grassWindowValid_ = false;
+}
+
+void Renderer::updateWind(float deltaTime) {
+    // The table, read once. Missing or malformed, it says so itself and a
+    // built-in light wind blows instead.
+    if (!windZonesLoaded_) {
+        windZonesLoaded_ = true;
+        windZones_ = pipeline::loadWindZonesFile("assets/wind_zones.json");
+    }
+
+    WindInputs inputs;
+    if (environment_.hasRealmTime()) {
+        inputs.clockSeconds = environment_.realmSeconds;
+        if (!windRealmSynced_ && windUnsyncedSaid_) {
+            LOG_INFO("Wind: the realm's clock has arrived; the wind is the realm's from now");
+        }
+        windRealmSynced_ = true;
+    } else {
+        // Not shared, but still a wind: the slots and phases come from this
+        // machine's clock instead. Before the world is on screen there is no
+        // realm to have a clock yet, which is not worth a line.
+        windRealmSynced_ = false;
+        inputs.clockSeconds = std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (worldInView_ && !windUnsyncedSaid_) {
+            windUnsyncedSaid_ = true;
+            LOG_WARNING("Wind: the world is drawn without the realm's clock; the wind follows "
+                        "this machine's clock, so other players see a different one");
+        }
+    }
+    inputs.weatherType = environment_.weatherType;
+    inputs.weatherIntensity = environment_.weatherIntensity;
+    inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
+    inputs.fixedWind = environment_.wind;
+    wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
+                 windZones_);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
@@ -4471,7 +4513,8 @@ void Renderer::renderShadowMap(bool contact) {
         wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
     if (m2Renderer) {
-        m2Renderer->renderShadow(currentCmd, passMatrix, globalTime, passCenter, shadowCullRadius, !contact);
+        m2Renderer->renderShadow(currentCmd, passMatrix, wind_.gpu(), passCenter, shadowCullRadius,
+                                 !contact);
     }
     if (characterRenderer) {
         characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !contact);

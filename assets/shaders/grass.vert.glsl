@@ -3,8 +3,8 @@
 // A grass blade: a tapered strip of five segments bent along a quadratic
 // Bezier, moved by wind and by whoever walks through it.
 //
-// The player interaction is ported from m2.vert.glsl. The wind is not, any
-// more: it began as that system's constants, and was reworked into travelling
+// The player interaction is ported from m2.vert.glsl. The wind is the same
+// field that moves the trees (wind.glsli), shaped for grass as travelling
 // waves - fronts that sweep across the field and gusts that roll through in
 // bands - because grass in place-to-place unison reads as a texture, and a
 // field the wind visibly crosses reads as weather. Phase still comes from
@@ -24,11 +24,28 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 ambientColor;
     vec4 viewPos;
     vec4 fogColor;
-    vec4 fogParams;   // z = wind time
+    vec4 fogParams;   // z = time
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
+    ivec4 localLightMeta;
+    vec4 volumetricParams;
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
+    vec4 windDirLean;  // wind.glsli
+    vec4 windPhases;
+    vec4 windTravel;
 };
+
+#define WIND_PER_FRAME
+#include "wind.glsli"
 
 // Matches GrassBladeGPU in include/rendering/grass_blade.hpp (std430).
 struct GrassBlade {
@@ -186,31 +203,13 @@ void main() {
     }
 
     // ---- Wind ---------------------------------------------------------------
-    // Travelling waves. `wave` is a front about thirteen yards wide sweeping
-    // along the wind at a few yards a second; `gustBand` is a far larger
-    // swell rolling through on top, so the field surges and rests instead of
-    // pulsing; `rustle` is the per-blade flutter riding on both. The bend
-    // direction also wobbles perpendicular to the wind as a front passes,
-    // which is what makes a wave look like it pushes through the grass rather
-    // than dimming and brightening it.
-    float windTime = fogParams.z;
-    vec2 windDir = normalize(vec2(0.80, 0.60));
-    float alongWind = dot(root.xy, windDir);
-
-    float wave     = sin(alongWind * 0.48 - windTime * 2.1);
-    float gustBand = 0.55 + 0.45 * sin(alongWind * 0.11 - windTime * 0.7);
-    float rustle   = sin(windTime * 1.9 + dot(root.xy, vec2(0.37, 0.71))
-                         + seed * 6.2831853);
-
-    float windAmount = (0.30 + 0.50 * (0.5 + 0.5 * wave) * gustBand)
-                     * (0.82 + 0.18 * rustle);
+    // The field's wind (wind.glsli): fronts and swells travelling downwind,
+    // and the per-blade rustle riding on both.
+    vec3 windBend = grassWindBend(perFrameGrassWind(), root.xy, seed);
+    vec2 dirNow = windBend.xy;
+    float windAmount = windBend.z;
     // A bolted stem catches more wind than the sward it stands above.
     if (seeded) windAmount *= 1.25;
-
-    vec2 perp = vec2(-windDir.y, windDir.x);
-    vec2 dirNow = normalize(windDir
-                            + perp * (0.30 * sin(alongWind * 0.48 - windTime * 2.1 + 1.3)
-                                      + (seed - 0.5) * 0.35));
     vec2 bendVec = dirNow * (windAmount * height * kWindBend * give);
 
     // A standing lean each blade was born with, in its own direction. A sward
@@ -257,7 +256,8 @@ void main() {
         // A quiver riding on the bend, only while the player is moving, phased
         // per blade so the patch shivers rather than pulsing in unison.
         float speed = clamp(playerPos.w / 7.0, 0.0, 1.0);
-        float quiver = sin(windTime * 17.0 + dot(root.xy, vec2(3.1, 2.7)))
+        // The frame clock, not the wind: this is the player's doing.
+        float quiver = sin(fogParams.z * 17.0 + dot(root.xy, vec2(3.1, 2.7)))
                      * influence * speed * height * 0.12;
         bendVec += vec2(-dir.y, dir.x) * quiver;
     }

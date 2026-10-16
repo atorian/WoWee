@@ -359,4 +359,10 @@ struct PlayerEquipmentResolved {
     std::array<uint32_t, 19> enchantIds{};
 };
 
+/// The server said what its wall clock reads, in seconds since 1970 - the
+/// reply to CMSG_QUERY_TIME. The realm clock keeps time from it.
+struct ServerTimeReceived {
+    uint32_t unixSeconds = 0;
+};
+
 } // namespace wowee::game::events

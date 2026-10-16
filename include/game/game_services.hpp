@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -41,6 +42,11 @@ struct GameServices {
     /// disk, one folder per account and server. Empty keeps none, which
     /// AccountDataHandler says once.
     std::string accountDataDir;
+    /// The monotonic clock the realm's time is kept running on between the
+    /// packets that set it. Real time in the client; a test hands over its
+    /// own, so time passes when it says.
+    std::function<std::chrono::steady_clock::time_point()> steadyNow =
+        [] { return std::chrono::steady_clock::now(); };
     uint32_t gryphonDisplayId = 0;
     uint32_t wyvernDisplayId = 0;
 };
