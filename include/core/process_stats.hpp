@@ -34,7 +34,9 @@ struct ProcessStats {
 /// cannot give it.
 class ProcessStatsReader {
 public:
-    [[nodiscard]] ProcessStats read();
+    /// Everything, or everything but the thread count, which is the costly
+    /// figure on Windows.
+    [[nodiscard]] ProcessStats read(bool withThreads = true);
 
 private:
     bool saidProcessMemory_ = false;
@@ -44,7 +46,9 @@ private:
 
 /// A thread that reads ProcessStats once a second, so the frame never waits
 /// on it: counting the process's threads on Windows walks every process on
-/// the machine and took from 17 to 180 milliseconds on a loaded one.
+/// the machine and took from 17 to 180 milliseconds on a loaded one. The
+/// thread count is read every fifth second and the reading between keeps the
+/// last one.
 class ProcessStatsSampler {
 public:
     ProcessStatsSampler();

@@ -5,9 +5,11 @@
 #include <chrono>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -225,11 +227,11 @@ void readThreads(ProcessStats& stats, bool& said) {
 
 } // namespace
 
-ProcessStats ProcessStatsReader::read() {
+ProcessStats ProcessStatsReader::read(bool withThreads) {
     ProcessStats stats;
     readProcessMemory(stats, saidProcessMemory_);
     readSystemMemory(stats, saidSystemMemory_);
-    readThreads(stats, saidThreads_);
+    if (withThreads) readThreads(stats, saidThreads_);
     return stats;
 }
 
@@ -257,11 +259,16 @@ std::optional<ProcessStats> ProcessStatsSampler::latest() const {
 }
 
 void ProcessStatsSampler::run() {
+    constexpr int kThreadCountEvery = 5;
     ProcessStatsReader reader;
+    std::optional<uint32_t> threads;
+    int reading = 0;
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stop_) {
         lock.unlock();
-        ProcessStats stats = reader.read();
+        const bool withThreads = reading++ % kThreadCountEvery == 0;
+        ProcessStats stats = reader.read(withThreads);
+        if (withThreads) threads = stats.threadCount; else stats.threadCount = threads;
         lock.lock();
         latest_ = std::move(stats);
         wake_.wait_for(lock, std::chrono::seconds(1), [this] { return stop_; });
