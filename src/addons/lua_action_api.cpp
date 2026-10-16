@@ -5,6 +5,7 @@
 #include "addons/lua_api_registrations.hpp"
 // For fireEvent: paging has to reach the frames as well as the addons.
 #include "addons/lua_engine.hpp"
+#include "addons/lua_handler_globals.hpp"
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
@@ -17,6 +18,8 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
+#include <cstring>
 #include "game/pet_action.hpp"
 #include "game/account_data_handler.hpp"
 #include "imgui.h"
@@ -486,8 +489,26 @@ static int lua_UseAction(lua_State* L) {
         }
     } else if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
         gh->useItemById(action.id);
+    } else if (action.type == game::ActionBarSlot::MACRO) {
+        // Run as RunMacro runs one, through the client's macro runner: one
+        // line at a time through the slash commands, /stopmacro honoured.
+        static std::set<uint32_t> said;
+        const game::Macro* macro = gh->accountData().macro(action.id);
+        auto* svc = getLuaServices(L);
+        if (!macro) {
+            if (said.insert(action.id).second) {
+                LOG_WARNING("UseAction: slot ", slot + 1, " holds macro ", action.id,
+                            ", which the account data does not have; nothing runs");
+            }
+        } else if (!svc || !svc->runMacroText) {
+            if (said.insert(action.id).second) {
+                LOG_WARNING("UseAction: macro \"", macro->name,
+                            "\" not run: this client has no macro runner");
+            }
+        } else if (!macro->body.empty()) {
+            svc->runMacroText(macro->body);
+        }
     }
-    // Macro execution requires GameScreen context; not available from pure Lua API
     return 0;
 }
 
@@ -1739,24 +1760,44 @@ void seedBindingDefaults() {
 BindingMap buildDefaultBindings() {
     BindingMap keys;
 
-    static const struct { const char* command; const char* key; } kDefaults[] = {
-        {"MOVEFORWARD", "W"},   {"MOVEBACKWARD", "S"},
-        {"TURNLEFT", "A"},      {"TURNRIGHT", "D"},
-        {"STRAFELEFT", "Q"},    {"STRAFERIGHT", "E"},
-        {"JUMP", "SPACE"},      {"TOGGLEAUTORUN", "NUMLOCK"},
+    // The original client's defaults for the keys this one answers. Movement,
+    // the number row and its shift and control layers run through these and
+    // nothing else, so a key missing here is a key that does nothing until an
+    // account binds it.
+    static const struct { const char* command; const char* key; const char* second; } kDefaults[] = {
+        {"MOVEFORWARD", "W", "UP"},     {"MOVEBACKWARD", "S", "DOWN"},
+        {"TURNLEFT", "A", "LEFT"},      {"TURNRIGHT", "D", "RIGHT"},
+        {"STRAFELEFT", "Q", ""},        {"STRAFERIGHT", "E", ""},
+        {"JUMP", "SPACE", ""},          {"TOGGLEAUTORUN", "NUMLOCK", ""},
+        {"SITORSTAND", "X", ""},
         // Tab targets, and has since the client was written; the panel said
         // this one was unbound because nothing had ever told it.
-        {"TARGETNEARESTENEMY", "TAB"},
-        {"TOGGLEGAMEMENU", "ESCAPE"},
-        {"SCREENSHOT", "PRINTSCREEN"},
-        {"ACTIONBUTTON1", "1"}, {"ACTIONBUTTON2", "2"},
-        {"ACTIONBUTTON3", "3"}, {"ACTIONBUTTON4", "4"},
-        {"ACTIONBUTTON5", "5"}, {"ACTIONBUTTON6", "6"},
-        {"ACTIONBUTTON7", "7"}, {"ACTIONBUTTON8", "8"},
-        {"ACTIONBUTTON9", "9"}, {"ACTIONBUTTON10", "0"},
-        {"ACTIONBUTTON11", "-"},{"ACTIONBUTTON12", "="},
+        {"TARGETNEARESTENEMY", "TAB", ""},
+        {"TOGGLEGAMEMENU", "ESCAPE", ""},
+        {"SCREENSHOT", "PRINTSCREEN", ""},
+        {"ACTIONBUTTON1", "1", ""}, {"ACTIONBUTTON2", "2", ""},
+        {"ACTIONBUTTON3", "3", ""}, {"ACTIONBUTTON4", "4", ""},
+        {"ACTIONBUTTON5", "5", ""}, {"ACTIONBUTTON6", "6", ""},
+        {"ACTIONBUTTON7", "7", ""}, {"ACTIONBUTTON8", "8", ""},
+        {"ACTIONBUTTON9", "9", ""}, {"ACTIONBUTTON10", "0", ""},
+        {"ACTIONBUTTON11", "-", ""},{"ACTIONBUTTON12", "=", ""},
+        // Shift and a number turns the main bar's page; control and a number
+        // is the pet's bar, control and a function key the stance bar.
+        {"ACTIONPAGE1", "SHIFT-1", ""}, {"ACTIONPAGE2", "SHIFT-2", ""},
+        {"ACTIONPAGE3", "SHIFT-3", ""}, {"ACTIONPAGE4", "SHIFT-4", ""},
+        {"ACTIONPAGE5", "SHIFT-5", ""}, {"ACTIONPAGE6", "SHIFT-6", ""},
+        {"BONUSACTIONBUTTON1", "CTRL-1", ""}, {"BONUSACTIONBUTTON2", "CTRL-2", ""},
+        {"BONUSACTIONBUTTON3", "CTRL-3", ""}, {"BONUSACTIONBUTTON4", "CTRL-4", ""},
+        {"BONUSACTIONBUTTON5", "CTRL-5", ""}, {"BONUSACTIONBUTTON6", "CTRL-6", ""},
+        {"BONUSACTIONBUTTON7", "CTRL-7", ""}, {"BONUSACTIONBUTTON8", "CTRL-8", ""},
+        {"BONUSACTIONBUTTON9", "CTRL-9", ""}, {"BONUSACTIONBUTTON10", "CTRL-0", ""},
+        {"SHAPESHIFTBUTTON1", "CTRL-F1", ""}, {"SHAPESHIFTBUTTON2", "CTRL-F2", ""},
+        {"SHAPESHIFTBUTTON3", "CTRL-F3", ""}, {"SHAPESHIFTBUTTON4", "CTRL-F4", ""},
+        {"SHAPESHIFTBUTTON5", "CTRL-F5", ""}, {"SHAPESHIFTBUTTON6", "CTRL-F6", ""},
+        {"SHAPESHIFTBUTTON7", "CTRL-F7", ""}, {"SHAPESHIFTBUTTON8", "CTRL-F8", ""},
+        {"SHAPESHIFTBUTTON9", "CTRL-F9", ""}, {"SHAPESHIFTBUTTON10", "CTRL-F10", ""},
     };
-    for (const auto& d : kDefaults) keys[d.command] = {d.key, ""};
+    for (const auto& d : kDefaults) keys[d.command] = {d.key, d.second};
 
     // Where a command corresponds to something the client really does, the key
     // shown is the one it really answers to.
@@ -1776,20 +1817,24 @@ BindingMap buildDefaultBindings() {
     //
     // Read off the table that performs the scheme rather than restated here,
     // so the two cannot drift. The rows with no command - the bumper that is
-    // only a modifier, the button that raises the pointer, the stick click
-    // that sits down - stay the client's own, having nothing in the
-    // interface's vocabulary to be.
+    // only a modifier, the button that raises the pointer - stay the client's
+    // own, having nothing in the interface's vocabulary to be.
     //
     // Second rather than first, so the keyboard's key is still the one shown
-    // where only one fits.
+    // where only one fits. A row's shifted command is the button with the
+    // left bumper held, which holds shift.
     const auto seedPad = [&keys](std::span<const wowee::ui::PadBinding> rows) {
+        const auto seed = [&keys](const char* command, const std::string& padKey) {
+            if (!command || !*command) return;
+            auto& pair = keys[command];
+            if (pair[0].empty()) pair[0] = padKey;
+            else if (pair[1].empty()) pair[1] = padKey;
+        };
         for (const wowee::ui::PadBinding& row : rows) {
-            const char* command = row.command;
-            if (!command || !*command) continue;
             const char* padKey = wowee::ui::padKeyName(row.button);
             if (!padKey || !*padKey) continue;
-            auto& pair = keys[command];
-            if (pair[1].empty()) pair[1] = padKey;
+            seed(row.command, padKey);
+            seed(row.shiftedCommand, std::string("SHIFT-") + padKey);
         }
     };
     seedPad(wowee::ui::padBindings());
@@ -1943,23 +1988,23 @@ bool clientActsOnBinding(const std::string& command) {
         if (command == live.command) return true;
     }
     // And the rest of what the client answers without going through a binding
-    // at all. Each is a real call site: movement and jumping are polled every
-    // frame, the action bar takes 1 through 0 and the two beside them in
-    // GameScreen, chat opens on Enter and on slash, Tab targets, and Escape has
-    // a whole chain of its own in escape_action.hpp.
+    // at all. Each is a real call site: chat opens on Enter and on slash, Tab
+    // targets, Print Screen and Z are read in GameScreen, and Escape has a
+    // whole chain of its own in escape_action.hpp.
+    //
+    // Movement and the action bar are not here: bindings.xml drives them, as
+    // it does in the original client - MoveForwardStart on the press of
+    // whatever key MOVEFORWARD is on, ActionButtonDown and ActionButtonUp for
+    // ACTIONBUTTON1 - so a key the account moves them to is the key they
+    // answer.
     //
     // By command rather than by key, because the conflict is that the *action*
     // happens twice. Most bindings toggle something, so two answers to one
     // press cancel out and the key reads as dead - which is worse than doing
     // nothing, since it looks like the binding never ran.
     static constexpr const char* kClientAnswers[] = {
-        "MOVEFORWARD", "MOVEBACKWARD", "TURNLEFT", "TURNRIGHT",
-        "STRAFELEFT", "STRAFERIGHT", "JUMP", "TOGGLEAUTORUN", "TOGGLERUN",
         "TOGGLEGAMEMENU", "OPENCHAT", "OPENCHATSLASH", "TARGETNEARESTENEMY",
         "SCREENSHOT", "TOGGLESHEATH",
-        "ACTIONBUTTON1", "ACTIONBUTTON2", "ACTIONBUTTON3", "ACTIONBUTTON4",
-        "ACTIONBUTTON5", "ACTIONBUTTON6", "ACTIONBUTTON7", "ACTIONBUTTON8",
-        "ACTIONBUTTON9", "ACTIONBUTTON10", "ACTIONBUTTON11", "ACTIONBUTTON12",
     };
     for (const char* name : kClientAnswers) {
         if (command == name) return true;
@@ -2108,19 +2153,110 @@ static int lua_LoadBindings(lua_State* L) {
 static int lua_RunBinding(lua_State* L) {
     const std::string command = luaL_checkstring(L, 1);
     const char* keystate = lua_isnoneornil(L, 2) ? "down" : luaL_checkstring(L, 2);
+    runBindingCommand(L, command, std::strcmp(keystate, "up") != 0);
+    return 0;
+}
 
-    lua_getglobal(L, "__WoweeBindingScripts");
-    if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
-    lua_getfield(L, -1, command.c_str());
-    if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return 0; }
-    lua_pushstring(L, keystate);
-    if (lua_pcall(L, 1, 0, 0) != 0) {
-        LOG_WARNING("Binding ", command, " failed: ",
-                    lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+namespace {
+
+/// Call a global function with one string, saying so when it fails.
+bool callBindingTarget(lua_State* L, const std::string& command, const char* function,
+                       const std::string& arg) {
+    lua_getglobal(L, function);
+    if (!lua_isfunction(L, -1)) {
         lua_pop(L, 1);
+        LOG_WARNING("Key binding ", command, ": ", function,
+                    " is not defined in this interface; the key does nothing");
+        return false;
+    }
+    lua_pushstring(L, arg.c_str());
+    if (checkedLuaCall(L, 1, 0, 0, "key binding") != 0) {
+        LOG_WARNING("Key binding ", command, " failed: ", luaL_optstring(L, -1, "?"));
+        lua_pop(L, 1);
+        return false;
+    }
+    return true;
+}
+
+/// "CLICK frame:button": the frame clicked with that button, LeftButton when
+/// none is named.
+bool clickBindingTarget(lua_State* L, const std::string& command, const std::string& target) {
+    const size_t colon = target.find(':');
+    const std::string frame = target.substr(0, colon);
+    const std::string button = colon == std::string::npos ? "LeftButton" : target.substr(colon + 1);
+    lua_getglobal(L, frame.c_str());
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        LOG_WARNING("Key binding ", command, ": there is no frame ", frame,
+                    " to click; the key does nothing");
+        return false;
+    }
+    lua_getfield(L, -1, "Click");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 2);
+        LOG_WARNING("Key binding ", command, ": ", frame,
+                    " cannot be clicked; the key does nothing");
+        return false;
+    }
+    lua_pushvalue(L, -2);
+    lua_pushstring(L, button.c_str());
+    if (checkedLuaCall(L, 2, 0, 0, "key binding") != 0) {
+        LOG_WARNING("Key binding ", command, " failed: ", luaL_optstring(L, -1, "?"));
+        lua_pop(L, 2);
+        return false;
     }
     lua_pop(L, 1);
-    return 0;
+    return true;
+}
+
+} // namespace
+
+bool bindingRunsOnUp(lua_State* L, const std::string& command) {
+    lua_getglobal(L, "__WoweeBindingRunOnUp");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; }
+    lua_getfield(L, -1, command.c_str());
+    const bool onUp = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 2);
+    return onUp;
+}
+
+bool runBindingCommand(lua_State* L, const std::string& command, bool down) {
+    // A key bound straight to a spell, a macro, an item or a button. What the
+    // original client writes to bindings-cache.wtf for SetBindingSpell and
+    // the rest, so an account that has them brings them here.
+    static constexpr struct { const char* prefix; const char* function; } kTargets[] = {
+        {"SPELL ", "CastSpellByName"},
+        {"MACRO ", "RunMacro"},
+        {"ITEM ",  "UseItemByName"},
+    };
+    for (const auto& target : kTargets) {
+        const size_t n = std::strlen(target.prefix);
+        if (command.compare(0, n, target.prefix) != 0) continue;
+        return !down || callBindingTarget(L, command, target.function, command.substr(n));
+    }
+    if (command.compare(0, 6, "CLICK ") == 0) {
+        return !down || clickBindingTarget(L, command, command.substr(6));
+    }
+
+    lua_getglobal(L, "__WoweeBindingScripts");
+    if (lua_istable(L, -1)) lua_getfield(L, -1, command.c_str()); else lua_pushnil(L);
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 2);
+        static std::set<std::string> said;
+        if (said.insert(command).second) {
+            LOG_WARNING("Key binding ", command, ": nothing in the interface runs it; "
+                        "the key does nothing");
+        }
+        return false;
+    }
+    lua_pushstring(L, down ? "down" : "up");
+    if (checkedLuaCall(L, 1, 0, 0, "key binding") != 0) {
+        LOG_WARNING("Key binding ", command, " failed: ", luaL_optstring(L, -1, "?"));
+        lua_pop(L, 2);
+        return false;
+    }
+    lua_pop(L, 1);
+    return true;
 }
 // The override-binding family, none of which this client implements - only
 // the Click variant was ever *bound*, and the other four raised. They are
@@ -2429,11 +2565,6 @@ void registerActionLuaAPI(lua_State* L) {
             if (page > 6) page = 6;
             lua_pushnumber(L, page);
             lua_setglobal(L, "__WoweeActionBarPage");
-            // The number keys are handled client-side against a page of their
-            // own, so it has to be told or they go on casting page one.
-            if (auto* svc = getLuaServices(L); svc && svc->setActionBarPage) {
-                svc->setActionBarPage(page);
-            }
             // Through the engine, which delivers to both registries.
             //
             // This walked __WoweeEvents by hand and stopped there. That table

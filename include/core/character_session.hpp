@@ -185,6 +185,9 @@ private:
     };
     BuiltInterface buildInterface();
     void loadInterface();
+    /// Let go of the movement the interface's key bindings hold, for when no
+    /// release can reach them any more.
+    void releaseBindingMovement();
 
     Services services_;
     const Identity identity_;

@@ -21,24 +21,22 @@ namespace {
 // a key, is every key one the client actually polls - are questions about the
 // data alone.
 constexpr PadBinding kBindings[] = {
-    {SDL_GAMEPAD_BUTTON_SOUTH,             SDL_SCANCODE_SPACE,        "Jump", "JUMP"},
-    {SDL_GAMEPAD_BUTTON_WEST,             SDL_SCANCODE_1,            "Action 1", "ACTIONBUTTON1"},
-    {SDL_GAMEPAD_BUTTON_NORTH,             SDL_SCANCODE_2,            "Action 2", "ACTIONBUTTON2"},
-    {SDL_GAMEPAD_BUTTON_DPAD_UP,       SDL_SCANCODE_3,            "Action 3", "ACTIONBUTTON3"},
-    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,    SDL_SCANCODE_4,            "Action 4", "ACTIONBUTTON4"},
-    {SDL_GAMEPAD_BUTTON_DPAD_DOWN,     SDL_SCANCODE_5,            "Action 5", "ACTIONBUTTON5"},
-    {SDL_GAMEPAD_BUTTON_DPAD_LEFT,     SDL_SCANCODE_6,            "Action 6", "ACTIONBUTTON6"},
-    // Shift is not an action of its own: the client already reads it as "the
-    // bottom-left bar", which is where actions 7 to 12 live on a keyboard
-    // too. So the modifier costs nothing to implement and behaves exactly as
-    // a player expects it to.
-    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  SDL_SCANCODE_LSHIFT,       "Hold: actions 7-12"},
-    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_SCANCODE_TAB,          "Target nearest enemy", "TARGETNEARESTENEMY"},
-    {SDL_GAMEPAD_BUTTON_LEFT_STICK,     SDL_SCANCODE_NUMLOCKCLEAR, "Autorun", "TOGGLEAUTORUN"},
-    // The last button every pad has and nothing was using. X sits the
+    {SDL_GAMEPAD_BUTTON_SOUTH,          SDL_SCANCODE_UNKNOWN, "Jump", "JUMP"},
+    {SDL_GAMEPAD_BUTTON_WEST,           SDL_SCANCODE_UNKNOWN, "Action 1", "ACTIONBUTTON1", "MULTIACTIONBAR1BUTTON1"},
+    {SDL_GAMEPAD_BUTTON_NORTH,          SDL_SCANCODE_UNKNOWN, "Action 2", "ACTIONBUTTON2", "MULTIACTIONBAR1BUTTON2"},
+    {SDL_GAMEPAD_BUTTON_DPAD_UP,        SDL_SCANCODE_UNKNOWN, "Action 3", "ACTIONBUTTON3", "MULTIACTIONBAR1BUTTON3"},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,     SDL_SCANCODE_UNKNOWN, "Action 4", "ACTIONBUTTON4", "MULTIACTIONBAR1BUTTON4"},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN,      SDL_SCANCODE_UNKNOWN, "Action 5", "ACTIONBUTTON5", "MULTIACTIONBAR1BUTTON5"},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT,      SDL_SCANCODE_UNKNOWN, "Action 6", "ACTIONBUTTON6", "MULTIACTIONBAR1BUTTON6"},
+    // Shift is not an action of its own: the six buttons above are bound
+    // with shift to the bottom-left bar, so holding it reaches six more.
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  SDL_SCANCODE_LSHIFT,  "Hold: bottom-left bar 1-6"},
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_SCANCODE_TAB,     "Target nearest enemy", "TARGETNEARESTENEMY"},
+    {SDL_GAMEPAD_BUTTON_LEFT_STICK,     SDL_SCANCODE_UNKNOWN, "Autorun", "TOGGLEAUTORUN"},
+    // The last button every pad has and nothing was using. It sits the
     // character down, and dives while swimming - both of them things a
     // keyboard could do and a controller could not reach at all.
-    {SDL_GAMEPAD_BUTTON_RIGHT_STICK,    SDL_SCANCODE_X,            "Sit down, or dive"},
+    {SDL_GAMEPAD_BUTTON_RIGHT_STICK,    SDL_SCANCODE_UNKNOWN, "Sit down, or dive", "SITORSTAND"},
 };
 
 }  // namespace
@@ -186,35 +184,14 @@ const char* padKeyName(SDL_GamepadButton button) {
 }
 
 SDL_Scancode padClientKeyFor(const std::string& command) {
-    // The poll sites' own keys: movement and jumping in the camera controller,
-    // the action bar, Tab and Print Screen in GameScreen. The order of the
-    // action buttons is the bar's slot order.
+    // The poll sites' own keys: Tab and Print Screen in GameScreen. Movement
+    // and the action bar are not here - their bindings run them.
     static constexpr struct {
         const char* command;
         SDL_Scancode key;
     } kPolled[] = {
-        {"MOVEFORWARD",        SDL_SCANCODE_W},
-        {"MOVEBACKWARD",       SDL_SCANCODE_S},
-        {"TURNLEFT",           SDL_SCANCODE_A},
-        {"TURNRIGHT",          SDL_SCANCODE_D},
-        {"STRAFELEFT",         SDL_SCANCODE_Q},
-        {"STRAFERIGHT",        SDL_SCANCODE_E},
-        {"JUMP",               SDL_SCANCODE_SPACE},
-        {"TOGGLEAUTORUN",      SDL_SCANCODE_NUMLOCKCLEAR},
         {"TARGETNEARESTENEMY", SDL_SCANCODE_TAB},
         {"SCREENSHOT",         SDL_SCANCODE_PRINTSCREEN},
-        {"ACTIONBUTTON1",      SDL_SCANCODE_1},
-        {"ACTIONBUTTON2",      SDL_SCANCODE_2},
-        {"ACTIONBUTTON3",      SDL_SCANCODE_3},
-        {"ACTIONBUTTON4",      SDL_SCANCODE_4},
-        {"ACTIONBUTTON5",      SDL_SCANCODE_5},
-        {"ACTIONBUTTON6",      SDL_SCANCODE_6},
-        {"ACTIONBUTTON7",      SDL_SCANCODE_7},
-        {"ACTIONBUTTON8",      SDL_SCANCODE_8},
-        {"ACTIONBUTTON9",      SDL_SCANCODE_9},
-        {"ACTIONBUTTON10",     SDL_SCANCODE_0},
-        {"ACTIONBUTTON11",     SDL_SCANCODE_MINUS},
-        {"ACTIONBUTTON12",     SDL_SCANCODE_EQUALS},
     };
     for (const auto& polled : kPolled) {
         if (command == polled.command) return polled.key;
@@ -237,10 +214,10 @@ namespace {
 // is a row in a settings list that does not exist and a key that can never be
 // pressed.
 constexpr PadBinding kExtras[] = {
-    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, SDL_SCANCODE_7,          "Action 7", "ACTIONBUTTON7"},
-    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE1, SDL_SCANCODE_8,          "Action 8", "ACTIONBUTTON8"},
-    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2, SDL_SCANCODE_9,          "Action 9", "ACTIONBUTTON9"},
-    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE2, SDL_SCANCODE_0,          "Action 10", "ACTIONBUTTON10"},
+    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, SDL_SCANCODE_UNKNOWN,     "Action 7", "ACTIONBUTTON7"},
+    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE1,  SDL_SCANCODE_UNKNOWN,     "Action 8", "ACTIONBUTTON8"},
+    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2, SDL_SCANCODE_UNKNOWN,     "Action 9", "ACTIONBUTTON9"},
+    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE2,  SDL_SCANCODE_UNKNOWN,     "Action 10", "ACTIONBUTTON10"},
     // The share, capture and microphone buttons are all one button to SDL,
     // and on every pad that has one it is the button for keeping a moment.
     {SDL_GAMEPAD_BUTTON_MISC1,   SDL_SCANCODE_PRINTSCREEN, "Screenshot", "SCREENSHOT"},

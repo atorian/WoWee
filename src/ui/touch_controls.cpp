@@ -3,6 +3,7 @@
 #include "core/input.hpp"
 #include "core/logger.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/movement_command.hpp"
 
 #include <imgui.h>
 
@@ -41,16 +42,16 @@ void TouchControls::setInWorld(bool inWorld) {
     if (!inWorld_) reset();
 }
 
-void TouchControls::setMovementKeys(bool forward, bool back, bool left, bool right) const {
-    auto& input = core::Input::getInstance();
-    input.setVirtualKey(SDL_SCANCODE_W, forward);
-    input.setVirtualKey(SDL_SCANCODE_S, back);
-    // Q and E rather than A and D. With the right button up - which it always
-    // is on a phone - this client turns the character on A and D and strafes on
-    // Q and E. Turning meant the stick swung the view as well as the feet,
-    // which is not what a stick pushed sideways should do.
-    input.setVirtualKey(SDL_SCANCODE_Q, left);
-    input.setVirtualKey(SDL_SCANCODE_E, right);
+void TouchControls::setMovementKeys(bool forward, bool back, bool left, bool right) {
+    if (!camera_) return;
+    using rendering::MovementCommand;
+    constexpr auto kStick = rendering::MovementSource::TouchStick;
+    camera_->holdMovement(MovementCommand::Forward, kStick, forward);
+    camera_->holdMovement(MovementCommand::Backward, kStick, back);
+    // Strafing rather than turning. Turning meant the stick swung the view as
+    // well as the feet, which is not what a stick pushed sideways should do.
+    camera_->holdMovement(MovementCommand::StrafeLeft, kStick, left);
+    camera_->holdMovement(MovementCommand::StrafeRight, kStick, right);
 }
 
 void TouchControls::handleEvent(const SDL_Event& event, int windowWidth, int windowHeight) {
@@ -202,8 +203,7 @@ void TouchControls::reset() {
     pinching_ = false;
     stickX_ = stickY_ = 0.0f;
     wasForward_ = wasBack_ = wasLeft_ = wasRight_ = false;
-    // Everything the stick could be holding, not just the four it uses now.
-    core::Input::getInstance().clearVirtualKeys();
+    if (camera_) camera_->releaseMovement(rendering::MovementSource::TouchStick);
 }
 
 }  // namespace ui

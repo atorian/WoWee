@@ -210,43 +210,56 @@ public:
     /// number up, so without this a stack could only be split with the arrows.
     void dispatchFrameChar(const char* utf8);
 
-    /// Run whatever FrameXML has bound to this key, if anything. True if a
-    /// binding ran.
+    /// A key going down or coming up, by WoW's name for it - "Q", "=", "PAD3",
+    /// with no modifier prefix - and the modifiers held at that moment.
     ///
-    /// The interface ships 273 binding scripts and, until this existed, no key
-    /// press could reach any of them: keys went to a focused edit box or to a
-    /// frame listening for them, and nowhere else. The caller must not offer a
-    /// key this client answers itself - see KeybindingManager::answersKey -
-    /// because most bindings toggle something and two answers to one press
-    /// cancel out.
-    bool dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool alt,
+    /// The press runs the command bound to the key with those modifiers, or
+    /// the bare key's when that combination is unbound - so shift held while
+    /// walking still walks - and remembers it against the key. The release
+    /// runs that same command's release, whatever is held by then, and only
+    /// for a command bindings.xml marks runOnUp: ACTIONBUTTON1 pushes its
+    /// button on the press and performs the action on the release, and
+    /// MOVEFORWARD starts walking on one and stops on the other.
+    ///
+    /// True when the key is the interface's: a binding ran on the press, or
+    /// this is the release of one. A command this client performs itself is
+    /// declined (see clientActsOnBinding), and so is its release - most
+    /// bindings toggle something, and two answers to one press cancel out.
+    bool dispatchBindingKey(const std::string& key, bool shift, bool ctrl, bool alt,
                             bool down);
+    /// Every key whose binding is held, let go: the window lost the keyboard,
+    /// so no release is coming for any of them.
+    void releaseBindingKeys();
 
     /// Put the key bindings of the set in force back in force -
     /// LoadBindings(GetCurrentBindingSet()), as the original client does when
     /// the world loads and when the account data's bindings change.
     void reloadKeyBindings();
 
-    /// The command this key holds, or empty. Whether the client would run it is
-    /// a separate question - see clientActsOnBinding - and keeping the two
-    /// apart is what lets a declined key be told from an unbound one.
-    std::string bindingCommandFor(int sdlKeycode, bool shift, bool ctrl,
+    /// The command a key's press runs with these modifiers held - the
+    /// combination's, or the bare key's when the combination is unbound - or
+    /// empty. Whether the client would run it is a separate question - see
+    /// clientActsOnBinding - and keeping the two apart is what lets a declined
+    /// key be told from an unbound one.
+    std::string bindingCommandFor(const std::string& key, bool shift, bool ctrl,
                                   bool alt);
     /// The command a key holds, by WoW's name for it - "SHIFT-1", "PAD3" - or
     /// empty.
     std::string bindingCommandForKey(const std::string& key);
 
-    /// A controller button, by its binding name.
+    /// A controller button going down, by its binding name, with the
+    /// modifiers held - the left bumper holds shift.
     ///
     /// Given to the key binding panel while it is waiting for a key, which is
     /// the only way a button can be bound: the panel learns keys from
-    /// OnKeyDown. Otherwise looked up as a binding - run here when the
-    /// interface performs the command, handed back when the client does.
+    /// OnKeyDown. Otherwise pressed as a binding, as dispatchBindingKey does -
+    /// run here when the interface performs the command, handed back when the
+    /// client does. Its release is dispatchBindingKey with down false.
     struct PadKeyOutcome {
         bool taken = false;   ///< the panel captured it, or a binding script ran
         std::string command;  ///< a command the client performs itself, else empty
     };
-    PadKeyOutcome dispatchPadKey(const char* padKey);
+    PadKeyOutcome dispatchPadKey(const char* padKey, bool shift, bool ctrl, bool alt);
     /// Whether an edit box currently has focus, so the client knows not to
     /// treat the same keystrokes as movement.
     ///
@@ -344,8 +357,11 @@ private:
 
     /// The frame a typed key belongs to - see dispatchFrameKey.
     [[nodiscard]] const ui::Widget* topKeyboardFrame() const;
-    /// Runs a binding command's script. False when it has none, or it failed.
-    bool runBindingScript(const std::string& command, bool down);
+    /// Runs a key's press: the command, remembered against the key so its
+    /// release runs the same one.
+    void pressBinding(const std::string& key, const std::string& command);
+    /// Each key whose press ran a binding, and the command it ran.
+    std::unordered_map<std::string, std::string> heldBindingKeys_;
 
     void callFrameScript(uint32_t wid, const char* script, const char* arg = nullptr);
     /// The same, with a number. A handler that compares its argument against
@@ -487,5 +503,11 @@ private:
 
     static bool uiSoundsSuppressed_;
 };
+
+/// WoW's name for the key an SDL keycode stands for - "Q", "5", "=", "F1",
+/// "NUMPAD3", "SPACE" - as its binding tables spell it, or empty for a key it
+/// has no name for. Modifier keys have none: they are the prefixes on the
+/// others.
+[[nodiscard]] std::string bindingKeyName(int sdlKeycode);
 
 } // namespace wowee::addons

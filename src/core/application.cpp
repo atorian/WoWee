@@ -344,7 +344,14 @@ bool Application::initialize() {
             auto* addons = characterAddons();
             auto* engine = addons ? addons->getLuaEngine() : nullptr;
             if (!engine) return answer;
-            auto outcome = engine->dispatchPadKey(padKey);
+            // The modifiers as held, the left bumper's shift included: it is
+            // what moves a face button to the bottom-left bar.
+            const auto& input = Input::getInstance();
+            auto outcome = engine->dispatchPadKey(
+                padKey,
+                input.isKeyPressed(SDL_SCANCODE_LSHIFT) || input.isKeyPressed(SDL_SCANCODE_RSHIFT),
+                input.isKeyPressed(SDL_SCANCODE_LCTRL) || input.isKeyPressed(SDL_SCANCODE_RCTRL),
+                input.isKeyPressed(SDL_SCANCODE_LALT) || input.isKeyPressed(SDL_SCANCODE_RALT));
             if (outcome.taken) {
                 answer.kind = ui::PadKeyAnswer::Kind::Taken;
             } else if (!outcome.command.empty()) {
@@ -353,6 +360,12 @@ bool Application::initialize() {
                 answer.command = std::move(outcome.command);
             }
             return answer;
+        });
+        ui::gamepadControls().setKeyRelease([this](const char* padKey) {
+            auto* addons = characterAddons();
+            if (auto* engine = addons ? addons->getLuaEngine() : nullptr) {
+                engine->dispatchBindingKey(padKey, false, false, false, false);
+            }
         });
         // A mapping file for a pad SDL does not already know. Beside the
         // installed data first, because that is the directory a player can
@@ -853,9 +866,6 @@ bool Application::initialize() {
             LOG_INFO("Exit Game with no session to leave - closing");
             if (window) window->setShouldClose(true);
         };
-        luaSvc.setActionBarPage = [uim = uiManager.get()](int page) {
-            if (uim) uim->getGameScreen().actionBarPanel().setMainActionBarPage(page);
-        };
         luaSvc.setZoneMusicLooping = [this](bool loop) {
             if (audioCoordinator_) audioCoordinator_->setZoneMusicLooping(loop);
         };
@@ -941,6 +951,19 @@ bool Application::initialize() {
         };
         luaSvc.runMacroText = [uim = uiManager.get(), gh = gameHandler.get()](const std::string& body) {
             if (uim && gh) uim->getGameScreen().getChatPanel().executeMacroText(*gh, body);
+        };
+        // The movement bindings.xml drives - MoveForwardStart and the rest -
+        // held for the key bindings, beside the sticks.
+        luaSvc.holdMovement = [this](rendering::MovementCommand command, bool held) {
+            if (auto* camera = getCameraController()) {
+                camera->holdMovement(command, rendering::MovementSource::Bindings, held);
+            }
+        };
+        luaSvc.toggleAutoRun = [this]() {
+            if (auto* camera = getCameraController()) camera->toggleAutoRun();
+        };
+        luaSvc.toggleRun = [this]() {
+            if (auto* camera = getCameraController()) camera->toggleRun();
         };
         luaSvc.clientChatCommandNames = [uim = uiManager.get()]() {
             std::vector<std::string> out;
@@ -1955,8 +1978,12 @@ void Application::pumpInput(float deltaTime, const FramePlan& plan) {
                 if (gameHandler) gameHandler->fireAddonEvent("DISPLAY_SIZE_CHANGED");
             }
         }
+        // Focus lost too: the keys held when it went will send no release, and
+        // letting go of their bindings runs Lua, which waits for the Interface
+        // phase.
         if (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN ||
-            event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_WHEEL) {
+            event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_WHEEL ||
+            event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
             interfaceInput_.push_back({event, event.type == SDL_EVENT_TEXT_INPUT && event.text.text
                                                ? event.text.text : ""});
         }
@@ -2005,6 +2032,23 @@ void Application::dispatchInterfaceInput() {
     for (auto& saved : input) {
         SDL_Event event = saved.event;
         if (event.type == SDL_EVENT_TEXT_INPUT) event.text.text = saved.text.c_str();
+        // A key coming up goes back to the binding its press ran, before
+        // anything else looks at it and whatever has the keyboard now: the
+        // press of W walked, and an edit box opened since does not stop the
+        // release from stopping. A key whose press ran no binding has nothing
+        // to release, and passes on as before.
+        if (event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+            if (auto* addons = worldInterface()) {
+                if (auto* engine = addons->getLuaEngine()) {
+                    if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                        engine->releaseBindingKeys();
+                    } else {
+                        engine->dispatchBindingKey(addons::bindingKeyName(event.key.key),
+                                                   false, false, false, false);
+                    }
+                }
+            }
+        }
         if (getCameraController() && !ImGui::GetIO().WantCaptureMouse) {
             if (event.type == SDL_EVENT_MOUSE_WHEEL) {
                 // The interface gets first refusal, and only where a
@@ -2173,11 +2217,17 @@ void Application::dispatchInterfaceInput() {
                 // untouched; what it adds is every command the client
                 // has no path for, which until now could be bound in
                 // the interface's own key-binding panel and then never
-                // honoured by any press.
-                if (auto* engine = addons->getLuaEngine()) {
+                // honoured by any press. Movement and the action bar are
+                // bindings like any other, so a key the account moves them
+                // to is the key that walks or casts.
+                //
+                // Not while one of this client's own text fields is typed
+                // into: the keystroke is a letter there.
+                if (auto* engine = addons->getLuaEngine();
+                    engine && !ImGui::GetIO().WantTextInput) {
                     const SDL_Keymod mods = event.key.mod;
                     if (engine->dispatchBindingKey(
-                            event.key.key,
+                            addons::bindingKeyName(event.key.key),
                             (mods & SDL_KMOD_SHIFT) != 0,
                             (mods & SDL_KMOD_CTRL) != 0,
                             (mods & SDL_KMOD_ALT) != 0, true)) {

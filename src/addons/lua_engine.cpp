@@ -5886,6 +5886,7 @@ void LuaEngine::registerCoreAPI() {
     registerSocialLuaAPI(L_);
     registerSystemLuaAPI(L_);
     registerActionLuaAPI(L_);
+    registerMovementLuaAPI(L_);
     registerLfgLuaAPI(L_);
     registerSocketLuaAPI(L_);
 
@@ -9768,9 +9769,11 @@ void LuaEngine::dispatchText(const char* utf8) {
 /// SDL's keycode as WoW names it, or empty for one WoW has no name for.
 ///
 /// The handlers compare against these by name - CoinPickupFrame checks for
-/// "ESCAPE" and the digits - so a wrong spelling is a handler that never
-/// matches rather than an error anyone would see.
-static std::string wowKeyName(int sym) {
+/// "ESCAPE" and the digits - and so do the binding tables, so a wrong spelling
+/// is a handler that never matches or a key whose binding never runs, rather
+/// than an error anyone would see. The punctuation keys are their own
+/// characters, as bindings-cache.wtf writes them ("bind = ACTIONBUTTON12").
+std::string bindingKeyName(int sym) {
     if (sym >= 'a' && sym <= 'z') return std::string(1, static_cast<char>(sym - 32));
     if (sym >= '0' && sym <= '9') return std::string(1, static_cast<char>(sym));
     switch (sym) {
@@ -9779,6 +9782,9 @@ static std::string wowKeyName(int sym) {
         case '\r':       return "ENTER";
         case '\t':       return "TAB";
         case '\b':       return "BACKSPACE";
+        case '-': case '=': case '[': case ']': case '\\':
+        case ';': case '\'': case ',': case '.': case '/': case '`':
+            return std::string(1, static_cast<char>(sym));
         case 0x4000004A: return "HOME";
         case 0x4000004D: return "END";
         case 0x4000004B: return "PAGEUP";
@@ -9789,27 +9795,46 @@ static std::string wowKeyName(int sym) {
         case 0x4000004F: return "RIGHT";
         case 0x40000052: return "UP";
         case 0x40000051: return "DOWN";
+        case 0x40000039: return "CAPSLOCK";
+        case 0x40000046: return "PRINTSCREEN";
+        case 0x40000047: return "SCROLLLOCK";
+        case 0x40000048: return "PAUSE";
+        case 0x40000053: return "NUMLOCK";
+        case 0x40000054: return "NUMPADDIVIDE";
+        case 0x40000055: return "NUMPADMULTIPLY";
+        case 0x40000056: return "NUMPADMINUS";
+        case 0x40000057: return "NUMPADPLUS";
+        case 0x40000058: return "ENTER";           // the keypad's, which WoW does not tell apart
+        case 0x40000062: return "NUMPAD0";
+        case 0x40000063: return "NUMPADDECIMAL";
         default: break;
     }
-    // F1..F12 are contiguous in SDL's scancode-derived range.
+    // F1..F12 are contiguous in SDL's scancode-derived range, and so are the
+    // keypad's 1..9.
     if (sym >= 0x4000003A && sym <= 0x40000045) {
         return "F" + std::to_string(sym - 0x4000003A + 1);
+    }
+    if (sym >= 0x40000059 && sym <= 0x40000061) {
+        return "NUMPAD" + std::to_string(sym - 0x40000059 + 1);
     }
     return {};
 }
 
-std::string LuaEngine::bindingCommandFor(int sdlKeycode, bool shift, bool ctrl,
+std::string LuaEngine::bindingCommandFor(const std::string& key, bool shift, bool ctrl,
                                          bool alt) {
-    if (!L_) return "";
-    std::string key = wowKeyName(sdlKeycode);
-    if (key.empty()) return "";
+    if (!L_ || key.empty()) return "";
     // WoW's own spelling, and the order is part of it: ALT before CTRL before
     // SHIFT, because that is how the binding tables are keyed and a prefix in
     // any other order matches nothing at all.
-    if (shift) key = "SHIFT-" + key;
-    if (ctrl)  key = "CTRL-"  + key;
-    if (alt)   key = "ALT-"   + key;
-    return bindingCommandForKey(key);
+    std::string modified = key;
+    if (shift) modified = "SHIFT-" + modified;
+    if (ctrl)  modified = "CTRL-"  + modified;
+    if (alt)   modified = "ALT-"   + modified;
+    std::string command = bindingCommandForKey(modified);
+    // A combination nothing is bound to is the bare key, as in the original
+    // client: shift held to read a tooltip does not stop W walking.
+    if (command.empty() && modified != key) command = bindingCommandForKey(key);
+    return command;
 }
 
 std::string LuaEngine::bindingCommandForKey(const std::string& key) {
@@ -9833,15 +9858,43 @@ std::string LuaEngine::bindingCommandForKey(const std::string& key) {
     return command;
 }
 
-bool LuaEngine::dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl,
+bool LuaEngine::dispatchBindingKey(const std::string& key, bool shift, bool ctrl,
                                    bool alt, bool down) {
-    if (!L_) return false;
-    const std::string command = bindingCommandFor(sdlKeycode, shift, ctrl, alt);
+    if (!L_ || key.empty()) return false;
+    if (!down) {
+        // The command the press ran, not the one the key would run now: shift
+        // let go between the two must not send the release somewhere else.
+        const auto held = heldBindingKeys_.find(key);
+        if (held == heldBindingKeys_.end()) return false;
+        const std::string command = std::move(held->second);
+        heldBindingKeys_.erase(held);
+        if (bindingRunsOnUp(L_, command)) runBindingCommand(L_, command, false);
+        return true;
+    }
+    // A key still held is the keyboard repeating it, and a binding runs once a
+    // press - holding the key that opens the bags does not open and shut them.
+    if (heldBindingKeys_.count(key)) return true;
+    const std::string command = bindingCommandFor(key, shift, ctrl, alt);
     if (command.empty()) return false;
     // Left alone if the client performs it. Not "already handled, so skip the
     // work" - running it as well would undo it.
     if (clientActsOnBinding(command)) return false;
-    return runBindingScript(command, down);
+    pressBinding(key, command);
+    return true;
+}
+
+void LuaEngine::pressBinding(const std::string& key, const std::string& command) {
+    heldBindingKeys_[key] = command;
+    runBindingCommand(L_, command, true);
+}
+
+void LuaEngine::releaseBindingKeys() {
+    if (!L_) return;
+    auto held = std::move(heldBindingKeys_);
+    heldBindingKeys_.clear();
+    for (const auto& [key, command] : held) {
+        if (bindingRunsOnUp(L_, command)) runBindingCommand(L_, command, false);
+    }
 }
 
 void LuaEngine::reloadKeyBindings() {
@@ -9862,25 +9915,8 @@ void LuaEngine::reloadKeyBindings() {
     lua_settop(L_, top);
 }
 
-bool LuaEngine::runBindingScript(const std::string& command, bool down) {
-    if (!L_) return false;
-    lua_getglobal(L_, "__WoweeBindingScripts");
-    if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return false; }
-    lua_getfield(L_, -1, command.c_str());
-    if (!lua_isfunction(L_, -1)) { lua_pop(L_, 2); return false; }
-    lua_pushstring(L_, down ? "down" : "up");
-    if (checkedLuaCall(L_, 1, 0, 0) != 0) {
-        LOG_WARNING("Binding ", command, " failed: ",
-                    luaL_optstring(L_, -1, "?"));
-        lua_pop(L_, 1);
-        lua_pop(L_, 1);
-        return false;
-    }
-    lua_pop(L_, 1);
-    return true;
-}
-
-LuaEngine::PadKeyOutcome LuaEngine::dispatchPadKey(const char* padKey) {
+LuaEngine::PadKeyOutcome LuaEngine::dispatchPadKey(const char* padKey, bool shift,
+                                                   bool ctrl, bool alt) {
     PadKeyOutcome outcome;
     if (!L_ || !padKey || !*padKey) return outcome;
 
@@ -9906,7 +9942,13 @@ LuaEngine::PadKeyOutcome LuaEngine::dispatchPadKey(const char* padKey) {
         }
     }
 
-    const std::string command = bindingCommandForKey(padKey);
+    // Still held from a press the pad forgot it had made - it was set aside
+    // while the player typed - and so already running.
+    if (heldBindingKeys_.count(padKey)) {
+        outcome.taken = true;
+        return outcome;
+    }
+    const std::string command = bindingCommandFor(padKey, shift, ctrl, alt);
     if (command.empty()) return outcome;
     if (clientActsOnBinding(command)) {
         outcome.command = command;
@@ -9915,7 +9957,7 @@ LuaEngine::PadKeyOutcome LuaEngine::dispatchPadKey(const char* padKey) {
     // Taken whether or not a script ran. A button bound to a command with no
     // script doing nothing is right; falling back to the default scheme would
     // be the button doing what the player bound it away from.
-    (void)runBindingScript(command, true);
+    pressBinding(padKey, command);
     outcome.taken = true;
     return outcome;
 }
@@ -9960,7 +10002,7 @@ void LuaEngine::dispatchFrameChar(const char* utf8) {
 
 bool LuaEngine::dispatchFrameKey(int sdlKeycode, bool down) {
     if (!L_) return false;
-    const std::string key = wowKeyName(sdlKeycode);
+    const std::string key = bindingKeyName(sdlKeycode);
     if (key.empty()) return false;
 
     const ui::Widget* best = topKeyboardFrame();

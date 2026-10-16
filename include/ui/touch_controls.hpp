@@ -81,7 +81,8 @@ private:
     /// tap, so that selecting a target does not also swing the view.
     static constexpr float kLookSlopPixels = 16.0f;
 
-    void setMovementKeys(bool forward, bool back, bool left, bool right) const;
+    /// The stick, as the camera's movement commands held by the touch stick.
+    void setMovementKeys(bool forward, bool back, bool left, bool right);
     /// Full deflection in real pixels, from the display's density.
     [[nodiscard]] float stickRadius() const;
     /// Held with hysteresis: a direction already on lets go later than it came on.
