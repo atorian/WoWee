@@ -181,14 +181,22 @@ bool LightingManager::loadLightSkyboxDbc(pipeline::AssetManager* assetManager) {
         return false;
     }
 
-    lightSkyboxPaths_.clear();
+    // ID, model path, flags. The flags column is WotLK's; a file without it
+    // reads as every sky standing in for the client's own.
+    const bool hasFlags = dbc.getFieldCount() > 2;
+    lightSkyboxes_.clear();
+    size_t combining = 0;
     for (uint32_t i = 0; i < dbc.getRecordCount(); ++i) {
         const uint32_t id = dbc.getUInt32(i, 0);
         std::string path = dbc.getString(i, 1);
-        if (id != 0 && !path.empty()) lightSkyboxPaths_[id] = std::move(path);
+        if (id == 0 || path.empty()) continue;
+        const uint32_t flags = hasFlags ? dbc.getUInt32(i, 2) : 0;
+        if (flags & LIGHT_SKYBOX_COMBINE_PROCEDURAL) ++combining;
+        lightSkyboxes_[id] = {.path = std::move(path), .flags = flags};
     }
-    LOG_INFO("Loaded LightSkybox.dbc: ", lightSkyboxPaths_.size(), " model paths");
-    return !lightSkyboxPaths_.empty();
+    LOG_INFO("Loaded LightSkybox.dbc: ", lightSkyboxes_.size(), " model paths, ", combining,
+             " drawn over the client's own sky", hasFlags ? "" : " (no flags column)");
+    return !lightSkyboxes_.empty();
 }
 
 bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
@@ -351,8 +359,14 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // same volumes and with the same smoothing the colours use, so the two
     // cross the border together. A light with no sky model contributes to no
     // layer, and the models fade toward the plain sky there.
+    //
+    // Gathered by LightSkybox row, as WoW.exe gathers its slots (0x7ed713):
+    // lights naming the same row add their weights, and two rows naming one
+    // model are two layers. Several rows share a model with different flags -
+    // DeathKnightFireSkyBox is 38 and 39 without the combine flag and 40 with
+    // it - and whether the client's sky is drawn under it is the row's say.
     {
-        std::vector<std::pair<std::string, float>> target;
+        std::vector<std::pair<uint32_t, float>> target;
         if (!isIndoors_) {
             const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
             for (size_t i = 0; i < blendCount; ++i) {
@@ -361,30 +375,39 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                 auto profileIt = lightParamsProfiles_.find(paramsId);
                 if (profileIt == lightParamsProfiles_.end() ||
                     profileIt->second.lightSkyboxId == 0) continue;
-                auto skyIt = lightSkyboxPaths_.find(profileIt->second.lightSkyboxId);
-                if (skyIt == lightSkyboxPaths_.end() || skyIt->second.empty()) continue;
+                const uint32_t skyboxId = profileIt->second.lightSkyboxId;
+                if (!lightSkyboxes_.contains(skyboxId)) {
+                    if (missingSkyboxIds_.insert(skyboxId).second) {
+                        LOG_WARNING("LightParams ", paramsId, " names LightSkybox ", skyboxId,
+                                    ", which LightSkybox.dbc does not have: no sky model there");
+                    }
+                    continue;
+                }
                 auto t = std::find_if(target.begin(), target.end(),
-                                      [&](const auto& e) { return e.first == skyIt->second; });
-                if (t == target.end()) target.emplace_back(skyIt->second, wv.weight);
-                else t->second += wv.weight;
+                                      [&](const auto& e) { return e.first == skyboxId; });
+                if (t == target.end()) target.emplace_back(skyboxId, wv.weight);
+                else t->second = std::min(1.0f, t->second + wv.weight);
             }
         }
-        auto targetFor = [&](const std::string& path) {
-            for (const auto& [p, w] : target) if (p == path) return w;
+        auto targetFor = [&](uint32_t id) {
+            for (const auto& [i, w] : target) if (i == id) return w;
             return 0.0f;
         };
         for (auto& layer : skyboxLayers_) {
-            layer.weight += (targetFor(layer.path) - layer.weight) * blendFactor;
+            layer.weight += (targetFor(layer.id) - layer.weight) * blendFactor;
         }
-        for (const auto& [path, w] : target) {
+        for (const auto& [id, w] : target) {
             const bool present = std::any_of(skyboxLayers_.begin(), skyboxLayers_.end(),
-                                             [&](const SkyboxLayer& l) { return l.path == path; });
-            if (!present) skyboxLayers_.push_back({.path = path, .weight = w * blendFactor});
+                                             [&](const SkyboxLayer& l) { return l.id == id; });
+            if (present) continue;
+            const SkyboxRow& row = lightSkyboxes_.at(id);
+            skyboxLayers_.push_back({.id = id, .path = row.path, .flags = row.flags,
+                                     .weight = w * blendFactor});
         }
         // Gone once faded out and not wanted - never while it is still wanted,
         // so a model is not dropped and reloaded on its way in.
         std::erase_if(skyboxLayers_, [&](const SkyboxLayer& l) {
-            return l.weight < 0.005f && targetFor(l.path) <= 0.0f;
+            return l.weight < 0.005f && targetFor(l.id) <= 0.0f;
         });
         std::sort(skyboxLayers_.begin(), skyboxLayers_.end(),
                   [](const SkyboxLayer& a, const SkyboxLayer& b) { return a.weight > b.weight; });
@@ -546,6 +569,13 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.cloudDensity = glm::mix(currentParams_.cloudDensity, newParams.cloudDensity, blendFactor);
     currentParams_.horizonGlow = glm::mix(currentParams_.horizonGlow, newParams.horizonGlow, blendFactor);
     currentParams_.directionalDir = glm::normalize(glm::mix(currentParams_.directionalDir, newParams.directionalDir, blendFactor));
+}
+
+bool LightingManager::skyModelsHideProceduralSky(
+    const std::function<bool(uint32_t)>& isLoaded) const {
+    return std::any_of(skyboxLayers_.begin(), skyboxLayers_.end(), [&](const SkyboxLayer& l) {
+        return l.hidesProceduralSky() && isLoaded(l.id);
+    });
 }
 
 std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const {

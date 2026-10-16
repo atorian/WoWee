@@ -1558,12 +1558,8 @@ void Renderer::beginFrame() {
             skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
-        float coverage = 0.0f;
-        if (lightingManager) {
-            for (const auto& layer : lightingManager->getSkyboxLayers()) coverage += layer.weight;
-        }
         const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
-        renderSkyBackground(timeOfDay, authored, authored && coverage >= 0.5f);
+        renderSkyBackground(timeOfDay, authored, skyModelsHideProceduralSky());
         if (skyProbe) {
             static bool logged = false;
             if (!logged) {
@@ -1911,30 +1907,40 @@ bool Renderer::updateSkyboxLayers() {
     // Faded out and no longer wanted.
     std::erase_if(skyLayers_, [&](const SkyLayerInstance& sky) {
         const bool wanted = std::any_of(layers.begin(), layers.end(), [&](const auto& l) {
-            return normalized(l.path) == sky.path;
+            return l.id == sky.skyboxId;
         });
         if (!wanted) skyboxModelRenderer_->removeInstance(sky.instanceId);
         return !wanted;
     });
 
+    // One instance per LightSkybox row, as WoW.exe draws one per slot: two
+    // rows naming the same model each draw it at their own weight. The model
+    // itself is uploaded once, by path.
     for (const auto& layer : layers) {
-        const std::string path = normalized(layer.path);
         auto it = std::find_if(skyLayers_.begin(), skyLayers_.end(),
-                               [&](const SkyLayerInstance& s) { return s.path == path; });
+                               [&](const SkyLayerInstance& s) { return s.skyboxId == layer.id; });
         if (it == skyLayers_.end()) {
-            const uint32_t modelId = loadSkyboxModel(path);
+            const uint32_t modelId = loadSkyboxModel(normalized(layer.path));
             if (modelId == 0) continue;
             const uint32_t instanceId = skyboxModelRenderer_->createInstance(
                 modelId, camera->getPosition(), glm::vec3(0.0f), 1.0f);
             if (instanceId == 0) continue;
             skyboxModelRenderer_->setSkipCollision(instanceId, true);
-            skyLayers_.push_back({.path = path, .instanceId = instanceId});
+            skyLayers_.push_back({.skyboxId = layer.id, .instanceId = instanceId});
             it = std::prev(skyLayers_.end());
         }
         skyboxModelRenderer_->setInstanceFade(it->instanceId, layer.weight);
         skyboxModelRenderer_->setInstancePosition(it->instanceId, camera->getPosition());
     }
     return !skyLayers_.empty();
+}
+
+bool Renderer::skyModelsHideProceduralSky() const {
+    if (!skyboxModelRenderer_ || !lightingManager) return false;
+    return lightingManager->skyModelsHideProceduralSky([&](uint32_t skyboxId) {
+        return std::any_of(skyLayers_.begin(), skyLayers_.end(),
+                           [&](const SkyLayerInstance& s) { return s.skyboxId == skyboxId; });
+    });
 }
 
 uint32_t Renderer::loadSkyboxModel(const std::string& path) {
@@ -2909,15 +2915,14 @@ void Renderer::renderWorld() {
         ? lightingManager->getVisualTimeOfDayHours()
         : (skybox ? skybox->getTimeOfDay() : 12.0f);
     // Two questions, apart while the sky crossfades. The sky models are drawn
-    // whenever any is up at all; the procedural sun, moons and clouds they
-    // stand in for hand over halfway, where both are at half and a switch is
-    // least visible - rather than staying away until the last model has faded.
+    // whenever any is up at all. The client's own stars, sun, moons and clouds
+    // go only under a model that is fully up and does not ask for them, as in
+    // WoW.exe: while a sky fades in, while two crossfade at a border, and
+    // under the auroras they are drawn and the models go over them. This was
+    // a hand-over at half the summed weight, which took them away under every
+    // sky model, auroras included, and at every border.
     const bool drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
-    float skyModelCoverage = 0.0f;
-    if (lightingManager) {
-        for (const auto& layer : lightingManager->getSkyboxLayers()) skyModelCoverage += layer.weight;
-    }
-    const bool useOriginalSkybox = drawSkyModels && skyModelCoverage >= 0.5f;
+    const bool useOriginalSkybox = skyModelsHideProceduralSky();
 
 
     // ── Multithreaded secondary command buffer recording ──

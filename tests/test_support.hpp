@@ -15,8 +15,10 @@
 /// every test target sets it, so the fallback is an empty root and the caller
 /// gets whatever a relative path means - which is what each copy already did.
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -78,6 +80,56 @@ inline std::filesystem::path scratchDir(const char* name) {
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
     return dir;
+}
+
+/// `data` written to `path`, its directories made first.
+inline void writeFile(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+}
+
+/// A WDBC file with `fields` uint32 columns; the strings block as given. A
+/// float column is its bits (std::bit_cast<uint32_t>).
+inline std::vector<uint8_t> wdbcFile(uint32_t fields,
+                                     const std::vector<std::vector<uint32_t>>& rows,
+                                     const std::string& strings) {
+    std::vector<uint8_t> out = {'W', 'D', 'B', 'C'};
+    auto u32 = [&out](uint32_t v) {
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    u32(static_cast<uint32_t>(rows.size()));
+    u32(fields);
+    u32(fields * 4);
+    u32(static_cast<uint32_t>(strings.size()));
+    for (const auto& row : rows)
+        for (uint32_t v : row) u32(v);
+    out.insert(out.end(), strings.begin(), strings.end());
+    return out;
+}
+
+/// An extracted data root an AssetManager can open: the files on disk, keyed
+/// by their archive path, under a manifest naming them.
+inline std::filesystem::path makeDataRoot(
+    const char* name, const std::map<std::string, std::vector<uint8_t>>& files) {
+    const std::filesystem::path root = scratchDir(name);
+    std::string entries;
+    for (const auto& [key, data] : files) {
+        std::string relative = key;
+        for (char& c : relative) if (c == '\\') c = '/';
+        writeFile(root / relative, data);
+        std::string jsonKey;
+        for (char c : key) {
+            if (c == '\\') jsonKey += "\\\\";
+            else jsonKey += c;
+        }
+        if (!entries.empty()) entries += ",";
+        entries += "\"" + jsonKey + "\":{\"p\":\"" + relative + "\",\"s\":" +
+                   std::to_string(data.size()) + ",\"h\":\"00000000\"}";
+    }
+    std::ofstream(root / "manifest.json")
+        << "{\"version\":1,\"basePath\":\".\",\"entries\":{" << entries << "}}";
+    return root;
 }
 
 /// The .dbc for a table, found case-insensitively, or an empty path.

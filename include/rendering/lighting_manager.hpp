@@ -1,9 +1,11 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <vector>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <glm/glm.hpp>
 
@@ -245,16 +247,49 @@ public:
     /** Time used by the visible sky, including persistent zone ambience. */
     [[nodiscard]] float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
 
+    /// LightSkybox.dbc's flag for a sky model drawn over the client's own sky
+    /// rather than instead of it - the auroras, Dragonblight's scarlet sky,
+    /// the Death Knight fire sky, the Wintergrasp battlefield haze.
+    static constexpr uint32_t LIGHT_SKYBOX_COMBINE_PROCEDURAL = 0x2;
+
     /// One of the original client's sky models, and how much of it is up.
     struct SkyboxLayer {
+        uint32_t id = 0;       ///< the LightSkybox row
         std::string path;
+        uint32_t flags = 0;    ///< LightSkybox.flags
         float weight = 0.0f;   ///< 0..1: the share of the lights here that name it
+
+        /// Whether this sky, once its model is loaded, stands in for the
+        /// client's own sky - the star dome, sun, moons and clouds - so they
+        /// are not drawn under it.
+        ///
+        /// WoW.exe's sky render (0x7f09b0) skips that whole group for a
+        /// blended skybox slot that is loaded, above 0.99 and without
+        /// LIGHT_SKYBOX_COMBINE_PROCEDURAL (the flag is read at 0x7f3877).
+        /// Anything less - a sky still fading in, two crossfading at a
+        /// border, or one that sets the flag - is drawn over the client's
+        /// sky, after it.
+        [[nodiscard]] bool hidesProceduralSky() const {
+            return weight > 0.99f && (flags & LIGHT_SKYBOX_COMBINE_PROCEDURAL) == 0;
+        }
     };
     /// Every sky model the lights around the player name, heaviest first, at
     /// the weights those lights have - the same falloff the sky colours blend
     /// by, smoothed the same way. A zone's sky fades out across its edge as
     /// the next one's fades in, rather than one swapping for the other.
+    ///
+    /// One layer per LightSkybox row, as WoW.exe keeps its slots (0x7ed713):
+    /// lights naming the same row add up, and two rows naming one model stay
+    /// apart, since their flags can differ.
     [[nodiscard]] const std::vector<SkyboxLayer>& getSkyboxLayers() const { return skyboxLayers_; }
+
+    /// Whether the sky models up here stand in for the client's own sky this
+    /// frame, so its stars, sun, moons and clouds are left out: one layer that
+    /// hidesProceduralSky and whose model is loaded. `isLoaded` answers that
+    /// for a LightSkybox row; a sky whose model failed to load hides nothing,
+    /// as in WoW.exe, which asks the slot's model first (0x7f0b14).
+    [[nodiscard]] bool skyModelsHideProceduralSky(
+        const std::function<bool(uint32_t skyboxId)>& isLoaded) const;
 
     /**
      * Manually set time of day for testing
@@ -308,7 +343,14 @@ private:
 
     // LightParams profiles by ID
     std::map<uint32_t, LightParamsProfile> lightParamsProfiles_;
-    std::map<uint32_t, std::string> lightSkyboxPaths_;
+    /// LightSkybox rows by id.
+    struct SkyboxRow {
+        std::string path;
+        uint32_t flags = 0;
+    };
+    std::map<uint32_t, SkyboxRow> lightSkyboxes_;
+    /// LightSkybox ids a LightParams row names and the file lacks, reported once.
+    std::set<uint32_t> missingSkyboxIds_;
 
     // Current state
     LightingParams currentParams_;

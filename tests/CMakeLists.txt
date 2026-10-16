@@ -2334,6 +2334,22 @@ wowee_test_link_glm(test_light_bands)
 add_test(NAME light_bands COMMAND test_light_bands)
 register_test_target(test_light_bands)
 
+# ── test_sky_model_gate ──────────────────────────────────────
+# When the original client's sky models stand in for its own stars, sun,
+# moons and clouds, and when they are drawn over them: LightingManager over
+# Light, LightParams and LightSkybox files made up in a data root. Links the
+# pipeline library for the AssetManager and the DBC reader.
+add_executable(test_sky_model_gate
+    test_sky_model_gate.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp)
+target_include_directories(test_sky_model_gate PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_sky_model_gate SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_sky_model_gate)
+add_test(NAME sky_model_gate COMMAND test_sky_model_gate)
+register_test_target(test_sky_model_gate)
+
 # ── test_light_headroom ──────────────────────────────────────
 # Keeping ambient + diffuse inside 1.0. 82% of the client's LightParams
 # rows exceed it at noon, and per-channel clipping shifts hue: Mulgore's

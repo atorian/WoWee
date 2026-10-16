@@ -345,10 +345,11 @@ private:
     std::function<uint32_t(uint32_t)> areaZoneResolver_;
     std::function<void(const glm::vec3&, uint32_t)> ambientEmitterSink_;
 
-    /// The original client's sky models that are up, one instance each, faded
-    /// by the weight LightingManager gives them. See updateSkyboxLayers.
+    /// The original client's sky models that are up, one instance per
+    /// LightSkybox row, faded by the weight LightingManager gives it. See
+    /// updateSkyboxLayers.
     struct SkyLayerInstance {
-        std::string path;
+        uint32_t skyboxId = 0;
         uint32_t instanceId = 0;
     };
     std::vector<SkyLayerInstance> skyLayers_;
@@ -454,6 +455,10 @@ public:
 private:
     void applyMsaaChange();
     bool updateSkyboxLayers();
+    /// Whether a loaded sky model stands in for the client's own sky this
+    /// frame, so its stars, sun, moons and clouds are not drawn. See
+    /// LightingManager::SkyboxLayer::hidesProceduralSky.
+    [[nodiscard]] bool skyModelsHideProceduralSky() const;
     uint32_t loadSkyboxModel(const std::string& path);
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
