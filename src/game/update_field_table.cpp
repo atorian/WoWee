@@ -65,6 +65,7 @@ static const UFNameEntry kUFNames[] = {
     {.name = "PLAYER_XP", .field = UF::PLAYER_XP},
     {.name = "PLAYER_NEXT_LEVEL_XP", .field = UF::PLAYER_NEXT_LEVEL_XP},
     {.name = "PLAYER_FIELD_COINAGE", .field = UF::PLAYER_FIELD_COINAGE},
+    {.name = "PLAYER_FIELD_BYTES", .field = UF::PLAYER_FIELD_BYTES},
     {.name = "PLAYER_QUEST_LOG_START", .field = UF::PLAYER_QUEST_LOG_START},
     {.name = "PLAYER_FIELD_INV_SLOT_HEAD", .field = UF::PLAYER_FIELD_INV_SLOT_HEAD},
     {.name = "PLAYER_FIELD_PACK_SLOT_1", .field = UF::PLAYER_FIELD_PACK_SLOT_1},

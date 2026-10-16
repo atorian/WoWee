@@ -72,6 +72,9 @@ enum class UF : uint16_t {
     PLAYER_NEXT_LEVEL_XP,
     PLAYER_REST_STATE_EXPERIENCE,
     PLAYER_FIELD_COINAGE,
+    /// Byte 2 is which of the four extra action bars are shown - the realm
+    /// keeps it, CMSG_SET_ACTIONBAR_TOGGLES sets it.
+    PLAYER_FIELD_BYTES,
     PLAYER_QUEST_LOG_START,
     PLAYER_FIELD_INV_SLOT_HEAD,
     PLAYER_FIELD_PACK_SLOT_1,

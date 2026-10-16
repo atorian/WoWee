@@ -1,7 +1,9 @@
 // lua_system_api.cpp - System, time, sound, locale, map, addons, instances, and utilities Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
+#include "game/entity_controller.hpp"
 #include <array>
 #include <algorithm>
+#include <optional>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -5475,71 +5477,36 @@ void registerSystemLuaAPI(lua_State* L) {
                 // client does not have. False disables the control rather than
                 // leaving it offering something that would do nothing.
                 {"IsPlayerResolutionAvailable", lua_ReturnFalse},
-                // Which extra action bars are shown. FrameXML draws the bars
-                // and MultiActionBar_Update decides from the SHOW_MULTI_ACTIONBAR_*
-                // globals, which are CVars and persist on their own - so the
-                // C-side toggle this mirrors has nothing left to do here.
                 // Set/GetActionBarToggles - which of the four extra action
-                // bars are shown.
+                // bars FrameXML shows: bottom left, bottom right, right and
+                // right 2. The Action Bars page's checkboxes read and write
+                // them, and MultiActionBar_Update shows the bars from the
+                // SHOW_MULTI_ACTIONBAR_* globals those set.
                 //
-                // The setter was a no-op and the getter was not bound at all.
-                // Each of the four checkboxes in Interface Options reads its
-                // own state with
-                //     self.value or ((select(n, GetActionBarToggles()) ...
-                // and self.value is nil until something sets it, so opening
-                // that panel called nil four times.
-                // The Interface Options checkboxes for the extra bars.
+                // The realm keeps them, as the original client's do - byte 2
+                // of the character's PLAYER_FIELD_BYTES, set by
+                // CMSG_SET_ACTIONBAR_TOGGLES - so the bars another client
+                // turned on are on here. What this client last saved answers
+                // only while the realm's are not known, which says so.
                 //
-                // These were stored here and nowhere else. This client draws
-                // its own action bars and suppresses FrameXML's MultiBar
-                // frames, so the toggle changed a number that only this file
-                // read: ticking "Bottom Left Bar" did nothing at all, which is
-                // the whole of "no way to add action bars".
-                //
-                // Only the two the client has a bar for are passed on. Bottom
-                // Right and Right Bar 2 have nothing to drive, so they are
-                // still remembered but move nothing - saying so here rather
-                // than mapping them onto a bar that is not theirs.
+                // The fifth argument, ALWAYS_SHOW_MULTIBARS, is the
+                // alwaysShowActionBars CVar's, which FrameXML reads itself.
                 {"SetActionBarToggles", [](lua_State* L) -> int {
             auto& shown = actionBarToggles();
-            shown[0] = lua_toboolean(L, 1) != 0;   // Bottom Left
-            shown[1] = lua_toboolean(L, 2) != 0;   // Bottom Right
-            shown[2] = lua_toboolean(L, 3) != 0;   // Right
-            shown[3] = lua_toboolean(L, 4) != 0;   // Right 2
-            // The fifth is ALWAYS_SHOW_MULTIBARS, which asks for the empty
-            // slots of a shown bar to stay visible. This client draws its bars
-            // whole, so there is nothing for it to change - read here so it is
-            // plainly ignored rather than silently dropped.
-            const bool alwaysShow = lua_toboolean(L, 5) != 0;
-            (void)alwaysShow;
-            saveInterfaceState();
-            // The fourth is this client's left bar, despite being labelled
-            // "Right Bar 2" where the player ticks it: the interface's fourth
-            // multi-bar is MultiBarLeft, which is action page 4, which is the
-            // upright bar this client draws at the left edge. Without it the
-            // tick did nothing and the bar could only be turned on from this
-            // client's own panel, where its checkbox then disagreed.
-            if (auto* svc = getLuaServices(L); svc && svc->setClientSetting) {
-                svc->setClientSetting("showbar2",     shown[0] ? "1" : "0");
-                svc->setClientSetting("showrightbar", shown[2] ? "1" : "0");
-                svc->setClientSetting("showleftbar",  shown[3] ? "1" : "0");
+            uint8_t mask = 0;
+            for (int i = 0; i < 4; ++i) {
+                shown[i] = lua_toboolean(L, i + 1) != 0;
+                if (shown[i]) mask = static_cast<uint8_t>(mask | (1u << i));
             }
+            saveInterfaceState();
+            if (auto* gh = getGameHandler(L)) gh->getEntityController()->setActionBarToggles(mask);
             return 0;
         }},
-                // Read back from the client's own settings for the two that
-                // drive a bar, so the checkbox shows what is on screen rather
-                // than what this file last stored. The two disagreed whenever
-                // the bar was turned on from the client's own settings window.
                 {"GetActionBarToggles", [](lua_State* L) -> int {
             auto shown = actionBarToggles();
-            if (auto* svc = getLuaServices(L); svc && svc->getClientSetting) {
-                const auto readBool = [&svc](const char* key, bool fallback) {
-                    const std::string v = svc->getClientSetting(key);
-                    return v.empty() ? fallback : (v != "0");
-                };
-                shown[0] = readBool("showbar2", shown[0]);
-                shown[2] = readBool("showrightbar", shown[2]);
-                shown[3] = readBool("showleftbar", shown[3]);
+            auto* gh = getGameHandler(L);
+            if (const auto mask = gh ? gh->getEntityController()->actionBarToggles() : std::nullopt) {
+                for (int i = 0; i < 4; ++i) shown[i] = (*mask & (1u << i)) != 0;
             }
             for (bool on : shown) lua_pushboolean(L, on ? 1 : 0);
             return 4;

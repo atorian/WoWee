@@ -557,6 +557,18 @@ if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/Fr
         "--bind:NUMPADDIVIDE"
         "--bindup:NUMPADDIVIDE"
         "--walk-toggles:1")
+
+    # The extra bars are FrameXML's, and its own Action Bars page shows them:
+    # the page is offered with all four bars and the lock, and ticking a bar
+    # puts it on screen and keeps it as the character's.
+    wowee_framexml_test(framexml_action_bars_page
+        "--player"
+        "--lua:assert(InterfaceOptionsActionBarsPanel and not InterfaceOptionsActionBarsPanel.hidden, 'the Action Bars page is not offered')"
+        "--lua:for _, n in ipairs({'BottomLeft', 'BottomRight', 'Right', 'RightTwo', 'LockActionBars', 'AlwaysShowActionBars'}) do assert(_G['InterfaceOptionsActionBarsPanel' .. n]:IsShown(), n .. ' is not on the Action Bars page') end"
+        "--lua:assert(not MultiBarBottomRight:IsShown(), 'the bottom right bar was on before it was ticked')"
+        "--lua:InterfaceOptionsActionBarsPanelBottomRight:Click()"
+        "--lua:assert(MultiBarBottomRight:IsShown(), 'ticking Bottom Right did not show the bar')"
+        "--lua:assert(select(2, GetActionBarToggles()), 'the bottom right bar is not kept as shown')")
 endif()
 
 # ── test_taxi_map_projection ────────────────────────────────
@@ -2917,7 +2929,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data)
+foreach(_domain chat spell inventory quest social session account_data action_bar)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

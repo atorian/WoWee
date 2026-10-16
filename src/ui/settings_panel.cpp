@@ -80,17 +80,6 @@ void SettingsPanel::renderSettingsInterfaceTab(const std::function<void()>& save
     drawSchemaCategory("Interface", saveCallback);
 
     ImGui::Spacing();
-    ImGui::SeparatorText("Action Bars");
-    drawSchemaCategory("Action Bars", saveCallback);
-    // Not a setting: the two offsets are, and this is the way back to where
-    // they started without dragging both sliders to zero by eye.
-    if (ImGui::Button("Reset Bottom Left Position")) {
-        pendingActionBar2OffsetX = 0.0f;
-        pendingActionBar2OffsetY = 0.0f;
-        saveCallback();
-    }
-
-    ImGui::Spacing();
     ImGui::SeparatorText("HUD");
     drawSchemaCategory("HUD", saveCallback);
 
@@ -204,8 +193,7 @@ void SettingsPanel::renderSettingsGameplayTab(const std::function<void()>& saveC
 
     if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
         for (const char* category : {"Camera", "Interface", "Minimap",
-                                     "Action Bars", "Combat & HUD",
-                                     "Gameplay", "Chat"}) {
+                                     "Combat & HUD", "Gameplay", "Chat"}) {
             restoreSchemaDefaults(category);
         }
         // One the schema cannot hold: the bag scale's default depends on the
@@ -1098,15 +1086,6 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "minimaprotate",  .asBool  = &SettingsPanel::pendingMinimapRotate},
 
     // --- Action bars ---
-    {.key = "actionbarscale",  .asFloat = &SettingsPanel::pendingActionBarScale},
-    {.key = "buffbarscale",    .asFloat = &SettingsPanel::pendingBuffBarScale},
-    {.key = "showbar2",        .asBool  = &SettingsPanel::pendingShowActionBar2},
-    {.key = "bar2offsetx",     .asFloat = &SettingsPanel::pendingActionBar2OffsetX},
-    {.key = "bar2offsety",     .asFloat = &SettingsPanel::pendingActionBar2OffsetY},
-    {.key = "showrightbar",    .asBool  = &SettingsPanel::pendingShowRightBar},
-    {.key = "rightbaroffsety", .asFloat = &SettingsPanel::pendingRightBarOffsetY},
-    {.key = "showleftbar",     .asBool  = &SettingsPanel::pendingShowLeftBar},
-    {.key = "leftbaroffsety",  .asFloat = &SettingsPanel::pendingLeftBarOffsetY},
 
     // --- Combat and HUD ---
     {.key = "nameplatescale",     .asFloat = &SettingsPanel::nameplateScale_},

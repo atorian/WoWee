@@ -179,21 +179,6 @@ public:
     // ---- Pending soundtrack ----
     bool pendingUseOriginalSoundtrack = true;
 
-    // ---- Pending buff bar layout ----
-    // Multiplier for the buff/debuff bar icons, on top of the automatic
-    // resolution scaling (0.75–1.5).
-    float pendingBuffBarScale = 1.0f;
-
-    // ---- Pending action bar layout ----
-    bool pendingShowActionBar2 = false;  // Show bottom-left extra action bar above main bar
-    float pendingActionBarScale = 1.0f;  // Multiplier for action bar slot size (0.5–1.5)
-    float pendingActionBar2OffsetX = 0.0f;  // Horizontal offset from default center position
-    float pendingActionBar2OffsetY = 0.0f;  // Vertical offset from default (above bar 1)
-    bool pendingShowRightBar = false;   // Right-edge vertical action bar (FrameXML page 3)
-    bool pendingShowLeftBar  = false;   // Left-edge vertical action bar (FrameXML page 4)
-    float pendingRightBarOffsetY = 0.0f;  // Vertical offset from screen center
-    float pendingLeftBarOffsetY  = 0.0f;  // Vertical offset from screen center
-
     // ---- Pending graphics quality ----
     int pendingGroundClutterDensity = kDefaultGroundClutter;
     /// The five that used to live only on the game's own Effects panel,

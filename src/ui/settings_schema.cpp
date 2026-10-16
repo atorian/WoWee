@@ -436,33 +436,10 @@ constexpr SettingDesc kSchema[] = {
      "Turn the minimap so the way you are facing is up, rather than\n"
      "north. The minimap's own menu has this too.", "", 0},
 
-    // ------------------------------------------------------------- Action Bars
-    // Up to 2, not 1.5: a slot is 48 pixels times this, and the scale a
-    // 2160-line screen wants is 2. Stopping at 1.5 meant the control could not
-    // ask for what the display needed, and the bars sat smaller than the buff
-    // bar beside them however far it was dragged.
-    {"actionbarscale", "Action bar scale", SettingKind::Float, 0.5f, 2.0f, 0.05f,
-     "Action Bars", "Scale", "Size of every action bar button.", "", 1},
-    {"buffbarscale", "Buff bar scale", SettingKind::Float, 0.75f, 1.5f, 0.05f,
-     "Action Bars", "", "Size of the buff and debuff icons, on top of the automatic\n"
-     "scaling for your display.", "", 1},
-    {"showbar2", "Bottom left bar", SettingKind::Bool, 0, 0, 0, "Action Bars", "Extra bars",
-     "A second bar above the main one. Holds the game's action page 6,\n"
-     "where the original client keeps this bar.", "", 0},
-    {"bar2offsetx", "Bottom left bar: move across", SettingKind::Float, -600, 600, 10,
-     "Action Bars", "", "Shift that bar left or right of its usual place, in pixels.", "", 0, "showbar2"},
-    {"bar2offsety", "Bottom left bar: move up", SettingKind::Float, -400, 400, 10,
-     "Action Bars", "", "Shift that bar up or down from its usual place, in pixels.", "", 0, "showbar2"},
-    {"showrightbar", "Right side bar", SettingKind::Bool, 0, 0, 0, "Action Bars", "",
-     "An upright bar at the right edge of the screen. Holds action\n"
-     "page 3.", "", 0},
-    {"rightbaroffsety", "Right side bar: move up", SettingKind::Float, -400, 400, 10,
-     "Action Bars", "", "Shift it up or down from the middle of the screen, in pixels.", "", 0, "showrightbar"},
-    {"showleftbar", "Left side bar", SettingKind::Bool, 0, 0, 0, "Action Bars", "",
-     "An upright bar at the left edge of the screen. Holds action\n"
-     "page 4.", "", 0},
-    {"leftbaroffsety", "Left side bar: move up", SettingKind::Float, -400, 400, 10,
-     "Action Bars", "", "Shift it up or down from the middle of the screen, in pixels.", "", 0, "showleftbar"},
+    // No Action Bars rows. The bars are FrameXML's, and so is the page that
+    // shows and locks them - InterfaceOptionsActionBarsPanel, whose four
+    // toggles the realm keeps. The rows that were here sized and placed the
+    // bars this client used to draw, and nothing read them once it stopped.
 
     // --------------------------------------------------------------------- HUD
     // Combat & HUD until 2026-09-06, when the fighting rows went to a Combat

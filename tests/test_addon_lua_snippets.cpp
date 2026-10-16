@@ -111,7 +111,9 @@ local bars = frame("InterfaceOptionsActionBarsPanel")
 local bottomLeft = frame("InterfaceOptionsActionBarsPanelBottomLeft", bars)
 bottomLeft.value = "1"
 bottomLeft.uvar = "SHOW_MULTI_ACTIONBAR_1"
-bars.controls = { bottomLeft }
+local secure = frame("InterfaceOptionsActionBarsPanelSecureAbilityToggle", bars)
+secure.value = "1"
+bars.controls = { bottomLeft, secure }
 )LUA";
 
 }  // namespace
@@ -135,6 +137,7 @@ TEST_CASE("a retired control commits nothing and keeps its place", "[addonlua]")
             local vsync = VideoOptionsResolutionPanelVSync
             local scale = VideoOptionsResolutionPanelUIScaleSlider
             local bar = InterfaceOptionsActionBarsPanelBottomLeft
+            local secure = InterfaceOptionsActionBarsPanelSecureAbilityToggle
             local listed = ""
             for _, c in ipairs(VideoOptionsResolutionPanel.controls) do
                 listed = listed .. c:GetName() .. " "
@@ -142,6 +145,7 @@ TEST_CASE("a retired control commits nothing and keeps its place", "[addonlua]")
             return "listed=" .. listed
                 .. "| vsync.value=" .. tostring(vsync.value)
                 .. " scale.value=" .. tostring(scale.value)
+                .. " secure.value=" .. tostring(secure.value)
                 .. " bar.value=" .. tostring(bar.value)
                 .. " bar.uvar=" .. tostring(bar.uvar)
                 .. " hidden=" .. tostring(vsync._hidden)
@@ -150,9 +154,11 @@ TEST_CASE("a retired control commits nothing and keeps its place", "[addonlua]")
     });
     // The retired boxes keep their place on the panel, so setup still reaches
     // them, and lose only the value the Okay loops would have written back.
+    // The bar boxes are not retired - the page that shows the bars is the
+    // game's own - and commit as they always did.
     CHECK(result ==
           "listed=VideoOptionsResolutionPanelVSync VideoOptionsResolutionPanelUIScaleSlider "
-          "| vsync.value=nil scale.value=1 bar.value=nil "
+          "| vsync.value=nil scale.value=1 secure.value=nil bar.value=1 "
           "bar.uvar=SHOW_MULTI_ACTIONBAR_1 hidden=true");
 }
 

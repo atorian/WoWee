@@ -339,7 +339,7 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
     for (const auto& d : schema()) present.insert(d.category);
 
     for (const char* category : {"Graphics", "Detail", "Grass", "Ray Tracing", "Upscaling", "Display",
-                                 "Camera", "Interface", "Minimap", "Action Bars", "HUD",
+                                 "Camera", "Interface", "Minimap", "HUD",
                                  "Combat", "Names", "Nameplates", "Combat Text", "Unit Frames",
                                  "Sound", "Sound Effects", "Chat", "Gameplay"}) {
         INFO("no setting names the category " << category
@@ -360,7 +360,9 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
     // is more than the 413 by 428 container holds in two columns, and the
     // last four were being laid out past the bottom of the second one.
     // Twenty with Ray Tracing, for the same reason as Grass: Graphics and
-    // Detail both fill their columns.
-    INFO("the schema names " << present.size() << " categories where twenty are expected");
-    CHECK(present.size() == 20);
+    // Detail both fill their columns. Nineteen since Action Bars went back to
+    // the game's own page: the bars are FrameXML's, and so is the page that
+    // shows them.
+    INFO("the schema names " << present.size() << " categories where nineteen are expected");
+    CHECK(present.size() == 19);
 }

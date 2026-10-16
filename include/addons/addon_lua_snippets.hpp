@@ -1215,9 +1215,8 @@ local kRemoved = {
     -- of these writes a value the schema shows on a row of its own: vertical
     -- sync, windowed mode and gamma on the Display page, gamma as brightness;
     -- invert mouse, camera style, follow speed and max camera distance on
-    -- Camera; auto loot and the secure ability toggle on Gameplay; the four
-    -- extra bars on Action Bars, where Bottom Right drove nothing at all; and
-    -- chat style and both speech-bubble boxes on Chat.
+    -- Camera; auto loot and the secure ability toggle on Gameplay; and chat
+    -- style and both speech-bubble boxes on Chat.
     "VideoOptionsResolutionPanelVSync",
     "VideoOptionsResolutionPanelWindowed",
     "VideoOptionsResolutionPanelGammaSlider",
@@ -1226,19 +1225,10 @@ local kRemoved = {
     "InterfaceOptionsCameraPanelFollowSpeedSlider",
     "InterfaceOptionsCameraPanelMaxDistanceSlider",
     "InterfaceOptionsControlsPanelAutoLootCorpse",
-    "InterfaceOptionsActionBarsPanelBottomLeft",
-    "InterfaceOptionsActionBarsPanelBottomRight",
-    "InterfaceOptionsActionBarsPanelRight",
-    "InterfaceOptionsActionBarsPanelRightTwo",
     "InterfaceOptionsActionBarsPanelSecureAbilityToggle",
     "InterfaceOptionsSocialPanelChatBubbles",
     "InterfaceOptionsSocialPanelPartyChat",
     "InterfaceOptionsSocialPanelChatStyle",
-    -- Two the client never reads. It draws its own bars, whole, and its own
-    -- buttons take the dragging; the lock and the always-show are for
-    -- FrameXML's bars, which are not the ones on screen.
-    "InterfaceOptionsActionBarsPanelLockActionBars",
-    "InterfaceOptionsActionBarsPanelAlwaysShowActionBars",
 
     -- The same anti-aliasing the schema offers, in the same four steps.
     -- The Resolution page keeps what is genuinely the window's: the size of
@@ -1311,15 +1301,13 @@ local kRemovedCategories = {
     -- sound controls in one list, one of them describing a master volume
     -- this client had already been showing beside it.
     "AudioOptionsSoundPanel",
-    -- Three Interface pages with nothing left on them once the controls
-    -- above are gone: Mouse kept only invert mouse, Camera only the three
-    -- the schema's Camera page has, and ActionBars only bars the schema's
-    -- Action Bars page toggles and two switches for bars this client does
-    -- not draw. Each would have sat beside the schema's page of the same
-    -- name, twice in one list.
+    -- Two Interface pages with nothing left on them once the controls above
+    -- are gone: Mouse kept only invert mouse, Camera only the three the
+    -- schema's Camera page has. Each would have sat beside the schema's page
+    -- of the same name, twice in one list. Not Action Bars: the bars are
+    -- FrameXML's, and its page is the one that shows, hides and locks them.
     "InterfaceOptionsMousePanel",
     "InterfaceOptionsCameraPanel",
-    "InterfaceOptionsActionBarsPanel",
     -- And the rest of the game's Interface pages, since 2026-09-06. Every
     -- control on them that this client or its FrameXML reads is a row in
     -- the schema, on the same CVar it always wrote - see SettingDesc::store

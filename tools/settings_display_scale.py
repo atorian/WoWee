@@ -54,7 +54,6 @@ MIN_AUTO, MAX_AUTO = 0.75, 2.0
 # setting key -> the range its own row allows, which is what its default is
 # held to.
 WATCHED = {
-    "actionbarscale": (0.5, 2.0),
     "windowuiscale": (0.75, 1.5),
     "bagscale": (0.75, 1.5),
 }

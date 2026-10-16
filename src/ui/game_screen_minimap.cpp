@@ -1745,18 +1745,9 @@ void GameScreen::saveSettings() {
     out << "show_micro_menu=" << (settingsPanel_.pendingShowMicroMenu ? 1 : 0) << "\n";
     out << "chat_box_visible=" << (settingsPanel_.pendingChatBoxVisible ? 1 : 0) << "\n";
     out << "idle_camera_orbit=" << (settingsPanel_.pendingIdleCameraOrbit ? 1 : 0) << "\n";
-    out << "buff_bar_scale=" << settingsPanel_.pendingBuffBarScale << "\n";
-    out << "action_bar_scale=" << settingsPanel_.pendingActionBarScale << "\n";
     out << "nameplate_scale=" << settingsPanel_.nameplateScale_ << "\n";
     out << "show_friendly_nameplates=" << (settingsPanel_.showFriendlyNameplates_ ? 1 : 0) << "\n";
     out << "show_enemy_nameplates=" << (settingsPanel_.showEnemyNameplates_ ? 1 : 0) << "\n";
-    out << "show_action_bar2=" << (settingsPanel_.pendingShowActionBar2 ? 1 : 0) << "\n";
-    out << "action_bar2_offset_x=" << settingsPanel_.pendingActionBar2OffsetX << "\n";
-    out << "action_bar2_offset_y=" << settingsPanel_.pendingActionBar2OffsetY << "\n";
-    out << "show_right_bar=" << (settingsPanel_.pendingShowRightBar ? 1 : 0) << "\n";
-    out << "show_left_bar=" << (settingsPanel_.pendingShowLeftBar ? 1 : 0) << "\n";
-    out << "right_bar_offset_y=" << settingsPanel_.pendingRightBarOffsetY << "\n";
-    out << "left_bar_offset_y=" << settingsPanel_.pendingLeftBarOffsetY << "\n";
     out << "damage_flash=" << (settingsPanel_.damageFlashEnabled_ ? 1 : 0) << "\n";
     out << "low_health_vignette=" << (settingsPanel_.lowHealthVignetteEnabled_ ? 1 : 0) << "\n";
 
@@ -1899,18 +1890,10 @@ void GameScreen::loadSettings() {
         SettingsPanel::recommendedPixelScale(currentDisplayHeight, 0.75f, 1.5f);
     settingsPanel_.pendingWindowUiScale =
         SettingsPanel::recommendedPixelScale(currentDisplayHeight, 0.75f, 1.5f);
-    // The action bar's slots are 48 pixels times this, and nothing else moves
-    // them - the buff bar beside them scales itself with the screen height, and
-    // the bars did not. Only the default: a saved value still wins, so nobody's
-    // bars move under them. Scaling inside the panel the way the buff bar does
-    // would be the better shape and would change what an existing 1.0 means.
-    settingsPanel_.pendingActionBarScale =
-        SettingsPanel::recommendedPixelScale(currentDisplayHeight, 0.5f, 2.0f);
     if (!in.is_open()) return;
 
     bool bagScaleLoaded = false;
     bool windowScaleLoaded = false;
-    bool actionBarScaleLoaded = false;
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
@@ -1987,31 +1970,12 @@ void GameScreen::loadSettings() {
                 settingsPanel_.pendingShowMicroMenu = (std::stoi(val) != 0);
             } else if (key == "idle_camera_orbit") {
                 settingsPanel_.pendingIdleCameraOrbit = (std::stoi(val) != 0);
-            } else if (key == "buff_bar_scale") {
-                settingsPanel_.pendingBuffBarScale = std::clamp(std::stof(val), 0.75f, 1.5f);
-            } else if (key == "action_bar_scale") {
-                settingsPanel_.pendingActionBarScale = std::clamp(std::stof(val), 0.5f, 2.0f);
-                actionBarScaleLoaded = true;
             } else if (key == "nameplate_scale") {
                 settingsPanel_.nameplateScale_ = std::clamp(std::stof(val), 0.5f, 2.0f);
             } else if (key == "show_friendly_nameplates") {
                 settingsPanel_.showFriendlyNameplates_ = (std::stoi(val) != 0);
             } else if (key == "show_enemy_nameplates") {
                 settingsPanel_.showEnemyNameplates_ = (std::stoi(val) != 0);
-            } else if (key == "show_action_bar2") {
-                settingsPanel_.pendingShowActionBar2 = (std::stoi(val) != 0);
-            } else if (key == "action_bar2_offset_x") {
-                settingsPanel_.pendingActionBar2OffsetX = std::clamp(std::stof(val), -600.0f, 600.0f);
-            } else if (key == "action_bar2_offset_y") {
-                settingsPanel_.pendingActionBar2OffsetY = std::clamp(std::stof(val), -400.0f, 400.0f);
-            } else if (key == "show_right_bar") {
-                settingsPanel_.pendingShowRightBar = (std::stoi(val) != 0);
-            } else if (key == "show_left_bar") {
-                settingsPanel_.pendingShowLeftBar = (std::stoi(val) != 0);
-            } else if (key == "right_bar_offset_y") {
-                settingsPanel_.pendingRightBarOffsetY = std::clamp(std::stof(val), -400.0f, 400.0f);
-            } else if (key == "left_bar_offset_y") {
-                settingsPanel_.pendingLeftBarOffsetY = std::clamp(std::stof(val), -400.0f, 400.0f);
             } else if (key == "damage_flash") {
                 settingsPanel_.damageFlashEnabled_ = (std::stoi(val) != 0);
             } else if (key == "low_health_vignette") {
@@ -2151,7 +2115,7 @@ void GameScreen::loadSettings() {
         } catch (...) {}
     }
 
-    if (!bagScaleLoaded || !windowScaleLoaded || !actionBarScaleLoaded) {
+    if (!bagScaleLoaded || !windowScaleLoaded) {
         // The height the file turned out to hold, now that it has been read -
         // this runs from the constructor, where there is no display to ask.
         const float defaultHeight = settingsPanel_.displaySettingsLoaded_
@@ -2164,10 +2128,6 @@ void GameScreen::loadSettings() {
         if (!windowScaleLoaded) {
             settingsPanel_.pendingWindowUiScale =
                 SettingsPanel::recommendedPixelScale(defaultHeight, 0.75f, 1.5f);
-        }
-        if (!actionBarScaleLoaded) {
-            settingsPanel_.pendingActionBarScale =
-                SettingsPanel::recommendedPixelScale(defaultHeight, 0.5f, 2.0f);
         }
     }
 
