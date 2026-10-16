@@ -666,6 +666,7 @@ set(WOWEE_SOURCES
     src/core/entity_spawner_processing.cpp
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
+    src/core/enchant_visual.cpp
     src/core/world_loader.cpp
     src/core/map_scope.cpp
     src/core/character_session.cpp

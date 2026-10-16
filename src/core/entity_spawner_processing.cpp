@@ -2,6 +2,7 @@
 #include "core/thread_pool.hpp"
 #include "core/character_paths.hpp"
 #include "core/helm_visual.hpp"
+#include "core/enchant_visual.hpp"
 
 #include <set>
 #include "rendering/m2_model_classifier.hpp"
@@ -835,7 +836,7 @@ void EntitySpawner::processAsyncEquipmentResults() {
                 renderer->setPredecodedBLPCache(nullptr);
             }
         } guard{this, charRenderer};
-        setOnlinePlayerEquipment(result.guid, result.displayInfoIds, result.inventoryTypes);
+        setOnlinePlayerEquipment(result.guid, result.equipment);
     }
 }
 
@@ -857,7 +858,8 @@ void EntitySpawner::processDeferredEquipmentQueue() {
         PreparedEquipmentUpdate ready;
         ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.token = jobToken;
         if (!jobToken.current()) return ready;
-        ready.displayInfoIds = equipment.first; ready.inventoryTypes = equipment.second;
+        ready.equipment = equipment;
+        const auto& displayInfoIds = ready.equipment.displayInfoIds;
         std::vector<std::string> paths{snapshot.bodySkinPath};
         paths.insert(paths.end(), snapshot.underwearPaths.begin(), snapshot.underwearPaths.end());
         auto keyFor = [](std::string path) {
@@ -879,8 +881,8 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                 if (texture.type == 0) paths.push_back(texture.filename);
             ready.models[key] = std::move(model);
         };
-        if (ready.displayInfoIds[0]) {
-            const auto helm = resolveHelmVisual(*assets, ready.displayInfoIds[0], snapshot.raceId, snapshot.genderId);
+        if (displayInfoIds[0]) {
+            const auto helm = resolveHelmVisual(*assets, displayInfoIds[0], snapshot.raceId, snapshot.genderId);
             prepareModel(helm.racialModelPath); prepareModel(helm.baseModelPath);
             paths.push_back(helm.texturePath);
         }
@@ -889,8 +891,8 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                 ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
             uint32_t fields[8]; pipeline::getItemDisplayInfoTextureFields(*dbc, layout, fields);
             for (int slot = 0; slot < 19; ++slot) {
-                const auto row = dbc->findRecordById(ready.displayInfoIds[slot]);
-                if (row < 0 || ready.displayInfoIds[slot] == 0) continue;
+                const auto row = dbc->findRecordById(displayInfoIds[slot]);
+                if (row < 0 || displayInfoIds[slot] == 0) continue;
                 for (int region = 0; region < 8; ++region) {
                     const auto name = dbc->getString(row, fields[region]);
                     if (name.empty()) continue;
@@ -930,6 +932,10 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                         paths.push_back("Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp");
                         paths.push_back("Item\\ObjectComponents\\Shield\\" + art.textureName + ".blp");
                     }
+                    // The enchant's glow, read here with the weapon so that
+                    // attaching it on the main thread reads nothing.
+                    for (const auto& path : resolveEnchantVisualModels(*assets, ready.equipment.enchantIds[slot]))
+                        prepareModel(path);
                 }
             }
         }
@@ -2343,7 +2349,7 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
         auto ready = spawns_->preparedEquipmentUpdate_->models.find(key);
         if (ready == spawns_->preparedEquipmentUpdate_->models.end() || !ready->second) return false;
         outModel = *ready->second;
-        return outModel.isValid();
+        return outModel.hasContent();
     }
     auto normalize = [](std::string path) {
         std::replace(path.begin(), path.end(), '/', '\\');
@@ -2368,7 +2374,7 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
     if (cached != assets_.attachmentModelData_.end() &&
         (skinKey.empty() || spawns_->preparedAttachmentTextures_.count(skinKey))) {
         outModel = *cached->second;
-        return outModel.isValid();
+        return outModel.hasContent();
     }
     if (spawns_->asyncAttachmentLoads_.size() >= 2) return false;
     auto model = cached == assets_.attachmentModelData_.end() ? nullptr : cached->second;
@@ -2398,10 +2404,10 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
                         LOG_WARNING("Model ", key, ": skin file ", skinPath, " did not parse");
                     }
                 }
-                if (!parsed->isValid()) {
-                    LOG_WARNING("Model ", key, " has no drawable geometry (version ", parsed->version,
-                                ", ", parsed->vertices.size(), " vertices, ", parsed->indices.size(),
-                                " indices, ", bytes.size(), " bytes)");
+                if (!parsed->hasContent()) {
+                    LOG_WARNING("Model ", key, " has nothing to draw - no geometry and no emitters (version ",
+                                parsed->version, ", ", parsed->vertices.size(), " vertices, ",
+                                parsed->indices.size(), " indices, ", bytes.size(), " bytes)");
                     parsed.reset();
                 } else pipeline::loadExternalAnimations(*assets, key, bytes, *parsed,
                     {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,

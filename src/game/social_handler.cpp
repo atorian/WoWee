@@ -1138,7 +1138,7 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         std::array<uint32_t, 19> items{};
         std::array<uint16_t, 19> enchantIds{};
         if (parseInspectEquipmentPayload(packet, guid, items, enchantIds)) {
-            owner_.cacheInspectedPlayerEquipment(guid, items);
+            owner_.cacheInspectedPlayerEquipment(guid, items, enchantIds);
 
             auto entity = owner_.getEntityManager().getEntity(guid);
             std::string playerName = "Target";
@@ -1223,14 +1223,11 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                      " unparsed payload bytes=", packet.getRemainingSize());
         }
 
-        const auto& inspected = owner_.inventory().inspectedPlayerItemEntries();
-        auto gearIt = inspected.find(guid);
-        if (gearIt != inspected.end()) {
-            inspectResult_.itemEntries = gearIt->second;
-        }
+        const auto* inspected = owner_.inventory().inspectedItemEntries(guid);
+        if (inspected) inspectResult_.itemEntries = *inspected;
 
         LOG_INFO("SMSG_INSPECT_TALENT (TBC): ", playerName,
-                 " gearCached=", (gearIt != inspected.end() ? "yes" : "no"),
+                 " gearCached=", (inspected ? "yes" : "no"),
                  " payload bytes remaining=", packet.getRemainingSize());
         if (owner_.hasAddonEventListener()) {
             char guidBuf[32];
@@ -1388,12 +1385,10 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
     // paperdoll however well equipped they were.
     if (sawGear) {
         inspectResult_.itemEntries = itemEntries;
-        owner_.cacheInspectedPlayerEquipment(guid, itemEntries);
+        owner_.cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
     } else {
-        const auto& inspected = owner_.inventory().inspectedPlayerItemEntries();
-        auto gearIt = inspected.find(guid);
-        inspectResult_.itemEntries =
-            (gearIt != inspected.end()) ? gearIt->second : std::array<uint32_t, 19>{};
+        const auto* inspected = owner_.inventory().inspectedItemEntries(guid);
+        inspectResult_.itemEntries = inspected ? *inspected : std::array<uint32_t, 19>{};
     }
 
     LOG_INFO("Inspect results for ", playerName, ": ", totalTalents, " talents, ",

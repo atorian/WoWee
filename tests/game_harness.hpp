@@ -198,6 +198,11 @@ public:
     /// SMSG_UPDATE_OBJECT creating an item object, as 3.3.5a writes one: no
     /// movement, then its entry and stack count.
     static std::vector<uint8_t> createItemBody(uint64_t guid, uint32_t entry, uint32_t stack);
+    /// SMSG_ITEM_QUERY_SINGLE_RESPONSE describing one item template, field for
+    /// field as AzerothCore writes it: this display and inventory type, the
+    /// rest a plain item with no stats, spells or sockets.
+    static std::vector<uint8_t> itemTemplateBody(uint32_t entry, const std::string& name,
+                                                 uint32_t displayInfoId, uint32_t inventoryType);
     /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
     static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
     /// Put the player's own object in view - what the realm's fields for the

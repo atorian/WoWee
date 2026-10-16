@@ -298,18 +298,16 @@ void EntitySpawner::queueGameObjectSpawn(uint64_t guid, uint32_t entry, uint32_t
     spawns_->pendingGameObjectSpawns_.push_back({guid, entry, displayId, x, y, z, orientation, scale, token});
 }
 
-void EntitySpawner::queuePlayerEquipment(uint64_t guid,
-                                          const std::array<uint32_t, 19>& displayInfoIds,
-                                          const std::array<uint8_t, 19>& inventoryTypes) {
+void EntitySpawner::queuePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {
     if (!spawns_) return;
     spawns_->jobs_.replace(JobGroup::Channel::Equipment, guid);
     for (auto& queued : spawns_->deferredEquipmentQueue_) {
         if (queued.first == guid) {
-            queued.second = {displayInfoIds, inventoryTypes};
+            queued.second = equipment;
             return;
         }
     }
-    spawns_->deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
+    spawns_->deferredEquipmentQueue_.push_back({guid, equipment});
 }
 
 // --- Across a reconnect ---

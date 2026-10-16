@@ -1286,12 +1286,8 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
                                                           effectsDbc.get());
 
     for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
-        const std::string& modelName = effectModels[visualSlot];
-        if (modelName.empty()) continue;
-
-        std::string m2Path = modelName;
-        size_t dot = m2Path.rfind('.');
-        m2Path = (dot != std::string::npos ? m2Path.substr(0, dot) : m2Path) + ".m2";
+        const std::string& m2Path = effectModels[visualSlot];
+        if (m2Path.empty()) continue;
 
         pipeline::M2Model effectModel;
         if (!loadPreviewM2(m2Path, effectModel)) {

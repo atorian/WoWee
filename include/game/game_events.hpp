@@ -353,6 +353,10 @@ struct PlayerEquipmentResolved {
     uint64_t guid = 0;
     std::array<uint32_t, 19> displayIds{};
     std::array<uint8_t, 19> inventoryTypes{};
+    /// The SpellItemEnchantment id each slot shows - a temporary enchant over
+    /// the permanent one, as InventoryHandler::shownEnchantId has it for the
+    /// player's own items - or zero. The glow on a weapon comes from this.
+    std::array<uint32_t, 19> enchantIds{};
 };
 
 } // namespace wowee::game::events

@@ -123,6 +123,13 @@ bool usesVisibleItemDisplayIds() {
     return false;
 }
 
+/// The enchant an item shows: a temporary one (a poison, a sharpening stone)
+/// masks the permanent one while it lasts. The one rule for the player's own
+/// items and for what other players' visible-item fields say of theirs.
+uint32_t shownEnchant(uint32_t permanent, uint32_t temporary) {
+    return temporary != 0 ? temporary : permanent;
+}
+
 constexpr int kTbcVisibleItemStride = 16;
 
 int tbcVisibleItemBaseFallback() {
@@ -4622,8 +4629,8 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // Selectively re-emit only players whose equipment references this item entry
         const uint32_t resolvedEntry = data.entry;
         int reemitCount = 0;
-        for (const auto& [guid, entries] : seen_.otherPlayerVisibleItemEntries) {
-            for (uint32_t e : entries) {
+        for (const auto& [guid, gear] : seen_.otherPlayerVisibleGear) {
+            for (uint32_t e : gear.items) {
                 if (e == resolvedEntry) {
                     emitOtherPlayerEquipment(guid);
                     reemitCount++;
@@ -4636,32 +4643,39 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         }
         // Same for inspect-based entries
         {
-            for (const auto& [guid, entries] : seen_.inspectedPlayerItemEntries) {
+            for (const auto& [guid, gear] : seen_.inspectedPlayerGear) {
                 bool relevant = false;
-                for (uint32_t e : entries) {
+                for (uint32_t e : gear.items) {
                     if (e == resolvedEntry) { relevant = true; break; }
                 }
                 if (!relevant) continue;
                 std::array<uint32_t, 19> displayIds{};
                 std::array<uint8_t, 19> invTypes{};
                 for (int s = 0; s < 19; s++) {
-                    uint32_t entry = entries[s];
+                    uint32_t entry = gear.items[s];
                     if (entry == 0) continue;
                     auto infoIt = itemInfoCache_.find(entry);
                     if (infoIt == itemInfoCache_.end()) continue;
                     displayIds[s] = infoIt->second.displayInfoId;
                     invTypes[s] = static_cast<uint8_t>(infoIt->second.inventoryType);
                 }
-                publishEquipment(guid, displayIds, invTypes);
+                publishEquipment(guid, displayIds, invTypes, gear.enchants);
             }
         }
     }
 }
 
 void InventoryHandler::publishEquipment(uint64_t guid, const std::array<uint32_t, 19>& displayIds,
-                                        const std::array<uint8_t, 19>& invTypes) {
+                                        const std::array<uint8_t, 19>& invTypes,
+                                        const std::array<uint32_t, 19>& enchantIds) {
     events_.publish(events::PlayerEquipmentResolved{
-        .guid = guid, .displayIds = displayIds, .inventoryTypes = invTypes});
+        .guid = guid, .displayIds = displayIds, .inventoryTypes = invTypes,
+        .enchantIds = enchantIds});
+}
+
+uint32_t InventoryHandler::shownEnchantId(uint64_t guid) const {
+    const auto [permanent, temporary] = getItemEnchantIds(guid);
+    return shownEnchant(permanent, temporary);
 }
 
 uint64_t InventoryHandler::resolveOnlineItemGuid(uint32_t itemId) const {
@@ -5525,13 +5539,27 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
     }
     if (base < 0 || stride <= 0) return; // Defensive: should never happen with defaults.
 
-    std::array<uint32_t, 19> newEntries{};
+    WornGear newGear;
+    auto& newEntries = newGear.items;
     for (int s = 0; s < 19; s++) {
-        uint16_t idx = static_cast<uint16_t>(base + s * stride);
-        auto it = fields.find(idx);
-        if (it != fields.end()) newEntries[s] = it->second;
+        const int entryField = base + s * stride;
+        auto valueAt = [&](int field) -> uint32_t {
+            auto it = fields.find(static_cast<uint16_t>(field));
+            return it != fields.end() ? it->second : 0;
+        };
+        newEntries[s] = valueAt(entryField);
+        // The enchants follow the entry - what puts a glow on the weapon.
+        // A two-field slot (WotLK, PLAYER_VISIBLE_ITEM_n_ENCHANTMENT) packs
+        // the permanent enchant in the low half of the one field after it and
+        // the temporary in the high half; the wider layouts before it give
+        // each enchant slot a field of its own, permanent first.
+        if (stride == 2) {
+            const uint32_t packed = valueAt(entryField + 1);
+            newGear.enchants[s] = shownEnchant(packed & 0xFFFFu, packed >> 16);
+        } else if (stride > 2) {
+            newGear.enchants[s] = shownEnchant(valueAt(entryField + 1), valueAt(entryField + 2));
+        }
     }
-
     int nonZero = 0;
     for (uint32_t e : newEntries) { if (e != 0) nonZero++; }
     const bool hasVisibleBodySlot =
@@ -5546,7 +5574,7 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
         valuesAreDisplayIds &&
         (nonZero == 0 || nonZero < 4 || (!hasVisibleBodySlot && nonZero < 8));
     const bool hasInspectedEntries =
-        seen_.inspectedPlayerItemEntries.find(guid) != seen_.inspectedPlayerItemEntries.end();
+        seen_.inspectedPlayerGear.find(guid) != seen_.inspectedPlayerGear.end();
 
     // Dump raw fields around visible item range to find the correct offset
     static int dumpCount = 0;
@@ -5607,9 +5635,10 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
     }
 
     bool changed = false;
-    auto& old = seen_.otherPlayerVisibleItemEntries[guid];
-    if (old != newEntries) {
-        old = newEntries;
+    // An enchant put on or worn off is a change as much as a new item is.
+    auto& old = seen_.otherPlayerVisibleGear[guid];
+    if (old != newGear) {
+        old = newGear;
         changed = true;
     }
 
@@ -5650,10 +5679,13 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
     }
 }
 
-void InventoryHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries) {
+void InventoryHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
+                                                     const std::array<uint16_t, 19>& enchantIds) {
     if (guid == 0) return;
 
-    seen_.inspectedPlayerItemEntries[guid] = itemEntries;
+    WornGear& gear = seen_.inspectedPlayerGear[guid];
+    gear.items = itemEntries;
+    for (size_t s = 0; s < 19; ++s) gear.enchants[s] = enchantIds[s];
 
     std::array<uint32_t, 19> displayIds{};
     std::array<uint8_t, 19> invTypes{};
@@ -5682,7 +5714,7 @@ void InventoryHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::a
               " chest=", displayIds[4], " legs=", displayIds[6],
               " mainhand=", displayIds[15], " offhand=", displayIds[16]);
 
-    if (resolved > 0) publishEquipment(guid, displayIds, invTypes);
+    if (resolved > 0) publishEquipment(guid, displayIds, invTypes, gear.enchants);
 }
 
 /// What another player is visibly wearing, without announcing it.
@@ -5743,11 +5775,11 @@ bool InventoryHandler::resolveOtherPlayerEquipment(
     if (guid != 0 && guid == queries_.characterGuid()) {
         return resolvePlayerEquipment(displayIds, invTypes);
     }
-    auto it = seen_.otherPlayerVisibleItemEntries.find(guid);
-    if (it == seen_.otherPlayerVisibleItemEntries.end()) return false;
+    auto it = seen_.otherPlayerVisibleGear.find(guid);
+    if (it == seen_.otherPlayerVisibleGear.end()) return false;
 
     if (usesVisibleItemDisplayIds()) {
-        displayIds = it->second;
+        displayIds = it->second.items;
         invTypes = inferredVisibleInventoryTypes();
         for (uint32_t displayId : displayIds) {
             if (displayId != 0) return true;
@@ -5758,7 +5790,7 @@ bool InventoryHandler::resolveOtherPlayerEquipment(
     bool anyEntry = false;
     int resolved = 0;
     for (int s = 0; s < 19; s++) {
-        const uint32_t entry = it->second[s];
+        const uint32_t entry = it->second.items[s];
         if (entry == 0) continue;
         anyEntry = true;
         auto infoIt = itemInfoCache_.find(entry);
@@ -5773,13 +5805,16 @@ bool InventoryHandler::resolveOtherPlayerEquipment(
 }
 
 void InventoryHandler::emitOtherPlayerEquipment(uint64_t guid) {
-    auto it = seen_.otherPlayerVisibleItemEntries.find(guid);
-    if (it == seen_.otherPlayerVisibleItemEntries.end()) return;
+    auto it = seen_.otherPlayerVisibleGear.find(guid);
+    if (it == seen_.otherPlayerVisibleGear.end()) return;
+    // A copy: the event is delivered before publishEquipment returns, and what
+    // a subscriber does may change the table.
+    const WornGear gear = it->second;
 
     std::array<uint32_t, 19> displayIds{};
     std::array<uint8_t, 19> invTypes{};
     if (usesVisibleItemDisplayIds()) {
-        displayIds = it->second;
+        displayIds = gear.items;
         invTypes = inferredVisibleInventoryTypes();
         int nonZeroDisplay = 0;
         for (uint32_t displayId : displayIds) {
@@ -5793,7 +5828,7 @@ void InventoryHandler::emitOtherPlayerEquipment(uint64_t guid) {
                  " mainhand=", displayIds[15], " offhand=", displayIds[16]);
 
         if (nonZeroDisplay == 0) return;
-        publishEquipment(guid, displayIds, invTypes);
+        publishEquipment(guid, displayIds, invTypes, gear.enchants);
         seen_.otherPlayerVisibleDirty.erase(guid);
         return;
     }
@@ -5802,7 +5837,7 @@ void InventoryHandler::emitOtherPlayerEquipment(uint64_t guid) {
     int resolved = 0, unresolved = 0;
 
     for (int s = 0; s < 19; s++) {
-        uint32_t entry = it->second[s];
+        uint32_t entry = gear.items[s];
         if (entry == 0) continue;
         anyEntry = true;
         auto infoIt = itemInfoCache_.find(entry);
@@ -5826,7 +5861,7 @@ void InventoryHandler::emitOtherPlayerEquipment(uint64_t guid) {
         return;
     }
 
-    publishEquipment(guid, displayIds, invTypes);
+    publishEquipment(guid, displayIds, invTypes, gear.enchants);
     seen_.otherPlayerVisibleDirty.erase(guid);
 
     // If we had entries but couldn't resolve any templates, also try inspect as a fallback.
@@ -5836,7 +5871,7 @@ void InventoryHandler::emitOtherPlayerEquipment(uint64_t guid) {
 }
 
 void InventoryHandler::emitAllOtherPlayerEquipment() {
-    for (const auto& [guid, _] : seen_.otherPlayerVisibleItemEntries) {
+    for (const auto& [guid, _] : seen_.otherPlayerVisibleGear) {
         emitOtherPlayerEquipment(guid);
     }
 }
@@ -6267,9 +6302,9 @@ bool InventoryHandler::forgetItemObject(uint64_t guid) {
 }
 
 void InventoryHandler::forgetPlayerEquipment(uint64_t guid) {
-    seen_.otherPlayerVisibleItemEntries.erase(guid);
+    seen_.otherPlayerVisibleGear.erase(guid);
     seen_.otherPlayerVisibleDirty.erase(guid);
-    seen_.inspectedPlayerItemEntries.erase(guid);
+    seen_.inspectedPlayerGear.erase(guid);
     seen_.pendingAutoInspect.erase(guid);
 }
 

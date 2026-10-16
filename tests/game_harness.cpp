@@ -297,6 +297,41 @@ std::vector<uint8_t> GameHarness::createItemBody(uint64_t guid, uint32_t entry, 
     return b.bytes();
 }
 
+std::vector<uint8_t> GameHarness::itemTemplateBody(uint32_t entry, const std::string& name,
+                                                   uint32_t displayInfoId, uint32_t inventoryType) {
+    Body b;
+    b.u32(entry);
+    b.u32(2).u32(7);                                // Class, SubClass: a one-handed sword
+    b.u32(0xFFFFFFFF);                              // SoundOverrideSubclass
+    b.cstr(name).u8(0).u8(0).u8(0);                 // Name, Name2..Name4
+    b.u32(displayInfoId);
+    b.u32(2);                                       // Quality
+    b.u32(0).u32(0);                                // Flags, Flags2
+    b.u32(10000).u32(2000);                         // BuyPrice, SellPrice
+    b.u32(inventoryType);
+    b.u32(0xFFFFFFFF).u32(0xFFFFFFFF);              // AllowableClass, AllowableRace
+    b.u32(60).u32(55);                              // ItemLevel, RequiredLevel
+    for (int i = 0; i < 8; ++i) b.u32(0);           // RequiredSkill .. MaxCount
+    b.u32(1).u32(0);                                // Stackable, ContainerSlots
+    b.u32(0);                                       // StatsCount
+    b.u32(0).u32(0);                                // ScalingStatDistribution, -Value
+    for (int i = 0; i < 2; ++i) b.f32(0.0f).f32(0.0f).u32(0);  // damage: min, max, type
+    b.u32(0);                                       // Armor
+    for (int i = 0; i < 6; ++i) b.u32(0);           // resistances
+    b.u32(2600).u32(0).f32(0.0f);                   // Delay, AmmoType, RangedModRange
+    for (int s = 0; s < 5; ++s)                     // spells: id, trigger, charges, cooldowns
+        b.u32(0).u32(0).u32(0).u32(0xFFFFFFFF).u32(0).u32(0xFFFFFFFF);
+    b.u32(1).cstr("");                              // Bonding, Description
+    for (int i = 0; i < 10; ++i) b.u32(0);          // PageText .. Block
+    b.u32(0).u32(90).u32(0).u32(0xFFFFFFFF);        // ItemSet, MaxDurability, Area, Map
+    b.u32(0).u32(0);                                // BagFamily, TotemCategory
+    for (int s = 0; s < 3; ++s) b.u32(0).u32(0);    // sockets: colour, content
+    b.u32(0).u32(0).u32(0);                         // SocketBonus, GemProperties, DisenchantSkill
+    b.f32(0.0f);                                    // ArmorDamageModifier
+    b.u32(0).u32(0).u32(0);                         // Duration, ItemLimitCategory, HolidayId
+    return b.bytes();
+}
+
 std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields) {
     Body b;
     b.u32(1);

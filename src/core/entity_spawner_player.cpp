@@ -1,5 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/helm_visual.hpp"
+#include "core/enchant_visual.hpp"
 #include "core/weapon_sheath.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/character_paths.hpp"
@@ -240,10 +241,10 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     spawns_->onlinePlayerAppearance_[guid] = std::move(st);
 }
 
-void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
-                                          const std::array<uint32_t, 19>& displayInfoIds,
-                                          const std::array<uint8_t, 19>& inventoryTypes) {
+void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
+    const auto& displayInfoIds = equipment.displayInfoIds;
+    const auto& inventoryTypes = equipment.inventoryTypes;
 
     // Skip local player - equipment handled by GameScreen::updateCharacterGeosets/Textures
     // via consumeOnlineEquipmentDirty(), which fires on the same server update.
@@ -255,7 +256,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // If the player isn't spawned yet, store equipment until spawn.
     auto appIt = spawns_->onlinePlayerAppearance_.find(guid);
     if (!spawns_->playerInstances_.count(guid) || appIt == spawns_->onlinePlayerAppearance_.end()) {
-        spawns_->pendingOnlinePlayerEquipment_[guid] = {displayInfoIds, inventoryTypes};
+        spawns_->pendingOnlinePlayerEquipment_[guid] = equipment;
         return;
     }
 
@@ -695,6 +696,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             continue;  // attachWeapon says why
         }
         st.weapons[hand] = {.attached = true, .inventoryType = inventoryType};
+        // The enchant it shows, the way the player's own weapons get theirs.
+        attachEnchantVisuals(
+            *charRenderer, *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
+            [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
+            [this] { return assets_.nextWeaponModelId_++; });
     }
 }
 

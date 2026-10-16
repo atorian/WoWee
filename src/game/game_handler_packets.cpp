@@ -2299,7 +2299,8 @@ void GameHandler::registerRemainingOpcodes() {
         ir.itemEntries    = items;
         ir.enchantIds     = {};
 
-        cacheInspectedPlayerEquipment(guid, items);
+        // Classic's SMSG_INSPECT names the items and none of their enchants.
+        cacheInspectedPlayerEquipment(guid, items, ir.enchantIds);
 
         LOG_INFO("SMSG_INSPECT (Classic): ", playerName, " has gear in ",
                  std::count_if(items.begin(), items.end(),

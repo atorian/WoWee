@@ -1918,8 +1918,9 @@ void GameHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMa
     inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
 }
 
-void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries) {
-    inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries);
+void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
+                                                const std::array<uint16_t, 19>& enchantIds) {
+    inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
 }
 
 void GameHandler::emitOtherPlayerEquipment(uint64_t guid) {

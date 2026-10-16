@@ -226,6 +226,11 @@ public:
         if (it == held_.onlineItems.end()) return {0, 0};
         return {it->second.permanentEnchantId, it->second.temporaryEnchantId};
     }
+    /// The enchant an item shows on the model carrying it: the temporary one
+    /// (a poison, a sharpening stone) over the permanent one while it lasts;
+    /// 0 for none or an item not known. Another player's weapons show theirs
+    /// by the same rule (PlayerEquipmentResolved::enchantIds).
+    [[nodiscard]] uint32_t shownEnchantId(uint64_t guid) const;
     /// The socket gem enchant ids (3 slots; 0 = empty socket) on an item.
     [[nodiscard]] std::array<uint32_t, 3> getItemSocketEnchantIds(uint64_t guid) const {
         auto it = held_.onlineItems.find(guid);
@@ -313,10 +318,11 @@ public:
     }
     /// Another player went out of view: what they wore is forgotten.
     void forgetPlayerEquipment(uint64_t guid);
-    /// What an inspect said another player wears, by entry.
-    [[nodiscard]] const std::unordered_map<uint64_t, std::array<uint32_t, 19>>&
-    inspectedPlayerItemEntries() const {
-        return seen_.inspectedPlayerItemEntries;
+    /// What an inspect said another player wears, by entry per equipment
+    /// slot; null when no inspect of them has come back.
+    [[nodiscard]] const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const {
+        auto it = seen_.inspectedPlayerGear.find(guid);
+        return it != seen_.inspectedPlayerGear.end() ? &it->second.items : nullptr;
     }
 
     // ---- Weapon enchants -----------------------------------------------------
@@ -827,7 +833,10 @@ public:
     void fireBankSlotEvents();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
-    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries);
+    /// An inspect's gear: the entries and the permanent enchant of each, which
+    /// is all of the enchants an inspect reports.
+    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
+                                       const std::array<uint16_t, 19>& enchantIds);
     void emitOtherPlayerEquipment(uint64_t guid);
     /// The same resolution, answered rather than announced - see the
     /// definition for why both shapes exist.
@@ -918,7 +927,8 @@ private:
     void raiseUiError(const std::string& message);
     /// Tell the client what a player wears (events::PlayerEquipmentResolved).
     void publishEquipment(uint64_t guid, const std::array<uint32_t, 19>& displayIds,
-                          const std::array<uint8_t, 19>& invTypes);
+                          const std::array<uint8_t, 19>& invTypes,
+                          const std::array<uint32_t, 19>& enchantIds);
 
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;
@@ -995,14 +1005,23 @@ private:
     };
     VisibleItemLayout visibleLayout_;
 
+    /// One player's gear seen from outside, per equipment slot: the item (its
+    /// entry) and the enchant it shows, by shownEnchantId's rule. Kept as one
+    /// so that whatever forgets the items forgets the enchants with them.
+    struct WornGear {
+        std::array<uint32_t, 19> items{};
+        std::array<uint32_t, 19> enchants{};
+        bool operator==(const WornGear&) const = default;
+    };
+
     /// What other players in view wear, decoded from their visible-item fields
     /// or from an inspect. Of the world, not of the character: leaveWorld
     /// forgets it.
     struct Seen {
-        std::unordered_map<uint64_t, std::array<uint32_t, 19>> otherPlayerVisibleItemEntries;
+        std::unordered_map<uint64_t, WornGear> otherPlayerVisibleGear;
         std::unordered_set<uint64_t> otherPlayerVisibleDirty;
         /// The inspect fallback, for players whose visible fields cannot be read.
-        std::unordered_map<uint64_t, std::array<uint32_t, 19>> inspectedPlayerItemEntries;
+        std::unordered_map<uint64_t, WornGear> inspectedPlayerGear;
         std::unordered_set<uint64_t> pendingAutoInspect;
         float inspectRateLimit = 0.0f;
     };
