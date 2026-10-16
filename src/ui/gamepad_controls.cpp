@@ -4,6 +4,7 @@
 #include "core/input.hpp"
 #include "core/logger.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/movement_command.hpp"
 
 #include <imgui.h>
 
@@ -68,6 +69,8 @@ void GamepadControls::releaseKeys() {
         heldKeys_[i] = 0;
         core::Input::getInstance().setVirtualKey(static_cast<SDL_Scancode>(i), false);
     }
+    if (camera_) camera_->releaseMovement(rendering::MovementSource::PadStick);
+    stickWalking_.fill(false);
     if (escapeDown_) {
         ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, false);
         escapeDown_ = false;
@@ -75,8 +78,12 @@ void GamepadControls::releaseKeys() {
     for (int key : imguiKeysDown_) ImGui::GetIO().AddKeyEvent(static_cast<ImGuiKey>(key), false);
     imguiKeysDown_.clear();
     // Forgotten as well as released, so a button still held when the pad is
-    // live again is looked up afresh rather than answered from before.
-    routes_.fill(ButtonRoute{});
+    // live again is looked up afresh rather than answered from before. Not
+    // the ones the interface took: their release runs Lua, which waits for
+    // dispatchBindings.
+    for (ButtonRoute& route : routes_) {
+        if (route.kind != PadKeyAnswer::Kind::Taken) route = ButtonRoute{};
+    }
     buttonWasDown_.fill(false);
     steering_ = false;
     zoomRemainder_ = 0.0f;
@@ -97,22 +104,23 @@ void GamepadControls::reset() {
 
 void GamepadControls::applyMovement(float x, float y) {
     // SDL's Y is positive downwards, and pushing the stick up means forward.
-    const auto stickHolds = [this](SDL_Scancode key) {
-        return (heldKeys_[static_cast<std::size_t>(key)] & kFromStick) != 0;
-    };
-    const bool forward = pushed(-y, kWalkThreshold, stickHolds(SDL_SCANCODE_W));
-    const bool back = pushed(y, kWalkThreshold, stickHolds(SDL_SCANCODE_S));
-    // Q and E rather than A and D, as the on-screen stick does it: with no
-    // right mouse button held this client turns the character on A and D and
-    // strafes on Q and E, and a stick pushed sideways should sidestep rather
-    // than swing the view - the right stick is what swings the view.
-    const bool left = pushed(-x, kStrafeThreshold, stickHolds(SDL_SCANCODE_Q));
-    const bool right = pushed(x, kStrafeThreshold, stickHolds(SDL_SCANCODE_E));
+    const bool forward = pushed(-y, kWalkThreshold, stickWalking_[0]);
+    const bool back = pushed(y, kWalkThreshold, stickWalking_[1]);
+    // Strafing rather than turning, as the on-screen stick does it: a stick
+    // pushed sideways should sidestep rather than swing the view - the right
+    // stick is what swings the view.
+    const bool left = pushed(-x, kStrafeThreshold, stickWalking_[2]);
+    const bool right = pushed(x, kStrafeThreshold, stickWalking_[3]);
+    stickWalking_ = {forward, back, left, right};
 
-    holdKey(SDL_SCANCODE_W, forward, kFromStick);
-    holdKey(SDL_SCANCODE_S, back, kFromStick);
-    holdKey(SDL_SCANCODE_Q, left, kFromStick);
-    holdKey(SDL_SCANCODE_E, right, kFromStick);
+    if (camera_) {
+        using rendering::MovementCommand;
+        constexpr auto kStick = rendering::MovementSource::PadStick;
+        camera_->holdMovement(MovementCommand::Forward, kStick, forward);
+        camera_->holdMovement(MovementCommand::Backward, kStick, back);
+        camera_->holdMovement(MovementCommand::StrafeLeft, kStick, left);
+        camera_->holdMovement(MovementCommand::StrafeRight, kStick, right);
+    }
 
     // Facing follows the camera while the stick is pushed, which is what the
     // right mouse button does on a desktop. Without it the character walks
@@ -277,6 +285,13 @@ void GamepadControls::routeButtons() {
             continue;
         }
         if (wasDown || !keyRouter_) continue;
+        // A and X are the pointer's two clicks while it is up, and looking
+        // their binding up is pressing it: clicking a window would jump, or
+        // cast at whatever was under the cursor.
+        if (pointerMode_ && (button == SDL_GAMEPAD_BUTTON_SOUTH ||
+                             button == SDL_GAMEPAD_BUTTON_WEST)) {
+            continue;
+        }
         const char* name = padKeyName(button);
         if (name[0] == '\0') continue;
 
@@ -306,8 +321,10 @@ void GamepadControls::routeButtons() {
 void GamepadControls::applyButtons() {
     const auto& pad = core::gamepad();
     // Worked out whole before any key is held, because two buttons can want
-    // the same key - X by default, and a D-pad bound to ACTIONBUTTON1 - and
-    // one of them letting go must not release the other.
+    // the same key - the right bumper by default, and a D-pad bound to
+    // TARGETNEARESTENEMY - and one of them letting go must not release the
+    // other. Only the rows with a key of their own: the rest act through
+    // their binding, and a button whose binding was taken away does nothing.
     std::array<bool, SDL_SCANCODE_COUNT> wanted{};
     for (const PadBinding& row : padBindings()) {
         // A and X are the pointer's two clicks while it is up. Jumping and
@@ -317,7 +334,9 @@ void GamepadControls::applyButtons() {
                              row.button == SDL_GAMEPAD_BUTTON_WEST)) {
             continue;
         }
-        if (schemeHeld(row.button)) wanted[static_cast<std::size_t>(row.key)] = true;
+        if (row.key != SDL_SCANCODE_UNKNOWN && schemeHeld(row.button)) {
+            wanted[static_cast<std::size_t>(row.key)] = true;
+        }
     }
 
     // The paddles and the share button, on the pads that have them. No test
@@ -326,7 +345,9 @@ void GamepadControls::applyButtons() {
     // nothing. The listing in the settings panel asks, because a row there is
     // a promise.
     for (const PadBinding& row : padExtraBindings()) {
-        if (schemeHeld(row.button)) wanted[static_cast<std::size_t>(row.key)] = true;
+        if (row.key != SDL_SCANCODE_UNKNOWN && schemeHeld(row.button)) {
+            wanted[static_cast<std::size_t>(row.key)] = true;
+        }
     }
 
     // Escape is the interface's, not the game's: it is read through
@@ -383,7 +404,23 @@ void GamepadControls::applyButtons() {
     imguiKeysDown_ = std::move(imguiWanted);
 }
 
+void GamepadControls::releaseBindings() {
+    const auto& pad = core::gamepad();
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+        ButtonRoute& route = routes_[static_cast<std::size_t>(b)];
+        if (route.kind != PadKeyAnswer::Kind::Taken) continue;
+        const auto button = static_cast<SDL_GamepadButton>(b);
+        if (bindingsActive_ && pad.held(button)) continue;
+        if (keyRelease_) keyRelease_(padKeyName(button));
+        route = ButtonRoute{};
+    }
+}
+
 void GamepadControls::dispatchBindings() {
+    // First, and whether or not the pad is live: a button let go while the
+    // player was typing, or a pad unplugged mid-press, still ends what its
+    // press began - a walk, a pushed action button.
+    releaseBindings();
     if (!bindingsActive_) return;
     routeButtons();
     // Back switches the right stick between the view and the pointer. On its
@@ -465,7 +502,7 @@ void GamepadControls::update(float deltaTime) {
                     name(SDL_GAMEPAD_BUTTON_EAST), " closes, ",
                     name(SDL_GAMEPAD_BUTTON_WEST), "/", name(SDL_GAMEPAD_BUTTON_NORTH),
                     " and the D-pad are actions 1-6, hold ",
-                    name(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER), " for 7-12, ",
+                    name(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER), " for the bottom-left bar, ",
                     name(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER), " targets, ",
                     name(SDL_GAMEPAD_BUTTON_LEFT_STICK), " autoruns, ",
                     name(SDL_GAMEPAD_BUTTON_BACK), " gives you a pointer",

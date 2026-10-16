@@ -438,6 +438,99 @@ add_test(NAME addon_xml_compiles COMMAND framexml_compile_check
          ${CMAKE_SOURCE_DIR}/Data/interface/addons)
 set_tests_properties(addon_xml_compiles PROPERTIES SKIP_RETURN_CODE 77)
 
+# ── Key bindings, run in the real interface ────────────────────────────────
+# A key goes down and comes up through the client's own binding dispatch into
+# the real FrameXML, and what the interface then did is asked of it. Only with
+# the headless runner built (WOWEE_BUILD_FRAMEXML_RUN) and an expansion's
+# interface on disk; each test fails the run with the number of checks that
+# raised.
+set(WOWEE_FRAMEXML_TEST_DATA "${CMAKE_SOURCE_DIR}/Data/expansions/wotlk" CACHE PATH
+    "An expansion directory whose interface the framexml_binding tests load")
+if(WOWEE_BUILD_FRAMEXML_RUN AND EXISTS "${WOWEE_FRAMEXML_TEST_DATA}/interface/FrameXML")
+    function(wowee_framexml_test name)
+        set(_dir "${CMAKE_CURRENT_BINARY_DIR}/framexml_run/${name}")
+        file(MAKE_DIRECTORY "${_dir}")
+        add_test(NAME ${name} COMMAND framexml_run "${WOWEE_FRAMEXML_TEST_DATA}" ${ARGN}
+                 WORKING_DIRECTORY "${_dir}")
+        # A config corner of its own, so no binding or setting one run saved
+        # is in force in the next.
+        set_tests_properties(${name} PROPERTIES
+            ENVIRONMENT "WOWEE_CONFIG_ROOT=${_dir}/config")
+    endfunction()
+
+    # bindings.xml marks the action buttons runOnUp: the press pushes the
+    # button and the release performs it. The release is the key's, and runs
+    # the command its press ran even when shift went down in between.
+    wowee_framexml_test(framexml_binding_release_runs_the_pressed_command
+        "--lua:SetBinding('Q', 'MULTIACTIONBAR1BUTTON1')"
+        "--lua:SetBinding('SHIFT-Q', 'MULTIACTIONBAR1BUTTON2')"
+        "--bind:Q"
+        "--lua:assert(MultiBarBottomLeftButton1:GetButtonState() == 'PUSHED', 'the press did not push the button')"
+        "--bindup:SHIFT-Q"
+        "--lua:assert(MultiBarBottomLeftButton1:GetButtonState() == 'NORMAL', 'the release did not reach the button the press pushed')")
+
+    # A binding without runOnUp runs once a press, not again on the release.
+    wowee_framexml_test(framexml_binding_runs_once_without_run_on_up
+        "--lua:opened = 0 ToggleFriendsFrame = function() opened = opened + 1 end"
+        "--lua:SetBinding('O', 'TOGGLESOCIAL')"
+        "--bind:O"
+        "--bindup:O"
+        "--lua:assert(opened == 1, 'TOGGLESOCIAL ran ' .. opened .. ' times for one press')")
+
+    # The main bar's keys are the interface's bindings like any other: = is
+    # ACTIONBUTTON12, pushed on the press and released on the release.
+    wowee_framexml_test(framexml_binding_action_bar_key
+        "--bind:="
+        "--lua:assert(ActionButton12:GetButtonState() == 'PUSHED', 'the = key did not push action button 12')"
+        "--bindup:="
+        "--lua:assert(ActionButton12:GetButtonState() == 'NORMAL', 'releasing = did not release action button 12')")
+
+    # A macro on the bar runs its body, from the key and from UseAction.
+    wowee_framexml_test(framexml_binding_macro_on_action_button
+        "--player"
+        "--lua:PickupMacro(CreateMacro('Shout', 1, '/say for the alliance', nil)) PlaceAction(1) ClearCursor()"
+        "--ran-macro:"
+        "--bind:1"
+        "--bindup:1"
+        "--ran-macro:/say for the alliance"
+        "--lua:UseAction(1)"
+        "--ran-macro:/say for the alliance")
+
+    # Movement goes through the bindings too: W walks while held, shift
+    # held with it changes nothing, and Q given to the action bar is no
+    # longer a strafe.
+    wowee_framexml_test(framexml_binding_movement_keys
+        "--lua:moves = '' for _, f in ipairs({'MoveForward', 'StrafeLeft'}) do _G[f .. 'Start'] = function() moves = moves .. '+' .. f end _G[f .. 'Stop'] = function() moves = moves .. '-' .. f end end"
+        "--bind:SHIFT-W"
+        "--bindup:W"
+        "--lua:assert(moves == '+MoveForward-MoveForward', 'W held with shift: ' .. moves)"
+        "--lua:SetBinding('Q', 'MULTIACTIONBAR1BUTTON1')"
+        "--bind:Q"
+        "--bindup:Q"
+        "--lua:assert(moves == '+MoveForward-MoveForward', 'Q bound to the action bar still strafes: ' .. moves)")
+
+    # And what those bindings hold reaches the client: held while the key is,
+    # by command, the arrows beside WASD, everything let go when the window
+    # loses the keyboard.
+    wowee_framexml_test(framexml_binding_movement_reaches_the_client
+        "--bind:W"
+        "--moving:Forward"
+        "--bind:SHIFT-SPACE"
+        "--moving:Forward,JumpOrAscend"
+        "--bindup:SPACE"
+        "--bindup:W"
+        "--moving:"
+        "--bind:UP"
+        "--bind:LEFT"
+        "--moving:Forward,TurnLeft"
+        "--release-all"
+        "--moving:"
+        "--lua:SetBinding('Q', 'MULTIACTIONBAR1BUTTON1')"
+        "--bind:Q"
+        "--moving:"
+        "--bindup:Q")
+endif()
+
 # ── test_taxi_map_projection ────────────────────────────────
 # The order of the coordinate conversions behind a flight map marker. Silent
 # when wrong - every marker still lands somewhere, just not where it belongs.

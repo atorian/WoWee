@@ -13,7 +13,6 @@
 #include "ui/settings_panel.hpp"
 #include "ui/minimap_projection.hpp"
 #include "ui/combat_ui.hpp"
-#include "ui/action_bar_panel.hpp"
 #include "ui/window_manager.hpp"
 #include "ui/ui_services.hpp"
 #include <vulkan/vulkan.h>
@@ -174,9 +173,6 @@ private:
 
     // Combat UI (extracted from GameScreen - owns all combat overlay rendering)
     CombatUI combatUI_;
-
-    // Action bar panel (extracted from GameScreen - owns action/stance/bag/xp/rep bars)
-    ActionBarPanel actionBarPanel_;
 
     // Window manager (extracted from GameScreen - owns NPC windows, popups, overlays)
     WindowManager windowManager_;
@@ -425,7 +421,6 @@ public:
     ToastManager& toastManager() { return toastManager_; }
     /// Reached by the barber bindings, which need state this owns.
     WindowManager& windowManager() { return windowManager_; }
-    ActionBarPanel& actionBarPanel() { return actionBarPanel_; }
 };
 
 } // namespace ui

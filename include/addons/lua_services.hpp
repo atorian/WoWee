@@ -3,6 +3,7 @@
 #pragma once
 
 #include "core/frame_plan.hpp"
+#include "rendering/movement_command.hpp"
 
 #include <functional>
 #include <cstdint>
@@ -31,6 +32,14 @@ struct LuaServices {
     /// through the same path the action bar uses for a macro button.
     std::function<void(const std::string&)> runMacroText;
 
+    /// Hold or let go of a movement command, as MoveForwardStart and
+    /// MoveForwardStop do - which is how bindings.xml walks the character on
+    /// whatever key MOVEFORWARD is bound to.
+    std::function<void(rendering::MovementCommand, bool)> holdMovement;
+    /// ToggleAutoRun() and ToggleRun().
+    std::function<void()> toggleAutoRun;
+    std::function<void()> toggleRun;
+
     /// This client's own slash commands, and a way to run one.
     ///
     /// The registry in ChatPanel answers about seventy names FrameXML has no
@@ -47,14 +56,6 @@ struct LuaServices {
 
     /// Loop Music - whether a zone track runs on or stops at its end.
     std::function<void(bool)> setZoneMusicLooping;
-
-    /// Which page of the main action bar is showing.
-    ///
-    /// The page belongs to the interface - ChangeActionBarPage moves it and
-    /// six frames redraw from it - while the number keys are handled here, so
-    /// the client has to be told. Without it those keys always cast page one,
-    /// whatever the bar on screen was showing.
-    std::function<void(int)> setActionBarPage;
 
     /// Close the program. The last resort behind Exit Game: the tidy path asks
     /// the server to log the character out first, and this is what answers

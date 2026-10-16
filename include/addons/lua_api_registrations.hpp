@@ -67,6 +67,24 @@ void noteClientSettingChanged(const std::string& settingKey, const std::string& 
 /// a player can rely on, and this client is exited every way there is.
 void setStoredCVar(const std::string& key, const std::string& value);
 void registerActionLuaAPI(lua_State* L);
+/// MoveForwardStart and the rest of what bindings.xml moves the character
+/// with, through LuaServices::holdMovement.
+void registerMovementLuaAPI(lua_State* L);
+
+/// Run a binding command's press or its release, as a key bound to it does
+/// and as RunBinding(command, keystate) asks.
+///
+/// A command is a bindings.xml script, given keystate "down" or "up" - or one
+/// of the four the original client writes for a key bound straight to
+/// something: "SPELL name", "MACRO name", "ITEM name" and "CLICK frame:button",
+/// from SetBindingSpell, SetBindingMacro, SetBindingItem and SetBindingClick.
+/// Those four act on the press. Says so in the log, once per command, when
+/// nothing in the interface runs it; false then, and when it raised.
+bool runBindingCommand(lua_State* L, const std::string& command, bool down);
+
+/// Whether bindings.xml marks a command runOnUp - its script is run for the
+/// release as well as the press.
+bool bindingRunsOnUp(lua_State* L, const std::string& command);
 
 /// Whether this client performs a binding command itself, without the
 /// interface.

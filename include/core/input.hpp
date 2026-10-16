@@ -16,15 +16,13 @@ public:
     // Keyboard
     [[nodiscard]] bool isKeyPressed(SDL_Scancode key) const;
 
-    /// Holds a key down from somewhere that is not a keyboard.
-    ///
-    /// The on-screen stick is the reason: movement, its animations and the
-    /// packets that announce it are a long chain that starts at
-    /// isKeyPressed(SDL_SCANCODE_W), and a phone has no W. Setting the key here
-    /// drives all of it without any of it knowing where the press came from.
-    /// Merged over the hardware state, so a keyboard still works alongside.
+    /// Holds a key down from somewhere that is not a keyboard: a pad button
+    /// standing in for one of the few keys the client still reads by
+    /// scancode - Tab, Print Screen, the shift the left bumper holds.
+    /// Movement is not one of them; the sticks hold movement commands on the
+    /// camera instead. Merged over the hardware state, so a keyboard still
+    /// works alongside.
     void setVirtualKey(SDL_Scancode key, bool held);
-    void clearVirtualKeys();
 
     /// Holds a mouse button down from somewhere that is not a mouse.
     ///

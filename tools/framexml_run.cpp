@@ -69,6 +69,11 @@
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
 #include "core/event_bus.hpp"
+#include "core/cvar_store.hpp"
+#include "network/world_socket.hpp"
+#include "rendering/movement_command.hpp"
+
+#include <array>
 #include "game/emote_table.hpp"
 #include "game/game_services.hpp"
 #include "game/character.hpp"
@@ -163,6 +168,23 @@ int main(int argc, char** argv) {
     // assigns the pending fields directly - so it was the harness undoing the
     // thing the harness exists to watch.
     wowee::addons::LuaServices settingServices;
+    // The macro bodies the interface asked the client to run, newest last,
+    // for --ran-macro. The client hands them to its chat panel; what this
+    // checks is that the interface asked, with which text.
+    static std::vector<std::string> macrosRun;
+    settingServices.runMacroText = [](const std::string& body) {
+        std::printf("   runMacroText: %s\n", body.c_str());
+        macrosRun.push_back(body);
+    };
+    // The movement commands the interface holds, for --moving. The client
+    // hands them to its camera; what this checks is which the interface asked
+    // for.
+    static std::array<bool, static_cast<size_t>(wowee::rendering::MovementCommand::Count)> moving{};
+    settingServices.holdMovement = [](wowee::rendering::MovementCommand command, bool held) {
+        std::printf("   holdMovement: %s %s\n", wowee::rendering::movementCommandName(command),
+                    held ? "held" : "let go");
+        moving[static_cast<size_t>(command)] = held;
+    };
     settingServices.getClientSetting = [](const std::string& key) -> std::string {
         return gameScreen.getSettingsPanel().settingValue(key);
     };
@@ -450,6 +472,12 @@ int main(int argc, char** argv) {
             svc.events = &events;
             static wowee::game::EmoteTable emotes(haveAssets ? &assets : nullptr);
             svc.emotes = &emotes;
+            // The two more GameHandler refuses to be built without. A store
+            // in memory, so a run writes no CVar file, and a connection
+            // factory that is never called: nothing here logs in.
+            static wowee::core::CVarStore cvars;
+            svc.cvars = &cvars;
+            svc.makeConnection = [] { return std::make_unique<wowee::network::WorldSocket>(); };
             // The real asset manager, so bindings that read a DBC - quest reward
             // XP from QuestXP.dbc, zone names from AreaTable - answer for real
             // rather than the empty they give with no assets behind them.
@@ -965,31 +993,108 @@ int main(int argc, char** argv) {
                         found, carrying);
             continue;
         }
+        // --release-all lets go of every key a binding holds, as the client
+        // does when its window loses the keyboard.
+        if (std::strcmp(argv[i], "--release-all") == 0) {
+            if (auto* engine = mgr.getLuaEngine()) engine->releaseBindingKeys();
+            std::printf("   released\n");
+            if (errors.size() != before) {
+                ++raised;
+                for (size_t k = before; k < errors.size(); ++k) {
+                    std::printf("   %s\n", errors[k].c_str());
+                }
+            }
+            continue;
+        }
+        // --moving:A,B says exactly these movement commands are held - by
+        // name, as movementCommandName spells them - and fails the run if not.
+        // An empty list says none is.
+        if (std::strncmp(argv[i], "--moving:", 9) == 0) {
+            std::string want = std::string(",") + (argv[i] + 9) + ",";
+            std::string held;
+            bool ok = true;
+            for (size_t c = 0; c < moving.size(); ++c) {
+                const char* name =
+                    wowee::rendering::movementCommandName(static_cast<wowee::rendering::MovementCommand>(c));
+                const bool wanted = want.find(std::string(",") + name + ",") != std::string::npos;
+                if (moving[c]) held += std::string(held.empty() ? "" : ",") + name;
+                if (moving[c] != wanted) ok = false;
+            }
+            if (ok) {
+                std::printf("   as expected\n");
+            } else {
+                ++raised;
+                std::printf("   expected '%s', held '%s'\n", argv[i] + 9, held.c_str());
+            }
+            continue;
+        }
+        // --ran-macro:TEXT says the interface handed exactly this macro body
+        // to the client to run since the last check, and fails the run if it
+        // did not. An empty TEXT says no macro ran.
+        if (std::strncmp(argv[i], "--ran-macro:", 12) == 0) {
+            const std::string want = argv[i] + 12;
+            const bool ok = want.empty() ? macrosRun.empty()
+                                         : (macrosRun.size() == 1 && macrosRun[0] == want);
+            if (ok) {
+                std::printf("   as expected\n");
+            } else {
+                ++raised;
+                std::printf("   expected %s, the interface asked for %zu macro(s)%s%s\n",
+                            want.empty() ? "no macro" : ("'" + want + "'").c_str(),
+                            macrosRun.size(), macrosRun.empty() ? "" : ", last: ",
+                            macrosRun.empty() ? "" : macrosRun.back().c_str());
+            }
+            macrosRun.clear();
+            continue;
+        }
         // --bind:KEY presses a key the way the client's binding dispatch does.
         //
         // Calling RunBinding by hand tests the script and nothing about whether
         // a key press would ever reach it, which is the part that was missing
         // entirely: 273 binding scripts loaded and none reachable.
-        if (std::strncmp(argv[i], "--bind:", 7) == 0) {
+        //
+        // --bindup:KEY lets it go again. Either takes WoW's modifier prefixes,
+        // ALT- CTRL- SHIFT-, for what is held at that moment: a key pressed
+        // with shift and released after shift was let go is
+        // --bind:SHIFT-Q then --bindup:Q.
+        const bool bindDown = std::strncmp(argv[i], "--bind:", 7) == 0;
+        const bool bindUp = std::strncmp(argv[i], "--bindup:", 9) == 0;
+        if (bindDown || bindUp) {
             relayout();
-            const char* name = argv[i] + 7;
-            // A letter arrives from SDL in lower case; the binding tables are
-            // upper. Only single letters need it, which is all this takes.
-            int sym = 0;
-            if (std::strlen(name) == 1) {
-                sym = std::tolower(static_cast<unsigned char>(name[0]));
-            } else if (std::strcmp(name, "ESCAPE") == 0) {
-                sym = 27;
-            } else if (std::strcmp(name, "SPACE") == 0) {
-                sym = ' ';
+            const char* name = argv[i] + (bindDown ? 7 : 9);
+            bool shift = false, ctrl = false, alt = false;
+            for (bool more = true; more;) {
+                more = false;
+                for (auto [prefix, flag] : {std::pair{"ALT-", &alt}, std::pair{"CTRL-", &ctrl},
+                                            std::pair{"SHIFT-", &shift}}) {
+                    const size_t n = std::strlen(prefix);
+                    if (std::strncmp(name, prefix, n) == 0 && name[n] != '\0') {
+                        *flag = true;
+                        name += n;
+                        more = true;
+                    }
+                }
             }
-            if (sym == 0) {
-                std::printf("   --bind: only single letters, ESCAPE and SPACE\n");
-                continue;
+            // WoW's name for the key, as the client turns a keycode into one:
+            // letters upper case, everything else as the binding tables spell
+            // it - "=", "SPACE", "NUMPAD3", "PAD1".
+            std::string key = name;
+            if (key.size() == 1) {
+                key[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(key[0])));
             }
             bool ran = false;
             if (auto* engine = mgr.getLuaEngine()) {
-                ran = engine->dispatchBindingKey(sym, false, false, false, true);
+                ran = engine->dispatchBindingKey(key, shift, ctrl, alt, bindDown);
+            }
+            if (bindUp) {
+                std::printf("   %s released%s\n", name, ran ? "" : "; no binding ran");
+                if (errors.size() != before) {
+                    ++raised;
+                    for (size_t k = before; k < errors.size(); ++k) {
+                        std::printf("   %s\n", errors[k].c_str());
+                    }
+                }
+                continue;
             }
             // Which command the key holds, said alongside the outcome.
             //
@@ -999,7 +1104,7 @@ int main(int argc, char** argv) {
             // the same way would make a decline read as a missing binding.
             std::string command;
             if (auto* engine = mgr.getLuaEngine()) {
-                command = engine->bindingCommandFor(sym, false, false, false);
+                command = engine->bindingCommandFor(key, shift, ctrl, alt);
             }
             if (ran) {
                 std::printf("   %s -> ran %s\n", name,

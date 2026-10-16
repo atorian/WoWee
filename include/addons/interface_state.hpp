@@ -208,6 +208,13 @@ struct InterfaceState {
         int continent = 0;
         int zone = 0;
     } worldMap;
+
+    /// The failures the bindings have already logged - a key binding nothing
+    /// runs, a macro the action bar holds and the account data does not - by
+    /// what failed, so each is said once rather than on every press.
+    std::set<std::string> failuresSaid;
+    /// True the first time a failure is reported, false every time after.
+    bool firstReport(const std::string& what) { return failuresSaid.insert(what).second; }
 };
 
 } // namespace wowee::addons

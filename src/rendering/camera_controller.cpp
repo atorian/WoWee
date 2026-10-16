@@ -15,6 +15,7 @@
 #include <future>
 #include <sstream>
 #include <string>
+#include <utility>
 #include "core/thread_pool.hpp"
 #include <imgui.h>
 #include "rendering/terrain_manager.hpp"
@@ -2603,7 +2604,30 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
     camera->setPosition(newPos);
 }
 
+void CameraController::holdMovement(MovementCommand command, MovementSource source, bool held) {
+    if (command == MovementCommand::Count) return;
+    uint8_t& sources = movementHeld_[static_cast<size_t>(command)];
+    const auto bit = static_cast<uint8_t>(1u << static_cast<unsigned>(source));
+    const bool wasHeld = sources != 0;
+    sources = held ? static_cast<uint8_t>(sources | bit) : static_cast<uint8_t>(sources & ~bit);
+    if (!wasHeld && sources != 0) {
+        if (command == MovementCommand::JumpOrAscend) jumpPressed_ = true;
+        if (command == MovementCommand::SitOrDescend) sitPressed_ = true;
+    }
+}
+
+void CameraController::releaseMovement(MovementSource source) {
+    for (size_t i = 0; i < movementHeld_.size(); ++i) {
+        holdMovement(static_cast<MovementCommand>(i), source, false);
+    }
+}
+
 void CameraController::update(float deltaTime) {
+    // The presses since the last frame, taken whether or not this frame moves
+    // anyone: a jump pressed during a flight path is not a jump on landing.
+    const bool jumpPressed = std::exchange(jumpPressed_, false);
+    const bool sitPressed = std::exchange(sitPressed_, false);
+    const int autoRunToggles = std::exchange(autoRunToggles_, 0);
     if (!enabled || !camera) {
         return;
     }
@@ -2688,26 +2712,34 @@ void CameraController::update(float deltaTime) {
     }
     bool movementSuppressed = movementSuppressTimer_ > 0.0f;
 
-    // Determine current key states
-    // Arrow keys mirror WASD the way the original client maps them:
-    // Up/Down move, Left/Right turn (strafe stays on Q/E).
-    bool keyW = !uiWantsKeyboard && !sitting && !movementSuppressed && (input.isKeyPressed(SDL_SCANCODE_W) || input.isKeyPressed(SDL_SCANCODE_UP));
-    bool keyS = !uiWantsKeyboard && !sitting && !movementSuppressed && (input.isKeyPressed(SDL_SCANCODE_S) || input.isKeyPressed(SDL_SCANCODE_DOWN));
-    bool keyA = !uiWantsKeyboard && !sitting && !movementSuppressed && (input.isKeyPressed(SDL_SCANCODE_A) || input.isKeyPressed(SDL_SCANCODE_LEFT));
-    bool keyD = !uiWantsKeyboard && !sitting && !movementSuppressed && (input.isKeyPressed(SDL_SCANCODE_D) || input.isKeyPressed(SDL_SCANCODE_RIGHT));
-    bool keyQ = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_Q);
-    bool keyE = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_E);
+    // What the player is asking for, by command. Which keys those are is the
+    // key bindings' business - the original client's defaults put the arrows
+    // beside WASD, Up and Down moving, Left and Right turning - and a key the
+    // account gives to something else holds none of these.
+    const bool canMove = !uiWantsKeyboard && !sitting && !movementSuppressed;
+    const auto wants = [&](MovementCommand command) {
+        return canMove && isMovementHeld(command);
+    };
+    bool wantForward = wants(MovementCommand::Forward);
+    bool wantBackward = wants(MovementCommand::Backward);
+    bool wantTurnLeft = wants(MovementCommand::TurnLeft);
+    bool wantTurnRight = wants(MovementCommand::TurnRight);
+    bool wantStrafeLeft = wants(MovementCommand::StrafeLeft);
+    bool wantStrafeRight = wants(MovementCommand::StrafeRight);
     bool shiftDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LSHIFT) || input.isKeyPressed(SDL_SCANCODE_RSHIFT));
     bool ctrlDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LCTRL) || input.isKeyPressed(SDL_SCANCODE_RCTRL));
-    bool nowJump = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyJustPressed(SDL_SCANCODE_SPACE);
+    // Walking, by Ctrl held or by TOGGLERUN.
+    const bool walking = ctrlDown || walkToggled_;
+    bool nowJump = canMove && jumpPressed;
     // Swimming and flying need the held state, not the press edge: on land
-    // space is a one-shot jump, but in water and in the air it is continuous
+    // the jump is one-shot, but in water and in the air it is continuous
     // ascent, and an edge gave a single impulse that then bled away - or, in
     // flight, a single frame of climb per press.
-    bool spaceHeld = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_SPACE);
+    bool spaceHeld = wants(MovementCommand::JumpOrAscend);
 
     // Idle camera: any input resets the timer; timeout triggers a slow orbit pan
-    bool anyInput = leftMouseDown || rightMouseDown || keyW || keyS || keyA || keyD || keyQ || keyE || nowJump;
+    bool anyInput = leftMouseDown || rightMouseDown || wantForward || wantBackward || wantTurnLeft ||
+                    wantTurnRight || wantStrafeLeft || wantStrafeRight || nowJump;
     if (anyInput) {
         idleTimer_ = 0.0f;
     } else if (!introActive && idleOrbitEnabled_) {
@@ -2748,16 +2780,14 @@ void CameraController::update(float deltaTime) {
             }
         }
         // Suppress player movement/input during intro.
-        keyW = keyS = keyA = keyD = keyQ = keyE = nowJump = spaceHeld = false;
+        wantForward = wantBackward = wantTurnLeft = wantTurnRight = false;
+        wantStrafeLeft = wantStrafeRight = nowJump = spaceHeld = false;
     }
 
-    // Tilde or NumLock toggles auto-run; any forward/backward key cancels it
-    bool tildeDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_GRAVE) ||
-                                           input.isKeyPressed(SDL_SCANCODE_NUMLOCKCLEAR));
-    if (tildeDown && !tildeWasDown) {
+    // TOGGLEAUTORUN starts or stops auto-run; moving forward or back cancels it
+    if (autoRunToggles % 2 != 0) {
         autoRunning = !autoRunning;
     }
-    tildeWasDown = tildeDown;
     // Helper: cancel auto-follow and notify game handler
     auto doCancelAutoFollow = [&]() {
         if (autoFollowTarget_) {
@@ -2766,7 +2796,7 @@ void CameraController::update(float deltaTime) {
         }
     };
 
-    if (keyW || keyS) {
+    if (wantForward || wantBackward) {
         autoRunning = false;
         doCancelAutoFollow();
     }
@@ -2798,8 +2828,8 @@ void CameraController::update(float deltaTime) {
         }
         // else: within stop distance, stay put
 
-        // Cancel on strafe/turn keys
-        if (keyA || keyD || keyQ || keyE) {
+        // Cancel on strafing or turning
+        if (wantTurnLeft || wantTurnRight || wantStrafeLeft || wantStrafeRight) {
             doCancelAutoFollow();
             autoFollowMove = false;
         }
@@ -2809,25 +2839,25 @@ void CameraController::update(float deltaTime) {
     const bool movBlocked = movementRooted_;
     // Auto-follow uses run speed (same as auto-run), not walk speed
     if (autoFollowMove) autoRunning = true;
-    bool nowForward = !movBlocked && (keyW || mouseAutorun || autoRunning);
-    bool nowBackward = !movBlocked && keyS;
+    bool nowForward = !movBlocked && (wantForward || mouseAutorun || autoRunning);
+    bool nowBackward = !movBlocked && wantBackward;
     bool nowStrafeLeft = false;
     bool nowStrafeRight = false;
     bool nowTurnLeft = false;
     bool nowTurnRight = false;
 
-    // WoW-like third-person keyboard behavior:
-    // - RMB held: A/D strafe
-    // - RMB released: A/D turn character+camera, Q/E strafe
+    // WoW-like third-person behavior:
+    // - RMB held: turning strafes instead
+    // - RMB released: turning turns character+camera, strafing strafes
     // Turning is allowed even while rooted; only positional movement is blocked.
     if (thirdPerson && !rightMouseDown) {
-        nowTurnLeft = keyA;
-        nowTurnRight = keyD;
-        nowStrafeLeft = !movBlocked && keyQ;
-        nowStrafeRight = !movBlocked && keyE;
+        nowTurnLeft = wantTurnLeft;
+        nowTurnRight = wantTurnRight;
+        nowStrafeLeft = !movBlocked && wantStrafeLeft;
+        nowStrafeRight = !movBlocked && wantStrafeRight;
     } else {
-        nowStrafeLeft = !movBlocked && (keyA || keyQ);
-        nowStrafeRight = !movBlocked && (keyD || keyE);
+        nowStrafeLeft = !movBlocked && (wantTurnLeft || wantStrafeLeft);
+        nowStrafeRight = !movBlocked && (wantTurnRight || wantStrafeRight);
     }
 
     // Keyboard turning updates camera yaw (character follows yaw in renderer).
@@ -2867,12 +2897,12 @@ void CameraController::update(float deltaTime) {
     // Calculate movement speed based on direction and modifiers
     float speed;
     if (useWoWSpeed) {
-        // Movement speeds (WoW-like: Ctrl walk, default run, backpedal slower)
+        // Movement speeds (WoW-like: Ctrl or TOGGLERUN walk, default run, backpedal slower)
         if (nowBackward && !nowForward) {
             speed = (runBackSpeedOverride_ > 0.0f && runBackSpeedOverride_ < 100.0f
                      && !std::isnan(runBackSpeedOverride_))
                         ? runBackSpeedOverride_ : WOW_BACK_SPEED;
-        } else if (ctrlDown) {
+        } else if (walking) {
             speed = (walkSpeedOverride_ > 0.0f && walkSpeedOverride_ < 100.0f && !std::isnan(walkSpeedOverride_))
                         ? walkSpeedOverride_ : WOW_WALK_SPEED;
         } else if (runSpeedOverride_ > 0.0f && runSpeedOverride_ < 100.0f && !std::isnan(runSpeedOverride_)) {
@@ -2895,7 +2925,7 @@ void CameraController::update(float deltaTime) {
     if (useWoWSpeed) {
         // "Sprinting" flag drives run animation/stronger footstep set.
         // In WoW mode this means running pace (not walk/backpedal), not Shift.
-        runPace = hasMoveInput && !ctrlDown && !nowBackward;
+        runPace = hasMoveInput && !walking && !nowBackward;
     } else {
         runPace = hasMoveInput && shiftDown;
     }
@@ -2951,16 +2981,15 @@ void CameraController::update(float deltaTime) {
                                   std::sin(moveYawRad) * std::cos(flightPitchRad),
                                   std::sin(flightPitchRad));
 
-    // Toggle sit/crouch with X key (edge-triggered) - only when UI doesn't want keyboard
-    // Blocked while mounted
+    // SITORSTAND sits down or stands up on its press - only when UI doesn't
+    // want keyboard. Blocked while mounted.
     bool prevSitting = sitting;
-    bool xDown = !uiWantsKeyboard && input.isKeyPressed(SDL_SCANCODE_X);
-    // While swimming, X dives down instead of toggling sit
-    if (xDown && !xKeyWasDown && !mounted_ && !swimming) {
+    bool xDown = !uiWantsKeyboard && isMovementHeld(MovementCommand::SitOrDescend);
+    // While swimming, it dives down instead of toggling sit
+    if (sitPressed && !uiWantsKeyboard && !mounted_ && !swimming) {
         sitting = !sitting;
     }
     if (mounted_) sitting = false;
-    xKeyWasDown = xDown;
 
     // Reset camera angles with R key (edge-triggered) - only when UI doesn't want keyboard
     // Does NOT move the player; full reset() is reserved for world-entry/respawn.
@@ -2979,12 +3008,10 @@ void CameraController::update(float deltaTime) {
     // have stood the character up was the one input that could not.
     if (sitting && !movementSuppressed) {
         const bool anyMoveKey = !uiWantsKeyboard && (
-            input.isKeyPressed(SDL_SCANCODE_W) || input.isKeyPressed(SDL_SCANCODE_S) ||
-            input.isKeyPressed(SDL_SCANCODE_A) || input.isKeyPressed(SDL_SCANCODE_D) ||
-            input.isKeyPressed(SDL_SCANCODE_Q) || input.isKeyPressed(SDL_SCANCODE_E) ||
-            input.isKeyPressed(SDL_SCANCODE_UP) || input.isKeyPressed(SDL_SCANCODE_DOWN) ||
-            input.isKeyPressed(SDL_SCANCODE_LEFT) || input.isKeyPressed(SDL_SCANCODE_RIGHT) ||
-            input.isKeyPressed(SDL_SCANCODE_SPACE));
+            isMovementHeld(MovementCommand::Forward) || isMovementHeld(MovementCommand::Backward) ||
+            isMovementHeld(MovementCommand::TurnLeft) || isMovementHeld(MovementCommand::TurnRight) ||
+            isMovementHeld(MovementCommand::StrafeLeft) || isMovementHeld(MovementCommand::StrafeRight) ||
+            isMovementHeld(MovementCommand::JumpOrAscend));
         // Not gated on uiWantsKeyboard, which is a different question, and not
         // on the interface wanting the mouse either: both flags are already
         // cleared at the press when it did.

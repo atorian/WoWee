@@ -3,9 +3,11 @@
 #include "rendering/camera.hpp"
 #include "rendering/camera_boom.hpp"
 #include "rendering/movement_limits.hpp"
+#include "rendering/movement_command.hpp"
 #include "core/input.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <optional>
 
@@ -74,6 +76,22 @@ public:
     /// While a finger is steering, the character faces where the view does -
     /// what holding the right mouse button means on a desktop.
     void setSteering(bool steering) { steering_ = steering; }
+
+    /// Hold or let go of a movement command on behalf of one source. Nothing
+    /// here reads a key: the key bindings say which key walks, and hold the
+    /// command for it (MoveForwardStart, MoveForwardStop), as do the sticks.
+    /// A command is held while any source holds it.
+    void holdMovement(MovementCommand command, MovementSource source, bool held);
+    /// Let go of everything one source holds: a pad unplugged, an interface
+    /// rebuilt with keys still down.
+    void releaseMovement(MovementSource source);
+    [[nodiscard]] bool isMovementHeld(MovementCommand command) const {
+        return movementHeld_[static_cast<size_t>(command)] != 0;
+    }
+    /// TOGGLEAUTORUN: start running forward, or stop.
+    void toggleAutoRun() { ++autoRunToggles_; }
+    /// TOGGLERUN: walk rather than run, or run again.
+    void toggleRun() { walkToggled_ = !walkToggled_; }
 
     void processMouseWheel(float delta);
     void setFollowTarget(glm::vec3* target);
@@ -677,11 +695,18 @@ private:
     float savedBarberPivot_ = 0.0f;
     bool ignoreSlopeLimit_ = false;
     float maxDistanceFactor_ = 1.0f;
-    bool xKeyWasDown = false;
     bool rKeyWasDown = false;
     bool runPace = false;
     bool autoRunning = false;
-    bool tildeWasDown = false;
+    /// Which sources hold each movement command, a bit per MovementSource.
+    std::array<uint8_t, static_cast<size_t>(MovementCommand::Count)> movementHeld_{};
+    /// Presses since the last update, so a tap shorter than a frame still
+    /// jumps, sits or toggles - an edge read off the held state would miss it.
+    bool jumpPressed_ = false;
+    bool sitPressed_ = false;
+    int autoRunToggles_ = 0;
+    /// TOGGLERUN's state: walking until toggled back.
+    bool walkToggled_ = false;
 
     // Auto-follow target position (WoW /follow). Non-null when following.
     const glm::vec3* autoFollowTarget_ = nullptr;

@@ -1753,54 +1753,10 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 }
             }
 
-            // Action bar keys (1-9, 0, -, =)
-            static const SDL_Scancode actionBarKeys[] = {
-                SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4,
-                SDL_SCANCODE_5, SDL_SCANCODE_6, SDL_SCANCODE_7, SDL_SCANCODE_8,
-                SDL_SCANCODE_9, SDL_SCANCODE_0, SDL_SCANCODE_MINUS, SDL_SCANCODE_EQUALS
-            };
-            const bool shiftDown = input.isKeyPressed(SDL_SCANCODE_LSHIFT) || input.isKeyPressed(SDL_SCANCODE_RSHIFT);
-            const bool ctrlDown  = input.isKeyPressed(SDL_SCANCODE_LCTRL)  || input.isKeyPressed(SDL_SCANCODE_RCTRL);
-            const auto& bar = gameHandler.getActionBar();
-
-            // Ctrl+1..Ctrl+8 → switch stance/form/presence (WoW default bindings).
-            // Only fires for classes that use a stance bar; same slot ordering as
-            // renderStanceBar: Warrior, DK, Druid, Rogue, Priest.
-            if (ctrlDown) {
-                // The list the bar is drawn from, so key N presses the form
-                // in position N rather than the Nth of a differently ordered
-                // table - which is what a second copy of these forms caused.
-                const auto forms = game::knownShapeshiftForms(
-                    gameHandler.getPlayerClass(), gameHandler.getKnownSpells());
-                if (!forms.empty()) {
-                    std::vector<uint32_t> avail;
-                    avail.reserve(forms.size());
-                    for (const auto& form : forms) avail.push_back(form.spellId);
-                    // Ctrl+1 = first stance, Ctrl+2 = second, …
-                    for (int i = 0; i < static_cast<int>(avail.size()) && i < 8; ++i) {
-                        if (input.isKeyJustPressed(actionBarKeys[i]))
-                            gameHandler.castSpell(avail[i]);
-                    }
-                }
-            }
-
-            for (int i = 0; i < game::GameHandler::SLOTS_PER_BAR; ++i) {
-                if (!ctrlDown && input.isKeyJustPressed(actionBarKeys[i])) {
-                    int slotIdx = shiftDown
-                        ? ActionBarPanel::actionSlotForPage(ActionBarPanel::kBottomLeftActionPage, i)
-                        : ActionBarPanel::actionSlotForPage(actionBarPanel_.getMainActionBarPage(), i);
-                    if (bar[slotIdx].type == game::ActionBarSlot::SPELL && bar[slotIdx].isReady()) {
-                        uint64_t target = gameHandler.hasTarget() ? gameHandler.getTargetGuid() : 0;
-                        gameHandler.castSpell(bar[slotIdx].id, target);
-                    } else if (bar[slotIdx].type == game::ActionBarSlot::ITEM && bar[slotIdx].id != 0) {
-                        gameHandler.useItemById(bar[slotIdx].id);
-                    } else if (bar[slotIdx].type == game::ActionBarSlot::MACRO) {
-                        if (const auto* macro = gameHandler.accountData().macro(bar[slotIdx].id)) {
-                            chatPanel_.executeMacroText(gameHandler, macro->body);
-                        }
-                    }
-                }
-            }
+            // No number row here. The action bar's keys are the key bindings'
+            // - ACTIONBUTTON1 on whatever key the account gives it, pushed on
+            // the press and used on the release by FrameXML's own buttons -
+            // and so are the shift and control layers over them.
         }
 
     }

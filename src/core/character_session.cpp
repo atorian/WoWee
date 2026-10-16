@@ -8,6 +8,7 @@
 #include "core/logger.hpp"
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
+#include "rendering/camera_controller.hpp"
 #include "game/account_data.hpp"
 #include "game/game_events.hpp"
 #include "game/game_handler.hpp"
@@ -161,6 +162,15 @@ void CharacterSession::leaveWorldInterface() {
     // the destructor: handlers read the player and the map as they leave.
     if (interfaceHoldsWorld()) interface_.addons->fireEvent("PLAYER_LEAVING_WORLD");
     interfaceLeft_ = true;
+    // From here no key's release reaches the bindings, so what they hold -
+    // a walk begun on W - is let go now rather than never.
+    releaseBindingMovement();
+}
+
+void CharacterSession::releaseBindingMovement() {
+    if (auto* camera = services_.playerView.getCameraController()) {
+        camera->releaseMovement(rendering::MovementSource::Bindings);
+    }
 }
 
 void CharacterSession::applyChangedKeyBindings() {
@@ -187,7 +197,10 @@ void CharacterSession::reloadInterfaceIfRequested() {
     LOG_INFO("Reloading the interface of '", identity_.name, "'");
     // The old state writes its saved variables and closes before the new one
     // reads them back; the InterfaceState it read stays, as the character does.
+    // The keys it held go with it: their releases would reach a state that
+    // never saw the presses, so what they hold is let go here.
     interface_ = {};
+    releaseBindingMovement();
     interface_ = buildInterface();
     if (!interfaceEntered_ || interfaceKind_ != Interface::Full) return;
     // The same events a world entry sends, so an interface reloaded from a
