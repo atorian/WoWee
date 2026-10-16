@@ -144,6 +144,13 @@ endfunction()
 wowee_add_test(test_event_bus
     SOURCES test_event_bus.cpp ${TEST_COMMON_SOURCES})
 
+# The resource telemetry behind the performance HUD's graphs and the resource
+# log line: its history, its frame summaries, and the warnings a crash log
+# should end with, once per crossing. No logger: the owner logs what it says.
+wowee_add_test(test_resource_telemetry
+    SOURCES test_resource_telemetry.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
+
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)

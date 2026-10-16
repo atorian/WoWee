@@ -661,6 +661,9 @@ set(WOWEE_SOURCES
     src/core/realm_address.cpp
     src/core/interface_input.cpp
     src/core/client_shortcuts.cpp
+    src/core/process_stats.cpp
+    src/core/resource_telemetry.cpp
+    src/core/resource_monitor.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
