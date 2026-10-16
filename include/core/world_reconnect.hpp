@@ -44,8 +44,8 @@ public:
 /// last login at the realm's current address, waits for the character list
 /// and logs the same character in - the game's own login path, which resets
 /// what the character held exactly as a login from the character screen
-/// does. An attempt that fails is followed by the next after 5 s times its
-/// number; after the last, or at a refusal, it gives up. Being back in the
+/// does. Attempts start 5 s times the failed one's number after it started;
+/// after the last, or at a refusal, it gives up. Being back in the
 /// world is said by the game (WorldEntered), not here.
 class WorldReconnect {
 public:
@@ -88,6 +88,8 @@ private:
     float waitLeft_ = 0.0f;
     float stepTime_ = 0.0f;
     float elapsed_ = 0.0f;
+    /// elapsed_ when the current attempt began.
+    float attemptStartedAt_ = 0.0f;
     std::string lastError_;
     std::string failure_;
 };

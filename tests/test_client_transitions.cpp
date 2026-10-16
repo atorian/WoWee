@@ -430,6 +430,23 @@ TEST_CASE("when every reconnect attempt fails the character leaves the world for
     CHECK(h.reconnectStatus().empty());
 }
 
+TEST_CASE("an attempt that timed out is followed by the next at once, not after another wait",
+          "[client][harness][reconnect]") {
+    ClientHarness h;
+    h.enterWorld();
+    // The login server does not answer: the first attempt runs out its time.
+    h.setRenewal(Renewal::Pending);
+    loseConnection(h);
+    h.frameUntil([&] { return h.renewalsBegun() == 2; }, 60 * 21, "the second attempt");
+    // It began as the first gave up - twenty seconds in, past the five the
+    // second may start after - and the network being back is all it needs.
+    h.setRenewal(Renewal::Renewed);
+    h.answerReconnect(h.player());
+    h.frame();
+    CHECK(h.loop().reconnecting() == nullptr);
+    CHECK(h.state() == AppState::IN_GAME);
+}
+
 TEST_CASE("a refused session ends the reconnect at once", "[client][harness][reconnect]") {
     ClientHarness h;
     h.enterWorld();

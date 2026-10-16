@@ -36,6 +36,7 @@ void WorldReconnect::enterStep(Step step) {
 
 void WorldReconnect::startAttempt() {
     ++attempt_;
+    attemptStartedAt_ = elapsed_;
     LOG_WARNING("Reconnecting to the world server: attempt ", attempt_, " of ", kMaxAttempts,
                 ", ", elapsed_, " s after the connection was lost");
     enterStep(Step::Renewing);
@@ -53,7 +54,11 @@ void WorldReconnect::attemptFailed(const std::string& why) {
         return;
     }
     enterStep(Step::Waiting);
-    waitLeft_ = kWaitPerAttempt * static_cast<float>(attempt_);
+    // Attempts start 5 s times their number apart, counted from the start of
+    // the one that failed: an attempt that spent its time waiting on a dead
+    // network has already waited, and the next goes as soon as it may.
+    const float spent = elapsed_ - attemptStartedAt_;
+    waitLeft_ = std::max(0.0f, kWaitPerAttempt * static_cast<float>(attempt_) - spent);
 }
 
 void WorldReconnect::giveUp(const std::string& why) {
