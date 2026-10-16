@@ -17,6 +17,7 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include <stdexcept>
+#include "rendering/m2_billboard.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
@@ -2235,7 +2236,96 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 }
 
-void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
+void CharacterRenderer::advanceAnimation(uint32_t instanceId, CharacterInstance& inst, float deltaTime) {
+    // Advance global sequence timer (accumulates independently of animation wrapping)
+    inst.globalSequenceTime += deltaTime * 1000.0f;
+
+    if (!inst.cachedModel || inst.cachedModel->data.sequences.empty()) return;
+    if (inst.currentSequenceIndex < 0) {
+        inst.currentSequenceIndex = 0;
+        inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
+    }
+    const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
+    inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
+    if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
+        if (inst.animationLoop) {
+            // Subtract duration instead of fmod to preserve float precision
+            // fmod() loses precision with large animationTime values
+            inst.animationTime -= static_cast<float>(seq.duration);
+            // Clamp to [0, duration) to handle multiple loops in one frame
+            while (inst.animationTime >= static_cast<float>(seq.duration)) {
+                inst.animationTime -= static_cast<float>(seq.duration);
+            }
+        } else {
+            // One-shot animation finished: return to the caller-specified
+            // resume anim (NPC state emote) or Stand, unless dead
+            if (inst.currentAnimationId != anim::DEATH) {
+                const uint32_t resumeAnim =
+                    inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
+                playAnimation(instanceId, resumeAnim, true);
+            } else {
+                // Stay on last frame of death
+                inst.animationTime = static_cast<float>(seq.duration);
+            }
+        }
+    }
+}
+
+void CharacterRenderer::poseInstances(std::vector<std::reference_wrapper<CharacterInstance>>& instances) {
+    const size_t count = instances.size();
+    if (count < 8 || numAnimThreads_ <= 1) {
+        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
+        return;
+    }
+
+    // Thread bone matrix computation in chunks
+    static const size_t minAnimWorkPerThread = std::max<size_t>(
+        8, envSizeOrDefault("WOWEE_CHAR_ANIM_WORK_PER_THREAD", 16));
+    const size_t maxUsefulThreads = std::max<size_t>(
+        1, (count + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
+    const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
+
+    if (numThreads <= 1) {
+        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
+        return;
+    }
+
+    const size_t chunkSize = count / numThreads;
+    const size_t remainder = count % numThreads;
+
+    auto processRange = [this, &instances](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; i++) {
+            calculateBoneMatrices(instances[i].get());
+        }
+    };
+
+    animFutures_.clear();
+    if (animFutures_.capacity() < numThreads) {
+        animFutures_.reserve(numThreads);
+    }
+
+    // Dispatch all but the last chunk to the shared pool; process the
+    // last chunk on this thread so the pool is never a hard dependency
+    // for finishing this frame's bone work.
+    size_t start = 0;
+    for (size_t t = 0; t + 1 < numThreads; t++) {
+        size_t end = start + chunkSize + (t < remainder ? 1 : 0);
+        animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+            [processRange, start, end]() { processRange(start, end); }));
+        start = end;
+    }
+    processRange(start, count);
+
+    for (auto& f : animFutures_) {
+        f.get();
+    }
+}
+
+void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view) {
+    // What billboard bones turn against this frame; with no view they stay
+    // as authored.
+    boneView_ = view ? std::optional<glm::mat4>(*view) : std::nullopt;
+
     // Distance culling for animation updates in dense areas.
     const float animUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_ANIM_RADIUS", 120));
     const float animUpdateRadiusSq = animUpdateRadius * animUpdateRadius;
@@ -2262,9 +2352,9 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
         }
 
-        // Skip weapon instances for animation - their transforms are set by parent
-        // bones. Enchant visuals are the exception: they are pure animated FX.
-        if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
+        // An attachment - a weapon, a helm, an enchant's effect - stands where
+        // its wielder's bones put it, so it is posed below, once they are.
+        if (inst.hasOverrideModelMatrix) continue;
 
         float distSq = glm::distance2(inst.position, cameraPos);
         const bool isSkyBird = inst.cachedModel && inst.cachedModel->isSkyBird;
@@ -2272,40 +2362,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         if (distSq > updateRadiusSq && !inst.isSceneModel) continue;
         inst.posedThisFrame = true;
 
-        // Advance global sequence timer (accumulates independently of animation wrapping)
-        inst.globalSequenceTime += deltaTime * 1000.0f;
-
-        // Always advance animation time (cheap)
-        if (inst.cachedModel && !inst.cachedModel->data.sequences.empty()) {
-            if (inst.currentSequenceIndex < 0) {
-                inst.currentSequenceIndex = 0;
-                inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
-            }
-            const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
-            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
-            if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
-                if (inst.animationLoop) {
-                    // Subtract duration instead of fmod to preserve float precision
-                    // fmod() loses precision with large animationTime values
-                    inst.animationTime -= static_cast<float>(seq.duration);
-                    // Clamp to [0, duration) to handle multiple loops in one frame
-                    while (inst.animationTime >= static_cast<float>(seq.duration)) {
-                        inst.animationTime -= static_cast<float>(seq.duration);
-                    }
-                } else {
-                    // One-shot animation finished: return to the caller-specified
-                    // resume anim (NPC state emote) or Stand, unless dead
-                    if (inst.currentAnimationId != anim::DEATH) {
-                        const uint32_t resumeAnim =
-                            inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
-                        playAnimation(pair.first, resumeAnim, true);
-                    } else {
-                        // Stay on last frame of death
-                        inst.animationTime = static_cast<float>(seq.duration);
-                    }
-                }
-            }
-        }
+        advanceAnimation(pair.first, inst, deltaTime);
 
         // Keep combat-range creatures at the render frame rate. Aggressive
         // throttling used to begin at 10 yards and reached every eighth frame
@@ -2326,58 +2383,13 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         }
     }
 
-    const size_t updatedCount = toUpdate_.size();
+    poseInstances(toUpdate_);
 
-    // Thread bone matrix computation in chunks
-    if (updatedCount >= 8 && numAnimThreads_ > 1) {
-        static const size_t minAnimWorkPerThread = std::max<size_t>(
-            8, envSizeOrDefault("WOWEE_CHAR_ANIM_WORK_PER_THREAD", 16));
-        const size_t maxUsefulThreads = std::max<size_t>(
-            1, (updatedCount + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
-        const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
-
-        if (numThreads <= 1) {
-            for (auto& instRef : toUpdate_) {
-                calculateBoneMatrices(instRef.get());
-            }
-        } else {
-            const size_t chunkSize = updatedCount / numThreads;
-            const size_t remainder = updatedCount % numThreads;
-
-            auto processRange = [this](size_t begin, size_t end) {
-                for (size_t i = begin; i < end; i++) {
-                    calculateBoneMatrices(toUpdate_[i].get());
-                }
-            };
-
-            animFutures_.clear();
-            if (animFutures_.capacity() < numThreads) {
-                animFutures_.reserve(numThreads);
-            }
-
-            // Dispatch all but the last chunk to the shared pool; process the
-            // last chunk on this thread so the pool is never a hard dependency
-            // for finishing this frame's bone work.
-            size_t start = 0;
-            for (size_t t = 0; t + 1 < numThreads; t++) {
-                size_t end = start + chunkSize + (t < remainder ? 1 : 0);
-                animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
-                    [processRange, start, end]() { processRange(start, end); }));
-                start = end;
-            }
-            processRange(start, updatedCount);
-
-            for (auto& f : animFutures_) {
-                f.get();
-            }
-        }
-    } else {
-        for (auto& instRef : toUpdate_) {
-            calculateBoneMatrices(instRef.get());
-        }
-    }
-
-    // Update weapon attachment transforms (after all bone matrices are computed)
+    // Place the attachments on their wielders' bones, now those are posed,
+    // and then pose the attachments themselves. An item model animates on its
+    // own clock - Thunderfury's arcs crackle, a glaive's glow pulses - and
+    // its billboard bones turn against the view from where it now stands.
+    toUpdate_.clear();
     for (auto& pair : scene_->instances) {
         auto& instance = pair.second;
         if (instance.weaponAttachments.empty()) continue;
@@ -2461,6 +2473,8 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
             weapIt->second.posedThisFrame = true;
+            advanceAnimation(wa.weaponInstanceId, weapIt->second, deltaTime);
+            toUpdate_.push_back(std::ref(weapIt->second));
 
             // Enchant visuals ride the weapon, offset to their attachment point on it.
             for (const auto& fx : wa.effects) {
@@ -2472,9 +2486,13 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 // Keep the effect near the character so animation distance culling
                 // (which works off instance position) treats it like its wielder.
                 fxIt->second.position = instance.position;
+                fxIt->second.posedThisFrame = true;
+                advanceAnimation(fx.effectInstanceId, fxIt->second, deltaTime);
+                toUpdate_.push_back(std::ref(fxIt->second));
             }
         }
     }
+    poseInstances(toUpdate_);
 }
 // --- Bone transform calculation ---
 
@@ -2546,6 +2564,10 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     const bool armsOwnSequences = (instance.armSequenceIndex[0] >= 0 || instance.armSequenceIndex[1] >= 0) &&
                                   instance.boneArm.size() == numBones;
 
+    // Model to view, for billboard bones; made when the first one needs it.
+    glm::mat4 viewModel(1.0f), invViewModel(1.0f);
+    bool haveViewModel = false;
+
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
@@ -2577,6 +2599,24 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
             instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * localTransform;
         } else {
             instance.boneMatrices[i] = localTransform;
+        }
+
+        // A billboard bone is rebuilt in view space, after its whole parent
+        // chain and the model's placement, and brought back into model space;
+        // its children follow it - as M2Renderer turns a doodad's. A weapon's
+        // glow card left as authored is a flat sheet through the blade.
+        if (boneView_ && (bone.flags & kM2BoneBillboardMask) != 0) {
+            if (!haveViewModel) {
+                viewModel = *boneView_ * (instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                                          : getModelMatrix(instance));
+                invViewModel = glm::inverse(viewModel);
+                haveViewModel = true;
+            }
+            // localTransform is T(pivot) T R S T(-pivot): its 3x3 is the bone's
+            // own rotation and scale.
+            instance.boneMatrices[i] = invViewModel *
+                m2BillboardBone(bone.flags, viewModel * instance.boneMatrices[i],
+                                glm::mat3(localTransform), bone.pivot);
         }
 
         // Diagnostic: detect bones with extreme translation. Gated so the abs()
@@ -4508,7 +4548,6 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     auto fxIt = scene_->instances.find(effectInstanceId);
     if (fxIt == scene_->instances.end()) return false;
     fxIt->second.hasOverrideModelMatrix = true;
-    fxIt->second.isEffectModel = true;
     fxIt->second.animationLoop = true;
     fxIt->second.opacity = charIt->second.opacity;
     fxIt->second.stateTint = charIt->second.stateTint;

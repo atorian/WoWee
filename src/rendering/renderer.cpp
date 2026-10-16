@@ -2250,7 +2250,8 @@ void Renderer::update(float deltaTime) {
 
     // Update character animations (runs in parallel with M2 animation above)
     if (characterRenderer && camera) {
-        characterRenderer->update(deltaTime, camera->getPosition());
+        const glm::mat4 characterView = camera->getViewMatrix();
+        characterRenderer->update(deltaTime, camera->getPosition(), &characterView);
     }
     endPhase("characters");
 

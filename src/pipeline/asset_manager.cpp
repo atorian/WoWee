@@ -338,7 +338,25 @@ BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed)
     // preference to the .blp beside them.
     BLPImage ddsImage = tryLoadDdsOverride(normalizedPath);
     if (ddsImage.isValid()) {
-        return ddsImage;
+        // The blocks go only to a caller that asked for them. The rest read
+        // RGBA8 from `data`, as the .blp beside it gives it them: handed the
+        // blocks, the character renderer uploaded an empty `data` and drew
+        // every upscaled glow on a weapon or a creature as a white card.
+        if (keepCompressed || !ddsImage.isBlockCompressed()) return ddsImage;
+        std::vector<uint8_t> pixels = BLPLoader::decodeBaseLevel(ddsImage);
+        if (!pixels.empty()) {
+            ddsImage.data = std::move(pixels);
+            ddsImage.mipmaps.clear();
+            ddsImage.mipLevels = 1;
+            return ddsImage;
+        }
+        static std::mutex logMtx;
+        static std::unordered_set<std::string> loggedUndecodable;
+        std::lock_guard<std::mutex> lock(logMtx);
+        if (loggedUndecodable.insert(normalizedPath).second) {
+            LOG_WARNING("DDS override for ", normalizedPath,
+                        " could not be decoded to RGBA8 - the .blp is used instead");
+        }
     }
 
     BLPImage pngImage = tryLoadPngOverride(normalizedPath);

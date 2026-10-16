@@ -4042,7 +4042,8 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                                               camera->getProjectionMatrix());
             // A model probed as a creature (WOWEE_PROBE_CHARACTER) moves, and
             // its emitters follow, the way Renderer::update has them in game.
-            renderer->getCharacterRenderer()->update(dt, camera->getPosition());
+            const glm::mat4 view = camera->getViewMatrix();
+            renderer->getCharacterRenderer()->update(dt, camera->getPosition(), &view);
             if (auto* emitters = renderer->getCharacterEmitters()) emitters->update(dt);
         }
     }
@@ -4949,7 +4950,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
             if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
-                !std::getenv("WOWEE_SHADOW_PROBE_SCENE"))
+                !std::getenv("WOWEE_SHADOW_PROBE_SCENE") && !std::getenv("WOWEE_MODEL_PROBE"))
                 uiManager->render(view, authHandler.get(), gameHandler.get());
         });
 
@@ -5018,9 +5019,9 @@ void Application::renderFrame(const FramePlan& plan) {
         }
     };
 
-    // The offline stream fixture draws its uploads through the real world path.
+    // The offline fixtures draw through the real world path.
     const bool drawWorld = view == FrameView::World || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
-        std::getenv("WOWEE_FOUNTAIN_PROBE");
+        std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
     renderer->setWorldInView(view == FrameView::World);
     screenRecording_->update();
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });

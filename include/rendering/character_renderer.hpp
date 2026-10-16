@@ -103,7 +103,9 @@ public:
     /// Play other animations on each arm alone, until the next playAnimation.
     void setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim);
 
-    void update(float deltaTime, const glm::vec3& cameraPos = glm::vec3(0.0f));
+    /// Advance every instance's animation and pose its skeleton. `view` is
+    /// what billboard bones turn against; without one they stay as authored.
+    void update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view);
 
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     void prepareRender(uint32_t frameIndex);
@@ -413,11 +415,6 @@ private:
         /// Where interiorLight was looked up, once it has been.
         std::optional<glm::vec3> interiorLightOrigin;
 
-        // Enchant visual attached to a weapon. Such a model is nothing but the
-        // additive FX batches that attached weapons otherwise drop, and it still
-        // needs its animation advanced even though its transform comes from the parent.
-        bool isEffectModel = false;
-
         // A scene rather than a character: the glue-screen backdrops. Two things
         // follow. Their origin can sit hundreds of units from their geometry, so
         // culling on it would drop them. And the material heuristics below exist to
@@ -445,6 +442,10 @@ private:
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
     void calculateBoneMatrices(CharacterInstance& instance);
+    /// One instance's clock: its sequence and its global sequences.
+    void advanceAnimation(uint32_t instanceId, CharacterInstance& instance, float deltaTime);
+    /// calculateBoneMatrices for each, spread over the frame workers.
+    void poseInstances(std::vector<std::reference_wrapper<CharacterInstance>>& instances);
     glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
@@ -644,6 +645,8 @@ private:
     uint32_t numAnimThreads_ = 1;
     std::vector<std::future<void>> animFutures_;
     std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
+    /// The view update() was given, for the billboard bones it poses.
+    std::optional<glm::mat4> boneView_;
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;

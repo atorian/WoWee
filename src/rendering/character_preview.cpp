@@ -1404,7 +1404,8 @@ void CharacterPreview::update(float deltaTime) {
         // doll rigid and its equipped weapons invisible.
         const glm::vec3 cameraPos = camera_ ? camera_->getPosition()
                                             : previewStandPosition_;
-        charRenderer_->update(deltaTime, cameraPos);
+        const glm::mat4 view = camera_ ? camera_->getViewMatrix() : glm::mat4(1.0f);
+        charRenderer_->update(deltaTime, cameraPos, camera_ ? &view : nullptr);
     }
 }
 

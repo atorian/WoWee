@@ -1272,6 +1272,14 @@ target_link_libraries(test_dds_sidecar PRIVATE catch2_main)
 add_test(NAME dds_sidecar COMMAND test_dds_sidecar)
 register_test_target(test_dds_sidecar)
 
+# ── test_dds_override ────────────────────────────────────────
+# The sidecar as AssetManager::loadTexture hands it over: RGBA8 to a caller
+# that did not ask for blocks. The character renderer did not, was handed
+# them anyway, and drew every upscaled glow on a weapon as a white card.
+wowee_add_test(test_dds_override
+    SOURCES test_dds_override.cpp)
+target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
+
 # ── test_blp_alpha_scan ──────────────────────────────────────
 # M2 textures were decoded to RGBA8 so something could walk every fourth byte
 # and learn whether the texture had any transparency. The block scan that
