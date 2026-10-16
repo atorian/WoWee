@@ -1583,7 +1583,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
             // InventoryHandler keeps the loot state. This asked GameHandler's
             // copy, which nothing filled, so a looted-but-not-empty corpse was
             // never a tab target.
-            return owner_.getInventoryHandler()->hasLootLeft(guid);
+            return owner_.inventory().hasLootLeft(guid);
         }
         const bool hostileByFaction = unit->isHostile();
         const bool hostileByCombat = isAggressiveTowardPlayer(guid);

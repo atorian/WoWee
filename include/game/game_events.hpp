@@ -2,8 +2,10 @@
 
 #include "game/refusal.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /// What the game tells the rest of the client has happened, delivered through
@@ -247,6 +249,37 @@ struct AccountDataLoaded {
 /// buttons that held it.
 struct MacroDeleted {
     uint32_t macroId = 0;
+};
+
+// ---- Items ----
+
+/// What the player carries in the backpack and the four worn bags, summed per
+/// item entry - the set the server checks at a quest turn-in. Said whenever
+/// the bags are rebuilt; the quest log's "collect N" objectives count from it,
+/// since 3.3.5a never sends those counts itself.
+struct CarriedItemsCounted {
+    std::unordered_map<uint32_t, uint32_t> counts;
+};
+
+/// The loot window opened on a corpse or a chest, or closed.
+struct LootWindowChanged {
+    bool open = false;
+};
+
+/// The player opened a vendor's window. The position is the vendor's, in
+/// canonical coordinates.
+struct VendorOpened {
+    uint64_t vendorGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// What a player in view is wearing, resolved to display ids: nineteen slots
+/// in the visible-item order (head, neck, shoulders ... tabard), zero where
+/// nothing is worn or nothing is known.
+struct PlayerEquipmentResolved {
+    uint64_t guid = 0;
+    std::array<uint32_t, 19> displayIds{};
+    std::array<uint8_t, 19> inventoryTypes{};
 };
 
 } // namespace wowee::game::events

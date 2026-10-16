@@ -724,12 +724,13 @@ void AnimationCallbackHandler::setupCallbacks() {
     });
 
     // Loot window callback - play kneel/loot animation while looting
-    gameHandler_.setLootWindowCallback([this](bool open) {
-        auto* ac = playerView_.getAnimationController();
-        if (!ac) return;
-        if (open) ac->startLooting();
-        else      ac->stopLooting();
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::LootWindowChanged>(
+        [this](const game::events::LootWindowChanged& e) {
+            auto* ac = playerView_.getAnimationController();
+            if (!ac) return;
+            if (e.open) ac->startLooting();
+            else        ac->stopLooting();
+        }));
 }
 
 }} // namespace wowee::core

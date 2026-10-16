@@ -2959,7 +2959,7 @@ int lua_Tooltip_SetInventoryItem(lua_State* L) {
     if (uid != "player" && slot > 19) { lua_pushboolean(L, 0); return 1; }
     if (uid != "player") {
         const uint64_t guid = wowee::addons::resolveUnitGuid(gh, uid);
-        auto& cache = gh->inspectedPlayerItemEntriesRef();
+        const auto& cache = gh->inventory().inspectedPlayerItemEntries();
         auto it = guid ? cache.find(guid) : cache.end();
         const uint32_t entry = (it != cache.end()) ? it->second[static_cast<size_t>(slot - 1)] : 0;
         lua_pushboolean(L, fillItemTooltipById(L, gh, entry) ? 1 : 0);

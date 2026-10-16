@@ -323,7 +323,13 @@ static std::string formatSpellNameList(GameHandler& handler,
 }
 
 SpellHandler::SpellHandler(GameHandler& owner)
-    : owner_(owner) {}
+    : owner_(owner) {
+    // A spell bought from a trainer is in the book from the moment the
+    // purchase succeeds; SMSG_LEARNED_SPELL can come after the trainer
+    // window has redrawn from SPELLS_CHANGED.
+    subscriptions_.push_back(owner_.eventBus().subscribe<events::TrainerSpellLearned>(
+        [this](const events::TrainerSpellLearned& e) { addKnownSpell(e.spellId); }));
+}
 
 // The five values FrameXML unpacks from any UNIT_SPELLCAST_* event:
 //   unit, spell name, rank, cast id, spell id
@@ -486,7 +492,6 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_SPELLLOGEXECUTE] = [this](network::Packet& p) { handleSpellLogExecute(p); };
     table[Opcode::SMSG_CLEAR_EXTRA_AURA_INFO] = [this](network::Packet& p) { handleClearExtraAuraInfo(p); };
     table[Opcode::SMSG_CLEAR_EXTRA_AURA_INFO_OBSOLETE] = [this](network::Packet& p) { handleClearExtraAuraInfo(p); };
-    table[Opcode::SMSG_ITEM_ENCHANT_TIME_UPDATE] = [this](network::Packet& p) { handleItemEnchantTimeUpdate(p); };
     table[Opcode::SMSG_RESUME_CAST_BAR] = [this](network::Packet& p) { handleResumeCastBar(p); };
     table[Opcode::MSG_CHANNEL_START] = [this](network::Packet& p) { handleChannelStart(p); };
     table[Opcode::MSG_CHANNEL_UPDATE] = [this](network::Packet& p) { handleChannelUpdate(p); };
@@ -4092,9 +4097,7 @@ void SpellHandler::handleItemCooldown(network::Packet& packet) {
                 }
             }
             // Resolve itemId from the GUID so item-type slots are also updated
-            uint32_t itemId = 0;
-            auto iit = owner_.onlineItemsRef().find(itemGuid);
-            if (iit != owner_.onlineItemsRef().end()) itemId = iit->second.entry;
+            const uint32_t itemId = owner_.inventory().getItemEntryByGuid(itemGuid);
             for (auto& slot : owner_.actionBarRef()) {
                 bool match = (spellId != 0 && slot.type == ActionBarSlot::SPELL && slot.id == spellId)
                           || (itemId  != 0 && slot.type == ActionBarSlot::ITEM  && slot.id == itemId);
@@ -4862,69 +4865,6 @@ void SpellHandler::handleClearExtraAuraInfo(network::Packet& packet) {
         }
     }
     packet.skipAll();
-}
-
-void SpellHandler::handleItemEnchantTimeUpdate(network::Packet& packet) {
-    // Format: uint64 itemGuid + uint32 enchantmentSlot + uint32 durationSec + uint64 playerGuid
-    //
-    // The slot here is the item's *enchantment* slot (TEMP_ENCHANTMENT_SLOT = 1),
-    // not the equipment slot - reading it as one labels every temporary enchant
-    // "Off Hand", even on a two-hander. The item GUID is what says where it sits.
-    if (!packet.hasRemaining(24)) {
-        packet.skipAll(); return;
-    }
-    uint64_t itemGuid    = packet.readUInt64();
-    /*uint32_t enchantmentSlot =*/ packet.readUInt32();
-    uint32_t durationSec = packet.readUInt32();
-    /*uint64_t playerGuid =*/ packet.readUInt64();
-
-    if (itemGuid == 0) return;
-
-    // Map the enchanted item to the weapon slot it is equipped in.
-    static constexpr EquipSlot kWeaponSlots[] = {
-        EquipSlot::MAIN_HAND, EquipSlot::OFF_HAND, EquipSlot::RANGED
-    };
-    uint32_t enchSlot = 0xFFFFFFFF;
-    for (uint32_t i = 0; i < 3; ++i) {
-        if (owner_.getEquipSlotGuid(static_cast<int>(kWeaponSlots[i])) == itemGuid) {
-            enchSlot = i;
-            break;
-        }
-    }
-    if (enchSlot > 2) return;  // enchanted item is not an equipped weapon
-
-    uint64_t nowMs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-
-    if (durationSec == 0) {
-        // Enchant expired / removed - erase the slot entry
-        owner_.tempEnchantTimersRef().erase(
-            std::remove_if(owner_.tempEnchantTimersRef().begin(), owner_.tempEnchantTimersRef().end(),
-                           [enchSlot](const GameHandler::TempEnchantTimer& t) { return t.slot == enchSlot; }),
-            owner_.tempEnchantTimersRef().end());
-    } else {
-        uint64_t expireMs = nowMs + static_cast<uint64_t>(durationSec) * 1000u;
-        bool found = false;
-        for (auto& t : owner_.tempEnchantTimersRef()) {
-            if (t.slot == enchSlot) { t.expireMs = expireMs; found = true; break; }
-        }
-        if (!found) owner_.tempEnchantTimersRef().push_back({.slot = enchSlot, .expireMs = expireMs});
-
-        // Warn at important thresholds
-        if (durationSec <= 60 && durationSec > 55) {
-            const char* slotName = (enchSlot < 3) ? owner_.kTempEnchantSlotNames[enchSlot] : "weapon";
-            char buf[80];
-            std::snprintf(buf, sizeof(buf), "Weapon enchant (%s) expires in 1 minute!", slotName);
-            owner_.addSystemChatMessage(buf);
-        } else if (durationSec <= 300 && durationSec > 295) {
-            const char* slotName = (enchSlot < 3) ? owner_.kTempEnchantSlotNames[enchSlot] : "weapon";
-            char buf[80];
-            std::snprintf(buf, sizeof(buf), "Weapon enchant (%s) expires in 5 minutes.", slotName);
-            owner_.addSystemChatMessage(buf);
-        }
-    }
-    LOG_DEBUG("SMSG_ITEM_ENCHANT_TIME_UPDATE: slot=", enchSlot, " dur=", durationSec, "s");
 }
 
 void SpellHandler::handleResumeCastBar(network::Packet& packet) {

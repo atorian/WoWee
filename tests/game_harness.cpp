@@ -4,7 +4,9 @@
 #include "test_support.hpp"
 
 #include "core/env.hpp"
+#include "game/entity.hpp"
 #include "game/protocol_tables.hpp"
+#include "game/update_field_table.hpp"
 #include "game/world_packet_data.hpp"
 
 #include <cstdlib>
@@ -229,6 +231,58 @@ std::vector<uint8_t> GameHarness::charEnumBody(const std::vector<PlayerSpec>& ch
 
 std::vector<uint8_t> GameHarness::loginVerifyWorldBody(const PlayerSpec& p) {
     return Body().u32(p.mapId).f32(p.x).f32(p.y).f32(p.z).f32(0.0f);
+}
+
+namespace {
+
+/// One block's fields as the wire carries them: the mask words, then each set
+/// field's value in ascending order.
+void writeFields(Body& b, const GameHarness::Fields& fields) {
+    const int words = fields.empty() ? 0 : fields.rbegin()->first / 32 + 1;
+    b.u8(static_cast<uint8_t>(words));
+    for (int w = 0; w < words; ++w) {
+        uint32_t mask = 0;
+        for (const auto& [field, value] : fields) {
+            if (field / 32 == w) mask |= 1u << (field % 32);
+        }
+        b.u32(mask);
+    }
+    for (const auto& [field, value] : fields) b.u32(value);
+}
+
+} // namespace
+
+void GameHarness::putGuid(Fields& fields, uint16_t field, uint64_t guid) {
+    fields[field] = static_cast<uint32_t>(guid);
+    fields[static_cast<uint16_t>(field + 1)] = static_cast<uint32_t>(guid >> 32);
+}
+
+std::vector<uint8_t> GameHarness::createItemBody(uint64_t guid, uint32_t entry, uint32_t stack) {
+    Fields fields;
+    fields[game::fieldIndex(game::UF::OBJECT_FIELD_ENTRY)] = entry;
+    fields[game::fieldIndex(game::UF::ITEM_FIELD_STACK_COUNT)] = stack;
+    Body b;
+    b.u32(1);                       // one block
+    b.u8(2);                        // CREATE_OBJECT
+    b.packedGuid(guid);
+    b.u8(1);                        // ITEM
+    b.u8(0).u8(0);                  // update flags: no movement
+    writeFields(b, fields);
+    return b.bytes();
+}
+
+std::vector<uint8_t> GameHarness::valuesBody(uint64_t guid, const Fields& fields) {
+    Body b;
+    b.u32(1);
+    b.u8(0);                        // VALUES
+    b.packedGuid(guid);
+    writeFields(b, fields);
+    return b.bytes();
+}
+
+void GameHarness::playerInView() {
+    const uint64_t guid = player_.guid;
+    game_->getEntityManager().addEntity(guid, std::make_shared<game::Player>(guid));
 }
 
 void GameHarness::enterWorld(const PlayerSpec& player) {

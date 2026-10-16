@@ -732,6 +732,7 @@ set(WOWEE_SOURCES
     src/game/account_data.cpp
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
+    src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/quest_objectives.cpp
     src/game/entity_controller.cpp

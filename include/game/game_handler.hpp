@@ -7,6 +7,7 @@
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
+#include "game/inventory_handler.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/packet_sender.hpp"
 #include "game/world_packet_data.hpp"
@@ -172,7 +173,8 @@ class GameHandler : public IConnectionState,
                      public IPvpState,
                      public PacketSender,
                      public FrameXmlEvents,
-                     public ActionBarQueries {
+                     public ActionBarQueries,
+                     public InventoryQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -238,8 +240,9 @@ public:
 
     // What the domain handlers are handed instead of this class: the world
     // connection to send on (PacketSender), the FrameXML event channel
-    // (FrameXmlEvents) and what the action bar asks about its actions
-    // (ActionBarQueries). See AGENTS.md, "A new domain handler".
+    // (FrameXmlEvents) and what the action bar and the inventory ask of the
+    // rest of the game (ActionBarQueries, InventoryQueries). See AGENTS.md,
+    // "A new domain handler".
     bool connected() const override { return isConnected(); }
     bool characterInWorld() const override { return isInWorld(); }
     void send(const network::Packet& packet) override;
@@ -247,10 +250,49 @@ public:
                            const std::vector<std::string>& args) override {
         fireAddonEvent(name, args);
     }
+    bool frameXmlListening() const override { return hasAddonEventListener(); }
     float spellCooldownRemaining(uint32_t spellId) const override;
     float itemCooldownRemaining(uint32_t itemId) const override;
     void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
     std::optional<uint32_t> playerFieldBytes() const override;
+
+    // InventoryQueries
+    uint64_t characterGuid() const override { return getPlayerGuid(); }
+    uint64_t currentTargetGuid() const override { return getTargetGuid(); }
+    const EntityManager& entities() const override { return getEntityManager(); }
+    const FlatFieldMap& playerFields() const override { return lastPlayerFields_; }
+    PacketParsers& packetParsers() override { return *packetParsers_; }
+    std::string playerName(uint64_t guid) const override { return lookupName(guid); }
+    void requestPlayerName(uint64_t guid) override { queryPlayerName(guid); }
+    bool inGuild() const override { return isInGuild(); }
+    std::string spellName(uint32_t spellId) const override { return getSpellName(spellId); }
+    bool spellKnownToClient(uint32_t spellId) const override { return isSpellKnownToClient(spellId); }
+    uint32_t spellImplicitTargetA(uint32_t spellId) const override { return getSpellImplicitTargetA(spellId); }
+    uint32_t spellTargetFlags(uint32_t spellId) const override { return getSpellTargetFlags(spellId); }
+    std::array<uint32_t, 3> spellEffects(uint32_t spellId) const override;
+    uint32_t classSkillLineOf(uint32_t spellId) override;
+    std::string skillLineName(uint32_t skillLineId) const override { return getSkillLineName(skillLineId); }
+    std::string itemIconPath(uint32_t displayInfoId) const override { return getItemIconPath(displayInfoId); }
+    std::string randomPropertyName(int32_t id) const override { return getRandomPropertyName(id); }
+    std::vector<RandomStatBonus> randomStatBonuses(int32_t id, uint32_t suffixFactor) const override {
+        return getRandomStatBonuses(id, suffixFactor);
+    }
+    std::string enchantName(uint32_t enchantId) const override { return getEnchantName(enchantId); }
+    bool casting() const override { return isCasting(); }
+    uint32_t currentCastSpellId() const override { return getCurrentCastSpellId(); }
+    bool restoring() const override { return isRestoring(); }
+    bool craftingWindowOpen() const override { return isCraftingWindowOpen(); }
+    bool mounted() const override { return isMounted(); }
+    uint32_t mountAuraSpellId() const override { return getMountAuraSpellId(); }
+    bool carriesAura(uint32_t spellId) const override { return playerCarriesAura(spellId); }
+    void noteItemCastSpell(uint32_t spellId) override;
+    void stopMovingForCast() override;
+    bool gameObjectLootPending(uint64_t lootGuid) const override;
+    bool gameObjectLootOpened(uint64_t lootGuid) override;
+    bool npcDialogOpen() const override;
+    bool questWantsItem(uint32_t itemId) const override;
+    // cancelCast, dismount, closeGossip and runInterfaceCommand are
+    // InventoryQueries' too, declared with the rest of their kind below.
 
     /**
      * Get current connection state
@@ -434,7 +476,7 @@ public:
     void setInterfaceCommandCallback(InterfaceCommand cb) {
         interfaceCommand_ = std::move(cb);
     }
-    void runInterfaceCommand(const std::string& lua);
+    void runInterfaceCommand(const std::string& lua) override;
 
     // Spell icon path resolver: spellId -> texture path string (e.g., "Interface\\Icons\\Spell_Fire_Fireball01")
     using SpellIconPathResolver = std::function<std::string(uint32_t)>;
@@ -480,7 +522,7 @@ public:
     // green/blue item gains from "of the Bear" etc. statType uses the ITEM_MOD codes shared
     // with ItemDef::ExtraStat (4=Str, 7=Sta, 45=SpellPower, ...). Suffix stats scale as
     // AllocationPct*suffixFactor/10000; positive properties use the enchant's fixed amount.
-    struct RandomStatBonus { uint32_t statType = 0; int32_t value = 0; };
+    using RandomStatBonus = game::RandomStatBonus;
     using RandomStatResolver = std::function<std::vector<RandomStatBonus>(int32_t, uint32_t)>;
     void setRandomStatResolver(RandomStatResolver r) { randomStatResolver_ = std::move(r); }
     std::vector<RandomStatBonus> getRandomStatBonuses(int32_t id, uint32_t suffixFactor) const {
@@ -509,8 +551,8 @@ public:
     void addLocalChatMessage(const MessageChatData& msg);
 
     // Money (copper)
-    uint64_t getMoneyCopper() const { return protocolMoneyCopper_.value_or(playerMoneyCopper_); }
-    void applyServerMoney(uint64_t copper);
+    uint64_t getMoneyCopper() const { return inventoryHandler_->moneyCopper(); }
+    void applyServerMoney(uint64_t copper) { inventoryHandler_->applyServerMoney(copper); }
 
     // PvP currency (TBC/WotLK only)
     uint32_t getHonorPoints() const { return playerHonorPoints_; }
@@ -602,13 +644,12 @@ public:
     }
 
     // Inventory
-    Inventory& getInventory() { return inventory; }
-    const Inventory& getInventory() const { return inventory; }
-    bool consumeOnlineEquipmentDirty() { bool d = onlineEquipDirty_; onlineEquipDirty_ = false; return d; }
-    /// Ask for the equipment visuals to be rebuilt - the helm toggle changes what
-    /// is drawn without any item moving.
-    void markOnlineEquipmentDirty() { onlineEquipDirty_ = true; }
-    void resetEquipmentDirtyTracking() { lastEquipDisplayIds_ = {}; onlineEquipDirty_ = true; }
+    // Inventory - InventoryHandler's; these forward for the old callers.
+    Inventory& getInventory() { return inventoryHandler_->items(); }
+    const Inventory& getInventory() const { return inventoryHandler_->items(); }
+    bool consumeOnlineEquipmentDirty() { return inventoryHandler_->consumeOnlineEquipmentDirty(); }
+    void markOnlineEquipmentDirty() { inventoryHandler_->markOnlineEquipmentDirty(); }
+    void resetEquipmentDirtyTracking() { inventoryHandler_->resetEquipmentDirtyTracking(); }
     void unequipToBackpack(EquipSlot equipSlot);
 
     // Targeting
@@ -1065,7 +1106,7 @@ public:
     const std::vector<ThreatEntry>* getTargetThreatList() const;
 
     void castSpell(uint32_t spellId, uint64_t targetGuid = 0);
-    void cancelCast();
+    void cancelCast() override;
     void cancelAura(uint32_t spellId);
     void dismissPet();
     void renamePet(const std::string& newName);
@@ -1404,9 +1445,6 @@ public:
     using NpcFarewellCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
     void setNpcFarewellCallback(NpcFarewellCallback cb) { npcFarewellCallback_ = std::move(cb); }
 
-    using NpcVendorCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcVendorCallback(NpcVendorCallback cb) { npcVendorCallback_ = std::move(cb); }
-
     // XP tracking
     uint32_t getPlayerXp() const { return playerXp_; }
     uint32_t getPlayerNextLevelXp() const { return playerNextLevelXp_; }
@@ -1509,14 +1547,6 @@ public:
 
     using PlayerDespawnCallback = std::function<void(uint64_t guid)>;
     void setPlayerDespawnCallback(PlayerDespawnCallback cb) { playerDespawnCallback_ = std::move(cb); }
-
-    // Online player equipment visuals callback.
-    // Sends a best-effort view of equipped items for players in view using ItemDisplayInfo IDs.
-    // Arrays are indexed by EquipSlot (0..18). Values are 0 when unknown/unavailable.
-    using PlayerEquipmentCallback = std::function<void(uint64_t guid,
-                                                      const std::array<uint32_t, 19>& displayInfoIds,
-                                                      const std::array<uint8_t, 19>& inventoryTypes)>;
-    void setPlayerEquipmentCallback(PlayerEquipmentCallback cb) { playerEquipmentCallback_ = std::move(cb); }
 
     // GameObject spawn callback (online mode - triggered when gameobject enters view)
     // Parameters: guid, entry, displayId, x, y, z (canonical), orientation, scale (OBJECT_FIELD_SCALE_X)
@@ -2014,10 +2044,7 @@ public:
     const std::array<uint64_t, 19>* getEquipmentSetItems(uint32_t setId) const;
     uint32_t getEquipmentSetIgnoreMask(uint32_t setId) const;
     /// The item an online guid refers to, or zero when it is not known here.
-    uint32_t getItemIdByGuid(uint64_t guid) const {
-        auto it = onlineItems_.find(guid);
-        return it == onlineItems_.end() ? 0u : it->second.entry;
-    }
+    uint32_t getItemIdByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
     bool supportsEquipmentSets() const;
     void useEquipmentSet(uint32_t setId);
     void saveEquipmentSet(const std::string& name, const std::string& iconName = "INV_Misc_QuestionMark",
@@ -2032,7 +2059,7 @@ public:
     void selectGossipQuest(uint32_t questId);
     void acceptQuest();
     void declineQuest(bool announce = true);
-    void closeGossip();
+    void closeGossip() override;
     // Quest-starting items: right-click triggers quest offer dialog via questgiver protocol
     void offerQuestFromItem(uint64_t itemGuid, uint32_t questId);
     uint64_t getBagItemGuid(int bagIndex, int slotIndex) const;
@@ -2069,9 +2096,6 @@ public:
     const std::vector<QuestLogEntry>& getQuestLog() const;
     // Seconds left on each timed quest, paired with its quest id.
     std::vector<std::pair<uint32_t, uint32_t>> getQuestTimers() const;
-    // Reconcile collect-item quest objectives against current bag contents.
-    // Forwards to QuestHandler; called by InventoryHandler after each rebuild.
-    void reconcileQuestItemObjectives(const std::unordered_map<uint32_t, uint32_t>& carriedCounts);
     // QuestSort.dbc name for negative ZoneOrSort values (class/profession/seasonal)
     const std::string& getQuestSortName(uint32_t sortId) const;
     int getSelectedQuestLogIndex() const;
@@ -2447,34 +2471,19 @@ public:
         uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
     };
 
-    // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE)
-    // Slot: 0=main-hand, 1=off-hand, 2=ranged. Value: expire time (steady_clock ms).
-    struct TempEnchantTimer {
-        uint32_t slot     = 0;
-        uint64_t expireMs = 0;   // std::chrono::steady_clock ms timestamp when it expires
-    };
-    // Returns remaining ms for a given slot, or 0 if absent/expired.
+    // Temporary weapon enchant timers (from SMSG_ITEM_ENCHANT_TIME_UPDATE), the
+    // inventory's. Returns remaining ms for a given slot, or 0 if absent/expired.
+    using TempEnchantTimer = game::TempEnchantTimer;
     uint32_t getTempEnchantRemainingMs(uint32_t slot) const;
-    static constexpr const char* kTempEnchantSlotNames[] = { "Main Hand", "Off Hand", "Ranged" };
 
-    // ---- Readable text (books / scrolls / notes) ----
-    // Populated by handlePageTextQueryResponse(); multi-page items chain via nextPageId.
-    struct BookPage { uint32_t pageId = 0; std::string text; };
-    const std::vector<BookPage>& getBookPages() const { return bookPages_; }
-    void clearBook() { bookPages_.clear(); bookTitle_.clear(); bookMaterial_ = 0; }
-
-    /// What is being read, for the heading over the page. Known at every point
-    /// a book is opened - the game object's name from its query cache, or the
-    /// item's from the inventory - and set there, because none of it survives
-    /// into the page text response itself: that carries the words and the id of
-    /// the page after it, and nothing about what the pages belong to.
-    const std::string& getBookTitle() const { return bookTitle_; }
-    void setBookTitle(std::string title) { bookTitle_ = std::move(title); }
-    /// The backing the open book's pages are drawn on, set from the same place
-    /// as the title and for the same reason: the page text response says
-    /// nothing about what the pages belong to.
-    uint32_t getBookMaterial() const { return bookMaterial_; }
-    void setBookMaterial(uint32_t material) { bookMaterial_ = material; }
+    // ---- Readable text (books / scrolls / notes) - the inventory's ----
+    using BookPage = game::BookPage;
+    const std::vector<BookPage>& getBookPages() const { return inventoryHandler_->getBookPages(); }
+    void clearBook() { inventoryHandler_->clearBook(); }
+    /// What is being read, for the heading over the page.
+    const std::string& getBookTitle() const { return inventoryHandler_->getBookTitle(); }
+    /// The backing the open book's pages are drawn on.
+    uint32_t getBookMaterial() const { return inventoryHandler_->getBookMaterial(); }
     /// PageTextMaterial.dbc's name for a material id, empty for none. The
     /// interface wants the word, not the number - it picks a texture and a
     /// text colour by it.
@@ -2816,10 +2825,6 @@ public:
     using PvpHonorCallback = std::function<void(uint32_t honorAmount, uint64_t victimGuid, uint32_t victimRank)>;
     void setPvpHonorCallback(PvpHonorCallback cb) { pvpHonorCallback_ = std::move(cb); }
 
-    // Loot window open/close callback (for loot kneel animation)
-    using LootWindowCallback = std::function<void(bool open)>;
-    void setLootWindowCallback(LootWindowCallback cb) { lootWindowCallback_ = std::move(cb); }
-
     // Mount state
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
     void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
@@ -2887,7 +2892,7 @@ public:
     // Set the character pitch angle (radians) for movement packets (flight / swimming).
     // Positive = nose up, negative = nose down.
     void setMovementPitch(float radians) { movementInfo.pitch = radians; }
-    void dismount();
+    void dismount() override;
     /// In the air on a flying mount or not - see MovementHandler::setFlightAirborne.
     void setFlightAirborne(bool airborne);
 
@@ -3148,17 +3153,8 @@ public:
     const AuctionListResult& getAuctionBrowseResults() const;
     const AuctionListResult& getAuctionOwnerResults() const;
     const AuctionListResult& getAuctionBidderResults() const;
-    /// Writable, for the one thing that reorders a result set in place: the
-    /// panel's own column sort. The server sends a list and the client sorts
-    /// it, which is what the real client does too, there is no re-query.
-    ///
-    /// These forward exactly as the const getters above do. They used to hand
-    /// out this class's own copy while every reader took the inventory
-    /// handler's, so the sort ran on a list nothing displayed and clicking a
-    /// column header did nothing at all.
-    AuctionListResult& auctionBrowseResultsRef();
-    AuctionListResult& auctionOwnerResultsRef();
-    AuctionListResult& auctionBidderResultsRef();
+    // The panel's column sort reorders the lists in place, through
+    // inventory().auctionBrowseResultsRef() and its two siblings.
     int getAuctionActiveTab() const;
     void setAuctionActiveTab(int tab);
     float getAuctionSearchDelay() const;
@@ -3206,42 +3202,15 @@ public:
     std::string getEnchantName(uint32_t enchantId) const;
     /// The gem item an enchantment came out of; 0 when it is not a gem.
     uint32_t getEnchantGemItem(uint32_t enchantId) const;
-    /// The template entry of an item this client is holding, by guid. Zero when
-    /// the guid names nothing in the player's own inventory or bank.
-    /// Has this item already bound to its owner? ITEM_FIELD_FLAGS bit 0x1.
-    /// What was paid for an item, and how long is left to hand it back.
-    ///
-    /// The server answers CMSG_ITEM_REFUND_INFO with this and nothing keeps
-    /// it until asked - so the whole record is a reply to a question, and the
-    /// question is only worth asking about an item the player is looking at.
-    struct ItemRefundInfo {
-        uint32_t money = 0;
-        uint32_t honor = 0;
-        uint32_t arena = 0;
-        std::array<std::pair<uint32_t, uint32_t>, 5> items{};  ///< id, count
-        /// Played seconds since the purchase. The window is two hours of it,
-        /// which is why this is played time and not wall-clock: logging out
-        /// does not run it down.
-        uint32_t playedSincePurchase = 0;
-    };
-    /// Ask the server what an item cost. The answer arrives asynchronously and
-    /// lands in the map below.
-    void requestItemRefundInfo(uint64_t itemGuid);
-    /// Hand an item back for what was paid for it.
-    void refundItem(uint64_t itemGuid);
+    // Refunds and held items - the inventory's; these forward for the old callers.
+    using ItemRefundInfo = game::ItemRefundInfo;
+    void requestItemRefundInfo(uint64_t itemGuid) { inventoryHandler_->requestItemRefundInfo(itemGuid); }
+    void refundItem(uint64_t itemGuid) { inventoryHandler_->refundItem(itemGuid); }
     const ItemRefundInfo* getItemRefundInfo(uint64_t itemGuid) const {
-        auto it = itemRefundInfo_.find(itemGuid);
-        return (it != itemRefundInfo_.end()) ? &it->second : nullptr;
+        return inventoryHandler_->getItemRefundInfo(itemGuid);
     }
-
-    bool isItemSoulbound(uint64_t guid) const {
-        auto it = onlineItems_.find(guid);
-        return it != onlineItems_.end() && (it->second.flags & 0x1u) != 0;
-    }
-    uint32_t getItemEntryByGuid(uint64_t guid) const {
-        auto it = onlineItems_.find(guid);
-        return (it != onlineItems_.end()) ? it->second.entry : 0;
-    }
+    bool isItemSoulbound(uint64_t guid) const { return inventoryHandler_->isItemSoulbound(guid); }
+    uint32_t getItemEntryByGuid(uint64_t guid) const { return inventoryHandler_->getItemEntryByGuid(guid); }
     /// The skill's own name, by SkillLine.dbc id.
     const std::string& getSkillLineName(uint32_t skillLineId) const;
     /// Returns the DispelType for a spell (0=none,1=magic,2=curse,3=disease,4=poison,5+=other)
@@ -3276,35 +3245,21 @@ public:
         std::vector<const TrainerSpell*> spells;
     };
     const std::vector<TrainerTab>& getTrainerTabs() const;
+    // Item templates and held items - the inventory's; forwarded for the old callers.
     const ItemQueryResponseData* getItemInfo(uint32_t itemId) const {
-        auto it = itemInfoCache_.find(itemId);
-        return (it != itemInfoCache_.end()) ? &it->second : nullptr;
+        return inventoryHandler_->getItemInfo(itemId);
     }
-    const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const { return itemInfoCache_; }
-    // Request item info from server if not already cached/pending
-    void ensureItemInfo(uint32_t entry) {
-        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
-        queryItemInfo(entry, 0);
+    const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const {
+        return inventoryHandler_->getItemInfoCache();
     }
-    uint64_t getBackpackItemGuid(int index) const {
-        if (index < 0 || index >= static_cast<int>(backpackSlotGuids_.size())) return 0;
-        return backpackSlotGuids_[index];
-    }
-    uint64_t getEquipSlotGuid(int slot) const {
-        if (slot < 0 || slot >= static_cast<int>(equipSlotGuids_.size())) return 0;
-        return equipSlotGuids_[slot];
-    }
-    // Returns the permanent and temporary enchant IDs for an item by GUID (0 if unknown).
+    void ensureItemInfo(uint32_t entry) { inventoryHandler_->ensureItemInfo(entry); }
+    uint64_t getBackpackItemGuid(int index) const { return inventoryHandler_->getBackpackItemGuid(index); }
+    uint64_t getEquipSlotGuid(int slot) const { return inventoryHandler_->getEquipSlotGuid(slot); }
     std::pair<uint32_t, uint32_t> getItemEnchantIds(uint64_t guid) const {
-        auto it = onlineItems_.find(guid);
-        if (it == onlineItems_.end()) return {0, 0};
-        return {it->second.permanentEnchantId, it->second.temporaryEnchantId};
+        return inventoryHandler_->getItemEnchantIds(guid);
     }
-    // Returns the socket gem enchant IDs (3 slots; 0 = empty socket) for an item by GUID.
     std::array<uint32_t, 3> getItemSocketEnchantIds(uint64_t guid) const {
-        auto it = onlineItems_.find(guid);
-        if (it == onlineItems_.end()) return {};
-        return it->second.socketEnchantIds;
+        return inventoryHandler_->getItemSocketEnchantIds(guid);
     }
     uint64_t getVendorGuid() const;
 
@@ -3348,8 +3303,11 @@ public:
     MovementHandler* getMovementHandler() { return movementHandler_.get(); }
     SpellHandler* getSpellHandler() { return spellHandler_.get(); }
     QuestHandler* getQuestHandler() { return questHandler_.get(); }
-    InventoryHandler* getInventoryHandler() { return inventoryHandler_.get(); }
     EntityController* getEntityController() { return entityController_.get(); }
+    /// What the character holds - bags, equipment, coin, books - and the
+    /// windows that move it: loot, vendors, mail, the bank, the auction house.
+    InventoryHandler& inventory() { return *inventoryHandler_; }
+    const InventoryHandler& inventory() const { return *inventoryHandler_; }
     /// Key bindings, macros and settings the server keeps for the account.
     AccountDataHandler& accountData() { return *accountDataHandler_; }
     const AccountDataHandler& accountData() const { return *accountDataHandler_; }
@@ -3363,7 +3321,6 @@ public:
     uint64_t& focusGuidRef() { return focusGuid; }
     uint64_t& mouseoverGuidRef() { return mouseoverGuid_; }
     MovementInfo& movementInfoRef() { return movementInfo; }
-    Inventory& inventoryRef() { return inventory; }
 
     // ── Core / Session ───────────────────────────────────────────────
     uint32_t getBuild() const { return build; }
@@ -3424,29 +3381,7 @@ public:
 
     // ── Inventory & Equipment ────────────────────────────────────────
     ActionBar& actionBarRef() { return actionBarHandler_->mutableSlots(); }
-    auto& backpackSlotGuidsRef() { return backpackSlotGuids_; }
-    auto& equipSlotGuidsRef() { return equipSlotGuids_; }
-    auto& keyringSlotGuidsRef() { return keyringSlotGuids_; }
-    auto& containerContentsRef() { return containerContents_; }
-    auto& invSlotBaseRef() { return invSlotBase_; }
-    auto& packSlotBaseRef() { return packSlotBase_; }
-    auto& visibleItemEntryBaseRef() { return visibleItemEntryBase_; }
-    auto& visibleItemLayoutVerifiedRef() { return visibleItemLayoutVerified_; }
-    auto& visibleItemStrideRef() { return visibleItemStride_; }
-    auto& itemInfoCacheRef() { return itemInfoCache_; }
-    auto& lastEquipDisplayIdsRef() { return lastEquipDisplayIds_; }
-    auto& onlineEquipDirtyRef() { return onlineEquipDirty_; }
-    auto& onlineItemsRef() { return onlineItems_; }
-    auto& inspectedPlayerItemEntriesRef() { return inspectedPlayerItemEntries_; }
-    auto& otherPlayerVisibleDirtyRef() { return otherPlayerVisibleDirty_; }
-    auto& otherPlayerVisibleItemEntriesRef() { return otherPlayerVisibleItemEntries_; }
-    auto& pendingItemPushNotifsRef() { return pendingItemPushNotifs_; }
-    auto& pendingItemQueriesRef() { return pendingItemQueries_; }
-    auto& pendingMoneyDeltaRef() { return pendingMoneyDelta_; }
-    auto& pendingMoneyDeltaTimerRef() { return pendingMoneyDeltaTimer_; }
-    auto& pendingAutoInspectRef() { return pendingAutoInspect_; }
     auto& pendingGameObjectLootRetriesRef() { return pendingGameObjectLootRetries_; }
-    auto& tempEnchantTimersRef() { return tempEnchantTimers_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
@@ -3465,7 +3400,6 @@ public:
     auto& playerHealBonusRef() { return playerHealBonus_; }
     auto& playerHonorPointsRef() { return playerHonorPoints_; }
     auto& playerMeleeAPRef() { return playerMeleeAP_; }
-    auto& playerMoneyCopperRef() { return playerMoneyCopper_; }
     auto& playerNextLevelXpRef() { return playerNextLevelXp_; }
     auto& playerParryPctRef() { return playerParryPct_; }
     auto& playerRangedAPRef() { return playerRangedAP_; }
@@ -3517,7 +3451,6 @@ public:
     auto& ignoreListGuidsRef() { return ignoreListGuids_; }
     auto& lastContactListCountRef() { return lastContactListCount_; }
     auto& lastContactListMaskRef() { return lastContactListMask_; }
-    std::vector<MailMessage>& mailInboxRef();
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
@@ -3592,7 +3525,6 @@ public:
     // ── Trainer, GM & Misc ───────────────────────────────────────────
     auto& gmTicketActiveRef() { return gmTicketActive_; }
     auto& gmTicketTextRef() { return gmTicketText_; }
-    auto& bookPagesRef() { return bookPages_; }
     auto& activeTotemSlotsRef() { return activeTotemSlots_; }
     auto& lastInteractedGoGuidRef() { return lastInteractedGoGuid_; }
     auto& pendingGameObjectInteractGuidRef() { return pendingGameObjectInteractGuid_; }
@@ -3620,7 +3552,6 @@ public:
     auto& hearthstonePreloadCallbackRef() { return hearthstonePreloadCallback_; }
     auto& hitReactionCallbackRef() { return hitReactionCallback_; }
     auto& knockBackCallbackRef() { return knockBackCallback_; }
-    auto& lootWindowCallbackRef() { return lootWindowCallback_; }
     auto& meleeSwingCallbackRef() { return meleeSwingCallback_; }
     void suppressNextMeleeSwingAnim() { suppressMeleeSwingAnim_ = true; }
     bool consumeSuppressMeleeSwingAnim() {
@@ -3635,11 +3566,9 @@ public:
     auto& npcGreetingCallbackRef() { return npcGreetingCallback_; }
     auto& npcRespawnCallbackRef() { return npcRespawnCallback_; }
     auto& npcSwingCallbackRef() { return npcSwingCallback_; }
-    auto& npcVendorCallbackRef() { return npcVendorCallback_; }
     auto& openLfgCallbackRef() { return openLfgCallback_; }
     auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
-    auto& playerEquipmentCallbackRef() { return playerEquipmentCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
     auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
@@ -3826,18 +3755,7 @@ public:
             default:         return {};
         }
     }
-    struct OnlineItemInfo {
-        uint32_t entry = 0;
-        uint32_t stackCount = 1;
-        uint32_t curDurability = 0;
-        uint32_t maxDurability = 0;
-        uint32_t permanentEnchantId = 0;
-        uint32_t temporaryEnchantId = 0;
-        std::array<uint32_t, 3> socketEnchantIds{};
-        uint32_t flags = 0;              // ITEM_FIELD_FLAGS (bit 0x1 = soulbound)
-        int32_t  randomPropertyId = 0;   // ITEM_FIELD_RANDOM_PROPERTIES_ID (signed)
-        uint32_t suffixFactor = 0;       // ITEM_FIELD_PROPERTY_SEED (random-suffix stat scale)
-    };
+    using OnlineItemInfo = game::OnlineItemInfo;
     bool isHostileFaction(uint32_t factionTemplateId) const {
         if (const int atWar = factionAtWarLive(factionTemplateId); atWar >= 0) return atWar == 1;
         auto it = factionHostileMap_.find(factionTemplateId);
@@ -4051,9 +3969,6 @@ private:
     // fallTime must be the elapsed ms since the FALLING flag was set; the server
     // uses it for fall-damage calculations and anti-cheat validation.
 
-    // Inventory
-    Inventory inventory;
-
     // Entity tracking (delegated to EntityController)
     std::unique_ptr<EntityController> entityController_;
 
@@ -4129,63 +4044,12 @@ private:
     glm::vec3 followRenderPos_{0.0f};  // Render-space position of followed entity (updated each frame)
 
 
-    // ---- Online item tracking ----
-    std::unordered_map<uint64_t, OnlineItemInfo> onlineItems_;
-    std::unordered_map<uint64_t, ItemRefundInfo> itemRefundInfo_;
-    std::set<uint64_t> itemRefundAsked_;
-    std::unordered_map<uint32_t, ItemQueryResponseData> itemInfoCache_;
-    std::unordered_set<uint32_t> pendingItemQueries_;
-    float pendingItemQueryTimer_ = 0.0f;
-
-    // Deferred SMSG_ITEM_PUSH_RESULT notifications for items whose info wasn't
-    // cached at arrival time; emitted once the query response arrives.
-    struct PendingItemPushNotif {
-        uint32_t itemId = 0;
-        uint32_t count  = 1;
-        /// The bag button the item landed in, in the interface's numbering:
-        /// 0 for the backpack and 20-23 for the four worn bags. Carried so the
-        /// deferred path can fire ITEM_PUSH with the same arguments the
-        /// immediate one does.
-        int bagButtonId = 0;
-    };
-    std::vector<PendingItemPushNotif> pendingItemPushNotifs_;
-    std::array<uint64_t, 23> equipSlotGuids_{};
-    std::array<uint64_t, 16> backpackSlotGuids_{};
-    std::array<uint64_t, 32> keyringSlotGuids_{};
-    // Container (bag) contents: containerGuid -> array of item GUIDs per slot
-    struct ContainerInfo {
-        uint32_t numSlots = 0;
-        std::array<uint64_t, 36> slotGuids{};  // max 36 slots
-    };
-    std::unordered_map<uint64_t, ContainerInfo> containerContents_;
-    int invSlotBase_ = -1;
-    int packSlotBase_ = -1;
+    // Items, coin, books and the equipment of players in view are the
+    // inventory's (InventoryHandler); none of it is kept here.
     FlatFieldMap lastPlayerFields_;
     /// The innkeeper that asked "make this your home?". SMSG_BINDER_CONFIRM
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
-    bool onlineEquipDirty_ = false;
-    std::array<uint32_t, 19> lastEquipDisplayIds_{};
-
-    // Visible equipment for other players: detect the update-field layout (base + stride)
-    // using the local player's own equipped items, then decode other players by index.
-    // WotLK 3.3.5a (AzerothCore/ChromieCraft): visible item entries appear at field
-    // WotLK 3.3.5a: PLAYER_VISIBLE_ITEM_1_ENTRYID = field 283, stride 2.
-    // Confirmed by RAW FIELDS dump: base=283 gives 17/19 valid item IDs,
-    // base=284 reads enchant values instead.
-    // Slots: HEAD=0, NECK=1, SHOULDERS=2, BODY=3, CHEST=4, WAIST=5, LEGS=6,
-    //        FEET=7, WRISTS=8, HANDS=9, FINGER1=10, FINGER2=11, TRINKET1=12,
-    //        TRINKET2=13, BACK=14, MAINHAND=15, OFFHAND=16, RANGED=17, TABARD=18
-    int visibleItemEntryBase_ = 283;
-    int visibleItemStride_ = 2;
-    bool visibleItemLayoutVerified_ = false;  // true once heuristic confirms/overrides default
-    std::unordered_map<uint64_t, std::array<uint32_t, 19>> otherPlayerVisibleItemEntries_;
-    std::unordered_set<uint64_t> otherPlayerVisibleDirty_;
-
-    // Inspect fallback (when visible item fields are missing/unreliable)
-    std::unordered_map<uint64_t, std::array<uint32_t, 19>> inspectedPlayerItemEntries_;
-    std::unordered_set<uint64_t> pendingAutoInspect_;
-    float inspectRateLimit_ = 0.0f;
 
     // ---- Combat ----
     std::deque<std::string>    areaTriggerMsgs_;
@@ -4202,7 +4066,6 @@ private:
     CreatureDespawnCallback creatureDespawnCallback_;
     PlayerSpawnCallback playerSpawnCallback_;
     PlayerDespawnCallback playerDespawnCallback_;
-    PlayerEquipmentCallback playerEquipmentCallback_;
     CreatureMoveCallback creatureMoveCallback_;
     TransportMoveCallback transportMoveCallback_;
     TransportSpawnCallback transportSpawnCallback_;
@@ -4330,8 +4193,6 @@ private:
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo
     // to send CMSG_LOOT after a gather cast (mining/herbalism) completes.
     uint64_t lastInteractedGoGuid_ = 0;
-    uint64_t playerMoneyCopper_ = 0;
-    std::optional<uint64_t> protocolMoneyCopper_; // A realm's authoritative extended balance.
     uint32_t playerHonorPoints_ = 0;
     uint32_t playerArenaPoints_ = 0;
     int32_t playerArmorRating_ = 0;
@@ -4354,10 +4215,6 @@ private:
     float playerRangedCritPct_ = -1.0f;
     float playerSpellCritPct_[7] = {-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f,-1.0f};
     int32_t playerCombatRatings_[25] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
-    // Some servers/custom clients shift update field indices. We can auto-detect coinage by correlating
-    // money-notify deltas with update-field diffs and then overriding UF::PLAYER_FIELD_COINAGE at runtime.
-    uint32_t pendingMoneyDelta_ = 0;
-    float pendingMoneyDeltaTimer_ = 0.0f;
 
     void performGameObjectInteractionNow(uint64_t guid);
 
@@ -4641,13 +4498,8 @@ private:
     PlayerHealthCallback playerHealthCallback_;
     NpcGreetingCallback npcGreetingCallback_;
     NpcFarewellCallback npcFarewellCallback_;
-    NpcVendorCallback npcVendorCallback_;
     ChargeCallback chargeCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
-    std::vector<TempEnchantTimer> tempEnchantTimers_;
-    std::vector<BookPage> bookPages_;            // pages collected for the current readable item
-    std::string bookTitle_;                      // name of the object or item those pages belong to
-    uint32_t bookMaterial_ = 0;                  // PageTextMaterial.dbc id, 0 for unknown
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
     mutable std::unordered_map<uint32_t, std::string> pageTextMaterialNames_;
@@ -4741,8 +4593,6 @@ private:
 
     // ---- Item loot callback ----
 
-    // ---- Loot window callback ----
-    LootWindowCallback lootWindowCallback_;
 
     // ---- Quest completion callback ----
 

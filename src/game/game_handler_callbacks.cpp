@@ -6,6 +6,7 @@
 #include "game/gather_spells.hpp"
 #include "game/packed_time.hpp"
 #include "game/inventory_slots.hpp"
+#include "game/ui_errors.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/movement_handler.hpp"
@@ -509,8 +510,7 @@ const Character* GameHandler::getActiveCharacter() const {
     return nullptr;
 }
 void GameHandler::addUIError(const std::string& msg) {
-    eventBus().publish(events::UiErrorRaised{.message = msg});
-    fireAddonEvent("UI_ERROR_MESSAGE", {msg});
+    game::raiseUiError(eventBus(), *this, msg);
 }
 
 void GameHandler::addScriptError(const std::string& msg) {
@@ -584,19 +584,8 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     playerGuid = characterGuid;
 
     // Reset per-character state so previous character data doesn't bleed through
-    inventory = Inventory();
-    onlineItems_.clear();
-    itemInfoCache_.clear();
-    pendingItemQueries_.clear();
-    equipSlotGuids_ = {};
-    backpackSlotGuids_ = {};
-    keyringSlotGuids_ = {};
-    invSlotBase_ = -1;
-    packSlotBase_ = -1;
+    inventoryHandler_->beginCharacter();
     lastPlayerFields_.clear();
-    onlineEquipDirty_ = false;
-    playerMoneyCopper_ = 0;
-    protocolMoneyCopper_.reset();
     playerArmorRating_ = 0;
     std::fill(std::begin(playerResistances_), std::end(playerResistances_), 0);
     std::fill(std::begin(playerStats_), std::end(playerStats_), -1);
@@ -828,10 +817,6 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     if (initialWorldEntry) {
         // Clear inspect caches on world entry to avoid showing stale data.
         inspectedPlayerAchievements_.clear();
-
-        // Buyback mirror persists across vendor windows within a session but
-        // must not leak into another character's session.
-        inventoryHandler_->clearBuybackState();
 
         // Reset talent initialization so the first SMSG_TALENTS_INFO after login
         // correctly sets the active spec (static locals don't reset across logins).
@@ -1193,9 +1178,6 @@ bool GameHandler::isMailboxOpen() const {
 const std::vector<MailMessage>& GameHandler::getMailInbox() const {
     return inventoryHandler_->getMailInbox();
 }
-std::vector<MailMessage>& GameHandler::mailInboxRef() {
-    return inventoryHandler_->mailInboxRef();
-}
 std::string GameHandler::getMailDisplaySubject(const MailMessage& mail) {
     if (mail.messageType != 2) return mail.subject;
 
@@ -1277,20 +1259,11 @@ uint64_t GameHandler::getAuctioneerGuid() const {
 const AuctionListResult& GameHandler::getAuctionBrowseResults() const {
     return inventoryHandler_->getAuctionBrowseResults();
 }
-AuctionListResult& GameHandler::auctionBrowseResultsRef() {
-    return inventoryHandler_->auctionBrowseResultsRef();
-}
 const AuctionListResult& GameHandler::getAuctionOwnerResults() const {
     return inventoryHandler_->getAuctionOwnerResults();
 }
-AuctionListResult& GameHandler::auctionOwnerResultsRef() {
-    return inventoryHandler_->auctionOwnerResultsRef();
-}
 const AuctionListResult& GameHandler::getAuctionBidderResults() const {
     return inventoryHandler_->getAuctionBidderResults();
-}
-AuctionListResult& GameHandler::auctionBidderResultsRef() {
-    return inventoryHandler_->auctionBidderResultsRef();
 }
 int GameHandler::getAuctionActiveTab() const {
     return inventoryHandler_->getAuctionActiveTab();
@@ -3151,14 +3124,7 @@ void GameHandler::offerQuestFromItem(uint64_t itemGuid, uint32_t questId) {
 }
 
 uint64_t GameHandler::getBagItemGuid(int bagIndex, int slotIndex) const {
-    if (bagIndex < 0 || bagIndex >= inventory.NUM_BAG_SLOTS) return 0;
-    if (slotIndex < 0) return 0;
-    uint64_t bagGuid = equipSlotGuids_[Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex];
-    if (bagGuid == 0) return 0;
-    auto it = containerContents_.find(bagGuid);
-    if (it == containerContents_.end()) return 0;
-    if (slotIndex >= static_cast<int>(it->second.numSlots)) return 0;
-    return it->second.slotGuids[slotIndex];
+    return inventoryHandler_->getBagItemGuid(bagIndex, slotIndex);
 }
 
 void GameHandler::openVendor(uint64_t npcGuid) {
@@ -3344,31 +3310,7 @@ void GameHandler::useItemById(uint32_t itemId, uint64_t unitTarget) {
 }
 
 uint32_t GameHandler::getItemIdForSpell(uint32_t spellId) const {
-    if (spellId == 0) return 0;
-    // Search backpack and bags for an item whose on-use spell matches
-    for (int i = 0; i < inventory.getBackpackSize(); i++) {
-        const auto& slot = inventory.getBackpackSlot(i);
-        if (slot.empty()) continue;
-        auto* info = getItemInfo(slot.item.itemId);
-        if (!info || !info->valid) continue;
-        for (const auto& sp : info->spells) {
-            if (sp.spellId == spellId && (sp.spellTrigger == 0 || sp.spellTrigger == 5))
-                return slot.item.itemId;
-        }
-    }
-    for (int bag = 0; bag < inventory.NUM_BAG_SLOTS; bag++) {
-        for (int s = 0; s < inventory.getBagSize(bag); s++) {
-            const auto& slot = inventory.getBagSlot(bag, s);
-            if (slot.empty()) continue;
-            auto* info = getItemInfo(slot.item.itemId);
-            if (!info || !info->valid) continue;
-            for (const auto& sp : info->spells) {
-                if (sp.spellId == spellId && (sp.spellTrigger == 0 || sp.spellTrigger == 5))
-                    return slot.item.itemId;
-            }
-        }
-    }
-    return 0;
+    return inventoryHandler_->itemIdForSpell(spellId);
 }
 
 void GameHandler::unstuck() {

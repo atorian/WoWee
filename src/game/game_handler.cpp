@@ -113,12 +113,14 @@ GameHandler::GameHandler(GameServices& services)
     movementHandler_  = std::make_unique<MovementHandler>(*this);
     combatHandler_    = std::make_unique<CombatHandler>(*this);
     spellHandler_     = std::make_unique<SpellHandler>(*this);
-    inventoryHandler_ = std::make_unique<InventoryHandler>(*this);
     socialHandler_    = std::make_unique<SocialHandler>(*this);
     questHandler_     = std::make_unique<QuestHandler>(*this);
     wardenHandler_    = std::make_unique<WardenHandler>(*this);
     // Built from what they use rather than from this class (AGENTS.md, "A new
     // domain handler").
+    inventoryHandler_ = std::make_unique<InventoryHandler>(
+        *this, *this, *services_.events, *chatHandler_, *this, *services_.cvars,
+        services_.assetManager);
     accountDataHandler_ = std::make_unique<AccountDataHandler>(
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
@@ -235,7 +237,6 @@ void GameHandler::clearWorldState() {
     movementHandler_->cancelPendingWorldTransfer();
     activeCharacterGuid_ = 0;
     knownTitleBits_.clear();
-    protocolMoneyCopper_.reset();
     friendGuids_.clear();
     contacts_.clear();
     transportAttachments_.clear();
@@ -250,8 +251,7 @@ void GameHandler::clearWorldState() {
         else if (entity->getType() == ObjectType::GAMEOBJECT && gameObjectDespawnCallback_)
             gameObjectDespawnCallback_(guid);
     }
-    otherPlayerVisibleItemEntries_.clear();
-    otherPlayerVisibleDirty_.clear();
+    inventoryHandler_->leaveWorld();
     spellHandler_->clearUnitCastStates();
     spellHandler_->clearUnitAurasCache();
     combatHandler_->clearCombatText();
@@ -302,6 +302,76 @@ std::optional<uint32_t> GameHandler::playerFieldBytes() const {
     const auto player = entityController_->getEntityManager().getEntity(playerGuid);
     if (!player || !player->hasField(index)) return std::nullopt;
     return player->getField(index);
+}
+
+std::array<uint32_t, 3> GameHandler::spellEffects(uint32_t spellId) const {
+    loadSpellNameCache();
+    const auto it = spellNameCache_.find(spellId);
+    if (it == spellNameCache_.end()) return {};
+    return {it->second.effectIds[0], it->second.effectIds[1], it->second.effectIds[2]};
+}
+
+uint32_t GameHandler::classSkillLineOf(uint32_t spellId) {
+    // SkillLine.dbc category 7 is a class's own lines - a talent tree, a spec.
+    static constexpr uint32_t kSkillLineCategoryClass = 7;
+    loadSkillLineDbc();
+    loadSkillLineAbilityDbc();
+    const auto line = spellToSkillLine_.find(spellId);
+    if (line == spellToSkillLine_.end()) return 0;
+    const auto category = skillLineCategories_.find(line->second);
+    if (category == skillLineCategories_.end() || category->second != kSkillLineCategoryClass) return 0;
+    return line->second;
+}
+
+void GameHandler::noteItemCastSpell(uint32_t spellId) {
+    spellHandler_->noteGroundCastSpell(spellId);
+}
+
+void GameHandler::stopMovingForCast() {
+    // Bandages are cast through CMSG_USE_ITEM and therefore bypass
+    // SpellHandler::castSpell(), which normally sends a stop before a timed cast.
+    // Explicitly synchronize the stationary state so the server cannot retain a
+    // stale start-forward/strafe/turn state after the character has visually stopped.
+    const uint32_t horizontalMask =
+        static_cast<uint32_t>(MovementFlags::FORWARD) |
+        static_cast<uint32_t>(MovementFlags::BACKWARD) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
+    const uint32_t turnMask =
+        static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
+        static_cast<uint32_t>(MovementFlags::TURN_RIGHT);
+    movementInfo.flags &= ~(horizontalMask | turnMask);
+
+    sendMovement(Opcode::MSG_MOVE_STOP);
+    sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
+    sendMovement(Opcode::MSG_MOVE_STOP_TURN);
+    sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+}
+
+bool GameHandler::gameObjectLootPending(uint64_t lootGuid) const {
+    if (lastInteractedGoGuid_ == 0 || lootGuid != lastInteractedGoGuid_) return false;
+    return (isCasting() && getCurrentCastSpellId() != 0) || hasPendingGameObjectLootOpen(lootGuid);
+}
+
+bool GameHandler::gameObjectLootOpened(uint64_t lootGuid) {
+    const bool interacted = lastInteractedGoGuid_ != 0 && lootGuid == lastInteractedGoGuid_;
+    if (interacted) lastInteractedGoGuid_ = 0;
+    clearPendingGameObjectLootOpen(lootGuid);
+    return interacted;
+}
+
+bool GameHandler::npcDialogOpen() const {
+    return questHandler_->isQuestDetailsOpen() || questHandler_->isGossipWindowOpen() ||
+           questHandler_->isQuestRequestItemsOpen() || questHandler_->isQuestOfferRewardOpen();
+}
+
+bool GameHandler::questWantsItem(uint32_t itemId) const {
+    for (const auto& quest : getQuestLog()) {
+        for (const auto& obj : quest.itemObjectives) {
+            if (obj.itemId == itemId && obj.required > 0) return true;
+        }
+    }
+    return false;
 }
 
 float GameHandler::itemCooldownRemaining(uint32_t itemId) const {
@@ -508,21 +578,9 @@ for (const auto& [guid, entity] : entityController_->getEntityManager().getEntit
 
 void GameHandler::updateTimers(float deltaTime) {
     spellHandler_->updateTimers(deltaTime);
-
-    // Periodically clear stale pending item queries so they can be retried.
-    // Without this, a lost/malformed response leaves the entry stuck forever.
-    pendingItemQueryTimer_ += deltaTime;
-    if (pendingItemQueryTimer_ >= 5.0f) {
-        pendingItemQueryTimer_ = 0.0f;
-        if (!pendingItemQueries_.empty()) {
-            LOG_DEBUG("Clearing ", pendingItemQueries_.size(), " stale pending item queries");
-            pendingItemQueries_.clear();
-        }
-    }
-
-    // Tick InventoryHandler's auction search cooldown (the authoritative
-    // timer - GameHandler previously ticked its own never-set duplicate).
-    inventoryHandler_->tickAuctionSearchDelay(deltaTime);
+    // Stale item queries, the auction search cooldown, the loot money fallback
+    // and the equipment inspects - each with the state it counts down.
+    inventoryHandler_->update(deltaTime);
 
     // Tick QuestHandler's pending-accept timeouts (the authoritative maps -
     // GameHandler previously ticked its own never-populated copies, so lost
@@ -556,13 +614,6 @@ void GameHandler::updateTimers(float deltaTime) {
         }
     }
 
-    if (pendingMoneyDeltaTimer_ > 0.0f) {
-        pendingMoneyDeltaTimer_ -= deltaTime;
-        if (pendingMoneyDeltaTimer_ <= 0.0f) {
-            pendingMoneyDeltaTimer_ = 0.0f;
-            pendingMoneyDelta_ = 0;
-        }
-    }
     // autoAttackRangeWarnCooldown_ decrement moved into CombatHandler::updateAutoAttack()
 
     if (pendingLoginQuestResync_) {
@@ -656,25 +707,6 @@ void GameHandler::updateTimers(float deltaTime) {
         }
     }
 
-    // The fallback for a server that sends no SMSG_LOOT_MONEY_NOTIFY lives
-    // with the state it reads - this ticked a copy of its own that nothing
-    // ever set, so the fallback never fired.
-    inventoryHandler_->tickLootMoneyFallback(deltaTime);
-
-    // Auto-inspect throttling (fallback for player equipment visuals).
-    if (inspectRateLimit_ > 0.0f) {
-        inspectRateLimit_ = std::max(0.0f, inspectRateLimit_ - deltaTime);
-    }
-    if (isInWorld() && inspectRateLimit_ <= 0.0f && !pendingAutoInspect_.empty()) {
-        uint64_t guid = *pendingAutoInspect_.begin();
-        pendingAutoInspect_.erase(pendingAutoInspect_.begin());
-        if (guid != 0 && guid != playerGuid && entityController_->getEntityManager().hasEntity(guid)) {
-            auto pkt = InspectPacket::build(guid);
-            socket->send(pkt);
-            inspectRateLimit_ = 2.0f; // throttle to avoid compositing stutter
-            LOG_DEBUG("Sent CMSG_INSPECT for player 0x", std::hex, guid, std::dec);
-        }
-    }
 }
 
 void GameHandler::update(float deltaTime) {
@@ -3576,23 +3608,6 @@ const ArenaTeamRoster* GameHandler::getArenaTeamRoster(uint32_t teamId) const {
     return socialHandler_->getArenaTeamRoster(teamId);
 }
 
-void GameHandler::requestItemRefundInfo(uint64_t itemGuid) {
-    if (itemGuid == 0) return;
-    if (getState() != WorldState::IN_WORLD || !getSocket()) return;
-    if (!itemRefundAsked_.insert(itemGuid).second) return;   // asked already
-    network::Packet packet(wireOpcode(Opcode::CMSG_ITEM_REFUND_INFO));
-    packet.writeUInt64(itemGuid);
-    getSocket()->send(packet);
-}
-
-void GameHandler::refundItem(uint64_t itemGuid) {
-    if (itemGuid == 0) return;
-    if (getState() != WorldState::IN_WORLD || !getSocket()) return;
-    network::Packet packet(wireOpcode(Opcode::CMSG_ITEM_REFUND));
-    packet.writeUInt64(itemGuid);
-    getSocket()->send(packet);
-}
-
 void GameHandler::resolveGMResponse() {
     if (getState() != WorldState::IN_WORLD || !getSocket()) return;
     network::Packet packet(wireOpcode(Opcode::CMSG_GMRESPONSE_RESOLVE));
@@ -4227,10 +4242,6 @@ const std::vector<GameHandler::QuestLogEntry>& GameHandler::getQuestLog() const 
     return questHandler_->getQuestLog();
 }
 
-void GameHandler::reconcileQuestItemObjectives(
-    const std::unordered_map<uint32_t, uint32_t>& carriedCounts) {
-    questHandler_->reconcileItemObjectivesFromInventory(carriedCounts);
-}
 const std::string& GameHandler::getQuestSortName(uint32_t sortId) const {
     static const std::string empty;
     return questHandler_->getQuestSortName(sortId);

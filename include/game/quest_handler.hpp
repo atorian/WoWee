@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
 #include "game/handler_types.hpp"
@@ -349,6 +350,9 @@ private:
     std::string sharedQuestTitle_;
     std::string sharedQuestSharerName_;
     uint64_t    sharedQuestSharerGuid_    = 0;
+
+    /// Last, so it goes first: its handler writes the quest log.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace game

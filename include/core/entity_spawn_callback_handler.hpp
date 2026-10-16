@@ -1,8 +1,11 @@
 #pragma once
 
+#include "core/event_bus.hpp"
+
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <vector>
 
 namespace wowee {
 
@@ -30,6 +33,7 @@ private:
     rendering::Renderer* renderer_;
     game::GameHandler& gameHandler_;
     std::function<bool(uint64_t)> isLocalPlayerGuid_;
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

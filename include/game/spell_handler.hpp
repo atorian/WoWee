@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
@@ -396,7 +397,6 @@ private:
     void handleSpellInstaKillLog(network::Packet& packet);
     void handleSpellLogExecute(network::Packet& packet);
     void handleClearExtraAuraInfo(network::Packet& packet);
-    void handleItemEnchantTimeUpdate(network::Packet& packet);
     void handleResumeCastBar(network::Packet& packet);
     void handleChannelStart(network::Packet& packet);
     void handleChannelUpdate(network::Packet& packet);
@@ -514,6 +514,9 @@ private:
     // Pet talent respec confirm dialog
     bool petUnlearnPending_ = false;
     uint32_t petUnlearnCost_ = 0;
+
+    /// Last, so it goes first: its handlers write the spell book.
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace game

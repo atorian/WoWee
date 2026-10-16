@@ -2321,8 +2321,7 @@ void MovementHandler::applyNewWorld(network::Packet& packet) {
             owner_.gameObjectDespawnCallbackRef()(guid);
         }
     }
-    owner_.otherPlayerVisibleItemEntriesRef().clear();
-    owner_.otherPlayerVisibleDirtyRef().clear();
+    owner_.inventory().leaveWorld();
     owner_.getSpellHandler()->clearUnitCaches();
     owner_.clearCombatText();
     owner_.getEntityManager().clear();

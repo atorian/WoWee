@@ -6,6 +6,7 @@
 #include "rendering/character_renderer.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_events.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/npc_voice_manager.hpp"
 
@@ -63,13 +64,14 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
     });
 
     // NPC vendor callback - play vendor voice line
-    gameHandler_.setNpcVendorCallback([this](uint64_t guid, const glm::vec3& position) {
-        if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
-            glm::vec3 renderPos = core::coords::canonicalToRender(position);
-            audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            audioCoordinator_->getNpcVoiceManager()->playVendor(guid, voiceType, renderPos);
-        }
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::VendorOpened>(
+        [this](const game::events::VendorOpened& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.vendorGuid);
+                audioCoordinator_->getNpcVoiceManager()->playVendor(e.vendorGuid, voiceType, renderPos);
+            }
+        }));
 
     // NPC aggro callback - play combat start voice line
     gameHandler_.setNpcAggroCallback([this](uint64_t guid, const glm::vec3& position) {

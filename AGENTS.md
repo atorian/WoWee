@@ -195,14 +195,25 @@ new code the way the target looks, not the way the old code does.
 A new handler is built from what it uses, never from `GameHandler&`. The older
 handlers take `GameHandler& owner` and reach through `owner_.` for anything -
 the socket, another handler's state, the facade; do not copy them.
-`AccountDataHandler` and `ActionBarHandler` are the pattern:
+`AccountDataHandler`, `ActionBarHandler` and `InventoryHandler` are the
+pattern:
 
 ```cpp
 AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                    core::EventBus& events, std::string cacheRoot);
 ActionBarHandler(PacketSender& sender, FrameXmlEvents& frameXml,
                  core::EventBus& events, ActionBarQueries& queries);
+InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                 core::EventBus& events, ChatLog& chat,
+                 InventoryQueries& queries, const core::CVarStore& cvars,
+                 pipeline::AssetManager* assets);
 ```
+
+State a domain keeps for the character goes in one struct it assigns whole
+when a character is logged in (`InventoryHandler::Held`, `beginCharacter`),
+so a field added later cannot keep the last character's value; there is one
+such call per domain, from `GameHandler::selectCharacter`, and no reset for a
+particular scenario.
 
 What there is to take:
 
@@ -210,6 +221,8 @@ What there is to take:
 |---|---|---|
 | send to the world server, know whether it can, whether a character is in the world | `PacketSender` | `game/packet_sender.hpp` |
 | fire a FrameXML event (`"UPDATE_MACROS"`, ...) | `FrameXmlEvents` | `game/frame_xml_events.hpp` |
+| put a line in the chat log ("Received item: ...") | `ChatLog` (ChatHandler is one) | `game/chat_log.hpp` |
+| a refusal on the error line ("That bag is full.") | `raiseUiError(bus, frameXml, text)` | `game/ui_errors.hpp` |
 | say what happened, hear another domain | `core::EventBus&` | `core/event_bus.hpp`, `game/game_events.hpp` |
 | a value from `GameServices` | that field alone (`std::string cacheRoot`, `const EmoteTable&`), not the struct | `game/game_services.hpp` |
 | ask something of another part of the game | a small interface of your own, in your header (`ActionBarQueries`) | |

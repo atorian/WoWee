@@ -113,8 +113,11 @@ WRITES_STATE = re.compile(
 #: was one: it fires its event two lines below the chat message this sweep
 #: caught it by. A false row here is worse than a missing one, because the
 #: obvious response to it is to add a second fire for an event already sent.
+#: fireFrameXmlEvent is the same again from a handler built from narrow
+#: interfaces (FrameXmlEvents): InventoryHandler's six announcing handlers
+#: read as silent the day it stopped reaching through GameHandler.
 TELLS_INTERFACE = ("fireAddonEvent", "addonEventCallbackRef()",
-                   "addonEventCallback_", "pendingEvents_.emit")
+                   "addonEventCallback_", "pendingEvents_.emit", "fireFrameXmlEvent")
 ANNOUNCES = re.compile(r"\bannounce[A-Z]\w*\(")
 
 #: Rows checked one at a time and found to be right as they stand, with what

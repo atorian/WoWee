@@ -5,6 +5,7 @@
 #include "game_harness.hpp"
 
 #include "game/game_events.hpp"
+#include "game/update_field_table.hpp"
 
 #include <algorithm>
 #include <string>
@@ -41,7 +42,8 @@ const wowee::game::QuestHandler::QuestLogEntry& logEntry(GameHarness& h, uint32_
 /// SMSG_QUEST_QUERY_RESPONSE as AzerothCore's WorldSession::HandleQuestQueryOpcode
 /// writes it on 3.3.5a: sixty-five numeric fields, then the strings - title,
 /// objectives, details, area description, completion text.
-std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>& strings) {
+std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>& strings,
+                                uint32_t collectItem = 0, uint32_t collectCount = 0) {
     Body b;
     b.u32(questId).u32(2).u32(50).u32(45).u32(38);   // id, method, level, min level, zone
     b.u32(0).u32(0);                                  // type, suggested players
@@ -56,6 +58,13 @@ std::vector<uint8_t> questQuery(uint32_t questId, const std::vector<std::string>
     b.zeros(5 * 3 * 4);                               // five reputations: ids, values, overrides
     b.u32(0).u32(0).u32(0).u32(0);                    // point of interest
     for (const auto& s : strings) b.cstr(s);
+    if (collectItem != 0) {
+        // The objectives: four {creature or object, count, dropped item,
+        // count} records, then six {required item, count}.
+        b.zeros(4 * 4 * 4);
+        b.u32(collectItem).u32(collectCount);
+        b.zeros(5 * 2 * 4);
+    }
     return b.bytes();
 }
 
@@ -156,4 +165,37 @@ TEST_CASE("a full quest log refuses a quest before asking the server", "[quest][
     CHECK(h.countSent(Opcode::CMSG_QUESTGIVER_ACCEPT_QUEST) == 0);
     CHECK_FALSE(inLog(h, 200));
     CHECK(errors == 1);
+}
+
+TEST_CASE("what the bags hold is what a quest's collect objective counts",
+          "[quest][inventory][harness]") {
+    // 3.3.5a never sends a collect objective's count: the quest log counts it
+    // from the bags, which are the inventory's. Across the two domains on the
+    // bus, so a log reading a copy of the bags nobody fills shows 0/5 here.
+    constexpr uint32_t kQuest = 33;
+    constexpr uint32_t kWolfMeat = 750;
+    constexpr uint64_t kMeat = 0x4000000000000B01ull;
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS, offer(kMarshal, kQuest, "Wolves Across the Border"));
+    h.pump();
+    h.game().acceptQuest();
+    h.receive(Opcode::SMSG_QUEST_QUERY_RESPONSE,
+              questQuery(kQuest, {"Wolves Across the Border", "Bring 5 Tough Wolf Meat.",
+                                  "The wolves have been raiding the farms.", "", "Return."},
+                         kWolfMeat, 5));
+    h.pump();
+    REQUIRE(logEntry(h, kQuest).itemObjectives[0].itemId == kWolfMeat);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, GameHarness::createItemBody(kMeat, kWolfMeat, 3));
+    GameHarness::Fields backpack;
+    GameHarness::putGuid(backpack, wowee::game::fieldIndex(wowee::game::UF::PLAYER_FIELD_PACK_SLOT_1), kMeat);
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, GameHarness::valuesBody(h.player().guid, backpack));
+    h.pump();
+
+    const auto& counts = logEntry(h, kQuest).itemCounts;
+    REQUIRE(counts.count(kWolfMeat) == 1);
+    CHECK(counts.at(kWolfMeat) == 3);
+    CHECK_FALSE(h.addonEvents("QUEST_WATCH_UPDATE").empty());
 }

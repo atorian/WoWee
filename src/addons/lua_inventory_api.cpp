@@ -1991,9 +1991,9 @@ std::vector<game::AuctionSortKey> wireAuctionSort(lua_State* L, std::string_view
 game::AuctionListResult* auctionListForSort(game::GameHandler* gh,
                                             std::string_view which) {
     if (!gh) return nullptr;
-    if (which == "owner")  return &gh->auctionOwnerResultsRef();
-    if (which == "bidder") return &gh->auctionBidderResultsRef();
-    return &gh->auctionBrowseResultsRef();
+    if (which == "owner")  return &gh->inventory().auctionOwnerResultsRef();
+    if (which == "bidder") return &gh->inventory().auctionBidderResultsRef();
+    return &gh->inventory().auctionBrowseResultsRef();
 }
 
 /// Orders two rows on one column.
@@ -2609,7 +2609,7 @@ static uint32_t inspectedItemEntry(game::GameHandler* gh, const std::string& uid
     if (!gh || slotId < 1 || slotId > 19) return 0;
     const uint64_t guid = resolveUnitGuid(gh, uid);
     if (!guid) return 0;
-    auto& cache = gh->inspectedPlayerItemEntriesRef();
+    const auto& cache = gh->inventory().inspectedPlayerItemEntries();
     auto it = cache.find(guid);
     if (it == cache.end()) return 0;
     const uint32_t entry = it->second[static_cast<size_t>(slotId - 1)];

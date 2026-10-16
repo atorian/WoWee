@@ -8,6 +8,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/game_handler.hpp"
+#include "game/game_events.hpp"
 
 namespace wowee { namespace core {
 
@@ -64,14 +65,13 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     });
 
     // Online player equipment callback - apply armor geosets/skin overlays per player instance.
-    gameHandler_.setPlayerEquipmentCallback([this](uint64_t guid,
-                                                  const std::array<uint32_t, 19>& displayInfoIds,
-                                                  const std::array<uint8_t, 19>& inventoryTypes) {
-        // Queue equipment compositing instead of doing it immediately -
-        // compositeWithRegions is expensive (file I/O + CPU blit + GPU upload)
-        // and causes frame stutters if multiple players update at once.
-        entitySpawner_.queuePlayerEquipment(guid, displayInfoIds, inventoryTypes);
-    });
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::PlayerEquipmentResolved>(
+        [this](const game::events::PlayerEquipmentResolved& e) {
+            // Queue equipment compositing instead of doing it immediately -
+            // compositeWithRegions is expensive (file I/O + CPU blit + GPU upload)
+            // and causes frame stutters if multiple players update at once.
+            entitySpawner_.queuePlayerEquipment(e.guid, e.displayIds, e.inventoryTypes);
+        }));
 
     gameHandler_.setOtherPlayerMountCallback([this](uint64_t guid, uint32_t mountDisplayId) {
         if (isLocalPlayerGuid_(guid)) return;

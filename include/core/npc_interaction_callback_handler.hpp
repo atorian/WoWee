@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 #include "audio/npc_voice_manager.hpp"
+#include "core/event_bus.hpp"
 
 namespace wowee {
 
@@ -31,6 +33,7 @@ private:
     rendering::Renderer* renderer_;
     game::GameHandler& gameHandler_;
     audio::AudioCoordinator* audioCoordinator_;
+    std::vector<EventBus::Subscription> subscriptions_;
 };
 
 } // namespace core

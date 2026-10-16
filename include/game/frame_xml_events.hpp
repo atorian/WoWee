@@ -19,6 +19,12 @@ public:
 
     virtual void fireFrameXmlEvent(const std::string& name,
                                    const std::vector<std::string>& args) = 0;
+    /// Whether an interface is there to hear an event. Firing without one is
+    /// harmless - the event is dropped - so this only lets a handler skip
+    /// building arguments nobody will read.
+    [[nodiscard]] virtual bool frameXmlListening() const = 0;
+
+    void fireFrameXmlEvent(const std::string& name) { fireFrameXmlEvent(name, {}); }
 };
 
 } // namespace wowee::game

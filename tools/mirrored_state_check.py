@@ -51,6 +51,21 @@ FIELD = re.compile(
 NOT_STATE = ("Handler_", "owner_")
 
 
+def is_dependency(declaration):
+    """What a handler is built from, rather than state it keeps.
+
+    A reference member (`PacketSender& sender_`) and a pointer fixed at
+    construction (`AssetManager* const assets_`) cannot be written after the
+    constructor, so there is no second copy for them to drift from - every
+    handler built from narrow interfaces holds its own `sender_` and
+    `frameXml_`, and that is the design (AGENTS.md, "A new domain handler").
+    A bus subscription is the object's own registration and ends with it.
+    """
+    type_part = declaration.split("=")[0].split("{")[0]
+    return ("&" in type_part or "* const" in type_part or
+            "EventBus::Subscription" in type_part)
+
+
 def main():
     owners = collections.defaultdict(set)
     for name in HEADERS:
@@ -60,8 +75,9 @@ def main():
             return 1
         text = re.sub(r"//[^\n]*|/\*.*?\*/", "", path.read_text(errors="ignore"), flags=re.S)
         for match in FIELD.finditer(text):
-            if not match.group(1).endswith(NOT_STATE):
-                owners[match.group(1)].add(name)
+            if match.group(1).endswith(NOT_STATE) or is_dependency(match.group(0)):
+                continue
+            owners[match.group(1)].add(name)
 
     mirrored = sorted((field, sorted(where)) for field, where in owners.items() if len(where) > 1)
     print(f"{len(owners)} fields across {len(HEADERS)} classes\n")

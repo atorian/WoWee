@@ -3,6 +3,7 @@
 #include <deque>
 
 #include "game/chat_filters.hpp"
+#include "game/chat_log.hpp"
 
 #include "game/world_packet_data.hpp"
 #include "game/opcode_table.hpp"
@@ -23,7 +24,9 @@ namespace game {
 class GameHandler;
 struct TextSubject;
 
-class ChatHandler {
+/// The chat log is this handler's, and the domains that write a line to it
+/// are handed it as a ChatLog.
+class ChatHandler : public ChatLog {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
@@ -76,8 +79,8 @@ public:
     /// off every one of them - arg4 is a channel name and it calls strlen on it
     /// without checking. Firing one of these with just the text raised there and
     /// took the rest of the handler with it, so the line never appeared at all.
-    void addLocalChatLine(ChatType type, const std::string& message);
-    void addSystemChatMessage(const std::string& message);
+    void addLocalChatLine(ChatType type, const std::string& message) override;
+    void addSystemChatMessage(const std::string& message) override;
 
     /// Announces a message as CHAT_MSG_<TYPE> with WoW's argument order. Both
     /// the server path and the local one go through here, because an interface

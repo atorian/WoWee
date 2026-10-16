@@ -534,7 +534,14 @@ static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_
 // ---------------------------------------------------------------------------
 
 QuestHandler::QuestHandler(GameHandler& owner)
-    : owner_(owner) {}
+    : owner_(owner) {
+    // "Collect N of item" advances from the bags: 3.3.5a never sends those
+    // counts, so what the inventory says it carries is the only source.
+    subscriptions_.push_back(owner_.eventBus().subscribe<events::CarriedItemsCounted>(
+        [this](const events::CarriedItemsCounted& e) {
+            reconcileItemObjectivesFromInventory(e.counts);
+        }));
+}
 
 // ---------------------------------------------------------------------------
 // Opcode registrations

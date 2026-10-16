@@ -152,13 +152,6 @@ void GameHandler::applyKnownTitleUpdate(uint8_t operation, const std::vector<uin
     LOG_INFO("Server known titles updated: operation=", unsigned(operation), " count=", bits.size());
 }
 
-void GameHandler::applyServerMoney(uint64_t copper) {
-    if (protocolMoneyCopper_ && *protocolMoneyCopper_ == copper) return;
-    protocolMoneyCopper_ = copper;
-    fireAddonEvent("PLAYER_MONEY", {});
-    LOG_INFO("Server extended money balance updated");
-}
-
 void GameHandler::registerCoreOpcodes() {
     // -----------------------------------------------------------------------
     // Auth / session / pre-world handshake
@@ -1645,20 +1638,6 @@ void GameHandler::registerRemainingOpcodes() {
             handleUpdateAuraDuration(slot, durationMs);
         }
     };
-    dispatchTable_[Opcode::SMSG_ITEM_NAME_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(4)) {
-            uint32_t itemId = packet.readUInt32();
-            std::string name = packet.readString();
-            if (!itemInfoCache_.count(itemId) && !name.empty()) {
-                ItemQueryResponseData stub;
-                stub.entry = itemId;
-                stub.name  = std::move(name);
-                stub.valid = true;
-                itemInfoCache_[itemId] = std::move(stub);
-            }
-        }
-        packet.skipAll();
-    };
     // A plain guid: Unit::SendMountSpecialAnim writes GetGUID(), not the
     // packed form, so reading it packed consumed the wrong number of bytes.
     dispatchTable_[Opcode::SMSG_MOUNTSPECIAL_ANIM] = [](network::Packet& packet) {
@@ -3129,34 +3108,6 @@ void GameHandler::registerRemainingOpcodes() {
     // These packets are not damage-shield events. Consume them without
     // synthesizing reflected damage entries or misattributing GUIDs.
     registerSkipHandler(Opcode::SMSG_SPELLBREAKLOG);
-    // Consume silently - informational, no UI action needed
-    // What an item cost and how long is left to hand it back.
-    //
-    // Skipped until now, which is why GetContainerItemPurchaseInfo answered
-    // nil and the refund lock never appeared. The client was never sent this
-    // unasked - it is a reply to CMSG_ITEM_REFUND_INFO, and nothing asked.
-    dispatchTable_[Opcode::SMSG_ITEM_REFUND_INFO_RESPONSE] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(8 + 4 * 3)) return;
-        const uint64_t itemGuid = packet.readUInt64();
-        ItemRefundInfo info;
-        info.money = packet.readUInt32();
-        info.honor = packet.readUInt32();
-        info.arena = packet.readUInt32();
-        // Five cost slots, id and count together - the same interleaving the
-        // item query's sockets use, and the same trap if read as two runs.
-        for (auto& slot : info.items) {
-            if (!packet.hasRemaining(8)) break;
-            slot.first  = packet.readUInt32();
-            slot.second = packet.readUInt32();
-        }
-        if (packet.hasRemaining(8)) {
-            packet.readUInt32();                       // always zero
-            info.playedSincePurchase = packet.readUInt32();
-        }
-        packet.skipAll();
-        itemRefundInfo_[itemGuid] = info;
-        fireAddonEvent("UPDATE_INVENTORY_ALERTS", {});
-    };
     // Consume silently - informational, no UI action needed
     registerSkipHandler(Opcode::SMSG_LOOT_LIST);
     // Same format as LOCKOUT_ADDED; consume

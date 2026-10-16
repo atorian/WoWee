@@ -30,6 +30,7 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -145,6 +146,19 @@ public:
     /// The list of an account with several characters, for a relog.
     static std::vector<uint8_t> charEnumBody(const std::vector<PlayerSpec>& characters);
     static std::vector<uint8_t> loginVerifyWorldBody(const PlayerSpec& player);
+
+    /// Update fields by index, as an SMSG_UPDATE_OBJECT block carries them.
+    using Fields = std::map<uint16_t, uint32_t>;
+    /// A guid in a pair of fields, low word first.
+    static void putGuid(Fields& fields, uint16_t field, uint64_t guid);
+    /// SMSG_UPDATE_OBJECT creating an item object, as 3.3.5a writes one: no
+    /// movement, then its entry and stack count.
+    static std::vector<uint8_t> createItemBody(uint64_t guid, uint32_t entry, uint32_t stack);
+    /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
+    static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
+    /// Put the player's own object in view - what the realm's fields for the
+    /// character are applied to.
+    void playerInView();
 
 private:
     core::EventBus events_;

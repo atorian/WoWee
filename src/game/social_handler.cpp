@@ -1216,13 +1216,14 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                      " unparsed payload bytes=", packet.getRemainingSize());
         }
 
-        auto gearIt = owner_.inspectedPlayerItemEntriesRef().find(guid);
-        if (gearIt != owner_.inspectedPlayerItemEntriesRef().end()) {
+        const auto& inspected = owner_.inventory().inspectedPlayerItemEntries();
+        auto gearIt = inspected.find(guid);
+        if (gearIt != inspected.end()) {
             inspectResult_.itemEntries = gearIt->second;
         }
 
         LOG_INFO("SMSG_INSPECT_TALENT (TBC): ", playerName,
-                 " gearCached=", (gearIt != owner_.inspectedPlayerItemEntriesRef().end() ? "yes" : "no"),
+                 " gearCached=", (gearIt != inspected.end() ? "yes" : "no"),
                  " payload bytes remaining=", packet.getRemainingSize());
         if (owner_.hasAddonEventListener()) {
             char guidBuf[32];
@@ -1382,10 +1383,10 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         inspectResult_.itemEntries = itemEntries;
         owner_.cacheInspectedPlayerEquipment(guid, itemEntries);
     } else {
-        auto gearIt = owner_.inspectedPlayerItemEntriesRef().find(guid);
+        const auto& inspected = owner_.inventory().inspectedPlayerItemEntries();
+        auto gearIt = inspected.find(guid);
         inspectResult_.itemEntries =
-            (gearIt != owner_.inspectedPlayerItemEntriesRef().end()) ? gearIt->second
-                                                                     : std::array<uint32_t, 19>{};
+            (gearIt != inspected.end()) ? gearIt->second : std::array<uint32_t, 19>{};
     }
 
     LOG_INFO("Inspect results for ", playerName, ": ", totalTalents, " talents, ",

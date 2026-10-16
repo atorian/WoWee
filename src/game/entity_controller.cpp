@@ -93,9 +93,6 @@ void EntityController::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_GAMEOBJECT_PAGETEXT] = [this](network::Packet& packet) {
         handleGameObjectPageText(packet);
     };
-    table[Opcode::SMSG_PAGE_TEXT_QUERY_RESPONSE] = [this](network::Packet& packet) {
-        handlePageTextQueryResponse(packet);
-    };
 }
 
 void EntityController::clearAll() {
@@ -235,8 +232,7 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
         // manager at all: the partial updates that carry them are tracked in
         // onlineItems_ alone, which is why the values path has a branch for
         // exactly that case.
-        owner_.containerContentsRef().erase(guid);
-        if (owner_.onlineItemsRef().erase(guid)) inventoryChanged = true;
+        if (owner_.inventory().forgetItemObject(guid)) inventoryChanged = true;
 
         auto entity = entityManager.getEntity(guid);
         if (!entity) continue;
@@ -264,12 +260,11 @@ size_t EntityController::processOutOfRangeObjectsUntil(const std::vector<uint64_
                        : type == ObjectType::GAMEOBJECT ? 2 : 3;
         if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
             owner_.creatureDespawnCallbackRef()(guid);
-        } else if (entity->getType() == ObjectType::PLAYER && owner_.playerDespawnCallbackRef()) {
-            owner_.playerDespawnCallbackRef()(guid);
-            owner_.otherPlayerVisibleItemEntriesRef().erase(guid);
-            owner_.otherPlayerVisibleDirtyRef().erase(guid);
-            owner_.inspectedPlayerItemEntriesRef().erase(guid);
-            owner_.pendingAutoInspectRef().erase(guid);
+        } else if (entity->getType() == ObjectType::PLAYER) {
+            if (owner_.playerDespawnCallbackRef()) owner_.playerDespawnCallbackRef()(guid);
+            // What they wore is decoded again if they come back: forgotten
+            // whether or not anything draws them.
+            owner_.inventory().forgetPlayerEquipment(guid);
             // Clear pending name query so the query is re-sent when this player
             // comes back into range (entity is recreated as a new object).
             pendingNameQueries.erase(guid);
@@ -403,7 +398,8 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
 
 void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
                                                const FlatFieldMap& newFields) {
-    if (owner_.pendingMoneyDeltaRef() == 0 || owner_.pendingMoneyDeltaTimerRef() <= 0.0f) return;
+    const uint32_t expectedDelta = owner_.inventory().expectedMoneyDelta();
+    if (expectedDelta == 0) return;
     if (oldFields.empty() || newFields.empty()) return;
 
     constexpr uint32_t kMaxPlausibleCoinage = 2147483647u;
@@ -416,7 +412,7 @@ void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
         uint32_t oldVal = itOld->second;
         if (newVal < oldVal) continue;
         uint32_t delta = newVal - oldVal;
-        if (delta != owner_.pendingMoneyDeltaRef()) continue;
+        if (delta != expectedDelta) continue;
         if (newVal > kMaxPlausibleCoinage) continue;
         candidates.push_back(idx);
     }
@@ -437,8 +433,7 @@ void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
         LOG_WARNING("Auto-detected PLAYER_FIELD_COINAGE index: ", chosen, " (was ", current, ")");
     }
 
-    owner_.pendingMoneyDeltaRef() = 0;
-    owner_.pendingMoneyDeltaTimerRef() = 0.0f;
+    owner_.inventory().clearExpectedMoneyDelta();
 }
 
 // ============================================================
@@ -1420,10 +1415,9 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             }
         }
         else if (key == pfi.coinage) {
-            uint64_t oldMoney = owner_.playerMoneyCopperRef();
-            owner_.playerMoneyCopperRef() = val;
+            const bool moneyChanged = owner_.inventory().setMoneyFromFields(val);
             LOG_DEBUG("Money ", isCreate ? "set from update fields: " : "updated via VALUES: ", val, " copper");
-            if (val != oldMoney)
+            if (moneyChanged)
                 pendingEvents_.emit("PLAYER_MONEY", {});
         }
         else if (pfi.honor != 0xFFFF && key == pfi.honor) {
@@ -1450,7 +1444,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         }
         else if (pfi.pBytes2 != 0xFFFF && key == pfi.pBytes2) {
             uint8_t bankBagSlots = static_cast<uint8_t>((val >> 16) & 0xFF);
-            owner_.inventoryRef().setPurchasedBankBagSlots(bankBagSlots);
+            owner_.inventory().setPurchasedBankBagSlots(bankBagSlots);
             // Byte 3 (bits 24-31): REST_STATE
             // 0 = not resting, 1 = REST_TYPE_IN_TAVERN, 2 = REST_TYPE_IN_CITY
             uint8_t restStateByte = static_cast<uint8_t>((val >> 24) & 0xFF);
@@ -1776,209 +1770,32 @@ void EntityController::announceObjectsInView() {
     }
     // Other players' clothes come from their visible items, kept beside the
     // entities by the inventory domain.
-    owner_.getInventoryHandler()->emitAllOtherPlayerEquipment();
+    owner_.inventory().emitAllOtherPlayerEquipment();
     LOG_INFO("Presented objects in view: units=", units, " players=", players,
              " gameobjects=", objects, " corpses=", corpses);
 }
 
 // Track online item/container objects during CREATE.
 void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItemCreated) {
-    auto entryIt = block.fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
-    auto stackIt = block.fields.find(fieldIndex(UF::ITEM_FIELD_STACK_COUNT));
-    auto durIt   = block.fields.find(fieldIndex(UF::ITEM_FIELD_DURABILITY));
-    auto maxDurIt= block.fields.find(fieldIndex(UF::ITEM_FIELD_MAXDURABILITY));
-    // ITEM_FIELD_FLAGS is 7 fields after STACK_COUNT (DURATION + 5×SPELL_CHARGES = 6, then
-    // FLAGS) across every expansion; the enchant block that follows starts at +8.
-    const uint16_t flagsField = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
-        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 7u) : 0xFFFFu;
-    // ITEM_FIELD_RANDOM_PROPERTIES_ID sits just before ITEM_FIELD_DURABILITY: pre-WotLK an
-    // ITEM_TEXT_ID field separates them (DUR-2), WotLK dropped that field so it is DUR-1.
-    const uint16_t randPropField = (fieldIndex(UF::ITEM_FIELD_DURABILITY) != 0xFFFF)
-        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_DURABILITY) - (isPreWotlk() ? 2u : 1u))
-        : 0xFFFFu;
-    // ITEM_FIELD_PROPERTY_SEED (the random-suffix stat scale) sits immediately before
-    // RANDOM_PROPERTIES_ID; the client multiplies each suffix allocation % by it.
-    const uint16_t seedField = (randPropField != 0xFFFF && randPropField > 0)
-        ? static_cast<uint16_t>(randPropField - 1u) : 0xFFFFu;
-    auto flagsIt    = (flagsField != 0xFFFF)    ? block.fields.find(flagsField)    : block.fields.end();
-    auto randPropIt = (randPropField != 0xFFFF) ? block.fields.find(randPropField) : block.fields.end();
-    auto seedIt     = (seedField != 0xFFFF)     ? block.fields.find(seedField)     : block.fields.end();
-    const uint16_t enchBase = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
-        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 8u) : 0xFFFFu;
-    auto permEnchIt  = (enchBase != 0xFFFF) ? block.fields.find(enchBase)       : block.fields.end();
-    auto tempEnchIt  = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 3u)  : block.fields.end();
-    auto sock1EnchIt = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 6u)  : block.fields.end();
-    auto sock2EnchIt = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 9u)  : block.fields.end();
-    auto sock3EnchIt = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 12u) : block.fields.end();
-    if (entryIt != block.fields.end() && entryIt->second != 0) {
-        // Preserve existing info when doing partial updates
-        GameHandler::OnlineItemInfo prev = owner_.onlineItemsRef().count(block.guid)
-            ? owner_.onlineItemsRef()[block.guid] : GameHandler::OnlineItemInfo{};
-        GameHandler::OnlineItemInfo info = prev;
-        info.entry = entryIt->second;
-        if (stackIt    != block.fields.end()) info.stackCount            = stackIt->second;
-        if (durIt      != block.fields.end()) info.curDurability         = durIt->second;
-        if (maxDurIt   != block.fields.end()) info.maxDurability         = maxDurIt->second;
-        if (permEnchIt != block.fields.end()) info.permanentEnchantId    = permEnchIt->second;
-        if (tempEnchIt != block.fields.end()) info.temporaryEnchantId    = tempEnchIt->second;
-        if (sock1EnchIt != block.fields.end()) info.socketEnchantIds[0]  = sock1EnchIt->second;
-        if (sock2EnchIt != block.fields.end()) info.socketEnchantIds[1]  = sock2EnchIt->second;
-        if (sock3EnchIt != block.fields.end()) info.socketEnchantIds[2]  = sock3EnchIt->second;
-        if (flagsIt    != block.fields.end()) info.flags                 = flagsIt->second;
-        if (randPropIt != block.fields.end()) info.randomPropertyId      = static_cast<int32_t>(randPropIt->second);
-        if (seedIt     != block.fields.end()) info.suffixFactor          = seedIt->second;
-        auto [itemIt, isNew] = owner_.onlineItemsRef().insert_or_assign(block.guid, info);
-        // A CREATE_OBJECT that re-sends an already-tracked item with a changed stack
-        // count (AzerothCore does this when crafting consumes a reagent) must still
-        // refresh the built inventory - otherwise bag and crafting-window counts stay
-        // stale until some later rebuild. Flag the batch rebuild on any tracked change,
-        // not just brand-new items.
-        const bool itemChanged = isNew ||
-            info.stackCount        != prev.stackCount ||
-            info.curDurability     != prev.curDurability ||
-            info.maxDurability     != prev.maxDurability ||
-            info.entry             != prev.entry ||
-            info.flags             != prev.flags ||
-            info.randomPropertyId  != prev.randomPropertyId ||
-            info.suffixFactor      != prev.suffixFactor ||
-            info.permanentEnchantId != prev.permanentEnchantId ||
-            info.temporaryEnchantId != prev.temporaryEnchantId ||
-            info.socketEnchantIds  != prev.socketEnchantIds;
-        if (itemChanged) newItemCreated = true;
-        owner_.queryItemInfo(info.entry, block.guid);
-    }
-    // Extract container slot GUIDs for bags
-    if (block.objectType == ObjectType::CONTAINER) {
-        owner_.extractContainerFields(block.guid, block.fields);
+    // The inventory reads what an item object's fields say; this rebuilds the
+    // bags once for the whole packet.
+    if (owner_.inventory().trackItemObject(block.guid, block.objectType == ObjectType::CONTAINER,
+                                           block.fields)) {
+        newItemCreated = true;
     }
 }
 
 // Update item stack count / durability / enchants for existing items during VALUES.
 void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
                                                   const std::shared_ptr<Entity>& entity) {
-    bool inventoryChanged = false;
-    // Tracked apart from inventoryChanged so the durability events fire on a
+    // The inventory reads the fields; what changed decides the events here,
+    // which go out with the rest of the packet's.
+    const auto change = owner_.inventory().updateItemObject(
+        block.guid, entity && entity->getType() == ObjectType::CONTAINER, block.fields);
+    const bool inventoryChanged = change.inventory;
+    // Apart from inventoryChanged so the durability events fire on a
     // durability change and not on every stack count that moves.
-    bool durabilityChanged = false;
-    const uint16_t itemStackField   = fieldIndex(UF::ITEM_FIELD_STACK_COUNT);
-    const uint16_t itemDurField     = fieldIndex(UF::ITEM_FIELD_DURABILITY);
-    const uint16_t itemMaxDurField  = fieldIndex(UF::ITEM_FIELD_MAXDURABILITY);
-    const uint16_t containerNumSlotsField = fieldIndex(UF::CONTAINER_FIELD_NUM_SLOTS);
-    const uint16_t containerSlot1Field = fieldIndex(UF::CONTAINER_FIELD_SLOT_1);
-    // ITEM_FIELD_ENCHANTMENT starts 8 fields after ITEM_FIELD_STACK_COUNT (fixed offset
-    // across all expansions: +DURATION, +5×SPELL_CHARGES, +FLAGS = +8).
-    // Slot 0 = permanent (field +0), slot 1 = temp (+3), slots 2-4 = sockets (+6,+9,+12).
-    const uint16_t itemEnchBase      = (itemStackField != 0xFFFF) ? (itemStackField + 8u)  : 0xFFFF;
-    const uint16_t itemPermEnchField = itemEnchBase;
-    const uint16_t itemTempEnchField = (itemEnchBase != 0xFFFF) ? (itemEnchBase + 3u)  : 0xFFFF;
-    const uint16_t itemSock1EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 6u)  : 0xFFFF;
-    const uint16_t itemSock2EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 9u)  : 0xFFFF;
-    const uint16_t itemSock3EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 12u) : 0xFFFF;
-    // ITEM_FIELD_FLAGS (STACK+7) carries the soulbound bit that a BoE item gains on equip;
-    // RANDOM_PROPERTIES_ID sits before DURABILITY (DUR-2 pre-WotLK, DUR-1 on WotLK).
-    const uint16_t itemFlagsField    = (itemStackField != 0xFFFF) ? (itemStackField + 7u) : 0xFFFF;
-    const uint16_t itemRandPropField = (itemDurField != 0xFFFF)
-        ? static_cast<uint16_t>(itemDurField - (isPreWotlk() ? 2u : 1u)) : 0xFFFF;
-    const uint16_t itemSeedField = (itemRandPropField != 0xFFFF && itemRandPropField > 0)
-        ? static_cast<uint16_t>(itemRandPropField - 1u) : 0xFFFF;
-
-    auto it = owner_.onlineItemsRef().find(block.guid);
-    bool isItemInInventory = (it != owner_.onlineItemsRef().end());
-
-    for (const auto& [key, val] : block.fields) {
-        if (key == itemStackField && isItemInInventory) {
-            if (it->second.stackCount != val) {
-                it->second.stackCount = val;
-                inventoryChanged = true;
-            }
-        } else if (key == itemDurField && isItemInInventory) {
-            if (it->second.curDurability != val) {
-                const uint32_t prevDur = it->second.curDurability;
-                it->second.curDurability = val;
-                inventoryChanged = true;
-                durabilityChanged = true;
-                LOG_DEBUG("Item durability update: guid=0x", std::hex, block.guid,
-                          std::dec, " dur ", prevDur, "->", val, "/", it->second.maxDurability);
-                // Warn once when durability drops below 20% for an equipped item.
-                const uint32_t maxDur = it->second.maxDurability;
-                if (maxDur > 0 && val < maxDur / 5u && prevDur >= maxDur / 5u) {
-                    // Check if this item is in an equip slot (not bag inventory).
-                    bool isEquipped = false;
-                    for (uint64_t slotGuid : owner_.equipSlotGuidsRef()) {
-                        if (slotGuid == block.guid) { isEquipped = true; break; }
-                    }
-                    if (isEquipped) {
-                        std::string itemName;
-                        const auto* info = owner_.getItemInfo(it->second.entry);
-                        if (info) itemName = info->name;
-                        char buf[128];
-                        if (!itemName.empty())
-                            std::snprintf(buf, sizeof(buf), "%s is about to break!", itemName.c_str());
-                        else
-                            std::snprintf(buf, sizeof(buf), "An equipped item is about to break!");
-                        owner_.addUIError(buf);
-                        owner_.addSystemChatMessage(buf);
-                    }
-                }
-            }
-        } else if (key == itemMaxDurField && isItemInInventory) {
-            if (it->second.maxDurability != val) {
-                it->second.maxDurability = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemPermEnchField != 0xFFFF && key == itemPermEnchField) {
-            if (it->second.permanentEnchantId != val) {
-                it->second.permanentEnchantId = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemTempEnchField != 0xFFFF && key == itemTempEnchField) {
-            if (it->second.temporaryEnchantId != val) {
-                it->second.temporaryEnchantId = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemSock1EnchField != 0xFFFF && key == itemSock1EnchField) {
-            if (it->second.socketEnchantIds[0] != val) {
-                it->second.socketEnchantIds[0] = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemSock2EnchField != 0xFFFF && key == itemSock2EnchField) {
-            if (it->second.socketEnchantIds[1] != val) {
-                it->second.socketEnchantIds[1] = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemSock3EnchField != 0xFFFF && key == itemSock3EnchField) {
-            if (it->second.socketEnchantIds[2] != val) {
-                it->second.socketEnchantIds[2] = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemFlagsField != 0xFFFF && key == itemFlagsField) {
-            if (it->second.flags != val) {
-                it->second.flags = val;
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemRandPropField != 0xFFFF && key == itemRandPropField) {
-            if (it->second.randomPropertyId != static_cast<int32_t>(val)) {
-                it->second.randomPropertyId = static_cast<int32_t>(val);
-                inventoryChanged = true;
-            }
-        } else if (isItemInInventory && itemSeedField != 0xFFFF && key == itemSeedField) {
-            if (it->second.suffixFactor != val) {
-                it->second.suffixFactor = val;
-                inventoryChanged = true;
-            }
-        }
-    }
-    // Update container slot GUIDs on bag content changes
-    if (entity && entity->getType() == ObjectType::CONTAINER) {
-        for (const auto& [key, _] : block.fields) {
-            if ((containerNumSlotsField != 0xFFFF && key == containerNumSlotsField) ||
-                (containerSlot1Field != 0xFFFF && key >= containerSlot1Field && key < containerSlot1Field + 72)) {
-                inventoryChanged = true;
-                break;
-            }
-        }
-        owner_.extractContainerFields(block.guid, block.fields);
-    }
+    const bool durabilityChanged = change.durability;
     if (inventoryChanged) {
         owner_.rebuildOnlineInventory();
         // One per bag: the interface redraws only the bag whose id matches
@@ -2371,16 +2188,13 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
                 characterIt->facialFeatures,
                 corpse.getX(), corpse.getY(), corpse.getZ(), corpse.getOrientation());
 
-            if (owner_.playerEquipmentCallbackRef()) {
-                std::array<uint32_t, 19> displayInfoIds{};
-                std::array<uint8_t, 19> inventoryTypes{};
-                const size_t count = std::min<size_t>(19, characterIt->equipment.size());
-                for (size_t i = 0; i < count; ++i) {
-                    displayInfoIds[i] = characterIt->equipment[i].displayModel;
-                    inventoryTypes[i] = characterIt->equipment[i].inventoryType;
-                }
-                owner_.playerEquipmentCallbackRef()(guid, displayInfoIds, inventoryTypes);
+            events::PlayerEquipmentResolved worn{.guid = guid};
+            const size_t count = std::min<size_t>(19, characterIt->equipment.size());
+            for (size_t i = 0; i < count; ++i) {
+                worn.displayIds[i] = characterIt->equipment[i].displayModel;
+                worn.inventoryTypes[i] = characterIt->equipment[i].inventoryType;
             }
+            owner_.eventBus().publish(worn);
         }
         if (owner_.npcDeathCallbackRef()) {
             owner_.npcDeathCallbackRef()(guid);
@@ -2406,19 +2220,18 @@ void EntityController::announceCorpse(uint64_t guid, const Entity& corpse) {
     owner_.playerSpawnCallbackRef()(guid, field(UF::CORPSE_FIELD_DISPLAY_ID), race, gender,
                                     appearance, facialHair, corpse.getX(), corpse.getY(), corpse.getZ(),
                                     corpse.getOrientation());
-    if (owner_.playerEquipmentCallbackRef()) {
-        std::array<uint32_t, 19> displayInfoIds{};
-        std::array<uint8_t, 19> inventoryTypes{};
+    {
+        events::PlayerEquipmentResolved worn{.guid = guid};
         for (uint32_t i = 0; i < 19; ++i) {
             const uint32_t item = field(UF::CORPSE_FIELD_ITEM, i);
-            displayInfoIds[i] = item & 0x00FFFFFFu;
-            inventoryTypes[i] = static_cast<uint8_t>(item >> 24);
+            worn.displayIds[i] = item & 0x00FFFFFFu;
+            worn.inventoryTypes[i] = static_cast<uint8_t>(item >> 24);
         }
         constexpr auto kHead = static_cast<size_t>(EquipSlot::HEAD);
         constexpr auto kBack = static_cast<size_t>(EquipSlot::BACK);
-        if (corpseFlags & CORPSE_FLAG_HIDE_HELM) { displayInfoIds[kHead] = 0; inventoryTypes[kHead] = 0; }
-        if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { displayInfoIds[kBack] = 0; inventoryTypes[kBack] = 0; }
-        owner_.playerEquipmentCallbackRef()(guid, displayInfoIds, inventoryTypes);
+        if (corpseFlags & CORPSE_FLAG_HIDE_HELM) { worn.displayIds[kHead] = 0; worn.inventoryTypes[kHead] = 0; }
+        if (corpseFlags & CORPSE_FLAG_HIDE_CLOAK) { worn.displayIds[kBack] = 0; worn.inventoryTypes[kBack] = 0; }
+        owner_.eventBus().publish(worn);
     }
     if (owner_.npcDeathCallbackRef()) owner_.npcDeathCallbackRef()(guid);
 }
@@ -2486,8 +2299,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
 
     // Self-player stat/inventory/quest field updates
     if (block.guid == owner_.getPlayerGuid()) {
-        const bool needCoinageDetectSnapshot =
-            (owner_.pendingMoneyDeltaRef() != 0 && owner_.pendingMoneyDeltaTimerRef() > 0.0f);
+        const bool needCoinageDetectSnapshot = owner_.inventory().expectedMoneyDelta() != 0;
         FlatFieldMap oldFieldsSnapshot;
         if (needCoinageDetectSnapshot) {
             oldFieldsSnapshot = owner_.lastPlayerFieldsRef();
@@ -2722,9 +2534,9 @@ void EntityController::handleValuesUpdate(const UpdateBlock& block) {
     auto entity = entityManager.getEntity(block.guid);
     if (!entity) {
         // Item/container entities may be absent from entityManager (e.g. server
-        // only sent a partial update) but we still track them in onlineItems_.
+        // only sent a partial update) but the inventory still holds them.
         // Process field updates so durability/stack changes from repair aren't lost.
-        if (owner_.onlineItemsRef().count(block.guid)) {
+        if (owner_.inventory().holdsItemObject(block.guid)) {
             pendingEvents_.clear();
             updateItemOnValuesUpdate(block, entity);
             flushPendingEvents();
@@ -2812,15 +2624,17 @@ void EntityController::finalizeUpdateObjectBatch(bool newItemCreated) {
     // Entity count logging disabled
 
     // Deferred rebuild: if new item objects were created in this packet, rebuild
-    // owner_.inventoryRef() so that slot GUIDs updated earlier in the same packet can resolve.
+    // the bags so that slot GUIDs updated earlier in the same packet can resolve.
     if (newItemCreated) {
         owner_.rebuildOnlineInventory();
     }
 
-    // Late owner_.inventoryRef() base detection once items are known
-    if (owner_.getPlayerGuid() != 0 && owner_.invSlotBaseRef() < 0 && !owner_.lastPlayerFieldsRef().empty() && !owner_.onlineItemsRef().empty()) {
+    // Late inventory base detection once items are known
+    auto& inventory = owner_.inventory();
+    if (owner_.getPlayerGuid() != 0 && !inventory.inventoryFieldBaseKnown() &&
+        !owner_.lastPlayerFieldsRef().empty() && !inventory.onlineItems().empty()) {
         owner_.detectInventorySlotBases(owner_.lastPlayerFieldsRef());
-        if (owner_.invSlotBaseRef() >= 0) {
+        if (inventory.inventoryFieldBaseKnown()) {
             if (owner_.applyInventoryFields(owner_.lastPlayerFieldsRef())) {
                 owner_.rebuildOnlineInventory();
             }
@@ -2899,13 +2713,10 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
         if (entity) {
             if (entity->getType() == ObjectType::UNIT && owner_.creatureDespawnCallbackRef()) {
                 owner_.creatureDespawnCallbackRef()(data.guid);
-            } else if (entity->getType() == ObjectType::PLAYER && owner_.playerDespawnCallbackRef()) {
+            } else if (entity->getType() == ObjectType::PLAYER) {
                 // Player entities also need renderer cleanup on DESTROY_OBJECT, not just out-of-range.
-                owner_.playerDespawnCallbackRef()(data.guid);
-                owner_.otherPlayerVisibleItemEntriesRef().erase(data.guid);
-                owner_.otherPlayerVisibleDirtyRef().erase(data.guid);
-                owner_.inspectedPlayerItemEntriesRef().erase(data.guid);
-                owner_.pendingAutoInspectRef().erase(data.guid);
+                if (owner_.playerDespawnCallbackRef()) owner_.playerDespawnCallbackRef()(data.guid);
+                owner_.inventory().forgetPlayerEquipment(data.guid);
                 pendingNameQueries.erase(data.guid);
             } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
                 owner_.gameObjectDespawnCallbackRef()(data.guid);
@@ -2938,8 +2749,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     if (owner_.getCombatHandler()) owner_.getCombatHandler()->removeHostileAttacker(data.guid);
 
     // Remove online item/container tracking
-    owner_.containerContentsRef().erase(data.guid);
-    if (owner_.onlineItemsRef().erase(data.guid)) {
+    if (owner_.inventory().forgetItemObject(data.guid)) {
         owner_.rebuildOnlineInventory();
     }
 
@@ -3061,7 +2871,7 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
         // whisperer's guid and finds the name in the cache this just filled.
 
         // Backfill mail inbox sender names
-        for (auto& mail : owner_.mailInboxRef()) {
+        for (auto& mail : owner_.inventory().mailInboxRef()) {
             if (mail.messageType == 0 && mail.senderGuid == data.guid) {
                 mail.senderName = data.name;
             }
@@ -3293,9 +3103,7 @@ void EntityController::showGameObjectPageText(uint64_t guid) {
                 " pageId=", pageId, " hasData=", info.hasData);
 
     if (pageId != 0 && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
-        owner_.bookPagesRef().clear();  // start a fresh book for this interaction
-        owner_.setBookTitle(info.name);
-        owner_.setBookMaterial(pageMaterial);
+        owner_.inventory().beginBook(info.name, pageMaterial);  // a fresh book for this interaction
         auto req = PageTextQueryPacket::build(pageId, guid);
         owner_.getSocket()->send(req);
         return;
@@ -3304,69 +3112,6 @@ void EntityController::showGameObjectPageText(uint64_t guid) {
     if (!info.name.empty()) {
         owner_.addSystemChatMessage(info.name);
     }
-}
-
-void EntityController::handlePageTextQueryResponse(network::Packet& packet) {
-    PageTextQueryResponseData data;
-    if (!PageTextQueryResponseParser::parse(packet, data)) {
-        // The other two ways a read ends with an empty page, and the two that
-        // nothing else can report: the request went out, the server answered,
-        // and the answer was dropped here. Silence at this point is
-        // indistinguishable from a server that never replied.
-        LOG_WARNING("handlePageTextQueryResponse: could not parse the reply - "
-                    "the page it carries is lost and the reader stays empty");
-        return;
-    }
-
-    if (!data.isValid()) {
-        LOG_WARNING("handlePageTextQueryResponse: reply carries page id 0, "
-                    "which is the server saying it has no such page");
-        return;
-    }
-
-    std::string playerName;
-    if (auto entity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
-        if (auto unit = std::dynamic_pointer_cast<Unit>(entity))
-            playerName = unit->getName();
-    }
-    data.text = normalizeWowTextTokens(data.text, playerName);
-
-    // Append page if not already collected
-    bool alreadyHave = false;
-    for (const auto& bp : owner_.bookPagesRef()) {
-        if (bp.pageId == data.pageId) { alreadyHave = true; break; }
-    }
-    if (!alreadyHave) {
-        owner_.bookPagesRef().push_back({.pageId = data.pageId, .text = data.text});
-    }
-
-    // Follow the chain: if there's a next page we haven't fetched yet, request it
-    if (data.nextPageId != 0) {
-        bool nextHave = false;
-        for (const auto& bp : owner_.bookPagesRef()) {
-            if (bp.pageId == data.nextPageId) { nextHave = true; break; }
-        }
-        if (!nextHave && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
-            auto req = PageTextQueryPacket::build(data.nextPageId, owner_.getPlayerGuid());
-            owner_.getSocket()->send(req);
-        }
-    }
-    // Tell the interface, which is otherwise never told about a book at all.
-    // The mail path fires these two from InventoryHandler and FrameXML's
-    // ItemTextFrame is wired to them; a book arrives on a different opcode and
-    // fired nothing, so with the Book element handed over there was nothing to
-    // read. BEGIN on the first page - the frame clears itself and picks its
-    // material on that - and READY on every page, since each one that lands is
-    // another the reader can turn to.
-    if (owner_.hasAddonEventListener()) {
-        if (owner_.bookPagesRef().size() == 1) {
-            owner_.fireAddonEvent("ITEM_TEXT_BEGIN", {});
-        }
-        owner_.fireAddonEvent("ITEM_TEXT_READY", {});
-    }
-    LOG_DEBUG("handlePageTextQueryResponse: pageId=", data.pageId,
-              " nextPage=", data.nextPageId,
-              " totalPages=", owner_.bookPagesRef().size());
 }
 
 

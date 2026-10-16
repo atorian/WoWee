@@ -173,7 +173,6 @@ public:
     void showGameObjectPageText(uint64_t guid);
 
 private:
-    void handlePageTextQueryResponse(network::Packet& packet);
 
     // --- Entity lifecycle ---
     /// Removes out-of-range objects from `next` on until `deadline`, at least

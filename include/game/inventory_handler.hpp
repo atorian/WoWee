@@ -11,22 +11,160 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace wowee {
+namespace core { class EventBus; class CVarStore; }
+namespace pipeline { class AssetManager; }
 namespace game {
 
-class GameHandler;
+class PacketSender;
+class FrameXmlEvents;
+class ChatLog;
+class EntityManager;
+class PacketParsers;
+class FlatFieldMap;
+
+/// An item this client holds, as its object's update fields describe it.
+struct OnlineItemInfo {
+    uint32_t entry = 0;
+    uint32_t stackCount = 1;
+    uint32_t curDurability = 0;
+    uint32_t maxDurability = 0;
+    uint32_t permanentEnchantId = 0;
+    uint32_t temporaryEnchantId = 0;
+    std::array<uint32_t, 3> socketEnchantIds{};
+    uint32_t flags = 0;              // ITEM_FIELD_FLAGS (bit 0x1 = soulbound)
+    int32_t  randomPropertyId = 0;   // ITEM_FIELD_RANDOM_PROPERTIES_ID (signed)
+    uint32_t suffixFactor = 0;       // ITEM_FIELD_PROPERTY_SEED (random-suffix stat scale)
+};
+
+/// A temporary weapon enchant - poison, sharpening stone, imbue - and when it
+/// runs out, by the weapon slot it is on (0 main hand, 1 off hand, 2 ranged).
+struct TempEnchantTimer {
+    uint32_t slot     = 0;
+    uint64_t expireMs = 0;   // std::chrono::steady_clock ms timestamp when it expires
+};
+
+/// One page of a book, a scroll or a note, as SMSG_PAGE_TEXT_QUERY_RESPONSE
+/// sends it. Multi-page items chain through the page's next id.
+struct BookPage { uint32_t pageId = 0; std::string text; };
+
+/// What was paid for an item, and how long is left to hand it back.
+///
+/// The server answers CMSG_ITEM_REFUND_INFO with this and nothing keeps it
+/// until asked - so the whole record is a reply to a question, and the
+/// question is only worth asking about an item the player is looking at.
+struct ItemRefundInfo {
+    uint32_t money = 0;
+    uint32_t honor = 0;
+    uint32_t arena = 0;
+    std::array<std::pair<uint32_t, uint32_t>, 5> items{};  ///< id, count
+    /// Played seconds since the purchase. The window is two hours of it,
+    /// which is why this is played time and not wall-clock: logging out does
+    /// not run it down.
+    uint32_t playedSincePurchase = 0;
+};
+
+/// A random suffix's or property's stat: ITEM_MOD code and amount.
+struct RandomStatBonus { uint32_t statType = 0; int32_t value = 0; };
+
+/// What the inventory asks of the rest of the game, and the few things it
+/// has the rest of the game do when an item is used.
+///
+/// Everything here is answered by whoever owns it - the spell data, the
+/// entities in view, the quest log, the open NPC dialog. The inventory reads
+/// none of that state itself.
+class InventoryQueries {
+public:
+    virtual ~InventoryQueries() = default;
+
+    // ---- The player and the world in view ----
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// What the player has selected; 0 for nothing.
+    [[nodiscard]] virtual uint64_t currentTargetGuid() const = 0;
+    /// The world's objects: who an item is aimed at, where a vendor stands,
+    /// which players' equipment there is to decode.
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    /// The player's own update fields as the realm last sent them. The
+    /// inventory slots and the visible-item layout are read out of them.
+    [[nodiscard]] virtual const FlatFieldMap& playerFields() const = 0;
+    /// This expansion's packet formats.
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// A player's name; empty while it is not known.
+    [[nodiscard]] virtual std::string playerName(uint64_t guid) const = 0;
+    /// Ask for a player's name, for a line or a window that shows it.
+    virtual void requestPlayerName(uint64_t guid) = 0;
+    [[nodiscard]] virtual bool inGuild() const = 0;
+
+    // ---- What the client's data says ----
+    [[nodiscard]] virtual std::string spellName(uint32_t spellId) const = 0;
+    /// Whether this install's Spell.dbc has the spell at all.
+    [[nodiscard]] virtual bool spellKnownToClient(uint32_t spellId) const = 0;
+    /// Spell.dbc EffectImplicitTargetA: what the spell aims at.
+    [[nodiscard]] virtual uint32_t spellImplicitTargetA(uint32_t spellId) const = 0;
+    /// Spell.dbc Targets (SpellCastTargetFlags).
+    [[nodiscard]] virtual uint32_t spellTargetFlags(uint32_t spellId) const = 0;
+    /// Spell.dbc Effect 1-3; zero where there is none or the spell is unknown.
+    [[nodiscard]] virtual std::array<uint32_t, 3> spellEffects(uint32_t spellId) const = 0;
+    /// The class skill line - a talent tree, a spec - the spell belongs to,
+    /// or 0 for one that belongs to none. A trainer's tabs are made of these.
+    /// Not const: the first ask reads the skill line tables.
+    [[nodiscard]] virtual uint32_t classSkillLineOf(uint32_t spellId) = 0;
+    [[nodiscard]] virtual std::string skillLineName(uint32_t skillLineId) const = 0;
+    [[nodiscard]] virtual std::string itemIconPath(uint32_t displayInfoId) const = 0;
+    /// "of the Eagle", by the item's signed random property id.
+    [[nodiscard]] virtual std::string randomPropertyName(int32_t randomPropertyId) const = 0;
+    [[nodiscard]] virtual std::vector<RandomStatBonus>
+    randomStatBonuses(int32_t randomPropertyId, uint32_t suffixFactor) const = 0;
+    [[nodiscard]] virtual std::string enchantName(uint32_t enchantId) const = 0;
+
+    // ---- What the player is doing ----
+    [[nodiscard]] virtual bool casting() const = 0;
+    [[nodiscard]] virtual uint32_t currentCastSpellId() const = 0;
+    /// Eating or drinking - a cast that any other use replaces.
+    [[nodiscard]] virtual bool restoring() const = 0;
+    virtual void cancelCast() = 0;
+    [[nodiscard]] virtual bool craftingWindowOpen() const = 0;
+    [[nodiscard]] virtual bool mounted() const = 0;
+    [[nodiscard]] virtual uint32_t mountAuraSpellId() const = 0;
+    [[nodiscard]] virtual bool carriesAura(uint32_t spellId) const = 0;
+    virtual void dismount() = 0;
+    /// An item cast a spell; a ground-targeted one waits for its spot.
+    virtual void noteItemCastSpell(uint32_t spellId) = 0;
+    /// Stop the character in place before a cast that must be stationary, so
+    /// the server is not left with a stale forward or turn.
+    virtual void stopMovingForCast() = 0;
+    /// Whether this loot is a game object the player is still busy opening
+    /// or gathering - an empty answer for it is not the loot.
+    [[nodiscard]] virtual bool gameObjectLootPending(uint64_t lootGuid) const = 0;
+    /// A loot window opened. True when it is the game object the player was
+    /// using - a chest, a quest container - rather than a corpse.
+    virtual bool gameObjectLootOpened(uint64_t lootGuid) = 0;
+
+    // ---- The NPC dialog and the quest log ----
+    /// A gossip or quest window is on screen.
+    [[nodiscard]] virtual bool npcDialogOpen() const = 0;
+    virtual void closeGossip() = 0;
+    /// Whether a quest in the log asks for this item.
+    [[nodiscard]] virtual bool questWantsItem(uint32_t itemId) const = 0;
+    /// Run a line of the interface's own Lua.
+    virtual void runInterfaceCommand(const std::string& lua) = 0;
+};
 
 class InventoryHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit InventoryHandler(GameHandler& owner);
+    InventoryHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                     core::EventBus& events, ChatLog& chat,
+                     InventoryQueries& queries, const core::CVarStore& cvars,
+                     pipeline::AssetManager* assets);
 
     /// Announce that the bags changed, one event per bag.
     ///
@@ -38,14 +176,177 @@ public:
 
     void registerOpcodes(DispatchTable& table);
 
-    /// Advances the fallback that announces looted money when the server
-    /// never sends SMSG_LOOT_MONEY_NOTIFY.
-    ///
-    /// Taking gold arms a 0.4s timer here and nothing ticked it: GameHandler
-    /// had its own copy of these members and ticked those, and its copy is
-    /// never set to anything but zero. So on a server that does not send the
-    /// notify, looting money said nothing and played no coin.
-    void tickLootMoneyFallback(float deltaTime);
+    // ---- Lifetime ------------------------------------------------------------
+
+    /// A character is being logged in: what the last one held - its bags, its
+    /// coin, its weapon enchants, the book it was reading - is not this one's.
+    void beginCharacter();
+    /// The world was left: the other players whose equipment was decoded are
+    /// gone with it.
+    void leaveWorld();
+    /// The frame's timers: the loot money fallback, the auction search
+    /// cooldown, stale item queries and the inspect that equipment visuals
+    /// fall back on.
+    void update(float deltaTime);
+
+    // ---- What the character holds -------------------------------------------
+
+    [[nodiscard]] Inventory& items() { return held_.items; }
+    [[nodiscard]] const Inventory& items() const { return held_.items; }
+    /// Every item object this client has been told of, by guid.
+    [[nodiscard]] const std::unordered_map<uint64_t, OnlineItemInfo>& onlineItems() const {
+        return held_.onlineItems;
+    }
+    [[nodiscard]] uint64_t getBackpackItemGuid(int index) const {
+        if (index < 0 || index >= static_cast<int>(held_.backpackSlotGuids.size())) return 0;
+        return held_.backpackSlotGuids[index];
+    }
+    [[nodiscard]] uint64_t getEquipSlotGuid(int slot) const {
+        if (slot < 0 || slot >= static_cast<int>(held_.equipSlotGuids.size())) return 0;
+        return held_.equipSlotGuids[slot];
+    }
+    [[nodiscard]] uint64_t getBagItemGuid(int bagIndex, int slotIndex) const;
+    /// An item in the backpack or the bags whose on-use spell is this one;
+    /// 0 when there is none.
+    [[nodiscard]] uint32_t itemIdForSpell(uint32_t spellId) const;
+    /// The template entry of an item this client is holding, by guid. Zero
+    /// when the guid names nothing in the player's own inventory or bank.
+    [[nodiscard]] uint32_t getItemEntryByGuid(uint64_t guid) const {
+        auto it = held_.onlineItems.find(guid);
+        return (it != held_.onlineItems.end()) ? it->second.entry : 0;
+    }
+    /// Has this item already bound to its owner? ITEM_FIELD_FLAGS bit 0x1.
+    [[nodiscard]] bool isItemSoulbound(uint64_t guid) const {
+        auto it = held_.onlineItems.find(guid);
+        return it != held_.onlineItems.end() && (it->second.flags & 0x1u) != 0;
+    }
+    /// The permanent and temporary enchant ids on an item (0 if unknown).
+    [[nodiscard]] std::pair<uint32_t, uint32_t> getItemEnchantIds(uint64_t guid) const {
+        auto it = held_.onlineItems.find(guid);
+        if (it == held_.onlineItems.end()) return {0, 0};
+        return {it->second.permanentEnchantId, it->second.temporaryEnchantId};
+    }
+    /// The socket gem enchant ids (3 slots; 0 = empty socket) on an item.
+    [[nodiscard]] std::array<uint32_t, 3> getItemSocketEnchantIds(uint64_t guid) const {
+        auto it = held_.onlineItems.find(guid);
+        if (it == held_.onlineItems.end()) return {};
+        return it->second.socketEnchantIds;
+    }
+
+    // ---- Item objects, as the entity updates describe them ------------------
+
+    /// An item or container object was created: what its fields say is kept,
+    /// and its template asked for. Returns whether anything the bags show
+    /// changed - a CREATE that re-sends a held item with a new stack count
+    /// (AzerothCore does this when crafting consumes a reagent) counts.
+    bool trackItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields);
+    struct ItemObjectChange {
+        bool inventory = false;   ///< something the bags show moved
+        bool durability = false;  ///< and durability among it
+    };
+    /// A held item's fields changed (a VALUES block).
+    ItemObjectChange updateItemObject(uint64_t guid, bool isContainer, const FlatFieldMap& fields);
+    /// An item object left the client's view - destroyed, traded, mailed.
+    /// Returns whether it was one the player held.
+    bool forgetItemObject(uint64_t guid);
+    /// Whether an item object is one the player holds.
+    [[nodiscard]] bool holdsItemObject(uint64_t guid) const {
+        return held_.onlineItems.count(guid) != 0;
+    }
+    /// The player bought bank bag slots.
+    void setPurchasedBankBagSlots(int slots) { held_.items.setPurchasedBankBagSlots(slots); }
+    /// Whether the player's inventory field layout has been worked out yet.
+    [[nodiscard]] bool inventoryFieldBaseKnown() const { return held_.invSlotBase >= 0; }
+
+    // ---- Item templates (SMSG_ITEM_QUERY_SINGLE_RESPONSE) -------------------
+
+    [[nodiscard]] const ItemQueryResponseData* getItemInfo(uint32_t itemId) const {
+        auto it = itemInfoCache_.find(itemId);
+        return (it != itemInfoCache_.end()) ? &it->second : nullptr;
+    }
+    [[nodiscard]] const std::unordered_map<uint32_t, ItemQueryResponseData>& getItemInfoCache() const {
+        return itemInfoCache_;
+    }
+    /// Ask for an item's template unless it is known or already asked for.
+    void ensureItemInfo(uint32_t entry) {
+        if (entry == 0 || itemInfoCache_.count(entry) || pendingItemQueries_.count(entry)) return;
+        queryItemInfo(entry, 0);
+    }
+
+    // ---- Money ---------------------------------------------------------------
+
+    /// The character's coin. A realm that keeps an extended balance of its
+    /// own (applyServerMoney) is answered from that.
+    [[nodiscard]] uint64_t moneyCopper() const {
+        return held_.serverMoneyCopper.value_or(held_.moneyCopper);
+    }
+    /// PLAYER_FIELD_COINAGE, as the realm sent it. Returns whether the coin
+    /// changed, which the caller announces (PLAYER_MONEY) with the rest of
+    /// the update it came in.
+    bool setMoneyFromFields(uint64_t copper);
+    /// A realm's own authoritative extended balance.
+    void applyServerMoney(uint64_t copper);
+    /// The coin the client is waiting to see added to a field, while the
+    /// coinage field's index is not known; zero when it is not waiting.
+    [[nodiscard]] uint32_t expectedMoneyDelta() const {
+        return held_.pendingMoneyDeltaTimer > 0.0f ? held_.pendingMoneyDelta : 0;
+    }
+    void clearExpectedMoneyDelta() {
+        held_.pendingMoneyDelta = 0;
+        held_.pendingMoneyDeltaTimer = 0.0f;
+    }
+
+    // ---- Equipment visuals ---------------------------------------------------
+
+    /// Whether what the player wears changed since the last ask.
+    bool consumeOnlineEquipmentDirty() {
+        const bool dirty = held_.onlineEquipDirty;
+        held_.onlineEquipDirty = false;
+        return dirty;
+    }
+    /// Ask for the equipment visuals to be rebuilt - the helm toggle changes
+    /// what is drawn without any item moving.
+    void markOnlineEquipmentDirty() { held_.onlineEquipDirty = true; }
+    void resetEquipmentDirtyTracking() {
+        held_.lastEquipDisplayIds = {};
+        held_.onlineEquipDirty = true;
+    }
+    /// Another player went out of view: what they wore is forgotten.
+    void forgetPlayerEquipment(uint64_t guid);
+    /// What an inspect said another player wears, by entry.
+    [[nodiscard]] const std::unordered_map<uint64_t, std::array<uint32_t, 19>>&
+    inspectedPlayerItemEntries() const {
+        return seen_.inspectedPlayerItemEntries;
+    }
+
+    // ---- Weapon enchants -----------------------------------------------------
+
+    [[nodiscard]] const std::vector<TempEnchantTimer>& tempEnchantTimers() const {
+        return held_.tempEnchantTimers;
+    }
+    static constexpr const char* kTempEnchantSlotNames[] = { "Main Hand", "Off Hand", "Ranged" };
+
+    // ---- Books ----------------------------------------------------------------
+
+    [[nodiscard]] const std::vector<BookPage>& getBookPages() const { return held_.bookPages; }
+    [[nodiscard]] const std::string& getBookTitle() const { return held_.bookTitle; }
+    /// PageTextMaterial.dbc id, 0 for unknown.
+    [[nodiscard]] uint32_t getBookMaterial() const { return held_.bookMaterial; }
+    void clearBook() { held_.bookPages.clear(); held_.bookTitle.clear(); held_.bookMaterial = 0; }
+    /// A new book is opened - an item read, an object used - before its first
+    /// page is asked for. SMSG_PAGE_TEXT_QUERY_RESPONSE fills it, here.
+    void beginBook(std::string title, uint32_t material);
+
+    // ---- Refunds -------------------------------------------------------------
+
+    /// Ask the server what an item cost. The answer arrives asynchronously.
+    void requestItemRefundInfo(uint64_t itemGuid);
+    /// Hand an item back for what was paid for it.
+    void refundItem(uint64_t itemGuid);
+    [[nodiscard]] const ItemRefundInfo* getItemRefundInfo(uint64_t itemGuid) const {
+        auto it = held_.itemRefundInfo.find(itemGuid);
+        return (it != held_.itemRefundInfo.end()) ? &it->second : nullptr;
+    }
 
     /// Whether this corpse or chest was opened and still has items in it, by
     /// what its last loot window held. Tab targeting asks, so a corpse left
@@ -495,15 +796,6 @@ public:
     int getAuctionActiveTab() const { return auctionActiveTab_; }
     void setAuctionActiveTab(int tab) { auctionActiveTab_ = tab; }
     float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
-    // Ticked from GameHandler::update - this member is the authoritative
-    // timer (GameHandler used to decrement its own never-set copy, leaving
-    // the search button disabled forever after the first search).
-    void tickAuctionSearchDelay(float deltaTime) {
-        if (auctionSearchDelayTimer_ > 0.0f) {
-            auctionSearchDelayTimer_ -= deltaTime;
-            if (auctionSearchDelayTimer_ < 0.0f) auctionSearchDelayTimer_ = 0.0f;
-        }
-    }
 
     // ---- Trainer ----
     struct TrainerTab {
@@ -606,7 +898,115 @@ private:
     void sendUseItem(uint8_t wowBag, uint8_t wowSlot, uint64_t itemGuid, uint32_t spellId,
                      uint64_t targetGuid, uint64_t itemTargetGuid);
 
-    GameHandler& owner_;
+    /// SMSG_ITEM_ENCHANT_TIME_UPDATE: a weapon's temporary enchant has this
+    /// long left, or is gone.
+    void handleItemEnchantTimeUpdate(network::Packet& packet);
+    /// SMSG_ITEM_REFUND_INFO_RESPONSE.
+    void handleItemRefundInfo(network::Packet& packet);
+    /// SMSG_PAGE_TEXT_QUERY_RESPONSE: a page of the book being read.
+    void handlePageTextQueryResponse(network::Packet& packet);
+
+    /// Advances the fallback that announces looted money when the server
+    /// never sends SMSG_LOOT_MONEY_NOTIFY.
+    void tickLootMoneyFallback(float deltaTime);
+    /// The auction house's search button waits this out after a search.
+    void tickAuctionSearchDelay(float deltaTime);
+    /// Equipment visuals fall back on an inspect when a player's visible-item
+    /// fields cannot be read; one goes out at a time, rate-limited.
+    void sendPendingAutoInspect(float deltaTime);
+
+    void raiseUiError(const std::string& message);
+    /// Tell the client what a player wears (events::PlayerEquipmentResolved).
+    void publishEquipment(uint64_t guid, const std::array<uint32_t, 19>& displayIds,
+                          const std::array<uint8_t, 19>& invTypes);
+
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    ChatLog& chat_;
+    InventoryQueries& queries_;
+    const core::CVarStore& cvars_;
+    /// The client's data, for the repair cost tables. Null in a test that
+    /// has none, which leaves repairs unestimated.
+    pipeline::AssetManager* const assets_;
+
+    /// Everything the character holds, as the realm has described it. Its own
+    /// struct so that a new character starts from nothing in one step -
+    /// beginCharacter assigns it whole, and a field added here cannot be left
+    /// holding the last character's value.
+    struct Held {
+        Inventory items;
+        std::unordered_map<uint64_t, OnlineItemInfo> onlineItems;
+        std::array<uint64_t, 23> equipSlotGuids{};
+        std::array<uint64_t, 16> backpackSlotGuids{};
+        std::array<uint64_t, 32> keyringSlotGuids{};
+        /// Container (bag) contents: containerGuid -> item guid per slot.
+        struct ContainerInfo {
+            uint32_t numSlots = 0;
+            std::array<uint64_t, 36> slotGuids{};  // max 36 slots
+        };
+        std::unordered_map<uint64_t, ContainerInfo> containerContents;
+        /// Where PLAYER_FIELD_INV_SLOT_HEAD and PLAYER_FIELD_PACK_SLOT_1 turned
+        /// out to be, once the fields have been read; -1 until then.
+        int invSlotBase = -1;
+        int packSlotBase = -1;
+        bool onlineEquipDirty = false;
+        std::array<uint32_t, 19> lastEquipDisplayIds{};
+        uint64_t moneyCopper = 0;
+        /// A realm's authoritative extended balance (EZWoW keeps one).
+        std::optional<uint64_t> serverMoneyCopper;
+        /// Coin just looted, while the client waits to see which field it
+        /// lands in - how PLAYER_FIELD_COINAGE is found when the table is wrong.
+        uint32_t pendingMoneyDelta = 0;
+        float pendingMoneyDeltaTimer = 0.0f;
+        std::vector<TempEnchantTimer> tempEnchantTimers;
+        std::vector<BookPage> bookPages;
+        std::string bookTitle;
+        uint32_t bookMaterial = 0;
+        std::unordered_map<uint64_t, ItemRefundInfo> itemRefundInfo;
+        /// Items whose refund has been asked about, so it is asked once.
+        std::set<uint64_t> itemRefundAsked;
+        /// SMSG_ITEM_PUSH_RESULT lines for items whose template had not
+        /// arrived; said once the query answers.
+        struct PendingItemPushNotif {
+            uint32_t itemId = 0;
+            uint32_t count  = 1;
+            /// The bag button the item landed in, in the interface's
+            /// numbering: 0 for the backpack and 20-23 for the four worn bags.
+            int bagButtonId = 0;
+        };
+        std::vector<PendingItemPushNotif> pendingItemPushNotifs;
+    };
+    Held held_;
+
+    /// Item templates the realm has described, and the queries out for more.
+    std::unordered_map<uint32_t, ItemQueryResponseData> itemInfoCache_;
+    std::unordered_set<uint32_t> pendingItemQueries_;
+    float pendingItemQueryTimer_ = 0.0f;
+
+    /// The visible-item layout (base field and stride) of this realm's update
+    /// fields, detected from the player's own equipped items and then used to
+    /// decode everyone else's. WotLK 3.3.5a: PLAYER_VISIBLE_ITEM_1_ENTRYID =
+    /// field 283, stride 2.
+    struct VisibleItemLayout {
+        int entryBase = 283;
+        int stride = 2;
+        bool verified = false;  ///< true once the heuristic confirmed or overrode the default
+    };
+    VisibleItemLayout visibleLayout_;
+
+    /// What other players in view wear, decoded from their visible-item fields
+    /// or from an inspect. Of the world, not of the character: leaveWorld
+    /// forgets it.
+    struct Seen {
+        std::unordered_map<uint64_t, std::array<uint32_t, 19>> otherPlayerVisibleItemEntries;
+        std::unordered_set<uint64_t> otherPlayerVisibleDirty;
+        /// The inspect fallback, for players whose visible fields cannot be read.
+        std::unordered_map<uint64_t, std::array<uint32_t, 19>> inspectedPlayerItemEntries;
+        std::unordered_set<uint64_t> pendingAutoInspect;
+        float inspectRateLimit = 0.0f;
+    };
+    Seen seen_;
 
     // ---- Item-targeted item use ----
     struct PendingItemTarget {
