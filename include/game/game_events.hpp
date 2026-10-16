@@ -243,4 +243,10 @@ struct AccountDataLoaded {
     std::string text;
 };
 
+/// A macro was deleted from the account data. The action bar empties the
+/// buttons that held it.
+struct MacroDeleted {
+    uint32_t macroId = 0;
+};
+
 } // namespace wowee::game::events

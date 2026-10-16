@@ -150,7 +150,8 @@ new code the way the target looks, not the way the old code does.
 
 - Each domain handler — `ChatHandler`, `CombatHandler`, `InventoryHandler`,
   `MovementHandler`, `QuestHandler`, `SocialHandler`, `SpellHandler`,
-  `WardenHandler`, `EntityController` — owns its state *and* the opcodes that
+  `WardenHandler`, `EntityController`, `AccountDataHandler`,
+  `ActionBarHandler` — owns its state *and* the opcodes that
   change it. A new opcode goes into that handler's `registerOpcodes`, never
   into `GameHandler::registerCoreOpcodes`/`registerRemainingOpcodes`. Domain
   handlers register last and overwrite the table, so a second registration in
@@ -188,6 +189,49 @@ new code the way the target looks, not the way the old code does.
   and the second silently replaced the first.
 - FrameXML/Lua events (`fireAddonEvent("UNIT_SPELLCAST_FAILED", ...)`) are the
   addon contract and stay strings; they are a separate channel from the bus.
+
+### A new domain handler
+
+A new handler is built from what it uses, never from `GameHandler&`. The older
+handlers take `GameHandler& owner` and reach through `owner_.` for anything -
+the socket, another handler's state, the facade; do not copy them.
+`AccountDataHandler` and `ActionBarHandler` are the pattern:
+
+```cpp
+AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                   core::EventBus& events, std::string cacheRoot);
+ActionBarHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                 core::EventBus& events, ActionBarQueries& queries);
+```
+
+What there is to take:
+
+| Need | Interface | Header |
+|---|---|---|
+| send to the world server, know whether it can, whether a character is in the world | `PacketSender` | `game/packet_sender.hpp` |
+| fire a FrameXML event (`"UPDATE_MACROS"`, ...) | `FrameXmlEvents` | `game/frame_xml_events.hpp` |
+| say what happened, hear another domain | `core::EventBus&` | `core/event_bus.hpp`, `game/game_events.hpp` |
+| a value from `GameServices` | that field alone (`std::string cacheRoot`, `const EmoteTable&`), not the struct | `game/game_services.hpp` |
+| ask something of another part of the game | a small interface of your own, in your header (`ActionBarQueries`) | |
+
+`GameHandler` implements these and hands itself over as each one; the handler
+never sees the class.
+
+- A handler does not take `GameHandler&`. `tools/domain_shape_check.py`
+  counts the handlers that do and the reaches through `owner_.` in
+  `src/game`; `sweep_guard` holds both and they only go down.
+- State the handler needs that still lives in `GameHandler` moves to its
+  owner first - a new handler if it has none, as the action bar did - and
+  `GameHandler` keeps a forwarding facade for the old callers. New code asks
+  the owner (`gh.actionBar()`), not the facade (`gh.getActionBar()`).
+- Two domains that react to each other talk through the bus, not through
+  references to each other: `AccountDataHandler` publishes `MacroDeleted` and
+  `ActionBarHandler` empties the buttons that held the macro.
+- Built in `GameHandler`'s constructor, registered in `registerDomainOpcodes`,
+  reached from outside through an accessor returning a reference
+  (`accountData()`, `actionBar()`).
+- Tested end to end through `GameHarness`, reading state through the
+  handler's accessor.
 
 ### Build time
 

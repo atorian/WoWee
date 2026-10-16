@@ -7,6 +7,7 @@
 #include "test_support.hpp"
 #include "game/account_data.hpp"
 #include "game/account_data_handler.hpp"
+#include "game/action_bar_handler.hpp"
 #include "game/game_events.hpp"
 
 #include <zlib.h>
@@ -149,7 +150,7 @@ TEST_CASE("a character's macro from the server is what its action button holds",
     h.receive(Opcode::SMSG_ACTION_BUTTONS, actionButtons({{2, 0x41000001u}}));
     h.pump();
 
-    const auto& slot = h.game().getActionBar()[2];
+    const auto& slot = h.game().actionBar().slots()[2];
     REQUIRE(slot.type == ActionBarSlot::MACRO);
     const auto* macro = h.game().accountData().macro(slot.id);
     REQUIRE(macro);
@@ -162,25 +163,48 @@ TEST_CASE("the server's action bar replaces the one before it, empty buttons inc
           "[accountdata][harness]") {
     GameHarness h;
     h.enterWorld();
+    const auto& bar = h.game().actionBar().slots();
 
     // Nothing on the bar the server did not put there.
-    for (const auto& slot : h.game().getActionBar()) CHECK(slot.isEmpty());
+    for (const auto& slot : bar) CHECK(slot.isEmpty());
 
     h.receive(Opcode::SMSG_ACTION_BUTTONS, actionButtons({{0, 6603}, {11, 8690}}));
     h.pump();
-    CHECK(h.game().getActionBar()[0].id == 6603);
+    CHECK(bar[0].id == 6603);
+    // The whole bar arrived, so every button is told: slot 0 means all.
+    const auto changed = h.addonEvents("ACTIONBAR_SLOT_CHANGED");
+    REQUIRE_FALSE(changed.empty());
+    CHECK(changed.back().args == std::vector<std::string>{"0"});
 
     // The player cleared button 1 and moved the hearthstone, in another client.
     h.receive(Opcode::SMSG_ACTION_BUTTONS, actionButtons({{5, 8690}}));
     h.pump();
-    CHECK(h.game().getActionBar()[0].isEmpty());
-    CHECK(h.game().getActionBar()[11].isEmpty());
-    CHECK(h.game().getActionBar()[5].id == 8690);
+    CHECK(bar[0].isEmpty());
+    CHECK(bar[11].isEmpty());
+    CHECK(bar[5].id == 8690);
 
     // Mode 2 is the spec switch clearing the bar before the next one arrives.
     h.receive(Opcode::SMSG_ACTION_BUTTONS, Body().u8(2));
     h.pump();
-    CHECK(h.game().getActionBar()[5].isEmpty());
+    CHECK(bar[5].isEmpty());
+}
+
+TEST_CASE("a button the player sets is drawn at once and kept by the server",
+          "[accountdata][harness]") {
+    GameHarness h;
+    h.enterWorld();
+
+    h.game().actionBar().setSlot(13, ActionBarSlot::SPELL, 78);
+    h.game().dispatchAddonEvents();
+
+    CHECK(h.game().actionBar().slots()[13].id == 78);
+    const auto changed = h.addonEvents("ACTIONBAR_SLOT_CHANGED");
+    REQUIRE_FALSE(changed.empty());
+    CHECK(changed.back().args == std::vector<std::string>{"14"});
+    auto* set = h.lastSent(Opcode::CMSG_SET_ACTION_BUTTON);
+    REQUIRE(set);
+    CHECK(set->readUInt8() == 13);
+    CHECK(set->readUInt32() == 78u);   // a spell: type 0, the id
 }
 
 TEST_CASE("a macro made here goes to the server as the original client writes it",
@@ -200,7 +224,7 @@ TEST_CASE("a macro made here goes to the server as the original client writes it
     const uint32_t mine = data.createMacro(true, "Charge", "", "/cast Charge\n/startattack");
     REQUIRE(mine != 0);
     CHECK(lastUpload(h).type == static_cast<uint32_t>(AccountDataType::CharacterMacros));
-    h.game().setActionBarSlot(0, ActionBarSlot::MACRO, mine);
+    h.game().actionBar().setSlot(0, ActionBarSlot::MACRO, mine);
     auto* set = h.lastSent(Opcode::CMSG_SET_ACTION_BUTTON);
     REQUIRE(set);
     CHECK(set->readUInt8() == 0);
@@ -209,7 +233,12 @@ TEST_CASE("a macro made here goes to the server as the original client writes it
     // Deleted, it leaves the account data and the button.
     REQUIRE(data.deleteMacro(mine));
     CHECK(lastUpload(h).text.empty());
-    CHECK(h.game().getActionBar()[0].isEmpty());
+    CHECK(h.game().actionBar().slots()[0].isEmpty());
+    // And the server is told the button is empty.
+    auto* cleared = h.lastSent(Opcode::CMSG_SET_ACTION_BUTTON);
+    REQUIRE(cleared);
+    CHECK(cleared->readUInt8() == 0);
+    CHECK(cleared->readUInt32() == 0u);
 }
 
 TEST_CASE("account data one session kept is not fetched again, and a change made away is sent",

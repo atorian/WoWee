@@ -1,9 +1,9 @@
 #include "game/account_data_handler.hpp"
-#include "game/game_handler.hpp"
+#include "game/frame_xml_events.hpp"
 #include "game/game_events.hpp"
 #include "game/game_utils.hpp"
+#include "game/packet_sender.hpp"
 #include "game/world_packets.hpp"
-#include "network/world_connection.hpp"
 #include "core/event_bus.hpp"
 #include "core/logger.hpp"
 
@@ -80,7 +80,9 @@ std::string pathSafe(const std::string& s) {
 
 } // namespace
 
-AccountDataHandler::AccountDataHandler(GameHandler& owner) : owner_(owner) {}
+AccountDataHandler::AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                                       core::EventBus& events, std::string cacheRoot)
+    : sender_(sender), frameXml_(frameXml), events_(events), cacheRoot_(std::move(cacheRoot)) {}
 
 void AccountDataHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_ACCOUNT_DATA_TIMES] = [this](network::Packet& p) { handleAccountDataTimes(p); };
@@ -114,7 +116,7 @@ void AccountDataHandler::accountAuthenticated() {
     // the times unasked as the session opens; a slot is asked for once
     // however many times it is announced.
     if (serverKeepsAccountData()) {
-        if (auto* socket = owner_.getSocket()) socket->send(ReadyForAccountDataTimesPacket::build());
+        if (sender_.connected()) sender_.send(ReadyForAccountDataTimesPacket::build());
     }
 }
 
@@ -218,14 +220,7 @@ bool AccountDataHandler::deleteMacro(uint32_t id) {
         if (it == half.end()) continue;
         half.erase(it);
         storeMacros(c == 1);
-        // A button left holding a macro that no longer exists would show a
-        // blank and run nothing; the original client takes it off the bar.
-        const auto& bar = owner_.getActionBar();
-        for (int slot = 0; slot < static_cast<int>(bar.size()); ++slot) {
-            if (bar[slot].type == ActionBarSlot::MACRO && bar[slot].id == id) {
-                owner_.setActionBarSlot(slot, ActionBarSlot::EMPTY, 0);
-            }
-        }
+        events_.publish(events::MacroDeleted{id});
         return true;
     }
     return false;
@@ -269,9 +264,7 @@ void AccountDataHandler::handleAccountDataTimes(network::Packet& packet) {
             slot.requested = true;
             LOG_INFO("Account data: asking for ", accountDataName(type), " (server ", serverTime,
                      ", here ", slot.time, ")");
-            if (auto* socket = owner_.getSocket()) {
-                socket->send(RequestAccountDataPacket::build(static_cast<uint32_t>(i)));
-            }
+            sender_.send(RequestAccountDataPacket::build(static_cast<uint32_t>(i)));
         } else if (serverTime < slot.time) {
             // Changed here and never reached the server - an edit made while
             // it could not be told, or a slot it has lost.
@@ -348,9 +341,8 @@ bool AccountDataHandler::slotInScope(AccountDataType type) const {
 }
 
 std::string AccountDataHandler::cacheDir(AccountDataType type) const {
-    const std::string& root = owner_.services().accountDataDir;
-    if (root.empty() || accountKey_.empty()) return {};
-    std::filesystem::path dir = std::filesystem::path(root) / accountKey_;
+    if (cacheRoot_.empty() || accountKey_.empty()) return {};
+    std::filesystem::path dir = std::filesystem::path(cacheRoot_) / accountKey_;
     if (isCharacterAccountData(type)) {
         std::ostringstream guid;
         guid << std::hex << std::setw(16) << std::setfill('0') << characterGuid_;
@@ -422,11 +414,10 @@ void AccountDataHandler::send(AccountDataType type) {
         slot.unsent = false;  // the disk copy is the only copy
         return;
     }
-    auto* socket = owner_.getSocket();
-    if (!socket || !socket->isConnected()) return;  // compared and sent at the next login
+    if (!sender_.connected()) return;  // compared and sent at the next login
     // A character's slots are stored against the character the server has
     // loaded, so they wait until it has.
-    if (isCharacterAccountData(type) && owner_.getState() != WorldState::IN_WORLD) return;
+    if (isCharacterAccountData(type) && !sender_.characterInWorld()) return;
     std::string error;
     auto packet = UpdateAccountDataPacket::build(static_cast<uint32_t>(type), slot.time, slot.text, error);
     if (!packet) {
@@ -436,7 +427,7 @@ void AccountDataHandler::send(AccountDataType type) {
         slot.unsent = false;
         return;
     }
-    socket->send(*packet);
+    sender_.send(*packet);
     slot.unsent = false;
 }
 
@@ -463,19 +454,19 @@ void AccountDataHandler::loaded(AccountDataType type) {
         if (mergeLegacyMacros(character)) {
             storeMacros(character);
         } else {
-            owner_.fireAddonEvent("UPDATE_MACROS", {});
-            owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+            frameXml_.fireFrameXmlEvent("UPDATE_MACROS", {});
+            frameXml_.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
         }
     }
-    owner_.eventBus().publish(events::AccountDataLoaded{static_cast<uint8_t>(type), slot.text});
+    events_.publish(events::AccountDataLoaded{static_cast<uint8_t>(type), slot.text});
 }
 
 void AccountDataHandler::storeMacros(bool character) {
     auto& half = macros_[character ? 1 : 0];
     std::sort(half.begin(), half.end(), macroOrder);
     store(macroSlot(character), writeMacrosCache(half));
-    owner_.fireAddonEvent("UPDATE_MACROS", {});
-    owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    frameXml_.fireFrameXmlEvent("UPDATE_MACROS", {});
+    frameXml_.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
 }
 
 bool AccountDataHandler::mergeLegacyMacros(bool character) {

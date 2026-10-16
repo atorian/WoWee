@@ -617,7 +617,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     spellFlatMods_.clear();
     spellPctMods_.clear();
-    actionBar = {};
+    actionBarHandler_->clear();
     petGuid_ = 0;
     stableWindowOpen_  = false;
     stableMasterGuid_  = 0;
@@ -2317,28 +2317,6 @@ void GameHandler::handleListStabledPets(network::Packet& packet) {
     spellHandler_->handleListStabledPets(packet);
 }
 
-void GameHandler::setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id) {
-    if (slot < 0 || slot >= ACTION_BAR_SLOTS) return;
-    actionBar[slot].type = type;
-    actionBar[slot].id = id;
-    // Pre-query item information so action bar displays item name instead of "Item" placeholder
-    if (type == ActionBarSlot::ITEM && id != 0) {
-        queryItemInfo(id, 0);
-    }
-    // Notify Lua addons that the action bar changed
-        fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {std::to_string(slot + 1)});
-        fireAddonEvent("ACTIONBAR_UPDATE_STATE", {});
-    // Notify the server so the action bar persists across relogs.
-    if (isInWorld()) {
-        const bool classic = isClassicLikeExpansion();
-        auto pkt = SetActionButtonPacket::build(
-            static_cast<uint8_t>(slot),
-            static_cast<uint8_t>(type),
-            id,
-            classic);
-        socket->send(pkt);
-    }
-}
 
 void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
     socialHandler_->setGroupAssistant(guid, apply);

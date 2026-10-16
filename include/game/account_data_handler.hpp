@@ -4,6 +4,8 @@
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 
+namespace wowee::core { class EventBus; }
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -15,7 +17,8 @@
 namespace wowee {
 namespace game {
 
-class GameHandler;
+class PacketSender;
+class FrameXmlEvents;
 
 /// The account data: the eight slots the server keeps for the account and for
 /// the character logged in - settings, key bindings, macros, chat and window
@@ -29,12 +32,19 @@ class GameHandler;
 ///
 /// A slot that changes here (a macro edited, a binding saved) is written to
 /// disk and sent at once, with the time of the change.
+///
+/// Built from what it uses and nothing else - see AGENTS.md, "A new domain
+/// handler". It sends packets, fires FrameXML events and says on the bus when
+/// a slot was loaded or a macro deleted; who answers is not its concern.
 class AccountDataHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit AccountDataHandler(GameHandler& owner);
+    /// `cacheRoot` is where the slots are kept on disk (GameServices::
+    /// accountDataDir); empty keeps none, which is said once.
+    AccountDataHandler(PacketSender& sender, FrameXmlEvents& frameXml,
+                       core::EventBus& events, std::string cacheRoot);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -74,7 +84,8 @@ public:
     /// that is not a macro.
     bool editMacro(uint32_t id, const std::string* name, const std::string* icon,
                    const std::string* body);
-    /// Remove a macro, and take it off every action button that held it.
+    /// Remove a macro, and say so (events::MacroDeleted): the action bar
+    /// takes it off every button that held it.
     bool deleteMacro(uint32_t id);
 
     /// Macros an older build of this client kept in its own character file.
@@ -112,7 +123,10 @@ private:
     /// Said once per key - a failure that repeats every login is one line.
     void warnOnce(const std::string& key, const std::string& message);
 
-    GameHandler& owner_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    const std::string cacheRoot_;
     std::string accountKey_;
     uint64_t characterGuid_ = 0;
     std::array<Slot, kAccountDataTypeCount> slots_{};
