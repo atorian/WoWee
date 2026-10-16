@@ -1021,11 +1021,6 @@ void SpellHandler::seedCooldownFromSpellInfo(uint32_t spellId) {
     const float seconds = cooldownMs / 1000.0f;
     spellCooldowns_[spellId] = seconds;
     spellCooldownTotals_[spellId] = seconds;
-    for (auto& slot : owner_.actionBarRef()) {
-        if (slot.type != ActionBarSlot::SPELL || slot.id != spellId) continue;
-        slot.cooldownRemaining = seconds;
-        slot.cooldownTotal = seconds;
-    }
 
     LOG_DEBUG("Seeded cooldown from Spell.dbc: spell=", spellId, " ms=", cooldownMs);
     if (owner_.hasAddonEventListener()) {
@@ -1562,30 +1557,6 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     // SMSG_ACTION_BUTTONS, which follows this packet.
     owner_.loadCharacterConfig();
 
-    // Sync login-time cooldowns into action bar slot overlays
-    for (auto& slot : owner_.actionBarRef()) {
-        if (slot.type == ActionBarSlot::SPELL && slot.id != 0) {
-            auto it = spellCooldowns_.find(slot.id);
-            if (it != spellCooldowns_.end() && it->second > 0.0f) {
-                slot.cooldownTotal     = it->second;
-                slot.cooldownRemaining = it->second;
-            }
-        } else if (slot.type == ActionBarSlot::ITEM && slot.id != 0) {
-            const auto* qi = owner_.getItemInfo(slot.id);
-            if (qi && qi->valid) {
-                for (const auto& sp : qi->spells) {
-                    if (sp.spellId == 0) continue;
-                    auto it = spellCooldowns_.find(sp.spellId);
-                    if (it != spellCooldowns_.end() && it->second > 0.0f) {
-                        slot.cooldownTotal     = it->second;
-                        slot.cooldownRemaining = it->second;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     // Pre-load skill line DBCs
     owner_.loadSkillLineDbc();
     owner_.loadSkillLineAbilityDbc();
@@ -1987,8 +1958,9 @@ void SpellHandler::handleSpellCooldown(network::Packet& packet) {
     const size_t entrySize = isClassicFormat ? 12u : 8u;
     while (packet.getRemainingSize() >= entrySize) {
         uint32_t spellId    = packet.readUInt32();
-        uint32_t cdItemId   = 0;
-        if (isClassicFormat) cdItemId = packet.readUInt32();
+        // Classic names the item a cooldown came from. It is kept under its
+        // spell, which is what an item's button asks about.
+        if (isClassicFormat) (void)packet.readUInt32();
         uint32_t cooldownMs = packet.readUInt32();
 
         float seconds = cooldownMs / 1000.0f;
@@ -2009,20 +1981,6 @@ void SpellHandler::handleSpellCooldown(network::Packet& packet) {
             float& total = spellCooldownTotals_[spellId];
             total = std::max(total, it->second);
         }
-        for (auto& slot : owner_.actionBarRef()) {
-            bool match = (slot.type == ActionBarSlot::SPELL && slot.id == spellId)
-                      || (cdItemId != 0 && slot.type == ActionBarSlot::ITEM && slot.id == cdItemId);
-            if (match) {
-                float prevRemaining = slot.cooldownRemaining;
-                float merged = mergeCooldownSeconds(slot.cooldownRemaining, seconds);
-                slot.cooldownRemaining = merged;
-                if (slot.cooldownTotal <= 0.0f || prevRemaining <= 0.0f) {
-                    slot.cooldownTotal = seconds;
-                } else {
-                    slot.cooldownTotal = std::max(slot.cooldownTotal, merged);
-                }
-            }
-        }
     }
     LOG_DEBUG("handleSpellCooldown: parsed for ",
               isClassicFormat ? "Classic" : "TBC/WotLK", " format");
@@ -2040,11 +1998,6 @@ void SpellHandler::handleCooldownEvent(network::Packet& packet) {
         packet.readUInt64();
     spellCooldowns_.erase(spellId);
     spellCooldownTotals_.erase(spellId);
-    for (auto& slot : owner_.actionBarRef()) {
-        if (slot.type == ActionBarSlot::SPELL && slot.id == spellId) {
-            slot.cooldownRemaining = 0.0f;
-        }
-    }
     if (owner_.hasAddonEventListener()) {
         owner_.fireAddonEvent("SPELL_UPDATE_COOLDOWN", {});
         owner_.fireAddonEvent("BAG_UPDATE_COOLDOWN", {});
@@ -2276,14 +2229,8 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
         LOG_DEBUG("Suppressed talent-rank removal chat for spell ", spellId);
     }
 
-    bool barChanged = false;
-    for (auto& slot : owner_.actionBarRef()) {
-        if (slot.type == ActionBarSlot::SPELL && slot.id == spellId) {
-            slot = ActionBarSlot{};
-            barChanged = true;
-        }
-    }
-    if (barChanged && owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    // Off the buttons that held it (ActionBarHandler).
+    owner_.eventBus().publish(events::SpellsUnlearned{.spellIds = {spellId}});
 }
 
 void SpellHandler::handleSupercededSpell(network::Packet& packet) {
@@ -2302,25 +2249,9 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
 
     LOG_INFO("Spell superceded: ", oldSpellId, " -> ", newSpellId);
 
-    bool barChanged = false;
-    for (auto& slot : owner_.actionBarRef()) {
-        if (slot.type == ActionBarSlot::SPELL && slot.id == oldSpellId) {
-            slot.id = newSpellId;
-            slot.cooldownRemaining = 0.0f;
-            slot.cooldownTotal = 0.0f;
-            barChanged = true;
-            LOG_DEBUG("Action bar slot upgraded: spell ", oldSpellId, " -> ", newSpellId);
-        }
-    }
-    if (barChanged) {
-        // Zero, not nothing. The slot is the argument, and zero is how the
-        // event says "all of them" - ActionButton_OnEvent reads
-        // `arg1 == 0 or arg1 == tonumber(self.action)`, so an absent one
-        // matches neither and not a single button redraws. Which slots a
-        // rank upgrade touched is not tracked here, and every slot is the
-        // honest answer as well as the working one.
-        if (owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
-    }
+    // The new rank takes the old one's place on the buttons (ActionBarHandler).
+    owner_.eventBus().publish(events::SpellSuperseded{.oldSpellId = oldSpellId,
+                                                      .newSpellId = newSpellId});
 
     if (!newSpellAlreadyAnnounced) {
         const std::string& newName = owner_.getSpellName(newSpellId);
@@ -2335,19 +2266,17 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
     uint32_t spellCount = packet.readUInt32();
     LOG_INFO("Unlearning ", spellCount, " spells");
 
-    bool barChanged = false;
+    std::vector<uint32_t> unlearned;
     for (uint32_t i = 0; i < spellCount && packet.getRemainingSize() >= 4; ++i) {
         uint32_t spellId = packet.readUInt32();
         knownSpells_.erase(spellId);
+        unlearned.push_back(spellId);
         LOG_INFO("  Unlearned spell: ", spellId);
-        for (auto& slot : owner_.actionBarRef()) {
-            if (slot.type == ActionBarSlot::SPELL && slot.id == spellId) {
-                slot = ActionBarSlot{};
-                barChanged = true;
-            }
-        }
     }
-    if (barChanged && owner_.hasAddonEventListener()) owner_.fireAddonEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+    // Off the buttons that held them (ActionBarHandler).
+    if (!unlearned.empty()) {
+        owner_.eventBus().publish(events::SpellsUnlearned{.spellIds = std::move(unlearned)});
+    }
 
     if (spellCount > 0) {
         owner_.addSystemChatMessage("Unlearned " + std::to_string(spellCount) + " spells");
@@ -3548,10 +3477,6 @@ void SpellHandler::handleClearCooldown(network::Packet& packet) {
         uint32_t spellId = packet.readUInt32();
         spellCooldowns_.erase(spellId);
         spellCooldownTotals_.erase(spellId);
-        for (auto& slot : owner_.actionBarRef()) {
-            if (slot.type == ActionBarSlot::SPELL && slot.id == spellId)
-                slot.cooldownRemaining = 0.0f;
-        }
     }
 }
 
@@ -3567,10 +3492,6 @@ void SpellHandler::handleModifyCooldown(network::Packet& packet) {
         auto it = spellCooldowns_.find(spellId);
         if (it != spellCooldowns_.end()) {
             it->second = std::max(0.0f, it->second + diffSec);
-            for (auto& slot : owner_.actionBarRef()) {
-                if (slot.type == ActionBarSlot::SPELL && slot.id == spellId)
-                    slot.cooldownRemaining = std::max(0.0f, slot.cooldownRemaining + diffSec);
-            }
         }
     }
 }
@@ -3819,22 +3740,9 @@ void SpellHandler::handleItemCooldown(network::Packet& packet) {
                     total = std::max(total, it->second);
                 }
             }
-            // Resolve itemId from the GUID so item-type slots are also updated
+            // The item's button asks for the cooldown of the spell it casts,
+            // which is the one kept above.
             const uint32_t itemId = owner_.inventory().getItemEntryByGuid(itemGuid);
-            for (auto& slot : owner_.actionBarRef()) {
-                bool match = (spellId != 0 && slot.type == ActionBarSlot::SPELL && slot.id == spellId)
-                          || (itemId  != 0 && slot.type == ActionBarSlot::ITEM  && slot.id == itemId);
-                if (match) {
-                    float prevRemaining = slot.cooldownRemaining;
-                    float merged = mergeCooldownSeconds(slot.cooldownRemaining, cdSec);
-                    slot.cooldownRemaining = merged;
-                    if (slot.cooldownTotal <= 0.0f || prevRemaining <= 0.0f) {
-                        slot.cooldownTotal = cdSec;
-                    } else {
-                        slot.cooldownTotal = std::max(slot.cooldownTotal, merged);
-                    }
-                }
-            }
             LOG_DEBUG("SMSG_ITEM_COOLDOWN: itemGuid=0x", std::hex, itemGuid, std::dec,
                       " spellId=", spellId, " itemId=", itemId, " cd=", cdSec, "s");
         }

@@ -245,6 +245,20 @@ struct AccountDataLoaded {
     std::string text;
 };
 
+/// The character no longer knows these spells (SMSG_REMOVED_SPELL,
+/// SMSG_SEND_UNLEARN_SPELLS). The action bar empties the buttons that held
+/// them.
+struct SpellsUnlearned {
+    std::vector<uint32_t> spellIds;
+};
+
+/// A spell was replaced by its next rank (SMSG_SUPERCEDED_SPELL). The action
+/// bar's buttons that held the old rank hold the new one.
+struct SpellSuperseded {
+    uint32_t oldSpellId = 0;
+    uint32_t newSpellId = 0;
+};
+
 /// A macro was deleted from the account data. The action bar empties the
 /// buttons that held it.
 struct MacroDeleted {

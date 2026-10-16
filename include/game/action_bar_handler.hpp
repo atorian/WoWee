@@ -25,16 +25,24 @@ inline constexpr int kActionBarSlots = kActionBarSlotsPerBar * kActionBars;  // 
 
 using ActionBar = std::array<ActionBarSlot, kActionBarSlots>;
 
+/// A cooldown as a button draws it: seconds left, and how long it was when it
+/// began. Both zero when the action is ready.
+struct ActionCooldown {
+    float remaining = 0.0f;
+    float total = 0.0f;
+    [[nodiscard]] bool ready() const { return remaining <= 0.0f; }
+};
+
 /// What the action bar asks of the rest of the game about the actions on it.
 class ActionBarQueries {
 public:
     virtual ~ActionBarQueries() = default;
 
-    /// Seconds left on a spell's cooldown; 0 when it is ready.
-    [[nodiscard]] virtual float spellCooldownRemaining(uint32_t spellId) const = 0;
-    /// Seconds left on the cooldown of the spell an item casts when used; 0
-    /// when it is ready or the item is not known yet.
-    [[nodiscard]] virtual float itemCooldownRemaining(uint32_t itemId) const = 0;
+    /// A spell's cooldown; zero when it is ready.
+    [[nodiscard]] virtual ActionCooldown spellCooldown(uint32_t spellId) const = 0;
+    /// The cooldown of the spell an item casts when used; zero when it is
+    /// ready or the item is not known yet.
+    [[nodiscard]] virtual ActionCooldown itemCooldown(uint32_t itemId) const = 0;
     /// Ask for an item's description, so a button holding it can show its
     /// name and icon.
     virtual void requestItemInfo(uint32_t itemId) = 0;
@@ -53,7 +61,10 @@ public:
 ///
 /// Not account data: the account data's macros are what a macro button
 /// names, and when one is deleted (events::MacroDeleted) the buttons holding
-/// it are emptied here.
+/// it are emptied here. Nor the spell book: a button's cooldown is the spell's
+/// own, asked for when it is drawn, and a spell unlearned or replaced by its
+/// next rank (events::SpellsUnlearned, SpellSuperseded) changes the buttons
+/// that held it.
 class ActionBarHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -67,6 +78,8 @@ public:
     // --- Queries -------------------------------------------------------------
 
     [[nodiscard]] const ActionBar& slots() const { return bar_; }
+    /// The cooldown of what a button holds, as the spell book has it.
+    [[nodiscard]] ActionCooldown cooldown(int slot) const;
 
     /// Which of the four extra bars are shown - bottom left, bottom right,
     /// right and right 2, as bits 0 to 3. The realm keeps them in byte 2 of
@@ -84,20 +97,14 @@ public:
     void setExtraBarsShown(uint8_t mask);
     /// A character is being logged in; its bar arrives from the server.
     void clear();
-    /// Count the buttons' cooldown sweeps down by a frame.
-    void tickCooldowns(float deltaTime);
-
-    /// The buttons, writable. For GameHandler's facade alone - the spell
-    /// handler still writes cooldowns and rank upgrades into them through
-    /// GameHandler::actionBarRef - until those move to commands here.
-    [[nodiscard]] ActionBar& mutableSlots() { return bar_; }
 
 private:
     void handleActionButtons(network::Packet& packet);
-    /// Cooldowns that started before the bar arrived - SMSG_SPELL_COOLDOWN
-    /// often comes first at login - shown on the buttons that hold them.
-    void syncCooldowns();
     void removeMacro(uint32_t macroId);
+    /// Spells the character no longer knows come off the buttons.
+    void forgetSpells(const std::vector<uint32_t>& spellIds);
+    /// A spell's next rank takes its place on the buttons.
+    void replaceSpell(uint32_t oldSpellId, uint32_t newSpellId);
 
     PacketSender& sender_;
     FrameXmlEvents& frameXml_;

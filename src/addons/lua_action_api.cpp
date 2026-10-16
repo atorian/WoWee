@@ -408,7 +408,8 @@ static int lua_GetActionCooldown(lua_State* L) {
         return 3;
     }
     const auto& action = bar[slot];
-    if (action.cooldownRemaining > 0.0f) {
+    const auto cooldown = gh->actionBar().cooldown(slot);
+    if (!cooldown.ready()) {
         // WoW returns GetTime()-based start time; approximate
         double now = 0;
         lua_getglobal(L, "GetTime");
@@ -419,9 +420,9 @@ static int lua_GetActionCooldown(lua_State* L) {
         } else {
             lua_pop(L, 1);
         }
-        double start = now - (action.cooldownTotal - action.cooldownRemaining);
+        double start = now - (cooldown.total - cooldown.remaining);
         lua_pushnumber(L, start);
-        lua_pushnumber(L, action.cooldownTotal);
+        lua_pushnumber(L, cooldown.total);
         lua_pushnumber(L, 1);
     } else if (action.type == game::ActionBarSlot::SPELL && gh->isGCDActive()) {
         // No individual cooldown but GCD is active - show GCD sweep
@@ -464,9 +465,10 @@ static int lua_UseAction(lua_State* L) {
     // all look the same from the button. At debug level, because pressing a
     // button on the action bar is the most ordinary thing a player does and
     // this was a warning on every one of them.
+    const bool ready = gh->actionBar().cooldown(slot).ready();
     LOG_DEBUG("UseAction: slot ", slot + 1, " type=", static_cast<int>(action.type),
-              " id=", action.id, " ready=", action.isReady() ? 1 : 0);
-    if (action.type == game::ActionBarSlot::SPELL && action.isReady()) {
+              " id=", action.id, " ready=", ready ? 1 : 0);
+    if (action.type == game::ActionBarSlot::SPELL && ready) {
         // A unit that resolves wins; anything else falls back to the target,
         // which is what an ordinary click has always done. An unresolvable
         // unit is not treated as "cast on nobody" - a raid frame naming a

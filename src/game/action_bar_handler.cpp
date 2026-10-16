@@ -8,6 +8,7 @@
 #include "core/logger.hpp"
 #include "network/packet.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace wowee::game {
@@ -17,6 +18,50 @@ ActionBarHandler::ActionBarHandler(PacketSender& sender, FrameXmlEvents& frameXm
     : sender_(sender), frameXml_(frameXml), queries_(queries) {
     subscriptions_.push_back(events.subscribe<events::MacroDeleted>(
         [this](const events::MacroDeleted& e) { removeMacro(e.macroId); }));
+    subscriptions_.push_back(events.subscribe<events::SpellsUnlearned>(
+        [this](const events::SpellsUnlearned& e) { forgetSpells(e.spellIds); }));
+    subscriptions_.push_back(events.subscribe<events::SpellSuperseded>(
+        [this](const events::SpellSuperseded& e) { replaceSpell(e.oldSpellId, e.newSpellId); }));
+}
+
+ActionCooldown ActionBarHandler::cooldown(int slot) const {
+    if (slot < 0 || slot >= kActionBarSlots) return {};
+    const ActionBarSlot& button = bar_[slot];
+    if (button.id == 0) return {};
+    // The spell's own cooldown, not a copy kept on the button: a copy was only
+    // ever written by the spell handler's packet paths, so a spell already
+    // cooling down and put on a new button read as ready.
+    if (button.type == ActionBarSlot::SPELL) return queries_.spellCooldown(button.id);
+    if (button.type == ActionBarSlot::ITEM) return queries_.itemCooldown(button.id);
+    return {};
+}
+
+void ActionBarHandler::forgetSpells(const std::vector<uint32_t>& spellIds) {
+    // The server has taken these off the character, and keeps its own bar
+    // without them: emptied here, not sent.
+    bool changed = false;
+    for (auto& slot : bar_) {
+        if (slot.type != ActionBarSlot::SPELL) continue;
+        if (std::find(spellIds.begin(), spellIds.end(), slot.id) == spellIds.end()) continue;
+        slot = ActionBarSlot{};
+        changed = true;
+    }
+    if (changed) frameXml_.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
+}
+
+void ActionBarHandler::replaceSpell(uint32_t oldSpellId, uint32_t newSpellId) {
+    bool changed = false;
+    for (auto& slot : bar_) {
+        if (slot.type != ActionBarSlot::SPELL || slot.id != oldSpellId) continue;
+        slot.id = newSpellId;
+        changed = true;
+        LOG_DEBUG("Action bar slot upgraded: spell ", oldSpellId, " -> ", newSpellId);
+    }
+    // Zero, not nothing. The slot is the argument, and zero is how the event
+    // says "all of them" - ActionButton_OnEvent reads
+    // `arg1 == 0 or arg1 == tonumber(self.action)`, so an absent one matches
+    // neither and not a single button redraws.
+    if (changed) frameXml_.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
 }
 
 void ActionBarHandler::registerOpcodes(DispatchTable& table) {
@@ -80,15 +125,6 @@ void ActionBarHandler::setExtraBarsShown(uint8_t mask) {
 void ActionBarHandler::clear() {
     bar_ = {};
     extraBarsSetHere_.reset();
-}
-
-void ActionBarHandler::tickCooldowns(float deltaTime) {
-    for (auto& slot : bar_) {
-        if (slot.cooldownRemaining > 0.0f) {
-            slot.cooldownRemaining -= deltaTime;
-            if (slot.cooldownRemaining < 0.0f) slot.cooldownRemaining = 0.0f;
-        }
-    }
 }
 
 void ActionBarHandler::handleActionButtons(network::Packet& packet) {
@@ -167,7 +203,6 @@ void ActionBarHandler::handleActionButtons(network::Packet& packet) {
         }
     }
     bar_ = bar;
-    syncCooldowns();
     LOG_INFO("SMSG_ACTION_BUTTONS: populated action bar from server");
     // Zero means every slot, which is what the whole bar arriving at once is.
     // Sent with no argument the buttons compared nil against zero and against
@@ -175,21 +210,6 @@ void ActionBarHandler::handleActionButtons(network::Packet& packet) {
     // drew nothing.
     frameXml_.fireFrameXmlEvent("ACTIONBAR_SLOT_CHANGED", {"0"});
     packet.skipAll();
-}
-
-void ActionBarHandler::syncCooldowns() {
-    for (auto& slot : bar_) {
-        float remaining = 0.0f;
-        if (slot.type == ActionBarSlot::SPELL && slot.id != 0) {
-            remaining = queries_.spellCooldownRemaining(slot.id);
-        } else if (slot.type == ActionBarSlot::ITEM && slot.id != 0) {
-            remaining = queries_.itemCooldownRemaining(slot.id);
-        }
-        if (remaining > 0.0f) {
-            slot.cooldownRemaining = remaining;
-            slot.cooldownTotal = remaining;
-        }
-    }
 }
 
 void ActionBarHandler::removeMacro(uint32_t macroId) {

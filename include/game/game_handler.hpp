@@ -253,8 +253,8 @@ public:
         fireAddonEvent(name, args);
     }
     bool frameXmlListening() const override { return hasAddonEventListener(); }
-    float spellCooldownRemaining(uint32_t spellId) const override;
-    float itemCooldownRemaining(uint32_t itemId) const override;
+    ActionCooldown spellCooldown(uint32_t spellId) const override;
+    ActionCooldown itemCooldown(uint32_t itemId) const override;
     void requestItemInfo(uint32_t itemId) override { queryItemInfo(itemId, 0); }
     std::optional<uint32_t> playerFieldBytes() const override;
 
@@ -1272,7 +1272,6 @@ public:
     static constexpr int SLOTS_PER_BAR    = kActionBarSlotsPerBar;
     static constexpr int ACTION_BARS      = kActionBars;
     static constexpr int ACTION_BAR_SLOTS = kActionBarSlots;
-    ActionBar& getActionBar() { return actionBarHandler_->mutableSlots(); }
     const ActionBar& getActionBar() const { return actionBarHandler_->slots(); }
     void setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t id) {
         actionBarHandler_->setSlot(slot, type, id);
@@ -3347,7 +3346,6 @@ public:
     auto& transportAttachmentsRef() { return transportAttachments_; }
 
     // ── Inventory & Equipment ────────────────────────────────────────
-    ActionBar& actionBarRef() { return actionBarHandler_->mutableSlots(); }
     auto& pendingGameObjectLootRetriesRef() { return pendingGameObjectLootRetries_; }
 
     // ── Combat & Player Stats ────────────────────────────────────────

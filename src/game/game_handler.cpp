@@ -291,10 +291,10 @@ void GameHandler::send(const network::Packet& packet) {
     if (socket) socket->send(packet);
 }
 
-float GameHandler::spellCooldownRemaining(uint32_t spellId) const {
-    const auto& cooldowns = spellHandler_->getSpellCooldowns();
-    const auto it = cooldowns.find(spellId);
-    return (it != cooldowns.end() && it->second > 0.0f) ? it->second : 0.0f;
+ActionCooldown GameHandler::spellCooldown(uint32_t spellId) const {
+    const float remaining = spellHandler_->getSpellCooldown(spellId);
+    if (remaining <= 0.0f) return {};
+    return {.remaining = remaining, .total = spellHandler_->getSpellCooldownTotal(spellId)};
 }
 
 std::optional<uint32_t> GameHandler::playerFieldBytes() const {
@@ -382,18 +382,18 @@ bool GameHandler::questWantsItem(uint32_t itemId) const {
     return false;
 }
 
-float GameHandler::itemCooldownRemaining(uint32_t itemId) const {
+ActionCooldown GameHandler::itemCooldown(uint32_t itemId) const {
     // An item's cooldown is that of the spell it casts when used - a potion,
-    // a trinket.
+    // a trinket. SMSG_ITEM_COOLDOWN keeps it under that spell.
     const auto* info = getItemInfo(itemId);
-    if (!info || !info->valid) return 0.0f;
+    if (!info || !info->valid) return {};
     for (const auto& spell : info->spells) {
         if (spell.spellId == 0) continue;
-        if (const float remaining = spellCooldownRemaining(spell.spellId); remaining > 0.0f) {
-            return remaining;
+        if (const ActionCooldown cooldown = spellCooldown(spell.spellId); !cooldown.ready()) {
+            return cooldown;
         }
     }
-    return 0.0f;
+    return {};
 }
 
 void GameHandler::sortBags() {
@@ -939,9 +939,8 @@ void GameHandler::updateGame(float deltaTime) {
         }
 
         // Unit cast states and spell cooldowns are ticked by SpellHandler::updateTimers()
-        // (called from GameHandler::updateTimers above). No duplicate tick-down here.
-
-        actionBarHandler_->tickCooldowns(deltaTime);
+        // (called from GameHandler::updateTimers above), and the action bar asks
+        // it for them - there is no copy on the buttons to tick.
 
         // Update combat text (Phase 2)
         updateCombatText(deltaTime);
