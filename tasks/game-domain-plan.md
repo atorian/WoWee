@@ -20,16 +20,18 @@ this branch:
 | `45b24a8` | `SpellHandler` built from what it uses; skills, talent modifiers, explored zones, totems, Spell.dbc and skill tables moved in |
 | `2d719e3`, `8464b33` | `ChatHandler` built from what it uses; the character's conversation (history, /r, AFK/DND, channels) begins at each login |
 | `76f98fb` | `QuestHandler` built from what it uses; the character's journal (log, windows, shared offer, tracked and completed quests) begins at each login |
+| `df2ca44` | `SocialHandler`'s state for a character (`SocialCharacterState`) begins at each login |
+| `9d0a9ef` | `SocialHandler` built from what it uses; contacts, summons, minimap pings and the outdoor battlefield moved in with their opcodes; `ReputationHandler` extracted |
 
 Counters (`tools/domain_shape_check.py`, pinned in `sweep_guard`):
 
-| | 048bb47 | after Spell (be38854) | now |
-|---|---|---|---|
-| handlers built from `GameHandler&` | 9 | 7 | 5 |
-| reaches through `owner_.` in src/game | 4213 | 2422 | 2058 |
-| `xxxRef()` accessors in GameHandler | 218 | 137 | 130 |
-| calls to them through `owner_` | 1320 | 654 | 605 |
-| `set*Callback` setters in GameHandler | 65 | 57 | 52 |
+| | 048bb47 | after Spell (be38854) | after Quest (76f98fb) | now |
+|---|---|---|---|---|
+| handlers built from `GameHandler&` | 9 | 7 | 5 | 4 |
+| reaches through `owner_.` in src/game | 4213 | 2422 | 2058 | 1206 |
+| `xxxRef()` accessors in GameHandler | 218 | 137 | 130 | 110 |
+| calls to them through `owner_` | 1320 | 654 | 605 | 505 |
+| `set*Callback` setters in GameHandler | 65 | 57 | 52 | 50 |
 
 Bugs found on the way, each with a test that failed first:
 
@@ -48,6 +50,13 @@ Bugs found on the way, each with a test that failed first:
   twice on the error line.
 - After a relog the next character was offered the last one's shared quest,
   saw the quest page it had open, and tracked its quests.
+- After a relog a duel challenge or a group invite put to the last character
+  was offered to the next, and accepting the duel sent the last one's flag.
+- After a relog the last character's at-war flags judged hostility and its
+  watched faction stayed on the reputation bar; the reputation list was built
+  once per session, so the next character saw the first one's, and a faction
+  that became visible never joined it (now rebuilt on `FactionListChanged`).
+- `gmTicketActive_` was written and never read; gone.
 
 ## Interfaces introduced
 
@@ -63,6 +72,8 @@ Bugs found on the way, each with a test that failed first:
 | `SpellQueries` | `game/spell_handler.hpp` | GameHandler | SpellHandler |
 | `ChatQueries` | `game/chat_handler.hpp` | GameHandler | ChatHandler |
 | `QuestQueries` | `game/quest_handler.hpp` | GameHandler | QuestHandler |
+| `SocialQueries` | `game/social_handler.hpp` | GameHandler | SocialHandler |
+| `ReputationQueries` | `game/reputation_handler.hpp` | GameHandler (Faction.dbc) | ReputationHandler |
 
 Events added to `game/game_events.hpp`: `CarriedItemsCounted`,
 `LootWindowChanged`, `VendorOpened`, `PlayerEquipmentResolved`,
@@ -70,11 +81,12 @@ Events added to `game/game_events.hpp`: `CarriedItemsCounted`,
 `PlayerMeleeSwing`, `SprintAuraChanged`, `HearthstoneCastStarted`,
 `ChargeStarted`, `CharacterSpellsArrived`, `PlayerNameKnown`,
 `UnitSaidAloud`, `UnitEmotePlayed`, `QuestObjectiveProgressed`,
-`QuestTrackingChanged`, `GossipOpenedOnNpc`, `GossipClosedOnNpc`. The
+`QuestTrackingChanged`, `GossipOpenedOnNpc`, `GossipClosedOnNpc`,
+`ReputationChanged`, `FactionListChanged`, `DungeonFinderOpened`. The
 callbacks they replaced (loot window, vendor, equipment, spell-cast
 animation, melee swing, sprint, hearthstone preload, charge, chat bubble,
-emote animation, quest progress, NPC greeting and farewell) are gone from
-GameHandler.
+emote animation, quest progress, NPC greeting and farewell, reputation
+change, open dungeon finder) are gone from GameHandler.
 
 Per-character state is reset by the one login path: each converted domain
 assigns its struct whole on `events::CharacterLoggingIn` (Chat's
@@ -113,10 +125,12 @@ By reaches and by how much they block the others:
    Spell's `currentTargetGuid`/`focusTargetGuid` have a real owner.
 4. ~~QuestHandler~~ - done. Left in GameHandler: the login quest resync
    (`pendingLoginQuestResync_`), which belongs to QuestHandler's `update`.
-5. **SocialHandler** (847, mostly `getSocket`/`addSystemChatMessage`/
-   `fireAddonEvent` - mechanical, like Inventory was). Factions, contacts,
-   guild, party, LFG live here; split factions (`initialFactionsRef`,
-   `factionStandingsRef`) out as a `ReputationHandler` on the way.
+5. ~~SocialHandler~~ - done, with `ReputationHandler` split out (standings,
+   flags, watched faction, the four faction opcodes). Left in GameHandler:
+   the Faction.dbc tables and the reputation list/rows built from them
+   (asked through `ReputationQueries`; they move into ReputationHandler
+   next), the helm/cloak flags (written by EntityController too), and the
+   GM ticket opcodes (ChatHandler's commands; they belong together).
 6. ~~ChatHandler~~ - done. Left in GameHandler: `chatAutoJoin` (copied into
    the handler at world entry - a mirror to remove) and the Languages.dbc
    name cache (asked through `ChatQueries::languageName`).
