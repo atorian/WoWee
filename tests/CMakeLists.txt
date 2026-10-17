@@ -167,6 +167,15 @@ wowee_add_test(test_texture_cache
     SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
 
+# Frames recorded only against a complete set of frame targets; a failure to
+# make one said once per stretch with the result, the size and the budget.
+wowee_add_test(test_frame_targets
+    SOURCES test_frame_targets.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/frame_targets.cpp)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_frame_targets PRIVATE Vulkan::Vulkan)
+endif()
+
 # Normal maps built on the builder's own few workers from a bounded queue,
 # nearest first. The derivation is a stand-in.
 wowee_add_test(test_normal_map_builder

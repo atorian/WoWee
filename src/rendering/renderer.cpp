@@ -1439,7 +1439,11 @@ void Renderer::beginFrame() {
         // Pixels, like the extent below: a window with a surface behind it is
         // never rebuilt from the size the desktop places it at.
         if (surface_->getDrawableWidth() == 0 || surface_->getDrawableHeight() == 0) return;
-        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
+        // A swapchain or a frame target that could not be made skips the
+        // frame: the context has said why, and tries again next frame. The
+        // rebuilds below would size themselves from a swapchain that is not
+        // there, and recording against it is what crashed the driver.
+        if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) return;
         // Rebuild water resources that reference swapchain extent/views
         if (waterRenderer) {
             waterRenderer->recreatePipelines();

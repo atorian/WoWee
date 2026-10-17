@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rendering/frames_in_flight.hpp"
+#include "rendering/frame_targets.hpp"
 #include "rendering/gpu_memory.hpp"
 #include "rendering/texture_cache.hpp"
 #include "rendering/vk_utils.hpp"
@@ -380,7 +381,15 @@ private:
     /// be separate copies of the same two hundred and sixty lines. `verb` is
     /// only the word in the failure messages, so a log still says which of
     /// the two was running.
+    ///
+    /// Frames are recorded only once it has succeeded (frameTargets_); on a
+    /// failure the swapchain stays dirty and the next frame tries again.
     bool createSwapchainRenderTargets(const char* verb);
+    bool createSwapchainTargetSet(const char* verb);
+    /// Say that a frame target could not be made, with the result, the size
+    /// asked for and the heap's budget - once per stretch of failures.
+    void frameTargetFailed(const char* target, VkResult result);
+    FrameTargets frameTargets_;
 
     bool createImGuiResources();
     void destroyImGuiResources();

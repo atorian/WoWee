@@ -1768,8 +1768,11 @@ bool VkContext::createDepthBuffer() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth image");
+    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr);
+        r != VK_SUCCESS) {
+        depthImage = VK_NULL_HANDLE;
+        depthAllocation = VK_NULL_HANDLE;
+        frameTargetFailed("depth buffer", r);
         return false;
     }
 
@@ -1782,8 +1785,9 @@ bool VkContext::createDepthBuffer() {
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
 
-    if (vkCreateImageView(device, &viewInfo, nullptr, &depthImageView) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &depthImageView); r != VK_SUCCESS) {
+        depthImageView = VK_NULL_HANDLE;
+        frameTargetFailed("depth buffer view", r);
         return false;
     }
 
@@ -1836,8 +1840,11 @@ bool VkContext::createMsaaColorImage() {
         // Retry without TRANSIENT (some drivers reject it at high sample counts)
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         allocInfo.preferredFlags = 0;
-        if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr) != VK_SUCCESS) {
-            LOG_ERROR("Failed to create MSAA color image");
+        if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr);
+            r != VK_SUCCESS) {
+            msaaColorImage_ = VK_NULL_HANDLE;
+            msaaColorAllocation_ = VK_NULL_HANDLE;
+            frameTargetFailed("multisampled colour image", r);
             return false;
         }
     }
@@ -1851,8 +1858,9 @@ bool VkContext::createMsaaColorImage() {
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
 
-    if (vkCreateImageView(device, &viewInfo, nullptr, &msaaColorView_) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create MSAA color image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &msaaColorView_); r != VK_SUCCESS) {
+        msaaColorView_ = VK_NULL_HANDLE;
+        frameTargetFailed("multisampled colour view", r);
         return false;
     }
 
@@ -1882,8 +1890,11 @@ bool VkContext::createDepthResolveImage() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth resolve image");
+    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr);
+        r != VK_SUCCESS) {
+        depthResolveImage = VK_NULL_HANDLE;
+        depthResolveAllocation = VK_NULL_HANDLE;
+        frameTargetFailed("depth resolve image", r);
         return false;
     }
 
@@ -1895,8 +1906,9 @@ bool VkContext::createDepthResolveImage() {
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(device, &viewInfo, nullptr, &depthResolveImageView) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth resolve image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &depthResolveImageView); r != VK_SUCCESS) {
+        depthResolveImageView = VK_NULL_HANDLE;
+        frameTargetFailed("depth resolve view", r);
         return false;
     }
 
@@ -1950,7 +1962,27 @@ static VkSubpassDependency sceneAttachmentDependency() {
     return dependency;
 }
 
+void VkContext::frameTargetFailed(const char* target, VkResult result) {
+    if (auto line = frameTargets_.failed(target, result, swapchainExtent.width, swapchainExtent.height,
+                                         deviceLocalHeap())) {
+        LOG_ERROR(*line);
+    }
+}
+
 bool VkContext::createSwapchainRenderTargets(const char* verb) {
+    // Until every target below exists no frame is recorded against them
+    // (beginFrame hands out no command buffer); a failure leaves the swapchain
+    // dirty, and the next frame tries again.
+    frameTargets_.rebuilding();
+    if (!createSwapchainTargetSet(verb)) {
+        swapchainDirty = true;
+        return false;
+    }
+    if (auto line = frameTargets_.made()) LOG_WARNING(*line);
+    return true;
+}
+
+bool VkContext::createSwapchainTargetSet(const char* verb) {
     if (!createDepthBuffer()) return false;
 
     // Create MSAA color image if needed
@@ -2133,8 +2165,11 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
             fbInfo.height = swapchainExtent.height;
             fbInfo.layers = 1;
 
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
+            if (VkResult r = vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]);
+                r != VK_SUCCESS) {
+                swapchainFramebuffers[i] = VK_NULL_HANDLE;
                 LOG_ERROR("Failed to ", verb, " MSAA swapchain framebuffer ", i);
+                frameTargetFailed("multisampled swapchain framebuffer", r);
                 return false;
             }
         }
@@ -2204,8 +2239,11 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
             fbInfo.height = swapchainExtent.height;
             fbInfo.layers = 1;
 
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
+            if (VkResult r = vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]);
+                r != VK_SUCCESS) {
+                swapchainFramebuffers[i] = VK_NULL_HANDLE;
                 LOG_ERROR("Failed to ", verb, " swapchain framebuffer ", i);
+                frameTargetFailed("swapchain framebuffer", r);
                 return false;
             }
         }
@@ -2968,6 +3006,9 @@ void VkContext::resetFrameSyncState() {
 VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     if (deviceLost_) return VK_NULL_HANDLE;
     if (swapchain == VK_NULL_HANDLE) return VK_NULL_HANDLE;  // Swapchain lost; recreate pending
+    // A target the frame would render into is missing: nothing is recorded
+    // against the incomplete set, and the rebuild is tried again next frame.
+    if (!frameTargets_.usable()) return VK_NULL_HANDLE;
 
     auto& frame = frames[currentFrame];
 
