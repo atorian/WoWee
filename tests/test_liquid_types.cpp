@@ -90,6 +90,7 @@ const std::vector<Row> kStockRows = {
     {4, "Slime", 3, "XTextures\\slime\\slime.%d.blp"},
     {13, "WMO Water", 0, "XTextures\\river\\lake_a.%d.blp"},
     {14, "WMO Ocean", 1, "XTextures\\ocean\\ocean_h.%d.blp"},
+    {17, "WMO Water - Interior", 0, "XTextures\\river\\lake_a.%d.blp"},
     {19, "WMO Magma", 2, "XTextures\\lava\\lava.%d.blp"},
     {21, "Naxxramas - Slime", 3, "XTextures\\slime\\slime.%d.blp"},
 };
@@ -182,6 +183,20 @@ TEST_CASE("a building's liquid is what its group header says, by the client's ru
         CHECK(table.basicOf(wmoGroupLiquidType(15, 0, false, 2)) == LiquidBasic::Magma);
         CHECK(table.basicOf(wmoGroupLiquidType(15, 0, false, 0)) == LiquidBasic::Water);
     }
+}
+
+TEST_CASE("water in an indoor group is the interior water row", "[liquid]") {
+    // Orgrimmar's valleys are interior groups of its WMO (flags 0x3841), naming
+    // Slow Water (5) in a model that uses the table ids.
+    const LiquidTypeTable table = tableOf(kStockRows);
+    const uint16_t indoor = wmoGroupLiquidType(5, 0x3841, true, 0);
+    REQUIRE(table.find(indoor));
+    CHECK(table.find(indoor)->name == "WMO Water - Interior");
+    CHECK(table.basicOf(indoor) == LiquidBasic::Water);
+    CHECK_FALSE(table.find(indoor)->texturePattern.empty());
+    // The same group out of doors is plain WMO water.
+    REQUIRE(table.find(wmoGroupLiquidType(5, 0x1841, true, 0)));
+    CHECK(table.find(wmoGroupLiquidType(5, 0x1841, true, 0))->name == "WMO Water");
 }
 
 TEST_CASE("the sea a building's group says is the sea in the scene", "[liquid]") {

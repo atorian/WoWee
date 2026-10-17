@@ -1243,11 +1243,12 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         const auto& group = groups[ft.wmoLiquidGroupIndex];
                         ft.wmoLiquidGroupIndex++;
                         if (!group.liquid.hasLiquid()) continue;
-                        if (group.flags & 0x2000) {
-                            const auto basic = liquidScene->basicOf(group.liquid.liquidType);
-                            if (basic == pipeline::LiquidBasic::Water ||
-                                basic == pipeline::LiquidBasic::Ocean) continue;
-                        }
+                        // Every group's liquid, indoor ones included. Water in an
+                        // interior group used to be dropped here without a word -
+                        // Orgrimmar's valleys are interior groups of its WMO, and
+                        // their ponds were only drawn while their MOMT index read
+                        // as slime. The client draws them as "WMO Water -
+                        // Interior", which wmoGroupLiquidType already names.
                         liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId);
                         liquidGroupsLoaded++;
                     }

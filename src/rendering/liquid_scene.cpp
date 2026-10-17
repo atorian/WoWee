@@ -425,13 +425,14 @@ bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat
     const int gridHeight = static_cast<int>(surface.height) + 1;
     const int vertexCount = gridWidth * gridHeight;
 
-    // WMO liquid base heights sit ~2 units above the visual waterline.
-    constexpr float WMO_WATER_Z_OFFSET = -1.0f;
-    float adjustedZ = surface.origin.z + WMO_WATER_Z_OFFSET;
-    surface.heights.assign(vertexCount, adjustedZ);
-    surface.minHeight = adjustedZ;
-    surface.maxHeight = adjustedZ;
-    surface.origin.z = adjustedZ;
+    // The water stands at MLIQ's own height, the corner's z placed with the
+    // building. A yard was taken off it here, on the reading that the base
+    // sat above the waterline; it does not, and the yard put every shallow
+    // WMO pool under its own floor - Orgrimmar's streams among them.
+    const float waterZ = surface.origin.z;
+    surface.heights.assign(vertexCount, waterZ);
+    surface.minHeight = waterZ;
+    surface.maxHeight = waterZ;
 
     if (surface.origin.z > 2000.0f || surface.origin.z < -500.0f)
         return reject("placed outside the world's height range");
