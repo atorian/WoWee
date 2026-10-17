@@ -4,8 +4,8 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "rendering/sky_billboard.hpp"
 #include "core/logger.hpp"
-#include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <vector>
 
@@ -170,9 +170,7 @@ void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
     const float sunDistance = 800.0f;
     glm::vec3 sunPos = dir * sunDistance;
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, sunPos);
-    model = glm::scale(model, glm::vec3(95.0f, 95.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(sunPos, 95.0f);
 
     // The zone's own sun, disc and glow. The disc was the light the sun casts
     // mixed half with a fixed warm yellow, so every zone's sun was the same
@@ -210,9 +208,7 @@ void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
 
     glm::vec3 moonPos = getMoonPosition(timeOfDay);
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(40.0f, 40.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(moonPos, 40.0f);
 
     glm::vec3 color = glm::vec3(0.8f, 0.85f, 1.0f);
 
@@ -252,9 +248,7 @@ void Celestial::renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet /*perFrameS
     moonPos.x += 80.0f;
     moonPos.z -= 40.0f;
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(30.0f, 30.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(moonPos, 30.0f);
 
     glm::vec3 color = glm::vec3(0.7f, 0.8f, 1.0f);
 

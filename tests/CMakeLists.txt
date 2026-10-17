@@ -2489,6 +2489,13 @@ wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_sky_billboard ───────────────────────────────────────
+# The sun and moon quads face the eye, so their discs are round on screen.
+# They lay in the world's horizontal plane and the sun at 37 degrees came
+# out a flat oval.
+wowee_add_test(test_sky_billboard
+    SOURCES test_sky_billboard.cpp)
+
 # ── test_light_params_eval ───────────────────────────────────
 # Which LightParams row a volume names for the weather, what a row with
 # missing bands gives, and how volumes blend when one names a missing row.
