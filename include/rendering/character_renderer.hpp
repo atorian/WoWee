@@ -414,6 +414,13 @@ private:
         // Instances drawn in this one's aura look (addLookCompanion). Ids are
         // never reused, so one removed since is simply not found.
         std::vector<uint32_t> lookCompanions;
+        // The body an attachment - a weapon, a helm, an enchant's effect -
+        // is part of; 0 for a body of its own. An attachment keeps no
+        // visibility, opacity or look of its own: it is shown, hidden,
+        // faded and tinted as its body is (drawnAs). Copied when it was
+        // attached, equipment that arrived after a druid's body was put away
+        // for a form floated over the bear.
+        uint32_t bodyId = 0;
 
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
@@ -458,6 +465,11 @@ private:
     glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
+    /// Whose opacity and aura look `instance` is drawn with: its body's for
+    /// an attachment, its own otherwise.
+    [[nodiscard]] const CharacterInstance& drawnAs(const CharacterInstance& instance) const;
+    /// Drawn at all: neither it nor, for an attachment, its body is hidden.
+    [[nodiscard]] bool isShown(const CharacterInstance& instance) const;
     void destroyModelGPU(M2ModelGPU& gpuModel, bool defer = false);
     void destroyInstanceBones(CharacterInstance& inst, bool defer = false);
 
