@@ -75,15 +75,21 @@ public:
         float layerFloor = 0.1f;
         /// 0 is even mist; 1 lets it thin to nothing and pile to double.
         float noiseAmount = 0.6f;
-        /// Brightness of the sunlit air against a white surface in the same
-        /// sun. The surfaces take LightParams' direct light as `diffuse * N.L`:
-        /// a Lambert reflector, sending 1/pi of what falls on it toward the
-        /// eye. Air scattering evenly sends 1/(4 pi) each way - a quarter of
-        /// that - and the phase function's forward lobe is what lifts the air
-        /// toward the sun above it. 0.8 made the air over three times brighter
-        /// than the light it is lit by, and the sky around the sun a white blot
-        /// whatever the zone's sun was.
-        float sunScatter = 0.25f;
+        /// Brightness of lit air against a white surface in the same light, for
+        /// every light that reaches it: the sun and the models' own lights
+        /// alike, since it is the air's, not the light's. The surfaces take a
+        /// light as its colour times N.L - LightParams' direct light, or a
+        /// point light over the client's falloff: a Lambert reflector, sending
+        /// 1/pi of what falls on it toward the eye. Air scattering evenly sends
+        /// 1/(4 pi) each way - a quarter of that - and for the sun the phase
+        /// function's forward lobe is what lifts the air toward it above that.
+        ///
+        /// 0.8 for the sun made the air over three times brighter than the
+        /// light it is lit by, and the sky around the sun a white blot whatever
+        /// the zone's sun was. 8 for the models' lights lit a campfire's air ten
+        /// yards out as brightly as the ground a yard from it, and the fire's
+        /// own flicker pulsed through the mist across the whole view.
+        float lightScatter = 0.25f;
         /// The zone's glow around the sun (LightParams' sunHaloColor): the
         /// colour and brightness of the light the air scatters forward, toward
         /// an eye looking at the sun. See sunlit_air.glsli.
@@ -98,10 +104,6 @@ public:
         /// colour. Half, so a shaft stands against the shade beside it rather
         /// than against a haze nearly as bright.
         float ambientScatter = 0.5f;
-        /// Brightness of the glow around local lights. Well above one because
-        /// a torch's reach is a dozen yards, and that little air scatters
-        /// little of it.
-        float localLightScatter = 8.0f;
     };
 
     VolumetricFog() = default;

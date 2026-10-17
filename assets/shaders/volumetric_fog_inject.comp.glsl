@@ -35,7 +35,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayCorner[4];   // rays one yard deep through uv (0,0), (1,0), (0,1), (1,1)
     mat4 prevViewProj;
     vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
-    vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter
+    vec4 lighting;       // x = light scatter (sun and models' lights), z = ambient scatter
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
@@ -151,9 +151,10 @@ void main() {
     }
 
     // The models' own lights: the same lights and falloff the surfaces are
-    // lit by, so the halo is where the pool of light is. Air has no normal,
-    // so no N.L. Past forty yards a light gives under a fiftieth and is
-    // skipped.
+    // lit by, so the halo is where the pool of light is, and scattered by the
+    // air as the sunlight is - a quarter of what a white surface returns, as
+    // brightly as the light is and no more. Air has no normal, so no N.L.
+    // Past forty yards a light gives under a fiftieth and is skipped.
     vec3 local = vec3(0.0);
     for (uint i = 0u; i < uint(localLightMeta.x); ++i) {
         vec3 toLight = localLightPosition(i) - p;
@@ -162,7 +163,7 @@ void main() {
         float dist = max(sqrt(distSq), 1e-3);
         local += localLightColor(i) / (0.7 * dist + 0.03 * dist * dist);
     }
-    light += min(local, vec3(1.0)) * vol.lighting.y;
+    light += min(local, vec3(1.0)) * vol.lighting.x;
 
     vec4 result = vec4(light * density, density);
 
