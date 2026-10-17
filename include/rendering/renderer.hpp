@@ -265,6 +265,24 @@ private:
     // the scene pass itself (see renderWorld).
     bool waterDrawsInContinuePass() const;
 
+    /// The single-sampled water pass over an off-screen, multisampled scene:
+    /// a framebuffer of the water's 1x pass on the post-process target's
+    /// resolved colour and depth. Built in beginFrame, once the frame's target
+    /// is settled and before the passes are chosen, and again whenever that
+    /// target or the water pass is rebuilt.
+    void updateOffscreenWater1xFramebuffer();
+    /// Built, and over the target and pass that exist now.
+    [[nodiscard]] bool offscreenWater1xReady() const;
+    void destroyOffscreenWater1xFramebuffer();
+    VkFramebuffer offscreenWater1xFb_ = VK_NULL_HANDLE;
+    uint64_t offscreenWater1xGeneration_ = 0;
+    /// The target generation a failure was last reported for, so it is said
+    /// once rather than every frame.
+    uint64_t offscreenWater1xFailedGeneration_ = ~uint64_t{0};
+    VkRenderPass offscreenWater1xPass_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xColor_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xDepth_ = VK_NULL_HANDLE;
+
     /// Ghost tint, brightness and the minimap, in that order, at the end of
     /// the scene pass. The threaded and single-threaded paths both finish this
     /// way and differ only in which command buffer they are recording into.
@@ -596,6 +614,9 @@ private:
     // what the frame did without it. See pass_ablation.hpp for why the GPU's
     // own timestamps cannot answer that on this platform.
     std::unique_ptr<PassAblation> passAblation_;
+    /// The ablation run has the water, or only its reflection, switched off.
+    [[nodiscard]] bool waterAblated() const;
+    [[nodiscard]] bool waterReflectionAblated() const;
     bool passAblationReported_ = false;
     bool worldDrawnLastFrame_ = false;
     std::chrono::steady_clock::time_point lastFrameStart_{};

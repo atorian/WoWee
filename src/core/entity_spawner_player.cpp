@@ -449,8 +449,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
     {
         uint32_t did = findDisplayIdByInvType({6});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(gg1 > 0 ? equippedGeoset(equipment::kBeltBase, gg1) : 0,
-                                equipment::kBeltBase);
+        geosetBelt = pickGeoset(beltGeoset(gg1), equipment::kBeltBase);
     }
 
     eraseGroup(4);
@@ -476,8 +475,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         hasInvType({16}) ? cloakGeoset(capeGG) : kGeosetNoCape,
         kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape);
-    // Tabard (invType 19)
-    if (hasInvType({19})) geosets.insert(kGeosetDefaultTabard);
+    // Tabard (invType 19) -> the flap, group 12. It asked for 1201 outright,
+    // which is no flap, so no other player's tabard was ever drawn.
+    eraseGroup(12);
+    const uint16_t geosetTabard =
+        pickGeoset(tabardGeoset(getGeosetGroup(findDisplayIdByInvType({19}), geosetGroup1Field)), 0);
+    if (geosetTabard != 0) geosets.insert(geosetTabard);
 
     // Hide hair under helmets: replace style-specific scalp with bald scalp
     // HEAD slot is index 0 in the 19-element equipment array

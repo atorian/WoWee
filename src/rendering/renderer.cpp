@@ -1104,6 +1104,7 @@ void Renderer::shutdown() {
 
     LOG_DEBUG("Renderer::shutdown - waterRenderer...");
     waterSubscription_.reset();
+    destroyOffscreenWater1xFramebuffer();
     if (waterRenderer) {
         waterRenderer->shutdown();
         waterRenderer.reset();
@@ -1432,6 +1433,9 @@ void Renderer::beginFrame() {
     // Post-process resource management (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_) postProcessPipeline_->manageResources();
 
+    // With MSAA, the water's pass over that target, rebuilt if the target was.
+    updateOffscreenWater1xFramebuffer();
+
     // The target that call may have just created or destroyed decides where
     // the water draws, and with it where the spray and the minimap go. Asked
     // again here, after the answer can have changed, rather than only at the
@@ -1665,7 +1669,7 @@ void Renderer::endFrame() {
     // renderWorld already took the copy at the one point in the frame where the
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
-    if (!waterDrawsInContinuePass()
+    if (!waterDrawsInContinuePass() && !waterAblated()
         && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(
@@ -3141,7 +3145,7 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
-            if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+            if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
@@ -3354,7 +3358,7 @@ void Renderer::renderWorld() {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
-        if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+        if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
             waterRenderer->setRenderExtent(activeRenderExtent_);
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
@@ -3406,7 +3410,7 @@ void Renderer::renderWorld() {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled()) {
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
@@ -3421,8 +3425,20 @@ void Renderer::renderWorld() {
         VkExtent2D waterExtent = activeRenderExtent_;
         if (msaaOn) {
             contRp.renderPass = waterRenderer->getWater1xRenderPass();
-            contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
-            waterExtent = vkCtx->getSwapchainExtent();
+            // Into the image the scene was resolved into: the swapchain's own,
+            // or the post-processing target's, which FXAA or the upscaler
+            // then read with the water in it.
+            const bool offscreenScene = postProcessPipeline_ &&
+                postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+            if (offscreenScene) {
+                // Ready, or waterDrawsInContinuePass would not have sent the
+                // water here.
+                contRp.framebuffer = offscreenWater1xFb_;
+                waterExtent = postProcessPipeline_->getSceneRenderExtent();
+            } else {
+                contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
+                waterExtent = vkCtx->getSwapchainExtent();
+            }
         } else {
             contRp.renderPass = vkCtx->getSceneContinueRenderPass();
             contRp.framebuffer = activeFramebuffer_;
@@ -3440,7 +3456,9 @@ void Renderer::renderWorld() {
         vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
         waterRenderer->setRenderExtent(waterExtent);
-        waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        if (!waterAblated()) {
+            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        }
 
         // What is blended goes over the water, not under it. Drawn in the scene
         // pass it was in the refraction copy and then covered by the sheet, so
@@ -3508,9 +3526,9 @@ void Renderer::syncSwimEffectsTargetPass() {
     // on screen behind it painted straight over the terrain it draws. The
     // spray at least only lost against water it was thrown off.
     //
-    // Only when water has actually left the scene pass. Where it has not - MSAA
-    // onto an off-screen scene, or no continuation pass at all - water is drawn
-    // before this and the minimap is already on top of it.
+    // Only when water has actually left the scene pass. Where it has not - no
+    // continuation pass, or MSAA without a resolved depth to test against -
+    // water is drawn before this and the minimap is already on top of it.
     if (minimap) {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
@@ -3688,13 +3706,82 @@ bool Renderer::fadedCharactersAfterWater() const {
 bool Renderer::waterDrawsInContinuePass() const {
     if (!waterRenderer || !vkCtx) return false;
     if (vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
-        // The 1x water pass targets the swapchain directly, so it cannot serve a
-        // frame whose scene went to an off-screen post-processing target.
+        if (!waterRenderer->hasWater1xPass()) return false;
+        // With the scene in an off-screen post-processing target (FXAA, FSR)
+        // the 1x pass draws into that target's resolved images instead of the
+        // swapchain's. It used to be unable to, and the water then stayed in
+        // the scene pass with its refraction copy taken from the finished
+        // frame - its own last output, so everything standing in or over the
+        // water left a trail of copies behind it as the camera moved.
         const bool offscreenScene =
             postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
-        return !offscreenScene && waterRenderer->hasWater1xPass();
+        return !offscreenScene || offscreenWater1xReady();
     }
     return vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+}
+
+bool Renderer::offscreenWater1xReady() const {
+    if (!offscreenWater1xFb_ || !waterRenderer || !postProcessPipeline_) return false;
+    return offscreenWater1xGeneration_ == postProcessPipeline_->sceneTargetGeneration() &&
+           offscreenWater1xPass_ == waterRenderer->getWater1xRenderPass() &&
+           offscreenWater1xColor_ == postProcessPipeline_->getSceneResolvedColorView() &&
+           offscreenWater1xDepth_ == postProcessPipeline_->getSceneResolvedDepthView();
+}
+
+void Renderer::updateOffscreenWater1xFramebuffer() {
+    if (!waterRenderer || !vkCtx || !postProcessPipeline_) return;
+    if (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT) return;
+    if (offscreenWater1xReady()) return;
+    destroyOffscreenWater1xFramebuffer();
+
+    const VkRenderPass pass = waterRenderer->getWater1xRenderPass();
+    const VkImageView color = postProcessPipeline_->getSceneResolvedColorView();
+    const VkImageView depth = postProcessPipeline_->getSceneResolvedDepthView();
+    const uint64_t generation = postProcessPipeline_->sceneTargetGeneration();
+    if (!pass || postProcessPipeline_->getSceneFramebuffer() == VK_NULL_HANDLE) return;
+    if (!color || !depth) {
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_WARNING("Water: the off-screen scene has no resolved depth - water stays in the "
+                        "multisampled scene pass and refracts the previous frame (trails behind "
+                        "anything moving over it)");
+        }
+        return;
+    }
+
+    const VkExtent2D extent = postProcessPipeline_->getSceneRenderExtent();
+    const VkImageView attachments[2] = {color, depth};
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = pass;
+    fbInfo.attachmentCount = 2;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = extent.width;
+    fbInfo.height = extent.height;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(vkCtx->getDevice(), &fbInfo, nullptr, &offscreenWater1xFb_) != VK_SUCCESS) {
+        offscreenWater1xFb_ = VK_NULL_HANDLE;
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_ERROR("Water: could not build its pass over the off-screen scene (", extent.width,
+                      "x", extent.height, ") - water stays in the multisampled scene pass and "
+                      "refracts the previous frame");
+        }
+        return;
+    }
+    offscreenWater1xGeneration_ = generation;
+    offscreenWater1xPass_ = pass;
+    offscreenWater1xColor_ = color;
+    offscreenWater1xDepth_ = depth;
+}
+
+void Renderer::destroyOffscreenWater1xFramebuffer() {
+    if (!offscreenWater1xFb_ || !vkCtx) return;
+    // A frame still in flight may have recorded it.
+    VkDevice device = vkCtx->getDevice();
+    VkFramebuffer fb = offscreenWater1xFb_;
+    vkCtx->deferAfterAllFrameFences([device, fb]() { vkDestroyFramebuffer(device, fb, nullptr); });
+    offscreenWater1xFb_ = VK_NULL_HANDLE;
 }
 
 // initPostProcess(), resizePostProcess(), shutdownPostProcess() removed -
@@ -4306,8 +4393,17 @@ void Renderer::setSecondaryViewportScissor(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
+bool Renderer::waterAblated() const {
+    return passAblation_ && passAblation_->skip(AblationPass::Water);
+}
+
+bool Renderer::waterReflectionAblated() const {
+    return waterAblated() || (passAblation_ && passAblation_->skip(AblationPass::WaterReflection));
+}
+
 void Renderer::renderReflectionPass() {
     if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
+    if (waterReflectionAblated()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 
     // Select the current frame's pre-bound reflection descriptor set

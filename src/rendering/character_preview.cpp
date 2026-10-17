@@ -924,9 +924,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     {
         uint32_t did = findDisplayId({6});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(
-            gg > 0 ? core::equippedGeoset(core::equipment::kBeltBase, gg) : 0,
-            core::equipment::kBeltBase);
+        geosetBelt = pickGeoset(core::beltGeoset(gg), core::equipment::kBeltBase);
     }
 
     eraseGroup(4);
@@ -951,9 +949,12 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         hasInvType({16}) ? core::cloakGeoset(capeGG) : core::kGeosetNoCape,
         core::kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape); // Cloak mesh toggle (visual may still be limited)
-    if (hasInvType({19})) {
-        uint16_t geosetTabard = pickGeoset(core::kGeosetDefaultTabard, 0);
-        if (geosetTabard != 0) geosets.insert(geosetTabard);
+    // The tabard flap, group 12. This asked for 1201, which is no flap.
+    eraseGroup(12);
+    if (const uint16_t geosetTabard =
+            pickGeoset(core::tabardGeoset(getGeosetGroup(findDisplayId({19}), geosetGroup1Field)), 0);
+        geosetTabard != 0) {
+        geosets.insert(geosetTabard);
     }
 
     // Keep hair visible in the preview. The in-world renderer can hide hair

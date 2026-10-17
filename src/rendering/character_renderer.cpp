@@ -3639,24 +3639,21 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
     if (texSlot >= gm.textureIds.size()) return {.texture = &whiteTexture_};
 
     const TextureRef* texPtr = &gm.textureIds[texSlot];
-    const uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
     const uint8_t wrapFlags = texSlot < gm.data.textures.size()
         ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
         : BatchTexture::kRepeatBoth;
-    // Texture slot overrides. A type-1 (skin) override only reaches skin-group
-    // batches, so the skin composite does not bleed onto cloak or hair.
+    // The instance's own texture for this slot, whatever the batch's geoset.
+    //
+    // A type-1 slot is the body - the skin with the armour composited onto it
+    // - and every batch that samples it is a piece of that body. This used to
+    // reach only a list of geoset groups, which left out 10, 11, 12 and 18:
+    // the tail of a doublet, the plate over the thighs, the tabard and the
+    // belt. Those drew the model's texture instead - your own bare skin and
+    // loincloth under a set of plate legs, and on everyone else, whose model
+    // is shared and carries no skin of its own, white. Hair, the cloak and
+    // the eye glow are not type 1; their slots keep them apart.
     auto itO = inst.textureSlotOverrides.find(texSlot);
-    if (itO != inst.textureSlotOverrides.end() && itO->second) {
-        if (texType == 1) {
-            const uint16_t grp = b.submeshId / 100;
-            const bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                      grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
-                                      grp == 20);
-            if (isSkinGroup) texPtr = &itO->second;
-        } else {
-            texPtr = &itO->second;
-        }
-    }
+    if (itO != inst.textureSlotOverrides.end() && itO->second) texPtr = &itO->second;
     return {.texture = *texPtr ? texPtr : &whiteTexture_, .wrapFlags = wrapFlags};
 }
 
