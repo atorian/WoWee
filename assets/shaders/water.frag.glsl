@@ -74,8 +74,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float rippleSlope; // root mean square slope of the ripple in this wind
-    float pad2;
+    float pad1, pad2;
 } push;
 
 #include "gerstner_waves.glsli"
@@ -86,12 +85,7 @@ layout(set = 1, binding = 0) uniform WaterMaterial {
     float shimmerStrength;
     float alphaScale;
     float bodyFloor;   // least the water's own colour shows, however shallow
-    // The liquid's own animated ripple (LiquidType.dbc's texture): x frames,
-    // 0 for none; y frames a second; z yards one repeat covers; w slope.
-    vec4 ripple;
 };
-// Its frames, a ripple height per texel in .r.
-layout(set = 1, binding = 1) uniform sampler2DArray RippleFrames;
 
 layout(set = 2, binding = 0) uniform sampler2D SceneColor;
 layout(set = 2, binding = 1) uniform sampler2D SceneDepth;
@@ -100,11 +94,18 @@ layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
 // is a churn site that spreads and dies, so a running character leaves a trail
 // of froth rather than a disc stuck under its feet.
 const int MAX_WAKE_POINTS = 32;
+// kWindWaveCount in wind_waves.hpp.
+const int WIND_WAVE_COUNT = 24;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;                  // xy = centre, z = cull radius, w = count
     vec4 wakePoints[MAX_WAKE_POINTS]; // xy = world pos, z = age 0..1, w = strength
+    // The wind's waves (WaterRenderer::advanceWindWaves): positions are taken
+    // from waveOrigin.xy; each train is xy = direction times wavenumber,
+    // z = amplitude in yards, w = its phase at the origin now.
+    vec4 waveOrigin;
+    vec4 windWaves[WIND_WAVE_COUNT];
 };
 
 layout(location = 0) in vec3 FragPos;
@@ -115,10 +116,8 @@ layout(location = 4) in vec2 ScreenUV;
 layout(location = 0) out vec4 outColor;
 
 // ============================================================
-// Dual-scroll detail normals (multi-octave ripple overlay)
+// The wind's waves
 // ============================================================
-float noiseValue(vec2 p);  // defined below
-float gradNoise(vec2 p);   // defined below; used to bend the wave fronts
 
 /// How much of a wave running along `dir` at `frequency` (radians a yard) a
 /// pixel can show: all of it from 64 pixels a wavelength, none by 16. Below
@@ -129,130 +128,40 @@ float gradNoise(vec2 p);   // defined below; used to bend the wave fronts
 float waveVisibility(vec2 dir, float frequency, vec2 surfaceDx, vec2 surfaceDy) {
     float yardsPerPixel = max(abs(dot(surfaceDx, dir)), abs(dot(surfaceDy, dir)));
     float wavelengthPixels = 6.28318 / (frequency * max(yardsPerPixel, 1e-4));
-    return smoothstep(16.0, 64.0, wavelengthPixels);
+    return smoothstep(4.0, 8.0, wavelengthPixels);
 }
 
-vec3 dualScrollWaveNormal(vec2 p, float time, vec2 surfaceDx, vec2 surfaceDy) {
-    // Three wave octaves at different angles, frequencies, and speeds.
-    // Directions are non-axis-aligned to prevent visible tiling patterns.
-    // Frequency increases and amplitude decreases per octave (standard
-    // multi-octave noise layering for natural water appearance).
-    vec2 d1 = normalize(vec2(0.86, 0.51));   // ~30° from +X
-    vec2 d2 = normalize(vec2(-0.47, 0.88));  // ~118° (opposing cross-wave)
-    vec2 d3 = normalize(vec2(0.32, -0.95));  // ~-71° (third axis for variety)
-    float f1 = 0.19, f2 = 0.43, f3 = 0.72;  // spatial frequency (higher = tighter ripples)
-    float s1 = 0.95, s2 = 1.73, s3 = 2.40;  // scroll speed (higher octaves move faster)
-    float a1 = 0.22, a2 = 0.10, a3 = 0.05;  // amplitude (decreasing for natural falloff)
-    // Each octave only as far off as it still reads as a wave.
-    a1 *= waveVisibility(d1, f1, surfaceDx, surfaceDy);
-    a2 *= waveVisibility(d2, f2, surfaceDx, surfaceDy);
-    a3 *= waveVisibility(d3, f3, surfaceDx, surfaceDy);
-
-    vec2 p1 = p + d1 * (time * s1 * 4.0);
-    vec2 p2 = p + d2 * (time * s2 * 4.0);
-    vec2 p3 = p + d3 * (time * s3 * 4.0);
-
-    // Bend the wave fronts. Each octave on its own is a pure cosine, which is a
-    // set of infinitely long straight ridges - in perspective those read as
-    // bright parallel lines running to the horizon, and the specular highlight
-    // rides along each crest. Perturbing the phase with low-frequency noise
-    // makes the crests wander, at the same wavelength, amplitude and speed. The
-    // noise is much coarser than the waves, so it curves them rather than
-    // roughening them. Gradient noise, not value noise: value noise sits square
-    // on its lattice, and at a whole turn of phase per unit its cells showed as
-    // a mosaic of blocks across the far sea, where the waves are small.
-    float warp = gradNoise(p * 0.018 + vec2(time * 0.015)) * 6.28318;
-    float c1 = cos(dot(p1, d1) * f1 + warp);
-    float c2 = cos(dot(p2, d2) * f2 + warp * 1.7);
-    float c3 = cos(dot(p3, d3) * f3 + warp * 2.6);
-
-    float dHx = c1 * d1.x * f1 * a1 + c2 * d2.x * f2 * a2 + c3 * d3.x * f3 * a3;
-    float dHy = c1 * d1.y * f1 * a1 + c2 * d2.y * f2 * a2 + c3 * d3.y * f3 * a3;
-
-    return normalize(vec3(-dHx, -dHy, 1.0));
-}
-
-// ============================================================
-// The liquid's own ripple, from its animated frames
-// ============================================================
-// The original client lays these frames over the water as it is, a fine
-// moving chop. Here they are taken as a height and their slope is the
-// surface's small-scale normal, so the sun and the sky glint off the same
-// ripple the original showed. Two neighbouring frames are blended so the
-// animation moves rather than steps.
-// The pixel's footprint in the frames' uv, taken where every pixel of the
-// quad takes it - before any branch - and handed to the samples, which may
-// sit in one.
-struct RippleUv {
-    vec2 uv;
-    vec2 ddx;
-    vec2 ddy;
+// The chop the wind raises, as the pixel sees it: the slope of the trains it
+// is big enough to show, and the mean square slope of those it is not -
+// which still scatter the sun, and go into the highlight's width. The trains
+// are windWavesFor's (wind_waves.hpp): as steep together as the sea is in this
+// wind, an equal share to each wavelength, running mostly downwind, each at
+// the speed water carries a wave that long. Nothing drawn from a texture, so
+// nothing repeats and no pattern but the waves' own shows in the glint.
+struct WindChop {
+    vec2 slope;
+    float undrawnSlopeSq;
 };
 
-RippleUv rippleUv(vec2 p) {
-    RippleUv r;
-    r.uv = p / ripple.z;
-    r.ddx = dFdx(r.uv);
-    r.ddy = dFdy(r.uv);
-    return r;
-}
-
-float rippleHeight(RippleUv r, vec2 offset, float layer) {
-    return textureGrad(RippleFrames, vec3(r.uv + offset, layer), r.ddx, r.ddy).r;
-}
-
-// How much of the ripple this pixel can show. One repeat of the frames is a
-// few yards across; far off it shrinks to a handful of pixels, and then what
-// shows is not a ripple but the repeat itself - a grid of the same patch,
-// grainy where the frames' detail aliases. So it goes by how many pixels a
-// repeat covers on screen, not by distance: all of it from 48 pixels a
-// repeat, none of it by 12, whatever the camera's height, field of view or
-// resolution. The pixel's footprint is what the sampler can make of it: at a
-// grazing view the pixel is long in depth, and the sampler's anisotropic
-// filtering takes up to eight of its short side along the long one - judging
-// by the long side alone took the ripple off water close enough to show it,
-// and by the short side alone left it on water too far off to filter.
-float rippleVisibility(RippleUv r) {
-    const float kSamplerAnisotropy = 8.0;  // the ripple sampler's maxAnisotropy
-    float a = length(r.ddx), b = length(r.ddy);
-    float footprint = max(min(a, b), max(a, b) / kSamplerAnisotropy);  // repeats per pixel
-    return 1.0 - smoothstep(1.0 / 48.0, 1.0 / 12.0, footprint);
-}
-
-vec3 rippleNormal(RippleUv r, float time) {
-    float frames = ripple.x;
-    float f = time * ripple.y;
-    float l0 = mod(floor(f), frames);
-    float l1 = mod(l0 + 1.0, frames);
-    float t = fract(f);
-    // The frames are a flipbook. Their larger shapes move on from one frame to
-    // the next, but what is a texel or two across is drawn anew in each, and
-    // a slope taken across single texels is made of exactly that: every
-    // glint on the water jumped to a new place fifteen times a second. So
-    // the slope is never taken finer than the scale the animation holds
-    // together at, however close the camera.
-    const float kCoherentTexels = 4.0;
-    float heldTogether = kCoherentTexels / float(textureSize(RippleFrames, 0).x);
-    float seen = length(abs(r.ddx) + abs(r.ddy));
-    if (seen < heldTogether) {
-        float widen = heldTogether / max(seen, 1e-6);
-        r.ddx *= widen;
-        r.ddy *= widen;
+WindChop windChop(vec2 p, vec2 surfaceDx, vec2 surfaceDy) {
+    WindChop chop;
+    chop.slope = vec2(0.0);
+    chop.undrawnSlopeSq = 0.0;
+    vec2 q = p - waveOrigin.xy;
+    for (int i = 0; i < WIND_WAVE_COUNT; ++i) {
+        vec4 w = windWaves[i];
+        if (w.z <= 0.0) continue;
+        float k = length(w.xy);
+        float shown = waveVisibility(w.xy / k, k, surfaceDx, surfaceDy);
+        // A sine of amplitude a has a mean square slope of (k a)^2 / 2.
+        float slopeSq = 0.5 * (k * w.z) * (k * w.z);
+        chop.undrawnSlopeSq += slopeSq * (1.0 - shown * shown);
+        if (shown > 0.001) {
+            // h = a sin(k.q + phase): its gradient is a cos(...) times k.
+            chop.slope += w.xy * (w.z * shown * cos(dot(w.xy, q) + w.w));
+        }
     }
-    // A texel's width in uv at the level being sampled, so the slope is
-    // measured across what this pixel actually sees.
-    float texel = max(seen, heldTogether);
-    vec2 dx = vec2(texel, 0.0);
-    vec2 dy = vec2(0.0, texel);
-    float gx = mix(rippleHeight(r, dx, l0) - rippleHeight(r, -dx, l0),
-                   rippleHeight(r, dx, l1) - rippleHeight(r, -dx, l1), t);
-    float gy = mix(rippleHeight(r, dy, l0) - rippleHeight(r, -dy, l0),
-                   rippleHeight(r, dy, l1) - rippleHeight(r, -dy, l1), t);
-    // Height per uv over the frames' own steepness (ripple.w is one over it,
-    // measured on this scale) is a slope of root mean square one; the wind
-    // says how steep the water is.
-    vec2 slope = vec2(gx, gy) / (2.0 * texel) * ripple.w * push.rippleSlope;
-    return normalize(vec3(-slope, 1.0));
+    return chop;
 }
 
 // ============================================================
@@ -537,27 +446,12 @@ void main() {
         SwellWave w = swellWave(i);
         addSwellWave(swell, w, waveVisibility(w.dir, w.freq, restDx, restDy), RestPos, time);
     }
-    vec3 swellNorm = swellNormal(swell);
     float waveHeight = swell.height;
-    // The liquid's own animated ripple where it has one and it is big enough
-    // on screen to read as one; the procedural swell - broader, and with no
-    // repeat for the eye to find - where it is not, and where LiquidType.dbc
-    // names no frames at all. Far off that is all there is to draw.
-    vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
-    float rippleShown = 0.0;
-    if (ripple.x > 0.5) {
-        RippleUv rippleAt = rippleUv(FragPos.xy);
-        // As much as the pixel can show. How steep it is the wind decides
-        // (rippleNormal): in still air the frames lie flat.
-        rippleShown = rippleVisibility(rippleAt);
-        if (rippleShown > 0.001) {
-            detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
-        }
-    }
-    // No fade by distance on top: each of these already lies down as it gets
-    // too small on screen to show, which is what a distance stood in for.
-    const float kDetailShare = 0.55;
-    vec3 norm = normalize(mix(swellNorm, detailNorm, kDetailShare));
+    // On the swell, the wind's chop; their slopes add, as the waves do. No
+    // fade by distance on top: each wave already lies down as it gets too
+    // small on screen to show, which is what a distance stood in for.
+    WindChop chop = windChop(FragPos.xy, surfaceDx, surfaceDy);
+    vec3 norm = normalize(vec3(-(swell.slope + chop.slope), 1.0 - swell.lean));
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;
@@ -697,7 +591,7 @@ void main() {
         // No refraction data - use lit water body with animated variation
         vec3 litWater = waterBody * (ambientColor.rgb * 0.8 + NdotL * lightColor.rgb * 0.6)
                       * shadowLightFactor(sunReach);
-        float normalShift = dot(detailNorm.xy, vec2(0.5, 0.5));
+        float normalShift = dot(norm.xy, vec2(0.5, 0.5));
         litWater += vec3(0.02, 0.06, 0.10) * normalShift;
         refractedColor = litWater;
     }
@@ -787,19 +681,16 @@ void main() {
     vec3 normalDx = dFdx(norm);
     vec3 normalDy = dFdy(norm);
     float spread = min(2.0 * kVariance * (dot(normalDx, normalDx) + dot(normalDy, normalDy)), kMaxSpread);
-    // The sun's path. The wind's chop is as steep as rippleSlopeForWind says,
-    // but only the part of it the ripple draws (its share of this pixel's
-    // normal) tilts the normal; the rest is chop too small to draw, and it is
-    // still there - it scatters the sun the way it scattered it in Cox and
-    // Munk's photographs. So that slope goes into the highlight's width, as
-    // GGX alpha squared = 2 x mean square slope. Close up the ripple draws
-    // the chop and the sun glints off its crests; further off it can draw
-    // less of it, and the highlight widens into a glitter path running to
-    // the horizon; in still air there is none and the sun is a sharp disc.
-    float drawnChop = kDetailShare * rippleShown;
-    float undrawnSlopeSq = push.rippleSlope * push.rippleSlope * (1.0 - drawnChop * drawnChop);
+    // The sun's path. Only the wind's waves big enough for this pixel tilt
+    // its normal; the rest is chop too small to draw, and it is still there -
+    // it scatters the sun the way it scattered it in Cox and Munk's
+    // photographs. So its slope goes into the highlight's width, as GGX alpha
+    // squared = 2 x mean square slope. Close up the sun glints off the drawn
+    // crests; further off fewer are drawn, and the highlight widens into a
+    // glitter path running to the horizon; in still air there is none and the
+    // sun is a sharp disc.
     float ggxAlpha = kSurfaceRoughness * kSurfaceRoughness;  // DistributionGGX squares roughness
-    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread + 2.0 * undrawnSlopeSq, 0.0, 1.0);
+    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread + 2.0 * chop.undrawnSlopeSq, 0.0, 1.0);
     float roughness = sqrt(sqrt(alphaSq));
     vec3 halfDir = normalize(ldir + viewDir);
     float D = DistributionGGX(norm, halfDir, roughness);

@@ -30,8 +30,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float meshStep;   // yards between the mesh's vertices
-    float rippleSlope; // the fragment stage's
-    float pad2;
+    float pad1, pad2;
 } push;
 
 #include "gerstner_waves.glsli"

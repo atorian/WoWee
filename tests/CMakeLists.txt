@@ -2145,12 +2145,11 @@ wowee_add_test(test_liquid_types
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
             ${TEST_COMMON_SOURCES})
 
-# ── test_liquid_ripple_frames ────────────────────────────────
-# A liquid's animated frames made ready to draw: which there are, which
-# channel holds the ripple, and the mip chain.
-wowee_add_test(test_liquid_ripple_frames
-    SOURCES test_liquid_ripple_frames.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_ripple_frames.cpp
+# ── test_wind_waves ──────────────────────────────────────────
+# The waves the wind raises on the water: how steep, how fast, which way.
+wowee_add_test(test_wind_waves
+    SOURCES test_wind_waves.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/wind_waves.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_sphere_map ──────────────────────────────────────────

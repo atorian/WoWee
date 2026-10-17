@@ -1001,7 +1001,7 @@ set(WOWEE_SOURCES
     src/rendering/performance_hud.cpp
     src/rendering/water_renderer.cpp
     src/rendering/liquid_scene.cpp
-    src/rendering/liquid_ripple_frames.cpp
+    src/rendering/wind_waves.cpp
     src/rendering/skybox.cpp
     src/rendering/celestial.cpp
     src/rendering/sky_sun.cpp

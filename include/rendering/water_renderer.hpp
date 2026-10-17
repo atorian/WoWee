@@ -1,10 +1,9 @@
 #pragma once
 
 #include "rendering/liquid_scene.hpp"
-#include "rendering/vk_texture.hpp"
+#include "rendering/wind_waves.hpp"
 
-#include <string>
-#include <unordered_map>
+#include <array>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -15,7 +14,6 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
 namespace rendering {
 
 class Camera;
@@ -38,6 +36,11 @@ struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
     glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
+    // The wind's waves (advanceWindWaves): position is measured from
+    // waveOrigin.xy; each train is xy = direction times wavenumber, z = its
+    // amplitude in yards, w = its phase at the origin now.
+    glm::vec4 waveOrigin{0.0f};
+    glm::vec4 windWaves[kWindWaveCount]{};
 };
 
 class WaterRenderer : public LiquidSceneListener {
@@ -98,11 +101,6 @@ public:
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
     bool hasSurfaces() const { return !drawn_.empty(); }
 
-    /// Where each liquid's animated ripple frames come from: LiquidType.dbc
-    /// names them, the assets hold them. Set before any surface is added;
-    /// without them every liquid gets the shader's own ripple.
-    void setLiquidAssets(pipeline::AssetManager* assets, const pipeline::LiquidTypeTable* types);
-
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
     bool isEnabled() const { return renderingEnabled; }
 
@@ -115,22 +113,15 @@ public:
     // which is deliberately smaller than the frame.
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
-    /// The wind over the water this frame, yards a second with its gust in:
-    /// how steep each liquid's ripple is (rippleSlopeForWind).
-    void setWindSpeed(float yardsPerSecond) { windSpeed_ = yardsPerSecond; }
+    /// Move the wind's waves on by `deltaSeconds` under a wind of
+    /// `windSpeed` yards a second (gust in) blowing toward `windDirection`,
+    /// measured near `nearby` (the player). Call once per frame.
+    void advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection, glm::vec2 nearby);
 
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
 private:
-    /// One liquid texture's frames on the GPU, shared by every surface of
-    /// every liquid that names it.
-    struct RippleSet {
-        std::unique_ptr<VkTexture> texture;
-        uint32_t frames = 0;
-        float slopeRms = 0.0f;  // the frames' own steepness (rippleSlopeRms), per repeat
-    };
-
     /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
     struct DrawnSurface {
         LiquidSurfaceId id = 0;
@@ -145,8 +136,6 @@ private:
         uint8_t height = 0;
         /// 0 water, 1 ocean, 2 magma, 3 slime - LiquidType.dbc's word for it.
         uint8_t basicType = 0;
-        /// The liquid's ripple frames, or none for the shader's own.
-        const RippleSet* ripple = nullptr;
 
         ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -169,16 +158,8 @@ private:
     glm::vec4 getLiquidColor(uint8_t basicType) const;
     float getLiquidAlpha(uint8_t basicType) const;
 
-    /// The frames for a liquid id, loaded the first time it is asked for;
-    /// null for a liquid with none, or whose frames did not load (said once).
-    const RippleSet* rippleFor(uint16_t liquidType);
-    /// Every water's and sea's frames, loaded up front.
-    void preloadRipples();
-    pipeline::AssetManager* assets_ = nullptr;
-    const pipeline::LiquidTypeTable* liquidTypes_ = nullptr;
-    std::unordered_map<std::string, RippleSet> rippleSets_;
-    VkTexture flatRipple_;
-    VkSampler rippleSampler_ = VK_NULL_HANDLE;
+    /// Each wind wave train's running phase, radians, carried in double.
+    std::array<double, kWindWaveCount> windWavePhase_{};
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();
@@ -271,7 +252,6 @@ private:
     // what is under it: no depth, no shoreline, no sea bed.
     bool refractionEnabled = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
-    float windSpeed_ = 0.0f;  // until the renderer says, still air: no ripple
 };
 
 } // namespace rendering

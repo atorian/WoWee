@@ -2567,7 +2567,11 @@ void Renderer::updateWind(float deltaTime) {
     inputs.fixedWind = environment_.wind;
     wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
                  windZones_);
-    if (waterRenderer) waterRenderer->setWindSpeed(wind_.state().speed * wind_.state().gust);
+    if (waterRenderer) {
+        const WindState& wind = wind_.state();
+        waterRenderer->advanceWindWaves(deltaTime, wind.speed * wind.gust, wind.direction,
+                                        glm::vec2(characterPosition.x, characterPosition.y));
+    }
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
@@ -3958,7 +3962,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
                       "though it can still be swum in");
             waterRenderer.reset();
         } else {
-            waterRenderer->setLiquidAssets(assetManager, &liquidTypes_);
             // Told of whatever the scene already holds before this returns.
             waterSubscription_ = liquidScene_.subscribe(*waterRenderer);
         }
