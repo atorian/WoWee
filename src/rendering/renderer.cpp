@@ -2220,7 +2220,7 @@ void Renderer::update(float deltaTime) {
 
         endPhase("pre-lighting");
         lightingManager->update(characterPosition, environment_.mapId, resolvedZoneId,
-                                environment_.gameTime, environment_.raining, isUnderwater);
+                                environment_.gameTime, environment_.weatherIntensity, isUnderwater);
         endPhase("lighting");
 
         // Sync weather visual renderer with game state
@@ -3193,7 +3193,10 @@ void Renderer::renderWorld() {
                     environment_.gameTime, environment_.weatherIntensity,
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
-                skyParams.sunGlareVisibility = sunGlare_;
+                // As much as the glare shows, weather included, as the client
+                // puts its glare out (0x7f37c3).
+                skyParams.sunGlareVisibility =
+                    sunGlare_ * sky_celestial::weatherFade(environment_.weatherIntensity);
                 skySystem->render(cmd, perFrameSet, *camera, skyParams);
                 logSunDiagnostic(skyParams);
                 if (drawSkyModels) {
@@ -3411,7 +3414,8 @@ void Renderer::renderWorld() {
                 environment_.gameTime, environment_.weatherIntensity,
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
-            skyParams.sunGlareVisibility = sunGlare_;
+            skyParams.sunGlareVisibility =
+                sunGlare_ * sky_celestial::weatherFade(environment_.weatherIntensity);
             skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
             logSunDiagnostic(skyParams);
             if (drawSkyModels) {

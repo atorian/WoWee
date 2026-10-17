@@ -7,6 +7,7 @@
 /// Header-only, so the rules can be held against hand-built profiles without
 /// the light tables loaded.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -123,6 +124,29 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.directionalDir =
         sunLightDirection(timeHalfMinutes / static_cast<float>(LIGHT_HALF_MINUTES_PER_DAY));
     return params;
+}
+
+/// A clear row's light blended toward its storm row by `w`
+/// (sky_celestial::stormWeight of the weather), as WoW.exe blends
+/// them (0x7ec220): every colour channel, the fog's distances and the cloud
+/// cover, lerped. The light's direction, the fog density no band holds and
+/// the horizon glow keep the clear row's.
+inline LightingParams blendTowardStorm(const LightingParams& clear, const LightingParams& storm,
+                                       float w) {
+    LightingParams out = clear;
+    out.ambientColor = glm::mix(clear.ambientColor, storm.ambientColor, w);
+    out.diffuseColor = glm::mix(clear.diffuseColor, storm.diffuseColor, w);
+    out.fogColor = glm::mix(clear.fogColor, storm.fogColor, w);
+    out.skyTopColor = glm::mix(clear.skyTopColor, storm.skyTopColor, w);
+    out.skyMiddleColor = glm::mix(clear.skyMiddleColor, storm.skyMiddleColor, w);
+    out.skyBand1Color = glm::mix(clear.skyBand1Color, storm.skyBand1Color, w);
+    out.skyBand2Color = glm::mix(clear.skyBand2Color, storm.skyBand2Color, w);
+    out.sunColor = glm::mix(clear.sunColor, storm.sunColor, w);
+    out.sunHaloColor = glm::mix(clear.sunHaloColor, storm.sunHaloColor, w);
+    out.fogStart = glm::mix(clear.fogStart, storm.fogStart, w);
+    out.fogEnd = glm::mix(clear.fogEnd, storm.fogEnd, w);
+    out.cloudDensity = glm::mix(clear.cloudDensity, storm.cloudDensity, w);
+    return out;
 }
 
 struct WeightedLightingParams {

@@ -6,6 +6,7 @@
 #include "rendering/daylight_fill.hpp"
 #include "rendering/light_params_eval.hpp"
 #include "rendering/light_volume_order.hpp"
+#include "rendering/sky_celestial.hpp"
 #include <glm/gtc/constants.hpp>
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -295,7 +296,7 @@ bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
 
 void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                               float gameTime,
-                              bool isRaining, bool isUnderwater) {
+                              float weatherIntensity, bool isUnderwater) {
     if (!initialized_) return;
 
     // Update time
@@ -368,7 +369,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
             for (size_t i = 0; i < blendCount; ++i) {
                 const auto& wv = activeVolumes_[i];
-                const uint32_t paramsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
+                // The clear row's sky model, storm or not: the client blends a
+                // storm's colours and fog but keeps the clear row's skybox.
+                const uint32_t paramsId = selectLightParamsId(*wv.volume, false, isUnderwater);
                 auto profileIt = lightParamsProfiles_.find(paramsId);
                 if (profileIt == lightParamsProfiles_.end() ||
                     profileIt->second.lightSkyboxId == 0) continue;
@@ -423,14 +426,26 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         std::array<WeightedLightingParams, MAX_BLEND_VOLUMES> parts;
         size_t partCount = 0;
         const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
+        const float storm = sky_celestial::stormWeight(weatherIntensity);
         for (size_t i = 0; i < blendCount; ++i) {
             const auto& wv = activeVolumes_[i];
-            const uint32_t lightParamsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
+            const uint32_t lightParamsId = selectLightParamsId(*wv.volume, false, isUnderwater);
             auto it = lightParamsProfiles_.find(lightParamsId);
             if (it == lightParamsProfiles_.end()) continue;
-            parts[partCount++] = {
-                .params = sampleLightParams(it->second, timeHalfMinutes, fallbackParams_),
-                .weight = wv.weight};
+            LightingParams params = sampleLightParams(it->second, timeHalfMinutes, fallbackParams_);
+            // Toward the storm row by the weather, as the client blends them
+            // (0x7ec220) - it switched to the storm row outright when it rained,
+            // so the first drop changed the whole sky at once.
+            if (storm > 0.0f) {
+                const uint32_t stormId = selectLightParamsId(*wv.volume, true, isUnderwater);
+                auto stormIt = lightParamsProfiles_.find(stormId);
+                if (stormId != lightParamsId && stormIt != lightParamsProfiles_.end()) {
+                    params = blendTowardStorm(
+                        params, sampleLightParams(stormIt->second, timeHalfMinutes, fallbackParams_),
+                        storm);
+                }
+            }
+            parts[partCount++] = {.params = params, .weight = wv.weight};
 
             // Debug logging for fog params (first few samples only)
             static int debugCount = 0;

@@ -155,14 +155,10 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
     if (clouds_) {
-        // Sync cloud density with weather/DBC-driven cloud coverage.
-        // Active weather (rain/snow/storm) increases cloud density for visual consistency.
-        float effectiveDensity = params.cloudDensity;
-        if (params.weatherIntensity > 0.05f) {
-            float weatherBoost = params.weatherIntensity * 0.4f;  // storms add up to 0.4 density
-            effectiveDensity = glm::min(1.0f, effectiveDensity + weatherBoost);
-        }
-        clouds_->setDensity(effectiveDensity);
+        // The cover LightParams gives, already blended toward the storm row by
+        // the weather as the client blends it. A fixed 0.4 per unit of weather
+        // was added on top, a second storm over the first.
+        clouds_->setDensity(params.cloudDensity);
         clouds_->render(cmd, perFrameSet, params);
     }
 

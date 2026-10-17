@@ -216,7 +216,9 @@ public:
      * @param playerPos Player world position
      * @param mapId Current map ID
      * @param gameTime Optional game time in seconds (use -1 for real time)
-     * @param isRaining Whether it's raining
+     * @param weatherIntensity The weather's intensity, 0-1: each volume's light
+     *        is its clear row blended toward its storm row by
+     *        min(1, 4 x intensity), as WoW.exe blends them (0x7ec220).
      * @param isUnderwater Whether the camera is under water
      *
      * Note: WoW uses server-sent game time, not local PC time.
@@ -224,7 +226,7 @@ public:
      */
     void update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                 float gameTime = -1.0f,
-                bool isRaining = false, bool isUnderwater = false);
+                float weatherIntensity = 0.0f, bool isUnderwater = false);
 
     /**
      * Get current lighting parameters

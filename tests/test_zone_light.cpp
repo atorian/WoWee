@@ -33,6 +33,8 @@ using wowee::rendering::LightingParams;
 namespace {
 
 constexpr uint32_t PARAMS_ID = 1;
+/// The volume's storm row, with colours of its own.
+constexpr uint32_t STORM_ID = 2;
 constexpr float DBC_X = 1000.0f;
 constexpr float DBC_Y = 1000.0f;
 
@@ -46,14 +48,19 @@ std::vector<uint8_t> lightDbc() {
     row[5] = std::bit_cast<uint32_t>(100.0f * wowee::rendering::LIGHT_COORD_UNITS_PER_YARD);
     row[6] = std::bit_cast<uint32_t>(200.0f * wowee::rendering::LIGHT_COORD_UNITS_PER_YARD);
     // Clear, clear underwater, storm, storm underwater.
-    row[7] = row[8] = row[9] = row[10] = PARAMS_ID;
+    row[7] = row[8] = PARAMS_ID;
+    row[9] = row[10] = STORM_ID;
     return wowee::test::wdbcFile(15, {row}, std::string(1, '\0'));
 }
 
 std::vector<uint8_t> lightParamsDbc() {
-    return wowee::test::wdbcFile(9, {{PARAMS_ID, 0, 0, 0, 0, 0, 0, 0, 0}},
+    return wowee::test::wdbcFile(9, {{PARAMS_ID, 0, 0, 0, 0, 0, 0, 0, 0},
+                                     {STORM_ID, 0, 0, 0, 0, 0, 0, 0, 0}},
                                  std::string(1, '\0'));
 }
+
+/// The storm row's noon: a grey-violet everywhere.
+uint32_t stormNoonColour(uint32_t channel) { return 0x806090 + channel; }
 
 /// Tirisfal's noon, as the client's LightIntBand has it: the light the sun
 /// casts, a cool pinkish white; the sun's disc, a pale green; and the glow of
@@ -79,21 +86,25 @@ glm::vec3 rgb(uint32_t packed) {
 /// rows have: a dark blue midnight and a bright noon.
 std::vector<uint8_t> lightIntBandDbc() {
     std::vector<std::vector<uint32_t>> rows;
-    for (uint32_t channel = 0; channel < 18; ++channel) {
-        std::vector<uint32_t> row(34, 0);
-        row[0] = (PARAMS_ID - 1) * 18 + channel + 1;
-        row[1] = 2;
-        row[2] = 0;       // midnight
-        row[3] = 1440;    // noon, in half-minutes
-        row[18] = 0x101830;
-        row[19] = noonColour(channel);
-        rows.push_back(row);
+    for (const uint32_t params : {PARAMS_ID, STORM_ID}) {
+        for (uint32_t channel = 0; channel < 18; ++channel) {
+            std::vector<uint32_t> row(34, 0);
+            row[0] = (params - 1) * 18 + channel + 1;
+            row[1] = 2;
+            row[2] = 0;       // midnight
+            row[3] = 1440;    // noon, in half-minutes
+            row[18] = 0x101830;
+            row[19] = params == STORM_ID ? stormNoonColour(channel) : noonColour(channel);
+            rows.push_back(row);
+        }
     }
     return wowee::test::wdbcFile(34, rows, std::string(1, '\0'));
 }
 
-/// What a player standing in the volume under `zoneId` at `hour` is lit by.
-LightingParams lightIn(const char* rootName, uint32_t zoneId, float hour) {
+/// What a player standing in the volume under `zoneId` at `hour`, in weather
+/// of `weatherIntensity`, is lit by.
+LightingParams lightIn(const char* rootName, uint32_t zoneId, float hour,
+                       float weatherIntensity = 0.0f) {
     wowee::pipeline::AssetManager assets;
     LightingManager lighting;
     const auto root = wowee::test::makeDataRoot(rootName, {
@@ -108,10 +119,10 @@ LightingParams lightIn(const char* rootName, uint32_t zoneId, float hour) {
     // settle on where the player stands.
     const glm::vec3 pos = wowee::rendering::lightPositionToWorld(DBC_X, DBC_Y, 0.0f);
     for (int i = 0; i < 8; ++i) {
-        lighting.update(pos, 0, zoneId, hour);
+        lighting.update(pos, 0, zoneId, hour, weatherIntensity);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-    lighting.update(pos, 0, zoneId, hour);
+    lighting.update(pos, 0, zoneId, hour, weatherIntensity);
     return lighting.getLightingParams();
 }
 
@@ -165,4 +176,22 @@ TEST_CASE("The sky is handed the zone's sun colour, not the light it casts", "[l
     CHECK_FALSE(matches(sky.sunColor, lit.diffuseColor));
     // Channel 10, the zone's tint round the sun, is the air's forward glow.
     CHECK(matches(lit.sunHaloColor, rgb(NOON_SUN_HALO)));
+}
+
+TEST_CASE("Weather blends the light toward the storm row, all the way at a quarter", "[light]") {
+    // WoW.exe lerps every colour channel toward the volume's storm row by
+    // min(1, 4 x intensity) (0x7ec220). The renderer switched to the storm row
+    // outright on any rain, and stayed clear in snow or a light drizzle the
+    // server sent as weather without the rain flag.
+    const auto matches = [](const glm::vec3& x, const glm::vec3& y) {
+        return glm::all(glm::lessThan(glm::abs(x - y), glm::vec3(3e-3f)));
+    };
+    const glm::vec3 clearSky = rgb(noonColour(2));
+    const glm::vec3 stormSky = rgb(stormNoonColour(2));
+
+    CHECK(matches(lightIn("wowee_zone_light_clear", 12, 12.0f, 0.0f).skyTopColor, clearSky));
+    CHECK(matches(lightIn("wowee_zone_light_drizzle", 12, 12.0f, 0.0625f).skyTopColor,
+                  glm::mix(clearSky, stormSky, 0.25f)));
+    CHECK(matches(lightIn("wowee_zone_light_quarter", 12, 12.0f, 0.25f).skyTopColor, stormSky));
+    CHECK(matches(lightIn("wowee_zone_light_heavy", 12, 12.0f, 0.8f).skyTopColor, stormSky));
 }

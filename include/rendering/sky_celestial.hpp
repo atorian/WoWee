@@ -152,10 +152,17 @@ inline bool discAboveHorizon(const SkyDisc& disc) {
     return disc.horizonHeight + 0.5f * disc.scale > 0.0f;
 }
 
-/// What weather leaves of the disc and the glare: none once the weather is a
-/// quarter of the way in (0x7f3920: w = min(1, 4 intensity), alpha 1 - w).
+/// The client's weather weight (0x7f3920): min(1, 4 x intensity), all the way
+/// once the weather is a quarter in. How far the light goes toward its storm
+/// row, how much of the clouds' sunlit colour it takes away, and what it
+/// leaves of the sun and moon.
+inline float stormWeight(float weatherIntensity) {
+    return std::min(1.0f, 4.0f * std::max(weatherIntensity, 0.0f));
+}
+
+/// What weather leaves of the discs and the glares (0x7f37c3: alpha 1 - w).
 inline float weatherFade(float weatherIntensity) {
-    return 1.0f - std::min(1.0f, 4.0f * std::max(weatherIntensity, 0.0f));
+    return 1.0f - stormWeight(weatherIntensity);
 }
 
 /// A glare as the camera sees it (0x7ef6e0), from `facing`, the cosine
