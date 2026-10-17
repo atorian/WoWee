@@ -255,6 +255,9 @@ TEST_CASE("a building's pool is liquid in the building", "[liquid]") {
     const float x = 100.0f + 2.0f * 4.1666625f;
     const float y = 200.0f + 2.0f * 4.1666625f;
     CHECK(scene.isWmoLiquidAt(x, y));
+    // At MLIQ's own height: a yard taken off it put shallow pools under their floors.
+    REQUIRE(scene.heightAt(x, y));
+    CHECK(*scene.heightAt(x, y) == Catch::Approx(50.0f));
     CHECK(scene.typeAt(x, y) == kWater);
     REQUIRE(scene.bodyAt(x, y));
     CHECK(scene.bodyAt(x, y)->inWmo);

@@ -33,7 +33,8 @@ enum class LiquidBasic : uint8_t {
 ///
 /// `tileLiquid` is the low nibble of the first wet MLIQ tile, which the client
 /// falls back to for a group marked green lava in a model that predates the
-/// table ids.
+/// table ids. Water in an interior group (MOGP 0x2000) is "WMO Water -
+/// Interior", as the client draws it.
 [[nodiscard]] uint16_t wmoGroupLiquidType(uint32_t groupLiquid, uint32_t groupFlags,
                                           bool rootUsesDbcIds, uint8_t tileLiquid);
 

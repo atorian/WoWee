@@ -10,14 +10,16 @@ namespace {
 // LiquidType.dbc rows the client turns a WMO group's old-style liquid into.
 constexpr uint16_t kWmoWater = 13;
 constexpr uint16_t kWmoOcean = 14;
+constexpr uint16_t kWmoWaterInterior = 17;
 constexpr uint16_t kWmoMagma = 19;
 constexpr uint16_t kWmoSlime = 20;
 // groupLiquid values the rule tests against.
 constexpr uint32_t kGreenLava = 15;
 constexpr uint32_t kEndBasicLiquids = 20;
 constexpr uint32_t kFirstNonBasicLiquid = 21;
-// MOGP flag: the group's water is the sea.
+// MOGP flags: the group's water is the sea; the group is indoors.
 constexpr uint32_t kGroupWaterIsOcean = 0x80000;
+constexpr uint32_t kGroupInterior = 0x2000;
 
 uint16_t toWmoLiquid(uint32_t basic, uint32_t groupFlags) {
     switch (basic & 3u) {
@@ -34,8 +36,10 @@ uint16_t basicLiquidTypeId(LiquidBasic basic) {
     return static_cast<uint16_t>(static_cast<uint8_t>(basic) + 1);
 }
 
-uint16_t wmoGroupLiquidType(uint32_t groupLiquid, uint32_t groupFlags, bool rootUsesDbcIds,
-                            uint8_t tileLiquid) {
+namespace {
+
+uint16_t groupLiquidRow(uint32_t groupLiquid, uint32_t groupFlags, bool rootUsesDbcIds,
+                        uint8_t tileLiquid) {
     if (rootUsesDbcIds) {
         // A group that names no liquid but has a liquid chunk all the same:
         // its tiles say what it is.
@@ -46,6 +50,16 @@ uint16_t wmoGroupLiquidType(uint32_t groupLiquid, uint32_t groupFlags, bool root
     if (groupLiquid == kGreenLava) return toWmoLiquid(tileLiquid, groupFlags);
     if (groupLiquid < kEndBasicLiquids) return toWmoLiquid(groupLiquid, groupFlags);
     return static_cast<uint16_t>(groupLiquid + 1);
+}
+
+} // namespace
+
+uint16_t wmoGroupLiquidType(uint32_t groupLiquid, uint32_t groupFlags, bool rootUsesDbcIds,
+                            uint8_t tileLiquid) {
+    const uint16_t row = groupLiquidRow(groupLiquid, groupFlags, rootUsesDbcIds, tileLiquid);
+    // Water indoors is its own row, as the client draws it.
+    if (row == kWmoWater && (groupFlags & kGroupInterior)) return kWmoWaterInterior;
+    return row;
 }
 
 LiquidTypeTable LiquidTypeTable::basicOnly() {
