@@ -48,21 +48,27 @@ struct Sandbox {
 
 }  // namespace
 
-TEST_CASE("the default data root is a real per-user location") {
-    const fs::path root = userDataRoot();
+TEST_CASE("the default data root is Data beside the executable, wherever it was started from") {
+    // It was the per-user directory - the system drive on Windows - so a
+    // client on D: built its gigabytes of assets on a full C:. And a client
+    // started from a shortcut runs in whatever folder the shortcut names, so
+    // the working directory is not the answer either.
+    const fs::path exeDir = getExecutableDir();
+    REQUIRE_FALSE(exeDir.empty());
 
-    // Empty is the documented answer where the platform will not say - a
-    // container with no HOME, say - and is not a failure. Everywhere it does
-    // answer, the answer has to be somewhere absolute.
-    if (root.empty()) {
-        WARN("This environment names no per-user directory; nothing to check.");
-        return;
-    }
+    Sandbox elsewhere;
+    const fs::path startedIn = fs::current_path();
+    fs::current_path(elsewhere.root);
+    const fs::path root = defaultDataRoot();
+    fs::current_path(startedIn);
+
     CHECK(root.is_absolute());
+    CHECK(fs::equivalent(root.parent_path(), exeDir));
     // The folder the assets go in, not the folder above it: both programs join
     // "expansions" onto this, and a root off by one level is two programs
     // writing and reading different places.
     CHECK(root.filename() == "Data");
+    CHECK(root != perUserDataRoot());
 }
 
 TEST_CASE("nothing is installed in an empty folder") {
@@ -181,7 +187,7 @@ TEST_CASE("an install that is its own data root copies nothing") {
 
 TEST_CASE("the data folder being read is searched before the one beside the client") {
     // The integrity hash and Warden's copy of the executable looked in Data/
-    // alone, and the asset builder writes to the per-user folder - so an
+    // alone, and the asset builder can be told to write anywhere - so an
     // extraction it made was never found by either.
     const char* saved = std::getenv("WOW_DATA_PATH");
     const std::string restore = saved ? saved : "";

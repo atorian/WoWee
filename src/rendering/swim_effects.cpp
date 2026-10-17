@@ -1,7 +1,7 @@
 #include "rendering/swim_effects.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/viewer_motion.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
@@ -417,15 +417,15 @@ void SwimEffects::spawnInsect(const glm::vec3& vegPos) {
 
 void SwimEffects::update(const Camera& camera, const ViewerMotion& viewer,
                          const glm::vec3& characterPosition,
-                         const WaterRenderer& water, float deltaTime) {
+                         const LiquidScene& water, float deltaTime) {
     glm::vec3 camPos = camera.getPosition();
 
     // Use character position for ripples in third-person mode
     const glm::vec3 charPos = viewer.thirdPerson ? characterPosition : camPos;
 
     // Check water at character position (for ripples) and camera position (for bubbles)
-    auto charWaterH = water.getWaterHeightAt(charPos.x, charPos.y);
-    auto camWaterH = water.getWaterHeightAt(camPos.x, camPos.y);
+    auto charWaterH = water.heightAt(charPos.x, charPos.y);
+    auto camWaterH = water.heightAt(camPos.x, camPos.y);
 
     const bool swimming = viewer.swimming;
     const bool moving = viewer.moving;

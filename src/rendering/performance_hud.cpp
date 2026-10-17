@@ -323,10 +323,13 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
         // Water info
         auto* waterRenderer = renderer->getWaterRenderer();
         if (waterRenderer) {
+            const auto& liquid = renderer->liquidScene();
             ImGui::TextColored(ImVec4(0.2f, 0.5f, 1.0f, 1.0f), "WATER");
             ImGui::Separator();
 
-            ImGui::Text("Surfaces: %d", waterRenderer->getSurfaceCount());
+            ImGui::Text("Surfaces: %d (%d drawn)", static_cast<int>(liquid.surfaceCount()),
+                        waterRenderer->getDrawnSurfaceCount());
+            ImGui::Text("Bodies: %d", static_cast<int>(liquid.bodies().size()));
             ImGui::Text("Enabled: %s", waterRenderer->isEnabled() ? "YES" : "NO");
 
             ImGui::Spacing();

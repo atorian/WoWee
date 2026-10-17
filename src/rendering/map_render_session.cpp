@@ -6,7 +6,7 @@
 #include "rendering/character_emitters.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/terrain_renderer.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
 
@@ -27,10 +27,11 @@ private:
 struct TerrainStreamingSession {
     // Destruction stops/destroys the manager before its draw layers retire.
     LayerContents<TerrainRenderer> tiles;
-    LayerContents<WaterRenderer> water;
+    // The map's liquid; clearing it also takes it off the GPU.
+    LayerContents<LiquidScene> water;
     std::unique_ptr<TerrainManager> manager;
     explicit TerrainStreamingSession(Renderer& renderer)
-        : tiles(*renderer.getTerrainRenderer()), water(*renderer.getWaterRenderer()),
+        : tiles(*renderer.getTerrainRenderer()), water(renderer.liquidScene()),
           manager(renderer.takeTerrainSession()) {}
 };
 }

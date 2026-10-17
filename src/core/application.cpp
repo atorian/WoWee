@@ -343,7 +343,7 @@ bool Application::initialize() {
         // installed data first, because that is the directory a player can
         // reach without a terminal, then beside the binary for a checkout.
         for (const std::filesystem::path& where :
-             {core::userDataRoot() / "gamecontrollerdb.txt",
+             {core::defaultDataRoot() / "gamecontrollerdb.txt",
               std::filesystem::path("assets/gamecontrollerdb.txt")}) {
             std::error_code ec;
             if (!std::filesystem::exists(where, ec)) continue;
@@ -5958,8 +5958,8 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
 
     // Once, for archives already downloaded to the old place, so they are not
     // fetched again.
-    const fs::path oldDirectory = userDataRoot() / "realm_patches" / dirName;
-    if (!userDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
+    const fs::path oldDirectory = perUserDataRoot() / "realm_patches" / dirName;
+    if (!perUserDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
         fs::create_directories(directory.parent_path(), ec);
         // A rename only, which is instant on one drive. Across drives it fails,
         // and copying gigabytes here would hold up the login for minutes, so

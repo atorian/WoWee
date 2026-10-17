@@ -10,7 +10,7 @@ namespace rendering {
 
 class Camera;
 struct ViewerMotion;
-class WaterRenderer;
+class LiquidScene;
 class M2Renderer;
 class VkContext;
 
@@ -49,7 +49,7 @@ public:
     }
     /// characterPosition is where a third-person viewer's character stands.
     void update(const Camera& camera, const ViewerMotion& viewer, const glm::vec3& characterPosition,
-                const WaterRenderer& water, float deltaTime);
+                const LiquidScene& water, float deltaTime);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     void spawnFootSplash(const glm::vec3& footPos, float waterH);
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }

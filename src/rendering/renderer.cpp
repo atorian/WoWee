@@ -1103,6 +1103,7 @@ void Renderer::shutdown() {
     }
 
     LOG_DEBUG("Renderer::shutdown - waterRenderer...");
+    waterSubscription_.reset();
     if (waterRenderer) {
         waterRenderer->shutdown();
         waterRenderer.reset();
@@ -2190,8 +2191,8 @@ void Renderer::update(float deltaTime) {
     }
 
     // Update swim effects
-    if (swimEffects && camera && waterRenderer) {
-        swimEffects->update(*camera, viewerMotion_, characterPosition, *waterRenderer, deltaTime);
+    if (swimEffects && camera) {
+        swimEffects->update(*camera, viewerMotion_, characterPosition, liquidScene_, deltaTime);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
@@ -2204,7 +2205,7 @@ void Renderer::update(float deltaTime) {
         bool wading = false;
 
         if (viewerMotion_.moving) {
-            if (auto waterH = waterRenderer->getWaterHeightAt(charPos.x, charPos.y)) {
+            if (auto waterH = liquidScene_.heightAt(charPos.x, charPos.y)) {
                 if (swimming) {
                     // A wake only exists where the swimmer meets the surface -
                     // diving deep leaves the surface undisturbed.
@@ -2652,10 +2653,10 @@ void Renderer::updateGrassPopulation() {
             // Any water over this chunk. Sampled once here rather than per
             // blade: a pond's surface is flat, and three hundred thousand
             // height queries a rebuild is not.
-            if (waterRenderer) {
+            {
                 const float cx = chunk->position[0] - 4.0f * kUnitSize;
                 const float cy = chunk->position[1] - 4.0f * kUnitSize;
-                if (const auto level = waterRenderer->getWaterHeightAt(cx, cy)) {
+                if (const auto level = liquidScene_.heightAt(cx, cy)) {
                     context.waterHeight = *level;
                     context.hasWater = true;
                 }
@@ -3517,13 +3518,13 @@ void Renderer::syncSwimEffectsTargetPass() {
 }
 
 std::optional<float> Renderer::cameraWaterDepth() const {
-    if (!waterRenderer || !camera) return std::nullopt;
+    if (!camera) return std::nullopt;
     const glm::vec3 camPos = camera->getPosition();
-    if (waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) return std::nullopt;
+    if (liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) return std::nullopt;
     // Far enough for deep ocean; see renderUnderwaterOverlay for what the
     // default 15 units did.
     constexpr float kUnderwaterReach = 400.0f;
-    const auto waterH = waterRenderer->getNearestWaterHeightAt(
+    const auto waterH = liquidScene_.nearestHeightAt(
         camPos.x, camPos.y, camPos.z, kUnderwaterReach);
     if (!waterH) return std::nullopt;
     // That reach also finds a lake over a dry cave; the ground tells the two
@@ -3544,7 +3545,7 @@ void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
     // client happened to be recording with decided which of the two the
     // player got, and on the fallback path crossing the surface showed a
     // bare line with no water either side of it.
-if (overlaySystem_ && waterRenderer && camera) {
+if (overlaySystem_ && camera) {
         glm::vec3 camPos = camera->getPosition();
         // The default vertical reach of this query is 15 units, meant to
         // stop water on a cliff above being mistaken for water the camera
@@ -3553,7 +3554,7 @@ if (overlaySystem_ && waterRenderer && camera) {
         // overlay stopped, and the scene snapped bright at a fixed depth.
         // Deep ocean is far deeper than that, so reach much further here.
         constexpr float kUnderwaterReach = 400.0f;
-        auto waterH = waterRenderer->getNearestWaterHeightAt(
+        auto waterH = liquidScene_.nearestHeightAt(
             camPos.x, camPos.y, camPos.z, kUnderwaterReach);
         // How far the eye is under the surface. The tint used to wait
         // until 1.5 units down and then apply to the whole screen at
@@ -3580,7 +3581,7 @@ if (overlaySystem_ && waterRenderer && camera) {
                 lastLog = globalTime;
                 LOG_INFO("underwater: camZ=", camPos.z, " waterZ=", *waterH,
                          " eyeDepth=", eyeDepth, " band=", kCrossingBand,
-                         " wmoWater=", waterRenderer->isWmoWaterAt(camPos.x, camPos.y) ? 1 : 0,
+                         " wmoWater=", liquidScene_.isWmoLiquidAt(camPos.x, camPos.y) ? 1 : 0,
                          " drawing=", (eyeDepth > 0.0f) ? 1 : 0);
             }
         }
@@ -3600,9 +3601,9 @@ if (overlaySystem_ && waterRenderer && camera) {
         // whose ray enters the world above the surface comes out untouched -
         // so the band above the surface costs nothing where there is no water.
         if (waterH && eyeDepth > -kCrossingBand
-                   && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
+                   && !liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) {
             bool canal = false;
-            if (auto lt = waterRenderer->getWaterTypeAt(camPos.x, camPos.y))
+            if (auto lt = liquidScene_.typeAt(camPos.x, camPos.y))
                 canal = (*lt == 5 || *lt == 13 || *lt == 17);
             // Until the eye passes the surface the view is darkened by
             // looking through the water plane itself, which is strong -
@@ -3747,8 +3748,12 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     if (!waterRenderer) {
         waterRenderer = std::make_unique<WaterRenderer>();
         if (!waterRenderer->initialize(vkCtx, perFrameSetLayout)) {
-            LOG_ERROR("Failed to initialize water renderer");
+            LOG_ERROR("Failed to initialize water renderer - liquid is not drawn, "
+                      "though it can still be swum in");
             waterRenderer.reset();
+        } else {
+            // Told of whatever the scene already holds before this returns.
+            waterSubscription_ = liquidScene_.subscribe(*waterRenderer);
         }
     }
 
@@ -3768,8 +3773,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             LOG_ERROR("M2Renderer initialization failed");
         m2Renderer->setRtScene(rtScene_.get());
         m2Renderer->setWaterHeightQuery([this](float x, float y, float z) -> std::optional<float> {
-            return waterRenderer ? waterRenderer->getNearestWaterHeightAt(x, y, z, 3.0f)
-                                 : std::nullopt;
+            return liquidScene_.nearestHeightAt(x, y, z, 3.0f);
         });
         if (swimEffects) {
             swimEffects->setM2Renderer(m2Renderer.get());
@@ -3843,10 +3847,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             terrainManager = nullptr;
             return false;
         }
-        // Set water renderer for terrain streaming
-        if (waterRenderer) {
-            terrainManager->setWaterRenderer(waterRenderer.get());
-        }
+        // The liquid streams in with the terrain and the buildings.
+        terrainManager->setLiquidScene(&liquidScene_);
         // Set M2 renderer for doodad loading during streaming
         if (m2Renderer) {
             terrainManager->setM2Renderer(m2Renderer.get());
@@ -4319,7 +4321,7 @@ void Renderer::renderReflectionPass() {
 
     // Find dominant water height near camera
     const glm::vec3 camPos = camera->getPosition();
-    auto waterH = waterRenderer->getDominantWaterHeight(camPos);
+    auto waterH = liquidScene_.dominantWaterHeight(camPos);
     if (!waterH) return;
 
     float waterHeight = *waterH;
