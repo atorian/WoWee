@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <mutex>
+#include <unordered_set>
 
+#include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -25,6 +28,23 @@ std::string resolveItemRegionTexture(AssetManager& assets, int region,
     if (assets.fileExists(unisex)) return unisex;
     std::string plain = base + ".blp";
     if (assets.fileExists(plain)) return plain;
+
+    // The table names art that no archive carries. Every caller skips the
+    // region, so the body shows through where the armour should be - which
+    // looked like a renderer fault (plate legs drawn as bare thighs) and said
+    // nothing. Realm DBC diffs do this for whole sets: a row naming
+    // "plate_raiddeathknight_k_01_Pant_LU" where only the blood, frost and
+    // unholy colours of it were shipped. Said once per name and wearer; the
+    // workers that prepare other players' equipment ask too.
+    static std::mutex logMutex;
+    static std::unordered_set<std::string> reported;
+    const std::string key = base + (isFemale ? "|F" : "|M");
+    std::lock_guard<std::mutex> lock(logMutex);
+    if (reported.insert(key).second) {
+        LOG_WARNING("Item texture ", base, " (", isFemale ? "_F" : "_M",
+                    ", _U or no suffix) is named by ItemDisplayInfo but no archive has it - ",
+                    dir, " is drawn without that item's art");
+    }
     return {};
 }
 

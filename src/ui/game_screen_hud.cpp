@@ -339,6 +339,13 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
     }
 
+    {
+        std::vector<uint16_t> sorted(geosets.begin(), geosets.end());
+        std::sort(sorted.begin(), sorted.end());
+        std::string list;
+        for (uint16_t g : sorted) list += " " + std::to_string(g);
+        LOG_INFO("Player geosets:", list);
+    }
     charRenderer->setActiveGeosets(instanceId, geosets);
 }
 
@@ -398,6 +405,22 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
             if (fullPath.empty()) continue;
             regionLayers.emplace_back(region, fullPath);
         }
+    }
+
+    // What the body is dressed in, as one line: the first question about a
+    // piece of armour drawn wrong on your own character is which art it
+    // asked for, and nothing said.
+    {
+        std::string worn;
+        for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
+            const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
+            if (slot.empty() || slot.item.displayInfoId == 0) continue;
+            worn += " " + std::to_string(s) + ":" + std::to_string(slot.item.displayInfoId) +
+                    "/" + std::to_string(slot.item.inventoryType);
+        }
+        std::string regions;
+        for (const auto& [region, path] : regionLayers) regions += " " + std::to_string(region) + "=" + path;
+        LOG_INFO("Player appearance: worn (slot:display/invType)", worn, "; regions", regions);
     }
 
     // Re-composite: base skin + underwear + equipment regions
