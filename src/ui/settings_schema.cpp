@@ -92,7 +92,7 @@ constexpr SettingDesc kSchema[] = {
      "How thick the lit mist is, when light shafts are on (Detail).\n"
      "At 1 the houses across a street stand in the mist and the trees\n"
      "past them are shapes in it; lower clears the air, higher closes\n"
-     "it in. Rain, snow, dawn and foggy zones thicken it further.",
+     "it in. Foggy zones, their weather and the dawn thicken it further.",
      "", 1.0f, "lightshafts!=0"},
 
     // Labelled for what it does, with the term of art in brackets: nobody

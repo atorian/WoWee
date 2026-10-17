@@ -4866,6 +4866,12 @@ float Renderer::volumetricFogExtinction() const {
         // open plain's ends far out and gets less. The player's fog slider
         // divides those distances, so it is multiplied back out to reach the
         // zone's number rather than the slider's.
+        //
+        // The weather comes in here too, and only here: the light blends
+        // toward the zone's storm row as it rains or snows, and that row's
+        // fog is the zone's word on how close the weather brings it. A rain
+        // and snow factor of our own on top - up to three times in a storm -
+        // closed a jungle in to a wall in the first shower.
         const float strength = lightingManager->getFogStrength();
         if (strength > 0.001f && lp.fogEnd > 1.0f) {
             const float authoredEnd = lp.fogEnd * strength;
@@ -4875,16 +4881,6 @@ float Renderer::volumetricFogExtinction() const {
         const float hours = lightingManager->getTimeOfDayHours();
         const float dawn = 1.0f - glm::smoothstep(0.0f, 2.5f, std::abs(hours - 6.5f));
         extinction *= 1.0f + 0.8f * dawn;
-    }
-
-    if (weather) {
-        const float w = glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
-        switch (weather->getWeatherType()) {
-            case Weather::Type::RAIN:  extinction *= 1.0f + 1.2f * w; break;
-            case Weather::Type::SNOW:  extinction *= 1.0f + 0.8f * w; break;
-            case Weather::Type::STORM: extinction *= 1.0f + 2.0f * w; break;
-            default: break;
-        }
     }
 
     // Indoors the outdoor air mostly stays outside. Not all of it: a hall
