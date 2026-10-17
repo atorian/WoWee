@@ -123,9 +123,11 @@ ninja -C build-dev scene_render
 tools/scene_render.sh tools/scene_render/scenes/lamppost.json build-dev/scratch/lamppost.png
 ```
 
-A renderer edit rebuilds only the renderer and this; shader edits only need
-`ninja -C build-dev wowee_shaders`. Use it before reaching for the client, and
-keep it building: nothing in `wowee_render` may need the game to link.
+A renderer edit rebuilds only the renderer and this; a shader edit only its
+`.spv`. Building `scene_render` (or `wowee_shaders` alone) also copies the
+built shaders and the rest of `assets/` into `build-dev/bin`, where it loads
+them from - build it before every run. Use it before reaching for the client,
+and keep it building: nothing in `wowee_render` may need the game to link.
 
 ### Testing the game without the client
 

@@ -530,11 +530,26 @@ endif()
 option(WOWEE_SHADER_DEBUG_INFO
        "Compile shaders unoptimised and with debug info, so GPU validation can name a line" OFF)
 
+# Where the programs run from, and so where they look for assets/: bin, or
+# bin/<config> under a multi-config generator.
+get_property(WOWEE_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(WOWEE_MULTI_CONFIG)
+    set(WOWEE_RUNTIME_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>)
+else()
+    set(WOWEE_RUNTIME_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+endif()
+# Copies only what changed, where CMake can; older ones copy everything.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.26)
+    set(WOWEE_COPY_DIRECTORY copy_directory_if_different)
+else()
+    set(WOWEE_COPY_DIRECTORY copy_directory)
+endif()
+
 # Function to compile GLSL shaders to SPIR-V
 function(compile_shaders TARGET_NAME)
     set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders)
     # Compile in place, next to the GLSL. The .spv files are tracked (they are the
-    # fallback when glslc is absent), and the POST_BUILD step below copies the whole
+    # fallback when glslc is absent), and wowee_runtime_assets copies the whole
     # source assets/ tree over the runtime one - so compiling into the runtime tree
     # would just be overwritten by the committed .spv, silently running stale shaders.
     set(SPV_DIR ${SHADER_DIR})
@@ -610,7 +625,15 @@ function(compile_shaders TARGET_NAME)
         list(APPEND SPV_OUTPUTS ${SPV_DIR}/${VARIANT_OUT})
     endforeach()
 
-    add_custom_target(${TARGET_NAME}_shaders ALL DEPENDS ${SPV_OUTPUTS})
+    # Built shaders are only of use where the programs load them, so the target
+    # puts them there too: building it alone after a shader edit leaves nothing
+    # stale for the next run to draw with.
+    add_custom_target(${TARGET_NAME}_shaders ALL
+        COMMAND ${CMAKE_COMMAND} -E ${WOWEE_COPY_DIRECTORY}
+                ${SHADER_DIR} ${WOWEE_RUNTIME_DIR}/assets/shaders
+        DEPENDS ${SPV_OUTPUTS}
+        COMMENT "Syncing shaders to ${WOWEE_RUNTIME_DIR}/assets/shaders"
+        VERBATIM)
     add_dependencies(${TARGET_NAME} ${TARGET_NAME}_shaders)
 endfunction()
 
@@ -1505,6 +1528,20 @@ if(GLSLC)
     compile_shaders(wowee)
 endif()
 
+# The source assets/ tree copied to where the programs run from (every build,
+# not just configure). The renderer depends on it, so anything that draws -
+# the client, scene_render, the editor - finds the assets it was built against
+# beside it, rather than whatever the last client build left there.
+add_custom_target(wowee_runtime_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E ${WOWEE_COPY_DIRECTORY}
+            ${CMAKE_CURRENT_SOURCE_DIR}/assets ${WOWEE_RUNTIME_DIR}/assets
+    COMMENT "Syncing assets to ${WOWEE_RUNTIME_DIR}/assets"
+    VERBATIM)
+if(TARGET wowee_shaders)
+    add_dependencies(wowee_runtime_assets wowee_shaders)
+endif()
+add_dependencies(wowee wowee_runtime_assets)
+
 # Version header generated from `git describe`. Regenerated on every build (the
 # script rewrites the header only when the version changed), so tagging a release
 # is enough to update the version shown in the client.
@@ -1725,10 +1762,9 @@ target_precompile_headers(wowee_render PRIVATE
     <glm/glm.hpp>
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
-# The shaders it loads at run time are built beside the binaries that use it.
-if(TARGET wowee_shaders)
-    add_dependencies(wowee_render wowee_shaders)
-endif()
+# The shaders and assets it loads at run time are put beside the binaries that
+# use it.
+add_dependencies(wowee_render wowee_runtime_assets)
 
 add_library(wowee_protocol STATIC ${WOWEE_PROTOCOL_SOURCES})
 target_link_libraries(wowee_protocol PUBLIC wowee_base OpenSSL::Crypto ZLIB::ZLIB)
@@ -1968,16 +2004,6 @@ endif()
 
 
 
-# Copy assets next to the executable (runs every build, not just configure).
-# Uses $<TARGET_FILE_DIR:wowee> so MSVC multi-config generators place assets
-# in bin/Debug/ or bin/Release/ alongside the exe, not the common bin/ parent.
-add_custom_command(TARGET wowee POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/assets
-        $<TARGET_FILE_DIR:wowee>/assets
-    COMMENT "Syncing assets to $<TARGET_FILE_DIR:wowee>/assets"
-)
-
 # Symlink Data/ next to the executable so expansion profiles, opcode tables,
 # and other runtime data files are found when running from the build directory.
 if(NOT WIN32)
@@ -2134,7 +2160,7 @@ if(WOWEE_BUILD_RT_PROBE)
         add_custom_target(rt_lookup_probe_shader DEPENDS ${RT_LOOKUP_SPV})
         add_dependencies(rt_probe rt_lookup_probe_shader)
     endif()
-    add_dependencies(rt_probe wowee_shaders)
+    add_dependencies(rt_probe wowee_runtime_assets)
 endif()
 
 # ---- Tool: mpq_build (loose files → MPQ) ----
@@ -2818,9 +2844,7 @@ if(NOT MSVC)
         target_compile_options(wowee_editor PRIVATE -Werror)
     endif()
 endif()
-if(GLSLC)
-    add_dependencies(wowee_editor wowee_shaders)
-endif()
+add_dependencies(wowee_editor wowee_runtime_assets)
 set_target_properties(wowee_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     EXCLUDE_FROM_ALL $<NOT:$<BOOL:${WOWEE_BUILD_EDITOR}>>
