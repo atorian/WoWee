@@ -53,6 +53,7 @@
 #include "rendering/minimap.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
@@ -132,6 +133,17 @@ bool openAssets(pipeline::AssetManager& assets) {
     }
     if (!assets.initialize(assetPath)) return false;
     if (assetPath != dataPath) assets.setBaseFallbackPath(dataPath, expansion);
+
+    // The expansion's DBC column layouts, as the client sets them: the
+    // renderer reads tables through them (LiquidType.dbc among them).
+    static pipeline::DBCLayout layouts;
+    const std::string layoutsPath = expansionPath + "/dbc_layouts.json";
+    if (layouts.loadFromJson(layoutsPath)) {
+        pipeline::setActiveDBCLayout(&layouts);
+    } else {
+        std::fprintf(stderr, "scene_render: no DBC layouts at %s - tables are read without "
+                             "them\n", layoutsPath.c_str());
+    }
     return true;
 }
 

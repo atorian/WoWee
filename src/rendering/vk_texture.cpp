@@ -3,6 +3,7 @@
 #include "core/logger.hpp"
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -167,6 +168,138 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
     if (generateMips) {
         generateMipmaps(ctx, format, width, height);
     }
+
+    if (ctx.isInUploadBatch()) {
+        ctx.deferStagingCleanup(staging);
+    } else {
+        destroyBuffer(ctx.getAllocator(), staging);
+    }
+    return true;
+}
+
+bool VkTexture::uploadArray(VkContext& ctx, const std::vector<std::vector<uint8_t>>& levels,
+    uint32_t width, uint32_t height, uint32_t layers, VkFormat format, uint32_t bytesPerTexel,
+    std::source_location where)
+{
+    if (levels.empty() || width == 0 || height == 0 || layers == 0 || bytesPerTexel == 0) return false;
+    // Every level has to hold every layer at that level's size.
+    {
+        uint32_t w = width, h = height;
+        for (const auto& level : levels) {
+            if (level.size() != static_cast<size_t>(w) * h * layers * bytesPerTexel) {
+                LOG_ERROR("Array texture ", width, "x", height, "x", layers,
+                          ": a mip level holds ", level.size(), " bytes, not ",
+                          static_cast<size_t>(w) * h * layers * bytesPerTexel);
+                return false;
+            }
+            w = std::max(1u, w / 2);
+            h = std::max(1u, h / 2);
+        }
+    }
+
+    VkDeviceSize totalSize = 0;
+    for (const auto& level : levels) totalSize += level.size();
+    AllocatedBuffer staging = createBuffer(ctx.getAllocator(), totalSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    void* mapped = nullptr;
+    vmaMapMemory(ctx.getAllocator(), staging.allocation, &mapped);
+    VkDeviceSize offset = 0;
+    for (const auto& level : levels) {
+        std::memcpy(static_cast<uint8_t*>(mapped) + offset, level.data(), level.size());
+        offset += level.size();
+    }
+    vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
+
+    destroy(device_, allocator_);
+    device_ = ctx.getDevice();
+    allocator_ = ctx.getAllocator();
+    mipLevels_ = static_cast<uint32_t>(levels.size());
+
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.format = format;
+    imgInfo.extent = {.width = width, .height = height, .depth = 1};
+    imgInfo.mipLevels = mipLevels_;
+    imgInfo.arrayLayers = layers;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    if (vmaCreateImage(allocator_, &imgInfo, &allocInfo, &image_.image, &image_.allocation,
+                       nullptr) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create array texture ", width, "x", height, "x", layers);
+        image_ = {};
+        destroyBuffer(ctx.getAllocator(), staging);
+        return false;
+    }
+    {
+        char name[96];
+        const char* file = where.file_name();
+        if (const char* slash = std::strrchr(file, '/')) file = slash + 1;
+        std::snprintf(name, sizeof(name), "img array %ux%ux%u mips=%u fmt=%d from %s:%u",
+                      width, height, layers, mipLevels_, static_cast<int>(format), file,
+                      where.line());
+        vmaSetAllocationName(allocator_, image_.allocation, name);
+    }
+    image_.extent = {.width = width, .height = height};
+    image_.format = format;
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = image_.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
+                                 .levelCount = mipLevels_, .baseArrayLayer = 0,
+                                 .layerCount = layers};
+    if (vkCreateImageView(device_, &viewInfo, nullptr, &image_.imageView) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create the view of array texture ", width, "x", height, "x", layers);
+        destroyImage(device_, allocator_, image_);
+        destroyBuffer(ctx.getAllocator(), staging);
+        return false;
+    }
+
+    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier toDst{};
+        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = image_.image;
+        toDst.subresourceRange = viewInfo.subresourceRange;
+        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+        VkDeviceSize bufOffset = 0;
+        uint32_t w = width, h = height;
+        for (uint32_t i = 0; i < mipLevels_; ++i) {
+            VkBufferImageCopy region{};
+            region.bufferOffset = bufOffset;
+            region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = i,
+                                       .baseArrayLayer = 0, .layerCount = layers};
+            region.imageExtent = {.width = w, .height = h, .depth = 1};
+            vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            bufOffset += levels[i].size();
+            w = std::max(1u, w / 2);
+            h = std::max(1u, h / 2);
+        }
+
+        VkImageMemoryBarrier toRead = toDst;
+        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &toRead);
+    });
 
     if (ctx.isInUploadBatch()) {
         ctx.deferStagingCleanup(staging);

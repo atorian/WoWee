@@ -122,7 +122,10 @@ struct WMOLiquid {
     uint32_t xTiles = 0;        // Tiles in X (= xVerts - 1)
     uint32_t yTiles = 0;        // Tiles in Y (= yVerts - 1)
     glm::vec3 basePosition;     // Corner position in model space
-    uint16_t materialId = 0;    // Liquid material/type
+    uint16_t materialId = 0;    // MLIQ's material: an index into the root's MOMT
+    /// The LiquidType.dbc row the group's liquid is, by the client's rule
+    /// over the group header and the root flags (see wmoGroupLiquidType).
+    uint16_t liquidType = 0;
     std::vector<float> heights; // Height per vertex (xVerts * yVerts)
     std::vector<uint8_t> flags; // Flags per tile (xTiles * yTiles)
 
@@ -202,6 +205,9 @@ struct WMOModel {
     glm::vec3 ambientColor;     // MOHD ambient color (used for interior group lighting)
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
+    /// MOHD flags. 0x4: group liquid is named by its LiquidType.dbc id.
+    uint16_t flags = 0;
+    static constexpr uint16_t kFlagLiquidTypeIsDbcId = 0x4;
 
     // Materials and textures
     std::vector<WMOMaterial> materials;

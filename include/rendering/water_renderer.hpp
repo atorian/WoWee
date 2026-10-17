@@ -1,7 +1,10 @@
 #pragma once
 
 #include "rendering/liquid_scene.hpp"
+#include "rendering/vk_texture.hpp"
 
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -12,6 +15,7 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace rendering {
 
 class Camera;
@@ -94,6 +98,11 @@ public:
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
     bool hasSurfaces() const { return !drawn_.empty(); }
 
+    /// Where each liquid's animated ripple frames come from: LiquidType.dbc
+    /// names them, the assets hold them. Set before any surface is added;
+    /// without them every liquid gets the shader's own ripple.
+    void setLiquidAssets(pipeline::AssetManager* assets, const pipeline::LiquidTypeTable* types);
+
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
     bool isEnabled() const { return renderingEnabled; }
 
@@ -110,6 +119,13 @@ public:
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
 private:
+    /// One liquid texture's frames on the GPU, shared by every surface of
+    /// every liquid that names it.
+    struct RippleSet {
+        std::unique_ptr<VkTexture> texture;
+        uint32_t frames = 0;
+    };
+
     /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
     struct DrawnSurface {
         LiquidSurfaceId id = 0;
@@ -122,6 +138,10 @@ private:
         uint32_t wmoId = 0;
         uint8_t width = 0;
         uint8_t height = 0;
+        /// 0 water, 1 ocean, 2 magma, 3 slime - LiquidType.dbc's word for it.
+        uint8_t basicType = 0;
+        /// The liquid's ripple frames, or none for the shader's own.
+        const RippleSet* ripple = nullptr;
 
         ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -141,8 +161,19 @@ private:
     void destroyWaterMesh(DrawnSurface& drawn);
     void destroyAllDrawn();
 
-    glm::vec4 getLiquidColor(uint16_t liquidType) const;
-    float getLiquidAlpha(uint16_t liquidType) const;
+    glm::vec4 getLiquidColor(uint8_t basicType) const;
+    float getLiquidAlpha(uint8_t basicType) const;
+
+    /// The frames for a liquid id, loaded the first time it is asked for;
+    /// null for a liquid with none, or whose frames did not load (said once).
+    const RippleSet* rippleFor(uint16_t liquidType);
+    /// Every water's and sea's frames, loaded up front.
+    void preloadRipples();
+    pipeline::AssetManager* assets_ = nullptr;
+    const pipeline::LiquidTypeTable* liquidTypes_ = nullptr;
+    std::unordered_map<std::string, RippleSet> rippleSets_;
+    VkTexture flatRipple_;
+    VkSampler rippleSampler_ = VK_NULL_HANDLE;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();

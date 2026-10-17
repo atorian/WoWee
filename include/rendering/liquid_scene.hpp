@@ -9,6 +9,8 @@
 
 #include <glm/glm.hpp>
 
+#include "pipeline/liquid_types.hpp"
+
 namespace wowee {
 namespace pipeline {
 struct ADTTerrain;
@@ -36,7 +38,10 @@ struct LiquidSurface {
     glm::vec3 stepY{0.0f};
     float minHeight = 0.0f;
     float maxHeight = 0.0f;
+    /// The LiquidType.dbc row, however the map data named it.
     uint16_t liquidType = 0;
+    /// What that row says the liquid is.
+    pipeline::LiquidBasic basic = pipeline::LiquidBasic::Water;
 
     /// The terrain tile it came with, or -1 for a WMO's liquid.
     int tileX = -1;
@@ -55,7 +60,7 @@ struct LiquidSurface {
     std::vector<uint8_t> mask;
 
     /// 0 inland water, 1 ocean, 2 magma, 3 slime.
-    [[nodiscard]] uint8_t basicType() const;
+    [[nodiscard]] uint8_t basicType() const { return static_cast<uint8_t>(basic); }
     [[nodiscard]] bool cellHasLiquid(int x, int y) const;
 };
 
@@ -130,6 +135,14 @@ public:
     /// The listener is told of every surface already here before this returns.
     [[nodiscard]] Subscription subscribe(LiquidSceneListener& listener);
 
+    /// LiquidType.dbc, for what each liquid id is. Set before any liquid is
+    /// added; until then only the four basic rows are known. Must outlive
+    /// the scene's use of it.
+    void setLiquidTypes(const pipeline::LiquidTypeTable* types);
+    [[nodiscard]] const pipeline::LiquidTypeTable& liquidTypes() const { return *types_; }
+    /// What a liquid id is, by that table.
+    [[nodiscard]] pipeline::LiquidBasic basicOf(uint16_t liquidType) const;
+
     /// A terrain tile's liquid. Returns how many surfaces it added.
     std::size_t addTerrainTile(const pipeline::ADTTerrain& terrain, int tileX, int tileY);
     /// A WMO group's liquid, placed by the instance's model matrix. False when
@@ -153,6 +166,8 @@ public:
                                                        float maxAbove = 15.0f) const;
     /// The liquid type of the highest surface over a point.
     [[nodiscard]] std::optional<uint16_t> typeAt(float x, float y) const;
+    /// What that liquid is: water, ocean, magma or slime.
+    [[nodiscard]] std::optional<pipeline::LiquidBasic> basicTypeAt(float x, float y) const;
     /// Whether a point falls inside a WMO's liquid grid.
     [[nodiscard]] bool isWmoLiquidAt(float x, float y) const;
     /// The height of the water (not magma or slime) whose surface centre is
@@ -201,6 +216,8 @@ private:
 
     std::vector<LiquidSurface> surfaces_;
     LiquidSurfaceId nextId_ = 1;
+    pipeline::LiquidTypeTable basicTypes_ = pipeline::LiquidTypeTable::basicOnly();
+    const pipeline::LiquidTypeTable* types_ = &basicTypes_;
     std::vector<LiquidSceneListener*> listeners_;
 
     std::unordered_map<LiquidSurfaceId, SurfacePatches> surfacePatches_;

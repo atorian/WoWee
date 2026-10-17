@@ -1,5 +1,6 @@
 #include "core/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
+#include "pipeline/liquid_types.hpp"
 #include "core/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -164,11 +165,17 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
                 int wci = w.value("chunk", -1);
                 if (wci < 0 || wci >= 256) continue;
                 ADTTerrain::WaterLayer wl;
-                wl.liquidType = w.value("type", 0u);
-                // Known WoW liquid types: 0=water, 1=ocean, 2=magma, 3=slime.
-                // Out-of-range values would default to plain water in render
-                // but might break server-side liquid behaviour.
-                if (wl.liquidType > 3) wl.liquidType = 0;
+                // The format says which basic kind the water is: 0 water,
+                // 1 ocean, 2 magma, 3 slime. Held as the LiquidType.dbc row,
+                // as MH2O holds it, so the field means one thing however the
+                // tile was loaded.
+                uint32_t kind = w.value("type", 0u);
+                if (kind > 3) {
+                    LOG_WARNING("Open terrain ", wotPath, ": water in chunk ", wci, " has type ",
+                                kind, ", not 0-3 (water, ocean, magma, slime) - loaded as water");
+                    kind = 0;
+                }
+                wl.liquidType = basicLiquidTypeId(static_cast<LiquidBasic>(kind));
                 wl.maxHeight = w.value("height", 0.0f);
                 // NaN water height would produce NaN vertex positions and
                 // a degenerate GPU draw, or crash the water mesh build.

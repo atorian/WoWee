@@ -353,14 +353,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             grounded = true;
             inWater = false;
         } else if (waterH && targetPos.z < *waterH) {
-            std::optional<uint16_t> waterType;
-            if (liquidScene) {
-                waterType = liquidScene->typeAt(targetPos.x, targetPos.y);
-            }
-            bool isOcean = false;
-            if (waterType && *waterType != 0) {
-                isOcean = (((*waterType - 1) % 4) == 1);
-            }
+            const bool isOcean = liquidScene &&
+                liquidScene->basicTypeAt(targetPos.x, targetPos.y) == pipeline::LiquidBasic::Ocean;
             // Depth gate only applies when ENTERING swim (e.g. don't start
             // swimming in a dry cave beneath a lake's water plane). Once
             // swimming, any depth is fine - you can only get deep by
@@ -2427,14 +2421,8 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
     constexpr float MAX_SWIM_DEPTH_FROM_SURFACE = 12.0f;
     bool inWater = false;
     if (waterH && feetZ < *waterH) {
-        std::optional<uint16_t> waterType;
-        if (liquidScene) {
-            waterType = liquidScene->typeAt(newPos.x, newPos.y);
-        }
-        bool isOcean = false;
-        if (waterType && *waterType != 0) {
-            isOcean = (((*waterType - 1) % 4) == 1);
-        }
+        const bool isOcean = liquidScene &&
+            liquidScene->basicTypeAt(newPos.x, newPos.y) == pipeline::LiquidBasic::Ocean;
         bool depthAllowed = isOcean || ((*waterH - feetZ) <= MAX_SWIM_DEPTH_FROM_SURFACE);
         if (!depthAllowed) {
             inWater = false;
