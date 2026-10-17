@@ -1,0 +1,75 @@
+// The wind's sea as the water reads it: the surface OceanWaves builds every
+// frame, three cascades of it, each repeating over its own patch.
+//
+// Needs, declared before it: WaterFrameData (oceanCascades, oceanSea) and
+// the surface itself, `oceanSurface`, a sampler2DArray. Layers as
+// ocean_waves.glsli writes them: c the displacement (Dx, Dy, H, Dxy),
+// 3 + c the derivatives (Hx, Hy, Dxx, Dyy), 6 + c their squares.
+
+#include "ocean_spectrum.glsli"
+#include "ocean_fft.glsli"
+
+const float kOceanTexels = 256.0;  // kOceanSize, as a float
+
+/// Where `rest` falls on cascade `c`'s patch: measured from the cascade's
+/// origin near the player, and on its texels' centres.
+vec2 oceanPatchUv(vec2 rest, int c) {
+    vec4 cascade = oceanCascades[c];
+    return (rest - cascade.xy) * cascade.z + 0.5 / kOceanTexels;
+}
+
+/// Where the still water at `rest` is carried by the waves a mesh `step`
+/// yards apart can carry. A wave of two steps lands its vertices on crest
+/// and trough alike, and is no longer a wave but a slow false plaid of the
+/// mesh's spacing beating against it; the mip whose texel is the step has
+/// filtered those out and keeps the longer ones.
+vec3 oceanDisplacementAt(vec2 rest, float step) {
+    vec3 displacement = vec3(0.0);
+    for (int c = 0; c < kOceanCascades; ++c) {
+        float texel = oceanCascades[c].w / kOceanTexels;
+        float lod = max(log2(max(step, 1e-4) / texel), 0.0);
+        displacement += textureLod(oceanSurface, vec3(oceanPatchUv(rest, c), float(c)), lod).xyz;
+    }
+    return displacement;
+}
+
+/// The sea at a pixel, for its light: the slope of the surface the water
+/// has been carried into, of the waves the pixel is big enough to show;
+/// the mean square slope of those it is not, which still scatter the sun
+/// and go into the highlight's width (LEAN mapping: the filtered squares
+/// less the square of the filtered slope); the height; and the Jacobian,
+/// how much riding toward the crests has bunched the surface - below a
+/// half, it is breaking. `carried` is 0 where the surface is held flat and
+/// lit by its slopes alone.
+struct OceanLight {
+    vec2 slope;
+    float unseenSlopeSq;
+    float height;
+    float jacobian;
+};
+
+OceanLight oceanLightAt(vec2 rest, float carried) {
+    vec4 derivatives = vec4(0.0);
+    float stretchXY = 0.0;
+    float height = 0.0;
+    float unseen = 0.0;
+    for (int c = 0; c < kOceanCascades; ++c) {
+        vec2 uv = oceanPatchUv(rest, c);
+        vec4 displacement = texture(oceanSurface, vec3(uv, float(c)));
+        vec4 d = texture(oceanSurface, vec3(uv, float(kOceanCascades + c)));
+        vec4 squares = texture(oceanSurface, vec3(uv, float(2 * kOceanCascades + c)));
+        derivatives += d;
+        stretchXY += displacement.w;
+        height += displacement.z;
+        unseen += max(squares.x - d.x * d.x, 0.0) + max(squares.y - d.y * d.y, 0.0);
+    }
+    derivatives.zw *= carried;
+    stretchXY *= carried;
+    OceanSurface s = oceanSurfaceFrom(vec3(0.0, 0.0, height), derivatives, stretchXY);
+    OceanLight light;
+    light.slope = s.slope;
+    light.unseenSlopeSq = unseen;
+    light.height = height;
+    light.jacobian = s.jacobian;
+    return light;
+}

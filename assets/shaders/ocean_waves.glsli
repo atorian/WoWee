@@ -1,0 +1,36 @@
+// What the ocean's compute passes share (OceanWaves): the images they work
+// in and the push constants that say what this frame's sea is.
+//
+//   state      r32f, one layer a cascade: each wave vector's height
+//              variance now, following its wind (ocean_spectrum.comp)
+//   modes      rgba32f, two layers a cascade: the packed complex fields of
+//              ocean_fft.glsli's oceanEvolve, transformed in place, rows
+//              then columns (ocean_evolve.comp, ocean_fft.comp)
+//   surface    rgba16f, three layers a cascade, mip 0 written here, the rest
+//              filtered down from it: kOceanDisplacementLayer + c holds
+//              (Dx, Dy, H, Dxy), kOceanDerivativeLayer + c (Hx, Hy, Dxx, Dyy),
+//              kOceanMomentLayer + c (Hx^2, Hy^2, Hx Hy, 0), which the water
+//              reads for the slope its pixels are too coarse to show
+//              (ocean_assemble.comp)
+
+#include "ocean_spectrum.glsli"
+#include "ocean_fft.glsli"
+
+layout(set = 0, binding = 0, r32f) uniform image2DArray oceanState;
+layout(set = 0, binding = 1, rgba32f) uniform image2DArray oceanModes;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2DArray oceanSurface;
+
+const int kOceanDisplacementLayer = 0;
+const int kOceanDerivativeLayer = kOceanCascades;
+const int kOceanMomentLayer = 2 * kOceanCascades;
+
+layout(push_constant) uniform OceanPush {
+    vec2 toward;       // unit, the way the wind blows
+    float speed;       // yards a second, gust in
+    float slopeScale;  // oceanSlopeScale(speed)
+    float deltaTime;   // seconds since the last frame's sea
+    float time;        // the sea's clock, seconds, below kOceanRepeatSeconds
+    float ride;        // oceanRide of the sea as it stands
+    int restart;       // 1: the sea as the wind has it, no growing toward it
+    int vertical;      // ocean_fft.comp: 0 transforms rows, 1 columns
+} ocean;

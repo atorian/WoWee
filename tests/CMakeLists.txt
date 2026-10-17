@@ -2145,12 +2145,17 @@ wowee_add_test(test_liquid_types
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
             ${TEST_COMMON_SOURCES})
 
-# ── test_wind_waves ──────────────────────────────────────────
-# The waves the wind raises on the water: how steep, how fast, which way.
-wowee_add_test(test_wind_waves
-    SOURCES test_wind_waves.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/wind_waves.cpp
-            ${TEST_COMMON_SOURCES})
+# ── test_ocean_spectrum ──────────────────────────────────────
+# The wind's sea as the ocean's compute shaders draw it: steep, downwind,
+# its waves as long and as fast as the sea's.
+wowee_add_test(test_ocean_spectrum
+    SOURCES test_ocean_spectrum.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
+
+# ── test_ocean_fft ───────────────────────────────────────────
+# The sea's surface out of its spectrum, by the compute shaders' own FFT.
+wowee_add_test(test_ocean_fft
+    SOURCES test_ocean_fft.cpp)
 
 # ── test_water_reflection ────────────────────────────────────
 # The mirrored camera sees what stands above the water and nothing of the bed.

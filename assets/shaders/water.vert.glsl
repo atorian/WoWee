@@ -39,16 +39,17 @@ layout(push_constant) uniform Push {
 } push;
 
 const int MAX_WAKE_POINTS = 32;
-const int WIND_WAVE_COUNT = 32;  // kWindWaveCount in wind_waves.hpp
+const int OCEAN_CASCADES = 3;  // kOceanCascadeCount in ocean_waves.hpp
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;
     vec4 wakePoints[MAX_WAKE_POINTS];
-    vec4 waveOrigin;   // xy = origin of positions, z = how far points ride toward the crests
-    vec4 windWaves[WIND_WAVE_COUNT];
+    vec4 oceanCascades[OCEAN_CASCADES];  // xy = origin, z = 1 / patch, w = patch (yards)
+    vec4 oceanSea;                       // x = rms height, y = ride, z = mean square slope
 };
+layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 
-#include "gerstner_waves.glsli"
+#include "ocean_surface.glsli"
 #include "water_surface.glsli"
 
 layout(location = 0) in vec3 aPos;

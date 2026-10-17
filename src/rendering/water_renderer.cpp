@@ -1,5 +1,4 @@
 #include "rendering/water_renderer.hpp"
-#include "rendering/wind_waves.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -119,17 +118,30 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         reflUBOBinding.stageFlags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     }
 
+    // The sea's surface (OceanWaves): the vertices are carried by it, the
+    // pixels lit by its slopes.
+    VkDescriptorSetLayoutBinding oceanBinding{};
+    oceanBinding.binding = 4;
+    oceanBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    oceanBinding.descriptorCount = 1;
+    oceanBinding.stageFlags = reflUBOBinding.stageFlags;
+
     sceneSetLayout = createDescriptorSetLayout(device,
-        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding});
+        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding});
     if (!sceneSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create scene set layout");
         return false;
     }
 
-    // Pool needs 3 combined image samplers + 1 uniform buffer per frame
+    if (!ocean_.initialize(vkCtx)) {
+        LOG_ERROR("WaterRenderer: the sea's surface could not be made - no water drawn");
+        return false;
+    }
+
+    // Pool needs 4 combined image samplers + 1 uniform buffer per frame
     std::array<VkDescriptorPoolSize, 2> scenePoolSizes{};
     scenePoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    scenePoolSizes[0].descriptorCount = 3 * SCENE_HISTORY_FRAMES;
+    scenePoolSizes[0].descriptorCount = 4 * SCENE_HISTORY_FRAMES;
     scenePoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     scenePoolSizes[1].descriptorCount = SCENE_HISTORY_FRAMES;
     VkDescriptorPoolCreateInfo scenePoolInfo{};
@@ -240,26 +252,9 @@ VkPipeline WaterRenderer::buildWaterPipeline(VkRenderPass renderPass, VkSampleCo
 
 void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection,
                                      glm::vec2 nearby) {
-    sea_.advance(deltaSeconds, windSpeed, windDirection);
-    const auto waves = sea_.drawn();
-    // The shader measures position from an origin near the player, and the
-    // phase here makes up the rest in double: k.x on the world's own
-    // coordinates is tens of thousands of radians, which a float holds to a
-    // few hundredths. The origin moves in whole steps, the phase with it, so
-    // the crests do not move when it does.
-    constexpr float kOriginStep = 512.0f;
-    const glm::dvec2 origin(std::floor(nearby.x / kOriginStep) * kOriginStep,
-                            std::floor(nearby.y / kOriginStep) * kOriginStep);
-    constexpr double kTwoPi = 6.28318530717958647692;
-    for (int i = 0; i < kWindWaveCount; ++i) {
-        const WindWave& w = waves[i];
-        const glm::dvec2 kvec = glm::dvec2(w.direction) * static_cast<double>(w.wavenumber);
-        const double atOrigin = std::fmod(glm::dot(kvec, origin) - sea_.phase(w.train), kTwoPi);
-        frameUBO_.windWaves[i] = glm::vec4(static_cast<float>(kvec.x), static_cast<float>(kvec.y),
-                                           w.amplitude, static_cast<float>(atOrigin));
-    }
-    frameUBO_.waveOrigin = glm::vec4(static_cast<float>(origin.x), static_cast<float>(origin.y),
-                                     windWaveRide(waves), 0.0f);
+    ocean_.advance(deltaSeconds, windSpeed, windDirection, nearby);
+    for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
+    frameUBO_.oceanSea = ocean_.seaState();
 }
 
 void WaterRenderer::recreatePipelines() {
@@ -345,6 +340,7 @@ void WaterRenderer::shutdown() {
     destroyWater1xResources();
     destroyReflectionResources();
     destroySceneHistoryResources();
+    ocean_.shutdown();
     destroy(device, waterPipeline);
     destroy(device, pipelineLayout);
     destroy(device, sceneDescPool);
@@ -555,6 +551,19 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
             w3.pBufferInfo = &reflUBOInfo;
             writes.push_back(w3);
         }
+
+        VkDescriptorImageInfo oceanInfo{};
+        oceanInfo.sampler = ocean_.surfaceSampler();
+        oceanInfo.imageView = ocean_.surfaceView();
+        oceanInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w4{};
+        w4.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w4.dstSet = sh.sceneSet;
+        w4.dstBinding = 4;
+        w4.descriptorCount = 1;
+        w4.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w4.pImageInfo = &oceanInfo;
+        writes.push_back(w4);
 
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }

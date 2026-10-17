@@ -1,23 +1,12 @@
-// Where a point of the still water is drawn: moved by the swell and the
-// wind's waves that geometry this fine can carry, and by the player's
-// ripple. Shared by the vertex stage, which moves the water's own mesh, and
-// the tessellation evaluation stage, which moves the finer mesh near the
+// Where a point of the still water is drawn: carried by the wind's sea as
+// far as geometry this fine can carry it, and by the player's ripple.
+// Shared by the vertex stage, which moves the water's own mesh, and the
+// tessellation evaluation stage, which moves the finer mesh near the
 // camera - both go by `step`, the yards between the vertices doing it.
 //
 // Needs, declared before it: the PerFrame block (fogParams, playerPos), the
-// water push block (push.*, gerstner_waves.glsli) and WaterFrameData
-// (waveOrigin, windWaves).
-
-/// How much of a wave of `wavenumber` (radians a yard) vertices `step` yards
-/// apart can carry: all of it from three a wavelength, none at two. At two
-/// they land on crest and trough alike and the wave stops being a wave;
-/// below that each samples it at a phase that drifts from one to the next,
-/// and the sea showed a slow false plaid of the mesh's spacing beating
-/// against the short waves. The fragment stage lights the surface by those.
-float carriedAt(float wavenumber, float step) {
-    float verticesPerWave = 6.28318 / (wavenumber * max(step, 1e-3));
-    return smoothstep(2.0, 3.0, verticesPerWave);
-}
+// water push block (push.*), WaterFrameData and the sea's surface
+// (ocean_surface.glsli).
 
 vec3 displacedWaterPoint(vec3 rest, float step, float time) {
     vec3 displacement = vec3(0.0);
@@ -27,32 +16,12 @@ vec3 displacedWaterPoint(vec3 rest, float step, float time) {
         float wave = sin(rest.x * freq * 0.5 + time * spd * 0.3) * 0.4
                    + sin(rest.y * freq * 0.3 + time * spd * 0.5) * 0.3;
         displacement.z = wave * amp * 0.5;
-    } else {
-        Swell swell = noSwell();
-        for (int i = 0; i < kSwellWaves; ++i) {
-            SwellWave w = swellWave(i);
-            addSwellWave(swell, w, carriedAt(w.freq, step), rest.xy, time);
-        }
-        displacement = swell.displacement;
-
-        // The wind's waves, where this surface moves at all. A point of the
-        // water goes round in a circle as a wave passes: up by a sin, and
-        // along the way the wave runs by a cos - toward each crest as it
-        // comes, which is what draws crests sharp and troughs wide. Scaled
-        // down by waveOrigin.z when the waves together are steep enough that
-        // the surface would fold over itself.
-        if (push.displaced > 0.5) {
-            vec2 q = rest.xy - waveOrigin.xy;
-            for (int i = 0; i < WIND_WAVE_COUNT; ++i) {
-                vec4 w = windWaves[i];
-                if (w.z <= 0.0) continue;
-                float k = length(w.xy);
-                float a = w.z * carriedAt(k, step);
-                if (a <= 0.0) continue;
-                float theta = dot(w.xy, q) + w.w;
-                displacement += vec3(waveOrigin.z * a * (w.xy / k) * cos(theta), a * sin(theta));
-            }
-        }
+    } else if (push.displaced > 0.5) {
+        // The wind's sea, where this surface moves at all: under a passing
+        // wave a point of the water goes round a circle, up and down and
+        // toward each crest as it comes, which draws crests sharp and
+        // troughs wide (ocean_fft.glsli).
+        displacement = oceanDisplacementAt(rest.xy, step);
     }
     vec3 p = rest + displacement;
 

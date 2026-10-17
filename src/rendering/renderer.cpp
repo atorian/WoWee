@@ -1092,6 +1092,7 @@ bool Renderer::initialize(RenderSurface* surface) {
     overlaySystem_ = std::make_unique<OverlaySystem>(vkCtx);
     renderGraph_->registerResource("shadow_depth");
     renderGraph_->registerResource("volumetric_fog");
+    renderGraph_->registerResource("ocean_surface");
     renderGraph_->registerResource("reflection_texture");
     renderGraph_->registerResource("scene_color");
     renderGraph_->registerResource("scene_depth");
@@ -5057,6 +5058,20 @@ void Renderer::buildFrameGraph() {
             renderVolumetricFog();
         });
     renderGraph_->setPassEnabled("volumetric_fog", volumetricThisFrame_);
+
+    // The sea → outputs the surface every water surface is carried by and
+    // lit from. Only while there is water to draw; the sea's clock and its
+    // wind go on regardless, and it catches up when water comes back.
+    auto oceanSurface = renderGraph_->findResource("ocean_surface");
+    renderGraph_->addPass("ocean_waves", {}, {oceanSurface},
+        [this](VkCommandBuffer) {
+            if (waterRenderer && currentCmd != VK_NULL_HANDLE) {
+                waterRenderer->recordWaves(currentCmd);
+                if (vkCtx) vkCtx->gpuMark(currentCmd, "ocean waves");
+            }
+        });
+    renderGraph_->setPassEnabled("ocean_waves", waterRenderer && waterRenderer->hasSurfaces() &&
+                                                    !waterAblated());
 
     // Reflection pre-pass → outputs reflection_texture (reads scene, so after shadow)
     renderGraph_->addPass("reflection_pass", {shadowDepth}, {reflTex},

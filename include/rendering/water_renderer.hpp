@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rendering/liquid_scene.hpp"
-#include "rendering/wind_waves.hpp"
+#include "rendering/ocean_waves.hpp"
 
 #include <array>
 #include <vector>
@@ -20,8 +20,8 @@ class Camera;
 class VkContext;
 
 /**
- * Water renderer (Vulkan) with planar reflections, Gerstner waves,
- * GGX specular, shoreline foam, and subsurface scattering.
+ * Water renderer (Vulkan) with planar reflections, the wind's sea
+ * (OceanWaves), GGX specular, shoreline foam, and subsurface scattering.
  *
  * Draws the liquid a LiquidScene holds and nothing else: it is told of each
  * surface as it comes and goes (LiquidSceneListener) and keeps only the GPU
@@ -36,11 +36,12 @@ struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
     glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
-    // The wind's waves (advanceWindWaves): position is measured from
-    // waveOrigin.xy; each train is xy = direction times wavenumber, z = its
-    // amplitude in yards, w = its phase at the origin now.
-    glm::vec4 waveOrigin{0.0f};
-    glm::vec4 windWaves[kWindWaveCount]{};
+    // The wind's sea (OceanWaves::cascades, seaState): per cascade xy = the
+    // origin its patch is measured from, z = 1 / patch, w = patch, in yards;
+    // and the sea as it stands - x = root mean square height, y = ride,
+    // z = mean square slope.
+    glm::vec4 oceanCascades[kOceanCascadeCount]{};
+    glm::vec4 oceanSea{0.0f};
 };
 
 class WaterRenderer : public LiquidSceneListener {
@@ -114,6 +115,9 @@ public:
     /// `windSpeed` yards a second (gust in) blowing toward `windDirection`,
     /// measured near `nearby` (the player). Call once per frame.
     void advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection, glm::vec2 nearby);
+    /// Build this frame's sea surface (OceanWaves::record): outside any
+    /// render pass, before the water is drawn.
+    void recordWaves(VkCommandBuffer cmd) { ocean_.record(cmd); }
 
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
@@ -162,8 +166,8 @@ private:
     glm::vec4 getLiquidColor(uint8_t basicType) const;
     float getLiquidAlpha(uint8_t basicType) const;
 
-    /// The wind's sea: every train's steepness and phase, following the wind.
-    WindSea sea_;
+    /// The wind's sea, as the surface every water surface samples.
+    OceanWaves ocean_;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();

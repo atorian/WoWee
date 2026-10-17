@@ -78,8 +78,6 @@ layout(push_constant) uniform Push {
     float pad2;
 } push;
 
-#include "gerstner_waves.glsli"
-
 layout(set = 1, binding = 0) uniform WaterMaterial {
     vec4 waterColor;
     float waterAlpha;
@@ -95,20 +93,23 @@ layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
 // is a churn site that spreads and dies, so a running character leaves a trail
 // of froth rather than a disc stuck under its feet.
 const int MAX_WAKE_POINTS = 32;
-// kWindWaveCount in wind_waves.hpp.
-const int WIND_WAVE_COUNT = 32;
+// kOceanCascadeCount in ocean_waves.hpp.
+const int OCEAN_CASCADES = 3;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;                  // xy = centre, z = cull radius, w = count
     vec4 wakePoints[MAX_WAKE_POINTS]; // xy = world pos, z = age 0..1, w = strength
-    // The wind's waves (WaterRenderer::advanceWindWaves): positions are taken
-    // from waveOrigin.xy, and waveOrigin.z is how far a point rides toward
-    // the crests; each train is xy = direction times wavenumber, z = amplitude
-    // in yards, w = its phase at the origin now.
-    vec4 waveOrigin;
-    vec4 windWaves[WIND_WAVE_COUNT];
+    // The wind's sea (OceanWaves): per cascade xy = the origin its patch is
+    // measured from, z = 1 / patch, w = patch, in yards; and the sea as it
+    // stands, x = its root mean square height, y = how far its water rides
+    // toward the crests, z = its mean square slope.
+    vec4 oceanCascades[OCEAN_CASCADES];
+    vec4 oceanSea;
 };
+layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
+
+#include "ocean_surface.glsli"
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec2 RestPos;   // where this point lies on the still surface
@@ -116,64 +117,6 @@ layout(location = 2) in vec2 TexCoord;
 layout(location = 4) in vec2 ScreenUV;
 
 layout(location = 0) out vec4 outColor;
-
-// ============================================================
-// The wind's waves
-// ============================================================
-
-/// How much of a wave running along `dir` at `frequency` (radians a yard) a
-/// pixel can show: all of it from 64 pixels a wavelength, none by 16. Below
-/// that a wave is not a wave on screen but rows of blocks, which is what the
-/// far sea was made of. Measured along the wave's own direction, because
-/// perspective squeezes the surface in depth only: crests running across the
-/// view compress, crests running into it do not.
-float waveVisibility(vec2 dir, float frequency, vec2 surfaceDx, vec2 surfaceDy) {
-    float yardsPerPixel = max(abs(dot(surfaceDx, dir)), abs(dot(surfaceDy, dir)));
-    float wavelengthPixels = 6.28318 / (frequency * max(yardsPerPixel, 1e-4));
-    return smoothstep(4.0, 8.0, wavelengthPixels);
-}
-
-// The chop the wind raises, as the pixel sees it: the slope of the trains it
-// is big enough to show, and the mean square slope of those it is not -
-// which still scatter the sun, and go into the highlight's width. The trains
-// are windWavesFor's (wind_waves.hpp): as steep together as the sea is in this
-// wind, an equal share to each wavelength, running mostly downwind, each at
-// the speed water carries a wave that long. Nothing drawn from a texture, so
-// nothing repeats and no pattern but the waves' own shows in the glint.
-// Taken at the point's place on the still surface: the geometry has carried
-// it along the waves toward their crests (water_surface.glsli), and the
-// surface it is on is the one those waves make of the still one - its slope,
-// and `lean`, how much riding toward the crests has bunched it there.
-struct WindChop {
-    vec2 slope;
-    float lean;
-    float undrawnSlopeSq;
-};
-
-WindChop windChop(vec2 rest, vec2 surfaceDx, vec2 surfaceDy) {
-    WindChop chop;
-    chop.slope = vec2(0.0);
-    chop.lean = 0.0;
-    chop.undrawnSlopeSq = 0.0;
-    vec2 q = rest - waveOrigin.xy;
-    float ride = waveOrigin.z * push.displaced;
-    for (int i = 0; i < WIND_WAVE_COUNT; ++i) {
-        vec4 w = windWaves[i];
-        if (w.z <= 0.0) continue;
-        float k = length(w.xy);
-        float shown = waveVisibility(w.xy / k, k, surfaceDx, surfaceDy);
-        // A sine of amplitude a has a mean square slope of (k a)^2 / 2.
-        float slopeSq = 0.5 * (k * w.z) * (k * w.z);
-        chop.undrawnSlopeSq += slopeSq * (1.0 - shown * shown);
-        if (shown > 0.001) {
-            // h = a sin(k.q + phase): its gradient is a cos(...) times k.
-            float theta = dot(w.xy, q) + w.w;
-            chop.slope += w.xy * (w.z * shown * cos(theta));
-            chop.lean += ride * k * w.z * shown * sin(theta);
-        }
-    }
-    return chop;
-}
 
 // ============================================================
 // GGX/Cook-Torrance BRDF
@@ -456,32 +399,27 @@ void main() {
     float sunReach = sunOnWater(FragPos);
 
     // --- Normal computation ---
-    // How the surface moves from one pixel to the next, for how small each
-    // wave has become on screen.
+    // How the surface moves from one pixel to the next, along the pixel's
+    // longer side, for patterns drawn the same in every direction: those
+    // have to fit the worst of it.
     vec2 surfaceDx = dFdx(FragPos.xy);
     vec2 surfaceDy = dFdy(FragPos.xy);
-    vec2 restDx = dFdx(RestPos);
-    vec2 restDy = dFdy(RestPos);
-    // Along the pixel's longer side, for patterns drawn the same in every
-    // direction: those have to fit the worst of it.
     float pixelsPerYard = 1.0 / max(max(length(surfaceDx), length(surfaceDy)), 1e-4);
-    // The swell, worked out here rather than taken from the vertices: the mesh
-    // carries only the waves longer than its own step, and a normal
-    // interpolated between vertices could not show the shorter ones - it
-    // showed them as a slow plaid instead. Every wave is in here for as long as
-    // it is big enough on screen to read as one, so far off the swell lies down
-    // into a smooth sheet and close up it has all six.
-    Swell swell = noSwell();
-    for (int i = 0; i < kSwellWaves; ++i) {
-        SwellWave w = swellWave(i);
-        addSwellWave(swell, w, waveVisibility(w.dir, w.freq, restDx, restDy), RestPos, time);
-    }
-    float waveHeight = swell.height;
-    // On the swell, the wind's chop; their slopes add, as the waves do. No
-    // fade by distance on top: each wave already lies down as it gets too
-    // small on screen to show, which is what a distance stood in for.
-    WindChop chop = windChop(RestPos, restDx, restDy);
-    vec3 norm = normalize(vec3(-(swell.slope + chop.slope), 1.0 - swell.lean - chop.lean));
+    // The wind's sea, taken where this point lay on the still surface: the
+    // geometry has carried it along the waves toward their crests, and the
+    // surface it is on is the one those waves make of the still one. Its
+    // slope is of the waves this pixel is big enough to show - the filtered
+    // surface lies down into a smooth sheet as they shrink on screen, which
+    // is what a fade by distance stood in for - and the slope of the rest
+    // goes into the highlight's width below.
+    OceanLight sea = oceanLightAt(RestPos, push.displaced);
+    vec3 norm = normalize(vec3(-sea.slope, 1.0));
+    // The height as a share of the sea's own: one where a crest stands two
+    // of its standard deviations up.
+    float waveHeight = sea.height / max(2.0 * oceanSea.x, 1e-3);
+    // Where riding toward the crests has bunched the surface to under half,
+    // the crest is too steep to hold and is breaking.
+    float breaking = smoothstep(0.55, 0.25, sea.jacobian) * push.displaced;
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;
@@ -717,16 +655,17 @@ void main() {
     vec3 normalDx = dFdx(norm);
     vec3 normalDy = dFdy(norm);
     float spread = min(2.0 * kVariance * (dot(normalDx, normalDx) + dot(normalDy, normalDy)), kMaxSpread);
-    // The sun's path. Only the wind's waves big enough for this pixel tilt
-    // its normal; the rest is chop too small to draw, and it is still there -
-    // it scatters the sun the way it scattered it in Cox and Munk's
-    // photographs. So its slope goes into the highlight's width, as GGX alpha
-    // squared = 2 x mean square slope. Close up the sun glints off the drawn
-    // crests; further off fewer are drawn, and the highlight widens into a
-    // glitter path running to the horizon; in still air there is none and the
-    // sun is a sharp disc.
+    // The sun's path. Only the waves big enough for this pixel tilt its
+    // normal; the rest is chop too small to draw, and it is still there - it
+    // scatters the sun the way it scattered it in Cox and Munk's photographs.
+    // So its slope goes into the highlight's width: a Beckmann surface whose
+    // mean square slope, both ways together, is alpha squared, which GGX
+    // follows near its peak. Close up the sun glints off the drawn crests;
+    // further off fewer are drawn, and the highlight widens into a glitter
+    // path running to the horizon; in still air there is none and the sun is
+    // a sharp disc.
     float ggxAlpha = kSurfaceRoughness * kSurfaceRoughness;  // DistributionGGX squares roughness
-    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread + 2.0 * chop.undrawnSlopeSq, 0.0, 1.0);
+    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread + sea.unseenSlopeSq, 0.0, 1.0);
     float roughness = sqrt(sqrt(alphaSq));
     vec3 halfDir = normalize(ldir + viewDir);
     float D = DistributionGGX(norm, halfDir, roughness);
@@ -933,12 +872,14 @@ void main() {
     }
 
     // ============================================================
-    // Wave crest foam (ocean only) - particle-based
+    // Whitecaps - particle-based
     // ============================================================
-    // Only on a crest: the mask is zero below half wave height, and the
-    // cellular field it would multiply is the expensive part.
-    if (basicType > 0.5 && basicType < 1.5 && push.waveAmp > 0.0 && waveHeight > 0.5) {
-        float crestMask = smoothstep(0.5, 1.0, waveHeight);
+    // Only where a crest is breaking (`breaking`, from how far riding
+    // toward it has bunched the surface): a wind of a few yards a second
+    // breaks none, a gale many. The mask is zero elsewhere, and the cellular
+    // field it would multiply is the expensive part.
+    if (basicType < 1.5 && breaking > 0.001) {
+        float crestMask = breaking;
         vec2 crestWarp = vec2(
             noiseValue(FragPos.xy * 1.8 + time * 0.1) - 0.5,
             noiseValue(FragPos.xy * 1.8 + vec2(53.0) + time * 0.07) - 0.5

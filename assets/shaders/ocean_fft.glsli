@@ -1,0 +1,154 @@
+// The sea's surface out of its spectrum (ocean_spectrum.glsli), in three
+// steps the ocean's compute shaders take every frame:
+//  - oceanEvolve: each wave vector's complex height now, and what follows
+//    from it - how far it carries the water toward its crests, and the
+//    slopes and stretches of both - packed two real fields to a complex
+//    number, since each of the fields is real;
+//  - oceanStockhamButterfly: the radix-2 Stockham inverse FFT that turns a
+//    row, then a column, of those into the surface on the patch's grid;
+//  - oceanSurfaceAt: the fields of one grid point unpacked, with the
+//    normal of the surface the water has been carried into.
+//
+// Plain functions of their arguments, so the tests include this file as
+// C++ (glsl_as_cpp.hpp) and run the FFT the shaders run.
+
+/// Complex numbers as vec2(real, imaginary).
+vec2 oceanComplexMul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+vec2 oceanConjugate(vec2 a) {
+    return vec2(a.x, -a.y);
+}
+/// e^(i angle).
+vec2 oceanPhasor(float angle) {
+    return vec2(cos(angle), sin(angle));
+}
+/// p + i q, for two complex numbers that are each the transform of a real
+/// field: the inverse transform of the sum is p's field in its real part
+/// and q's in its imaginary one.
+vec2 oceanPackPair(vec2 p, vec2 q) {
+    return vec2(p.x - q.y, p.y + q.x);
+}
+
+/// What one wave vector's draw holds at the start: its random pair times
+/// half the root of its height variance, so that it and its mirror together
+/// carry `variance` into the real surface.
+vec2 oceanInitialHeight(vec2 gaussianPair, float variance) {
+    float amplitude = 0.5 * sqrt(max(variance, 0.0));
+    return gaussianPair * amplitude;
+}
+
+/// The fields of a wave vector, packed two to a complex number:
+///   modesA = (H + i Dx, Dy + i Hx), modesB = (Hy + i Dxx, Dyy + i Dxy)
+/// H the height; D the ride toward the crests (x, y); Hx, Hy its slopes;
+/// Dxx, Dyy, Dxy the ride's own derivatives, which stretch the surface.
+struct OceanModes {
+    vec4 modesA;
+    vec4 modesB;
+};
+
+/// Wave vector `k` at `time` seconds, from its own initial height `h0` and
+/// its mirror's (-k's) `h0Mirror`, each wave running at `omega` radians a
+/// second along its own k - so the pair are the waves running both ways
+/// along that line, and the surface they make together is real.
+/// `ride` is how far points ride toward the crests (oceanRide).
+OceanModes oceanEvolve(vec2 k, vec2 h0, vec2 h0Mirror, float omega, float time, float ride) {
+    vec2 turn = oceanPhasor(omega * time);
+    // A wave e^(i (k.x - w t)) runs along k.
+    vec2 h = oceanComplexMul(h0, oceanConjugate(turn)) + oceanComplexMul(oceanConjugate(h0Mirror), turn);
+    float kl = length(k);
+    vec2 unit = kl > 0.0 ? k / kl : vec2(0.0);
+    // i h, times each factor: the derivative of e^(i k.x) along x is i kx.
+    vec2 ih = vec2(-h.y, h.x);
+    vec2 dx = ih * (ride * unit.x);
+    vec2 dy = ih * (ride * unit.y);
+    vec2 hx = ih * k.x;
+    vec2 hy = ih * k.y;
+    // i kx times i unit.x h: -kx unit.x h.
+    vec2 dxx = h * (-ride * k.x * unit.x);
+    vec2 dyy = h * (-ride * k.y * unit.y);
+    vec2 dxy = h * (-ride * k.x * unit.y);
+    OceanModes m;
+    vec2 a0 = oceanPackPair(h, dx);
+    vec2 a1 = oceanPackPair(dy, hx);
+    vec2 b0 = oceanPackPair(hy, dxx);
+    vec2 b1 = oceanPackPair(dyy, dxy);
+    m.modesA = vec4(a0.x, a0.y, a1.x, a1.y);
+    m.modesB = vec4(b0.x, b0.y, b1.x, b1.y);
+    return m;
+}
+
+/// One butterfly of stage `stage` of the inverse radix-2 Stockham FFT of
+/// `n` points: butterfly `j` of n / 2 reads source0 and source1 of the last
+/// stage's results and writes target0 = s0 + w s1 and target1 = s0 - w s1.
+/// After log2(n) stages, starting with stage 0, point x holds the sum over
+/// m of the input's m e^(2 pi i m x / n). Stockham's ordering needs no bit
+/// reversal: every stage reads and writes in place of its own pattern, so
+/// a row goes back and forth between two buffers and comes out in order.
+struct OceanButterfly {
+    int source0;
+    int source1;
+    int target0;
+    int target1;
+    vec2 twiddle;
+};
+
+OceanButterfly oceanStockhamButterfly(int j, int stage, int n) {
+    int span = 1 << stage;
+    int within = j % span;
+    OceanButterfly b;
+    b.source0 = j;
+    b.source1 = j + n / 2;
+    b.target0 = (j / span) * 2 * span + within;
+    b.target1 = b.target0 + span;
+    b.twiddle = oceanPhasor(kOceanPi * float(within) / float(span));
+    return b;
+}
+
+/// The grid's wave vectors are centred on k = 0, so the plain inverse
+/// transform of them is the surface times (-1)^(x + y).
+float oceanGridSign(int x, int y) {
+    return ((x + y) & 1) == 0 ? 1.0 : -1.0;
+}
+
+/// The surface at one grid point, out of its two transformed, sign-righted
+/// texels. `displacement` is where the point of the still water has gone
+/// (x, y along the waves, z up); `derivatives` = (Hx, Hy, Dxx, Dyy) and
+/// `stretchXY` = Dxy, which add between cascades as the waves do; `slope`
+/// is the surface's own, dz / dx and dz / dy where the point has gone,
+/// and `jacobian` how much the ride has stretched (above 1) or bunched
+/// (below 1) the surface there - below 0 it would have folded over.
+struct OceanSurface {
+    vec3 displacement;
+    vec4 derivatives;
+    float stretchXY;
+    vec2 slope;
+    float jacobian;
+};
+
+/// The normal's own parts from the summed derivatives: where the still
+/// surface's x and y lines have been carried, (1 + Dxx, Dxy, Hx) and
+/// (Dxy, 1 + Dyy, Hy), crossed.
+OceanSurface oceanSurfaceFrom(vec3 displacement, vec4 derivatives, float stretchXY) {
+    OceanSurface s;
+    s.displacement = displacement;
+    s.derivatives = derivatives;
+    s.stretchXY = stretchXY;
+    float hx = derivatives.x, hy = derivatives.y;
+    float sx = 1.0 + derivatives.z, sy = 1.0 + derivatives.w;
+    float nx = stretchXY * hy - hx * sy;
+    float ny = hx * stretchXY - sx * hy;
+    s.jacobian = sx * sy - stretchXY * stretchXY;
+    // A fold's normal points down; the slope where it is about to fold is
+    // as steep as the surface can be drawn.
+    float nz = max(s.jacobian, 0.05);
+    s.slope = -vec2(nx, ny) / nz;
+    return s;
+}
+
+OceanSurface oceanSurfaceAt(vec4 transformedA, vec4 transformedB, float sign) {
+    vec4 a = transformedA * sign;
+    vec4 b = transformedB * sign;
+    // a = (H, Dx, Dy, Hx), b = (Hy, Dxx, Dyy, Dxy).
+    return oceanSurfaceFrom(vec3(a.y, a.z, a.x), vec4(a.w, b.x, b.y, b.z), b.w);
+}
