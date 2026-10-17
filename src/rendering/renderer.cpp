@@ -4836,6 +4836,7 @@ void Renderer::renderVolumetricFog() {
     in.time = globalTime;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
+    if (lightingManager) in.sunHaloColor = lightingManager->getLightingParams().sunHaloColor;
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
 

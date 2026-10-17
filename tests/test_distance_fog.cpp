@@ -12,6 +12,7 @@ using glm::mix;
 using glm::pow;
 using glm::smoothstep;
 #include "../assets/shaders/sky_atmosphere.glsli"
+#include "../assets/shaders/sunlit_air.glsli"
 }
 
 TEST_CASE("zone light blending has no fallback sky or extra fog distance", "[light][fog]") {
@@ -79,6 +80,31 @@ TEST_CASE("the sky around the sun glows in the zone's halo colour", "[light][fog
     const vec3 none = atmosphereSkyColor(away, sun, top, middle, band1, fringe, tirisfalHalo) -
                       atmosphereSkyColor(away, sun, top, middle, band1, fringe, vec3(0.0f));
     CHECK(glm::length(none) < 1e-6f);
+}
+
+TEST_CASE("sunlit air glows toward the sun in the zone's halo, and is lit by the sun elsewhere",
+          "[light][fog]") {
+    // Tirisfal at a quarter past four: the sun casts a cool white, and its
+    // halo is a dim green. The air toward the sun was the cool white too, a
+    // white blot over the green sun the light tables draw.
+    using namespace fog_math;
+    const vec3 sunLight(.64f, .70f, .86f);
+    const vec3 halo(.22f, .42f, .33f);
+
+    // Looking into the sun through the air: green, the halo's hue.
+    const vec3 intoSun = sunlitAirLight(sunLight, halo, 1.0f);
+    CHECK(intoSun.g > intoSun.r);
+    CHECK(intoSun.g > intoSun.b);
+    CHECK(intoSun.r / intoSun.g == Catch::Approx(halo.r / halo.g).margin(0.05));
+    // As bright as the halo is: a halo twice as bright, a glow twice as bright.
+    const vec3 brighter = sunlitAirLight(sunLight, halo * 2.0f, 1.0f);
+    CHECK(brighter.g > 1.8f * intoSun.g);
+
+    // With the sun behind the eye the forward glow is gone, and the air is lit
+    // by the light the sun casts - blue the brightest, as in that light.
+    const vec3 sunBehind = sunlitAirLight(sunLight, halo, -1.0f);
+    CHECK(sunBehind.b > sunBehind.g);
+    CHECK(sunBehind.b > sunBehind.r);
 }
 
 TEST_CASE("fog leaves nearby surfaces clear and has finite degenerate ranges", "[light][fog]") {

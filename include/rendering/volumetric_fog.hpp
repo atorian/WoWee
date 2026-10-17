@@ -84,6 +84,10 @@ public:
         /// than the light it is lit by, and the sky around the sun a white blot
         /// whatever the zone's sun was.
         float sunScatter = 0.25f;
+        /// The zone's glow around the sun (LightParams' sunHaloColor): the
+        /// colour and brightness of the light the air scatters forward, toward
+        /// an eye looking at the sun. See sunlit_air.glsli.
+        glm::vec3 sunHaloColor{0.0f};
         /// Brightness of the air the sun does not reach, lit by the zone's fog
         /// colour. Half, so a shaft stands against the shade beside it rather
         /// than against a haze nearly as bright.

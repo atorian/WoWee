@@ -39,6 +39,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
+    vec4 sunHalo;        // rgb = the zone's glow around the sun (LightIntBand 10)
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -114,11 +115,7 @@ float sunVisibility(vec3 p) {
     return mix(lit, 1.0, smoothstep(0.8, 1.0, max(edge.x, edge.y)));
 }
 
-// Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
-float phaseHG(float cosTheta, float g) {
-    float g2 = g * g;
-    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5);
-}
+#include "sunlit_air.glsli"
 
 void main() {
     ivec3 cell = ivec3(gl_GlobalInvocationID);
@@ -134,12 +131,10 @@ void main() {
     // The light reaching this air. Where only the sky lights it, it takes the
     // zone's fog colour, at half: shade under trees is darker than the open
     // haze, and a shaft reads against the shade beside it. Sunlight comes on
-    // top, and mostly forward, as it does off mist and dust: looking at the
-    // sun the air takes nineteen times the light it would scattering evenly,
-    // ten degrees off it twelve, thirty degrees off two and a half, and from
-    // forty five degrees on about one or less. That is where shafts are seen
-    // outdoors - toward a sun low enough to look at, through whatever stands
-    // in front of it.
+    // top, and mostly forward, as it does off mist and dust, the forward part
+    // in the colour of the zone's halo (sunlit_air.glsli). That is where
+    // shafts are seen outdoors - toward a sun low enough to look at, through
+    // whatever stands in front of it.
     //
     // Only while the sun is up. At night the light's direction points up
     // from under the ground; the shadow map flips it to build its projection,
@@ -148,10 +143,10 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    float phase = mix(1.0, phaseHG(dot(travel, toCamera), 0.75), 0.65);
     vec3 light = fogColor.rgb * vol.lighting.z;
     if (sunUp > 0.0) {
-        light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);
+        light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb, dot(travel, toCamera)) *
+                 (sunVisibility(p) * sunUp * vol.lighting.x);
     }
 
     // The models' own lights: the same lights and falloff the surfaces are
