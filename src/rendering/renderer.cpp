@@ -800,6 +800,7 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
+        currentFrameData.sunHaloColor = glm::vec4(lp.sunHaloColor, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -1567,11 +1568,11 @@ void Renderer::beginFrame() {
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
     if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
-            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
+            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
             skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
-        const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
+        const float timeOfDay = lightingManager ? lightingManager->getTimeOfDayHours() : 12.0f;
         renderSkyBackground(timeOfDay, authored, skyModelsHideProceduralSky());
         if (skyProbe) {
             static bool logged = false;
@@ -2103,9 +2104,9 @@ void Renderer::update(float deltaTime) {
     // Characters, creatures and their weapons take the light of the interior
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
-        characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
-        });
+        characterRenderer->updateInteriorLight(
+            [this](const glm::vec3& p) { return wmoRenderer->interiorLightAt(p.x, p.y, p.z); },
+            wmoRenderer->contentRevision());
     }
 
     // Update lighting system
@@ -2178,7 +2179,7 @@ void Renderer::update(float deltaTime) {
     }
     if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
-            ? lightingManager->getVisualTimeOfDayHours()
+            ? lightingManager->getTimeOfDayHours()
             : (skybox ? skybox->getTimeOfDay() : 12.0f));
         skyboxModelRenderer_->update(deltaTime, camera->getViewMatrix(),
                                      camera->getProjectionMatrix());
@@ -2475,6 +2476,7 @@ void Renderer::updateWind(float deltaTime) {
     inputs.fixedWind = environment_.wind;
     wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
                  windZones_);
+    if (waterRenderer) waterRenderer->setWindSpeed(wind_.state().speed * wind_.state().gust);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
@@ -2964,7 +2966,7 @@ void Renderer::renderWorld() {
     // Get time of day for sky-related rendering
     auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
     float timeOfDay = lightingManager
-        ? lightingManager->getVisualTimeOfDayHours()
+        ? lightingManager->getTimeOfDayHours()
         : (skybox ? skybox->getTimeOfDay() : 12.0f);
     // Two questions, apart while the sky crossfades. The sky models are drawn
     // whenever any is up at all. The client's own stars, sun, moons and clouds
@@ -4473,24 +4475,18 @@ void Renderer::renderReflectionPass() {
     if (canRenderScene) {
         // Render scene into reflection texture (sky + terrain + WMO only for perf)
         if (skySystem) {
-            rendering::SkyParams skyParams;
+            // The same fill as the camera's sky, so a field added to one is in
+            // the other: this was a third copy, and it gave the water the
+            // sun's cast light for the sun's own colour.
             auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = lightingManager
-                ? lightingManager->getVisualTimeOfDayHours()
+            const float timeOfDay = lightingManager
+                ? lightingManager->getTimeOfDayHours()
                 : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
-            if (lightingManager) {
-                const auto& lp = lightingManager->getLightingParams();
-                skyParams.directionalDir = lp.directionalDir;
-                skyParams.sunColor = lp.diffuseColor;
-                skyParams.skyTopColor = lp.skyTopColor;
-                skyParams.skyMiddleColor = lp.skyMiddleColor;
-                skyParams.skyBand1Color = lp.skyBand1Color;
-                skyParams.skyBand2Color = lp.skyBand2Color;
-                skyParams.cloudDensity = lp.cloudDensity;
-                skyParams.fogDensity = lp.fogDensity;
-                skyParams.horizonGlow = lp.horizonGlow;
-            }
-            // weatherIntensity left at default 0 for reflection pass (no game handler in scope)
+            // No server hour, no weather and the procedural sky: the reflection
+            // has never drawn the sky model or the weather's dimming.
+            rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
+                timeOfDay, -1.0f, 0.0f,
+                lightingManager ? &lightingManager->getLightingParams() : nullptr, false);
             // A flare is an artefact of the lens, so it belongs to the camera
             // and not to what the water is showing it.
             skyParams.sunOcclusion = 1.0f;
@@ -4777,7 +4773,7 @@ float Renderer::volumetricFogExtinction() const {
             extinction *= glm::clamp(900.0f / authoredEnd, 0.6f, 2.0f);
         }
         // Morning mist: thickest around half past six, gone by nine.
-        const float hours = lightingManager->getVisualTimeOfDayHours();
+        const float hours = lightingManager->getTimeOfDayHours();
         const float dawn = 1.0f - glm::smoothstep(0.0f, 2.5f, std::abs(hours - 6.5f));
         extinction *= 1.0f + 0.8f * dawn;
     }
@@ -4841,6 +4837,7 @@ void Renderer::renderVolumetricFog() {
     in.time = globalTime;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
+    if (lightingManager) in.sunHaloColor = lightingManager->getLightingParams().sunHaloColor;
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
 
@@ -4881,11 +4878,11 @@ void Renderer::recordSunShafts() {
             // Rain and snow put a lid over it.
             if (weather) strength *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
 
-            // The sun's own colour, kept in hue and not in brightness, and
-            // half white: the rays should warm at dusk, not turn orange.
-            const glm::vec3 c = lp.diffuseColor;
-            const float peak = std::max({c.r, c.g, c.b, 1e-3f});
-            in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
+            // The rays are the eye looking into the sun, so they take the
+            // sun's own colour from LightParams - pale green over Tirisfal,
+            // blue over Duskwood. They were the light it casts, normalized
+            // and mixed half with white, the same near-white everywhere.
+            in.tint = glm::min(lp.sunColor, glm::vec3(1.0f));
             in.sunUV = sun.uv;
             in.strength = strength;
         }

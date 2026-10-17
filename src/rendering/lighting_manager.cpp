@@ -319,13 +319,10 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     }
     // else: manualTime_ is set, use timeOfDay_ as-is
 
-    // Duskwood's visible sky is permanently late-night even while the global
-    // world clock continues normally for gameplay and every other zone.
-    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(zoneId, timeOfDay_ * 24.0f);
-
-    // Convert visual time to half-minutes (WoW DBC format: 0-2879).
-    const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
-    uint16_t timeHalfMinutes = static_cast<uint16_t>(visualDayFraction * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
+    // The hour in half-minutes (WoW DBC format: 0-2879). One clock for every
+    // zone, as the client has: Duskwood's gloom and Tirisfal's overcast are in
+    // their LightParams curves, not in a different hour.
+    uint16_t timeHalfMinutes = static_cast<uint16_t>(timeOfDay_ * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
 
     // Update player position and map
     currentPlayerPos_ = playerPos;
@@ -466,8 +463,6 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    applyZoneAmbienceOverride(zoneId, newParams);
-
     // Keep the authored fog colour. The surface shaders blend it toward the
     // actual sky band along each camera ray; one CPU-side mid-sky tint made
     // buildings below the horizon stand out as pale silhouettes.
@@ -530,7 +525,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         const bool changed =
             zoneId != diagZoneId_ || topSkybox != diagSkyboxPath_ ||
             firstVolume != diagFirstVolume_ || secondVolume != diagSecondVolume_ ||
-            std::abs(visualTimeOfDayHours_ - diagVisualHours_) > 0.02f ||
+            std::abs(getTimeOfDayHours() - diagHours_) > 0.02f ||
             std::abs(skyLuma - diagSkyLuma_) > 0.01f;
         // Rate-limited as well as change-gated, because a change is not rare:
         // walking through the falloff between two volumes moves the target
@@ -540,7 +535,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         ++diagCallsSinceLog_;
         if (changed && diagCallsSinceLog_ >= 30) {
             diagCallsSinceLog_ = 0;
-            LOG_INFO("sky: zone=", zoneId, " hour=", visualTimeOfDayHours_,
+            LOG_INFO("sky: zone=", zoneId, " hour=", getTimeOfDayHours(),
                      " skyLuma=", skyLuma, " volumes=", firstVolume, "/", secondVolume,
                      " inRange=", activeVolumes_.size(),
                      " skybox=", topSkybox.empty() ? "-" : topSkybox);
@@ -548,7 +543,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             diagSkyboxPath_ = topSkybox;
             diagFirstVolume_ = firstVolume;
             diagSecondVolume_ = secondVolume;
-            diagVisualHours_ = visualTimeOfDayHours_;
+            diagHours_ = getTimeOfDayHours();
             diagSkyLuma_ = skyLuma;
         }
     }
@@ -563,6 +558,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.skyMiddleColor = glm::mix(currentParams_.skyMiddleColor, newParams.skyMiddleColor, blendFactor);
     currentParams_.skyBand1Color = glm::mix(currentParams_.skyBand1Color, newParams.skyBand1Color, blendFactor);
     currentParams_.skyBand2Color = glm::mix(currentParams_.skyBand2Color, newParams.skyBand2Color, blendFactor);
+    currentParams_.sunColor = glm::mix(currentParams_.sunColor, newParams.sunColor, blendFactor);
+    currentParams_.sunHaloColor = glm::mix(currentParams_.sunHaloColor, newParams.sunHaloColor, blendFactor);
     currentParams_.fogStart = glm::mix(currentParams_.fogStart, newParams.fogStart, blendFactor);
     currentParams_.fogEnd = glm::mix(currentParams_.fogEnd, newParams.fogEnd, blendFactor);
     currentParams_.fogDensity = glm::mix(currentParams_.fogDensity, newParams.fogDensity, blendFactor);

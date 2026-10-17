@@ -3795,7 +3795,7 @@ void Application::followRendererUpdate(float deltaTime) {
         zctx.weatherIntensity = weather->getIntensity();
     }
     if (auto* lighting = renderer->getLightingManager()) {
-        zctx.gameTimeHours = lighting->getVisualTimeOfDayHours();
+        zctx.gameTimeHours = lighting->getTimeOfDayHours();
     }
     if (const auto* terrain = renderer->getTerrainManager()) {
         const auto tile = terrain->getCurrentTile();

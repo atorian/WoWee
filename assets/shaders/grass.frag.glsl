@@ -29,6 +29,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;  // unread here, through windTravel; declared to reach sunHaloColor
+    vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 sunHaloColor;  // rgb = the sky's glow around the sun (LightIntBand 10)
 };
 
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -79,7 +85,8 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
         sky = textureLod(uSceneSky, uv, 0.0).rgb;
     } else {
         sky = atmosphereSkyColor(ray, normalize(-lightDir.xyz), fogSkyTop.rgb,
-                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb,
+                                 sunHaloColor.rgb);
         sky = sky * air.a + air.rgb;
     }
     if (fogFactor < 1.0 && fogSkyTop.w > 0.0)

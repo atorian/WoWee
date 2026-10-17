@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 
 namespace wowee::rendering {
@@ -26,6 +27,31 @@ struct InteriorLightGPU {
     if (!light) return {};
     return {.ambient = glm::vec4(light->ambient, 1.0f), .direct = glm::vec4(light->direct, 0.0f)};
 }
+
+/// When a unit's interior light has to be looked up again.
+///
+/// It was looked up once and then only when the unit moved. An innkeeper
+/// placed before the inn had streamed in was told "outdoors" and, standing
+/// still, kept that: lit by the sun's light under a roof the sun's shadow
+/// covers, so drawn in the frame's dim ambient alone. Now the answer is also
+/// thrown away whenever the buildings change - one added, removed, or its
+/// model finished - which `worldRevision` counts (WMORenderer::contentRevision).
+struct InteriorLightProbe {
+    std::optional<glm::vec3> origin;
+    uint64_t revision = 0;
+
+    /// Whether the last answer no longer holds for a unit now at `at`.
+    [[nodiscard]] bool stale(const glm::vec3& at, uint64_t worldRevision,
+                             float requeryDistance) const {
+        return !origin || revision != worldRevision ||
+               glm::distance(*origin, at) >= requeryDistance;
+    }
+
+    void record(const glm::vec3& at, uint64_t worldRevision) {
+        origin = at;
+        revision = worldRevision;
+    }
+};
 
 /// A doodad an interior group lists: the building's MOHD ambient, and the
 /// colour its MODD entry carries as its direct light.

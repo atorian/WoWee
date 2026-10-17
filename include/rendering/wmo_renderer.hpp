@@ -426,8 +426,13 @@ public:
 
     /// The light of a character or creature at the point: from the floor
     /// under it in the WMO interior group that holds it, or no value when no
-    /// interior group does.
+    /// interior group does. Anywhere in the world, not only near the player.
     [[nodiscard]] std::optional<InteriorLight> interiorLightAt(float glX, float glY, float glZ) const;
+
+    /// Changes whenever the buildings the queries answer from do: an instance
+    /// created or removed, a model finished loading or unloaded. An answer
+    /// kept from an earlier revision may be out of date.
+    [[nodiscard]] uint64_t contentRevision() const { return contentRevision_; }
 
     /**
      * Raycast against WMO bounding boxes for camera collision
@@ -768,10 +773,17 @@ private:
         glm::vec3 localPos;
     };
 
+    /// Which instances a query looks at: those inside the collision focus
+    /// around the player, or every one. The focus is for the player's
+    /// collision; a light looked up for a creature across town is not, and
+    /// filtered by it came out "outdoors" for every building more than twenty
+    /// yards from the player.
+    enum class QueryReach { CollisionFocus, Everywhere };
+
     /// The first of a WMO's groups, or only of its interior ones, that holds
     /// a point.
     std::optional<GroupHolding> findGroupHolding(float glX, float glY, float glZ,
-                                                 bool interiorOnly) const;
+                                                 bool interiorOnly, QueryReach reach) const;
 
     /// Whether a point is inside any of a WMO's groups, or only its
     /// interior ones. The two public queries above differ by that flag.
@@ -971,6 +983,10 @@ private:
 
     // Optional query-space culling for collision/raycast hot paths.
     CollisionFocus collisionFocus;
+
+    /// See contentRevision(). Bumped by markContentChanged().
+    uint64_t contentRevision_ = 1;
+    void markContentChanged() { ++contentRevision_; }
 
     // Uniform grid for fast local collision queries.
     // Collision scratch buffers are thread_local (see wmo_renderer.cpp) for thread-safety.

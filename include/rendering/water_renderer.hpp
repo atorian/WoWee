@@ -115,6 +115,10 @@ public:
     // which is deliberately smaller than the frame.
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
+    /// The wind over the water this frame, yards a second with its gust in:
+    /// how steep each liquid's ripple is (rippleSlopeForWind).
+    void setWindSpeed(float yardsPerSecond) { windSpeed_ = yardsPerSecond; }
+
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
@@ -124,6 +128,7 @@ private:
     struct RippleSet {
         std::unique_ptr<VkTexture> texture;
         uint32_t frames = 0;
+        float slopeRms = 0.0f;  // the frames' own steepness (rippleSlopeRms), per repeat
     };
 
     /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
@@ -260,8 +265,13 @@ private:
 
     std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
-    bool refractionEnabled = false;
+    // On from the start. The renderer keeps it always on, but did so only when
+    // the interface applied its saved settings, so until then - and in a
+    // renderer with no interface, scene_render - the water had no capture of
+    // what is under it: no depth, no shoreline, no sea bed.
+    bool refractionEnabled = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
+    float windSpeed_ = 0.0f;  // until the renderer says, still air: no ripple
 };
 
 } // namespace rendering

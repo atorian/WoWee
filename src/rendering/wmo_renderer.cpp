@@ -975,6 +975,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
     loadedModels[id] = std::move(modelData);
     scene_->loadingModels_.erase(id);
+    // Instances placed while it loaded had no groups to answer from.
+    markContentChanged();
     retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
     return ModelLoadResult::Complete;
@@ -1007,6 +1009,7 @@ void WMORenderer::unloadModel(uint32_t id) {
     }
 
     loadedModels.erase(it);
+    markContentChanged();
     core::Logger::getInstance().info("WMO model ", id, " unloaded");
 }
 
@@ -1071,6 +1074,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     size_t idx = scene_->instances.size() - 1;
     scene_->instanceIndexById[instance.id] = idx;
     insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    markContentChanged();
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
     return instance.id;
 }
@@ -1234,6 +1238,7 @@ void WMORenderer::removeInstance(uint32_t instanceId) {
         }
         scene_->instances.erase(it);
         rebuildSpatialIndex();
+        markContentChanged();
         core::Logger::getInstance().debug("Removed WMO instance ", instanceId);
     }
 }
@@ -1269,6 +1274,7 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
     if (scene_->instances.size() != oldSize) {
         rebuildSpatialIndex();
+        markContentChanged();
         core::Logger::getInstance().debug("Removed ", (oldSize - scene_->instances.size()),
                                           " WMO instances (batched)");
     }
@@ -1289,6 +1295,7 @@ void WMORenderer::clearInstances() {
         for (auto& group : model.groups) destroyGroupGPU(group, true);
     }
     *scene_ = InstanceState{};
+    markContentChanged();
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
 
@@ -1312,6 +1319,7 @@ void WMORenderer::clearAll() {
     // The models' textures go back to the shared cache with them, to be found
     // again by the next map or evicted when room is wanted.
     loadedModels.clear();
+    markContentChanged();
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
@@ -4169,14 +4177,14 @@ bool WMORenderer::withinWorldBounds(const WMOInstance& instance,
 /// model matrix and multiplying is the expensive part, and a building whose
 /// own bounds contain the point usually has no *group* that does.
 std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
-        float glX, float glY, float glZ, bool interiorOnly) const {
+        float glX, float glY, float glZ, bool interiorOnly, QueryReach reach) const {
     const glm::vec3 queryMin(glX - 0.5f, glY - 0.5f, glZ - 0.5f);
     const glm::vec3 queryMax(glX + 0.5f, glY + 0.5f, glZ + 0.5f);
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
         const auto& instance = scene_->instances[idx];
-        if (outsideCollisionFocus(instance)) continue;
+        if (reach == QueryReach::CollisionFocus && outsideCollisionFocus(instance)) continue;
         if (!withinWorldBounds(instance, glX, glY, glZ)) continue;
 
         auto it = loadedModels.find(instance.modelId);
@@ -4209,7 +4217,7 @@ std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
 
 bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                                     bool interiorOnly, uint32_t* outModelId) const {
-    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly);
+    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly, QueryReach::CollisionFocus);
     if (holding && outModelId) *outModelId = holding->instance->modelId;
     return holding.has_value();
 }
@@ -4250,7 +4258,8 @@ static std::optional<glm::vec3> floorColorBelow(const Group& group, const glm::v
 
 std::optional<InteriorLight> WMORenderer::interiorLightAt(float glX, float glY, float glZ) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
-    const auto holding = findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true);
+    const auto holding =
+        findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true, QueryReach::Everywhere);
     if (!holding) return std::nullopt;
     const glm::vec3 localDown =
         glm::normalize(glm::vec3(holding->instance->invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));

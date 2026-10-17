@@ -22,7 +22,10 @@ class LightingManager;
 struct SkyParams {
     // Sun/moon positioning
     glm::vec3 directionalDir{0.0f, -1.0f, 0.3f};
-    glm::vec3 sunColor{1.0f, 1.0f, 0.9f};
+    /// The disc, and the glow of the sky around it: LightingParams'
+    /// sunColor and sunHaloColor, not the light the sun casts.
+    glm::vec3 sunColor{1.0f, 0.97f, 0.87f};
+    glm::vec3 sunHaloColor{1.0f, 0.78f, 0.54f};
 
     // Sky colors (for skybox tinting/blending)
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};

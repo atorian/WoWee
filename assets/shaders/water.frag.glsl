@@ -22,6 +22,12 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyMiddle;
     vec4 fogSkyBand1;
     vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;  // unread here, through windTravel; declared to reach sunHaloColor
+    vec4 contactParams;
+    vec4 windDirLean;
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 sunHaloColor;  // rgb = the sky's glow around the sun (LightIntBand 10)
 };
 
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -39,7 +45,8 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float pad1, pad2;
+    float rippleSlope; // root mean square slope of the ripple in this wind
+    float pad2;
 } push;
 
 #include "gerstner_waves.glsli"
@@ -189,18 +196,33 @@ vec3 rippleNormal(RippleUv r, float time) {
     float l0 = mod(floor(f), frames);
     float l1 = mod(l0 + 1.0, frames);
     float t = fract(f);
+    // The frames are a flipbook. Their larger shapes move on from one frame to
+    // the next, but what is a texel or two across is drawn anew in each, and
+    // a slope taken across single texels is made of exactly that: every
+    // glint on the water jumped to a new place fifteen times a second. So
+    // the slope is never taken finer than the scale the animation holds
+    // together at, however close the camera.
+    const float kCoherentTexels = 4.0;
+    float heldTogether = kCoherentTexels / float(textureSize(RippleFrames, 0).x);
+    float seen = length(abs(r.ddx) + abs(r.ddy));
+    if (seen < heldTogether) {
+        float widen = heldTogether / max(seen, 1e-6);
+        r.ddx *= widen;
+        r.ddy *= widen;
+    }
     // A texel's width in uv at the level being sampled, so the slope is
     // measured across what this pixel actually sees.
-    float texel = max(length(abs(r.ddx) + abs(r.ddy)),
-                      1.0 / float(textureSize(RippleFrames, 0).x));
+    float texel = max(seen, heldTogether);
     vec2 dx = vec2(texel, 0.0);
     vec2 dy = vec2(0.0, texel);
     float gx = mix(rippleHeight(r, dx, l0) - rippleHeight(r, -dx, l0),
                    rippleHeight(r, dx, l1) - rippleHeight(r, -dx, l1), t);
     float gy = mix(rippleHeight(r, dy, l0) - rippleHeight(r, -dy, l0),
                    rippleHeight(r, dy, l1) - rippleHeight(r, -dy, l1), t);
-    // Height per uv, turned into height per yard.
-    vec2 slope = vec2(gx, gy) / (2.0 * texel) / ripple.z * ripple.w;
+    // Height per uv over the frames' own steepness (ripple.w is one over it,
+    // measured on this scale) is a slope of root mean square one; the wind
+    // says how steep the water is.
+    vec2 slope = vec2(gx, gy) / (2.0 * texel) * ripple.w * push.rippleSlope;
     return normalize(vec3(-slope, 1.0));
 }
 
@@ -324,6 +346,38 @@ float cellularFoam(vec2 p, float jitter) {
 }
 float cellularFoam(vec2 p) { return cellularFoam(p, 1.0); }
 
+// How much of a cellular pattern with `cellsPerYard` cells a pixel can show:
+// all of it from six pixels a cell, none by two. The foam is drawn in cells a
+// few hundredths of a yard across - a speck at the player's feet is a pixel
+// a few yards off - and a speck smaller than its pixel lands on it or misses
+// it from one frame to the next, so the whole shoreline sparkled and shook as
+// the surf and the camera moved.
+float cellsShown(float cellsPerYard, float pixelsPerYard) {
+    return smoothstep(2.0, 6.0, pixelsPerYard / cellsPerYard);
+}
+
+// A dot of `radius` (in cells) in every cell of `cellsPerYard` at `p`. It is
+// the dot that has to fit a pixel, not the cell: a dot a tenth of its cell
+// across is under a pixel while the cell is still ten. Where the dots are
+// too small to show, what is left is what they cover on average, so the
+// foam a band of them made stays as a tint rather than going out: a dot
+// falling off as smoothstep over its radius covers 0.3 pi r^2.
+float foamDots(vec2 p, float radius, float cellsPerYard, float pixelsPerYard) {
+    float dotPixels = 2.0 * radius * pixelsPerYard / cellsPerYard;
+    float shown = smoothstep(1.5, 4.0, dotPixels);
+    float mean = 0.942 * radius * radius;
+    if (shown <= 0.001) return mean;
+    return mix(mean, 1.0 - smoothstep(0.0, radius, cellularFoam(p)), shown);
+}
+
+// The distance to the nearest cell point, or its average - 0.43 for a fully
+// jittered grid - where the cells are too small to show.
+float cellDistance(vec2 p, float shown) {
+    const float kMeanDistance = 0.43;
+    if (shown <= 0.001) return kMeanDistance;
+    return mix(kMeanDistance, cellularFoam(p), shown);
+}
+
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
@@ -357,7 +411,8 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
         sky = textureLod(uSceneSky, uv, 0.0).rgb;
     } else {
         sky = atmosphereSkyColor(ray, normalize(-lightDir.xyz), fogSkyTop.rgb,
-                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb,
+                                 sunHaloColor.rgb);
         sky = sky * air.a + air.rgb;
     }
     if (fogFactor < 1.0 && fogSkyTop.w > 0.0)
@@ -439,6 +494,9 @@ void main() {
     vec2 surfaceDy = dFdy(FragPos.xy);
     vec2 restDx = dFdx(RestPos);
     vec2 restDy = dFdy(RestPos);
+    // Along the pixel's longer side, for patterns drawn the same in every
+    // direction: those have to fit the worst of it.
+    float pixelsPerYard = 1.0 / max(max(length(surfaceDx), length(surfaceDy)), 1e-4);
     // The swell, worked out here rather than taken from the vertices: the mesh
     // carries only the waves longer than its own step, and a normal
     // interpolated between vertices could not show the shorter ones - it
@@ -459,6 +517,8 @@ void main() {
     vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
     if (ripple.x > 0.5) {
         RippleUv rippleAt = rippleUv(FragPos.xy);
+        // As much as the pixel can show. How steep it is the wind decides
+        // (rippleNormal): in still air the frames lie flat.
         float rippleShown = rippleVisibility(rippleAt);
         if (rippleShown > 0.001) {
             detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
@@ -504,8 +564,25 @@ void main() {
     float far = push.depthRange.y;
     float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
 
-    vec2 refractOffset = norm.xy * (0.02 + 0.03 * fresnel);
-    vec2 refractUV = clamp(screenUV + refractOffset, vec2(0.001), vec2(0.999));
+    // How far the bed seen through this pixel moves, in yards on the water:
+    // the depth of water the light comes up through, times how far the
+    // surface's tilt bends it (1 - 1/1.33 of the slope, for water's index),
+    // then put on screen through the camera. It was a fixed share of the
+    // screen whatever the depth, so over a hand's depth of water the sand
+    // under it slid yards with every ripple and its light streaks danced
+    // across the shallows; under deep water the same share was too little.
+    // The depth is the one straight down this pixel, before any offset.
+    const float kBend = 1.0 - 1.0 / 1.33;
+    const float kMaxBend = 1.5;  // yards: further than this the sample is no longer the bed below
+    float straightLinDepth = linearizeDepth(texture(SceneDepth, screenUV).r, near, far);
+    float straightDepth = max(straightLinDepth - waterLinDepth, 0.0) * max(abs(viewDir.z), 0.05);
+    vec2 bend = norm.xy / max(norm.z, 0.2) * straightDepth * kBend;
+    float bendLength = length(bend);
+    if (bendLength > kMaxBend) bend *= kMaxBend / bendLength;
+    vec4 hereClip = projection * view * vec4(FragPos, 1.0);
+    vec4 bentClip = projection * view * vec4(FragPos + vec3(bend, 0.0), 1.0);
+    vec2 bentOnScreen = (bentClip.xy / max(bentClip.w, 1e-4) - hereClip.xy / max(hereClip.w, 1e-4)) * 0.5;
+    vec2 refractUV = clamp(screenUV + bentOnScreen, vec2(0.001), vec2(0.999));
     float sceneDepth = texture(SceneDepth, refractUV).r;
     float sceneLinDepth = linearizeDepth(sceneDepth, near, far);
     // Only what is behind the surface can be seen through it. Next to anything
@@ -659,7 +736,24 @@ void main() {
     // ============================================================
     // GGX Specular
     // ============================================================
-    float roughness = 0.18;
+    // A pixel covers a patch of surface, not a point, and across the patch
+    // the normal turns. At 0.18 the sun's highlight is far smaller than the
+    // turn a ripple makes within one pixel a few yards off, so whichever
+    // pixel's centre happened to face the sun lit up alone, and the next
+    // frame another one did: the water glittered in single pixels that moved
+    // with every frame of the ripple. The spread of the normal over the pixel
+    // goes into the roughness instead (Kaplanyan and Hoffman 2016, as
+    // Tokuyoshi and Kaplanyan 2019 filter it), so the highlight takes in what
+    // the pixel covers and a highlight smaller than a pixel spreads to one.
+    const float kSurfaceRoughness = 0.18;
+    const float kVariance = 0.25;       // the screen-space filter kernel's variance, in pixels
+    const float kMaxSpread = 0.18;      // most it may add to alpha squared
+    vec3 normalDx = dFdx(norm);
+    vec3 normalDy = dFdy(norm);
+    float spread = min(2.0 * kVariance * (dot(normalDx, normalDx) + dot(normalDy, normalDy)), kMaxSpread);
+    float ggxAlpha = kSurfaceRoughness * kSurfaceRoughness;  // DistributionGGX squares roughness
+    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread, 0.0, 1.0);
+    float roughness = sqrt(sqrt(alphaSq));
     vec3 halfDir = normalize(ldir + viewDir);
     float D = DistributionGGX(norm, halfDir, roughness);
     float G = GeometrySmith(NdotV, NdotL, roughness);
@@ -667,14 +761,15 @@ void main() {
     vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
     specular = min(specular, vec3(2.0));
 
-    // Noise-based sparkle. Its features are far smaller than the wave detail, so
-    // it aliases sooner - fade it out over the near half of the detail range,
-    // otherwise flattening the normals just leaves the sparkle field behind as
-    // the visible pattern.
-    if (dist < 700.0) {  // where the fade below still leaves any of it
+    // Noise-based sparkle. Its features are far smaller than the wave detail:
+    // its coarsest octave is twelve to the yard, so it is there only while a
+    // pixel can show that. Faded by distance it ran out to 700 yards, a
+    // flicker of single pixels over every beach in view.
+    float sparkleShown = cellsShown(12.0, pixelsPerYard);
+    if (sparkleShown > 0.001) {
         float sparkleNoise = fbmNoise(FragPos.xy * 4.0 + time * 0.5, time * 1.5);
         float sparkle = pow(max(sparkleNoise - 0.55, 0.0) / 0.45, 3.0) * shimmerStrength * 0.10;
-        specular += sparkle * lightColor.rgb * (1.0 - smoothstep(150.0, 700.0, dist));
+        specular += sparkle * lightColor.rgb * sparkleShown;
     }
 
     // ============================================================
@@ -748,14 +843,14 @@ void main() {
         const mat2 rot2 = mat2( 0.26, -0.97,  0.97,  0.26);   // ~75 degrees
         float thresholdJitter = noiseValue(FragPos.xy * 5.0 + time * 0.2);
 
-        float cells1 = cellularFoam(rot1 * foamUV * 13.0 + time * vec2(0.15, 0.08));
-        float foam1 = (1.0 - smoothstep(0.0, 0.075 + 0.075 * thresholdJitter, cells1)) * 0.45;
-
-        float cells2 = cellularFoam(rot2 * foamUV * 27.7 + time * vec2(-0.12, 0.22));
-        float foam2 = (1.0 - smoothstep(0.0, 0.045 + 0.05 * (1.0 - thresholdJitter), cells2)) * 0.30;
-
-        float cells3 = cellularFoam(foamUV * 51.3 + time * vec2(0.25, -0.1));
-        float foam3 = (1.0 - smoothstep(0.0, 0.05, cells3)) * 0.18;
+        float foam1 = foamDots(rot1 * foamUV * 13.0 + time * vec2(0.15, 0.08),
+                               0.075 + 0.075 * thresholdJitter,
+                               13.0, pixelsPerYard) * 0.45;
+        float foam2 = foamDots(rot2 * foamUV * 27.7 + time * vec2(-0.12, 0.22),
+                               0.045 + 0.05 * (1.0 - thresholdJitter),
+                               27.7, pixelsPerYard) * 0.30;
+        float foam3 = foamDots(foamUV * 51.3 + time * vec2(0.25, -0.1), 0.05,
+                               51.3, pixelsPerYard) * 0.18;
 
         // Noise breakup for clumping
         float noiseMask = noiseValue(FragPos.xy * 3.0 + time * 0.15);
@@ -764,16 +859,16 @@ void main() {
         // The surf line itself, on the contour computed above with the wet sand,
         // so the foam sits exactly where the water currently reaches.
         float swashBand = 1.0 - smoothstep(0.0, 0.085, abs(shoreDepth - swashDepth));
-        float swashTexture = 0.55 + 0.45 * cellularFoam(rot1 * foamUV * 8.6 + time * vec2(0.05, 0.12));
+        float swashTexture = 0.55 + 0.45 * cellDistance(rot1 * foamUV * 8.6 + time * vec2(0.05, 0.12),
+                                                        cellsShown(8.6, pixelsPerYard));
         foam += swashBand * swashTexture * 0.55 * foamDepthMask;
 
         // Spray thrown off the front as it runs up: much finer than the foam,
         // sparse, and only while the surf is advancing. It is what sells the
         // edge as breaking water rather than a wet line.
         float sprayMask = 1.0 - smoothstep(0.0, 0.11, abs(shoreDepth - swashDepth + 0.04));
-        float sprayCells = cellularFoam(rot2 * (foamUV + swashAdvect * 0.5) * 96.0
-                                        + time * vec2(0.6, -0.45));
-        float spray = (1.0 - smoothstep(0.0, 0.035, sprayCells))
+        float spray = foamDots(rot2 * (foamUV + swashAdvect * 0.5) * 96.0 + time * vec2(0.6, -0.45),
+                               0.035, 96.0, pixelsPerYard)
                     * sprayMask * max(swashPhase, 0.0) * 0.7;
         foam += spray * foamDepthMask;
 
@@ -826,11 +921,21 @@ void main() {
                 // Thresholding across the middle of the range inverts that: most
                 // of the patch is foam and the gaps between cells are the
                 // texture, which is what aerated water actually looks like.
-                float cells = cellularFoam(churnUV * 12.0 + time * vec2(0.25, -0.18));
-                float cover = 1.0 - smoothstep(0.08, 0.38, cells);
-
-                float fine = cellularFoam(churnUV * 29.0 - time * vec2(0.14, 0.30));
-                cover = max(cover * 0.85, (1.0 - smoothstep(0.05, 0.22, fine)) * 0.5);
+                // Each of the two, where its cells are too small to show, is
+                // what it covers on average (17% and 6% of a cell).
+                float coarseShown = cellsShown(12.0, pixelsPerYard);
+                float cover = 0.175;
+                if (coarseShown > 0.001) {
+                    float cells = cellularFoam(churnUV * 12.0 + time * vec2(0.25, -0.18));
+                    cover = mix(cover, 1.0 - smoothstep(0.08, 0.38, cells), coarseShown);
+                }
+                float fineShown = cellsShown(29.0, pixelsPerYard);
+                float fineCover = 0.062;
+                if (fineShown > 0.001) {
+                    float fine = cellularFoam(churnUV * 29.0 - time * vec2(0.14, 0.30));
+                    fineCover = mix(fineCover, 1.0 - smoothstep(0.05, 0.22, fine), fineShown);
+                }
+                cover = max(cover * 0.85, fineCover * 0.5);
 
                 // Clumping, so the trail thins and thickens along its length.
                 cover *= 0.55 + 0.45 * noiseValue(churnUV * 2.2 + time * 0.35);
@@ -855,8 +960,8 @@ void main() {
             noiseValue(FragPos.xy * 1.8 + time * 0.1) - 0.5,
             noiseValue(FragPos.xy * 1.8 + vec2(53.0) + time * 0.07) - 0.5
         ) * 2.0;
-        float crestCells = cellularFoam((FragPos.xy + crestWarp) * 6.0 + time * vec2(0.12, 0.08));
-        float crestFoam = (1.0 - smoothstep(0.0, 0.18, crestCells)) * crestMask;
+        float crestFoam = foamDots((FragPos.xy + crestWarp) * 6.0 + time * vec2(0.12, 0.08), 0.18,
+                                   6.0, pixelsPerYard) * crestMask;
         float crestNoise = noiseValue(FragPos.xy * 3.0 - time * 0.3);
         crestFoam *= smoothstep(0.3, 0.6, crestNoise);
         color = mix(color, vec3(0.68, 0.78, 0.88), crestFoam * 0.30);
@@ -882,6 +987,15 @@ void main() {
     // after the clamp - clamping afterwards restored the 0.15 floor and put the
     // edge straight back.
     alpha *= smoothstep(2400.0, 600.0, dist);
+    // And into the beach: the sheet thins out over its last fifth of a yard of
+    // depth, so there is no line where it meets the sand. Only a few
+    // hundredths of a yard did this before, and with the 0.15 floor above the
+    // water ended on its own edge, which every rise and fall of the surface
+    // then moved across the sand. Not where there is no capture of what is
+    // under the water to measure the depth against.
+    if (hasSceneData) {
+        alpha *= smoothstep(0.0, 0.2, shoreDepth);
+    }
 
     color = applyFog(color, FragPos, dist);
 

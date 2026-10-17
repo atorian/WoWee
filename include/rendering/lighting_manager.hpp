@@ -32,6 +32,14 @@ struct LightingParams {
     glm::vec3 skyBand1Color{0.9f, 0.95f, 1.0f};    // Sky band 1
     glm::vec3 skyBand2Color{1.0f, 0.98f, 0.9f};    // Sky band 2
 
+    /// The sun's disc and the glow of the sky around it, LightIntBand
+    /// channels 9 and 10. Not the light it casts (diffuseColor): Tirisfal's sun
+    /// lights the ground a cool white and is drawn pale green in a green halo;
+    /// Duskwood's is blue, Teldrassil's pink in violet, Durotar's warm white in
+    /// orange.
+    glm::vec3 sunColor{1.0f, 0.97f, 0.87f};
+    glm::vec3 sunHaloColor{1.0f, 0.78f, 0.54f};
+
     float cloudDensity = 0.3f;                      // Cloud density/opacity
     float horizonGlow = 0.3f;                       // Horizon glow intensity
 
@@ -48,16 +56,12 @@ struct LightingParams {
             .skyMiddleColor = glm::vec3(0.0f),
             .skyBand1Color = glm::vec3(0.0f),
             .skyBand2Color = glm::vec3(0.0f),
+            .sunColor = glm::vec3(0.0f),
+            .sunHaloColor = glm::vec3(0.0f),
             .cloudDensity = 0.0f, .horizonGlow = 0.0f
         };
     }
 };
-
-/** Apply any authored ambience that must remain stable regardless of world time. */
-void applyZoneAmbienceOverride(uint32_t zoneId, LightingParams& params);
-
-/** Resolve the sky clock shown for a zone without changing the world clock. */
-float resolveZoneVisualTimeHours(uint32_t zoneId, float worldTimeHours);
 
 /**
  * Light set keyframe for time-of-day interpolation
@@ -153,7 +157,13 @@ struct LightParamsProfile {
         SKY_BAND2_COLOR = 5,
         SKY_SMOG_COLOR = 6,
         FOG_COLOR = 7,
+        // The sun's disc and the sky's glow around it. Across the file 9 is a
+        // near-white - (255,247,222) over most of the world - turned pale
+        // green in Tirisfal and Felwood, blue in Duskwood, pink in Teldrassil;
+        // 10 is the same zones' tint at full strength and darker: orange over
+        // Durotar, green over Tirisfal, violet over Teldrassil.
         SUN_COLOR = 9,
+        SUN_HALO_COLOR = 10,
         // ... more channels exist (clouds, ocean, river)
         COLOR_CHANNEL_COUNT = 18
     };
@@ -244,8 +254,9 @@ public:
      */
     [[nodiscard]] float getTimeOfDay() const { return timeOfDay_; }
 
-    /** Time used by the visible sky, including persistent zone ambience. */
-    [[nodiscard]] float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
+    /// The same hour, 0-24: the one the light bands are sampled at, and the
+    /// sky's, in every zone alike.
+    [[nodiscard]] float getTimeOfDayHours() const { return timeOfDay_ * 24.0f; }
 
     /// LightSkybox.dbc's flag for a sky model drawn over the client's own sky
     /// rather than instead of it - the auroras, Dragonblight's scarlet sky,
@@ -357,7 +368,6 @@ private:
     std::vector<WeightedVolume> activeVolumes_;
     glm::vec3 currentPlayerPos_{0.0f};
     float timeOfDay_ = 0.5f;  // Start at noon
-    float visualTimeOfDayHours_ = 12.0f;
     std::vector<SkyboxLayer> skyboxLayers_;
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
@@ -374,7 +384,7 @@ private:
     uint32_t diagCallsSinceLog_ = 0;
     uint32_t diagFirstVolume_ = 0xFFFFFFFFu;
     uint32_t diagSecondVolume_ = 0xFFFFFFFFu;
-    float diagVisualHours_ = -1.0f;
+    float diagHours_ = -1.0f;
     float diagSkyLuma_ = -1.0f;
     std::string diagSkyboxPath_ = "\x01";
     bool manualTime_ = false;

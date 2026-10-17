@@ -1517,10 +1517,9 @@ register_test_target(test_anim_capability)
 wowee_add_test(test_indoor_shadows
     SOURCES test_indoor_shadows.cpp)
 
-# ── test_zone_ambience ─────────────────────────────────────────
-wowee_add_test(test_zone_ambience
-    SOURCES test_zone_ambience.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp)
+# ── test_zone_tiles ────────────────────────────────────────────
+wowee_add_test(test_zone_tiles
+    SOURCES test_zone_tiles.cpp)
 
 # ── test_transport_components ────────────────────────────────
 wowee_add_test(test_transport_components
@@ -2460,14 +2459,27 @@ register_test_target(test_light_bands)
 # pipeline library for the AssetManager and the DBC reader.
 add_executable(test_sky_model_gate
     test_sky_model_gate.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp)
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
 target_include_directories(test_sky_model_gate PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_sky_model_gate SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_base)
 wowee_test_link_glm(test_sky_model_gate)
 add_test(NAME sky_model_gate COMMAND test_sky_model_gate)
 register_test_target(test_sky_model_gate)
+
+# ── test_zone_light ──────────────────────────────────────────
+# A zone is lit by the Light.dbc volumes over it and nothing that knows its
+# id: LightingManager over a light volume made up in a data root, stood in
+# under Tirisfal's, Silverpine's and Duskwood's zone ids.
+add_executable(test_zone_light
+    test_zone_light.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+target_include_directories(test_zone_light PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_zone_light SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_zone_light PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_zone_light)
+add_test(NAME zone_light COMMAND test_zone_light)
+register_test_target(test_zone_light)
 
 # ── test_light_headroom ──────────────────────────────────────
 # Keeping ambient + diffuse inside 1.0. 82% of the client's LightParams
@@ -2476,6 +2488,13 @@ register_test_target(test_sky_model_gate)
 wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_sky_billboard ───────────────────────────────────────
+# The sun and moon quads face the eye, so their discs are round on screen.
+# They lay in the world's horizontal plane and the sun at 37 degrees came
+# out a flat oval.
+wowee_add_test(test_sky_billboard
+    SOURCES test_sky_billboard.cpp)
 
 # ── test_light_params_eval ───────────────────────────────────
 # Which LightParams row a volume names for the weather, what a row with

@@ -1205,19 +1205,20 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             size_t liquidGroupsLoaded = 0;
             while (ft.wmoInstanceIndex < pending->wmoModels.size() && created < kWmoInstancesPerStep) {
                 auto& wmoReady = pending->wmoModels[ft.wmoInstanceIndex];
-                // Skip duplicates and unloaded models
-                if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
-                    continue;
-                }
-                if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
-                    continue;
-                }
-                // Create the instance on first visit (liquidGroupIndex == 0)
-                if (ft.wmoLiquidGroupIndex == 0) {
+                // A placement is looked at once: skipped as a duplicate or for
+                // its model, or given its instance. A placement already open
+                // is this one resumed for the rest of its liquid - it is in
+                // placedWmoIds because it was placed, not because another tile
+                // placed it.
+                if (!ft.wmoInstanceOpen) {
+                    if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
+                        ft.wmoInstanceIndex++;
+                        continue;
+                    }
+                    if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
+                        ft.wmoInstanceIndex++;
+                        continue;
+                    }
                     uint32_t wmoInstId = wmoRenderer->createInstance(
                         wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
                     if (!wmoInstId) {
@@ -1229,6 +1230,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         placedWmoIds.insert(wmoReady.uniqueId);
                         ft.tileWmoUniqueIds.push_back(wmoReady.uniqueId);
                     }
+                    ft.wmoInstanceOpen = true;
+                    ft.wmoLiquidGroupIndex = 0;
                 }
                 // Load WMO liquids incrementally (canals, pools, etc.)
                 if (liquidScene) {
@@ -1259,6 +1262,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 }
                 ft.wmoInstanceIndex++;
                 ft.wmoLiquidGroupIndex = 0;
+                ft.wmoInstanceOpen = false;
                 created++;
             }
             if (ft.wmoInstanceIndex < pending->wmoModels.size()) {

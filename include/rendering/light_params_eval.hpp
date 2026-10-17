@@ -98,6 +98,8 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.skyMiddleColor = sampleColorBand(profile.colorBands[P::SKY_MIDDLE_COLOR], timeHalfMinutes);
     params.skyBand1Color = sampleColorBand(profile.colorBands[P::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile.colorBands[P::SKY_BAND2_COLOR], timeHalfMinutes);
+    params.sunColor = sampleColorBand(profile.colorBands[P::SUN_COLOR], timeHalfMinutes);
+    params.sunHaloColor = sampleColorBand(profile.colorBands[P::SUN_HALO_COLOR], timeHalfMinutes);
 
     // The fog distance is stored in the same thirty-sixths of a yard as the
     // light positions, and was being used raw: Tirisfal's 12000 became 12000
@@ -150,6 +152,8 @@ inline std::optional<LightingParams> blendLightingParams(
         sum.skyMiddleColor += p.skyMiddleColor * w;
         sum.skyBand1Color += p.skyBand1Color * w;
         sum.skyBand2Color += p.skyBand2Color * w;
+        sum.sunColor += p.sunColor * w;
+        sum.sunHaloColor += p.sunHaloColor * w;
         sum.fogStart += p.fogStart * w;
         sum.fogEnd += p.fogEnd * w;
         sum.fogDensity += p.fogDensity * w;
@@ -168,6 +172,8 @@ inline std::optional<LightingParams> blendLightingParams(
     sum.skyMiddleColor *= inv;
     sum.skyBand1Color *= inv;
     sum.skyBand2Color *= inv;
+    sum.sunColor *= inv;
+    sum.sunHaloColor *= inv;
     sum.fogStart *= inv;
     sum.fogEnd *= inv;
     sum.fogDensity *= inv;

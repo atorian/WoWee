@@ -27,6 +27,7 @@ layout(push_constant) uniform Push {
     vec4 horizonColor;    // DBC skyBand1Color
     vec4 fogColorPush;    // DBC skyBand2Color
     vec4 sunDirAndTime;   // xyz = sun direction, w = timeOfDay
+    vec4 sunHaloColor;    // DBC sun halo, LightIntBand channel 10
 } push;
 
 layout(location = 0) in vec2 TexCoord;
@@ -55,7 +56,7 @@ void main() {
 
     vec3 sky = atmosphereSkyColor(worldDir, sunDir, push.zenithColor.rgb,
                                   push.midColor.rgb, push.horizonColor.rgb,
-                                  push.fogColorPush.rgb);
+                                  push.fogColorPush.rgb, push.sunHaloColor.rgb);
 
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeSky(TexCoord);

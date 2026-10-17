@@ -148,7 +148,7 @@ void LensFlare::generateFlareElements() {
     flareElements.clear();
 
     // Main sun glow (at sun position)
-    flareElements.push_back({.position = 0.0f, .size = 0.3f, .color = glm::vec3(1.0f, 0.95f, 0.8f), .brightness = 0.8f});
+    flareElements.push_back({.position = 0.0f, .size = 0.3f, .color = glm::vec3(1.0f), .brightness = 0.8f});
 
     // Flare ghosts along sun-to-center axis
 
@@ -227,6 +227,7 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 }
 
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
+                       const glm::vec3& sunColor,
                        float timeOfDay, float fogDensity, float cloudDensity,
                        float weatherIntensity, float sunOcclusion) {
     if (!enabled || pipeline == VK_NULL_HANDLE) {
@@ -293,9 +294,6 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
 
-    // Warm tint at sunrise/sunset - shift flare color toward orange/amber when sun is low
-    float warmTint = 1.0f - glm::smoothstep(0.05f, 0.35f, sunHeight);
-
     // Render each flare element
     for (const auto& element : flareElements) {
         // Calculate position along sun-to-center axis
@@ -304,12 +302,10 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
         // Apply visibility, intensity, and atmospheric attenuation
         float brightness = element.brightness * visibility * intensityMultiplier * atmosphericFactor;
 
-        // Apply warm sunset/sunrise color shift
-        glm::vec3 tintedColor = element.color;
-        if (warmTint > 0.01f) {
-            glm::vec3 warmColor(1.0f, 0.6f, 0.25f);  // amber/orange
-            tintedColor = glm::mix(tintedColor, warmColor, warmTint * 0.5f);
-        }
+        // The sun's light through the element's coating. A fixed amber was
+        // mixed in as the sun got low instead, the same in every zone; the
+        // light tables already turn the sun's colour through the day.
+        const glm::vec3 tintedColor = element.color * sunColor;
 
         // Set push constants
         FlarePushConstants push{};

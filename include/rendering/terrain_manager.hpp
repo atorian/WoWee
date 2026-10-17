@@ -175,6 +175,11 @@ struct FinalizingTile {
     size_t wmoInstanceIndex = 0;   // Next WMO placement to instantiate
     size_t wmoDoodadIndex   = 0;   // Next WMO doodad to upload
     size_t wmoLiquidGroupIndex = 0; // Next liquid group within current WMO instance
+    // The current placement's instance exists and its liquid is being laid
+    // down over several steps. Without it a resumed placement looked like a
+    // duplicate of itself - it had been marked placed on the first step - and
+    // every liquid group after the first few was skipped.
+    bool wmoInstanceOpen = false;
 
     // Incremental terrain upload state (splits TERRAIN phase across frames)
     bool terrainPreloaded = false;  // True after preloaded textures uploaded

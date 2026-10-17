@@ -1,12 +1,10 @@
-# Build directories
+# Build directories: build/ and every build-<name>/ or build_<name>/ beside
+# it. Listing them one by one let a new one (build-clang/) be committed, and
+# the files its test runs rewrite then conflicted between every pair of
+# branches that ran the tests.
 build/
-build_asan/
-build-asan/
-build-android/
-build-android-deps/
-build-debug/
-build-sanitize/
-build-dev/
+build-*/
+build_*/
 # Personal presets beside the shared CMakePresets.json.
 CMakeUserPresets.json
 # ccache directory CI keeps in the workspace.

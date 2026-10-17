@@ -4,8 +4,8 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
+#include "rendering/sky_billboard.hpp"
 #include "core/logger.hpp"
-#include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <vector>
 
@@ -59,7 +59,7 @@ bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset     = 0;
-    pushRange.size       = sizeof(CelestialPush); // 96 bytes
+    pushRange.size       = sizeof(CelestialPush); // 112 bytes
 
     // ------------------------------------------------------------------ pipeline layout
     pipelineLayout_ = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -117,7 +117,8 @@ void Celestial::shutdown() {
 
 void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                        float timeOfDay,
-                       const glm::vec3* sunDir, const glm::vec3* sunColor,
+                       const glm::vec3* sunDir, const glm::vec3& sunColor,
+                       const glm::vec3& sunHaloColor,
                        float gameTime, float nightFactor) {
     if (!renderingEnabled_ || pipeline_ == VK_NULL_HANDLE) {
         return;
@@ -139,7 +140,7 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindIndexBuffer(cmd, indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
     // Draw sun, then moon(s) - each call pushes different constants
-    renderSun(cmd, perFrameSet, timeOfDay, sunDir, sunColor);
+    renderSun(cmd, perFrameSet, timeOfDay, sunDir, sunColor, sunHaloColor);
     renderMoon(cmd, perFrameSet, timeOfDay, nightFactor);
     if (dualMoonMode_) {
         renderBlueChild(cmd, perFrameSet, timeOfDay, nightFactor);
@@ -152,7 +153,8 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
 void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
                            float timeOfDay,
-                           const glm::vec3* sunDir, const glm::vec3* sunColor) {
+                           const glm::vec3* sunDir, const glm::vec3& sunColor,
+                           const glm::vec3& sunHaloColor) {
     // Sun visible 5:00–19:00
     if (timeOfDay < 5.0f || timeOfDay >= 19.0f) {
         return;
@@ -168,18 +170,18 @@ void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
     const float sunDistance = 800.0f;
     glm::vec3 sunPos = dir * sunDistance;
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, sunPos);
-    model = glm::scale(model, glm::vec3(95.0f, 95.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(sunPos, 95.0f);
 
-    glm::vec3 color = sunColor ? *sunColor : getSunColor(timeOfDay);
-    const glm::vec3 warmSun(1.0f, 0.88f, 0.55f);
-    color = glm::mix(color, warmSun, 0.52f);
+    // The zone's own sun, disc and glow. The disc was the light the sun casts
+    // mixed half with a fixed warm yellow, so every zone's sun was the same
+    // warm white whatever its light tables said - Tirisfal's pale green and
+    // Duskwood's blue among them.
     float intensity = getSunIntensity(timeOfDay) * 0.92f;
 
     CelestialPush push{};
     push.model          = model;
-    push.celestialColor = glm::vec4(color, 1.0f);
+    push.celestialColor = glm::vec4(sunColor, 1.0f);
+    push.haloColor      = glm::vec4(sunHaloColor, 1.0f);
     push.intensity      = intensity;
     push.moonPhase      = 0.5f; // unused for sun
     push.animTime       = sunHazeTimer_;
@@ -206,9 +208,7 @@ void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
 
     glm::vec3 moonPos = getMoonPosition(timeOfDay);
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(40.0f, 40.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(moonPos, 40.0f);
 
     glm::vec3 color = glm::vec3(0.8f, 0.85f, 1.0f);
 
@@ -248,9 +248,7 @@ void Celestial::renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet /*perFrameS
     moonPos.x += 80.0f;
     moonPos.z -= 40.0f;
 
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, moonPos);
-    model = glm::scale(model, glm::vec3(30.0f, 30.0f, 1.0f));
+    const glm::mat4 model = skyBillboard(moonPos, 30.0f);
 
     glm::vec3 color = glm::vec3(0.7f, 0.8f, 1.0f);
 
@@ -298,24 +296,6 @@ glm::vec3 Celestial::getMoonPosition(float timeOfDay) const {
     float x = radius * std::cos(angle);
     float z = height * std::sin(angle);
     return glm::vec3(x, 0.0f, z);
-}
-
-glm::vec3 Celestial::getSunColor(float timeOfDay) const {
-    if (timeOfDay >= 5.0f && timeOfDay < 7.0f) {
-        return glm::vec3(1.0f, 0.6f, 0.2f); // Sunrise orange
-    }
-    if (timeOfDay >= 7.0f && timeOfDay < 9.0f) {
-        float t = (timeOfDay - 7.0f) / 2.0f;
-        return glm::mix(glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(1.0f, 1.0f, 0.9f), t);
-    }
-    if (timeOfDay >= 9.0f && timeOfDay < 16.0f) {
-        return glm::vec3(1.0f, 1.0f, 0.9f); // Day yellow-white
-    }
-    if (timeOfDay >= 16.0f && timeOfDay < 18.0f) {
-        float t = (timeOfDay - 16.0f) / 2.0f;
-        return glm::mix(glm::vec3(1.0f, 1.0f, 0.9f), glm::vec3(1.0f, 0.5f, 0.1f), t);
-    }
-    return glm::vec3(1.0f, 0.4f, 0.1f); // Sunset orange
 }
 
 float Celestial::getSunIntensity(float timeOfDay) const {

@@ -4,12 +4,15 @@
 
 #include "rendering/liquid_ripple_frames.hpp"
 
+#include <cmath>
 #include <map>
 #include <string>
 
 using wowee::pipeline::BLPImage;
 using wowee::rendering::liquidFramePath;
 using wowee::rendering::loadLiquidRippleFrames;
+using wowee::rendering::rippleSlopeForWind;
+using wowee::rendering::rippleSlopeRms;
 
 namespace {
 
@@ -98,4 +101,70 @@ TEST_CASE("a pattern with no frame number is one frame", "[liquid][ripple]") {
         [](const std::string&) { return frame(4, true, 1); }, why);
     REQUIRE(set);
     CHECK(set->frames == 1);
+}
+
+// The ripple is the chop the wind raises, as steep as Cox and Munk found the
+// sea's in that wind: still air leaves the water a mirror, a breeze tilts it
+// by a few degrees, never the forty-five the painted frames gave.
+TEST_CASE("still air raises no ripple", "[liquid][ripple][wind]") {
+    CHECK(rippleSlopeForWind(0.0f) == 0.0f);
+    CHECK(rippleSlopeForWind(-1.0f) == 0.0f);
+}
+
+TEST_CASE("the ripple is as steep as the sea's in that wind", "[liquid][ripple][wind]") {
+    constexpr float kYardsPerMetre = 1.0936133f;
+    CHECK(rippleSlopeForWind(5.0f * kYardsPerMetre) == Catch::Approx(0.160f).margin(0.003f));
+    CHECK(rippleSlopeForWind(10.0f * kYardsPerMetre) == Catch::Approx(0.226f).margin(0.003f));
+    float last = 0.0f;
+    for (float speed = 0.5f; speed < 15.0f; speed += 0.5f) {
+        const float slope = rippleSlopeForWind(speed);
+        CHECK(slope > last);
+        CHECK(slope < 0.3f);
+        last = slope;
+    }
+}
+
+namespace {
+
+/// Frames of one sine across, `amplitude` either side of mid-grey, in the alpha.
+BLPImage sineFrame(int size, float amplitude) {
+    BLPImage img;
+    img.width = img.height = size;
+    img.data.resize(static_cast<size_t>(size) * size * 4);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float v = 0.5f + amplitude * std::sin(6.2831853f * x / size);
+            uint8_t* p = &img.data[(static_cast<size_t>(y) * size + x) * 4];
+            p[0] = p[1] = p[2] = 4;
+            p[3] = static_cast<uint8_t>(std::lround(v * 255.0f));
+        }
+    }
+    return img;
+}
+
+}  // namespace
+
+TEST_CASE("frames painted twice as steep measure twice as steep", "[liquid][ripple]") {
+    std::string why;
+    const auto gentle = loadLiquidRippleFrames("gentle.%d",
+        [](const std::string& path) { return path == "gentle.1" ? sineFrame(64, 0.2f) : BLPImage{}; }, why);
+    const auto steep = loadLiquidRippleFrames("steep.%d",
+        [](const std::string& path) { return path == "steep.1" ? sineFrame(64, 0.4f) : BLPImage{}; }, why);
+    REQUIRE(gentle);
+    REQUIRE(steep);
+    const float g = rippleSlopeRms(*gentle, 4);
+    const float s = rippleSlopeRms(*steep, 4);
+    CHECK(g > 0.0f);
+    CHECK(s / g == Catch::Approx(2.0f).epsilon(0.03));
+    // One sine of amplitude A across a repeat rises 2 pi A / sqrt 2 per repeat
+    // in root mean square; the four-texel scale loses a few percent of it.
+    CHECK(g == Catch::Approx(6.2831853f * 0.2f / std::sqrt(2.0f)).epsilon(0.06));
+}
+
+TEST_CASE("frames with no relief have no steepness", "[liquid][ripple]") {
+    std::string why;
+    const auto flat = loadLiquidRippleFrames("flat.%d",
+        [](const std::string& path) { return path == "flat.1" ? sineFrame(16, 0.0f) : BLPImage{}; }, why);
+    REQUIRE(flat);
+    CHECK(rippleSlopeRms(*flat, 4) == 0.0f);
 }
