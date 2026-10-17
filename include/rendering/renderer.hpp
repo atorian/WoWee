@@ -614,6 +614,9 @@ private:
     // what the frame did without it. See pass_ablation.hpp for why the GPU's
     // own timestamps cannot answer that on this platform.
     std::unique_ptr<PassAblation> passAblation_;
+    /// The ablation run has the water, or only its reflection, switched off.
+    [[nodiscard]] bool waterAblated() const;
+    [[nodiscard]] bool waterReflectionAblated() const;
     bool passAblationReported_ = false;
     bool worldDrawnLastFrame_ = false;
     std::chrono::steady_clock::time_point lastFrameStart_{};

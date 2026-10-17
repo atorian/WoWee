@@ -1665,7 +1665,7 @@ void Renderer::endFrame() {
     // renderWorld already took the copy at the one point in the frame where the
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
-    if (!waterDrawsInContinuePass()
+    if (!waterDrawsInContinuePass() && !waterAblated()
         && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(
@@ -3141,7 +3141,7 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
-            if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+            if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
@@ -3354,7 +3354,7 @@ void Renderer::renderWorld() {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
-        if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+        if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
             waterRenderer->setRenderExtent(activeRenderExtent_);
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
@@ -3406,7 +3406,7 @@ void Renderer::renderWorld() {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled()) {
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
@@ -3452,7 +3452,9 @@ void Renderer::renderWorld() {
         vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
         waterRenderer->setRenderExtent(waterExtent);
-        waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        if (!waterAblated()) {
+            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        }
 
         // What is blended goes over the water, not under it. Drawn in the scene
         // pass it was in the refraction copy and then covered by the sheet, so
@@ -4387,8 +4389,17 @@ void Renderer::setSecondaryViewportScissor(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
+bool Renderer::waterAblated() const {
+    return passAblation_ && passAblation_->skip(AblationPass::Water);
+}
+
+bool Renderer::waterReflectionAblated() const {
+    return waterAblated() || (passAblation_ && passAblation_->skip(AblationPass::WaterReflection));
+}
+
 void Renderer::renderReflectionPass() {
     if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
+    if (waterReflectionAblated()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 
     // Select the current frame's pre-bound reflection descriptor set
