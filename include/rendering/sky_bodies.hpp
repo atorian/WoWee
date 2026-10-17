@@ -4,6 +4,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
+#include "rendering/frames_in_flight.hpp"
 #include "rendering/sky_celestial.hpp"
 #include "rendering/vk_texture.hpp"
 
@@ -69,6 +70,26 @@ public:
                      const glm::vec3& direction, float size, const glm::vec3& colour,
                      float alpha);
 
+    /// How much of each disc the world leaves in view, as WoW.exe measures it
+    /// for its glare (0x9abe00): the disc's quad drawn on the far plane with
+    /// no colour and its samples counted, over the samples its on-screen box
+    /// holds. A frame slot late - the client's is a frame late. Every building,
+    /// tree and hill that is drawn hides it, at any distance; the ray this
+    /// replaced saw only the collision within twenty yards of the player, so a
+    /// moon rising behind the inn shone through it.
+    [[nodiscard]] float measuredVisibility(Body body) const {
+        return measured_[static_cast<int>(body)];
+    }
+    /// Read this slot's answers from its last frame and reset its queries.
+    /// Outside any render pass, after the slot's fence has been waited on.
+    void beginFrameQueries(VkCommandBuffer cmd, uint32_t frame);
+    /// Ask how much of a disc the world hides. Inside the scene pass, after
+    /// the world has been drawn.
+    void queryDiscVisibility(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Body body,
+                             const sky_celestial::SkyDisc& disc, uint32_t frame,
+                             const glm::mat4& view, const glm::mat4& projection,
+                             VkExtent2D extent);
+
 private:
     struct SpritePush {
         glm::mat4 model;
@@ -89,7 +110,9 @@ private:
     Sprite& discSprite(Body body) { return sprites_[static_cast<int>(body) * 2]; }
     Sprite& glareSprite(Body body) { return sprites_[static_cast<int>(body) * 2 + 1]; }
 
-    VkPipeline buildPipeline(bool glare);
+    enum class SpritePass { Disc, Glare, Occlusion };
+    VkPipeline buildPipeline(SpritePass pass);
+    glm::mat4 discModel(const sky_celestial::SkyDisc& disc) const;
     void bindAndDraw(VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorSet perFrameSet,
                      VkDescriptorSet textureSet, const SpritePush& push);
     void loadSprite(pipeline::AssetManager* assets, Sprite& sprite);
@@ -100,6 +123,14 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline discPipeline_ = VK_NULL_HANDLE;
     VkPipeline glarePipeline_ = VK_NULL_HANDLE;
+    VkPipeline occlusionPipeline_ = VK_NULL_HANDLE;
+
+    /// One occlusion query per body per frame slot: index frame * 2 + body.
+    VkQueryPool queryPool_ = VK_NULL_HANDLE;
+    bool queryIssued_[MAX_FRAMES_IN_FLIGHT][2] = {};
+    /// The samples the disc's on-screen box holds, when it was asked.
+    float queryExpectedSamples_[MAX_FRAMES_IN_FLIGHT][2] = {};
+    float measured_[2] = {};
 
     VkBuffer vertexBuffer_ = VK_NULL_HANDLE;
     VmaAllocation vertexAlloc_ = VK_NULL_HANDLE;

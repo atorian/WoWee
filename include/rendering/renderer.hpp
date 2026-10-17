@@ -324,8 +324,9 @@ private:
     std::unique_ptr<Camera> camera;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
     /// The sun's glare, eased as WoW.exe eases it (sky_celestial::easeGlare):
-    /// its hours, the cloud in front of the sun, a sky model over it, and the
-    /// line from the eye to the disc. Whether the glare, the lens flare and
+    /// its hours, the cloud in front of the sun, a sky model over it, and how
+    /// much of the disc the world leaves in view (SkyBodies::measuredVisibility,
+    /// the GPU's occlusion count). Whether the glare, the lens flare and
     /// the dimming of the scene show. updateGlares() each frame.
     float sunGlare_ = 0.0f;
     /// The same without the line of sight - how much the sky around the sun
@@ -339,11 +340,6 @@ private:
     /// sun's as large and bright as the view is turned onto it, the moon's
     /// twice the moon; each by its visibility and what the weather leaves.
     void drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-
-    /// The line from the eye toward `sunDir`, blocked (1) or clear (0), asked of
-    /// the terrain, the buildings, the models and where the camera is: the
-    /// client's fallback for its occlusion query (0x9abc60).
-    [[nodiscard]] float sampleSunOcclusion(const glm::vec3& sunDir) const;
 
     /// The sun as the camera's sky drew it: whether the disc was drawn and,
     /// if not, why; where it stands and whether it is in view; what it was

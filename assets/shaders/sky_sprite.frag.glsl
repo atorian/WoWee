@@ -27,5 +27,8 @@ void main() {
         if (h <= 0.0) discard;
         alpha *= clamp(2.5 * h, 0.0, 1.0);
     }
+    // The client's alpha test, reference 1: what would add nothing is not
+    // drawn - and, for the occlusion query, not counted.
+    if (alpha < 1.0 / 255.0) discard;
     outColor = vec4(texel.rgb * push.colour.rgb, alpha);
 }

@@ -301,6 +301,10 @@ public:
     /// False on hardware without fillModeNonSolid, where a VK_POLYGON_MODE_LINE
     /// pipeline cannot be built and the wireframe views are unavailable.
     [[nodiscard]] bool isWireframeSupported() const { return fillModeNonSolidSupported_; }
+    /// Occlusion queries count samples rather than answering yes or no.
+    [[nodiscard]] bool isOcclusionQueryPreciseSupported() const {
+        return occlusionQueryPreciseSupported_;
+    }
     /// Whether tessellation control and evaluation stages can be used.
     [[nodiscard]] bool isTessellationSupported() const { return tessellationSupported_; }
     /// False on hardware missing shaderStorageImageWriteWithoutFormat or
@@ -657,6 +661,7 @@ private:
     std::unordered_map<uint64_t, VkSampler> samplerCache_;
     bool samplerAnisotropySupported_ = false;
     bool fillModeNonSolidSupported_ = false;
+    bool occlusionQueryPreciseSupported_ = false;
     bool tessellationSupported_ = false;
     bool fsr2ComputeFeaturesSupported_ = false;
     bool blockCompressionSupported_ = false;

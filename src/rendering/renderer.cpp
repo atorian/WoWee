@@ -1504,6 +1504,11 @@ void Renderer::beginFrame() {
     // This slot's fence has just been waited on, so a frame it copied for the
     // recording two frames ago is complete.
     collectRecordedFrame();
+    // The sun's and moon's occlusion answers from this slot's last frame, read
+    // now its fence is passed, and its queries reset before any pass begins.
+    if (skySystem && skySystem->getBodies()) {
+        skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
+    }
     writeRtLightingBindings(vkCtx->getCurrentFrame());
     writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
@@ -2026,50 +2031,6 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
     return modelId;
 }
 
-float Renderer::sampleSunOcclusion(const glm::vec3& sunDir) const {
-    if (!camera) return 1.0f;
-    const glm::vec3 eye = camera->getPosition();
-
-    // Toward the disc, which is where the glare is. Below the horizon the
-    // ground is in the way.
-    if (sunDir.z <= 0.0f) return 1.0f;
-
-    // Indoors the sun is behind a roof by definition, and a roof is the one
-    // occluder the terrain march below cannot see.
-    if (wmoRenderer && wmoRenderer->isInsideWMO(eye.x, eye.y, eye.z)) return 1.0f;
-
-    // How far to look. Far enough to clear the hill the camera is standing
-    // under, and no further: past a few hundred yards a ridge on the horizon
-    // is the sky's business, not the flare's.
-    constexpr float kReach = 600.0f;
-
-    if (wmoRenderer && wmoRenderer->raycastBoundingBoxes(eye, sunDir, kReach) < kReach) {
-        return 1.0f;
-    }
-    // The trees and other models with collision, as the client's own ray
-    // through world collision sees them (0x9abc60).
-    if (m2Renderer && m2Renderer->raycastCollision(eye, sunDir, kReach) < kReach) {
-        return 1.0f;
-    }
-
-    // The terrain, marched rather than intersected: the heightmap is what
-    // terrain collision is here, so asking it how high the ground is under each
-    // sample answers the same question an intersection would.
-    //
-    // Geometric steps, because the sample that decides this is almost always
-    // near the eye - the lip of the slope being stood under, or the hillside
-    // the camera has been pushed into - while a sample five hundred yards out
-    // only has to be finer than a mountain. Nineteen of them cover the range.
-    if (terrainManager) {
-        for (float t = 1.0f; t < kReach; t *= 1.4f) {
-            const glm::vec3 p = eye + sunDir * t;
-            const std::optional<float> ground = terrainManager->getHeightAt(p.x, p.y);
-            if (ground && *ground > p.z) return 1.0f;
-        }
-    }
-    return 0.0f;
-}
-
 void Renderer::updateGlares(float deltaTime) {
     namespace sc = sky_celestial;
     float sunSky = 0.0f, sunSeen = 0.0f, moonSeen = 0.0f;
@@ -2091,16 +2052,20 @@ void Renderer::updateGlares(float deltaTime) {
             if (!clouds || !clouds->isEnabled()) return 0.0f;
             return cloud_coverage::coverageToward(dir, clouds->getDensity(), clouds->getWindOffset());
         };
-        // Each body's own hours and the cloud in front of it; then whether the
-        // eye can see its disc, asked only when there is anything to see.
+        // Each body's own hours and the cloud in front of it; then how much of
+        // its disc the world leaves in view, as the GPU last counted it.
+        const SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
+        const auto seenOf = [&](SkyBodies::Body body) {
+            return bodies ? bodies->measuredVisibility(body) : 0.0f;
+        };
         const sc::SkyDisc sun = sc::sunDisc(day);
         sunSky = shared * sc::lookup(sc::kSunGlareHours, day) *
                  sc::sunGlareThroughCloud(coverageToward(sun.direction));
-        sunSeen = sunSky > 0.0f ? sunSky * (1.0f - sampleSunOcclusion(sun.direction)) : 0.0f;
+        sunSeen = sunSky * seenOf(SkyBodies::Body::Sun);
         const sc::SkyDisc moon = sc::moonDisc(day);
         const float moonSky = shared * sc::lookup(sc::kMoonGlareHours, day) *
                               sc::moonGlareThroughCloud(coverageToward(moon.direction));
-        moonSeen = moonSky > 0.0f ? moonSky * (1.0f - sampleSunOcclusion(moon.direction)) : 0.0f;
+        moonSeen = moonSky * seenOf(SkyBodies::Body::Moon);
     }
     sunGlare_ = sc::easeGlare(sc::kSunGlare, sunGlare_, sunSeen, deltaTime);
     sunGlareSky_ = sc::easeGlare(sc::kSunGlare, sunGlareSky_, sunSky, deltaTime);
@@ -2115,6 +2080,15 @@ void Renderer::drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     const glm::vec3 forward = glm::normalize(camera->getForward());
     const glm::vec3& colour = lightingManager->getLightingParams().sunColor;
     const float weather = sc::weatherFade(environment_.weatherIntensity);
+    // First ask, of the finished depth, how much of each disc the world
+    // hides; the answer comes back a frame slot later (updateGlares).
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    for (const SkyBodies::Body body : {SkyBodies::Body::Sun, SkyBodies::Body::Moon}) {
+        bodies->queryDiscVisibility(cmd, perFrameSet, body,
+                                    body == SkyBodies::Body::Sun ? sc::sunDisc(day) : sc::moonDisc(day),
+                                    frame, camera->getViewMatrix(), camera->getProjectionMatrix(),
+                                    activeRenderExtent_);
+    }
     if (sunGlare_ > 0.0f) {
         const sc::SkyDisc sun = sc::sunDisc(day);
         const sc::GlareShape shape = sc::sunGlareShape(glm::dot(forward, sun.direction));

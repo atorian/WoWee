@@ -576,6 +576,11 @@ bool VkContext::selectPhysicalDevice() {
     };
     samplerAnisotropySupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::samplerAnisotropy);
     fillModeNonSolidSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::fillModeNonSolid);
+    // The sun's and moon's glare count how many samples of their disc the
+    // world leaves in view, as WoW.exe's occlusion query does (0x9abe00).
+    // Without it a query says only whether any sample passed.
+    occlusionQueryPreciseSupported_ =
+        enableIfPresent(&VkPhysicalDeviceFeatures::occlusionQueryPrecise);
     // The water's waves near the camera are tessellated; without it the
     // water is drawn on its own mesh and its short waves only in the light.
     tessellationSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::tessellationShader);
