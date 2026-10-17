@@ -75,9 +75,15 @@ public:
         float layerFloor = 0.1f;
         /// 0 is even mist; 1 lets it thin to nothing and pile to double.
         float noiseAmount = 0.6f;
-        /// Brightness of the sunlit air. Most of it goes forward, so this is
-        /// mostly what the air toward the sun does.
-        float sunScatter = 0.8f;
+        /// Brightness of the sunlit air against a white surface in the same
+        /// sun. The surfaces take LightParams' direct light as `diffuse * N.L`:
+        /// a Lambert reflector, sending 1/pi of what falls on it toward the
+        /// eye. Air scattering evenly sends 1/(4 pi) each way - a quarter of
+        /// that - and the phase function's forward lobe is what lifts the air
+        /// toward the sun above it. 0.8 made the air over three times brighter
+        /// than the light it is lit by, and the sky around the sun a white blot
+        /// whatever the zone's sun was.
+        float sunScatter = 0.25f;
         /// Brightness of the air the sun does not reach, lit by the zone's fog
         /// colour. Half, so a shaft stands against the shade beside it rather
         /// than against a haze nearly as bright.

@@ -4881,11 +4881,12 @@ void Renderer::recordSunShafts() {
             // Rain and snow put a lid over it.
             if (weather) strength *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
 
-            // The sun's own colour, kept in hue and not in brightness, and
-            // half white: the rays should warm at dusk, not turn orange.
-            const glm::vec3 c = lp.diffuseColor;
-            const float peak = std::max({c.r, c.g, c.b, 1e-3f});
-            in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
+            // The sun's own light from LightParams, brightness and all. It was
+            // normalized to its brightest channel and mixed half with white,
+            // so every zone's sun streamed the same near-white rays: Tirisfal's
+            // overcast sun poured as much light as Elwynn's noon, and its blue
+            // cast was gone.
+            in.tint = glm::min(lp.diffuseColor, glm::vec3(1.0f));
             in.sunUV = sun.uv;
             in.strength = strength;
         }
