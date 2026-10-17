@@ -157,6 +157,23 @@ void ResourceTelemetry::checkThresholds(const ResourceSample& sample, const std:
             alerts.push_back({ResourceAlert::Kind::PrivateCommit, *change, text.str()});
         }
     }
+
+    if (sample.videoMemory && sample.videoMemory->budgetBytes > 0) {
+        const auto& video = *sample.videoMemory;
+        const double limit = static_cast<double>(video.budgetBytes) * limits.maxVideoMemoryShareOfBudget;
+        if (auto change = videoMemory_.update(static_cast<double>(video.usageBytes), limit, limit * 0.1)) {
+            std::ostringstream text;
+            text << "Resources: the client holds " << formatBytes(video.usageBytes)
+                 << " of video memory, " << (*change ? "over " : "back under ")
+                 << static_cast<int>(limits.maxVideoMemoryShareOfBudget * 100.0) << "% of the "
+                 << formatBytes(video.budgetBytes) << " the driver allows it";
+            if (*change) {
+                text << " - the next render target or texture may not fit, and the driver moves "
+                        "what does not into system memory; " << line;
+            }
+            alerts.push_back({ResourceAlert::Kind::VideoMemory, *change, text.str()});
+        }
+    }
 }
 
 // ---- ResourceTelemetry ------------------------------------------------------
@@ -188,6 +205,8 @@ ResourceTelemetry::Recorded ResourceTelemetry::record(ResourceSample sample) {
     push(ResourceSeries::PrivateMB, orNotMeasured(process.privateBytes, kMiB));
     push(ResourceSeries::SystemCommitUsedMB, orNotMeasured(process.systemCommitUsedBytes, kMiB));
     push(ResourceSeries::Threads, orNotMeasured(process.threadCount));
+    push(ResourceSeries::VideoMemoryMB,
+         sample.videoMemory ? static_cast<float>(sample.videoMemory->usageBytes / kMiB) : kNotMeasured);
 
     // The line the alerts carry is of the frames since the last line too:
     // that is the stretch the warning arrives at the end of.
@@ -236,6 +255,16 @@ std::string ResourceTelemetry::describe(const ResourceSample& sample, const Fram
          << bytesOrNone(process.totalPhysicalBytes);
     line << " | threads ";
     if (process.threadCount) line << *process.threadCount; else line << "n/a";
+    if (sample.videoMemory) {
+        const auto& video = *sample.videoMemory;
+        line << " | video memory " << formatBytes(video.usageBytes) << " of "
+             << formatBytes(video.budgetBytes) << " budget";
+        for (size_t i = 0; i < video.parts.size(); ++i) {
+            line << (i == 0 ? " (" : ", ") << video.parts[i].name << " "
+                 << formatBytes(video.parts[i].value);
+        }
+        if (!video.parts.empty()) line << ")";
+    }
 
     for (const auto& cache : sample.caches) {
         line << " | " << cache.name << " " << formatBytes(cache.stats.bytes);

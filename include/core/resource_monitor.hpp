@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -34,9 +36,18 @@ public:
 private:
     [[nodiscard]] ResourceSample sample(const rendering::Renderer* renderer,
                                         const pipeline::AssetManager* assets,
-                                        std::optional<uint32_t> latencyMs, double now) const;
+                                        std::optional<uint32_t> latencyMs, double now);
+    /// The device-local heap, and what it is used for as last broken down.
+    void sampleVideoMemory(const rendering::Renderer& renderer, double now, ResourceSample& out);
 
     bool loud_;
+    /// Where WOWEE_GPU_MEMORY_DUMP asks for the allocator's detailed map to be
+    /// written each time video memory is broken down; empty when it does not.
+    std::string gpuMemoryDumpPath_;
+    /// Breaking video memory down walks every allocation, so it is done every
+    /// few seconds and the parts are carried between.
+    std::vector<ResourceSample::Count> videoMemoryParts_;
+    std::optional<double> lastVideoBreakdownAt_;
     ResourceTelemetry telemetry_;
     ProcessStatsSampler sampler_;
     std::chrono::steady_clock::time_point started_;

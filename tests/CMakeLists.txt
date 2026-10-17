@@ -151,6 +151,22 @@ wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
             ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
 
+# What the video memory is used for, from the allocator's detailed map: each
+# allocation by its usage flags, in VRAM or system memory. No device.
+wowee_add_test(test_gpu_memory
+    SOURCES test_gpu_memory.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/gpu_memory.cpp)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_gpu_memory PRIVATE Vulkan::Vulkan)
+endif()
+
+# The renderers' one texture cache: one entry per key, one budget, eviction of
+# only what nothing references, nothing freed before its frames have fenced.
+# The device is a fake; no GPU.
+wowee_add_test(test_texture_cache
+    SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
+
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)

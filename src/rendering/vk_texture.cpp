@@ -266,7 +266,7 @@ VkTexture::BlockUploadTally VkTexture::blockUploadTally() {
             .decodedBytes = g_blockUploadDecodedBytes.load(std::memory_order_relaxed)};
 }
 
-bool VkTexture::uploadBLP(VkContext& ctx, const pipeline::BLPImage& image) {
+bool VkTexture::uploadBLP(VkContext& ctx, const pipeline::BLPImage& image, uint32_t skipLevels) {
     if (!image.isValid()) return false;
 
     {
@@ -298,19 +298,27 @@ bool VkTexture::uploadBLP(VkContext& ctx, const pipeline::BLPImage& image) {
         return false;
     }
 
+    // Never past the last level, nor below a single block.
+    const auto levelCount = static_cast<uint32_t>(image.mipmaps.size());
+    uint32_t skip = std::min(skipLevels, levelCount - 1);
+    while (skip > 0 && ((static_cast<uint32_t>(image.width) >> skip) < 4 ||
+                        (static_cast<uint32_t>(image.height) >> skip) < 4)) {
+        --skip;
+    }
+
     std::vector<const uint8_t*> levels;
     std::vector<uint32_t> sizes;
-    levels.reserve(image.mipmaps.size());
-    sizes.reserve(image.mipmaps.size());
-    for (const auto& level : image.mipmaps) {
-        levels.push_back(level.data());
-        sizes.push_back(static_cast<uint32_t>(level.size()));
+    levels.reserve(levelCount - skip);
+    sizes.reserve(levelCount - skip);
+    for (uint32_t i = skip; i < levelCount; ++i) {
+        levels.push_back(image.mipmaps[i].data());
+        sizes.push_back(static_cast<uint32_t>(image.mipmaps[i].size()));
     }
 
     if (!uploadMips(ctx, levels.data(), sizes.data(),
                     static_cast<uint32_t>(levels.size()),
-                    static_cast<uint32_t>(image.width),
-                    static_cast<uint32_t>(image.height), format)) {
+                    static_cast<uint32_t>(image.width) >> skip,
+                    static_cast<uint32_t>(image.height) >> skip, format)) {
         return false;
     }
 
@@ -432,6 +440,13 @@ void VkTexture::destroy(VkDevice device, VmaAllocator allocator) {
     destroyImage(device, allocator, image_);
     device_ = VK_NULL_HANDLE;
     allocator_ = VK_NULL_HANDLE;
+}
+
+uint64_t VkTexture::allocatedBytes() const {
+    if (!allocator_ || !image_.allocation) return 0;
+    VmaAllocationInfo info{};
+    vmaGetAllocationInfo(allocator_, image_.allocation, &info);
+    return info.size;
 }
 
 VkDescriptorImageInfo VkTexture::descriptorInfo(VkImageLayout layout) const {

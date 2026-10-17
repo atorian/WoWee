@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/cache_stats.hpp"
+#include "rendering/texture_cache.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
@@ -261,12 +261,6 @@ public:
                                 wowee::rendering::VkShaderModule& fragShader);
     bool isInitialized() const { return initialized_; }
     uint32_t getModelCount() const { return loadedModels.size(); }
-    /// The textures loaded for buildings, with their generated normal maps,
-    /// in estimated GPU bytes, against the budget eviction keeps them under.
-    /// Main thread.
-    [[nodiscard]] core::CacheStats textureCacheStats() const {
-        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
-    }
 
     /**
      * Get number of active instances
@@ -671,8 +665,12 @@ private:
         // Uses the public DoodadTemplate struct defined above
         std::vector<DoodadTemplate> doodadTemplates;
 
-        // Texture handles for this model (indexed by texture path order)
-        std::vector<VkTexture*> textures;  // non-owning, from cache
+        // The model's textures in path order, held for as long as the model
+        // is: its batches and the ray-traced scene point at them.
+        std::vector<TextureRef> textures;
+        /// The normal/height map made from each texture, where there is one
+        /// (parallel to textures).
+        std::vector<TextureRef> normalMaps;
         std::vector<std::string> textureNames;  // lowercase texture paths (parallel to textures)
 
         // Material texture indices (materialId -> texture index)
@@ -822,23 +820,23 @@ private:
                          const Frustum& frustum,
                          const glm::mat4& modelMatrix) const;
 
-    /**
-     * Load a texture from path
-     */
-    VkTexture* loadTexture(const std::string& path);
+    /// A building texture and the normal/height map made from it.
+    struct LoadedTexture {
+        /// White when the file would not load or found no room.
+        TextureRef diffuse;
+        /// Empty where none is made: normal mapping and parallax off, the
+        /// texture white, or the map neither prepared by the terrain workers
+        /// nor made here.
+        TextureRef normalHeight;
+    };
+    /// From the shared cache, loading what is not there.
+    LoadedTexture loadTexture(const std::string& path);
+    /// The normal/height map of a loaded texture, from the cache, the terrain
+    /// workers' prepared pixels, or - outside streaming - made here.
+    TextureRef loadNormalHeightMap(const std::string& resolvedPath, const pipeline::BLPImage* decoded);
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedNormalMapCache_ = nullptr;
     std::unordered_map<std::string, float>* predecodedNormalMapVariances_ = nullptr;
-
-    /**
-     * Generate normal+height map from diffuse RGBA8 pixels
-     * @param pixels RGBA8 pixel data
-     * @param width Texture width
-     * @param height Texture height
-     * @param outVariance Receives height map variance (for POM threshold)
-     * @return Generated VkTexture (RGBA8: RGB=normal, A=height)
-     */
-    std::unique_ptr<VkTexture> generateNormalHeightMap(const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance);
 
     /**
      * Allocate a material descriptor set from the pool
@@ -847,15 +845,14 @@ private:
     /// Create a merged batch's material buffer and descriptor set.
     void createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                    GroupResources::MergedBatch& mb);
-    /// The normal/height map the cache made alongside a texture, if any.
-    void attachNormalHeightMap(GroupResources::MergedBatch& mb) const;
+    /// Point a batch at the normal/height map made from its texture, if any.
+    void attachNormalHeightMap(const ModelData& model, uint32_t texIndex,
+                               GroupResources::MergedBatch& mb) const;
     /// Ask again for textures that failed to load and give the batches drawn
     /// white for want of them their texture. A failed MPQ read is often
     /// transient.
     void retryPendingTextures();
     std::vector<uint32_t> modelsWithPendingTextures_;
-    /// Free least recently used textures no loaded or loading model refers to.
-    size_t evictUnreferencedTextures(size_t bytesNeeded);
 
     /**
      * Destroy GPU resources for a single group.
@@ -920,29 +917,17 @@ private:
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
     static constexpr uint32_t MAX_MATERIAL_SETS = 32768;
 
-    // Texture cache (path -> VkTexture)
-    struct TextureCacheEntry {
-        std::unique_ptr<VkTexture> texture;
-        std::unique_ptr<VkTexture> normalHeightMap;  // generated normal+height from diffuse
-        float heightMapVariance = 0.0f;  // variance of generated height map
-        size_t approxBytes = 0;
-        uint64_t lastUse = 0;
-    };
-    std::unordered_map<std::string, TextureCacheEntry> textureCache;
-    size_t textureCacheBytes_ = 0;
-    uint64_t textureCacheCounter_ = 0;
-    size_t textureCacheBudgetBytes_ = 8192ull * 1024 * 1024;  // 8 GB default, overridden at init
-    std::unordered_set<std::string> failedTextureCache_;
+    /// When a path that would not load, or found no room, is worth asking for
+    /// again: a failed MPQ read is often transient.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
     uint64_t textureLookupSerial_ = 0;
-    uint32_t textureBudgetRejectWarnings_ = 0;
 
-    // Default white texture
-    std::unique_ptr<VkTexture> whiteTexture_;
+    // Default white texture, held in the shared cache.
+    TextureRef whiteTexture_;
 
     // Flat normal placeholder (128,128,255,128) = up-pointing normal, mid-height
-    std::unique_ptr<VkTexture> flatNormalTexture_;
+    TextureRef flatNormalTexture_;
 
     // Loaded models (modelId -> ModelData)
     std::unordered_map<uint32_t, ModelData> loadedModels;

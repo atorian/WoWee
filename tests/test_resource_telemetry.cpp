@@ -6,6 +6,7 @@
 
 #include "core/resource_telemetry.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -178,4 +179,53 @@ TEST_CASE("the client committing over half the machine's memory is said once", "
     CHECK(alertsOf(telemetry.record(sample(0, 10 * kGiB)), Kind::PrivateCommit).empty());
     CHECK(alertsOf(telemetry.record(sample(1, 17 * kGiB)), Kind::PrivateCommit) == std::vector<bool>{true});
     CHECK(alertsOf(telemetry.record(sample(2, 20 * kGiB)), Kind::PrivateCommit).empty());
+}
+
+namespace {
+
+ResourceSample withVideoMemory(double t, uint64_t usage, uint64_t budget) {
+    ResourceSample s;
+    s.timeSeconds = t;
+    s.videoMemory = ResourceSample::VideoMemory{.budgetBytes = budget, .usageBytes = usage, .parts = {}};
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("video memory is graphed and said in the resource line with what it holds", "[resources]") {
+    ResourceTelemetry::Config config;
+    config.logIntervalSeconds = 10.0;
+    ResourceTelemetry telemetry(config);
+
+    std::optional<std::string> line;
+    for (int second = 0; second <= 10; ++second) {
+        auto s = withVideoMemory(second, 3 * kGiB + kGiB / 2, 10 * kGiB);
+        s.videoMemory->parts = {{"render targets", 400ull * 1024 * 1024},
+                                {"normal maps", 2 * kGiB}};
+        if (auto l = telemetry.record(s).logLine) line = l;
+    }
+
+    REQUIRE(line);
+    CHECK(contains(*line, "video memory 3.50 GB of 10.00 GB budget"));
+    CHECK(contains(*line, "render targets 400 MB"));
+    CHECK(contains(*line, "normal maps 2.00 GB"));
+    const auto graph = telemetry.series(ResourceSeries::VideoMemoryMB).measured();
+    REQUIRE(graph.size() == 11);
+    CHECK(graph.back() == Catch::Approx(3.5f * 1024.0f));
+}
+
+TEST_CASE("video memory close to the driver's budget is said once a crossing", "[resources]") {
+    ResourceTelemetry::Config config;
+    config.thresholds.maxVideoMemoryShareOfBudget = 0.95;
+    ResourceTelemetry telemetry(config);
+    using Kind = ResourceAlert::Kind;
+    const uint64_t budget = 10 * kGiB;
+
+    CHECK(alertsOf(telemetry.record(withVideoMemory(0, 8 * kGiB, budget)), Kind::VideoMemory).empty());
+    const auto full = telemetry.record(withVideoMemory(1, budget - kGiB / 4, budget));
+    REQUIRE(alertsOf(full, Kind::VideoMemory) == std::vector<bool>{true});
+    CHECK(contains(full.alerts.front().message, "of the 10.00 GB"));
+    CHECK(alertsOf(telemetry.record(withVideoMemory(2, budget, budget)), Kind::VideoMemory).empty());
+    CHECK(alertsOf(telemetry.record(withVideoMemory(3, 6 * kGiB, budget)), Kind::VideoMemory) ==
+          std::vector<bool>{false});
 }

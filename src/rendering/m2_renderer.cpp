@@ -1,6 +1,7 @@
 #include <atomic>
 #include "rendering/placement_transform.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/texture_upload.hpp"
 #include <stdexcept>
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_batch_opacity.hpp"
@@ -976,10 +977,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
     // --- Create white fallback texture ---
     {
-        uint8_t white[] = {255, 255, 255, 255};
-        whiteTexture_ = std::make_unique<VkTexture>();
-        whiteTexture_->upload(*vkCtx_, white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM);
-        whiteTexture_->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        const uint8_t white[] = {255, 255, 255, 255};
+        whiteTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                    true, VK_SAMPLER_ADDRESS_MODE_REPEAT);
     }
 
     // --- Generate soft radial gradient glow texture ---
@@ -1001,9 +1001,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
                 px[idx + 3] = static_cast<uint8_t>(a * 255);
             }
         }
-        glowTexture_ = std::make_unique<VkTexture>();
-        glowTexture_->upload(*vkCtx_, px.data(), SZ, SZ, VK_FORMAT_R8G8B8A8_UNORM);
-        glowTexture_->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        glowTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, px.data(), SZ, SZ, VK_FORMAT_R8G8B8A8_UNORM,
+                                   true, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
         // Pre-allocate glow texture descriptor set (reused every frame).
         //
         // Valid, not merely built: upload and createSampler both answer nothing
@@ -1011,7 +1010,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         // into this set for the glow pass to sample. The bind site already
         // skips a null set, so leaving it unallocated loses the glow sprites
         // rather than the device.
-        if (glowTexture_->isValid() && particleTexLayout_ && materialDescPool_) {
+        if (glowTexture_ && glowTexture_->isValid() && particleTexLayout_ && materialDescPool_) {
             VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
@@ -1028,10 +1027,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             }
         }
     }
-    textureCacheBudgetBytes_ =
-        envSizeMBOrDefault("WOWEE_M2_TEX_CACHE_MB", 4096) * 1024ull * 1024ull;
     modelCacheLimit_ = envSizeMBOrDefault("WOWEE_M2_MODEL_LIMIT", 6000);
-    LOG_INFO("M2 texture cache budget: ", textureCacheBudgetBytes_ / (1024 * 1024), " MB");
     LOG_INFO("M2 model cache limit: ", modelCacheLimit_);
 
     LOG_INFO("M2 renderer initialized (Vulkan)");
@@ -1076,25 +1072,10 @@ void M2Renderer::shutdown() {
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
 
-    // Delete cached textures. ~VkTexture is empty by design -- it has no device
-    // or allocator to free with -- so clearing the map on its own drops the
-    // unique_ptrs and leaks every image, view and allocation behind them.
-    for (auto& [path, entry] : textureCache) {
-        if (entry.texture) entry.texture->destroy(device, alloc);
-    }
-    textureCache.clear();
-    // The singletons the cache never held. Same reason as above: a
-    // unique_ptr<VkTexture> releases nothing on its own.
-    if (whiteTexture_) { whiteTexture_->destroy(device, alloc); whiteTexture_.reset(); }
-    if (glowTexture_)  { glowTexture_->destroy(device, alloc);  glowTexture_.reset(); }
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-    texturePropsByPtr_.clear();
-    failedTextureCache_.clear();
+    // The models gave their textures back with them; the fallbacks go too.
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
-    textureBudgetRejectWarnings_ = 0;
     whiteTexture_.reset();
     glowTexture_.reset();
 
@@ -1348,7 +1329,7 @@ VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
     return info;
 }
 
-void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const {
+void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const {
     // What the texture is, measured from the image. Nothing about how a batch
     // is drawn comes from its texture's file name: the client never keys out
     // black. A forge's or a bonfire's batches with an opaque material are its
@@ -1356,10 +1337,8 @@ void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const {
     // DALARAN_FORGECOALS, LAVA.30 - and their flames are particle emitters
     // (OrcBonFire draws FlameLickSmall and LavaLump2 from its two emitters,
     // not from a batch). Keying "fire" textures cut holes in the rocks.
-    auto pit = texturePropsByPtr_.find(batch.texture);
-    if (pit == texturePropsByPtr_.end()) return;
-    batch.hasAlpha = pit->second.hasAlpha;
-    batch.alphaIsSilhouette = pit->second.alphaIsSilhouette;
+    batch.hasAlpha = texture.hasAlpha;
+    batch.alphaIsSilhouette = texture.alphaIsSilhouette;
 }
 
 void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
@@ -1412,16 +1391,17 @@ void M2Renderer::retryPendingBatchTextures() {
             pendingBatchTextures_.pop_back();
             continue;
         }
-        VkTexture* tex = loadTexture(batch->pendingTextureKey, batch->pendingTextureFlags);
-        if (tex == nullptr || tex == whiteTexture_.get()) {
+        TextureRef tex = loadTexture(batch->pendingTextureKey);
+        if (!tex || tex == whiteTexture_) {
             ++i;
             continue;
         }
         // The batch has been hidden since it loaded, so nothing in flight
         // refers to its descriptor set or material buffer.
-        const M2ModelGPU& model = it->second;
-        batch->texture = tex;
-        applyBatchTextureProps(*batch);
+        M2ModelGPU& model = it->second;
+        batch->texture = tex.get();
+        applyBatchTextureProps(*batch, tex.info());
+        model.textureRefs.push_back(std::move(tex));
         writeBatchMaterial(model, *batch);
         writeBatchDescriptors(*batch);
         batch->batchOpacity = batch->loadedOpacity;
@@ -1892,7 +1872,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // Load ALL textures from the model into a local vector.
     // textureLoadFailed[i] is true if texture[i] had a named path that failed to load.
     // Such batches are hidden (batchOpacity=0) rather than rendered white.
+    // The model holds a reference to each (gpuModel.textureRefs); the batches,
+    // emitters and ribbons keep the raw pointers below.
     std::vector<VkTexture*> allTextures;
+    std::vector<TextureInfo> allTextureInfo;
     std::vector<bool> textureLoadFailed;
     std::vector<std::string> textureKeysLower;
     if (assetManager) {
@@ -1910,8 +1893,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 std::replace(texKey.begin(), texKey.end(), '/', '\\');
                 std::transform(texKey.begin(), texKey.end(), texKey.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                VkTexture* texPtr = loadTexture(texPath, tex.flags);
-                bool failed = (texPtr == whiteTexture_.get());
+                TextureRef texRef = loadTexture(texPath);
+                bool failed = (texRef == whiteTexture_);
                 if (failed) {
                     static uint32_t loggedModelTextureFails = 0;
                     static bool loggedModelTextureFailSuppressed = false;
@@ -1927,7 +1910,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 if (isInvisibleTrap) {
                     LOG_INFO("  InvisibleTrap texture[", ti, "]: ", texPath, " -> ", (failed ? "WHITE" : "OK"));
                 }
-                allTextures.push_back(texPtr);
+                allTextures.push_back(texRef.get());
+                allTextureInfo.push_back(texRef.info());
+                gpuModel.textureRefs.push_back(std::move(texRef));
                 textureLoadFailed.push_back(failed);
                 textureKeysLower.push_back(std::move(texKey));
             } else {
@@ -1967,6 +1952,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                     }
                 }
                 allTextures.push_back(whiteTexture_.get());
+                allTextureInfo.push_back(whiteTexture_.info());
                 textureLoadFailed.push_back(false);  // Empty filename = intentional white (type!=0)
                 textureKeysLower.emplace_back();
             }
@@ -2041,12 +2027,14 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
             // Resolve texture: batch.textureIndex → textureLookup → allTextures
             VkTexture* tex = whiteTexture_.get();
+            TextureInfo texInfo = whiteTexture_.info();
             bool texFailed = false;
             std::string batchTexKeyLower;
             if (batch.textureIndex < model.textureLookup.size()) {
                 uint16_t texIdx = model.textureLookup[batch.textureIndex];
                 if (texIdx < allTextures.size()) {
                     tex = allTextures[texIdx];
+                    texInfo = allTextureInfo[texIdx];
                     texFailed = (texIdx < textureLoadFailed.size()) && textureLoadFailed[texIdx];
                     if (texIdx < textureKeysLower.size()) {
                         batchTexKeyLower = textureKeysLower[texIdx];
@@ -2060,6 +2048,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                             " out of range (textureLookup size=", model.textureLookup.size(),
                             ") - falling back to texture[0]");
                 tex = allTextures[0];
+                texInfo = allTextureInfo[0];
                 texFailed = !textureLoadFailed.empty() && textureLoadFailed[0];
                 if (!textureKeysLower.empty()) {
                     batchTexKeyLower = textureKeysLower[0];
@@ -2068,10 +2057,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
             if (texFailed && groundDetailModel) {
                 static const std::string kDetailFallbackTexture = "World\\NoDXT\\Detail\\8des_detaildoodads01.blp";
-                VkTexture* fallbackTex = loadTexture(kDetailFallbackTexture, 0);
-                if (fallbackTex != nullptr && fallbackTex != whiteTexture_.get()) {
-                    tex = fallbackTex;
+                TextureRef fallbackTex = loadTexture(kDetailFallbackTexture);
+                if (fallbackTex && fallbackTex != whiteTexture_) {
+                    tex = fallbackTex.get();
+                    texInfo = fallbackTex.info();
                     texFailed = false;
+                    gpuModel.textureRefs.push_back(std::move(fallbackTex));
                 }
             }
             bgpu.texture = tex;
@@ -2108,7 +2099,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                                     (bgpu.lanternGlowHint && flameCard);
             bgpu.glowTint = tcls.glowTint;
             if (tex != nullptr && tex != whiteTexture_.get()) {
-                applyBatchTextureProps(bgpu);
+                applyBatchTextureProps(bgpu, texInfo);
             }
             // How its stages combine and where their coordinates come from,
             // as the client works it out at skin load. The second stage was
@@ -2153,7 +2144,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 const uint16_t texIdx = model.textureLookup[batch.textureIndex];
                 if (texIdx < model.textures.size()) {
                     bgpu.pendingTextureKey = batchTexKeyLower;
-                    bgpu.pendingTextureFlags = model.textures[texIdx].flags;
                 }
             }
 

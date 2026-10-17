@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-#include "core/cache_stats.hpp"
+#include "rendering/texture_cache.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
@@ -48,10 +48,11 @@ struct TerrainChunkGPU {
     ::VkBuffer paramsUBO = VK_NULL_HANDLE;
     VmaAllocation paramsAlloc = VK_NULL_HANDLE;
 
-    // Texture handles (owned by cache, NOT destroyed per-chunk)
-    VkTexture* baseTexture = nullptr;
-    VkTexture* layerTextures[3] = {nullptr, nullptr, nullptr};
-    VkTexture* alphaTextures[3] = {nullptr, nullptr, nullptr};
+    // The chunk's textures, held: what its material set names stays resident
+    // as long as the chunk does. The alpha maps are its own.
+    TextureRef baseTexture;
+    TextureRef layerTextures[3];
+    TextureRef alphaTextures[3];
     int layerCount = 0;
 
     // World position for culling
@@ -160,11 +161,6 @@ public:
     void clearShadowMap() {}
 
     [[nodiscard]] int getChunkCount() const { return static_cast<int>(chunks.size()); }
-    /// The ground's textures and alpha maps, in estimated GPU bytes, against
-    /// the budget eviction keeps them under. Main thread.
-    [[nodiscard]] core::CacheStats textureCacheStats() const {
-        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
-    }
     [[nodiscard]] int getRenderedChunkCount() const { return renderedChunks; }
     /// How far the furthest chunk drawn this frame was, for the diagnostic that
     /// compares it against the doodads. See Renderer::logViewDistanceDiag.
@@ -179,8 +175,10 @@ public:
 private:
     const std::vector<LocalLight>* frameLights_ = nullptr;
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
-    VkTexture* loadTexture(const std::string& path);
-    VkTexture* createAlphaTexture(const std::vector<uint8_t>& alphaData);
+    /// The tileset texture from the shared cache, loading it if it is not
+    /// there; white when it cannot be had.
+    TextureRef loadTexture(const std::string& path);
+    TextureRef createAlphaTexture(const std::vector<uint8_t>& alphaData);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
     VkDescriptorSet allocateMaterialSet();
@@ -236,38 +234,12 @@ private:
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;
 
-    // Texture cache (path -> VkTexture)
-    struct TextureCacheEntry {
-        std::unique_ptr<VkTexture> texture;
-        size_t approxBytes = 0;
-        uint64_t lastUse = 0;
-    };
-    std::unordered_map<std::string, TextureCacheEntry> textureCache;
-    size_t textureCacheBytes_ = 0;
-    uint64_t textureCacheCounter_ = 0;
-    size_t textureCacheBudgetBytes_ = 4096ull * 1024 * 1024;
-    std::unordered_set<std::string> failedTextureCache_;
+    /// Tileset paths that would not load, said once each.
     std::unordered_set<std::string> loggedTextureLoadFails_;
-    /// Cache entries handed out at or after this counter are never evicted.
-    ///
-    /// A chunk under construction is not in `chunks` yet, so the scan for what
-    /// is in use cannot see the textures it has already been given. Raised to
-    /// the counter at the start of every upload call, which puts everything
-    /// this tile has taken out of reach until the chunk holding it lands.
-    uint64_t evictProtectFrom_ = 0;
 
-    /// Free least-recently-used cached textures until `needBytes` fits.
-    ///
-    /// Returns whether there is now room. Only textures no live chunk points
-    /// at are freed, and they go through the frame fences rather than being
-    /// destroyed on the spot: a chunk's material descriptor set names the
-    /// image, so one still being drawn from must outlive the frame that
-    /// referenced it.
-    bool evictTexturesFor(size_t needBytes);
-
-    // Fallback textures
-    std::unique_ptr<VkTexture> whiteTexture;
-    std::unique_ptr<VkTexture> opaqueAlphaTexture;
+    // Fallback textures, held in the shared cache like any other.
+    TextureRef whiteTexture;
+    TextureRef opaqueAlphaTexture;
 
     // Rendering state
     bool wireframe = false;

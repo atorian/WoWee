@@ -66,6 +66,18 @@ struct ResourceSample {
     std::vector<Cache> caches;
     /// What is held where only the number is known: models, jobs in flight.
     std::vector<Count> counts;
+
+    /// The device's video memory, as the driver counts it.
+    struct VideoMemory {
+        /// What the driver lets the client hold in its largest VRAM heap.
+        uint64_t budgetBytes = 0;
+        /// What the client holds there now.
+        uint64_t usageBytes = 0;
+        /// What it is used for - render targets, textures, normal maps,
+        /// geometry - in bytes, as last broken down. Empty until it has been.
+        std::vector<Count> parts;
+    };
+    std::optional<VideoMemory> videoMemory;
 };
 
 /// The figures kept as graphs, one value a sample.
@@ -76,6 +88,7 @@ enum class ResourceSeries : size_t {
     PrivateMB,
     SystemCommitUsedMB,
     Threads,
+    VideoMemoryMB,
     Count_,
 };
 
@@ -90,11 +103,15 @@ struct ResourceThresholds {
     /// The client's own commit above this share of the physical memory: the
     /// machine pages it out from under itself.
     double maxPrivateShareOfPhysical = 0.5;
+    /// Video memory in use above this share of the driver's budget: the next
+    /// render target or texture may not fit, and the driver starts moving the
+    /// client's memory out to system RAM.
+    double maxVideoMemoryShareOfBudget = 0.95;
 };
 
 /// A threshold crossed or left.
 struct ResourceAlert {
-    enum class Kind { Threads, SystemCommit, PrivateCommit };
+    enum class Kind { Threads, SystemCommit, PrivateCommit, VideoMemory };
     Kind kind = Kind::Threads;
     /// True when it was crossed, false when the figure came back under it.
     bool crossed = true;
@@ -165,6 +182,7 @@ private:
     Watch threads_;
     Watch systemCommit_;
     Watch privateCommit_;
+    Watch videoMemory_;
 };
 
 /// A byte count as the HUD and the log write it: "512 MB", "1.25 GB".

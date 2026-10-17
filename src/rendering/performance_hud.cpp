@@ -572,6 +572,23 @@ void PerformanceHUD::renderResources() const {
     }
     plotSeries("Threads", resources_->series(ResourceSeries::Threads), whole);
 
+    if (latest->videoMemory) {
+        const auto& video = *latest->videoMemory;
+        plotSeries("Video memory", resources_->series(ResourceSeries::VideoMemoryMB), megabytes);
+        ImGui::Text("  of %s budget", core::formatBytes(video.budgetBytes).c_str());
+        if (!video.parts.empty() &&
+            ImGui::BeginTable("##videoMemory", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+            for (const auto& part : video.parts) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(part.name.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(core::formatBytes(part.value).c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
+
     if (!latest->caches.empty() &&
         ImGui::BeginTable("##caches", 4, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Cache");

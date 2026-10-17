@@ -189,6 +189,37 @@ uint32_t weatherType(const std::string& name) {
     return 0;
 }
 
+/// What the scene left in video memory, by use, and what each texture cache
+/// counts itself as holding: the world's share of a city, without a realm.
+/// WOWEE_GPU_MEMORY_DUMP names a file for the allocator's whole map.
+void reportVideoMemory(const rendering::Renderer& renderer) {
+    const rendering::VkContext* vk = renderer.getVkContext();
+    if (!vk) return;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    if (const auto heap = vk->deviceLocalHeap()) {
+        LOG_INFO("scene_render: video memory ", heap->usageBytes / kMiB, " MB of ",
+                 heap->budgetBytes / kMiB, " MB budget");
+    }
+    if (const auto byUse = vk->gpuMemoryByUse()) {
+        for (size_t i = 0; i < rendering::kGpuMemoryUseCount; ++i) {
+            const auto use = static_cast<rendering::GpuMemoryUse>(i);
+            LOG_INFO("scene_render: video memory for ", rendering::gpuMemoryUseName(use), ": ",
+                     byUse->deviceLocal(use) / kMiB, " MB");
+        }
+    }
+    const auto textures = vk->textures().stats();
+    LOG_INFO("scene_render: texture cache ", textures.bytes / kMiB, " MB in ", textures.entries,
+             " entries, budget ", textures.budgetBytes / kMiB, " MB, ", textures.refusals, " refused");
+    for (size_t i = 0; i < rendering::kTextureFormCount; ++i) {
+        const auto form = static_cast<rendering::TextureForm>(i);
+        LOG_INFO("scene_render: texture cache ", rendering::textureFormName(form), ": ",
+                 textures.form(form).bytes / kMiB, " MB in ", textures.form(form).entries, " entries");
+    }
+    if (const char* path = std::getenv("WOWEE_GPU_MEMORY_DUMP"); path && *path) {
+        if (vk->writeGpuMemoryMap(path)) LOG_INFO("scene_render: allocator map written to ", path);
+    }
+}
+
 int render(const json& scene, const std::string& outPath, pipeline::AssetManager& assets,
            rendering::Renderer& renderer) {
     const std::string map = scene.value("map", "Northrend");
@@ -280,6 +311,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;
     }
+    reportVideoMemory(renderer);
     return 0;
 }
 

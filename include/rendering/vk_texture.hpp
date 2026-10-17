@@ -46,7 +46,11 @@ public:
     ///
     /// Returns false if the image is invalid or the device cannot sample the
     /// block format, so a caller can fall back to loading it decoded.
-    bool uploadBLP(VkContext& ctx, const pipeline::BLPImage& image);
+    ///
+    /// `skipLevels` leaves out that many of the largest mips of a compressed
+    /// file - a quarter of the memory each - for when the full image does not
+    /// fit. Ignored for one the loader decoded.
+    bool uploadBLP(VkContext& ctx, const pipeline::BLPImage& image, uint32_t skipLevels = 0);
 
     /// Mean colour of the visible texels and the fraction that are visible,
     /// taken by uploadBLP (BLPImage::averageColor). White and fully covered
@@ -105,6 +109,9 @@ public:
     [[nodiscard]] uint32_t getHeight() const { return image_.extent.height; }
     [[nodiscard]] VkFormat getFormat() const { return image_.format; }
     [[nodiscard]] uint32_t getMipLevels() const { return mipLevels_; }
+    /// What the image's memory actually takes on the device, alignment and
+    /// all - what the texture cache charges it. Zero before an upload.
+    [[nodiscard]] uint64_t allocatedBytes() const;
     /// Whether this texture can be sampled - which needs a view as well.
     ///
     /// The view was not checked, and it is the handle that can be missing on
