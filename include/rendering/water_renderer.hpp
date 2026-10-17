@@ -116,7 +116,7 @@ public:
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
     /// The wind over the water this frame, yards a second with its gust in:
-    /// how much of its ripple each liquid shows (rippleShareForWind).
+    /// how steep each liquid's ripple is (rippleSlopeForWind).
     void setWindSpeed(float yardsPerSecond) { windSpeed_ = yardsPerSecond; }
 
     /// Surfaces with geometry on the GPU.
@@ -128,6 +128,7 @@ private:
     struct RippleSet {
         std::unique_ptr<VkTexture> texture;
         uint32_t frames = 0;
+        float slopeRms = 0.0f;  // the frames' own steepness (rippleSlopeRms), per repeat
     };
 
     /// The GPU copy of one LiquidSurface, with the little of it a draw needs.

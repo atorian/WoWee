@@ -67,13 +67,37 @@ std::vector<uint8_t> halve(const std::vector<uint8_t>& level, uint32_t w, uint32
 
 } // namespace
 
-float rippleShareForWind(float speedYardsPerSecond) {
-    constexpr float kYardsPerMetre = 1.0936133f;
-    constexpr float kRipplesStart = 0.5f * kYardsPerMetre;  // Beaufort 1, light air
-    constexpr float kRipplesFull = 3.4f * kYardsPerMetre;   // Beaufort 3, gentle breeze
-    const float t = std::clamp((speedYardsPerSecond - kRipplesStart) / (kRipplesFull - kRipplesStart),
-                               0.0f, 1.0f);
-    return t * t * (3.0f - 2.0f * t);
+float rippleSlopeForWind(float speedYardsPerSecond) {
+    constexpr float kMetresPerYard = 0.9144f;
+    const float metresPerSecond = std::max(speedYardsPerSecond, 0.0f) * kMetresPerYard;
+    return std::sqrt(0.00512f * metresPerSecond);  // the wind's part of Cox and Munk, 1954
+}
+
+float rippleSlopeRms(const LiquidRippleFrames& frames, uint32_t texels) {
+    if (frames.levels.empty() || frames.frames == 0 || frames.width == 0 || frames.height == 0) {
+        return 0.0f;
+    }
+    uint32_t level = 0;
+    while ((1u << (level + 1)) <= std::max(texels, 1u) && level + 1 < frames.levels.size()) ++level;
+    const uint32_t w = std::max(frames.width >> level, 1u);
+    const uint32_t h = std::max(frames.height >> level, 1u);
+    const std::vector<uint8_t>& texelsAt = frames.levels[level];
+    if (texelsAt.size() < static_cast<size_t>(w) * h * frames.frames) return 0.0f;
+
+    // The texture repeats, so the neighbours of an edge texel are across it.
+    double sum = 0.0;
+    for (uint32_t f = 0; f < frames.frames; ++f) {
+        const uint8_t* frame = texelsAt.data() + static_cast<size_t>(f) * w * h;
+        auto at = [&](uint32_t x, uint32_t y) { return frame[(y % h) * w + (x % w)] / 255.0; };
+        for (uint32_t y = 0; y < h; ++y) {
+            for (uint32_t x = 0; x < w; ++x) {
+                const double gx = (at(x + 1, y) - at(x + w - 1, y)) * 0.5 * w;  // per repeat
+                const double gy = (at(x, y + 1) - at(x, y + h - 1)) * 0.5 * h;
+                sum += gx * gx + gy * gy;
+            }
+        }
+    }
+    return static_cast<float>(std::sqrt(sum / (static_cast<double>(w) * h * frames.frames)));
 }
 
 std::string liquidFramePath(const std::string& pattern, uint32_t frame) {

@@ -30,7 +30,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float meshStep;   // yards between the mesh's vertices
-    float rippleWind; // the fragment stage's
+    float rippleSlope; // the fragment stage's
     float pad2;
 } push;
 

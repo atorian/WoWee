@@ -45,7 +45,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float rippleWind; // how much of its ripple the liquid shows in this wind, 0..1
+    float rippleSlope; // root mean square slope of the ripple in this wind
     float pad2;
 } push;
 
@@ -219,8 +219,10 @@ vec3 rippleNormal(RippleUv r, float time) {
                    rippleHeight(r, dx, l1) - rippleHeight(r, -dx, l1), t);
     float gy = mix(rippleHeight(r, dy, l0) - rippleHeight(r, -dy, l0),
                    rippleHeight(r, dy, l1) - rippleHeight(r, -dy, l1), t);
-    // Height per uv, turned into height per yard.
-    vec2 slope = vec2(gx, gy) / (2.0 * texel) / ripple.z * ripple.w;
+    // Height per uv over the frames' own steepness (ripple.w is one over it,
+    // measured on this scale) is a slope of root mean square one; the wind
+    // says how steep the water is.
+    vec2 slope = vec2(gx, gy) / (2.0 * texel) * ripple.w * push.rippleSlope;
     return normalize(vec3(-slope, 1.0));
 }
 
@@ -515,9 +517,9 @@ void main() {
     vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
     if (ripple.x > 0.5) {
         RippleUv rippleAt = rippleUv(FragPos.xy);
-        // As much as the pixel can show, and as much as the wind raises: in
-        // still air the liquid's frames lie flat and only the swell is left.
-        float rippleShown = rippleVisibility(rippleAt) * push.rippleWind;
+        // As much as the pixel can show. How steep it is the wind decides
+        // (rippleNormal): in still air the frames lie flat.
+        float rippleShown = rippleVisibility(rippleAt);
         if (rippleShown > 0.001) {
             detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
         }

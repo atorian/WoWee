@@ -29,13 +29,23 @@ struct LiquidRippleFrames {
     bool fromAlpha = false;
 };
 
-/// How much of its ripple a liquid shows under a wind of `speedYardsPerSecond`
-/// (speed times gust), 0 to 1. The frames are a fine chop, and a fine chop is
-/// what the wind raises: by the Beaufort scale still water is a mirror below
-/// 0.5 m/s, scaled ripples start there, and by 3.4 m/s the wavelets are as
-/// large as small waves get before crests break. So none below the first,
-/// all of it from the second, and a smooth rise between.
-[[nodiscard]] float rippleShareForWind(float speedYardsPerSecond);
+/// How steep a liquid's ripple is under a wind of `speedYardsPerSecond`
+/// (speed times gust): the root mean square slope (rise over run) of the
+/// chop the wind raises. Cox and Munk measured the sea's from sun glitter as
+/// a mean square slope of 0.003 + 0.00512 U for a wind of U m/s; the 0.003
+/// is there in still air, the swell's, which the waves already draw, and the
+/// rest is the wind's - so the ripple's is 0.00512 U. Still air leaves the
+/// water a mirror under its swell; a breeze of 5 m/s tilts it by nine
+/// degrees, not the forty-five the frames as painted gave.
+[[nodiscard]] float rippleSlopeForWind(float speedYardsPerSecond);
+
+/// The frames' own root mean square slope, in height (0..1) per repeat of
+/// the texture, measured as the water shader takes it: central differences
+/// one texel apart on the mip whose texel is `texels` texels of the full
+/// frame. Dividing the shader's slope by this makes any liquid's frames as
+/// steep as the wind says, whatever range their artist painted them in.
+/// 0 for frames with no relief at all.
+[[nodiscard]] float rippleSlopeRms(const LiquidRippleFrames& frames, uint32_t texels);
 
 /// The path of frame `frame` (from 1) of a pattern; a pattern with no %d is
 /// one frame, itself.

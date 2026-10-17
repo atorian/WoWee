@@ -37,12 +37,15 @@ static_assert(sizeof(WaterMaterialUBO) == 48, "water.frag.glsl's WaterMaterial b
 
 // The ripple's pace and size. LiquidType.dbc names the frames but no rate or
 // scale for them that is known, so these are matched by eye: the lake and
-// sea sets are thirty frames, a two-second loop; one repeat of the texture
-// covers two of a chunk's cells; and the slope is what reads as a fine chop
-// rather than a corrugated sheet.
+// sea sets are thirty frames, a two-second loop; and one repeat of the
+// texture covers two of a chunk's cells. How steep it is is not chosen: the
+// frames are scaled to their own measured steepness (rippleSlopeRms), and the
+// wind sets the steepness of the water (rippleSlopeForWind). A slope of 2.5
+// on the frames as painted, picked by eye, tilted the surface by forty-five
+// degrees, so a sun high overhead glinted off it into a low camera and the
+// glints came and went with the camera's angle.
 constexpr float kRippleFramesPerSecond = 15.0f;
 constexpr float kRippleYardsPerRepeat = 2.0f * (33.33333f / 8.0f);
-constexpr float kRippleSlope = 2.5f;
 
 // Push constants matching water.vert.glsl
 struct WaterPushConstants {
@@ -55,7 +58,7 @@ struct WaterPushConstants {
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
-    float rippleWind = 0.0f; // how much of its ripple the liquid shows in this wind, 0..1
+    float rippleSlope = 0.0f; // root mean square slope of the ripple in this wind (rippleSlopeForWind)
     float pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
@@ -307,8 +310,18 @@ const WaterRenderer::RippleSet* WaterRenderer::rippleFor(uint16_t liquidType) {
                     "drawn with the shader's own ripple");
         return nullptr;
     }
+    // Measured on the scale water.frag takes the slope at (its
+    // kCoherentTexels), so the two agree on how steep these frames are.
+    constexpr uint32_t kSlopeTexels = 4;
+    const float slopeRms = rippleSlopeRms(*frames, kSlopeTexels);
+    if (slopeRms <= 0.0f) {
+        LOG_WARNING("Water: the ripple of ", info->name, " (", pattern, ") has no relief - "
+                    "drawn with the shader's own ripple");
+        return nullptr;
+    }
     set.texture = std::move(texture);
     set.frames = frames->frames;
+    set.slopeRms = slopeRms;
     LOG_INFO("Water: ripple for ", info->name, " - ", frames->frames, " frames of ",
              frames->width, "x", frames->height, " from the ",
              frames->fromAlpha ? "alpha" : "colour", " of ", pattern, ", ",
@@ -740,7 +753,7 @@ void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
     mat.bodyFloor = bodyFloor;
     if (surface.ripple) {
         mat.ripple = glm::vec4(static_cast<float>(surface.ripple->frames), kRippleFramesPerSecond,
-                               kRippleYardsPerRepeat, kRippleSlope);
+                               kRippleYardsPerRepeat, 1.0f / surface.ripple->slopeRms);
     }
 
     // Create UBO
@@ -924,7 +937,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
         push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
-        push.rippleWind = rippleShareForWind(windSpeed_);
+        push.rippleSlope = rippleSlopeForWind(windSpeed_);
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
