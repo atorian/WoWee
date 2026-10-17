@@ -255,7 +255,7 @@ public:
      * Get number of loaded models
      */
     void recreatePipelines();
-    /// The four main-pass pipelines, which initialize() and
+    /// The three main-pass pipelines, which initialize() and
     /// recreatePipelines() both need and each used to describe.
     bool buildMainPassPipelines(VkDevice device,
                                 wowee::rendering::VkShaderModule& vertShader,
@@ -292,7 +292,6 @@ public:
     void setNormalMapStrength(float s) { normalMapStrength_ = s; materialSettingsDirty_ = true; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; materialSettingsDirty_ = true; }
     void setPOMQuality(int q) { pomQuality_ = q; materialSettingsDirty_ = true; }
-    void setWMOOnlyMap(bool v) { wmoOnlyMap_ = v; materialSettingsDirty_ = true; }
     bool isNormalMappingEnabled() const { return normalMappingEnabled_; }
     float getNormalMapStrength() const { return normalMapStrength_; }
     bool isPOMEnabled() const { return pomEnabled_; }
@@ -498,22 +497,24 @@ private:
         int32_t unlit;             // 8
         int32_t isInterior;        // 12
         float specularIntensity;   // 16
-        int32_t isWindow;          // 20
-        int32_t enableNormalMap;   // 24
-        int32_t enablePOM;         // 28
-        float pomScale;            // 32 (height scale)
-        int32_t pomMaxSamples;     // 36 (max ray-march steps)
-        float heightMapVariance;   // 40 (low variance = skip POM)
-        float normalMapStrength;   // 44 (0=flat, 1=full, 2=exaggerated)
-        int32_t isLava;            // 48 (1=lava/magma UV scroll)
-        float wmoAmbientR;         // 52 (interior ambient color R)
-        float wmoAmbientG;         // 56 (interior ambient color G)
-        float wmoAmbientB;         // 60 (interior ambient color B)
-        int32_t emissive;           // 64 (0 none, 1 lamp glass, 2 firelit)
-        int32_t hasVertexColors;    // 68: the group carries MOCV (MOGP flag 0x4)
-        int32_t receivesExteriorShadows; // 72: exterior light or visible exterior sky
-        int32_t padding2;           // 76
-    };  // 80 bytes total
+        int32_t enableNormalMap;   // 20
+        int32_t enablePOM;         // 24
+        float pomScale;            // 28 (height scale)
+        int32_t pomMaxSamples;     // 32 (max ray-march steps)
+        float heightMapVariance;   // 36 (low variance = skip POM)
+        float normalMapStrength;   // 40 (0=flat, 1=full, 2=exaggerated)
+        int32_t isLava;            // 44 (1=lava/magma UV scroll)
+        float wmoAmbientR;         // 48 (interior ambient color R)
+        float wmoAmbientG;         // 52 (interior ambient color G)
+        float wmoAmbientB;         // 56 (interior ambient color B)
+        int32_t emissive;           // 60 (0 none, 1 lamp glass, 2 firelit)
+        int32_t hasVertexColors;    // 64: the group carries MOCV (MOGP flag 0x4)
+        int32_t receivesExteriorShadows; // 68: exterior light or visible exterior sky
+        float sidnR;                // 72: F_SIDN glow colour, 0 without the flag
+        float sidnG;                // 76
+        float sidnB;                // 80
+        int32_t padding[3];         // 84
+    };  // 96 bytes total
 
     /**
      * WMO group GPU resources
@@ -555,7 +556,7 @@ private:
             bool alphaTest = false;
             bool unlit = false;
             bool isTransparent = false;     // blendMode >= 2
-            bool isWindow = false;          // F_SIDN or F_WINDOW material
+            uint32_t sidnColor = 0;         // F_SIDN glow colour (BGRA), 0 without
             bool isLava = false;            // lava/magma texture (UV scroll)
             /// Cloth hung in the building's own mesh: where the bar is, how
             /// far the cloth drops below it, and where it hangs.
@@ -688,6 +689,10 @@ private:
 
         // Material flags (materialId -> flags; 0x01 = unlit)
         std::vector<uint32_t> materialFlags;
+
+        // Material night glow colour (materialId -> MOMT sidnColor, BGRA),
+        // drawn only where the material has F_SIDN.
+        std::vector<uint32_t> materialSidnColors;
 
         // Portal visibility data
         std::vector<PortalData> portals;
@@ -905,7 +910,6 @@ private:
     // Vulkan pipelines
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
     VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
-    VkPipeline glassPipeline_ = VK_NULL_HANDLE;      // alpha blend + depth write (windows)
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
@@ -961,7 +965,6 @@ private:
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
-    bool wmoOnlyMap_ = false;            // true for dungeon/instance WMO-only maps
 
     // Rendering state
     bool wireframeMode = false;

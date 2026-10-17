@@ -288,7 +288,6 @@ bool WorldLoader::initializeScene() {
             ok = renderer_->loadTestTerrain(assetManager_, "World\\Maps\\" + name + "\\" + name + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
         }
         if (!ok) { fail("Cannot initialize geometry for " + name); return false; }
-        if (auto* wmo = renderer_->getWMORenderer()) wmo->setWMOOnlyMap(isInstance());
         if (auto* terrain = renderer_->getTerrainManager()) {
             terrain->setStreamingEnabled(!isInstance());
             if (!isInstance()) {

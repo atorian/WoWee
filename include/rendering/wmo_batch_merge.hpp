@@ -15,7 +15,7 @@
 /// about the first banner's pivot.
 ///
 /// Material flags are here only through what they change. F_UNLIT is
-/// `unlit`; F_SIDN and F_WINDOW reach the draw through `isWindow`. F_UNFOGGED
+/// `unlit`; F_SIDN is `sidnColor`, the glow it brings. F_UNFOGGED
 /// and F_UNCULLED change nothing yet - every WMO pipeline draws both faces and
 /// fogs every batch - so keying on them would only split batches that draw the
 /// same.
@@ -31,7 +31,8 @@ struct WmoBatchState {
     const void* texture = nullptr;  ///< the texture bound, fallback included
     uint32_t blendMode = 0;         ///< MOMT blend mode: 1 alpha-tests, 2+ blends
     bool unlit = false;
-    bool isWindow = false;
+    /// MOMT sidnColor (BGRA) of an F_SIDN material, 0 for any other.
+    uint32_t sidnColor = 0;
     bool isLava = false;
     uint8_t emissiveLevel = 0;
     /// Where cloth hangs: the top edge, how far it drops, and its middle.

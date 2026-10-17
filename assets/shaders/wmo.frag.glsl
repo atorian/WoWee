@@ -38,7 +38,6 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int unlit;
     int isInterior;
     float specularIntensity;
-    int isWindow;
     int enableNormalMap;
     int enablePOM;
     float pomScale;
@@ -52,7 +51,10 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     int emissive;
     int hasVertexColors;
     int receivesExteriorShadows;
-    int padding2;
+    // F_SIDN: the colour the material glows in, black without the flag.
+    float sidnR;
+    float sidnG;
+    float sidnB;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -379,55 +381,25 @@ void main() {
         // At half: a handful of Icecrown exteriors ship them pure white, and
         // added at full those would double in brightness.
         if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
+
+        // F_SIDN: after dark the material's glow colour adds to the light
+        // before the texture multiplies it, as WoW.exe's c29 emissive does,
+        // and the sum stops at twice the texture (wmo_night_glow.hpp).
+        vec3 glow = vec3(sidnR, sidnG, sidnB) * lightDir.w;
+        if (max(glow.r, max(glow.g, glow.b)) > 0.0)
+            result = min(result + texColor.rgb * glow, texColor.rgb * 2.0);
+
         // All of it darkened alike by a shadow; the highlight is the sun's
         // own and goes with it.
         result = result * shadowLightFactor(shadow) + shadow * spec * lightColor.rgb;
     }
 
-    if (isWindow == 0 && isLava == 0)
-        result += localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
+    if (isLava == 0)
+        result +=localLightContribution(FragPos, norm, texColor.rgb, vLocalLights);
 
     float dist = length(viewPos.xyz - FragPos);
 
     float alpha = texColor.a;
-
-    // Window glass: opaque but simulates dark tinted glass with reflections.
-    if (isWindow != 0) {
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        float NdotV = abs(dot(norm, viewDir));
-        float fresnel = 0.08 + 0.92 * pow(1.0 - NdotV, 4.0);
-
-        vec3 ldir = normalize(-lightDir.xyz);
-        vec3 reflectDir = reflect(-viewDir, norm);
-        float sunGlint = pow(max(dot(reflectDir, ldir), 0.0), 32.0);
-
-        float baseBrightness = mix(0.3, 0.9, sunGlint);
-        vec3 glass = result * baseBrightness;
-
-        vec3 reflectTint = atmosphereSkyColor(reflectDir, ldir, fogSkyTop.rgb,
-            fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
-        vec4 reflectedScene = rtReflectionAt(FragPos, vertexNormal);
-        reflectTint = mix(reflectTint, reflectedScene.rgb, reflectedScene.a);
-        glass = mix(glass, reflectTint, 0.2 + fresnel * 0.65);
-
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 256.0);
-        glass += spec * lightColor.rgb * 0.8;
-
-        float specBroad = pow(max(dot(norm, halfDir), 0.0), 12.0);
-        glass += specBroad * lightColor.rgb * 0.12;
-
-        result = glass;
-        if (isWindow == 2) {
-            // Instance/dungeon glass: mostly transparent to see through
-            alpha = mix(0.12, 0.35, fresnel);
-        } else {
-            // Exterior panes are backed by the building, not an aperture onto
-            // the terrain underneath a floating city. Reflection never comes
-            // from alpha-blending the background through this surface.
-            alpha = 1.0;
-        }
-    }
 
     result = applyFog(result, FragPos, dist);
     outColor = vec4(result, alpha);

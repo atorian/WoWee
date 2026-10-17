@@ -15,7 +15,7 @@ struct GPUPerFrameData {
     glm::mat4 view;
     glm::mat4 projection;
     glm::mat4 lightSpaceMatrix;
-    glm::vec4 lightDir;       // xyz = direction, w = unused
+    glm::vec4 lightDir;       // xyz = direction, w = how strongly F_SIDN materials glow (wmo_night_glow.hpp)
     glm::vec4 lightColor;     // xyz = color, w = unused
     glm::vec4 ambientColor;   // xyz = color, w = unused
     glm::vec4 viewPos;        // xyz = camera pos, w = unused

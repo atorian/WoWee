@@ -191,7 +191,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                     mat.shader = fields[1];
                     mat.blendMode = fields[2];
                     mat.texture1 = fields[3];
-                    mat.color1 = fields[4];
+                    mat.sidnColor = fields[4];
                     mat.texture2 = fields[6];  // Skip frameSidnColor at [5]
                     mat.color2 = fields[7];
                     mat.texture3 = fields[9];  // Skip ground_type at [8]

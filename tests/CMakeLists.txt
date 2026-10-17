@@ -2366,19 +2366,6 @@ target_link_libraries(test_format_lookup PRIVATE catch2_main)
 add_test(NAME format_lookup COMMAND test_format_lookup)
 register_test_target(test_format_lookup)
 
-# ── test_wmo_material_class ──────────────────────────────────
-# Which WMO materials are glass. The oracle is the shipped WMO data: the
-# MOMT flags the artist set, not the texture's file name.
-add_executable(test_wmo_material_class
-    test_wmo_material_class.cpp
-    ${TEST_COMMON_SOURCES})
-target_include_directories(test_wmo_material_class PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_wmo_material_class SYSTEM PRIVATE
-    ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_wmo_material_class PRIVATE catch2_main)
-add_test(NAME wmo_material_class COMMAND test_wmo_material_class)
-register_test_target(test_wmo_material_class)
-
 # ── test_asset_token_name ────────────────────────────────────
 # Which part of an asset path a token check may read. A directory name
 # poisons every token under it: Item/TextureComponents/LegLowerTexture
@@ -2764,6 +2751,18 @@ wowee_add_test(test_footstep_paths
 # it to draw around at night.
 wowee_add_test(test_sun_direction
     SOURCES test_sun_direction.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_wmo_night_glow ──────────────────────────────────────
+# When F_SIDN windows and lamps glow, by the client's own table over the day.
+wowee_add_test(test_wmo_night_glow
+    SOURCES test_wmo_night_glow.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_wmo_lighting ────────────────────────────────────────
+# Whether a WMO group takes the sun or its baked vertex light.
+wowee_add_test(test_wmo_lighting
+    SOURCES test_wmo_lighting.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_placement_transform ─────────────────────────────────

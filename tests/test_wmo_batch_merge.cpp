@@ -84,7 +84,7 @@ TEST_CASE("the shading state that merged before still splits",
           "[wmo-batch-merge]") {
     const WmoBatchState plain{ .texture = &kStone };
     const WmoBatchState unlit{ .texture = &kStone, .unlit = true };
-    const WmoBatchState glass{ .texture = &kStone, .isWindow = true };
+    const WmoBatchState glass{ .texture = &kStone, .sidnColor = 0xffffffffu };
     const WmoBatchState lamp{ .texture = &kStone, .emissiveLevel = 1 };
     const WmoBatchState otherTexture{ .texture = &kBanner };
     CHECK(groupWmoBatches({ plain, unlit, glass, lamp, otherTexture }) ==

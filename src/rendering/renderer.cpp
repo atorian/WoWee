@@ -33,6 +33,7 @@
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/wmo_night_glow.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/grass_profile.hpp"
 #include "pipeline/grass_population.hpp"
@@ -795,7 +796,8 @@ void Renderer::updatePerFrameUBO() {
     // Lighting from LightingManager
     if (lightingManager) {
         const auto& lp = lightingManager->getLightingParams();
-        currentFrameData.lightDir = glm::vec4(lp.directionalDir, 0.0f);
+        currentFrameData.lightDir = glm::vec4(
+            lp.directionalDir, wmoNightGlow(lightingManager->getTimeOfDayHours() / 24.0f));
         // Looking into the sun dims the scene's light by up to a third, as the
         // client dims its direct and ambient colours (0x781783) - by the glare
         // the eye can see, so not behind a hill or after dark.

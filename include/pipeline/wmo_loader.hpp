@@ -33,7 +33,7 @@ struct WMOMaterial {
     uint32_t shader;
     uint32_t blendMode;
     uint32_t texture1;          // Diffuse texture index
-    uint32_t color1;
+    uint32_t sidnColor;         // F_SIDN glow colour, BGRA
     uint32_t texture2;          // Environment/detail texture
     uint32_t color2;
     uint32_t texture3;
