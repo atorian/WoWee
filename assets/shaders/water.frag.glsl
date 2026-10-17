@@ -38,8 +38,11 @@ layout(push_constant) uniform Push {
     vec2 screenSize;  // size of the target being drawn into
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
-    float pad0, pad1, pad2;
+    float meshStep;   // yards between the mesh's vertices (the vertex stage's)
+    float pad1, pad2;
 } push;
+
+#include "gerstner_waves.glsli"
 
 layout(set = 1, binding = 0) uniform WaterMaterial {
     vec4 waterColor;
@@ -69,9 +72,8 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
 };
 
 layout(location = 0) in vec3 FragPos;
-layout(location = 1) in vec3 Normal;
+layout(location = 1) in vec2 RestPos;   // where this point lies on the still surface
 layout(location = 2) in vec2 TexCoord;
-layout(location = 3) in float WaveOffset;
 layout(location = 4) in vec2 ScreenUV;
 
 layout(location = 0) out vec4 outColor;
@@ -79,9 +81,22 @@ layout(location = 0) out vec4 outColor;
 // ============================================================
 // Dual-scroll detail normals (multi-octave ripple overlay)
 // ============================================================
-float noiseValue(vec2 p);  // defined below; used to bend the wave fronts
+float noiseValue(vec2 p);  // defined below
+float gradNoise(vec2 p);   // defined below; used to bend the wave fronts
 
-vec3 dualScrollWaveNormal(vec2 p, float time) {
+/// How much of a wave running along `dir` at `frequency` (radians a yard) a
+/// pixel can show: all of it from 64 pixels a wavelength, none by 16. Below
+/// that a wave is not a wave on screen but rows of blocks, which is what the
+/// far sea was made of. Measured along the wave's own direction, because
+/// perspective squeezes the surface in depth only: crests running across the
+/// view compress, crests running into it do not.
+float waveVisibility(vec2 dir, float frequency, vec2 surfaceDx, vec2 surfaceDy) {
+    float yardsPerPixel = max(abs(dot(surfaceDx, dir)), abs(dot(surfaceDy, dir)));
+    float wavelengthPixels = 6.28318 / (frequency * max(yardsPerPixel, 1e-4));
+    return smoothstep(16.0, 64.0, wavelengthPixels);
+}
+
+vec3 dualScrollWaveNormal(vec2 p, float time, vec2 surfaceDx, vec2 surfaceDy) {
     // Three wave octaves at different angles, frequencies, and speeds.
     // Directions are non-axis-aligned to prevent visible tiling patterns.
     // Frequency increases and amplitude decreases per octave (standard
@@ -92,6 +107,10 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
     float f1 = 0.19, f2 = 0.43, f3 = 0.72;  // spatial frequency (higher = tighter ripples)
     float s1 = 0.95, s2 = 1.73, s3 = 2.40;  // scroll speed (higher octaves move faster)
     float a1 = 0.22, a2 = 0.10, a3 = 0.05;  // amplitude (decreasing for natural falloff)
+    // Each octave only as far off as it still reads as a wave.
+    a1 *= waveVisibility(d1, f1, surfaceDx, surfaceDy);
+    a2 *= waveVisibility(d2, f2, surfaceDx, surfaceDy);
+    a3 *= waveVisibility(d3, f3, surfaceDx, surfaceDy);
 
     vec2 p1 = p + d1 * (time * s1 * 4.0);
     vec2 p2 = p + d2 * (time * s2 * 4.0);
@@ -103,8 +122,10 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
     // rides along each crest. Perturbing the phase with low-frequency noise
     // makes the crests wander, at the same wavelength, amplitude and speed. The
     // noise is much coarser than the waves, so it curves them rather than
-    // roughening them.
-    float warp = noiseValue(p * 0.018 + vec2(time * 0.015)) * 6.28318;
+    // roughening them. Gradient noise, not value noise: value noise sits square
+    // on its lattice, and at a whole turn of phase per unit its cells showed as
+    // a mosaic of blocks across the far sea, where the waves are small.
+    float warp = gradNoise(p * 0.018 + vec2(time * 0.015)) * 6.28318;
     float c1 = cos(dot(p1, d1) * f1 + warp);
     float c2 = cos(dot(p2, d2) * f2 + warp * 1.7);
     float c3 = cos(dot(p3, d3) * f3 + warp * 2.6);
@@ -123,26 +144,61 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
 // surface's small-scale normal, so the sun and the sky glint off the same
 // ripple the original showed. Two neighbouring frames are blended so the
 // animation moves rather than steps.
-float rippleHeight(vec2 uv, float layer) {
-    return texture(RippleFrames, vec3(uv, layer)).r;
+// The pixel's footprint in the frames' uv, taken where every pixel of the
+// quad takes it - before any branch - and handed to the samples, which may
+// sit in one.
+struct RippleUv {
+    vec2 uv;
+    vec2 ddx;
+    vec2 ddy;
+};
+
+RippleUv rippleUv(vec2 p) {
+    RippleUv r;
+    r.uv = p / ripple.z;
+    r.ddx = dFdx(r.uv);
+    r.ddy = dFdy(r.uv);
+    return r;
 }
 
-vec3 rippleNormal(vec2 p, float time) {
+float rippleHeight(RippleUv r, vec2 offset, float layer) {
+    return textureGrad(RippleFrames, vec3(r.uv + offset, layer), r.ddx, r.ddy).r;
+}
+
+// How much of the ripple this pixel can show. One repeat of the frames is a
+// few yards across; far off it shrinks to a handful of pixels, and then what
+// shows is not a ripple but the repeat itself - a grid of the same patch,
+// grainy where the frames' detail aliases. So it goes by how many pixels a
+// repeat covers on screen, not by distance: all of it from 48 pixels a
+// repeat, none of it by 12, whatever the camera's height, field of view or
+// resolution. The pixel's footprint is what the sampler can make of it: at a
+// grazing view the pixel is long in depth, and the sampler's anisotropic
+// filtering takes up to eight of its short side along the long one - judging
+// by the long side alone took the ripple off water close enough to show it,
+// and by the short side alone left it on water too far off to filter.
+float rippleVisibility(RippleUv r) {
+    const float kSamplerAnisotropy = 8.0;  // the ripple sampler's maxAnisotropy
+    float a = length(r.ddx), b = length(r.ddy);
+    float footprint = max(min(a, b), max(a, b) / kSamplerAnisotropy);  // repeats per pixel
+    return 1.0 - smoothstep(1.0 / 48.0, 1.0 / 12.0, footprint);
+}
+
+vec3 rippleNormal(RippleUv r, float time) {
     float frames = ripple.x;
     float f = time * ripple.y;
     float l0 = mod(floor(f), frames);
     float l1 = mod(l0 + 1.0, frames);
     float t = fract(f);
-    vec2 uv = p / ripple.z;
     // A texel's width in uv at the level being sampled, so the slope is
     // measured across what this pixel actually sees.
-    float texel = max(length(fwidth(uv)), 1.0 / float(textureSize(RippleFrames, 0).x));
+    float texel = max(length(abs(r.ddx) + abs(r.ddy)),
+                      1.0 / float(textureSize(RippleFrames, 0).x));
     vec2 dx = vec2(texel, 0.0);
     vec2 dy = vec2(0.0, texel);
-    float gx = mix(rippleHeight(uv + dx, l0) - rippleHeight(uv - dx, l0),
-                   rippleHeight(uv + dx, l1) - rippleHeight(uv - dx, l1), t);
-    float gy = mix(rippleHeight(uv + dy, l0) - rippleHeight(uv - dy, l0),
-                   rippleHeight(uv + dy, l1) - rippleHeight(uv - dy, l1), t);
+    float gx = mix(rippleHeight(r, dx, l0) - rippleHeight(r, -dx, l0),
+                   rippleHeight(r, dx, l1) - rippleHeight(r, -dx, l1), t);
+    float gy = mix(rippleHeight(r, dy, l0) - rippleHeight(r, -dy, l0),
+                   rippleHeight(r, dy, l1) - rippleHeight(r, -dy, l1), t);
     // Height per uv, turned into height per yard.
     vec2 slope = vec2(gx, gy) / (2.0 * texel) / ripple.z * ripple.w;
     return normalize(vec3(-slope, 1.0));
@@ -377,19 +433,40 @@ void main() {
     float dist = length(viewPos.xyz - FragPos);
 
     // --- Normal computation ---
-    vec3 meshNorm = normalize(Normal);
-    // The liquid's own animated ripple where it has one, the procedural one
-    // where LiquidType.dbc names no frames for it.
-    vec3 detailNorm = ripple.x > 0.5 ? rippleNormal(FragPos.xy, time)
-                                     : dualScrollWaveNormal(FragPos.xy, time);
-    // Wave detail is a scrolling pattern with a finite period. Held at full
-    // strength to the horizon it does two things the eye picks up immediately:
-    // the tiling repeats visibly, and the highlights land smaller than a pixel
-    // and alias into shimmer. Fade the detail back toward the flat surface
-    // normal with distance so what is left far away is a smooth sheet for the
-    // fog to take, which is also where the specular sparkle goes quiet.
-    float detailFade = 1.0 - smoothstep(250.0, 1400.0, dist);
-    vec3 norm = normalize(mix(meshNorm, detailNorm, 0.55 * detailFade));
+    // How the surface moves from one pixel to the next, for how small each
+    // wave has become on screen.
+    vec2 surfaceDx = dFdx(FragPos.xy);
+    vec2 surfaceDy = dFdy(FragPos.xy);
+    vec2 restDx = dFdx(RestPos);
+    vec2 restDy = dFdy(RestPos);
+    // The swell, worked out here rather than taken from the vertices: the mesh
+    // carries only the waves longer than its own step, and a normal
+    // interpolated between vertices could not show the shorter ones - it
+    // showed them as a slow plaid instead. Every wave is in here for as long as
+    // it is big enough on screen to read as one, so far off the swell lies down
+    // into a smooth sheet and close up it has all six.
+    Swell swell = noSwell();
+    for (int i = 0; i < kSwellWaves; ++i) {
+        SwellWave w = swellWave(i);
+        addSwellWave(swell, w, waveVisibility(w.dir, w.freq, restDx, restDy), RestPos, time);
+    }
+    vec3 swellNorm = swellNormal(swell);
+    float waveHeight = swell.height;
+    // The liquid's own animated ripple where it has one and it is big enough
+    // on screen to read as one; the procedural swell - broader, and with no
+    // repeat for the eye to find - where it is not, and where LiquidType.dbc
+    // names no frames at all. Far off that is all there is to draw.
+    vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
+    if (ripple.x > 0.5) {
+        RippleUv rippleAt = rippleUv(FragPos.xy);
+        float rippleShown = rippleVisibility(rippleAt);
+        if (rippleShown > 0.001) {
+            detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
+        }
+    }
+    // No fade by distance on top: each of these already lies down as it gets
+    // too small on screen to show, which is what a distance stood in for.
+    vec3 norm = normalize(mix(swellNorm, detailNorm, 0.55));
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;
@@ -604,7 +681,7 @@ void main() {
     // Subsurface scattering
     // ============================================================
     float sssBase = pow(max(dot(viewDir, -ldir), 0.0), 4.0);
-    float sss = sssBase * max(0.0, WaveOffset * 3.0) * 0.25;
+    float sss = sssBase * max(0.0, waveHeight * 3.0) * 0.25;
     vec3 sssColor = vec3(0.05, 0.55, 0.35) * sss * lightColor.rgb;
 
     // ============================================================
@@ -615,7 +692,7 @@ void main() {
     vec3 color = mix(refractedColor, envReflect, reflectWeight);
     color += specular + sssColor;
 
-    float crest = smoothstep(0.5, 1.0, WaveOffset) * 0.04;
+    float crest = smoothstep(0.5, 1.0, waveHeight) * 0.04;
     color += vec3(crest);
 
     // Carried out of the shoreline block so the alpha below can make the foam
@@ -772,8 +849,8 @@ void main() {
     // ============================================================
     // Only on a crest: the mask is zero below half wave height, and the
     // cellular field it would multiply is the expensive part.
-    if (basicType > 0.5 && basicType < 1.5 && push.waveAmp > 0.0 && WaveOffset > 0.5) {
-        float crestMask = smoothstep(0.5, 1.0, WaveOffset);
+    if (basicType > 0.5 && basicType < 1.5 && push.waveAmp > 0.0 && waveHeight > 0.5) {
+        float crestMask = smoothstep(0.5, 1.0, waveHeight);
         vec2 crestWarp = vec2(
             noiseValue(FragPos.xy * 1.8 + time * 0.1) - 0.5,
             noiseValue(FragPos.xy * 1.8 + vec2(53.0) + time * 0.07) - 0.5

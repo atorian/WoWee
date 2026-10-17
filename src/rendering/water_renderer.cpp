@@ -54,7 +54,8 @@ struct WaterPushConstants {
     glm::vec2 screenSize;  // target size, for screen-space UVs
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
-    float pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
+    float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
+    float pad1 = 0.0f, pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -921,6 +922,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // against a near plane of 0.05 while the camera's is 0.5.
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
+        push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
