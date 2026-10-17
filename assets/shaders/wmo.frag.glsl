@@ -35,8 +35,12 @@ layout(set = 1, binding = 0) uniform sampler2D uTexture;
 layout(set = 1, binding = 1) uniform WMOMaterial {
     int hasTexture;
     int alphaTest;
-    int unlit;
-    int isInterior;
+    // The client's light the batch is drawn with (rendering/wmo_lighting.hpp):
+    // one of the LIGHT_ values below.
+    int light;
+    // A transition batch's second light, drawn under `light` where the vertex
+    // colour's alpha falls to 0; -1 for every other batch.
+    int transitionLight;
     float specularIntensity;
     int enableNormalMap;
     int enablePOM;
@@ -72,6 +76,12 @@ layout(location = 5) in vec3 Bitangent;
 layout(location = 6) flat in uvec4 vLocalLights;
 
 layout(location = 0) out vec4 outColor;
+
+// WoW.exe's lighting modes, as WmoLight numbers them.
+const int LIGHT_VERTEX_COLOUR = 0;   // the vertex colours are the light
+const int LIGHT_SUN = 1;             // the zone's ambient and sun
+const int LIGHT_WINDOW = 2;          // the window light of an F_WINDOW material
+const int LIGHT_BUILDING_AMBIENT = 3; // the building's MOHD ambient, no sun
 
 // One texel of the shadow map, handed in by the renderer. The map is 512,
 // 1024, 2048 or 4096 a side by the quality setting; this used to be a
@@ -195,6 +205,71 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     }
     return color;
 }
+
+// The surface lit by one of the client's lights, before the room's own lamps
+// and the fog.
+vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
+    // F_SIDN: after dark the material's glow colour adds to the light before
+    // the texture multiplies it, as WoW.exe's c29 emissive does, and the sum
+    // stops at twice the texture (wmo_night_glow.hpp). Every light but the
+    // vertex colours alone is drawn with the shader that adds it.
+    vec3 glow = mode == LIGHT_VERTEX_COLOUR ? vec3(0.0) : vec3(sidnR, sidnG, sidnB) * lightDir.w;
+    const bool glows = max(glow.r, max(glow.g, glow.b)) > 0.0;
+
+    if (mode == LIGHT_VERTEX_COLOUR || mode == LIGHT_BUILDING_AMBIENT) {
+        // WotLK MapObj shaders modulate the texture by 2 * vertex color.
+        // MOHD is the building's base ambient; MOCV adds authored warm/cool
+        // pools to it. Using max() flattened those colors into the ambient,
+        // notably erasing Dalaran's blue portal and warm torch lighting.
+        vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
+        vec3 baked = hasVertexColors != 0
+            ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
+            : vec3(1.0);  // Neutral modulation when no baked colors exist.
+        if (glows) baked = min(baked + glow, vec3(2.0));
+        // The baked light is multiplied by the shadow, as the client does it.
+        return tex * baked * shadowLightFactor(shadow);
+    }
+
+    vec3 ambient = ambientColor.rgb;
+    vec3 sun = lightColor.rgb;
+    if (mode == LIGHT_WINDOW) {
+        // The client's window light (light update 0x7ee750): the sun's colour
+        // is halfway between the zone's ambient and its sun, and the ambient
+        // is that again, sixteen 255ths brighter. A window is lit about as
+        // well from inside the room as from the street.
+        sun = 0.5 * (ambientColor.rgb + lightColor.rgb);
+        ambient = min(sun + 16.0 / 255.0, vec3(1.0));
+    }
+
+    vec3 ldir = normalize(-lightDir.xyz);
+    float diff = max(dot(norm, ldir), 0.0);
+
+    vec3 viewDir = normalize(viewPos.xyz - FragPos);
+    vec3 halfDir = normalize(ldir + viewDir);
+    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
+
+    vec3 result = rtAmbient(rt, ambient) * tex + diff * sun * tex;
+
+    // An exterior group's vertex colour is light baked into it - a lamp's
+    // pool on a wall - and it adds to the sun, as it does in the client.
+    // It was multiplied in as if it were baked shadow, floored at a
+    // quarter: Stormwind has two exterior groups with vertex colours at
+    // all, both near black, and they drew at a quarter of the light the
+    // rest of the city had, shadows on or off - and so did 278 of the 362
+    // exterior groups in the game that carry any. A group without them has
+    // white filled in by the loader, which must add nothing.
+    //
+    // At half: a handful of Icecrown exteriors ship them pure white, and
+    // added at full those would double in brightness.
+    if (hasVertexColors != 0) result += tex * VertColor.rgb * 0.5;
+
+    if (glows) result = min(result + tex * glow, tex * 2.0);
+
+    // All of it darkened alike by a shadow; the highlight is the sun's
+    // own and goes with it.
+    return result * shadowLightFactor(shadow) + shadow * spec * sun;
+}
+
 void main() {
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
@@ -256,8 +331,10 @@ void main() {
     // Interior MOCV already contains the building's baked light and shade.
     // Its roof blocks the outdoor sun; multiplying the baked term by that
     // shadow darkened the entire room a second time. A room still takes the
-    // shadows of the units in it.
-    const bool sunReaches = isInterior == 0 || receivesExteriorShadows != 0;
+    // shadows of the units in it. Which batches the sun's map falls on is
+    // the renderer's call (wmoReceivesExteriorShadows).
+    const bool baked = light == LIGHT_VERTEX_COLOUR || light == LIGHT_BUILDING_AMBIENT;
+    const bool sunReaches = receivesExteriorShadows != 0;
     float shadow = 1.0;
     if (sunReaches && shadowParams.x > 0.5) {
         vec3 ldir = normalize(-lightDir.xyz);
@@ -280,7 +357,7 @@ void main() {
     RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
     float unitShadow = localShadowAt(FragPos);
-    if (isInterior != 0) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
+    if (baked) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
     shadow = min(shadow, unitShadow);
 
     if (emissive == 1) {
@@ -344,54 +421,15 @@ void main() {
     } else if (isLava != 0) {
         // Lava is self-luminous - bright emissive, no shadows
         result = texColor.rgb * 1.5;
-    } else if (isInterior != 0) {
-        // WotLK MapObj shaders modulate the texture by 2 * vertex color.
-        // MOHD is the building's base ambient; MOCV adds authored warm/cool
-        // pools to it. Using max() flattened those colors into the ambient,
-        // notably erasing Dalaran's blue portal and warm torch lighting.
-        vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
-        vec3 interiorLight = hasVertexColors != 0
-            ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
-            : vec3(1.0);  // Neutral modulation when no baked colors exist.
-        // The baked light is multiplied by the shadow, as the client does it.
-        result = texColor.rgb * interiorLight * shadowLightFactor(shadow);
-    } else if (unlit != 0) {
-        // Outdoor unlit surface - still receives directional shadows
-        result = texColor.rgb * shadowLightFactor(shadow);
     } else {
-        vec3 ldir = normalize(-lightDir.xyz);
-        float diff = max(dot(norm, ldir), 0.0);
-
-        vec3 viewDir = normalize(viewPos.xyz - FragPos);
-        vec3 halfDir = normalize(ldir + viewDir);
-        float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
-
-        result = rtAmbient(rt, ambientColor.rgb) * texColor.rgb
-               + diff * lightColor.rgb * texColor.rgb;
-
-        // An exterior group's vertex colour is light baked into it - a lamp's
-        // pool on a wall - and it adds to the sun, as it does in the client.
-        // It was multiplied in as if it were baked shadow, floored at a
-        // quarter: Stormwind has two exterior groups with vertex colours at
-        // all, both near black, and they drew at a quarter of the light the
-        // rest of the city had, shadows on or off - and so did 278 of the 362
-        // exterior groups in the game that carry any. A group without them has
-        // white filled in by the loader, which must add nothing.
-        //
-        // At half: a handful of Icecrown exteriors ship them pure white, and
-        // added at full those would double in brightness.
-        if (hasVertexColors != 0) result += texColor.rgb * VertColor.rgb * 0.5;
-
-        // F_SIDN: after dark the material's glow colour adds to the light
-        // before the texture multiplies it, as WoW.exe's c29 emissive does,
-        // and the sum stops at twice the texture (wmo_night_glow.hpp).
-        vec3 glow = vec3(sidnR, sidnG, sidnB) * lightDir.w;
-        if (max(glow.r, max(glow.g, glow.b)) > 0.0)
-            result = min(result + texColor.rgb * glow, texColor.rgb * 2.0);
-
-        // All of it darkened alike by a shadow; the highlight is the sun's
-        // own and goes with it.
-        result = result * shadowLightFactor(shadow) + shadow * spec * lightColor.rgb;
+        result = shadeBy(light, texColor.rgb, norm, rt, shadow);
+        // A transition batch is where a room meets the outside: the client
+        // draws it lit, then unlit over it, the two weighed by the vertex
+        // colour's alpha - lit where it is 1, the room's own light where it
+        // is 0.
+        if (transitionLight >= 0)
+            result = mix(shadeBy(transitionLight, texColor.rgb, norm, rt, shadow), result,
+                         VertColor.a);
     }
 
     if (isLava == 0)

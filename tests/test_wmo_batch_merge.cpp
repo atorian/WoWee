@@ -14,6 +14,7 @@
 
 using wowee::rendering::groupWmoBatches;
 using wowee::rendering::WmoBatchState;
+using wowee::rendering::WmoLight;
 
 namespace {
 
@@ -83,7 +84,8 @@ TEST_CASE("lava does not merge with rock on the same texture",
 TEST_CASE("the shading state that merged before still splits",
           "[wmo-batch-merge]") {
     const WmoBatchState plain{ .texture = &kStone };
-    const WmoBatchState unlit{ .texture = &kStone, .unlit = true };
+    const WmoBatchState unlit{ .texture = &kStone,
+                               .lighting = { .light = WmoLight::VertexColour } };
     const WmoBatchState glass{ .texture = &kStone, .sidnColor = 0xffffffffu };
     const WmoBatchState lamp{ .texture = &kStone, .emissiveLevel = 1 };
     const WmoBatchState otherTexture{ .texture = &kBanner };

@@ -711,11 +711,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 blendMode = modelData.materialBlendModes[batch.materialId];
             }
 
-            bool unlit = false;
             uint32_t matFlags = 0;
             if (batch.materialId < modelData.materialFlags.size()) {
                 matFlags = modelData.materialFlags[batch.materialId];
-                unlit = (matFlags & 0x01) != 0;
             }
             // F_SIDN: the material glows in its sidnColor - windows and lamps.
             uint32_t sidnColor = 0;
@@ -784,13 +782,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
-            batchStates.push_back({ .texture = tex, .blendMode = blendMode, .unlit = unlit,
+            batchStates.push_back({ .texture = tex, .blendMode = blendMode,
+                                    .lighting = wmoBatchLighting(model.flags, groupRes.groupFlags,
+                                                                 batch.kind, matFlags),
                                     .sidnColor = sidnColor, .isLava = isLava,
                                     .emissiveLevel = emissiveLevel,
                                     .clothTop = clothTop, .clothDrop = clothDrop,
                                     .clothCentreX = clothCx, .clothCentreY = clothCy,
-                                    .pendingTexture = pendingTexture,
-                                    .exteriorLighting = wmoUsesExteriorLighting(groupRes.groupFlags, matFlags) });
+                                    .pendingTexture = pendingTexture });
             batchTextures.push_back(tex);
             batchTextureIndices.push_back(usedTexture);
         }
@@ -805,7 +804,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             mb.pendingTextureIndex = state.pendingTexture;
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
-            mb.unlit = state.unlit;
             mb.isTransparent = state.blendMode >= 2;
             mb.sidnColor = state.sidnColor;
             mb.isLava = state.isLava;
@@ -814,7 +812,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             mb.clothDrop = state.clothDrop;
             mb.clothCentreX = state.clothCentreX;
             mb.clothCentreY = state.clothCentreY;
-            mb.exteriorLighting = state.exteriorLighting;
+            mb.lighting = state.lighting;
             if (mb.hasTexture) {
                 attachNormalHeightMap(modelData, texIndex, mb);
             }
@@ -2209,11 +2207,13 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
 
     // Create batches
     if (!group.batches.empty()) {
-        for (const auto& batch : group.batches) {
+        for (size_t i = 0; i < group.batches.size(); ++i) {
+            const auto& batch = group.batches[i];
             GroupResources::Batch resBatch;
             resBatch.startIndex = batch.startIndex;
             resBatch.indexCount = batch.indexCount;
             resBatch.materialId = batch.materialId;
+            resBatch.kind = group.batchKind(i);
             resources.batches.push_back(resBatch);
         }
     } else {
@@ -2293,11 +2293,14 @@ void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texInde
 
 void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                             GroupResources::MergedBatch& mb) {
-    // A portal-interior group can still be lit as exterior by its material;
-    // the baseline probe reproduces the lighting from before that was honoured.
+    // The baseline probe reproduces the lighting from before a portal-interior
+    // group could be sunlit at all: every batch of one baked, and unshadowed.
     const bool portalInterior = (group.groupFlags & 0x2000) != 0;
     const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
                                std::getenv("WOWEE_ORGRIMMAR_SHADOW_BASELINE");
+    const WmoBatchLighting lighting = baselineProbe && portalInterior
+        ? WmoBatchLighting{ .light = WmoLight::VertexColour }
+        : mb.lighting;
 
     // Create material UBO
     VmaAllocator allocator = vkCtx_->getAllocator();
@@ -2311,10 +2314,10 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     WMOMaterialUBO matData{};
     matData.hasTexture = mb.hasTexture ? 1 : 0;
     matData.alphaTest = mb.alphaTest ? 1 : 0;
-    matData.unlit = mb.unlit ? 1 : 0;
-    matData.isInterior = (portalInterior && (baselineProbe || !mb.exteriorLighting)) ? 1 : 0;
+    matData.light = static_cast<int32_t>(lighting.light);
+    matData.transitionLight = lighting.transition ? static_cast<int32_t>(lighting.under) : -1;
     matData.receivesExteriorShadows = !baselineProbe &&
-        wmoReceivesExteriorShadows(group.groupFlags, mb.exteriorLighting) ? 1 : 0;
+        wmoReceivesExteriorShadows(group.groupFlags, lighting) ? 1 : 0;
     matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
     // MOMT colours are BGRA bytes.

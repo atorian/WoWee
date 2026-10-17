@@ -6,6 +6,7 @@
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
+#include "rendering/wmo_lighting.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 
@@ -494,8 +495,8 @@ private:
     struct WMOMaterialUBO {
         int32_t hasTexture;        // 0
         int32_t alphaTest;         // 4
-        int32_t unlit;             // 8
-        int32_t isInterior;        // 12
+        int32_t light;             // 8: WmoLight the batch is drawn with
+        int32_t transitionLight;   // 12: WmoLight under it by 1 - MOCV alpha, -1 for none
         float specularIntensity;   // 16
         int32_t enableNormalMap;   // 20
         int32_t enablePOM;         // 24
@@ -509,7 +510,7 @@ private:
         float wmoAmbientB;         // 56 (interior ambient color B)
         int32_t emissive;           // 60 (0 none, 1 lamp glass, 2 firelit)
         int32_t hasVertexColors;    // 64: the group carries MOCV (MOGP flag 0x4)
-        int32_t receivesExteriorShadows; // 68: exterior light or visible exterior sky
+        int32_t receivesExteriorShadows; // 68: wmoReceivesExteriorShadows
         float sidnR;                // 72: F_SIDN glow colour, 0 without the flag
         float sidnG;                // 76
         float sidnB;                // 80
@@ -538,6 +539,8 @@ private:
             uint32_t startIndex;   // First index in EBO
             uint32_t indexCount;   // Number of indices to draw
             uint8_t materialId;    // Material/texture reference
+            /// The MOBA run it is in, which picks its light with its material.
+            pipeline::WMOBatchKind kind = pipeline::WMOBatchKind::Exterior;
         };
         std::vector<Batch> batches;
 
@@ -554,7 +557,6 @@ private:
             VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
             bool hasTexture = false;
             bool alphaTest = false;
-            bool unlit = false;
             bool isTransparent = false;     // blendMode >= 2
             uint32_t sidnColor = 0;         // F_SIDN glow colour (BGRA), 0 without
             bool isLava = false;            // lava/magma texture (UV scroll)
@@ -573,7 +575,7 @@ private:
             // from behind with a flicker (clock faces). See wmo.frag's emissive
             // branch for how each level is shaded.
             uint8_t emissiveLevel = 0;
-            bool exteriorLighting = false;  // material asks for exterior light (wmo_lighting.hpp)
+            WmoBatchLighting lighting;      // the light it is drawn with (wmo_lighting.hpp)
             // For multi-draw: store index ranges
             struct DrawRange { uint32_t firstIndex; uint32_t indexCount; };
             std::vector<DrawRange> draws;

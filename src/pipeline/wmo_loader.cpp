@@ -70,6 +70,20 @@ std::string readString(const std::vector<uint8_t>& data, uint32_t offset) {
     return result;
 }
 
+/// Which group a log line is about. The root file does not say its own path,
+/// and loadGroup runs before a caller sets sourcePath, so the group's MOGN
+/// name stands in for it when there is no path yet.
+std::string groupLabel(const WMOModel& model, uint32_t groupIndex) {
+    std::string label = model.sourcePath.empty() ? std::string("WMO") : "WMO " + model.sourcePath;
+    label += " group " + std::to_string(groupIndex);
+    if (groupIndex < model.groupInfo.size() && model.groupInfo[groupIndex].nameOffset >= 0) {
+        std::string name = readString(model.groupNameRaw,
+                                      static_cast<uint32_t>(model.groupInfo[groupIndex].nameOffset));
+        if (!name.empty()) label += " '" + name + "'";
+    }
+    return label;
+}
+
 } // anonymous namespace
 
 WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
@@ -492,7 +506,10 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             group.boundingBoxMax.z = read<float>(groupData, mogpOffset);
             group.portalStart = read<uint16_t>(groupData, mogpOffset);
             group.portalCount = read<uint16_t>(groupData, mogpOffset);
-            mogpOffset += 8; // transBatchCount, intBatchCount, extBatchCount, padding
+            group.transBatchCount = read<uint16_t>(groupData, mogpOffset);
+            group.intBatchCount = read<uint16_t>(groupData, mogpOffset);
+            group.extBatchCount = read<uint16_t>(groupData, mogpOffset);
+            mogpOffset += 2; // padding
             // fogIndices: 4 × uint8 (4 bytes total, NOT 4 × uint32)
             group.fogIndices[0] = read<uint8_t>(groupData, mogpOffset);
             group.fogIndices[1] = read<uint8_t>(groupData, mogpOffset);
@@ -720,11 +737,23 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
     // Create a default batch if none were loaded
     if (group.batches.empty() && !group.indices.empty()) {
+        core::Logger::getInstance().warning(groupLabel(model, groupIndex),
+                                            " has triangles but no MOBA batches - drawn as one"
+                                            " exterior batch of material 0");
         WMOBatch batch;
         batch.startIndex = 0;
         batch.indexCount = static_cast<uint16_t>(group.indices.size());
         batch.materialId = 0;
         group.batches.push_back(batch);
+        group.transBatchCount = group.intBatchCount = group.extBatchCount = 0;
+    } else if (static_cast<size_t>(group.transBatchCount) + group.intBatchCount +
+                   group.extBatchCount != group.batches.size()) {
+        // batchKind() counts off the first two runs as the client does, so
+        // the batches past them are lit as exterior whatever the third says.
+        core::Logger::getInstance().warning(
+            groupLabel(model, groupIndex), " MOGP says ", group.transBatchCount, " transition + ",
+            group.intBatchCount, " interior + ", group.extBatchCount, " exterior batches but MOBA has ",
+            group.batches.size(), " - the batches past the first two runs are lit as exterior");
     }
 
     core::Logger::getInstance().debug("WMO group ", groupIndex, " loaded: ",

@@ -2772,10 +2772,16 @@ wowee_add_test(test_wmo_night_glow
             ${TEST_COMMON_SOURCES})
 
 # ── test_wmo_lighting ────────────────────────────────────────
-# Whether a WMO group takes the sun or its baked vertex light.
+# Which light each batch of a WMO group is drawn with: by its MOBA run, its
+# group, its material and the model's path, as WoW.exe picks it. Groups are
+# read through the loader; the real Dalaran, Duskwood and Orgrimmar cases run
+# when the WotLK data is extracted.
 wowee_add_test(test_wmo_lighting
     SOURCES test_wmo_lighting.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
+target_compile_definitions(test_wmo_lighting PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── test_placement_transform ─────────────────────────────────
 # The model matrix a doodad or a building placement becomes. Nothing on flat
