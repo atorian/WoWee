@@ -260,7 +260,11 @@ private:
 
     std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
-    bool refractionEnabled = false;
+    // On from the start. The renderer keeps it always on, but did so only when
+    // the interface applied its saved settings, so until then - and in a
+    // renderer with no interface, scene_render - the water had no capture of
+    // what is under it: no depth, no shoreline, no sea bed.
+    bool refractionEnabled = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
 };
 

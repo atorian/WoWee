@@ -324,6 +324,34 @@ float cellularFoam(vec2 p, float jitter) {
 }
 float cellularFoam(vec2 p) { return cellularFoam(p, 1.0); }
 
+// How much of a cellular pattern with `cellsPerYard` cells a pixel can show:
+// all of it from six pixels a cell, none by two. The foam is drawn in cells a
+// few hundredths of a yard across - a speck at the player's feet is a pixel
+// a few yards off - and a speck smaller than its pixel lands on it or misses
+// it from one frame to the next, so the whole shoreline sparkled and shook as
+// the surf and the camera moved.
+float cellsShown(float cellsPerYard, float pixelsPerYard) {
+    return smoothstep(2.0, 6.0, pixelsPerYard / cellsPerYard);
+}
+
+// A dot of `radius` (in cells) in every cell of the pattern at `p`. Where the
+// cells are too small to show, what is left is what the dots cover on
+// average, so the foam a band of them made stays as a tint rather than going
+// out: a dot falling off as smoothstep over its radius covers 0.3 pi r^2.
+float foamDots(vec2 p, float radius, float shown) {
+    float mean = 0.942 * radius * radius;
+    if (shown <= 0.001) return mean;
+    return mix(mean, 1.0 - smoothstep(0.0, radius, cellularFoam(p)), shown);
+}
+
+// The distance to the nearest cell point, or its average - 0.43 for a fully
+// jittered grid - where the cells are too small to show.
+float cellDistance(vec2 p, float shown) {
+    const float kMeanDistance = 0.43;
+    if (shown <= 0.001) return kMeanDistance;
+    return mix(kMeanDistance, cellularFoam(p), shown);
+}
+
 // The air between the camera and this point, out of the fog volume: rgb is
 // the light it scatters toward the camera, a how much of the point shows
 // through it. See VolumetricFog.
@@ -439,6 +467,9 @@ void main() {
     vec2 surfaceDy = dFdy(FragPos.xy);
     vec2 restDx = dFdx(RestPos);
     vec2 restDy = dFdy(RestPos);
+    // Along the pixel's longer side, for patterns drawn the same in every
+    // direction: those have to fit the worst of it.
+    float pixelsPerYard = 1.0 / max(max(length(surfaceDx), length(surfaceDy)), 1e-4);
     // The swell, worked out here rather than taken from the vertices: the mesh
     // carries only the waves longer than its own step, and a normal
     // interpolated between vertices could not show the shorter ones - it
@@ -667,14 +698,15 @@ void main() {
     vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
     specular = min(specular, vec3(2.0));
 
-    // Noise-based sparkle. Its features are far smaller than the wave detail, so
-    // it aliases sooner - fade it out over the near half of the detail range,
-    // otherwise flattening the normals just leaves the sparkle field behind as
-    // the visible pattern.
-    if (dist < 700.0) {  // where the fade below still leaves any of it
+    // Noise-based sparkle. Its features are far smaller than the wave detail:
+    // its coarsest octave is twelve to the yard, so it is there only while a
+    // pixel can show that. Faded by distance it ran out to 700 yards, a
+    // flicker of single pixels over every beach in view.
+    float sparkleShown = cellsShown(12.0, pixelsPerYard);
+    if (sparkleShown > 0.001) {
         float sparkleNoise = fbmNoise(FragPos.xy * 4.0 + time * 0.5, time * 1.5);
         float sparkle = pow(max(sparkleNoise - 0.55, 0.0) / 0.45, 3.0) * shimmerStrength * 0.10;
-        specular += sparkle * lightColor.rgb * (1.0 - smoothstep(150.0, 700.0, dist));
+        specular += sparkle * lightColor.rgb * sparkleShown;
     }
 
     // ============================================================
@@ -748,14 +780,14 @@ void main() {
         const mat2 rot2 = mat2( 0.26, -0.97,  0.97,  0.26);   // ~75 degrees
         float thresholdJitter = noiseValue(FragPos.xy * 5.0 + time * 0.2);
 
-        float cells1 = cellularFoam(rot1 * foamUV * 13.0 + time * vec2(0.15, 0.08));
-        float foam1 = (1.0 - smoothstep(0.0, 0.075 + 0.075 * thresholdJitter, cells1)) * 0.45;
-
-        float cells2 = cellularFoam(rot2 * foamUV * 27.7 + time * vec2(-0.12, 0.22));
-        float foam2 = (1.0 - smoothstep(0.0, 0.045 + 0.05 * (1.0 - thresholdJitter), cells2)) * 0.30;
-
-        float cells3 = cellularFoam(foamUV * 51.3 + time * vec2(0.25, -0.1));
-        float foam3 = (1.0 - smoothstep(0.0, 0.05, cells3)) * 0.18;
+        float foam1 = foamDots(rot1 * foamUV * 13.0 + time * vec2(0.15, 0.08),
+                               0.075 + 0.075 * thresholdJitter,
+                               cellsShown(13.0, pixelsPerYard)) * 0.45;
+        float foam2 = foamDots(rot2 * foamUV * 27.7 + time * vec2(-0.12, 0.22),
+                               0.045 + 0.05 * (1.0 - thresholdJitter),
+                               cellsShown(27.7, pixelsPerYard)) * 0.30;
+        float foam3 = foamDots(foamUV * 51.3 + time * vec2(0.25, -0.1), 0.05,
+                               cellsShown(51.3, pixelsPerYard)) * 0.18;
 
         // Noise breakup for clumping
         float noiseMask = noiseValue(FragPos.xy * 3.0 + time * 0.15);
@@ -764,16 +796,16 @@ void main() {
         // The surf line itself, on the contour computed above with the wet sand,
         // so the foam sits exactly where the water currently reaches.
         float swashBand = 1.0 - smoothstep(0.0, 0.085, abs(shoreDepth - swashDepth));
-        float swashTexture = 0.55 + 0.45 * cellularFoam(rot1 * foamUV * 8.6 + time * vec2(0.05, 0.12));
+        float swashTexture = 0.55 + 0.45 * cellDistance(rot1 * foamUV * 8.6 + time * vec2(0.05, 0.12),
+                                                        cellsShown(8.6, pixelsPerYard));
         foam += swashBand * swashTexture * 0.55 * foamDepthMask;
 
         // Spray thrown off the front as it runs up: much finer than the foam,
         // sparse, and only while the surf is advancing. It is what sells the
         // edge as breaking water rather than a wet line.
         float sprayMask = 1.0 - smoothstep(0.0, 0.11, abs(shoreDepth - swashDepth + 0.04));
-        float sprayCells = cellularFoam(rot2 * (foamUV + swashAdvect * 0.5) * 96.0
-                                        + time * vec2(0.6, -0.45));
-        float spray = (1.0 - smoothstep(0.0, 0.035, sprayCells))
+        float spray = foamDots(rot2 * (foamUV + swashAdvect * 0.5) * 96.0 + time * vec2(0.6, -0.45),
+                               0.035, cellsShown(96.0, pixelsPerYard))
                     * sprayMask * max(swashPhase, 0.0) * 0.7;
         foam += spray * foamDepthMask;
 
@@ -826,11 +858,21 @@ void main() {
                 // Thresholding across the middle of the range inverts that: most
                 // of the patch is foam and the gaps between cells are the
                 // texture, which is what aerated water actually looks like.
-                float cells = cellularFoam(churnUV * 12.0 + time * vec2(0.25, -0.18));
-                float cover = 1.0 - smoothstep(0.08, 0.38, cells);
-
-                float fine = cellularFoam(churnUV * 29.0 - time * vec2(0.14, 0.30));
-                cover = max(cover * 0.85, (1.0 - smoothstep(0.05, 0.22, fine)) * 0.5);
+                // Each of the two, where its cells are too small to show, is
+                // what it covers on average (17% and 6% of a cell).
+                float coarseShown = cellsShown(12.0, pixelsPerYard);
+                float cover = 0.175;
+                if (coarseShown > 0.001) {
+                    float cells = cellularFoam(churnUV * 12.0 + time * vec2(0.25, -0.18));
+                    cover = mix(cover, 1.0 - smoothstep(0.08, 0.38, cells), coarseShown);
+                }
+                float fineShown = cellsShown(29.0, pixelsPerYard);
+                float fineCover = 0.062;
+                if (fineShown > 0.001) {
+                    float fine = cellularFoam(churnUV * 29.0 - time * vec2(0.14, 0.30));
+                    fineCover = mix(fineCover, 1.0 - smoothstep(0.05, 0.22, fine), fineShown);
+                }
+                cover = max(cover * 0.85, fineCover * 0.5);
 
                 // Clumping, so the trail thins and thickens along its length.
                 cover *= 0.55 + 0.45 * noiseValue(churnUV * 2.2 + time * 0.35);
@@ -855,8 +897,8 @@ void main() {
             noiseValue(FragPos.xy * 1.8 + time * 0.1) - 0.5,
             noiseValue(FragPos.xy * 1.8 + vec2(53.0) + time * 0.07) - 0.5
         ) * 2.0;
-        float crestCells = cellularFoam((FragPos.xy + crestWarp) * 6.0 + time * vec2(0.12, 0.08));
-        float crestFoam = (1.0 - smoothstep(0.0, 0.18, crestCells)) * crestMask;
+        float crestFoam = foamDots((FragPos.xy + crestWarp) * 6.0 + time * vec2(0.12, 0.08), 0.18,
+                                   cellsShown(6.0, pixelsPerYard)) * crestMask;
         float crestNoise = noiseValue(FragPos.xy * 3.0 - time * 0.3);
         crestFoam *= smoothstep(0.3, 0.6, crestNoise);
         color = mix(color, vec3(0.68, 0.78, 0.88), crestFoam * 0.30);
@@ -882,6 +924,15 @@ void main() {
     // after the clamp - clamping afterwards restored the 0.15 floor and put the
     // edge straight back.
     alpha *= smoothstep(2400.0, 600.0, dist);
+    // And into the beach: the sheet thins out over its last fifth of a yard of
+    // depth, so there is no line where it meets the sand. Only a few
+    // hundredths of a yard did this before, and with the 0.15 floor above the
+    // water ended on its own edge, which every rise and fall of the surface
+    // then moved across the sand. Not where there is no capture of what is
+    // under the water to measure the depth against.
+    if (hasSceneData) {
+        alpha *= smoothstep(0.0, 0.2, shoreDepth);
+    }
 
     color = applyFog(color, FragPos, dist);
 
