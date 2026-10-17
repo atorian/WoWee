@@ -29,7 +29,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace rendering { class TerrainRenderer; class Camera; class WaterRenderer; class M2Renderer; class WMORenderer; }
+namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; }
 
 namespace rendering {
 
@@ -273,7 +273,8 @@ public:
      */
     void getGroundEffectDoodads(uint32_t effectId, std::vector<std::string>& outModels,
                                 std::vector<uint32_t>& outWeights) const;
-    void setWaterRenderer(WaterRenderer* renderer) { waterRenderer = renderer; }
+    /// Where the tiles' and buildings' liquid goes as they stream in and out.
+    void setLiquidScene(LiquidScene* scene) { liquidScene = scene; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     void setWMORenderer(WMORenderer* renderer) { wmoRenderer = renderer; }
     /// Where a committed tile's sound emitters go - fires, torches, fountains,
@@ -432,7 +433,7 @@ private:
 
     pipeline::AssetManager* assetManager = nullptr;
     TerrainRenderer* terrainRenderer = nullptr;
-    WaterRenderer* waterRenderer = nullptr;
+    LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
     AmbientEmitterSink ambientEmitterSink_;

@@ -102,7 +102,7 @@ void PlayerView::attachWorld() {
         cameraController_->setTerrainManager(renderer_->getTerrainManager());
         cameraController_->setWMORenderer(renderer_->getWMORenderer());
         cameraController_->setM2Renderer(renderer_->getM2Renderer());
-        cameraController_->setWaterRenderer(renderer_->getWaterRenderer());
+        cameraController_->setLiquidScene(&renderer_->liquidScene());
     }
     // Snap camera to ground
     cameraController_->reset();

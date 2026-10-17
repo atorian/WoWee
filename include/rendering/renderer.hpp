@@ -26,6 +26,7 @@
 #include "pipeline/grass_biomes.hpp"
 #include "pipeline/wind_zones.hpp"
 #include "rendering/wind_field.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "pipeline/grass_population.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -174,6 +175,9 @@ public:
     std::unique_ptr<TerrainManager> takeTerrainSession();
     void releaseTerrainSession(TerrainManager* session);
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
+    /// The map's liquid: where it is, how high, what kind, which body.
+    LiquidScene& liquidScene() { return liquidScene_; }
+    const LiquidScene& liquidScene() const { return liquidScene_; }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
     Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
     StarField* getStarField() const { return skySystem ? skySystem->getStarField() : nullptr; }
@@ -310,12 +314,19 @@ private:
     /// That line, asked of the terrain, the buildings and where the camera is.
     [[nodiscard]] float sampleSunOcclusion() const;
 
+    /// The map's liquid, which the water renderer draws and everything else
+    /// asks about. It exists whether or not the water can be drawn, and is
+    /// declared before the terrain session that fills it so it outlives it.
+    LiquidScene liquidScene_;
     // A standalone scene owns its default session. The client transfers that
     // session into MapScope as soon as the renderers have been initialized.
     std::unique_ptr<TerrainManager> standaloneTerrain_;
     TerrainManager* terrainManager = nullptr;
     core::JobGroup::Token mapJobToken_;
     std::unique_ptr<WaterRenderer> waterRenderer;
+    /// The water renderer's subscription to liquidScene_; declared after
+    /// both, so it ends before either goes.
+    LiquidScene::Subscription waterSubscription_;
     std::unique_ptr<Skybox> skybox;
     std::unique_ptr<Celestial> celestial;
     std::unique_ptr<StarField> starField;

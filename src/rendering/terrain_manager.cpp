@@ -6,7 +6,7 @@
 #include "pipeline/grass_profile.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -1026,18 +1026,15 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         }
 
         // Load water after all terrain chunks are uploaded
-        if (!ft.terrainWaterDone && waterRenderer) {
+        if (!ft.terrainWaterDone) {
             ft.terrainWaterDone = true;
-            size_t beforeSurfaces = waterRenderer->getSurfaceCount();
-            waterRenderer->loadFromTerrain(pending->terrain, true, x, y);
-            size_t afterSurfaces = waterRenderer->getSurfaceCount();
-            if (afterSurfaces > beforeSurfaces) {
-                LOG_INFO("Water: tile [", x, ",", y, "] added ", afterSurfaces - beforeSurfaces,
-                         " surfaces (total: ", afterSurfaces, ")");
+            if (liquidScene) {
+                liquidScene->addTerrainTile(pending->terrain, x, y);
+            } else {
+                LOG_WARNING("Water: no liquid scene for tile [", x, ",", y,
+                            "] - its water is neither drawn nor swum in");
             }
             return false;
-        } else if (!waterRenderer) {
-            LOG_WARNING("Water: waterRenderer is null during tile [", x, ",", y, "] finalization!");
         }
 
         // Ensure M2 renderer has asset manager
@@ -1218,7 +1215,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     }
                 }
                 // Load WMO liquids incrementally (canals, pools, etc.)
-                if (waterRenderer) {
+                if (liquidScene) {
                     uint32_t wmoInstId = ft.wmoInstanceIds.back();
                     glm::mat4 modelMatrix = glm::mat4(1.0f);
                     modelMatrix = glm::translate(modelMatrix, wmoReady.position);
@@ -1235,7 +1232,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                             uint8_t basicType = (lt == 0) ? 0 : ((lt - 1) % 4);
                             if (basicType < 2) continue;
                         }
-                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId);
+                        liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId);
                         liquidGroupsLoaded++;
                     }
                     // More liquid groups remain on this WMO - yield
@@ -1669,8 +1666,8 @@ void TerrainManager::unloadTile(int x, int y) {
                 terrainRenderer->removeTile(x, y);
             }
             // If past TERRAIN phase, water was already loaded - remove it
-            if (fit->phase != FinalizationPhase::TERRAIN && waterRenderer) {
-                waterRenderer->removeTile(x, y);
+            if (fit->phase != FinalizationPhase::TERRAIN && liquidScene) {
+                liquidScene->removeTile(x, y);
             }
             // Clean up any M2/WMO instances that were already created
             if (m2Renderer && !fit->m2InstanceIds.empty()) {
@@ -1678,7 +1675,7 @@ void TerrainManager::unloadTile(int x, int y) {
             }
             if (wmoRenderer && !fit->wmoInstanceIds.empty()) {
                 for (uint32_t id : fit->wmoInstanceIds) {
-                    if (waterRenderer) waterRenderer->removeWMO(id);
+                    if (liquidScene) liquidScene->removeWmo(id);
                 }
                 wmoRenderer->removeInstances(fit->wmoInstanceIds);
             }
@@ -1722,8 +1719,8 @@ void TerrainManager::unloadTile(int x, int y) {
     if (wmoRenderer) {
         for (uint32_t id : tile->wmoInstanceIds) {
             // Remove WMO liquids associated with this instance
-            if (waterRenderer) {
-                waterRenderer->removeWMO(id);
+            if (liquidScene) {
+                liquidScene->removeWmo(id);
             }
         }
         wmoRenderer->removeInstances(tile->wmoInstanceIds);
@@ -1736,8 +1733,8 @@ void TerrainManager::unloadTile(int x, int y) {
     }
 
     // Remove water surfaces for this tile
-    if (waterRenderer) {
-        waterRenderer->removeTile(x, y);
+    if (liquidScene) {
+        liquidScene->removeTile(x, y);
     }
 
     loadedTiles.erase(it);
