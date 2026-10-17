@@ -47,7 +47,12 @@ layout(set = 1, binding = 0) uniform WaterMaterial {
     float shimmerStrength;
     float alphaScale;
     float bodyFloor;   // least the water's own colour shows, however shallow
+    // The liquid's own animated ripple (LiquidType.dbc's texture): x frames,
+    // 0 for none; y frames a second; z yards one repeat covers; w slope.
+    vec4 ripple;
 };
+// Its frames, a ripple height per texel in .r.
+layout(set = 1, binding = 1) uniform sampler2DArray RippleFrames;
 
 layout(set = 2, binding = 0) uniform sampler2D SceneColor;
 layout(set = 2, binding = 1) uniform sampler2D SceneDepth;
@@ -108,6 +113,39 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
     float dHy = c1 * d1.y * f1 * a1 + c2 * d2.y * f2 * a2 + c3 * d3.y * f3 * a3;
 
     return normalize(vec3(-dHx, -dHy, 1.0));
+}
+
+// ============================================================
+// The liquid's own ripple, from its animated frames
+// ============================================================
+// The original client lays these frames over the water as it is, a fine
+// moving chop. Here they are taken as a height and their slope is the
+// surface's small-scale normal, so the sun and the sky glint off the same
+// ripple the original showed. Two neighbouring frames are blended so the
+// animation moves rather than steps.
+float rippleHeight(vec2 uv, float layer) {
+    return texture(RippleFrames, vec3(uv, layer)).r;
+}
+
+vec3 rippleNormal(vec2 p, float time) {
+    float frames = ripple.x;
+    float f = time * ripple.y;
+    float l0 = mod(floor(f), frames);
+    float l1 = mod(l0 + 1.0, frames);
+    float t = fract(f);
+    vec2 uv = p / ripple.z;
+    // A texel's width in uv at the level being sampled, so the slope is
+    // measured across what this pixel actually sees.
+    float texel = max(length(fwidth(uv)), 1.0 / float(textureSize(RippleFrames, 0).x));
+    vec2 dx = vec2(texel, 0.0);
+    vec2 dy = vec2(0.0, texel);
+    float gx = mix(rippleHeight(uv + dx, l0) - rippleHeight(uv - dx, l0),
+                   rippleHeight(uv + dx, l1) - rippleHeight(uv - dx, l1), t);
+    float gy = mix(rippleHeight(uv + dy, l0) - rippleHeight(uv - dy, l0),
+                   rippleHeight(uv + dy, l1) - rippleHeight(uv - dy, l1), t);
+    // Height per uv, turned into height per yard.
+    vec2 slope = vec2(gx, gy) / (2.0 * texel) / ripple.z * ripple.w;
+    return normalize(vec3(-slope, 1.0));
 }
 
 // ============================================================
@@ -340,7 +378,10 @@ void main() {
 
     // --- Normal computation ---
     vec3 meshNorm = normalize(Normal);
-    vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time);
+    // The liquid's own animated ripple where it has one, the procedural one
+    // where LiquidType.dbc names no frames for it.
+    vec3 detailNorm = ripple.x > 0.5 ? rippleNormal(FragPos.xy, time)
+                                     : dualScrollWaveNormal(FragPos.xy, time);
     // Wave detail is a scrolling pattern with a finite period. Held at full
     // strength to the horizon it does two things the eye picks up immediately:
     // the tiling repeats visibly, and the highlights land smaller than a pixel

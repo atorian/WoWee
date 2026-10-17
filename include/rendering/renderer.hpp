@@ -332,6 +332,10 @@ private:
     /// That line, asked of the terrain, the buildings and where the camera is.
     [[nodiscard]] float sampleSunOcclusion() const;
 
+    /// LiquidType.dbc, read in initializeRenderers; the scene and the water
+    /// hold pointers to it, so it is declared before both.
+    pipeline::LiquidTypeTable liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+    bool liquidTypesLoaded_ = false;
     /// The map's liquid, which the water renderer draws and everything else
     /// asks about. It exists whether or not the water can be drawn, and is
     /// declared before the terrain session that fills it so it outlives it.

@@ -1,4 +1,5 @@
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/liquid_types.hpp"
 #include "core/logger.hpp"
 #include <cstring>
 #include <glm/gtc/quaternion.hpp>
@@ -131,8 +132,8 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                 model.boundingBoxMax.y = read<float>(wmoData, offset);
                 model.boundingBoxMax.z = read<float>(wmoData, offset);
 
-                // flags and numLod (uint16 each) - skip for now
-                offset += 4;
+                model.flags = read<uint16_t>(wmoData, offset);
+                offset += 2;  // numLod
 
                 core::Logger::getInstance().debug("WMO header: nTextures=", model.nTextures, " nGroups=", model.nGroups);
                 break;
@@ -694,9 +695,19 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                             group.liquid.flags.resize(tileCount, 0);
                         }
 
-                        if (group.liquid.materialId == 0) {
-                            group.liquid.materialId = static_cast<uint16_t>(group.liquidType);
+                        // What liquid it is comes from the group header, not
+                        // from MLIQ, whose material id indexes MOMT. It used to
+                        // be taken for the liquid type - and the group's own
+                        // liquid written over it when it was zero - so a
+                        // building's water was whatever its material index
+                        // happened to read as.
+                        uint8_t tileLiquid = 0;
+                        for (uint8_t f : group.liquid.flags) {
+                            if ((f & 0x0F) != 0x0F) { tileLiquid = f & 0x0F; break; }
                         }
+                        group.liquid.liquidType = wmoGroupLiquidType(
+                            group.liquidType, group.flags,
+                            (model.flags & WMOModel::kFlagLiquidTypeIsDbcId) != 0, tileLiquid);
                     }
                 }
 

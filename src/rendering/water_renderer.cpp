@@ -1,4 +1,7 @@
 #include "rendering/water_renderer.hpp"
+#include "rendering/liquid_ripple_frames.hpp"
+#include <chrono>
+#include "pipeline/asset_manager.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -25,7 +28,21 @@ struct WaterMaterialUBO {
     float shimmerStrength;
     float alphaScale;
     float bodyFloor;   // least the water's own colour shows, however shallow
+    /// The liquid's ripple frames at binding 1: x frames (0 - none, the
+    /// shader's own ripple), y frames a second, z yards one repeat of the
+    /// texture covers, w how steep the ripple is.
+    glm::vec4 ripple{0.0f};
 };
+static_assert(sizeof(WaterMaterialUBO) == 48, "water.frag.glsl's WaterMaterial block is 48 bytes");
+
+// The ripple's pace and size. LiquidType.dbc names the frames but no rate or
+// scale for them that is known, so these are matched by eye: the lake and
+// sea sets are thirty frames, a two-second loop; one repeat of the texture
+// covers two of a chunk's cells; and the slope is what reads as a fine chop
+// rather than a corrugated sheet.
+constexpr float kRippleFramesPerSecond = 15.0f;
+constexpr float kRippleYardsPerRepeat = 2.0f * (33.33333f / 8.0f);
+constexpr float kRippleSlope = 2.5f;
 
 // Push constants matching water.vert.glsl
 struct WaterPushConstants {
@@ -63,24 +80,32 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     matBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     matBinding.descriptorCount = 1;
     matBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // binding 1: the liquid's animated ripple frames (sampler2DArray)
+    VkDescriptorSetLayoutBinding rippleBinding{};
+    rippleBinding.binding = 1;
+    rippleBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    rippleBinding.descriptorCount = 1;
+    rippleBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    materialSetLayout = createDescriptorSetLayout(device, { matBinding });
+    materialSetLayout = createDescriptorSetLayout(device, { matBinding, rippleBinding });
     if (!materialSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create material set layout");
         return false;
     }
 
     // --- Descriptor pool ---
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = MAX_WATER_SETS;
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = MAX_WATER_SETS;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = MAX_WATER_SETS;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     poolInfo.maxSets = MAX_WATER_SETS;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create descriptor pool");
@@ -204,8 +229,102 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
 
+    // What a liquid with no ripple frames samples: one flat frame, mid grey,
+    // whose slope is nothing. The material says there are no frames, so the
+    // shader draws its own ripple instead; this only keeps the binding valid.
+    {
+        const std::vector<std::vector<uint8_t>> flat{{128}};
+        if (!flatRipple_.uploadArray(*vkCtx, flat, 1, 1, 1, VK_FORMAT_R8_UNORM, 1)) {
+            LOG_ERROR("WaterRenderer: failed to create the flat ripple texture");
+            return false;
+        }
+    }
+    VkSamplerCreateInfo rippleSamplerInfo{};
+    rippleSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    rippleSamplerInfo.magFilter = VK_FILTER_LINEAR;
+    rippleSamplerInfo.minFilter = VK_FILTER_LINEAR;
+    rippleSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    rippleSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.anisotropyEnable = VK_TRUE;
+    rippleSamplerInfo.maxAnisotropy = 8.0f;
+    rippleSamplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(device, &rippleSamplerInfo, nullptr, &rippleSampler_) != VK_SUCCESS) {
+        LOG_ERROR("WaterRenderer: failed to create the ripple sampler");
+        return false;
+    }
+
     LOG_INFO("Water renderer initialized (Vulkan)");
     return true;
+}
+
+void WaterRenderer::setLiquidAssets(pipeline::AssetManager* assets,
+                                    const pipeline::LiquidTypeTable* types) {
+    assets_ = assets;
+    liquidTypes_ = types;
+    if (!drawn_.empty()) {
+        LOG_WARNING("Water: liquid textures supplied with ", drawn_.size(),
+                    " surfaces already drawn - those keep the shader's own ripple");
+    }
+    preloadRipples();
+}
+
+const WaterRenderer::RippleSet* WaterRenderer::rippleFor(uint16_t liquidType) {
+    if (!liquidTypes_ || !assets_ || !vkCtx) return nullptr;
+    const pipeline::LiquidTypeInfo* info = liquidTypes_->find(liquidType);
+    if (!info || info->texturePattern.empty()) return nullptr;
+    const std::string& pattern = info->texturePattern;
+    if (auto it = rippleSets_.find(pattern); it != rippleSets_.end()) {
+        return it->second.texture ? &it->second : nullptr;
+    }
+
+    // Tried once whatever the answer: a set that is not there is said and
+    // drawn with the shader's own ripple from then on.
+    RippleSet& set = rippleSets_[pattern];
+    std::string whyNot;
+    const auto started = std::chrono::steady_clock::now();
+    // The set ends at the first frame number with no file. Asked as a
+    // question rather than a load, which would report the frame after the
+    // last as a missing texture.
+    const auto frames = loadLiquidRippleFrames(
+        pattern,
+        [this](const std::string& path) {
+            return assets_->fileExists(path) ? assets_->loadTexture(path) : pipeline::BLPImage{};
+        },
+        whyNot);
+    if (!frames) {
+        LOG_WARNING("Water: no ripple for ", info->name, " (liquid ", liquidType, "): ", whyNot,
+                    " - drawn with the shader's own ripple");
+        return nullptr;
+    }
+    auto texture = std::make_unique<VkTexture>();
+    if (!texture->uploadArray(*vkCtx, frames->levels, frames->width, frames->height,
+                              frames->frames, VK_FORMAT_R8_UNORM, 1)) {
+        LOG_WARNING("Water: the ripple of ", info->name, " (", pattern, ") did not upload - "
+                    "drawn with the shader's own ripple");
+        return nullptr;
+    }
+    set.texture = std::move(texture);
+    set.frames = frames->frames;
+    LOG_INFO("Water: ripple for ", info->name, " - ", frames->frames, " frames of ",
+             frames->width, "x", frames->height, " from the ",
+             frames->fromAlpha ? "alpha" : "colour", " of ", pattern, ", ",
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                 .count(), "ms");
+    return &set;
+}
+
+void WaterRenderer::preloadRipples() {
+    if (!liquidTypes_) return;
+    // Every water and sea in the table, now, while the world is still
+    // loading: decoding a set's frames takes a noticeable fraction of a
+    // second, and the first tile with that water used to pay it.
+    for (const auto& [id, info] : liquidTypes_->rows()) {
+        if (info.basic == pipeline::LiquidBasic::Water || info.basic == pipeline::LiquidBasic::Ocean) {
+            rippleFor(static_cast<uint16_t>(id));
+        }
+    }
 }
 
 void WaterRenderer::recreatePipelines() {
@@ -338,6 +457,12 @@ void WaterRenderer::shutdown() {
     destroy(device, sceneSetLayout);
     destroy(device, materialDescPool);
     destroy(device, materialSetLayout);
+    rippleSets_.clear();
+    flatRipple_.destroy(device, vkCtx->getAllocator());
+    if (rippleSampler_) {
+        vkDestroySampler(device, rippleSampler_, nullptr);
+        rippleSampler_ = VK_NULL_HANDLE;
+    }
 
     vkCtx = nullptr;
 }
@@ -575,12 +700,12 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
 }
 
 void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
-    glm::vec4 color = getLiquidColor(surface.liquidType);
-    float alpha = getLiquidAlpha(surface.liquidType);
+    glm::vec4 color = getLiquidColor(surface.basicType);
+    float alpha = getLiquidAlpha(surface.basicType);
 
     // WMO liquid material override
     if (surface.wmoId != 0) {
-        const uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
+        const uint8_t basicType = surface.basicType;
         if (basicType == 2) {
             // Magma - bright orange-red, opaque
             color = glm::vec4(1.0f, 0.35f, 0.05f, 1.0f);
@@ -600,7 +725,7 @@ void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
     // thinned below open water.
     float alphaScale = canalProfile ? 1.15f : 1.00f;
     float bodyFloor = 0.0f;
-    if (canalProfile && (surface.liquidType == 0 || (surface.liquidType - 1) % 4 < 2)) {
+    if (canalProfile && surface.basicType < 2) {
         color = glm::vec4(0.08f, 0.30f, 0.40f, 1.0f);
         bodyFloor = 0.45f;
     }
@@ -611,6 +736,10 @@ void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
     mat.shimmerStrength = shimmerStrength;
     mat.alphaScale = alphaScale;
     mat.bodyFloor = bodyFloor;
+    if (surface.ripple) {
+        mat.ripple = glm::vec4(static_cast<float>(surface.ripple->frames), kRippleFramesPerSecond,
+                               kRippleYardsPerRepeat, kRippleSlope);
+    }
 
     // Create UBO
     VkBufferCreateInfo bufCI{};
@@ -637,15 +766,27 @@ void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
         bufInfo.offset = 0;
         bufInfo.range = sizeof(WaterMaterialUBO);
 
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = surface.materialSet;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write.pBufferInfo = &bufInfo;
+        VkDescriptorImageInfo rippleInfo{};
+        rippleInfo.sampler = rippleSampler_;
+        rippleInfo.imageView = surface.ripple ? surface.ripple->texture->getImageView()
+                                              : flatRipple_.getImageView();
+        rippleInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 0, nullptr);
+        VkWriteDescriptorSet writes[2]{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = surface.materialSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo = &bufInfo;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = surface.materialSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &rippleInfo;
+
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 2, writes, 0, nullptr);
     } else {
         LOG_WARNING("Water: failed to allocate material descriptor set (pool exhaustion?)");
     }
@@ -664,6 +805,7 @@ void WaterRenderer::liquidSurfaceAdded(const LiquidSurface& surface) {
     drawn.minHeight = surface.minHeight;
     drawn.maxHeight = surface.maxHeight;
     drawn.liquidType = surface.liquidType;
+    drawn.basicType = surface.basicType();
     drawn.wmoId = surface.wmoId;
     drawn.width = surface.width;
     drawn.height = surface.height;
@@ -672,6 +814,9 @@ void WaterRenderer::liquidSurfaceAdded(const LiquidSurface& surface) {
     // A surface with no cell of liquid has nothing to draw; the scene still
     // knows of it.
     if (drawn.indexCount == 0) return;
+    // Water and sea ripple with their frames. Magma and slime keep their own
+    // flowing surface in the shader: their frames are a colour, not a ripple.
+    if (drawn.basicType < 2) drawn.ripple = rippleFor(surface.liquidType);
     if (vkCtx) updateMaterialUBO(drawn);
     drawn_.push_back(drawn);
 }
@@ -756,7 +901,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         bool isWmoWater = (surface.wmoId != 0);
         bool canalProfile = isWmoWater || (surface.liquidType == 5);
-        uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
+        const uint8_t basicType = surface.basicType;
         // WMO water gets no wave displacement - prevents visible slosh at
         // geometry edges (bridges, docks) where water is far below the surface.
         float waveAmp = isWmoWater ? 0.0f : (basicType == 1 ? 0.35f : 0.08f);
@@ -1055,8 +1200,7 @@ void WaterRenderer::destroyWaterMesh(DrawnSurface& surface) {
     });
 }
 
-glm::vec4 WaterRenderer::getLiquidColor(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
+glm::vec4 WaterRenderer::getLiquidColor(uint8_t basicType) const {
     switch (basicType) {
         case 0:  return glm::vec4(0.10f, 0.28f, 0.55f, 1.0f); // inland: richer blue
         case 1:  return glm::vec4(0.04f, 0.16f, 0.38f, 1.0f); // ocean: deep blue
@@ -1066,8 +1210,7 @@ glm::vec4 WaterRenderer::getLiquidColor(uint16_t liquidType) const {
     }
 }
 
-float WaterRenderer::getLiquidAlpha(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
+float WaterRenderer::getLiquidAlpha(uint8_t basicType) const {
     switch (basicType) {
         case 1:  return 0.72f;  // ocean
         case 2:  return 0.75f;  // magma

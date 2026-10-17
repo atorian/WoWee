@@ -144,7 +144,7 @@ struct ADTTerrain {
 
     // Water/liquid data (from MH2O chunk)
     struct WaterLayer {
-        uint16_t liquidType;      // Type of liquid (0=water, 1=ocean, 2=magma, 3=slime)
+        uint16_t liquidType;      // LiquidType.dbc row (1 Water, 2 Ocean, 3 Magma, 4 Slime, ...)
         uint16_t flags;
         float minHeight;
         float maxHeight;

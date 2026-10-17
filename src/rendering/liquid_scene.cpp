@@ -17,10 +17,6 @@ namespace rendering {
 
 namespace {
 
-uint8_t basicTypeOf(uint16_t liquidType) {
-    return (liquidType == 0) ? 0 : static_cast<uint8_t>((liquidType - 1) % 4);
-}
-
 struct Bounds2 {
     glm::vec2 min{std::numeric_limits<float>::max()};
     glm::vec2 max{std::numeric_limits<float>::lowest()};
@@ -63,8 +59,6 @@ float cellArea(const LiquidSurface& s) {
 
 } // namespace
 
-uint8_t LiquidSurface::basicType() const { return basicTypeOf(liquidType); }
-
 bool LiquidSurface::cellHasLiquid(int x, int y) const {
     return waterCellRendered(mask, wmoId, width, xOffset, yOffset, x, y);
 }
@@ -90,6 +84,21 @@ void LiquidScene::Subscription::reset() {
     }
     scene_ = nullptr;
     listener_ = nullptr;
+}
+
+void LiquidScene::setLiquidTypes(const pipeline::LiquidTypeTable* types) {
+    types_ = types ? types : &basicTypes_;
+    if (!surfaces_.empty()) {
+        // What is loaded was classified by the table it came in under; the
+        // renderer's copies were built from that. Said rather than half-fixed.
+        LOG_WARNING("Water: liquid types replaced with ", surfaces_.size(),
+                    " surfaces already loaded - they keep the kinds they were given until "
+                    "they stream out");
+    }
+}
+
+pipeline::LiquidBasic LiquidScene::basicOf(uint16_t liquidType) const {
+    return types_->basicOf(liquidType);
 }
 
 LiquidScene::Subscription LiquidScene::subscribe(LiquidSceneListener& listener) {
@@ -270,8 +279,8 @@ std::size_t LiquidScene::addTerrainTile(const pipeline::ADTTerrain& terrain, int
         // chunk that declares no liquid at all got a surface anyway: the
         // Caverns of Time, a hole in a coastal tile in Tanaris, was roofed with
         // ocean. Any cave below sea level on an ocean tile had the same.
-        uint8_t basicType = basicTypeOf(key.liquidType);
-        bool isOcean = (basicType == 1) && (std::abs(groupHeight) < 1.0f);
+        bool isOcean = (basicOf(key.liquidType) == pipeline::LiquidBasic::Ocean) &&
+                       (std::abs(groupHeight) < 1.0f);
         surface.mask.resize(maskBytes, 0x00);
 
         // ── Fill from each contributing chunk ──
@@ -368,7 +377,7 @@ bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat
         if (rejectedWmoSaid_.insert(wmoId).second) {
             LOG_WARNING("Water: WMO instance ", wmoId, " liquid not placed (", why, "; ",
                         liquid.xTiles, "x", liquid.yTiles, " tiles, ", liquid.xVerts, "x",
-                        liquid.yVerts, " vertices, material ", liquid.materialId,
+                        liquid.yVerts, " vertices, liquid type ", liquid.liquidType,
                         ") - the building is drawn dry and cannot be swum in there");
         }
         return false;
@@ -384,7 +393,7 @@ bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat
     surface.tileX = -1;
     surface.tileY = -1;
     surface.wmoId = wmoId;
-    surface.liquidType = liquid.materialId;
+    surface.liquidType = liquid.liquidType;
     surface.xOffset = 0;
     surface.yOffset = 0;
     surface.width = static_cast<uint8_t>(std::min<uint32_t>(255, liquid.xTiles));
@@ -478,6 +487,7 @@ bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat
 
 void LiquidScene::addSurface(LiquidSurface&& surface) {
     surface.id = nextId_++;
+    surface.basic = basicOf(surface.liquidType);
     surfaces_.push_back(std::move(surface));
     const LiquidSurface& stored = surfaces_.back();
     buildPatches(stored);
@@ -804,6 +814,12 @@ std::optional<uint16_t> LiquidScene::typeAt(float x, float y) const {
         }
     }
     return bestType;
+}
+
+std::optional<pipeline::LiquidBasic> LiquidScene::basicTypeAt(float x, float y) const {
+    const auto type = typeAt(x, y);
+    if (!type) return std::nullopt;
+    return basicOf(*type);
 }
 
 bool LiquidScene::isWmoLiquidAt(float x, float y) const {

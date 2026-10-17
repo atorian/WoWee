@@ -8,6 +8,7 @@
 #include <vk_mem_alloc.h>
 #include <string>
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace wowee {
@@ -36,6 +37,15 @@ public:
     bool uploadMips(VkContext& ctx, const uint8_t* const* mipData, const uint32_t* mipSizes,
         uint32_t mipCount, uint32_t width, uint32_t height,
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM);
+
+    /// Upload a 2D array texture: `layers` images of one size, sampled as a
+    /// sampler2DArray. `levels[i]` is mip level i of every layer, one layer
+    /// after another, each `bytesPerTexel` per texel - the caller builds the
+    /// chain, which for small single-channel layers is cheaper than a blit.
+    bool uploadArray(VkContext& ctx, const std::vector<std::vector<uint8_t>>& levels,
+        uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
+        uint32_t bytesPerTexel,
+        std::source_location where = std::source_location::current());
 
     /// Upload a loaded BLP, whichever form it came back in.
     ///

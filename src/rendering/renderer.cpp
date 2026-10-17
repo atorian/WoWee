@@ -3831,6 +3831,25 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         terrainRenderer->initializeShadow(shadowRenderPass);
     }
 
+    // What each liquid id in the map data is, read once: the scene says what
+    // kind a liquid is by it, and the water finds each liquid's ripple frames
+    // by it. Before any tile or building is loaded.
+    if (!liquidTypesLoaded_) {
+        liquidTypesLoaded_ = true;
+        const auto dbc = assetManager->loadDBC("LiquidType.dbc");
+        const pipeline::DBCLayout* layouts = pipeline::getActiveDBCLayout();
+        if (dbc && dbc->isLoaded()) {
+            liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
+                *dbc, layouts ? layouts->getLayout("LiquidType") : nullptr, "LiquidType.dbc");
+            LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
+        } else {
+            LOG_WARNING("Liquid types: LiquidType.dbc did not load - only the four basic "
+                        "liquids are known, drawn without their textures");
+            liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+        }
+        liquidScene_.setLiquidTypes(&liquidTypes_);
+    }
+
     // Create water renderer if not already created
     if (!waterRenderer) {
         waterRenderer = std::make_unique<WaterRenderer>();
@@ -3839,6 +3858,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
                       "though it can still be swum in");
             waterRenderer.reset();
         } else {
+            waterRenderer->setLiquidAssets(assetManager, &liquidTypes_);
             // Told of whatever the scene already holds before this returns.
             waterSubscription_ = liquidScene_.subscribe(*waterRenderer);
         }

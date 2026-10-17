@@ -249,7 +249,7 @@ TEST_CASE("a building's pool is liquid in the building", "[liquid]") {
     pool.xTiles = 4;
     pool.yTiles = 4;
     pool.basePosition = glm::vec3(100.0f, 200.0f, 50.0f);
-    pool.materialId = kWater;
+    pool.liquidType = kWater;
     REQUIRE(scene.addWmoLiquid(pool, glm::mat4(1.0f), 77));
 
     const float x = 100.0f + 2.0f * 4.1666625f;

@@ -805,6 +805,8 @@ set(WOWEE_SOURCES
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
     src/pipeline/wmo_loader.cpp
+    src/pipeline/liquid_types.cpp
+    src/pipeline/liquid_types_dbc.cpp
     src/pipeline/adt_loader.cpp
     src/pipeline/wdt_loader.cpp
     src/pipeline/wowee_terrain_loader.cpp
@@ -998,6 +1000,7 @@ set(WOWEE_SOURCES
     src/rendering/performance_hud.cpp
     src/rendering/water_renderer.cpp
     src/rendering/liquid_scene.cpp
+    src/rendering/liquid_ripple_frames.cpp
     src/rendering/skybox.cpp
     src/rendering/celestial.cpp
     src/rendering/starfield.cpp

@@ -1229,9 +1229,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         ft.wmoLiquidGroupIndex++;
                         if (!group.liquid.hasLiquid()) continue;
                         if (group.flags & 0x2000) {
-                            uint16_t lt = group.liquid.materialId;
-                            uint8_t basicType = (lt == 0) ? 0 : ((lt - 1) % 4);
-                            if (basicType < 2) continue;
+                            const auto basic = liquidScene->basicOf(group.liquid.liquidType);
+                            if (basic == pipeline::LiquidBasic::Water ||
+                                basic == pipeline::LiquidBasic::Ocean) continue;
                         }
                         liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId);
                         liquidGroupsLoaded++;

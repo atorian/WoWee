@@ -931,7 +931,8 @@ wowee_add_test(test_tile_size_agreement
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_chunk_surface ───────────────────────────────────────
 # Where a point inside a terrain chunk sits in the world. The clutter and
@@ -941,7 +942,8 @@ wowee_add_test(test_chunk_surface
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_spline_body ─────────────────────────────────────────
 # The body of SMSG_MONSTER_MOVE, whose head two parsers shared and neither
@@ -1733,6 +1735,7 @@ wowee_add_test(test_open_formats
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_terrain_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_open_format_emitter ─────────────────────────────────
@@ -1745,6 +1748,7 @@ add_executable(test_open_format_emitter
     ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -1839,6 +1843,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -2125,6 +2130,28 @@ wowee_add_test(test_wind_field
 wowee_add_test(test_liquid_scene
     SOURCES test_liquid_scene.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_types ────────────────────────────────────────
+# What each liquid is: LiquidType.dbc through its layout, the client's rule
+# for a WMO group's liquid, MCLQ's ocean - and what the scene then says.
+wowee_add_test(test_liquid_types
+    SOURCES test_liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types_dbc.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_ripple_frames ────────────────────────────────
+# A liquid's animated frames made ready to draw: which there are, which
+# channel holds the ripple, and the mip chain.
+wowee_add_test(test_liquid_ripple_frames
+    SOURCES test_liquid_ripple_frames.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_ripple_frames.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_sphere_map ──────────────────────────────────────────
@@ -2471,6 +2498,7 @@ wowee_add_test(test_camera_water_depth
 wowee_add_test(test_interior_light
     SOURCES test_interior_light.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_m2_view_distance ────────────────────────────────────
@@ -2804,7 +2832,8 @@ wowee_add_test(test_raid_mark_names
 wowee_add_test(test_adt_truncation
     SOURCES test_adt_truncation.cpp
             ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_blp_truncation ──────────────────────────────────────
 # What the BLP loader does with a texture that lies about its own sizes. The
@@ -2832,7 +2861,8 @@ wowee_add_test(test_adt_alpha
     SOURCES test_adt_alpha.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_terrain ─────────────────────────────────
 # Whether grass grows at a point, answered from the ADT's own ground-effect
@@ -2845,7 +2875,8 @@ wowee_add_test(test_grass_terrain
             ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_population ──────────────────────────────
 # Blades generated from terrain suitability. Most of these cases are one
