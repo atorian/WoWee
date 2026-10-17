@@ -162,8 +162,8 @@ private:
     glm::vec4 getLiquidColor(uint8_t basicType) const;
     float getLiquidAlpha(uint8_t basicType) const;
 
-    /// Each wind wave train's running phase, radians, carried in double.
-    std::array<double, kWindWaveCount> windWavePhase_{};
+    /// The wind's sea: every train's steepness and phase, following the wind.
+    WindSea sea_;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();

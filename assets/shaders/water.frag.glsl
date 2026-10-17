@@ -96,7 +96,7 @@ layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
 // of froth rather than a disc stuck under its feet.
 const int MAX_WAKE_POINTS = 32;
 // kWindWaveCount in wind_waves.hpp.
-const int WIND_WAVE_COUNT = 24;
+const int WIND_WAVE_COUNT = 32;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;

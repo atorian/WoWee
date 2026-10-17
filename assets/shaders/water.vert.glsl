@@ -39,7 +39,7 @@ layout(push_constant) uniform Push {
 } push;
 
 const int MAX_WAKE_POINTS = 32;
-const int WIND_WAVE_COUNT = 24;  // kWindWaveCount in wind_waves.hpp
+const int WIND_WAVE_COUNT = 32;  // kWindWaveCount in wind_waves.hpp
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;

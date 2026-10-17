@@ -11,6 +11,7 @@
 using wowee::rendering::kWindWaveCount;
 using wowee::rendering::waterWaveAngularSpeed;
 using wowee::rendering::windWaveRide;
+using wowee::rendering::windWaveTrain;
 using wowee::rendering::windWavesFor;
 using wowee::rendering::windWaveSlope;
 
@@ -67,10 +68,13 @@ TEST_CASE("a stronger wind raises longer waves", "[water][wind]") {
     // a light breeze cannot raise thirty-yard waves.
     auto longestShare = [](float speed) {
         const auto waves = windWavesFor(speed, {1.0f, 0.0f});
-        // The trains run from the longest down; take the longest quarter.
+        // Waves of ten yards and longer.
+        const float tenYards = 2.0f * kPi / 10.0f;
         double longest = 0.0;
-        for (int i = 0; i < kWindWaveCount / 4; ++i) {
-            longest += 0.5 * std::pow(static_cast<double>(waves[i].wavenumber * waves[i].amplitude), 2.0);
+        for (const auto& w : waves) {
+            if (w.wavenumber <= tenYards) {
+                longest += 0.5 * std::pow(static_cast<double>(w.wavenumber * w.amplitude), 2.0);
+            }
         }
         return longest / meanSquareSlope(waves);
     };
@@ -104,13 +108,74 @@ TEST_CASE("the water rides along with its waves but never folds over", "[water][
     }
 }
 
+TEST_CASE("long waves keep to the wind, short chop spreads across it", "[water][wind]") {
+    // A wind sea's long waves run in long crests close to the wind; its short
+    // ones cross each other at wide angles. Measured as how far off the wind
+    // the steepness of each lies, on average.
+    // A 6 yd/s wind's sea peaks at about twenty yards; the waves near the
+    // peak (ten yards and longer) against the ripple of a yard and under.
+    const glm::vec2 east(1.0f, 0.0f);
+    const auto waves = windWavesFor(6.0f, east);
+    const float tenYards = 2.0f * kPi / 10.0f;
+    const float oneYard = 2.0f * kPi / 1.0f;
+    double longOff = 0.0, longSum = 0.0, shortOff = 0.0, shortSum = 0.0;
+    for (const auto& w : waves) {
+        const double slopeSq = 0.5 * std::pow(static_cast<double>(w.wavenumber * w.amplitude), 2.0);
+        const double off = std::abs(w.direction.y);  // sine of the angle to the wind
+        if (w.wavenumber <= tenYards) { longOff += off * slopeSq; longSum += slopeSq; }
+        if (w.wavenumber >= oneYard) { shortOff += off * slopeSq; shortSum += slopeSq; }
+    }
+    REQUIRE(longSum > 0.0);
+    REQUIRE(shortSum > 0.0);
+    CHECK(longOff / longSum < 0.5 * (shortOff / shortSum));
+}
+
+TEST_CASE("the sea follows its wind over its waves' own periods", "[water][wind]") {
+    // Still water, then a breeze: the ripple is mostly up within ten seconds,
+    // the thirty-yard waves - periods of four seconds - barely begun; given
+    // time the sea is the one the wind asks for.
+    auto slopeOf = [](const auto& waves, float shortest, float longest) {
+        double sum = 0.0;
+        for (const auto& w : waves) {
+            const float wavelength = 2.0f * kPi / w.wavenumber;
+            if (wavelength >= shortest && wavelength <= longest) {
+                sum += 0.5 * std::pow(static_cast<double>(w.wavenumber * w.amplitude), 2.0);
+            }
+        }
+        return sum;
+    };
+    const glm::vec2 east(1.0f, 0.0f);
+    const auto steady = windWavesFor(6.0f, east);
+    wowee::rendering::WindSea sea;
+    sea.advance(0.0, 0.0f, east);            // the sea starts as still air has it
+    for (int i = 0; i < 100; ++i) sea.advance(0.1, 6.0f, east);  // ten seconds of breeze
+    const auto early = sea.drawn();
+    CHECK(slopeOf(early, 0.0f, 0.4f) > 0.6 * slopeOf(steady, 0.0f, 0.4f));
+    CHECK(slopeOf(early, 20.0f, 40.0f) < 0.2 * slopeOf(steady, 20.0f, 40.0f));
+    for (int i = 0; i < 6000; ++i) sea.advance(0.1, 6.0f, east);  // ten minutes
+    CHECK(slopeOf(sea.drawn(), 0.0f, 40.0f) ==
+          Catch::Approx(slopeOf(steady, 0.0f, 40.0f)).epsilon(0.01));
+}
+
+TEST_CASE("a sea's first moment is the one its wind already has", "[water][wind]") {
+    // Logging in by the sea shows a sea, not still water growing.
+    const glm::vec2 east(1.0f, 0.0f);
+    wowee::rendering::WindSea sea;
+    sea.advance(0.016, 6.0f, east);
+    CHECK(meanSquareSlope(sea.drawn()) ==
+          Catch::Approx(meanSquareSlope(windWavesFor(6.0f, east))).epsilon(1e-6));
+}
+
 TEST_CASE("a veering wind does not turn the crests", "[water][wind]") {
-    // Only how big each train is follows the wind; which way it runs and how
-    // long it is stay put, or crests thousands of yards off would race.
-    const auto before = windWavesFor(6.0f, {1.0f, 0.0f});
-    const auto after = windWavesFor(6.0f, {0.0f, 1.0f});
-    for (int i = 0; i < kWindWaveCount; ++i) {
-        CHECK(before[i].direction == after[i].direction);
-        CHECK(before[i].wavenumber == after[i].wavenumber);
+    // Only how big each train is, and which are drawn, follow the wind; which
+    // way a train runs and how long it is stay put, or crests thousands of
+    // yards off would race.
+    for (glm::vec2 wind : {glm::vec2(1.0f, 0.0f), glm::vec2(0.0f, 1.0f), glm::vec2(-0.6f, 0.8f)}) {
+        for (const auto& w : windWavesFor(6.0f, wind)) {
+            const auto train = windWaveTrain(w.train);
+            CHECK(w.direction == train.direction);
+            CHECK(w.wavenumber == train.wavenumber);
+            CHECK(w.angularSpeed == train.angularSpeed);
+        }
     }
 }

@@ -240,7 +240,8 @@ VkPipeline WaterRenderer::buildWaterPipeline(VkRenderPass renderPass, VkSampleCo
 
 void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection,
                                      glm::vec2 nearby) {
-    const auto waves = windWavesFor(windSpeed, windDirection);
+    sea_.advance(deltaSeconds, windSpeed, windDirection);
+    const auto waves = sea_.drawn();
     // The shader measures position from an origin near the player, and the
     // phase here makes up the rest in double: k.x on the world's own
     // coordinates is tens of thousands of radians, which a float holds to a
@@ -252,11 +253,8 @@ void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::
     constexpr double kTwoPi = 6.28318530717958647692;
     for (int i = 0; i < kWindWaveCount; ++i) {
         const WindWave& w = waves[i];
-        // Each train's own running phase, carried forward rather than taken
-        // as a product with the clock, which would lose its fraction.
-        windWavePhase_[i] = std::fmod(windWavePhase_[i] + w.angularSpeed * deltaSeconds, kTwoPi);
         const glm::dvec2 kvec = glm::dvec2(w.direction) * static_cast<double>(w.wavenumber);
-        const double atOrigin = std::fmod(glm::dot(kvec, origin) - windWavePhase_[i], kTwoPi);
+        const double atOrigin = std::fmod(glm::dot(kvec, origin) - sea_.phase(w.train), kTwoPi);
         frameUBO_.windWaves[i] = glm::vec4(static_cast<float>(kvec.x), static_cast<float>(kvec.y),
                                            w.amplitude, static_cast<float>(atOrigin));
     }
