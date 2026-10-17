@@ -175,8 +175,11 @@ wowee_add_test(test_asset_inventory
 # and did not: one looked in a macOS-only place, the other wrote beside the
 # terminal's working directory. Also what counts as installed, since the
 # manifest is written last and a folder without one is a run that stopped.
+# config_paths for where the executable is, which is where the assets go.
 wowee_add_test(test_data_paths
-    SOURCES test_data_paths.cpp)
+    SOURCES test_data_paths.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+            ${TEST_COMMON_SOURCES})
 
 # ── test_log_privacy ────────────────────────────────────────
 # The home directory, and with it the account name, written as ~ in the log.
