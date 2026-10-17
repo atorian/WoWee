@@ -1327,7 +1327,6 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         (hasGroup3 || hasGroup4 || hasGroup5 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15)) {
         bool hasRenderableCape = false;
         std::string capeTexturePath;  // first found cape texture for override
-        bool hasEquippedTabard = false;
         bool hasHumanoidExtra = false;
         uint8_t extraRaceId = 0;
         uint8_t extraSexId = 0;
@@ -1349,7 +1348,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
+        uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipTabardGG = 0;
         ItemGeosetColumns chestColumns, legsColumns;
         if (itDisplayData != assets_.displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
@@ -1358,7 +1357,6 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 hasHumanoidExtra = true;
                 extraRaceId = itExtra->second.raceId;
                 extraSexId = itExtra->second.sexId;
-                hasEquippedTabard = (itExtra->second.equipDisplayId[9] != 0);
                 const uint32_t hairKey = appearanceKey(
                     extraRaceId, extraSexId, itExtra->second.hairStyleId);
                 auto itHairGeo = assets_.hairGeosetMap_.find(hairKey);
@@ -1451,6 +1449,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     equipFeetGG = readGG(itExtra->second.equipDisplayId[6]);
                     equipGlovesGG = readGG(itExtra->second.equipDisplayId[8]);
                     equipCapeGG = readGG(itExtra->second.equipDisplayId[10]);
+                    equipTabardGG = readGG(itExtra->second.equipDisplayId[9]);
                 }
             }
         }
@@ -1549,36 +1548,10 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (sleeveSid != 0) normalizedGeosets.insert(sleeveSid);
         }
 
-        // Show tabard mesh only when CreatureDisplayInfoExtra equips one.
-        if (hasGroup12 && hasEquippedTabard) {
-            uint16_t wantTabard = kGeosetDefaultTabard;  // Default fallback
-
-            // Try to read tabard geoset variant from ItemDisplayInfo.dbc (slot 9)
-            if (hasHumanoidExtra && itDisplayData != assets_.displayDataMap_.end() &&
-                itDisplayData->second.extraDisplayId != 0) {
-                auto itExtra = assets_.humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
-                if (itExtra != assets_.humanoidExtraMap_.end()) {
-                    uint32_t tabardDisplayId = itExtra->second.equipDisplayId[9];
-                    if (tabardDisplayId != 0) {
-                        auto itemDisplayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-                        const auto* idiL = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                        if (itemDisplayDbc && idiL) {
-                            int32_t tabardIdx = itemDisplayDbc->findRecordById(tabardDisplayId);
-                            if (tabardIdx >= 0) {
-                                // Get geoset variant from ItemDisplayInfo GeosetGroup1 field
-                                const uint32_t ggField = (*idiL)["GeosetGroup1"];
-                                uint32_t tabardGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(tabardIdx), ggField);
-                                if (tabardGG > 0) {
-                                    wantTabard = equippedGeoset(equipment::kTabardBase, tabardGG);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            uint16_t tabardSid = resolveGeoset(wantTabard, allGeosets);
+        // The tabard flap, by the same rule as the player: the variant the
+        // tabard in CreatureDisplayInfoExtra's slot 9 names, or none.
+        if (hasGroup12) {
+            uint16_t tabardSid = resolveGeoset(tabardGeoset(equipTabardGG), allGeosets);
             if (tabardSid != 0) normalizedGeosets.insert(tabardSid);
         }
 
