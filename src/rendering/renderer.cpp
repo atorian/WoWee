@@ -1567,11 +1567,11 @@ void Renderer::beginFrame() {
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
     if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
-            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
+            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
             skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
-        const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
+        const float timeOfDay = lightingManager ? lightingManager->getTimeOfDayHours() : 12.0f;
         renderSkyBackground(timeOfDay, authored, skyModelsHideProceduralSky());
         if (skyProbe) {
             static bool logged = false;
@@ -2178,7 +2178,7 @@ void Renderer::update(float deltaTime) {
     }
     if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
-            ? lightingManager->getVisualTimeOfDayHours()
+            ? lightingManager->getTimeOfDayHours()
             : (skybox ? skybox->getTimeOfDay() : 12.0f));
         skyboxModelRenderer_->update(deltaTime, camera->getViewMatrix(),
                                      camera->getProjectionMatrix());
@@ -2964,7 +2964,7 @@ void Renderer::renderWorld() {
     // Get time of day for sky-related rendering
     auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
     float timeOfDay = lightingManager
-        ? lightingManager->getVisualTimeOfDayHours()
+        ? lightingManager->getTimeOfDayHours()
         : (skybox ? skybox->getTimeOfDay() : 12.0f);
     // Two questions, apart while the sky crossfades. The sky models are drawn
     // whenever any is up at all. The client's own stars, sun, moons and clouds
@@ -4476,7 +4476,7 @@ void Renderer::renderReflectionPass() {
             rendering::SkyParams skyParams;
             auto* reflSkybox = skySystem->getSkybox();
             skyParams.timeOfDay = lightingManager
-                ? lightingManager->getVisualTimeOfDayHours()
+                ? lightingManager->getTimeOfDayHours()
                 : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
             if (lightingManager) {
                 const auto& lp = lightingManager->getLightingParams();
@@ -4777,7 +4777,7 @@ float Renderer::volumetricFogExtinction() const {
             extinction *= glm::clamp(900.0f / authoredEnd, 0.6f, 2.0f);
         }
         // Morning mist: thickest around half past six, gone by nine.
-        const float hours = lightingManager->getVisualTimeOfDayHours();
+        const float hours = lightingManager->getTimeOfDayHours();
         const float dawn = 1.0f - glm::smoothstep(0.0f, 2.5f, std::abs(hours - 6.5f));
         extinction *= 1.0f + 0.8f * dawn;
     }

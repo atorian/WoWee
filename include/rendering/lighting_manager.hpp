@@ -53,12 +53,6 @@ struct LightingParams {
     }
 };
 
-/** Apply any authored ambience that must remain stable regardless of world time. */
-void applyZoneAmbienceOverride(uint32_t zoneId, LightingParams& params);
-
-/** Resolve the sky clock shown for a zone without changing the world clock. */
-float resolveZoneVisualTimeHours(uint32_t zoneId, float worldTimeHours);
-
 /**
  * Light set keyframe for time-of-day interpolation
  */
@@ -244,8 +238,9 @@ public:
      */
     [[nodiscard]] float getTimeOfDay() const { return timeOfDay_; }
 
-    /** Time used by the visible sky, including persistent zone ambience. */
-    [[nodiscard]] float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
+    /// The same hour, 0-24: the one the light bands are sampled at, and the
+    /// sky's, in every zone alike.
+    [[nodiscard]] float getTimeOfDayHours() const { return timeOfDay_ * 24.0f; }
 
     /// LightSkybox.dbc's flag for a sky model drawn over the client's own sky
     /// rather than instead of it - the auroras, Dragonblight's scarlet sky,
@@ -357,7 +352,6 @@ private:
     std::vector<WeightedVolume> activeVolumes_;
     glm::vec3 currentPlayerPos_{0.0f};
     float timeOfDay_ = 0.5f;  // Start at noon
-    float visualTimeOfDayHours_ = 12.0f;
     std::vector<SkyboxLayer> skyboxLayers_;
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
@@ -374,7 +368,7 @@ private:
     uint32_t diagCallsSinceLog_ = 0;
     uint32_t diagFirstVolume_ = 0xFFFFFFFFu;
     uint32_t diagSecondVolume_ = 0xFFFFFFFFu;
-    float diagVisualHours_ = -1.0f;
+    float diagHours_ = -1.0f;
     float diagSkyLuma_ = -1.0f;
     std::string diagSkyboxPath_ = "\x01";
     bool manualTime_ = false;
