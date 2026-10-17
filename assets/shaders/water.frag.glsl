@@ -189,10 +189,23 @@ vec3 rippleNormal(RippleUv r, float time) {
     float l0 = mod(floor(f), frames);
     float l1 = mod(l0 + 1.0, frames);
     float t = fract(f);
+    // The frames are a flipbook. Their larger shapes move on from one frame to
+    // the next, but what is a texel or two across is drawn anew in each, and
+    // a slope taken across single texels is made of exactly that: every
+    // glint on the water jumped to a new place fifteen times a second. So
+    // the slope is never taken finer than the scale the animation holds
+    // together at, however close the camera.
+    const float kCoherentTexels = 4.0;
+    float heldTogether = kCoherentTexels / float(textureSize(RippleFrames, 0).x);
+    float seen = length(abs(r.ddx) + abs(r.ddy));
+    if (seen < heldTogether) {
+        float widen = heldTogether / max(seen, 1e-6);
+        r.ddx *= widen;
+        r.ddy *= widen;
+    }
     // A texel's width in uv at the level being sampled, so the slope is
     // measured across what this pixel actually sees.
-    float texel = max(length(abs(r.ddx) + abs(r.ddy)),
-                      1.0 / float(textureSize(RippleFrames, 0).x));
+    float texel = max(seen, heldTogether);
     vec2 dx = vec2(texel, 0.0);
     vec2 dy = vec2(0.0, texel);
     float gx = mix(rippleHeight(r, dx, l0) - rippleHeight(r, -dx, l0),
@@ -334,11 +347,15 @@ float cellsShown(float cellsPerYard, float pixelsPerYard) {
     return smoothstep(2.0, 6.0, pixelsPerYard / cellsPerYard);
 }
 
-// A dot of `radius` (in cells) in every cell of the pattern at `p`. Where the
-// cells are too small to show, what is left is what the dots cover on
-// average, so the foam a band of them made stays as a tint rather than going
-// out: a dot falling off as smoothstep over its radius covers 0.3 pi r^2.
-float foamDots(vec2 p, float radius, float shown) {
+// A dot of `radius` (in cells) in every cell of `cellsPerYard` at `p`. It is
+// the dot that has to fit a pixel, not the cell: a dot a tenth of its cell
+// across is under a pixel while the cell is still ten. Where the dots are
+// too small to show, what is left is what they cover on average, so the
+// foam a band of them made stays as a tint rather than going out: a dot
+// falling off as smoothstep over its radius covers 0.3 pi r^2.
+float foamDots(vec2 p, float radius, float cellsPerYard, float pixelsPerYard) {
+    float dotPixels = 2.0 * radius * pixelsPerYard / cellsPerYard;
+    float shown = smoothstep(1.5, 4.0, dotPixels);
     float mean = 0.942 * radius * radius;
     if (shown <= 0.001) return mean;
     return mix(mean, 1.0 - smoothstep(0.0, radius, cellularFoam(p)), shown);
@@ -535,8 +552,25 @@ void main() {
     float far = push.depthRange.y;
     float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
 
-    vec2 refractOffset = norm.xy * (0.02 + 0.03 * fresnel);
-    vec2 refractUV = clamp(screenUV + refractOffset, vec2(0.001), vec2(0.999));
+    // How far the bed seen through this pixel moves, in yards on the water:
+    // the depth of water the light comes up through, times how far the
+    // surface's tilt bends it (1 - 1/1.33 of the slope, for water's index),
+    // then put on screen through the camera. It was a fixed share of the
+    // screen whatever the depth, so over a hand's depth of water the sand
+    // under it slid yards with every ripple and its light streaks danced
+    // across the shallows; under deep water the same share was too little.
+    // The depth is the one straight down this pixel, before any offset.
+    const float kBend = 1.0 - 1.0 / 1.33;
+    const float kMaxBend = 1.5;  // yards: further than this the sample is no longer the bed below
+    float straightLinDepth = linearizeDepth(texture(SceneDepth, screenUV).r, near, far);
+    float straightDepth = max(straightLinDepth - waterLinDepth, 0.0) * max(abs(viewDir.z), 0.05);
+    vec2 bend = norm.xy / max(norm.z, 0.2) * straightDepth * kBend;
+    float bendLength = length(bend);
+    if (bendLength > kMaxBend) bend *= kMaxBend / bendLength;
+    vec4 hereClip = projection * view * vec4(FragPos, 1.0);
+    vec4 bentClip = projection * view * vec4(FragPos + vec3(bend, 0.0), 1.0);
+    vec2 bentOnScreen = (bentClip.xy / max(bentClip.w, 1e-4) - hereClip.xy / max(hereClip.w, 1e-4)) * 0.5;
+    vec2 refractUV = clamp(screenUV + bentOnScreen, vec2(0.001), vec2(0.999));
     float sceneDepth = texture(SceneDepth, refractUV).r;
     float sceneLinDepth = linearizeDepth(sceneDepth, near, far);
     // Only what is behind the surface can be seen through it. Next to anything
@@ -782,12 +816,12 @@ void main() {
 
         float foam1 = foamDots(rot1 * foamUV * 13.0 + time * vec2(0.15, 0.08),
                                0.075 + 0.075 * thresholdJitter,
-                               cellsShown(13.0, pixelsPerYard)) * 0.45;
+                               13.0, pixelsPerYard) * 0.45;
         float foam2 = foamDots(rot2 * foamUV * 27.7 + time * vec2(-0.12, 0.22),
                                0.045 + 0.05 * (1.0 - thresholdJitter),
-                               cellsShown(27.7, pixelsPerYard)) * 0.30;
+                               27.7, pixelsPerYard) * 0.30;
         float foam3 = foamDots(foamUV * 51.3 + time * vec2(0.25, -0.1), 0.05,
-                               cellsShown(51.3, pixelsPerYard)) * 0.18;
+                               51.3, pixelsPerYard) * 0.18;
 
         // Noise breakup for clumping
         float noiseMask = noiseValue(FragPos.xy * 3.0 + time * 0.15);
@@ -805,7 +839,7 @@ void main() {
         // edge as breaking water rather than a wet line.
         float sprayMask = 1.0 - smoothstep(0.0, 0.11, abs(shoreDepth - swashDepth + 0.04));
         float spray = foamDots(rot2 * (foamUV + swashAdvect * 0.5) * 96.0 + time * vec2(0.6, -0.45),
-                               0.035, cellsShown(96.0, pixelsPerYard))
+                               0.035, 96.0, pixelsPerYard)
                     * sprayMask * max(swashPhase, 0.0) * 0.7;
         foam += spray * foamDepthMask;
 
@@ -898,7 +932,7 @@ void main() {
             noiseValue(FragPos.xy * 1.8 + vec2(53.0) + time * 0.07) - 0.5
         ) * 2.0;
         float crestFoam = foamDots((FragPos.xy + crestWarp) * 6.0 + time * vec2(0.12, 0.08), 0.18,
-                                   cellsShown(6.0, pixelsPerYard)) * crestMask;
+                                   6.0, pixelsPerYard) * crestMask;
         float crestNoise = noiseValue(FragPos.xy * 3.0 - time * 0.3);
         crestFoam *= smoothstep(0.3, 0.6, crestNoise);
         color = mix(color, vec3(0.68, 0.78, 0.88), crestFoam * 0.30);
