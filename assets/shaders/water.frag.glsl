@@ -724,7 +724,24 @@ void main() {
     // ============================================================
     // GGX Specular
     // ============================================================
-    float roughness = 0.18;
+    // A pixel covers a patch of surface, not a point, and across the patch
+    // the normal turns. At 0.18 the sun's highlight is far smaller than the
+    // turn a ripple makes within one pixel a few yards off, so whichever
+    // pixel's centre happened to face the sun lit up alone, and the next
+    // frame another one did: the water glittered in single pixels that moved
+    // with every frame of the ripple. The spread of the normal over the pixel
+    // goes into the roughness instead (Kaplanyan and Hoffman 2016, as
+    // Tokuyoshi and Kaplanyan 2019 filter it), so the highlight takes in what
+    // the pixel covers and a highlight smaller than a pixel spreads to one.
+    const float kSurfaceRoughness = 0.18;
+    const float kVariance = 0.25;       // the screen-space filter kernel's variance, in pixels
+    const float kMaxSpread = 0.18;      // most it may add to alpha squared
+    vec3 normalDx = dFdx(norm);
+    vec3 normalDy = dFdy(norm);
+    float spread = min(2.0 * kVariance * (dot(normalDx, normalDx) + dot(normalDy, normalDy)), kMaxSpread);
+    float ggxAlpha = kSurfaceRoughness * kSurfaceRoughness;  // DistributionGGX squares roughness
+    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread, 0.0, 1.0);
+    float roughness = sqrt(sqrt(alphaSq));
     vec3 halfDir = normalize(ldir + viewDir);
     float D = DistributionGGX(norm, halfDir, roughness);
     float G = GeometrySmith(NdotV, NdotL, roughness);
