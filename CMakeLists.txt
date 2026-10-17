@@ -1004,6 +1004,7 @@ set(WOWEE_SOURCES
     src/rendering/liquid_ripple_frames.cpp
     src/rendering/skybox.cpp
     src/rendering/celestial.cpp
+    src/rendering/sky_sun.cpp
     src/rendering/starfield.cpp
     src/rendering/clouds.cpp
     src/rendering/lens_flare.cpp

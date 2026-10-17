@@ -46,20 +46,14 @@ private:
 public:
 
     /**
-     * Render celestial bodies (sun and moons).
+     * Render the moons. The sun is SkySun's.
      * @param cmd         Command buffer to record into
      * @param perFrameSet Per-frame descriptor set (set 0, camera UBO)
      * @param timeOfDay   Time of day in hours (0-24)
-     * @param sunDir      Sun direction from the lighting system (normalized), or null
-     * @param sunColor    The disc's colour, LightParams' sunColor
-     * @param sunHaloColor The glow around it, LightParams' sunHaloColor
      * @param gameTime    Optional server game time in seconds (deterministic moon phases)
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 float timeOfDay,
-                const glm::vec3* sunDir,
-                const glm::vec3& sunColor,
-                const glm::vec3& sunHaloColor,
                 float gameTime = -1.0f,
                 float nightFactor = 1.0f);
 
@@ -86,10 +80,8 @@ public:
     void setDualMoonMode(bool enabled) { dualMoonMode_ = enabled; }
     [[nodiscard]] bool isDualMoonMode() const { return dualMoonMode_; }
 
-    // --- Positional / colour queries (unchanged from GL version) ---
-    [[nodiscard]] glm::vec3 getSunPosition(float timeOfDay) const;
+    // --- Positional queries (unchanged from GL version) ---
     [[nodiscard]] glm::vec3 getMoonPosition(float timeOfDay) const;
-    [[nodiscard]] float     getSunIntensity(float timeOfDay) const;
 
 private:
     // Push constant block - MUST match celestial.vert.glsl / celestial.frag.glsl
@@ -99,19 +91,13 @@ private:
         float     intensity;     //  4 bytes
         float     moonPhase;     //  4 bytes
         float     animTime;      //  4 bytes
-        float     _pad;          //  4 bytes  (round to 16-byte boundary)
-        glm::vec4 haloColor;     // 16 bytes  (the sun's glow; after the rest so the
-                                 //            vertex shader's offsets stay = 112 total)
+        float     _pad;          //  4 bytes  (round to 16-byte boundary = 96 bytes total)
     };
-    static_assert(sizeof(CelestialPush) == 112, "CelestialPush size mismatch");
+    static_assert(sizeof(CelestialPush) == 96, "CelestialPush size mismatch");
 
     void createQuad();
     void destroyQuad();
 
-    void renderSun(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                   float timeOfDay,
-                   const glm::vec3* sunDir, const glm::vec3& sunColor,
-                   const glm::vec3& sunHaloColor);
     void renderMoon(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,
                     float nightFactor);
     void renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,

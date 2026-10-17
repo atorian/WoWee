@@ -227,24 +227,15 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 }
 
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
-                       const glm::vec3& sunColor,
-                       float timeOfDay, float fogDensity, float cloudDensity,
-                       float weatherIntensity, float sunOcclusion) {
+                       const glm::vec3& sunColor, float glareVisibility) {
     if (!enabled || pipeline == VK_NULL_HANDLE) {
         return;
     }
 
-    // Nothing reaching the lens, nothing to scatter in it. Everything below
-    // asks where the sun is on screen and how thick the air is; none of it
-    // asks whether the sun can be seen from here, so a flare hung over the
-    // hillside that was covering it and over the ceiling of a building.
-    const float unblocked = 1.0f - glm::clamp(sunOcclusion, 0.0f, 1.0f);
-    if (unblocked < 0.01f) {
-        return;
-    }
-
-    // Only render lens flare during daytime (when sun is visible)
-    if (timeOfDay < 5.0f || timeOfDay > 19.0f) {
+    // Nothing reaching the lens, nothing to scatter in it: as much flare as
+    // the sun's glare shows, and none where it is gone.
+    const float atmosphericFactor = glm::clamp(glareVisibility, 0.0f, 1.0f);
+    if (atmosphericFactor < 0.01f) {
         return;
     }
 
@@ -261,20 +252,6 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
     // Calculate sun visibility
     float visibility = calculateSunVisibility(camera, anchoredSunPos);
     if (visibility < 0.01f) {
-        return;
-    }
-
-    // Sun height attenuation - flare weakens when sun is near horizon (sunrise/sunset)
-    float sunHeight = sunDir.z;  // z = up in render space; 0 = horizon, 1 = zenith
-    float heightFactor = glm::smoothstep(-0.05f, 0.25f, sunHeight);
-
-    // Atmospheric attenuation - fog, clouds, and weather reduce lens flare
-    float atmosphericFactor = heightFactor * unblocked;
-    atmosphericFactor *= (1.0f - glm::clamp(fogDensity * 0.8f, 0.0f, 0.9f));       // Heavy fog nearly kills flare
-    atmosphericFactor *= (1.0f - glm::clamp(cloudDensity * 0.6f, 0.0f, 0.7f));     // Clouds attenuate
-    atmosphericFactor *= (1.0f - glm::clamp(weatherIntensity * 0.9f, 0.0f, 0.95f)); // Rain/snow heavily attenuates
-
-    if (atmosphericFactor < 0.01f) {
         return;
     }
 

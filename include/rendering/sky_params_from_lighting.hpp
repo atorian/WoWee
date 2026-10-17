@@ -29,10 +29,10 @@ inline SkyParams skyParamsFromLighting(float timeOfDay, float gameTime,
     SkyParams params;
     params.timeOfDay = timeOfDay;
     params.gameTime = gameTime;
+    params.sunDisc = sky_celestial::sunDisc(timeOfDay / 24.0f);
     if (lighting) {
         params.directionalDir = lighting->directionalDir;
         params.sunColor = lighting->sunColor;
-        params.sunHaloColor = lighting->sunHaloColor;
         params.skyTopColor = lighting->skyTopColor;
         params.skyMiddleColor = lighting->skyMiddleColor;
         params.skyBand1Color = lighting->skyBand1Color;

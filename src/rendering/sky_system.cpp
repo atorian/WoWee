@@ -5,6 +5,7 @@
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
+#include "rendering/sky_sun.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
@@ -37,6 +38,13 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     celestial_ = std::make_unique<Celestial>();
     if (!celestial_->initialize(ctx, perFrameLayout)) {
         LOG_ERROR("Failed to initialize celestial bodies");
+        return false;
+    }
+
+    // The sun's disc and glare, as the client draws them.
+    sun_ = std::make_unique<SkySun>();
+    if (!sun_->initialize(ctx, perFrameLayout)) {
+        LOG_ERROR("Failed to initialize the sun's disc and glare");
         return false;
     }
 
@@ -78,12 +86,14 @@ void SkySystem::shutdown() {
     if (clouds_)     clouds_->shutdown();
     if (starField_)  starField_->shutdown();
     if (celestial_)  celestial_->shutdown();
+    if (sun_)        sun_->shutdown();
     if (skybox_)     skybox_->shutdown();
 
     lensFlare_.reset();
     clouds_.reset();
     starField_.reset();
     celestial_.reset();
+    sun_.reset();
     skybox_.reset();
 
     initialized_ = false;
@@ -142,16 +152,18 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         }
     }
 
-    // --- Celestial bodies (sun + White Lady + Blue Child) ---
+    // --- The sun's disc, on its own path, then the moons ---
+    if (sun_) {
+        sun_->renderDisc(cmd, perFrameSet, params.sunDisc, params.sunColor,
+                         sky_celestial::weatherFade(params.weatherIntensity));
+    }
     if (celestial_) {
         // Gate moon visibility on how dark the DBC sky actually is. The
         // hardcoded 19:00 night window can precede sky darkening by hours,
         // and full-brightness moons on a daylight sky read as extra suns.
         float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
         float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
-        celestial_->render(cmd, perFrameSet, params.timeOfDay,
-                           &params.directionalDir, params.sunColor, params.sunHaloColor,
-                           params.gameTime, nightFactor);
+        celestial_->render(cmd, perFrameSet, params.timeOfDay, params.gameTime, nightFactor);
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
@@ -167,19 +179,15 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         clouds_->render(cmd, perFrameSet, params);
     }
 
-    // --- Lens flare (attenuated by atmosphere) ---
+    // --- Lens flare: around the disc, as much of it as the glare shows ---
     if (lensFlare_) {
-        glm::vec3 sunPos = getSunPosition(params);
-        lensFlare_->render(cmd, camera, sunPos, params.sunColor, params.timeOfDay,
-                           params.fogDensity, params.cloudDensity,
-                           params.weatherIntensity, params.sunOcclusion);
+        lensFlare_->render(cmd, camera, params.sunDisc.direction * 800.0f, params.sunColor,
+                           params.sunGlareVisibility);
     }
 }
 
-glm::vec3 SkySystem::getSunPosition(const SkyParams& params) const {
-    // Below the horizon it stays below - see sun_direction.hpp for what the
-    // mirror that used to be here cost.
-    return sunDirectionFromLightDir(params.directionalDir) * 800.0f;
+void SkySystem::loadTextures(pipeline::AssetManager* assets) {
+    if (sun_) sun_->loadTextures(assets);
 }
 
 void SkySystem::setMoonPhaseCycling(bool enabled) {

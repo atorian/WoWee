@@ -2489,6 +2489,12 @@ wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_sky_celestial ───────────────────────────────────────
+# The sun as WoW.exe shows it: the disc's own path under the horizon at
+# night, its size, the glare's hours, weather, and looking into it.
+wowee_add_test(test_sky_celestial
+    SOURCES test_sky_celestial.cpp)
+
 # ── test_sky_billboard ───────────────────────────────────────
 # The sun and moon quads face the eye, so their discs are round on screen.
 # They lay in the world's horizontal plane and the sun at 37 degrees came

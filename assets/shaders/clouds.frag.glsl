@@ -35,45 +35,12 @@ vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
 }
 
-// --- Gradient noise (smoother than hash-based) ---
-vec2 hash2(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)),
-             dot(p, vec2(269.5, 183.3)));
-    return fract(sin(p) * 43758.5453);
-}
-
-float gradientNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-
-    // Quintic interpolation for smoother results
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-
-    float a = dot(hash2(i + vec2(0.0, 0.0)) * 2.0 - 1.0, f - vec2(0.0, 0.0));
-    float b = dot(hash2(i + vec2(1.0, 0.0)) * 2.0 - 1.0, f - vec2(1.0, 0.0));
-    float c = dot(hash2(i + vec2(0.0, 1.0)) * 2.0 - 1.0, f - vec2(0.0, 1.0));
-    float d = dot(hash2(i + vec2(1.0, 1.0)) * 2.0 - 1.0, f - vec2(1.0, 1.0));
-
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5 + 0.5;
-}
-
-// Octave count per call: the shape and its sun-ward re-sample keep all five,
-// because the self-shadow is their difference and the two have to match.
-// The warp, the erosion and the cirrus are modulators on top of it, and
-// their fourth and fifth octaves were below a pixel from any distance the
-// sky is seen at. Seven evaluations a pixel became about five.
-float fbm(vec2 p, int octaves) {
-    float val = 0.0;
-    float amp = 0.5;
-    // Rotate between octaves so ridge artifacts don't align to the axes
-    const mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
-    for (int i = 0; i < octaves; i++) {
-        val += amp * gradientNoise(p);
-        p = rot * p * 2.02;
-        amp *= 0.5;
-    }
-    return val;
-}
+// The layer's shape: domain-warped fbm cumulus over stretched cirrus, faded
+// at the horizon. Shared with the sun's glare, which is dimmed by the cloud
+// in front of the sun. Octave counts: the shape and its sun-ward re-sample
+// keep all five, because the self-shadow is their difference; the warp,
+// erosion and cirrus are modulators and stop at three or four.
+#include "cloud_coverage.glsli"
 
 void main() {
     vec3 dir = normalize(vWorldDir);
@@ -86,33 +53,12 @@ void main() {
     float sunIntensity = push.windAndLight.y;
     float ambient = push.windAndLight.z;
 
-    // Project the view ray onto a flat cloud layer. The +0.08 bias tempers the
-    // extreme UV stretching right at the horizon.
-    vec2 uv = dir.xy / (altitude + 0.08);
-    vec2 wind = vec2(windOffset, windOffset * 0.6);
-
-    // --- Cumulus layer: domain-warped FBM for billowy, irregular shapes ---
-    vec2 p = uv * 0.8 + wind;
-    vec2 q = vec2(fbm(p, 4), fbm(p + vec2(5.2, 1.3), 4));
-    float shape = fbm(p + q * 1.4, 5);
-
-    // Coverage: density opens the threshold; erosion breaks up the edges
-    float coverage = smoothstep(0.42 - density * 0.22, 0.74 - density * 0.10, shape);
-    float erosion = fbm(uv * 3.1 + wind * 1.6 + q, 3);
-    float cumulus = coverage * smoothstep(0.22, 0.55, erosion + coverage * 0.4);
-
-    // --- Cirrus layer: thin, stretched, faster-drifting streaks ---
-    vec2 cuv = vec2(uv.x * 0.32, uv.y * 1.5) + wind * 1.8 + vec2(3.7, 9.1);
-    float cirrus = fbm(cuv, 3) * fbm(cuv * 2.3 + 4.0, 3);
-    cirrus = smoothstep(0.16, 0.5, cirrus) * 0.30 * (0.35 + 0.65 * density);
-
-    float cloud = clamp(cumulus + cirrus * (1.0 - cumulus), 0.0, 1.0);
-
-    // Overall visibility still follows DBC density (0 = clear sky)
-    cloud *= clamp(density * 1.6, 0.0, 1.0);
-
-    // Horizon fade
-    cloud *= smoothstep(0.0, 0.15, altitude);
+    CloudShape s = cloudShapeAt(dir, density, windOffset);
+    float cloud = s.cloud;
+    float cumulus = s.cumulus;
+    float shape = s.shape;
+    vec2 p = s.p;
+    vec2 q = s.q;
     if (cloud < 0.01) discard;
 
     // --- Lighting ---
@@ -121,7 +67,7 @@ void main() {
 
     // Self-shadowing: re-sample the shape a step toward the sun; if the cloud
     // is denser upstream, this point sits in its own shadow.
-    float towardSun = fbm(p + q * 1.4 + sunDir.xy * 0.35, 5);
+    float towardSun = cloudFbm(p + q * 1.4 + sunDir.xy * 0.35, 5);
     float shadow = clamp(1.0 - (towardSun - shape) * 2.2, 0.35, 1.0);
 
     // Thick cores read darker - sunlight doesn't penetrate deep cloud

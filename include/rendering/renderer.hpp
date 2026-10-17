@@ -323,14 +323,25 @@ private:
     RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
-    /// How much of the line from the eye to the sun is blocked, smoothed.
-    ///
-    /// Sampled once a frame in update() and eased, because the raw answer is a
-    /// yes or a no and a hill edge crossing it would snap the flare on and off.
-    float sunOcclusion_ = 0.0f;
+    /// The sun's glare, eased as WoW.exe eases it (sky_celestial::easeGlare):
+    /// its hours, the cloud in front of the sun, a sky model over it, and the
+    /// line from the eye to the disc. Whether the glare, the lens flare and
+    /// the dimming of the scene show. updateSunGlare() each frame.
+    float sunGlare_ = 0.0f;
+    /// The same without the line of sight - how much the sky around the sun
+    /// shines, for the air and the rays, which a tree in front does not stop.
+    float sunGlareSky_ = 0.0f;
+    void updateSunGlare(float deltaTime);
+    /// The glare sprite over the finished world (SkySun::renderGlare): as
+    /// large and bright as the view is turned onto the sun, by sunGlare_ and
+    /// what the weather leaves of it.
+    void drawSunGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    /// That line, asked of the terrain, the buildings and where the camera is.
-    [[nodiscard]] float sampleSunOcclusion() const;
+    /// The line from the eye toward `sunDir`, blocked (1) or clear (0), asked of
+    /// the terrain, the buildings, the models and where the camera is: the
+    /// client's fallback for its occlusion query (0x9abc60).
+    [[nodiscard]] float sampleSunOcclusion(const glm::vec3& sunDir) const;
+
 
     /// LiquidType.dbc, read in initializeRenderers; the scene and the water
     /// hold pointers to it, so it is declared before both.

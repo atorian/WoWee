@@ -1,0 +1,66 @@
+// How much cloud covers the sky in a direction: the cloud layer's shape, as
+// clouds.frag draws it, and as the sun's glare asks of the cloud in front of
+// the sun - WoW.exe dims its glare by the cloud at the sun (0x7ef920,
+// 0x7efa30). Compiled into clouds.frag and, as C++, into the renderer, so the
+// glare and the clouds drawn over the sun agree.
+//
+// `dir` is unit and above the horizon; `density` the layer's coverage, 0-1;
+// `windOffset` how far it has drifted.
+
+vec2 cloudHash2(vec2 p) {
+    p = vec2(dot(p, vec2(127.1f, 311.7f)),
+             dot(p, vec2(269.5f, 183.3f)));
+    return fract(sin(p) * 43758.5453f);
+}
+
+float cloudGradientNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+    float a = dot(cloudHash2(i + vec2(0.0f, 0.0f)) * 2.0f - 1.0f, f - vec2(0.0f, 0.0f));
+    float b = dot(cloudHash2(i + vec2(1.0f, 0.0f)) * 2.0f - 1.0f, f - vec2(1.0f, 0.0f));
+    float c = dot(cloudHash2(i + vec2(0.0f, 1.0f)) * 2.0f - 1.0f, f - vec2(0.0f, 1.0f));
+    float d = dot(cloudHash2(i + vec2(1.0f, 1.0f)) * 2.0f - 1.0f, f - vec2(1.0f, 1.0f));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5f + 0.5f;
+}
+
+float cloudFbm(vec2 p, int octaves) {
+    float val = 0.0f;
+    float amp = 0.5f;
+    const mat2 rot = mat2(0.8f, 0.6f, -0.6f, 0.8f);
+    for (int i = 0; i < octaves; i++) {
+        val += amp * cloudGradientNoise(p);
+        p = rot * p * 2.02f;
+        amp *= 0.5f;
+    }
+    return val;
+}
+
+// What the clouds' shading needs besides the coverage.
+struct CloudShape {
+    float cloud;    // coverage, 0-1
+    float cumulus;  // the heaped part of it
+    float shape;    // the base field
+    vec2 p;         // where the field was sampled
+    vec2 q;         // its warp
+};
+
+CloudShape cloudShapeAt(vec3 dir, float density, float windOffset) {
+    CloudShape s;
+    float altitude = dir.z;
+    vec2 uv = vec2(dir.x, dir.y) / (altitude + 0.08f);
+    vec2 wind = vec2(windOffset, windOffset * 0.6f);
+    s.p = uv * 0.8f + wind;
+    s.q = vec2(cloudFbm(s.p, 4), cloudFbm(s.p + vec2(5.2f, 1.3f), 4));
+    s.shape = cloudFbm(s.p + s.q * 1.4f, 5);
+    float coverage = smoothstep(0.42f - density * 0.22f, 0.74f - density * 0.10f, s.shape);
+    float erosion = cloudFbm(uv * 3.1f + wind * 1.6f + s.q, 3);
+    s.cumulus = coverage * smoothstep(0.22f, 0.55f, erosion + coverage * 0.4f);
+    vec2 cuv = vec2(uv.x * 0.32f, uv.y * 1.5f) + wind * 1.8f + vec2(3.7f, 9.1f);
+    float cirrus = cloudFbm(cuv, 3) * cloudFbm(cuv * 2.3f + 4.0f, 3);
+    cirrus = smoothstep(0.16f, 0.5f, cirrus) * 0.30f * (0.35f + 0.65f * density);
+    s.cloud = clamp(s.cumulus + cirrus * (1.0f - s.cumulus), 0.0f, 1.0f);
+    s.cloud *= clamp(density * 1.6f, 0.0f, 1.0f);
+    s.cloud *= smoothstep(0.0f, 0.15f, altitude);
+    return s;
+}

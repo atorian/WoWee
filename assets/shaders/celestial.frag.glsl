@@ -2,12 +2,10 @@
 
 layout(push_constant) uniform Push {
     mat4 model;
-    vec4 celestialColor; // xyz = color, w = 1.0 sun / 0.0 moon
+    vec4 celestialColor; // xyz = color, w unused
     float intensity;
     float moonPhase;
     float animTime;
-    float _pad;
-    vec4 haloColor;      // xyz = the sun's glow (LightIntBand 10); unused for moons
 } push;
 
 layout(location = 0) in vec2 TexCoord;
@@ -32,34 +30,11 @@ void main() {
     // Hard circular cutoff - nothing beyond radius 0.35
     if (dist > 0.35) discard;
 
-    bool isMoon = push.celestialColor.w < 0.5;
+    // The moons only: the sun is sky_sprite's (sky_sun.hpp).
     vec3 color = push.celestialColor.rgb;
     float alpha;
 
-    if (!isMoon) {
-        // ---------------- Sun ----------------
-        // Hard disc with smooth edge
-        float disc = smoothstep(0.35, 0.28, dist);
-
-        // Soft glow confined within cutoff radius
-        float glow = exp(-dist * dist * 40.0) * 0.5;
-
-        float shown = max(disc, glow);
-        alpha = shown * push.intensity;
-        // The disc in the sun's colour, the glow past its edge in the halo's.
-        color = mix(push.haloColor.rgb, color, disc / max(shown, 1e-4));
-
-        // Smooth fade to zero at cutoff boundary
-        float edgeFade = 1.0 - smoothstep(0.25, 0.35, dist);
-        alpha *= edgeFade;
-
-        // Animated haze/turbulence overlay for the sun disc, brightening it in
-        // its own colour rather than toward a fixed orange.
-        float noise  = valueNoise(uv * 8.0  + vec2(push.animTime * 0.3,  push.animTime * 0.2));
-        float noise2 = valueNoise(uv * 16.0 - vec2(push.animTime * 0.5,  push.animTime * 0.15));
-        float turbulence = (noise * 0.6 + noise2 * 0.4) * disc;
-        color += color * (turbulence * 0.3);
-    } else {
+    {
         // ---------------- Moon ----------------
         const float r = 0.30;              // moon disc radius in UV space
         float disc = smoothstep(r, r - 0.02, dist);

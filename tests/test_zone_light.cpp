@@ -150,9 +150,10 @@ TEST_CASE("Tirisfal, Silverpine and Duskwood at noon are lit by their light volu
     }
 }
 
-TEST_CASE("The sky is handed the zone's sun disc and halo, not the light it casts", "[light]") {
+TEST_CASE("The sky is handed the zone's sun colour, not the light it casts", "[light]") {
     // The disc and the glow around it were drawn from the cast light mixed
     // with fixed warm colours, so Tirisfal's green sun came out warm white.
+    // WoW.exe tints both its disc and its glare with channel 9.
     const LightingParams lit = lightIn("wowee_zone_light_sun", 85, 12.0f);
     const wowee::rendering::SkyParams sky =
         wowee::rendering::skyParamsFromLighting(12.0f, 12.0f, 0.0f, &lit, false);
@@ -161,6 +162,7 @@ TEST_CASE("The sky is handed the zone's sun disc and halo, not the light it cast
         return glm::all(glm::lessThan(glm::abs(x - y), glm::vec3(2e-3f)));
     };
     CHECK(matches(sky.sunColor, rgb(NOON_SUN_DISC)));
-    CHECK(matches(sky.sunHaloColor, rgb(NOON_SUN_HALO)));
     CHECK_FALSE(matches(sky.sunColor, lit.diffuseColor));
+    // Channel 10, the zone's tint round the sun, is the air's forward glow.
+    CHECK(matches(lit.sunHaloColor, rgb(NOON_SUN_HALO)));
 }

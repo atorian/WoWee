@@ -1,9 +1,9 @@
 // The same atmospheric background for the skybox and distant surfaces.
 // Clouds/stars stay in their own sky layers; they are not painted on objects.
-// `sunHalo` is the zone's glow around the sun, LightIntBand channel 10: orange
-// over Durotar, green over Tirisfal, violet over Teldrassil.
+// No glow round the sun: WoW.exe's sky dome is its LightIntBand gradient
+// alone, and the glow is a sprite of its own (sky_sun.hpp, sunGlare.blp).
 vec3 atmosphereSkyColor(vec3 worldDir, vec3 sunDir, vec3 zenith,
-                        vec3 middle, vec3 horizon, vec3 fringe, vec3 sunHalo) {
+                        vec3 middle, vec3 horizon, vec3 fringe) {
     // Elevation: +1 = zenith, 0 = horizon, -1 = nadir
     float elev = worldDir.z;
     float elevClamped = clamp(elev, 0.0f, 1.0f);
@@ -33,17 +33,7 @@ vec3 atmosphereSkyColor(vec3 worldDir, vec3 sunDir, vec3 zenith,
         sky = mix(fringe, nadirColor, nadirFade);
     }
 
-    // --- The sun's halo: a wide glow low toward the sun, and a tighter one
-    // around it. Its colour is the zone's own. It was painted from fixed
-    // colours - orange low down, blue higher, a warm white around the disc -
-    // which gave every zone the same sun, and Tirisfal's green halo a white one.
-    float sunDot = max(dot(worldDir, sunDir), 0.0f);
     float sunAboveHorizon = clamp(sunDir.z, 0.0f, 1.0f);
-
-    float lowGlow = pow(1.0f - elevClamped, 3.0f) * 0.15f * sunDot;
-    float mieSharp = pow(sunDot, 64.0f) * 0.4f;
-    float mieSoft  = pow(sunDot, 8.0f) * 0.1f;
-    sky += sunHalo * (lowGlow + mieSharp + mieSoft) * sunAboveHorizon;
 
     // --- Subtle horizon haze ---
     float hazeDensity = exp(-elevClamped * 12.0f) * 0.06f;

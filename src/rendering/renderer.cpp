@@ -18,6 +18,8 @@
 #include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
+#include "rendering/cloud_coverage.hpp"
+#include "rendering/sky_sun.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/weather.hpp"
 #include "rendering/lightning.hpp"
@@ -789,8 +791,18 @@ void Renderer::updatePerFrameUBO() {
     if (lightingManager) {
         const auto& lp = lightingManager->getLightingParams();
         currentFrameData.lightDir = glm::vec4(lp.directionalDir, 0.0f);
-        currentFrameData.lightColor = glm::vec4(lp.diffuseColor, 1.0f);
-        currentFrameData.ambientColor = glm::vec4(lp.ambientColor, 1.0f);
+        // Looking into the sun dims the scene's light by up to a third, as the
+        // client dims its direct and ambient colours (0x781783) - by the glare
+        // the eye can see, so not behind a hill or after dark.
+        float lookingAtSun = 0.0f;
+        if (camera) {
+            const glm::vec3 discDir =
+                sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
+            lookingAtSun = sky_celestial::lookingAtSunDimming(
+                glm::dot(glm::normalize(camera->getForward()), discDir), sunGlare_);
+        }
+        currentFrameData.lightColor = glm::vec4(lp.diffuseColor * (1.0f - lookingAtSun), 1.0f);
+        currentFrameData.ambientColor = glm::vec4(lp.ambientColor * (1.0f - lookingAtSun), 1.0f);
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
@@ -800,7 +812,6 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
-        currentFrameData.sunHaloColor = glm::vec4(lp.sunHaloColor, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -1319,6 +1330,7 @@ void Renderer::applyMsaaChange() {
         if (auto* sb = skySystem->getSkybox()) sb->recreatePipelines();
         if (auto* sf = skySystem->getStarField()) sf->recreatePipelines();
         if (auto* ce = skySystem->getCelestial()) ce->recreatePipelines();
+        if (auto* sun = skySystem->getSun()) sun->recreatePipelines();
         if (auto* cl = skySystem->getClouds()) cl->recreatePipelines();
         if (auto* lf = skySystem->getLensFlare()) lf->recreatePipelines();
     }
@@ -2011,16 +2023,12 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
     return modelId;
 }
 
-float Renderer::sampleSunOcclusion() const {
+float Renderer::sampleSunOcclusion(const glm::vec3& sunDir) const {
     if (!camera) return 1.0f;
     const glm::vec3 eye = camera->getPosition();
 
-    // The same direction the flare itself is drawn around, from the same rule.
-    const glm::vec3 sunDir = lightingManager
-        ? sunDirectionFromLightDir(lightingManager->getLightingParams().directionalDir)
-        : glm::vec3(0.0f, 0.0f, -1.0f);
-    // Below the horizon there is nothing to be occluded by, and nothing to
-    // flare either - the time-of-day gate in LensFlare covers the same ground.
+    // Toward the disc, which is where the glare is. Below the horizon the
+    // ground is in the way.
     if (sunDir.z <= 0.0f) return 1.0f;
 
     // Indoors the sun is behind a roof by definition, and a roof is the one
@@ -2033,6 +2041,11 @@ float Renderer::sampleSunOcclusion() const {
     constexpr float kReach = 600.0f;
 
     if (wmoRenderer && wmoRenderer->raycastBoundingBoxes(eye, sunDir, kReach) < kReach) {
+        return 1.0f;
+    }
+    // The trees and other models with collision, as the client's own ray
+    // through world collision sees them (0x9abc60).
+    if (m2Renderer && m2Renderer->raycastCollision(eye, sunDir, kReach) < kReach) {
         return 1.0f;
     }
 
@@ -2054,20 +2067,54 @@ float Renderer::sampleSunOcclusion() const {
     return 0.0f;
 }
 
+void Renderer::updateSunGlare(float deltaTime) {
+    namespace sc = sky_celestial;
+    float sky = 0.0f;
+    float seen = 0.0f;
+    if (lightingManager) {
+        const float day = lightingManager->getTimeOfDayHours() / 24.0f;
+        const sc::SunDisc disc = sc::sunDisc(day);
+        // Its hours, then what stands in front of it in the sky (0x7ef6e0).
+        sky = sc::lookup(sc::kSunGlareHours, day);
+        if (skySystem && skySystem->getClouds() && skySystem->getClouds()->isEnabled()) {
+            const Clouds* clouds = skySystem->getClouds();
+            sky *= 1.0f - cloud_coverage::coverageToward(disc.direction, clouds->getDensity(),
+                                                         clouds->getWindOffset());
+        }
+        float skyModel = 0.0f;
+        for (const auto& layer : lightingManager->getSkyboxLayers()) {
+            skyModel = std::max(skyModel, layer.weight);
+        }
+        sky *= 1.0f - std::clamp(skyModel, 0.0f, 1.0f);
+        if (const auto depth = cameraWaterDepth(); depth && *depth > 0.0f) {
+            sky *= 1.0f - std::clamp(0.1f * *depth, 0.0f, 1.0f);
+        }
+        // And whether the eye can see the disc, asked only when there is
+        // anything to see.
+        seen = sky > 0.0f ? sky * (1.0f - sampleSunOcclusion(disc.direction)) : 0.0f;
+    }
+    sunGlare_ = sc::easeGlare(sunGlare_, seen, deltaTime);
+    sunGlareSky_ = sc::easeGlare(sunGlareSky_, sky, deltaTime);
+}
+
+void Renderer::drawSunGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    namespace sc = sky_celestial;
+    if (!skySystem || !skySystem->getSun() || !camera || !lightingManager) return;
+    if (sunGlare_ <= 0.0f) return;
+    const sc::SunDisc disc = sc::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f);
+    const float facing = glm::dot(glm::normalize(camera->getForward()), disc.direction);
+    const sc::GlareShape shape = sc::glareShape(facing);
+    const float alpha = shape.alpha * sunGlare_ * sc::weatherFade(environment_.weatherIntensity);
+    skySystem->getSun()->renderGlare(cmd, perFrameSet, disc.direction, shape.size,
+                                     lightingManager->getLightingParams().sunColor, alpha);
+}
+
 void Renderer::update(float deltaTime) {
     ZoneScopedN("Renderer::update");
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
 
-    // Ease toward it rather than taking it. The sample is a yes or a no, and
-    // walking a hill edge across the line to the sun would otherwise snap the
-    // flare on and off; a quarter second of travel reads as the sun going
-    // behind something.
-    {
-        const float target = sampleSunOcclusion();
-        const float rate = 1.0f - std::exp(-deltaTime / 0.25f);
-        sunOcclusion_ += (target - sunOcclusion_) * glm::clamp(rate, 0.0f, 1.0f);
-    }
+    updateSunGlare(deltaTime);
 
     auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
@@ -2908,7 +2955,7 @@ void Renderer::renderSkyBackground(float timeOfDay,
         timeOfDay, environment_.gameTime, environment_.weatherIntensity,
         lightingManager ? &lightingManager->getLightingParams() : nullptr,
         useOriginalSkybox);
-    params.sunOcclusion = 1.0f; // Lens flare is an optical overlay, not background haze.
+    params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
     skySystem->render(currentCmd, skyPerFrameDescSets[slot], *camera, params);
     if (drawSkyModels) {
         skyboxModelRenderer_->prepareRender(slot, *camera);
@@ -3093,7 +3140,7 @@ void Renderer::renderWorld() {
                     environment_.gameTime, environment_.weatherIntensity,
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
-                skyParams.sunOcclusion = sunOcclusion_;
+                skyParams.sunGlareVisibility = sunGlare_;
                 skySystem->render(cmd, perFrameSet, *camera, skyParams);
                 if (drawSkyModels) {
                     skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
@@ -3160,6 +3207,7 @@ void Renderer::renderWorld() {
             if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
             if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
+            drawSunGlare(cmd, perFrameSet);
 
             renderUnderwaterOverlay(cmd);
             renderPostSceneOverlays(cmd);
@@ -3309,7 +3357,7 @@ void Renderer::renderWorld() {
                 environment_.gameTime, environment_.weatherIntensity,
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
-            skyParams.sunOcclusion = sunOcclusion_;
+            skyParams.sunGlareVisibility = sunGlare_;
             skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
             if (drawSkyModels) {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
@@ -3374,6 +3422,7 @@ void Renderer::renderWorld() {
         if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
+        drawSunGlare(currentCmd, perFrameSet);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
         if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
@@ -3832,6 +3881,9 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     } else if (!terrainRenderer->hasShadowPipeline() && shadowRenderPass != VK_NULL_HANDLE) {
         terrainRenderer->initializeShadow(shadowRenderPass);
     }
+
+    // The sun's disc and glare textures, from the client's data.
+    if (skySystem) skySystem->loadTextures(assetManager);
 
     // What each liquid id in the map data is, read once: the scene says what
     // kind a liquid is by it, and the water finds each liquid's ripple frames
@@ -4489,7 +4541,7 @@ void Renderer::renderReflectionPass() {
                 lightingManager ? &lightingManager->getLightingParams() : nullptr, false);
             // A flare is an artefact of the lens, so it belongs to the camera
             // and not to what the water is showing it.
-            skyParams.sunOcclusion = 1.0f;
+            skyParams.sunGlareVisibility = 0.0f;
             skySystem->render(currentCmd, reflDescSet, *camera, skyParams);
         }
         if (terrainRenderer && terrainEnabled) {

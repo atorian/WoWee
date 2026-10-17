@@ -54,6 +54,8 @@ public:
     // --- Cloud parameters ---
     void setDensity(float density);
     [[nodiscard]] float getDensity() const { return density_; }
+    /// How far the layer has drifted (cloud_coverage.glsli's windOffset).
+    [[nodiscard]] float getWindOffset() const { return windOffset_; }
 
     void setWindSpeed(float speed) { windSpeed_ = speed; }
     [[nodiscard]] float getWindSpeed() const { return windSpeed_; }

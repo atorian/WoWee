@@ -35,9 +35,9 @@ TEST_CASE("distant haze uses the horizon and nadir instead of the middle sky", "
     using namespace fog_math;
     const vec3 top(.2f, .15f, .3f), middle(.7f, .6f, .8f);
     const vec3 band1(.35f, .2f, .4f), fringe(.25f, .1f, .3f);
-    const vec3 sun(0, 0, 1), halo(1.0f, .78f, .54f);
+    const vec3 sun(0, 0, 1);
     const auto sky = [&](vec3 ray) {
-        return atmosphereSkyColor(ray, sun, top, middle, band1, fringe, halo);
+        return atmosphereSkyColor(ray, sun, top, middle, band1, fringe);
     };
     // No sun disk on these rays. Existing horizon haze is shared with skybox.
     const vec3 horizon = sky(vec3(1, 0, 0));
@@ -59,27 +59,19 @@ TEST_CASE("distant haze uses the horizon and nadir instead of the middle sky", "
     CHECK(farther == below);
 }
 
-TEST_CASE("the sky around the sun glows in the zone's halo colour", "[light][fog]") {
-    // It glowed a fixed warm white and orange, so Tirisfal's green halo
-    // (LightIntBand channel 10) never showed.
+TEST_CASE("the sky dome has no glow of its own round the sun", "[light][fog]") {
+    // WoW.exe's dome is its LightIntBand gradient alone; the glow round the
+    // sun is the glare sprite (sky_sun.hpp). The dome painted one in fixed
+    // warm colours, and then in the zone's halo, on top of the sprite.
     using namespace fog_math;
     const vec3 top(.15f, .3f, .25f), middle(.17f, .37f, .29f);
     const vec3 band1(.25f, .4f, .33f), fringe(.33f, .58f, .53f);
     const vec3 sun = glm::normalize(vec3(0, .6f, .8f));
-    const vec3 tirisfalHalo(.22f, .42f, .33f);
-
-    const vec3 glow = atmosphereSkyColor(sun, sun, top, middle, band1, fringe, tirisfalHalo) -
-                      atmosphereSkyColor(sun, sun, top, middle, band1, fringe, vec3(0.0f));
-    CHECK(glow.g > 0.05f);
-    // The glow is the halo, scaled: the same hue, no warm cast of its own.
-    CHECK(glow.r / glow.g == Catch::Approx(tirisfalHalo.r / tirisfalHalo.g).epsilon(1e-3));
-    CHECK(glow.b / glow.g == Catch::Approx(tirisfalHalo.b / tirisfalHalo.g).epsilon(1e-3));
-
-    // Facing away from the sun there is none.
-    const vec3 away = glm::normalize(vec3(0, -1, .2f));
-    const vec3 none = atmosphereSkyColor(away, sun, top, middle, band1, fringe, tirisfalHalo) -
-                      atmosphereSkyColor(away, sun, top, middle, band1, fringe, vec3(0.0f));
-    CHECK(glm::length(none) < 1e-6f);
+    // Toward the sun and the same height on the far side of the sky.
+    const vec3 away = glm::normalize(vec3(0, -.6f, .8f));
+    const vec3 toward = atmosphereSkyColor(sun, sun, top, middle, band1, fringe);
+    const vec3 opposite = atmosphereSkyColor(away, sun, top, middle, band1, fringe);
+    CHECK(glm::length(toward - opposite) < 1e-6f);
 }
 
 TEST_CASE("sunlit air glows toward the sun in the zone's halo, and is lit by the sun elsewhere",

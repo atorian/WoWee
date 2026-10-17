@@ -4,7 +4,10 @@
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 
+#include "rendering/sky_celestial.hpp"
+
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace rendering {
 
 class Camera;
@@ -14,6 +17,7 @@ class Celestial;
 class StarField;
 class Clouds;
 class LensFlare;
+class SkySun;
 class LightingManager;
 
 /**
@@ -22,10 +26,11 @@ class LightingManager;
 struct SkyParams {
     // Sun/moon positioning
     glm::vec3 directionalDir{0.0f, -1.0f, 0.3f};
-    /// The disc, and the glow of the sky around it: LightingParams'
-    /// sunColor and sunHaloColor, not the light the sun casts.
+    /// The sun's disc and glare colour: LightingParams' sunColor, not the
+    /// light the sun casts.
     glm::vec3 sunColor{1.0f, 0.97f, 0.87f};
-    glm::vec3 sunHaloColor{1.0f, 0.78f, 0.54f};
+    /// Where the disc stands at this hour - its own path, not the light's.
+    sky_celestial::SunDisc sunDisc;
 
     // Sky colors (for skybox tinting/blending)
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};
@@ -38,12 +43,11 @@ struct SkyParams {
     float fogDensity = 0.0f;        // 0-1
     float horizonGlow = 0.3f;       // 0-1
     float weatherIntensity = 0.0f;  // 0-1 (rain/snow intensity, attenuates lens flare)
-    // How much of the line from the eye to the sun is blocked, 0 clear to 1
-    // solid. The lens flare had no such input: it asked only whether the sun
-    // was in front of the camera and on screen, so a hillside, a building or a
-    // ceiling between the two changed nothing and the flare hung over the
-    // terrain that was covering it.
-    float sunOcclusion = 0.0f;
+    // How much of the sun's glare the camera sees, eased, 0 to 1: its hours,
+    // the cloud and weather in front of it, a sky model over it and whatever
+    // stands between it and the eye (Renderer::updateSunGlare). The lens
+    // flare is drawn by it. Zero for a pass that is not the camera's own.
+    float sunGlareVisibility = 0.0f;
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours
@@ -110,7 +114,6 @@ public:
     /**
      * Get sun position in world space (for lens flare, shadows, etc.)
      */
-    [[nodiscard]] glm::vec3 getSunPosition(const SkyParams& params) const;
 
     /**
      * Enable/disable moon phase cycling
@@ -127,6 +130,10 @@ public:
     [[nodiscard]] StarField* getStarField() const { return starField_.get(); }
     [[nodiscard]] Clouds*    getClouds()    const { return clouds_.get(); }
     [[nodiscard]] LensFlare* getLensFlare() const { return lensFlare_.get(); }
+    [[nodiscard]] SkySun*    getSun()       const { return sun_.get(); }
+
+    /// The sun's textures, once the client's data is open.
+    void loadTextures(pipeline::AssetManager* assets);
 
 private:
     std::unique_ptr<Skybox>    skybox_;      // Authoritative sky
@@ -134,6 +141,7 @@ private:
     std::unique_ptr<StarField> starField_;   // Fallback procedural stars
     std::unique_ptr<Clouds>    clouds_;      // Cloud layer
     std::unique_ptr<LensFlare> lensFlare_;   // Sun lens flare
+    std::unique_ptr<SkySun>    sun_;         // Sun disc and glare
 
     bool proceduralStarsEnabled_ = false;
     bool debugSkyMode_ = false;
