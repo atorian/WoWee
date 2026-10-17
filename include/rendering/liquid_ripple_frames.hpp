@@ -29,6 +29,14 @@ struct LiquidRippleFrames {
     bool fromAlpha = false;
 };
 
+/// How much of its ripple a liquid shows under a wind of `speedYardsPerSecond`
+/// (speed times gust), 0 to 1. The frames are a fine chop, and a fine chop is
+/// what the wind raises: by the Beaufort scale still water is a mirror below
+/// 0.5 m/s, scaled ripples start there, and by 3.4 m/s the wavelets are as
+/// large as small waves get before crests break. So none below the first,
+/// all of it from the second, and a smooth rise between.
+[[nodiscard]] float rippleShareForWind(float speedYardsPerSecond);
+
 /// The path of frame `frame` (from 1) of a pattern; a pattern with no %d is
 /// one frame, itself.
 [[nodiscard]] std::string liquidFramePath(const std::string& pattern, uint32_t frame);

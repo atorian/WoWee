@@ -45,7 +45,8 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float pad1, pad2;
+    float rippleWind; // how much of its ripple the liquid shows in this wind, 0..1
+    float pad2;
 } push;
 
 #include "gerstner_waves.glsli"
@@ -514,7 +515,9 @@ void main() {
     vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
     if (ripple.x > 0.5) {
         RippleUv rippleAt = rippleUv(FragPos.xy);
-        float rippleShown = rippleVisibility(rippleAt);
+        // As much as the pixel can show, and as much as the wind raises: in
+        // still air the liquid's frames lie flat and only the swell is left.
+        float rippleShown = rippleVisibility(rippleAt) * push.rippleWind;
         if (rippleShown > 0.001) {
             detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
         }

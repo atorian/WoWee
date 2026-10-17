@@ -2476,6 +2476,7 @@ void Renderer::updateWind(float deltaTime) {
     inputs.fixedWind = environment_.wind;
     wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
                  windZones_);
+    if (waterRenderer) waterRenderer->setWindSpeed(wind_.state().speed * wind_.state().gust);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {

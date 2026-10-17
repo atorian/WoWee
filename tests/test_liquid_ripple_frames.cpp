@@ -10,6 +10,7 @@
 using wowee::pipeline::BLPImage;
 using wowee::rendering::liquidFramePath;
 using wowee::rendering::loadLiquidRippleFrames;
+using wowee::rendering::rippleShareForWind;
 
 namespace {
 
@@ -98,4 +99,27 @@ TEST_CASE("a pattern with no frame number is one frame", "[liquid][ripple]") {
         [](const std::string&) { return frame(4, true, 1); }, why);
     REQUIRE(set);
     CHECK(set->frames == 1);
+}
+
+// The ripple is a chop the wind raises: still air leaves the water a mirror,
+// a breeze gives it all of its ripple, and in between it grows with the wind.
+TEST_CASE("still air shows none of the ripple", "[liquid][ripple][wind]") {
+    CHECK(rippleShareForWind(0.0f) == 0.0f);
+    CHECK(rippleShareForWind(0.5f) == 0.0f);   // calm's top speed, under 0.5 m/s
+    CHECK(rippleShareForWind(-1.0f) == 0.0f);
+}
+
+TEST_CASE("a breeze shows all of the ripple", "[liquid][ripple][wind]") {
+    CHECK(rippleShareForWind(4.0f) == 1.0f);   // strong's lowest speed
+    CHECK(rippleShareForWind(14.0f) == 1.0f);  // a storm shows no more of it
+}
+
+TEST_CASE("the ripple grows with the wind between the two", "[liquid][ripple][wind]") {
+    float last = 0.0f;
+    for (float speed = 0.6f; speed < 3.7f; speed += 0.25f) {
+        const float share = rippleShareForWind(speed);
+        CHECK(share > last);
+        CHECK(share < 1.0f);
+        last = share;
+    }
 }

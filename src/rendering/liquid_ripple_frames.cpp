@@ -67,6 +67,15 @@ std::vector<uint8_t> halve(const std::vector<uint8_t>& level, uint32_t w, uint32
 
 } // namespace
 
+float rippleShareForWind(float speedYardsPerSecond) {
+    constexpr float kYardsPerMetre = 1.0936133f;
+    constexpr float kRipplesStart = 0.5f * kYardsPerMetre;  // Beaufort 1, light air
+    constexpr float kRipplesFull = 3.4f * kYardsPerMetre;   // Beaufort 3, gentle breeze
+    const float t = std::clamp((speedYardsPerSecond - kRipplesStart) / (kRipplesFull - kRipplesStart),
+                               0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 std::string liquidFramePath(const std::string& pattern, uint32_t frame) {
     const size_t at = pattern.find("%d");
     if (at == std::string::npos) return pattern;

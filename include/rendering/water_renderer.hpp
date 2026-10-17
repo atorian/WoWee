@@ -115,6 +115,10 @@ public:
     // which is deliberately smaller than the frame.
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
+    /// The wind over the water this frame, yards a second with its gust in:
+    /// how much of its ripple each liquid shows (rippleShareForWind).
+    void setWindSpeed(float yardsPerSecond) { windSpeed_ = yardsPerSecond; }
+
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
@@ -266,6 +270,7 @@ private:
     // what is under it: no depth, no shoreline, no sea bed.
     bool refractionEnabled = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
+    float windSpeed_ = 0.0f;  // until the renderer says, still air: no ripple
 };
 
 } // namespace rendering
