@@ -30,6 +30,13 @@ public:
     PipelineBuilder& setShaders(VkPipelineShaderStageCreateInfo vert,
         VkPipelineShaderStageCreateInfo frag);
 
+    /// Tessellate: the control and evaluation stages join the vertex and
+    /// fragment ones, the topology becomes a patch list of
+    /// `patchControlPoints`, and the device must have tessellationShader
+    /// enabled (VkContext::isTessellationSupported). Call after setShaders.
+    PipelineBuilder& setTessellation(VkPipelineShaderStageCreateInfo control,
+        VkPipelineShaderStageCreateInfo evaluation, uint32_t patchControlPoints);
+
     // Vertex input
     PipelineBuilder& setVertexInput(
         const std::vector<VkVertexInputBindingDescription>& bindings,
@@ -135,6 +142,7 @@ private:
     std::vector<VkDynamicState> dynamicStates_;
     VkPipelineCreateFlags flags_ = 0;
     VkPipeline basePipelineHandle_ = VK_NULL_HANDLE;
+    uint32_t patchControlPoints_ = 0;  // non-zero: tessellated (setTessellation)
 };
 
 // ---------------------------------------------------------------------------

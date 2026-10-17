@@ -301,6 +301,8 @@ public:
     /// False on hardware without fillModeNonSolid, where a VK_POLYGON_MODE_LINE
     /// pipeline cannot be built and the wireframe views are unavailable.
     [[nodiscard]] bool isWireframeSupported() const { return fillModeNonSolidSupported_; }
+    /// Whether tessellation control and evaluation stages can be used.
+    [[nodiscard]] bool isTessellationSupported() const { return tessellationSupported_; }
     /// False on hardware missing shaderStorageImageWriteWithoutFormat or
     /// shaderInt16, which the FSR2 compute shaders both need.
     [[nodiscard]] bool areFsr2ComputeFeaturesSupported() const {
@@ -655,6 +657,7 @@ private:
     std::unordered_map<uint64_t, VkSampler> samplerCache_;
     bool samplerAnisotropySupported_ = false;
     bool fillModeNonSolidSupported_ = false;
+    bool tessellationSupported_ = false;
     bool fsr2ComputeFeaturesSupported_ = false;
     bool blockCompressionSupported_ = false;
     /// True when the swapchain was built with a transform the surface is not

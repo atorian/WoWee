@@ -40,7 +40,8 @@ struct WaterPushConstants {
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
-    float pad1 = 0.0f, pad2 = 0.0f;
+    float displaced = 0.0f;  // 1 where the surface moves with the waves, 0 where it is held flat
+    float pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -112,7 +113,11 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     reflUBOBinding.binding = 3;
     reflUBOBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     reflUBOBinding.descriptorCount = 1;
-    reflUBOBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // The wind's waves in it move the vertices as well as light the pixels.
+    reflUBOBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+    if (vkCtx->isTessellationSupported()) {
+        reflUBOBinding.stageFlags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    }
 
     sceneSetLayout = createDescriptorSetLayout(device,
         {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding});
@@ -138,8 +143,13 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     }
 
     // --- Pipeline layout ---
+    pushStages_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (vkCtx->isTessellationSupported()) {
+        pushStages_ |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                       VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    }
     VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.stageFlags = pushStages_;
     pushRange.offset = 0;
     pushRange.size = sizeof(WaterPushConstants);
 
@@ -158,49 +168,7 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
                                 vkCtx->getSwapchainFormat(),
                                 vkCtx->getDepthFormat());
 
-    // --- Shaders ---
-    VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv")) {
-        LOG_ERROR("WaterRenderer: failed to load vertex shader");
-        return false;
-    }
-    if (!fragShader.loadFromFile(device, "assets/shaders/water.frag.spv")) {
-        LOG_ERROR("WaterRenderer: failed to load fragment shader");
-        return false;
-    }
-
-    // --- Vertex input (interleaved: pos3 + normal3 + uv2 = 8 floats = 32 bytes) ---
-    VkVertexInputBindingDescription vertBinding{};
-    vertBinding.binding = 0;
-    vertBinding.stride = 8 * sizeof(float);
-    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    // Water vertex shader only takes aPos(vec3) at loc 0 and aTexCoord(vec2) at loc 1
-    // (normal is computed in shader from wave derivatives)
-    std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },                     // aPos
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },        // aTexCoord (skip normal)
-    };
-
-    VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
-
-    waterPipeline = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertBinding }, vertAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)  // depth test yes, write no
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .build(device, vkCtx->getPipelineCache());
-
-    vertShader.destroy();
-    fragShader.destroy();
-
+    waterPipeline = buildWaterPipeline(vkCtx->getImGuiRenderPass(), vkCtx->getMsaaSamples());
     if (!waterPipeline) {
         LOG_ERROR("WaterRenderer: failed to create pipeline");
         return false;
@@ -208,6 +176,66 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
 
     LOG_INFO("Water renderer initialized (Vulkan)");
     return true;
+}
+
+VkPipeline WaterRenderer::buildWaterPipeline(VkRenderPass renderPass, VkSampleCountFlagBits samples) {
+    VkDevice device = vkCtx->getDevice();
+    // Interleaved: pos3 + normal3 + uv2, 32 bytes; the shaders take the
+    // position at 0 and the uv at 1 and work the normal out themselves.
+    VkVertexInputBindingDescription vertBinding{};
+    vertBinding.binding = 0;
+    vertBinding.stride = 8 * sizeof(float);
+    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    const std::vector<VkVertexInputAttributeDescription> vertAttribs = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
+    };
+
+    // Tessellated where the device can: the waves near the camera need
+    // vertices a fraction of a yard apart, and the water's own mesh has them
+    // four yards apart (water.tesc, water.tese). Otherwise the water's own
+    // mesh, which carries only the longer waves.
+    const bool tessellate = vkCtx->isTessellationSupported();
+    VkShaderModule vertShader, controlShader, evalShader, fragShader;
+    const char* vertPath = tessellate ? "assets/shaders/water_tess.vert.spv"
+                                      : "assets/shaders/water.vert.spv";
+    if (!vertShader.loadFromFile(device, vertPath) ||
+        !fragShader.loadFromFile(device, "assets/shaders/water.frag.spv") ||
+        (tessellate && (!controlShader.loadFromFile(device, "assets/shaders/water.tesc.spv") ||
+                        !evalShader.loadFromFile(device, "assets/shaders/water.tese.spv")))) {
+        LOG_ERROR("WaterRenderer: a water shader did not load (", vertPath,
+                  tessellate ? ", water.tesc, water.tese" : "", ", water.frag) - no water drawn");
+        vertShader.destroy();
+        controlShader.destroy();
+        evalShader.destroy();
+        fragShader.destroy();
+        return VK_NULL_HANDLE;
+    }
+
+    PipelineBuilder builder;
+    builder.setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                       fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({ vertBinding }, vertAttribs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    if (tessellate) {
+        builder.setTessellation(controlShader.stageInfo(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT),
+                                evalShader.stageInfo(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT), 3);
+    }
+    VkPipeline pipeline = builder
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)  // depth test yes, write no
+        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setMultisample(samples)
+        .setLayout(pipelineLayout)
+        .setRenderPass(renderPass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
+
+    vertShader.destroy();
+    controlShader.destroy();
+    evalShader.destroy();
+    fragShader.destroy();
+    return pipeline;
 }
 
 void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection,
@@ -232,7 +260,8 @@ void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::
         frameUBO_.windWaves[i] = glm::vec4(static_cast<float>(kvec.x), static_cast<float>(kvec.y),
                                            w.amplitude, static_cast<float>(atOrigin));
     }
-    frameUBO_.waveOrigin = glm::vec4(static_cast<float>(origin.x), static_cast<float>(origin.y), 0.0f, 0.0f);
+    frameUBO_.waveOrigin = glm::vec4(static_cast<float>(origin.x), static_cast<float>(origin.y),
+                                     windWaveRide(waves), 0.0f);
 }
 
 void WaterRenderer::recreatePipelines() {
@@ -248,48 +277,7 @@ void WaterRenderer::recreatePipelines() {
     // Destroy old pipeline (keep layout)
     destroy(device, waterPipeline);
 
-    // Load shaders
-    VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv")) {
-        LOG_ERROR("WaterRenderer::recreatePipelines: failed to load vertex shader");
-        return;
-    }
-    if (!fragShader.loadFromFile(device, "assets/shaders/water.frag.spv")) {
-        LOG_ERROR("WaterRenderer::recreatePipelines: failed to load fragment shader");
-        vertShader.destroy();
-        return;
-    }
-
-    // Vertex input (same as initialize)
-    VkVertexInputBindingDescription vertBinding{};
-    vertBinding.binding = 0;
-    vertBinding.stride = 8 * sizeof(float);
-    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
-    };
-
-    VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
-
-    waterPipeline = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertBinding }, vertAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .build(device, vkCtx->getPipelineCache());
-
-    vertShader.destroy();
-    fragShader.destroy();
-
+    waterPipeline = buildWaterPipeline(vkCtx->getImGuiRenderPass(), vkCtx->getMsaaSamples());
     if (!waterPipeline) {
         LOG_ERROR("WaterRenderer::recreatePipelines: failed to create pipeline");
     }
@@ -805,9 +793,12 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
         push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
+        // Held flat for the same reason as its swell: a building's water
+        // meets its floors, bridges and docks, and waves rising through
+        // them read as the water leaking.
+        push.displaced = isWmoWater ? 0.0f : 1.0f;
 
-        vkCmdPushConstants(cmd, pipelineLayout,
-                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        vkCmdPushConstants(cmd, pipelineLayout, pushStages_,
                             0, sizeof(WaterPushConstants), &push);
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
@@ -1608,41 +1599,8 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
         return false;
     }
 
-    // Build 1x water pipeline against this render pass
-    VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv") ||
-        !fragShader.loadFromFile(device, "assets/shaders/water.frag.spv")) {
-        LOG_ERROR("WaterRenderer: failed to load shaders for 1x pipeline");
-        return false;
-    }
-
-    VkVertexInputBindingDescription vertBinding{};
-    vertBinding.binding = 0;
-    vertBinding.stride = 8 * sizeof(float);
-    vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
-    };
-
-    water1xPipeline = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertBinding }, vertAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(VK_SAMPLE_COUNT_1_BIT)
-        .setLayout(pipelineLayout)
-        .setRenderPass(water1xRenderPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .build(device, vkCtx->getPipelineCache());
-
-    vertShader.destroy();
-    fragShader.destroy();
-
+    // The same water, drawn against this pass
+    water1xPipeline = buildWaterPipeline(water1xRenderPass, VK_SAMPLE_COUNT_1_BIT);
     if (!water1xPipeline) {
         LOG_ERROR("WaterRenderer: failed to create 1x water pipeline");
         return false;

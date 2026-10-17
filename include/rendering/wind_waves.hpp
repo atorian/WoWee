@@ -50,5 +50,13 @@ struct WindWave {
 [[nodiscard]] std::array<WindWave, kWindWaveCount> windWavesFor(float speedYardsPerSecond,
                                                                 glm::vec2 windDirection);
 
+/// How far a point of the water rides along with the waves, 0 to 1. Under a
+/// passing wave a point of water goes round a circle as wide as the wave is
+/// high, which carries it toward each crest and away from each trough:
+/// crests sharp, troughs wide. Where the trains together are steep enough
+/// that their circles would cross - the sum of k a over 0.9 - the surface
+/// would fold over itself, and the ride is cut to keep it from folding.
+[[nodiscard]] float windWaveRide(const std::array<WindWave, kWindWaveCount>& waves);
+
 } // namespace rendering
 } // namespace wowee

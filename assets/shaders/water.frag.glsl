@@ -74,7 +74,8 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float pad1, pad2;
+    float displaced;  // 1 where the surface moves with the waves, 0 where it is held flat
+    float pad2;
 } push;
 
 #include "gerstner_waves.glsli"
@@ -102,8 +103,9 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     vec4 wakeBounds;                  // xy = centre, z = cull radius, w = count
     vec4 wakePoints[MAX_WAKE_POINTS]; // xy = world pos, z = age 0..1, w = strength
     // The wind's waves (WaterRenderer::advanceWindWaves): positions are taken
-    // from waveOrigin.xy; each train is xy = direction times wavenumber,
-    // z = amplitude in yards, w = its phase at the origin now.
+    // from waveOrigin.xy, and waveOrigin.z is how far a point rides toward
+    // the crests; each train is xy = direction times wavenumber, z = amplitude
+    // in yards, w = its phase at the origin now.
     vec4 waveOrigin;
     vec4 windWaves[WIND_WAVE_COUNT];
 };
@@ -138,16 +140,23 @@ float waveVisibility(vec2 dir, float frequency, vec2 surfaceDx, vec2 surfaceDy) 
 // wind, an equal share to each wavelength, running mostly downwind, each at
 // the speed water carries a wave that long. Nothing drawn from a texture, so
 // nothing repeats and no pattern but the waves' own shows in the glint.
+// Taken at the point's place on the still surface: the geometry has carried
+// it along the waves toward their crests (water_surface.glsli), and the
+// surface it is on is the one those waves make of the still one - its slope,
+// and `lean`, how much riding toward the crests has bunched it there.
 struct WindChop {
     vec2 slope;
+    float lean;
     float undrawnSlopeSq;
 };
 
-WindChop windChop(vec2 p, vec2 surfaceDx, vec2 surfaceDy) {
+WindChop windChop(vec2 rest, vec2 surfaceDx, vec2 surfaceDy) {
     WindChop chop;
     chop.slope = vec2(0.0);
+    chop.lean = 0.0;
     chop.undrawnSlopeSq = 0.0;
-    vec2 q = p - waveOrigin.xy;
+    vec2 q = rest - waveOrigin.xy;
+    float ride = waveOrigin.z * push.displaced;
     for (int i = 0; i < WIND_WAVE_COUNT; ++i) {
         vec4 w = windWaves[i];
         if (w.z <= 0.0) continue;
@@ -158,7 +167,9 @@ WindChop windChop(vec2 p, vec2 surfaceDx, vec2 surfaceDy) {
         chop.undrawnSlopeSq += slopeSq * (1.0 - shown * shown);
         if (shown > 0.001) {
             // h = a sin(k.q + phase): its gradient is a cos(...) times k.
-            chop.slope += w.xy * (w.z * shown * cos(dot(w.xy, q) + w.w));
+            float theta = dot(w.xy, q) + w.w;
+            chop.slope += w.xy * (w.z * shown * cos(theta));
+            chop.lean += ride * k * w.z * shown * sin(theta);
         }
     }
     return chop;
@@ -450,8 +461,8 @@ void main() {
     // On the swell, the wind's chop; their slopes add, as the waves do. No
     // fade by distance on top: each wave already lies down as it gets too
     // small on screen to show, which is what a distance stood in for.
-    WindChop chop = windChop(FragPos.xy, surfaceDx, surfaceDy);
-    vec3 norm = normalize(vec3(-(swell.slope + chop.slope), 1.0 - swell.lean));
+    WindChop chop = windChop(RestPos, restDx, restDy);
+    vec3 norm = normalize(vec3(-(swell.slope + chop.slope), 1.0 - swell.lean - chop.lean));
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;

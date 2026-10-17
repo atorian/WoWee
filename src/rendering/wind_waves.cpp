@@ -69,5 +69,15 @@ std::array<WindWave, kWindWaveCount> windWavesFor(float speedYardsPerSecond, glm
     return waves;
 }
 
+float windWaveRide(const std::array<WindWave, kWindWaveCount>& waves) {
+    // Points fold over where the stretch of the surface, 1 - sum of ride k a
+    // sin, reaches zero; at worst every sine is 1 together.
+    constexpr double kMostSteepness = 0.9;
+    double steepness = 0.0;
+    for (const WindWave& w : waves) steepness += static_cast<double>(w.wavenumber) * w.amplitude;
+    if (steepness <= kMostSteepness) return 1.0f;
+    return static_cast<float>(kMostSteepness / steepness);
+}
+
 } // namespace rendering
 } // namespace wowee

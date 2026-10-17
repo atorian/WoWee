@@ -1,0 +1,26 @@
+// What the tessellation control and evaluation stages of the water agree
+// on: how long a piece of edge is on screen, and so how fine the mesh is
+// at a point. The evaluation stage moves each vertex by the waves a mesh
+// that fine can carry; working that out from the point's own distance,
+// rather than from the patch's level, gives a vertex on an edge the same
+// place whichever of the two triangles sharing it is drawn.
+//
+// Needs the PerFrame block (projection, viewPos) and the push block
+// (screenSize, meshStep) declared before it.
+
+const float kSegmentPixels = 6.0;   // how long a piece of tessellated edge is on screen
+const float kMaxTessLevel = 64.0;   // the most pieces an edge is cut into
+
+/// Pixels a yard of the surface at `p` covers on screen, face on.
+float pixelsPerYardAt(vec3 p) {
+    float dist = max(length(viewPos.xyz - p), 0.5);
+    return abs(projection[1][1]) * 0.5 * push.screenSize.y / dist;
+}
+
+/// The yards between the vertices of the mesh at `p`: a piece of edge
+/// kSegmentPixels long, but never finer than the water's own cells cut
+/// kMaxTessLevel ways, nor coarser than the cells themselves.
+float meshStepAt(vec3 p) {
+    float wanted = kSegmentPixels / pixelsPerYardAt(p);
+    return clamp(wanted, push.meshStep / kMaxTessLevel, push.meshStep);
+}

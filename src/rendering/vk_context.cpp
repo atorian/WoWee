@@ -576,6 +576,9 @@ bool VkContext::selectPhysicalDevice() {
     };
     samplerAnisotropySupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::samplerAnisotropy);
     fillModeNonSolidSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::fillModeNonSolid);
+    // The water's waves near the camera are tessellated; without it the
+    // water is drawn on its own mesh and its short waves only in the light.
+    tessellationSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::tessellationShader);
     fsr2ComputeFeaturesSupported_ =
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);
@@ -603,6 +606,10 @@ bool VkContext::selectPhysicalDevice() {
                 : (noRobust ? "off (WOWEE_VK_NO_ROBUST_BUFFERS)" : "not offered by this device"));
     LOG_INFO("Sampler anisotropy supported: ", samplerAnisotropySupported_ ? "YES" : "NO");
     LOG_INFO("Wireframe views supported: ", fillModeNonSolidSupported_ ? "YES" : "NO");
+    if (!tessellationSupported_) {
+        LOG_WARNING("Tessellation shaders not offered by this device - the water's waves are "
+                    "drawn on its own mesh, the short ones only in the light");
+    }
     LOG_INFO("FSR2 compute features supported: ",
              fsr2ComputeFeaturesSupported_ ? "YES" : "NO");
     LOG_INFO("Block compressed textures (BC1/2/3) supported: ",

@@ -312,6 +312,11 @@ bool Renderer::createPerFrameResources() {
     // Compute as well: the fog volume is lit from this same block.
     bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
                              VK_SHADER_STAGE_COMPUTE_BIT;
+    // And the water's tessellation, which divides and moves it by the camera.
+    if (vkCtx->isTessellationSupported()) {
+        bindings[0].stageFlags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    }
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;

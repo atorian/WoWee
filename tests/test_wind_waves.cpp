@@ -10,6 +10,7 @@
 
 using wowee::rendering::kWindWaveCount;
 using wowee::rendering::waterWaveAngularSpeed;
+using wowee::rendering::windWaveRide;
 using wowee::rendering::windWavesFor;
 using wowee::rendering::windWaveSlope;
 
@@ -86,6 +87,21 @@ TEST_CASE("the waves run with the wind", "[water][wind]") {
         if (glm::dot(w.direction, east) > 0.0f) downwind += slopeSq; else upwind += slopeSq;
     }
     CHECK(downwind > 4.0 * upwind);
+}
+
+TEST_CASE("the water rides along with its waves but never folds over", "[water][wind]") {
+    // A gentle sea rides its waves all the way round; a steep one only as far
+    // as its surface stays one sheet - the stretch 1 - sum(ride k a) above 0.
+    CHECK(windWaveRide(windWavesFor(1.0f, {1.0f, 0.0f})) == 1.0f);
+    for (float speed : {2.0f, 5.0f, 10.0f, 20.0f, 40.0f}) {
+        const auto waves = windWavesFor(speed, {1.0f, 0.0f});
+        double steepness = 0.0;
+        for (const auto& w : waves) steepness += static_cast<double>(w.wavenumber * w.amplitude);
+        const float ride = windWaveRide(waves);
+        CHECK(ride > 0.0f);
+        CHECK(ride <= 1.0f);
+        CHECK(1.0 - ride * steepness > 0.0);
+    }
 }
 
 TEST_CASE("a veering wind does not turn the crests", "[water][wind]") {

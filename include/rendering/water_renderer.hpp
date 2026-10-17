@@ -155,6 +155,13 @@ private:
     void destroyWaterMesh(DrawnSurface& drawn);
     void destroyAllDrawn();
 
+    /// The water's pipeline for `renderPass` at `samples`: tessellated near
+    /// the camera where the device can, its own mesh otherwise.
+    VkPipeline buildWaterPipeline(VkRenderPass renderPass, VkSampleCountFlagBits samples);
+    /// The stages the push constants reach: the tessellation ones as well
+    /// where the pipeline has them.
+    VkShaderStageFlags pushStages_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
     glm::vec4 getLiquidColor(uint8_t basicType) const;
     float getLiquidAlpha(uint8_t basicType) const;
 
