@@ -4889,7 +4889,12 @@ void Renderer::renderVolumetricFog() {
     in.time = globalTime;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
-    if (lightingManager) in.sunHaloColor = lightingManager->getLightingParams().sunHaloColor;
+    if (lightingManager) {
+        in.sunHaloColor = lightingManager->getLightingParams().sunHaloColor;
+        in.sunGlareDirection =
+            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
+        in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(environment_.weatherIntensity);
+    }
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
 
@@ -4911,8 +4916,10 @@ void Renderer::recordSunShafts() {
         currentImageIndex < images.size() &&
         !(passAblation_ && passAblation_->skip(AblationPass::SunShafts))) {
         const auto& lp = lightingManager->getLightingParams();
-        // The sun the lens flare draws around, from the same rule.
-        const glm::vec3 sunDir = sunDirectionFromLightDir(lp.directionalDir);
+        // Around the disc, where the glare is - not the light's direction,
+        // which never sets.
+        const glm::vec3 sunDir =
+            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
         const SunOnScreen sun = sunScreenPosition(camera->getViewMatrix(),
                                                   camera->getProjectionMatrix(), sunDir);
         if (sun.inFront) {
@@ -4920,15 +4927,14 @@ void Renderer::recordSunShafts() {
             // fully lit walk crosses. Less, because the sky around the sun is
             // already the brightest thing on screen.
             float strength = 0.8f;
-            // Up out of the horizon and gone again as it sets. A sun under the
-            // ground lights nothing to stream from.
-            strength *= glm::smoothstep(-0.02f, 0.1f, sunDir.z);
+            // As much as the sky round the sun shines: the glare's hours, the
+            // cloud in front, a sky model over it and the weather. Not its line
+            // of sight - the rays are what a tree in front lets through.
+            strength *= sunGlareSky_ * sky_celestial::weatherFade(environment_.weatherIntensity);
             // In view, or streaming in from just past an edge, fading out as
             // it goes half a screen beyond one.
             const glm::vec2 past = glm::max(glm::abs(sun.uv - 0.5f) - 0.5f, glm::vec2(0.0f));
             strength *= 1.0f - glm::smoothstep(0.0f, 0.5f, std::max(past.x, past.y));
-            // Rain and snow put a lid over it.
-            if (weather) strength *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
 
             // The rays are the eye looking into the sun, so they take the
             // sun's own colour from LightParams - pale green over Tirisfal,

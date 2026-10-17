@@ -28,6 +28,7 @@ struct VolumeParamsGPU {
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
     glm::vec4 sunHalo;        // rgb = the zone's glow around the sun, w = unused
+    glm::vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -432,6 +433,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
     p.dims = glm::ivec4(size_, 0);
     p.sunHalo = glm::vec4(in.sunHaloColor, 0.0f);
+    p.sunGlare = glm::vec4(in.sunGlareDirection, in.sunGlareAmount);
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
     // Everything that last touched these volumes: last frame's inject and

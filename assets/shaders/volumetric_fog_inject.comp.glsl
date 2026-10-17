@@ -40,6 +40,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
     vec4 sunHalo;        // rgb = the zone's glow around the sun (LightIntBand 10)
+    vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -145,7 +146,7 @@ void main() {
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
     vec3 light = fogColor.rgb * vol.lighting.z;
     if (sunUp > 0.0) {
-        light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb, dot(travel, toCamera)) *
+        light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb * vol.sunGlare.w, dot(-vol.sunGlare.xyz, toCamera)) *
                  (sunVisibility(p) * sunUp * vol.lighting.x);
     }
 

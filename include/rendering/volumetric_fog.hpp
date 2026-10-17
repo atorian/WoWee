@@ -88,6 +88,12 @@ public:
         /// colour and brightness of the light the air scatters forward, toward
         /// an eye looking at the sun. See sunlit_air.glsli.
         glm::vec3 sunHaloColor{0.0f};
+        /// Toward the sun's disc, and how much the sky round it shines (the
+        /// glare's hours, cloud, sky model and weather; 0 at night). The
+        /// forward glow is around the disc and goes with it, not with the
+        /// light's direction, which never sets.
+        glm::vec3 sunGlareDirection{0.0f, 0.0f, 1.0f};
+        float sunGlareAmount = 0.0f;
         /// Brightness of the air the sun does not reach, lit by the zone's fog
         /// colour. Half, so a shaft stands against the shade beside it rather
         /// than against a haze nearly as bright.
