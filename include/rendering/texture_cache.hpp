@@ -221,10 +221,6 @@ public:
     /// resident for as long as the other. Replaces one attached before.
     void setNormalMap(const TextureRef& texture, TextureRef normalMap);
 
-    /// Retire every entry nothing references - leaving a map, say, when
-    /// nothing of it will be asked for again.
-    void releaseUnused();
-
     [[nodiscard]] TextureCacheStats stats() const;
     [[nodiscard]] uint64_t budgetBytes() const;
 
@@ -240,7 +236,6 @@ private:
     [[nodiscard]] uint64_t effectiveBudgetLocked() const;
     [[nodiscard]] bool makeRoomLocked(uint64_t bytes);
     void retireLocked(detail::TextureEntry* entry);
-    void touchLocked(detail::TextureEntry* entry);
     void unlinkIdleLocked(detail::TextureEntry* entry);
     void linkIdleLocked(detail::TextureEntry* entry);
     TextureRef admitLocked(std::unique_ptr<detail::TextureEntry> entry, bool named);

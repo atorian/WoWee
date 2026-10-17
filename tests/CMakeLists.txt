@@ -2164,6 +2164,7 @@ wowee_add_test(test_m2_billboard_model
     SOURCES test_m2_billboard_model.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
             ../src/rendering/m2_model_classifier.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp
             ${TEST_COMMON_SOURCES})
 target_compile_definitions(test_m2_billboard_model PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 

@@ -244,16 +244,6 @@ void TextureCache::linkIdleLocked(TextureEntry* entry) {
     idleBytes_ += entry->bytes;
 }
 
-void TextureCache::touchLocked(TextureEntry* entry) {
-    // Only the idle list is ordered by use: a referenced entry cannot be
-    // evicted however old it is, and joins the list at the tail - most
-    // recently used - when its last reference goes.
-    if (entry->idle) {
-        unlinkIdleLocked(entry);
-        linkIdleLocked(entry);
-    }
-}
-
 void TextureCache::retireLocked(TextureEntry* entry) {
     unlinkIdleLocked(entry);
     // Its normal map goes back with it, to be evicted in turn when room is
@@ -415,14 +405,6 @@ void TextureCache::setNormalMap(const TextureRef& texture, TextureRef normalMap)
     TextureEntry* normal = std::exchange(normalMap.entry_, nullptr);
     if (TextureEntry* old = texture.entry_->normalMap.exchange(normal, std::memory_order_acq_rel)) {
         releaseLocked(old);
-    }
-}
-
-void TextureCache::releaseUnused() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    while (TextureEntry* victim = idleHead_) {
-        retireLocked(victim);
-        named_.erase(victim->key);
     }
 }
 
