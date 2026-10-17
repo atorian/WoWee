@@ -4862,12 +4862,13 @@ void Renderer::writeFogVolumeBindings(uint32_t i) {
 }
 
 float Renderer::volumetricFogExtinction() const {
-    // Per yard, at and below the layer, near the camera. At this a sixth of
-    // the light is gone over the first hundred yards and two fifths across
-    // the whole volume, which thins its air out by 400 - a haze, not a wall,
-    // before the slider scales it - while a ten-yard shaft near the sun still
-    // lifts what is behind it by a tenth or more.
-    constexpr float kBaseExtinction = 0.002f;
+    // Per yard, at and below the layer, near the camera. At this a quarter of
+    // the light is gone over the first thirty yards along the ground and two
+    // thirds over a hundred, before the zone and the slider scale it: the
+    // houses across a street stand in the mist, the trees past them are
+    // shapes in it. A fifth of this, with the layer thirty yards deep, took a
+    // sixth over a hundred and read as the picture dimmed, not as mist.
+    constexpr float kBaseExtinction = 0.01f;
     float extinction = kBaseExtinction * volumetricFogDensity_;
 
     if (lightingManager) {

@@ -35,7 +35,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayCorner[4];   // rays one yard deep through uv (0,0), (1,0), (0,1), (1,1)
     mat4 prevViewProj;
     vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
-    vec4 lighting;       // x = light scatter (sun and models' lights), z = ambient scatter
+    vec4 lighting;       // x = light scatter (sun and models' lights)
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
@@ -130,12 +130,16 @@ void main() {
     float density = airDensity(p, depth);
 
     // The light reaching this air. Where only the sky lights it, it takes the
-    // zone's fog colour, at half: shade under trees is darker than the open
-    // haze, and a shaft reads against the shade beside it. Sunlight comes on
-    // top, and mostly forward, as it does off mist and dust, the forward part
-    // in the colour of the zone's halo (sunlit_air.glsli). That is where
-    // shafts are seen outdoors - toward a sun low enough to look at, through
-    // whatever stands in front of it.
+    // zone's fog colour, whole: that is the colour the zone's distance fog
+    // fades everything to, so deep air comes out as the same haze, and what
+    // stands far off in the mist turns to it - lighter than a dark forest, as
+    // mist is. At half, the air took out more light than it gave and the mist
+    // only darkened what was behind it, the more of it the darker.
+    //
+    // Sunlight comes on top, and mostly forward, as it does off mist and
+    // dust, the forward part in the colour of the zone's halo
+    // (sunlit_air.glsli). That is where shafts are seen outdoors - toward a
+    // sun low enough to look at, through whatever stands in front of it.
     //
     // Only while the sun is up. At night the light's direction points up
     // from under the ground; the shadow map flips it to build its projection,
@@ -144,7 +148,7 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    vec3 light = fogColor.rgb * vol.lighting.z;
+    vec3 light = fogColor.rgb;
     if (sunUp > 0.0) {
         light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb * vol.sunGlare.w, dot(-vol.sunGlare.xyz, toCamera)) *
                  (sunVisibility(p) * sunUp * vol.lighting.x);

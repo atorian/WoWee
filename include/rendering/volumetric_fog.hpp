@@ -68,7 +68,11 @@ public:
         /// World height the densest air sits on.
         float layerBase = 0.0f;
         /// Yards over which the density falls by a factor of e above that.
-        float layerHeight = 30.0f;
+        /// A few, so the mist lies on the ground - thick along a road, thin
+        /// in the tree tops - and the air a few yards up is clearer than the
+        /// air at the feet. Thirty spread it evenly through everything a
+        /// player looks at, a haze with no ground to it.
+        float layerHeight = 8.0f;
         /// Share of the density still left high above the layer, so a shaft
         /// seen from a flying mount does not vanish for want of air. Kept low:
         /// the zenith looks through the whole depth of it.
@@ -100,10 +104,6 @@ public:
         /// light's direction, which never sets.
         glm::vec3 sunGlareDirection{0.0f, 0.0f, 1.0f};
         float sunGlareAmount = 0.0f;
-        /// Brightness of the air the sun does not reach, lit by the zone's fog
-        /// colour. Half, so a shaft stands against the shade beside it rather
-        /// than against a haze nearly as bright.
-        float ambientScatter = 0.5f;
     };
 
     VolumetricFog() = default;

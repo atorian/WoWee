@@ -90,8 +90,9 @@ constexpr SettingDesc kSchema[] = {
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
      "How thick the lit mist is, when light shafts are on (Detail).\n"
-     "1 is a light haze; above it the air closes in. Rain, snow, dawn\n"
-     "and foggy zones thicken it further.",
+     "At 1 the houses across a street stand in the mist and the trees\n"
+     "past them are shapes in it; lower clears the air, higher closes\n"
+     "it in. Rain, snow, dawn and foggy zones thicken it further.",
      "", 1.0f, "lightshafts!=0"},
 
     // Labelled for what it does, with the term of art in brackets: nobody
