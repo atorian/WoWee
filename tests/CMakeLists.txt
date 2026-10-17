@@ -1318,6 +1318,13 @@ wowee_add_test(test_dds_override
     SOURCES test_dds_override.cpp)
 target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
 
+# ── test_asset_file_cache ────────────────────────────────────
+# A texture read to be uploaded is not kept a second time in the file cache;
+# a model file read for its own sake is.
+wowee_add_test(test_asset_file_cache
+    SOURCES test_asset_file_cache.cpp)
+target_link_libraries(test_asset_file_cache PRIVATE wowee_pipeline wowee_base)
+
 # ── test_blp_alpha_scan ──────────────────────────────────────
 # M2 textures were decoded to RGBA8 so something could walk every fourth byte
 # and learn whether the texture had any transparency. The block scan that
