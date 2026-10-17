@@ -30,10 +30,43 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 sunHaloColor;  // rgb = the sky's glow around the sun (LightIntBand 10)
 };
 
+layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
 
 #include "sky_atmosphere.glsli"
+#include "rt_lighting.glsli"
+#include "contact_shadows.glsli"
+
+// One texel of the shadow map, as the terrain takes it.
+float shadowTexel() {
+    return shadowParams.z > 0.0 ? shadowParams.z : 1.0 / 4096.0;
+}
+
+#include "shadow_receiver.glsli"
+
+// How much of the sun reaches the water here, 1 lit to 0 in shadow: the
+// sun's map, the units' map and the traced sun, the way the ground beside it
+// takes them, so a tree's shadow runs from the bank onto the water unbroken.
+// Call in uniform control flow (the receiver slope is taken from derivatives).
+float sunOnWater(vec3 worldPos) {
+    float shadow = 1.0;
+    const vec3 up = vec3(0.0, 0.0, 1.0);
+    vec3 ldir = normalize(-lightDir.xyz);
+    float normalOffset = shadowParams.w * 1.5 * (1.0 - abs(dot(up, ldir)));
+    vec4 lsPos = lightSpaceMatrix * vec4(worldPos + up * normalOffset, 1.0);
+    vec3 proj = lsPos.xyz / lsPos.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    vec2 receiverSlope = shadowReceiverSlope(proj);
+    if (shadowParams.x > 0.5 && proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 &&
+        proj.z >= 0.0 && proj.z <= 1.0) {
+        shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
+        shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
+    }
+    RtLight rt = rtLightAt(worldPos, up);
+    shadow = rtShadow(rt, shadow);
+    return min(shadow, localShadowAt(worldPos));
+}
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -486,6 +519,7 @@ void main() {
     vec2 screenUV = gl_FragCoord.xy / max(push.screenSize, vec2(1.0));
 
     float dist = length(viewPos.xyz - FragPos);
+    float sunReach = sunOnWater(FragPos);
 
     // --- Normal computation ---
     // How the surface moves from one pixel to the next, for how small each
@@ -515,18 +549,20 @@ void main() {
     // repeat for the eye to find - where it is not, and where LiquidType.dbc
     // names no frames at all. Far off that is all there is to draw.
     vec3 detailNorm = dualScrollWaveNormal(FragPos.xy, time, surfaceDx, surfaceDy);
+    float rippleShown = 0.0;
     if (ripple.x > 0.5) {
         RippleUv rippleAt = rippleUv(FragPos.xy);
         // As much as the pixel can show. How steep it is the wind decides
         // (rippleNormal): in still air the frames lie flat.
-        float rippleShown = rippleVisibility(rippleAt);
+        rippleShown = rippleVisibility(rippleAt);
         if (rippleShown > 0.001) {
             detailNorm = normalize(mix(detailNorm, rippleNormal(rippleAt, time), rippleShown));
         }
     }
     // No fade by distance on top: each of these already lies down as it gets
     // too small on screen to show, which is what a distance stood in for.
-    vec3 norm = normalize(mix(swellNorm, detailNorm, 0.55));
+    const float kDetailShare = 0.55;
+    vec3 norm = normalize(mix(swellNorm, detailNorm, kDetailShare));
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;
@@ -664,13 +700,18 @@ void main() {
         }
     } else {
         // No refraction data - use lit water body with animated variation
-        vec3 litWater = waterBody * (ambientColor.rgb * 0.8 + NdotL * lightColor.rgb * 0.6);
+        vec3 litWater = waterBody * (ambientColor.rgb * 0.8 + NdotL * lightColor.rgb * 0.6)
+                      * shadowLightFactor(sunReach);
         float normalShift = dot(detailNorm.xy, vec2(0.5, 0.5));
         litWater += vec3(0.02, 0.06, 0.10) * normalShift;
         refractedColor = litWater;
     }
 
-    vec3 litBase = waterBody * (ambientColor.rgb * 0.7 + NdotL * lightColor.rgb * 0.5);
+    // In shade the water's own colour darkens as the ground beside it does,
+    // by the client's 0.7 + 0.3 of the shadow; what is seen through it was
+    // drawn already shadowed.
+    vec3 litBase = waterBody * (ambientColor.rgb * 0.7 + NdotL * lightColor.rgb * 0.5)
+                 * shadowLightFactor(sunReach);
     refractedColor = mix(refractedColor, litBase, clamp(depthFade * 0.3, 0.0, 0.5));
 
     // ============================================================
@@ -751,14 +792,32 @@ void main() {
     vec3 normalDx = dFdx(norm);
     vec3 normalDy = dFdy(norm);
     float spread = min(2.0 * kVariance * (dot(normalDx, normalDx) + dot(normalDy, normalDy)), kMaxSpread);
+    // The sun's path. The wind's chop is as steep as rippleSlopeForWind says,
+    // but only the part of it the ripple draws (its share of this pixel's
+    // normal) tilts the normal; the rest is chop too small to draw, and it is
+    // still there - it scatters the sun the way it scattered it in Cox and
+    // Munk's photographs. So that slope goes into the highlight's width, as
+    // GGX alpha squared = 2 x mean square slope. Close up the ripple draws
+    // the chop and the sun glints off its crests; further off it can draw
+    // less of it, and the highlight widens into a glitter path running to
+    // the horizon; in still air there is none and the sun is a sharp disc.
+    float drawnChop = kDetailShare * rippleShown;
+    float undrawnSlopeSq = push.rippleSlope * push.rippleSlope * (1.0 - drawnChop * drawnChop);
     float ggxAlpha = kSurfaceRoughness * kSurfaceRoughness;  // DistributionGGX squares roughness
-    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread, 0.0, 1.0);
+    float alphaSq = clamp(ggxAlpha * ggxAlpha + spread + 2.0 * undrawnSlopeSq, 0.0, 1.0);
     float roughness = sqrt(sqrt(alphaSq));
     vec3 halfDir = normalize(ldir + viewDir);
     float D = DistributionGGX(norm, halfDir, roughness);
     float G = GeometrySmith(NdotV, NdotL, roughness);
     vec3 F = fresnelSchlickRoughness(max(dot(halfDir, viewDir), 0.0), F0, roughness);
-    vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
+    // In the units every surface here is lit in. Their diffuse is albedo x
+    // light x N.L, with no 1/pi - the renderer's light is what a white face
+    // turned to the sun shows - while GGX's D carries the 1/pi of a true
+    // BRDF. Taken as it was, the sun's glint was a third as bright as the
+    // ground beside it says the sun is, and once the wind spread it into a
+    // path it sank into the water's own colour.
+    const float kPi = 3.14159265;
+    vec3 specular = kPi * (D * G * F) / (4.0 * NdotV * NdotL + 0.001) * lightColor.rgb * NdotL;
     specular = min(specular, vec3(2.0));
 
     // Noise-based sparkle. Its features are far smaller than the wave detail:
@@ -785,7 +844,9 @@ void main() {
     // reflAmount is 0 where no valid reflection data exists - no dark arc
     float reflectWeight = clamp(fresnel * reflAmount, 0.0, 0.30);
     vec3 color = mix(refractedColor, envReflect, reflectWeight);
-    color += specular + sssColor;
+    // The sun's glint and the light it puts through the crests need the sun:
+    // in shadow there is nothing for the surface to reflect.
+    color += (specular + sssColor) * sunReach;
 
     float crest = smoothstep(0.5, 1.0, waveHeight) * 0.04;
     color += vec3(crest);
