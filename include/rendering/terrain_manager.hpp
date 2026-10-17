@@ -131,6 +131,9 @@ struct PendingTile {
     // Pre-loaded terrain texture BLP data (loaded on background thread to avoid
     // blocking file I/O on the main thread during finalizeTile)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedTextures;
+    // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
+    // a texture whose relief was already in the cache.
+    std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
 
     // Pre-decoded M2 model textures (decoded on background thread)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedM2Textures;
@@ -445,6 +448,8 @@ private:
     /// How the workers encode WMO normal maps: the device's, read once when
     /// the renderer is set rather than from the workers.
     NormalMapFormat wmoNormalMapFormat_ = NormalMapFormat::Rgba8;
+    /// The same for the ground's relief, read when the terrain renderer is set.
+    NormalMapFormat terrainNormalMapFormat_ = NormalMapFormat::Rgba8;
     AmbientEmitterSink ambientEmitterSink_;
 
     std::string mapName = "Azeroth";

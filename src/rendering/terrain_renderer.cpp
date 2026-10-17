@@ -11,6 +11,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -32,6 +33,27 @@ struct TerrainParamsUBO {
     int32_t hasLayer2;
     int32_t hasLayer3;
 };
+
+// The fragment stage's push constants, after the vertex stage's
+// GPUPushConstants. Matches `Surface` in terrain.frag.glsl.
+struct TerrainSurfacePush {
+    /// x: how steep the textures' relief is drawn, 0 for flat ground.
+    glm::vec4 relief{0.0f};
+};
+constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
+
+// The material set's bindings past the seven samplers and the params block:
+// the base texture's relief, then each layer's.
+constexpr uint32_t kFirstNormalMapBinding = 8;
+constexpr uint32_t kMaterialBindingCount = kFirstNormalMapBinding + 4;
+constexpr uint32_t kMaterialSamplerCount = 7 + 4;
+
+/// The Sobel strength the ground's relief is derived with, half a wall's. The
+/// ground is seen at a grazing angle across a whole road at once, where the
+/// WMO renderer's two turned every grain of a cobble into a chiselled edge;
+/// at one, Goldshire's road reads as stones and mortar at the default "Bump
+/// strength", which scales the result in the shader.
+constexpr float kTerrainNormalMapStrength = 1.0f;
 
 TerrainRenderer::TerrainRenderer() = default;
 
@@ -127,19 +149,16 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // --- Create material descriptor set layout (set 1) ---
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
     // binding 7: uniform buffer (TerrainParams)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(8);
-    for (uint32_t i = 0; i < 7; i++) {
+    // bindings 8-11: combined image samplers (base + 3 layer normal maps)
+    std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         materialBindings[i] = {};
         materialBindings[i].binding = i;
-        materialBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        materialBindings[i].descriptorType = i == 7 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                    : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         materialBindings[i].descriptorCount = 1;
         materialBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    materialBindings[7] = {};
-    materialBindings[7].binding = 7;
-    materialBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    materialBindings[7].descriptorCount = 1;
-    materialBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     materialSetLayout = createDescriptorSetLayout(device, materialBindings);
     if (!materialSetLayout) {
@@ -149,7 +168,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     // --- Create descriptor pool ---
     VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 7 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * kMaterialSamplerCount },
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
     };
 
@@ -170,9 +189,13 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
     pushRange.size = sizeof(GPUPushConstants);
+    VkPushConstantRange surfaceRange{};
+    surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    surfaceRange.offset = kSurfacePushOffset;
+    surfaceRange.size = sizeof(TerrainSurfacePush);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
-    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
+    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     if (!pipelineLayout) {
         LOG_ERROR("TerrainRenderer: failed to create pipeline layout");
         return false;
@@ -206,6 +229,10 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     const uint8_t opaqueAlpha = 255;
     opaqueAlphaTexture = adoptPixels(*vkCtx, TextureForm::Owned, &opaqueAlpha, 1, 1, VK_FORMAT_R8_UNORM,
                                      false, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    // Straight up, for a texture whose relief could not be had.
+    const uint8_t flatNormal[4] = {128, 128, 255, 128};
+    flatNormalTexture = adoptPixels(*vkCtx, TextureForm::Owned, flatNormal, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                    false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
     // Allocate mega vertex/index buffers and indirect draw buffer.
     // All terrain chunks share these buffers, eliminating per-chunk VB/IB rebinds.
@@ -311,8 +338,10 @@ void TerrainRenderer::shutdown() {
     vkCtx->flushDeferredCleanup();
 
     loggedTextureLoadFails_.clear();
+    loggedNormalMapFails_.clear();
     whiteTexture.reset();
     opaqueAlphaTexture.reset();
+    flatNormalTexture.reset();
 
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
@@ -475,6 +504,7 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
     uint32_t baseTexId = chunk.layers[0].textureId;
     if (baseTexId < texturePaths.size()) {
         gpuChunk.baseTexture = loadTexture(texturePaths[baseTexId]);
+        gpuChunk.baseNormalMap = loadNormalMap(texturePaths[baseTexId]);
     } else {
         LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                     "] base textureId ", baseTexId, " >= texturePaths size ",
@@ -490,6 +520,7 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
         TextureRef layerTex = whiteTexture;
         if (layer.textureId < texturePaths.size()) {
             layerTex = loadTexture(texturePaths[layer.textureId]);
+            gpuChunk.layerNormalMaps[li] = loadNormalMap(texturePaths[layer.textureId]);
         } else {
             LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                         "] layer[", i, "] textureId ", layer.textureId,
@@ -599,6 +630,55 @@ TextureRef TerrainRenderer::loadTexture(const std::string& path) {
     return whiteTexture;
 }
 
+EncodedNormalMap TerrainRenderer::deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format) {
+    if (!blp.isValid()) return {};
+    const std::vector<uint8_t> decoded =
+        blp.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(blp) : blp.data;
+    const auto width = static_cast<uint32_t>(blp.width);
+    const auto height = static_cast<uint32_t>(blp.height);
+    if (decoded.size() < static_cast<size_t>(width) * height * 4) return {};
+    float variance = 0.0f;
+    std::vector<uint8_t> rgba =
+        generateNormalHeightMap(decoded.data(), width, height, kTerrainNormalMapStrength, variance);
+    if (rgba.empty()) return {};
+    return encodeNormalMap(std::move(rgba), width, height, format, variance);
+}
+
+TextureKey TerrainRenderer::normalMapKey(const std::string& path) {
+    return {normalizeTexturePath(path), TextureForm::NormalHeight,
+            static_cast<uint8_t>(kTerrainNormalMapStrength)};
+}
+
+NormalMapFormat TerrainRenderer::normalMapFormat() const {
+    return vkCtx ? normalMapFormatFor(*vkCtx) : NormalMapFormat::Rgba8;
+}
+
+void TerrainRenderer::uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map) {
+    // Held by nothing until a chunk binds it, as the textures above are.
+    const TextureKey key = normalMapKey(path);
+    if (!map.valid() || vkCtx->textures().find(key)) return;
+    (void)cacheNormalMap(*vkCtx, key, map);
+}
+
+TextureRef TerrainRenderer::loadNormalMap(const std::string& path) {
+    const TextureKey key = normalMapKey(path);
+    if (TextureRef cached = vkCtx->textures().find(key)) return cached;
+    if (loggedNormalMapFails_.count(key.path) != 0) return {};
+
+    // The loading worker derives it ahead of the tile; it is missing here
+    // only when the cache let it go before the chunk was bound.
+    const EncodedNormalMap map =
+        deriveNormalMap(assetManager->loadTexture(key.path, true), normalMapFormat());
+    if (!map.valid()) {
+        loggedNormalMapFails_.insert(key.path);
+        LOG_WARNING("Terrain: no relief could be derived from '", path,
+                    "' - the ground there is lit flat");
+        return {};
+    }
+    // Refused or failed: the cache has said so, and the ground is lit flat.
+    return cacheNormalMap(*vkCtx, key, map);
+}
+
 void TerrainRenderer::uploadPreloadedTextures(
     const std::unordered_map<std::string, pipeline::BLPImage>& textures) {
     // Into the shared cache ahead of the chunks that will name them, in one
@@ -682,11 +762,18 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
         return false;
     }
 
-    VkDescriptorImageInfo imageInfos[7];
+    // The flat normal is the relief's fallback, and a white one stands in
+    // for it: lit flat but for a slight tilt, never unbound.
+    VkTexture* flat = pick(flatNormalTexture.get(), white);
+
+    // Indexed by binding; 7 is the params block.
+    VkDescriptorImageInfo imageInfos[kMaterialBindingCount] = {};
     imageInfos[0] = pick(chunk.baseTexture.get(), white)->descriptorInfo();
-    for (int i = 0; i < 3; i++) {
+    imageInfos[kFirstNormalMapBinding] = pick(chunk.baseNormalMap.get(), flat)->descriptorInfo();
+    for (uint32_t i = 0; i < 3; i++) {
         imageInfos[1 + i] = pick(chunk.layerTextures[i].get(), white)->descriptorInfo();
         imageInfos[4 + i] = pick(chunk.alphaTextures[i].get(), opaque)->descriptorInfo();
+        imageInfos[kFirstNormalMapBinding + 1 + i] = pick(chunk.layerNormalMaps[i].get(), flat)->descriptorInfo();
     }
 
     VkDescriptorBufferInfo bufInfo{};
@@ -694,23 +781,22 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     bufInfo.offset = 0;
     bufInfo.range = sizeof(TerrainParamsUBO);
 
-    VkWriteDescriptorSet writes[8] = {};
-    for (int i = 0; i < 7; i++) {
+    VkWriteDescriptorSet writes[kMaterialBindingCount] = {};
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
-        writes[i].dstBinding = static_cast<uint32_t>(i);
+        writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].pImageInfo = &imageInfos[i];
+        if (i == 7) {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[i].pBufferInfo = &bufInfo;
+        } else {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo = &imageInfos[i];
+        }
     }
-    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[7].dstSet = set;
-    writes[7].dstBinding = 7;
-    writes[7].descriptorCount = 1;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[7].pBufferInfo = &bufInfo;
 
-    vkUpdateDescriptorSets(vkCtx->getDevice(), 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(vkCtx->getDevice(), kMaterialBindingCount, writes, 0, nullptr);
     return true;
 }
 
@@ -760,6 +846,10 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(GPUPushConstants), &push);
     LocalLightSet pushedLights = push.localLights;
+    TerrainSurfacePush surface{};
+    surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                       kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
 
     Frustum frustum;
     if (frustumCullingEnabled) {
@@ -1097,6 +1187,8 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.baseTexture.reset();
     for (TextureRef& t : chunk.layerTextures) t.reset();
     for (TextureRef& t : chunk.alphaTextures) t.reset();
+    chunk.baseNormalMap.reset();
+    for (TextureRef& t : chunk.layerNormalMaps) t.reset();
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsUBO, paramsAlloc, pool, materialSet]() {

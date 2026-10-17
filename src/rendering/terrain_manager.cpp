@@ -148,6 +148,7 @@ void TerrainManager::setWMORenderer(WMORenderer* renderer) {
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
     assetManager = assets;
     terrainRenderer = renderer;
+    if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
 
     if (!assetManager) {
         LOG_ERROR("Asset manager is null");
@@ -928,12 +929,21 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
     // Pre-load terrain texture BLP data on background thread so finalizeTile
     // doesn't block the main thread with file I/O.
+    // Their relief is derived here too, from a decoded copy, unless a tile
+    // loaded earlier already left it in the cache.
+    TextureCache* textureCache = terrainRenderer && terrainRenderer->getVkContext()
+        ? &terrainRenderer->getVkContext()->textures() : nullptr;
     for (const auto& texPath : pending->terrain.textures) {
         if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The
         // normal-map source below still decodes: it reads the pixels.
-        pending->preloadedTextures[texPath] = assetManager->loadTexture(texPath, true);
+        pipeline::BLPImage blp = assetManager->loadTexture(texPath, true);
+        if (blp.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
+            EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
+            if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
+        }
+        pending->preloadedTextures[texPath] = std::move(blp);
     }
 
     LOG_DEBUG("Prepared tile [", x, ",", y, "]: ",
@@ -992,6 +1002,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 one.clear();
                 one.emplace(it->first, std::move(it->second));
                 terrainRenderer->uploadPreloadedTextures(one);
+                if (auto normals = pending->preloadedTerrainNormalMaps.find(it->first);
+                    normals != pending->preloadedTerrainNormalMaps.end()) {
+                    terrainRenderer->uploadPreloadedNormalMap(normals->first, normals->second);
+                    pending->preloadedTerrainNormalMaps.erase(normals);
+                }
                 if (std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
             }

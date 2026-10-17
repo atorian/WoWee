@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "rendering/texture_cache.hpp"
+#include "rendering/normal_map_encoding.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
@@ -41,7 +42,7 @@ struct TerrainChunkGPU {
     VmaAllocation indexAlloc = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
 
-    // Material descriptor set (set 1: 7 samplers + params UBO)
+    // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
 
     // Per-chunk params UBO (hasLayer1/2/3)
@@ -53,6 +54,10 @@ struct TerrainChunkGPU {
     TextureRef baseTexture;
     TextureRef layerTextures[3];
     TextureRef alphaTextures[3];
+    /// The relief of the base and layer textures, derived from their colours;
+    /// empty where none could be had, which binds a flat one.
+    TextureRef baseNormalMap;
+    TextureRef layerNormalMaps[3];
     int layerCount = 0;
 
     // World position for culling
@@ -113,6 +118,31 @@ public:
     void removeTile(int tileX, int tileY);
 
     void uploadPreloadedTextures(const std::unordered_map<std::string, pipeline::BLPImage>& textures);
+
+    /// The relief of a tileset texture, derived from its colours on a loading
+    /// worker and encoded with its mips. Pure: no Vulkan, safe off the main
+    /// thread. Invalid when the texture has no pixels to read.
+    ///
+    /// The ground's relief used to be made in the fragment shader from the
+    /// screen-space derivatives of the shaded colour. A 2x2 pixel quad then
+    /// decided where a cobble's edge was, so the relief changed with every
+    /// sub-pixel move of the camera: blocky noise that crawled over roads and
+    /// grass as the player rode. Derived here it belongs to the texture, is
+    /// filtered by its mips like the colour is, and holds still.
+    [[nodiscard]] static EncodedNormalMap deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format);
+    /// The cache key a tileset texture's relief is kept under.
+    [[nodiscard]] static TextureKey normalMapKey(const std::string& path);
+    /// Puts a normal map made by deriveNormalMap in the shared cache, where
+    /// the chunks that lay its texture find it.
+    void uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map);
+    [[nodiscard]] NormalMapFormat normalMapFormat() const;
+
+    /// The "Surface bumps" setting: the ground lit by its textures' relief, as
+    /// strongly as `strength` asks (1 as derived, 2 twice as steep). Off is
+    /// flat ground lit by its vertex normals alone, as the original client
+    /// draws it.
+    void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; }
+    void setNormalMapStrength(float strength) { normalMapStrength_ = std::clamp(strength, 0.0f, 2.0f); }
 
     /**
      * Render terrain
@@ -178,6 +208,10 @@ private:
     /// The tileset texture from the shared cache, loading it if it is not
     /// there; white when it cannot be had.
     TextureRef loadTexture(const std::string& path);
+    /// The tileset texture's relief from the shared cache. Normally the
+    /// loading worker made it; when the cache let it go since, it is derived
+    /// again here, on this thread. Empty when it cannot be had.
+    TextureRef loadNormalMap(const std::string& path);
     TextureRef createAlphaTexture(const std::vector<uint8_t>& alphaData);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
@@ -240,9 +274,14 @@ private:
     // Fallback textures, held in the shared cache like any other.
     TextureRef whiteTexture;
     TextureRef opaqueAlphaTexture;
+    TextureRef flatNormalTexture;
+    /// Tileset paths whose relief could not be derived, said once each.
+    std::unordered_set<std::string> loggedNormalMapFails_;
 
     // Rendering state
     bool wireframe = false;
+    bool normalMappingEnabled_ = true;
+    float normalMapStrength_ = 0.8f;
     bool frustumCullingEnabled = true;
     bool fogEnabled = true;
     float maxViewDistance_ = 1200.0f;

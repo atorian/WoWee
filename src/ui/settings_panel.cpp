@@ -37,6 +37,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/terrain_renderer.hpp"
 #include "game/zone_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"
@@ -1191,6 +1192,7 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
     auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
     auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
+    auto* terrain = renderer ? renderer->getTerrainRenderer() : nullptr;
 
     // The switches the game's own Sound panel used to own. Writing the setting
     // has already written the cvar behind it - see noteClientSettingChanged -
@@ -1332,9 +1334,11 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (key == "normalmapping") {
         if (wmo) wmo->setNormalMappingEnabled(pendingNormalMapping);
         if (chars) chars->setNormalMappingEnabled(pendingNormalMapping);
+        if (terrain) terrain->setNormalMappingEnabled(pendingNormalMapping);
     } else if (key == "normalmapstrength") {
         if (wmo) wmo->setNormalMapStrength(pendingNormalMapStrength);
         if (chars) chars->setNormalMapStrength(pendingNormalMapStrength);
+        if (terrain) terrain->setNormalMapStrength(pendingNormalMapStrength);
     } else if (key == "parallax") {
         if (wmo) wmo->setPOMEnabled(pendingPOM);
     } else if (key == "sharpstars") {
