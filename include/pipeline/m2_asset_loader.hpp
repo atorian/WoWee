@@ -24,7 +24,9 @@ struct M2Model;
  *
  * Models from version 264 keep their submeshes in that separate file; earlier
  * ones carry them inside the M2 and it is not asked for. Returns false when the
- * M2 cannot be read or does not parse into a usable model.
+ * M2 cannot be read or holds nothing to show - neither a mesh nor emitters. A
+ * model of emitters alone (an enchant's glow) loads; M2Model::isValid() says
+ * whether there is a mesh as well.
  *
  * Four copies of this existed, one per thing that loads a weapon, a helm or a
  * portrait, and they disagreed about whether to name the model after its path -

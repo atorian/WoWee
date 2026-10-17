@@ -2609,10 +2609,9 @@ static uint32_t inspectedItemEntry(game::GameHandler* gh, const std::string& uid
     if (!gh || slotId < 1 || slotId > 19) return 0;
     const uint64_t guid = resolveUnitGuid(gh, uid);
     if (!guid) return 0;
-    const auto& cache = gh->inventory().inspectedPlayerItemEntries();
-    auto it = cache.find(guid);
-    if (it == cache.end()) return 0;
-    const uint32_t entry = it->second[static_cast<size_t>(slotId - 1)];
+    const auto* inspected = gh->inventory().inspectedItemEntries(guid);
+    if (!inspected) return 0;
+    const uint32_t entry = (*inspected)[static_cast<size_t>(slotId - 1)];
     // The name and icon come from the item cache, which will not have an entry
     // this client has never seen; asking queues the query.
     if (entry) gh->ensureItemInfo(entry);

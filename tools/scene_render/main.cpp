@@ -14,6 +14,13 @@
 //     "hour": 12.0,                       // the realm clock; the sky and the light
 //     "weather": "none",                  // none | rain | snow | storm
 //     "weatherIntensity": 0.0,
+//     "realmTime": 0.0,                   // the realm's calendar clock, seconds since
+//                                         //   1970, that the wind is drawn from; it
+//                                         //   runs on with the frames
+//     "wind": { "direction": 37.0,        // a fixed wind instead of the zone's:
+//               "speed": 2.0 },           //   degrees it blows toward (0 render +x,
+//                                         //   90 render +y), yards a second; 2 is the
+//                                         //   speed the sway is tuned at
 //     "server": [5815.0, 629.0, 647.0],   // where it stands, as the realm and
 //                                         //   .gps give positions,
 //     "origin": [5815.0, 629.0, 647.0],   //   or in render coordinates
@@ -289,6 +296,21 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     environment.weatherType = weatherType(scene.value("weather", std::string("none")));
     environment.weatherIntensity = scene.value("weatherIntensity", 0.0f);
     environment.raining = environment.weatherType == 1 || environment.weatherType == 3;
+    // A realm clock of the scene's own, so the wind - drawn from it - is the
+    // same on every run rather than whatever this machine's clock says.
+    const double realmTime = scene.value("realmTime", 0.0);
+    environment.realmSeconds = realmTime;
+    if (scene.contains("wind")) {
+        const json& wind = scene["wind"];
+        if (!wind.is_object() || !wind.contains("direction") || !wind["direction"].is_number() ||
+            !wind.contains("speed") || !wind["speed"].is_number() || wind["speed"].get<float>() < 0.0f) {
+            std::fprintf(stderr, "scene_render: \"wind\" wants { \"direction\": degrees, "
+                                 "\"speed\": yards a second, zero or more }\n");
+            return 1;
+        }
+        environment.wind = rendering::WindOverride{wind["direction"].get<float>(),
+                                                   wind["speed"].get<float>()};
+    }
     renderer.setWorldEnvironment(environment);
     renderer.setWorldInView(true);
 
@@ -302,6 +324,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                                                        terrain->getRemainingTileCount() > 0);
          ++frame) {
         if (frame >= frames) ++extra;
+        environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
+        renderer.setWorldEnvironment(environment);
         renderer.update(kStep);
         renderer.beginFrame();
         renderer.renderWorld();

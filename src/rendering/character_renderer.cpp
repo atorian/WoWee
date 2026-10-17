@@ -1734,8 +1734,14 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
-    if (!model.isValid()) {
-        core::Logger::getInstance().error("Cannot load invalid M2 model");
+    // A mesh, emitters, or both. A model of emitters alone - nearly every
+    // enchant glow, and some creatures - has no batches to draw here and is
+    // still an instance with a skeleton: CharacterEmitters poses its emitters
+    // on that skeleton in M2Renderer. Refusing it for want of a mesh dropped
+    // every weapon enchant on the floor.
+    if (!model.hasContent()) {
+        LOG_ERROR("CharacterRenderer: model '", model.name.empty() ? "<unnamed>" : model.name,
+                  "' (id ", id, ") has no mesh and no emitters; not loaded");
         return false;
     }
 

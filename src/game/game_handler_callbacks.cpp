@@ -15,6 +15,7 @@
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -643,32 +644,6 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
 
     setState(WorldState::ENTERING_WORLD);
     LOG_INFO("CMSG_PLAYER_LOGIN sent, entering world...");
-}
-
-void GameHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
-    // SMSG_LOGIN_SETTIMESPEED (0x042)
-    // Structure: PackedTime gameTime, float timeScale
-    //
-    // gameTime is a packed bitfield, not a count of seconds - Player.cpp writes
-    // it with AppendPackedTime. It was being stored raw and then divided by
-    // 86400 to get a time of day, which made the sky's clock a number with no
-    // relation to the hour the server sent.
-    //
-    // timeScale: game minutes per real second - 1/60 is real time.
-
-    if (packet.getSize() < 8) {
-        LOG_WARNING("SMSG_LOGIN_SETTIMESPEED: packet too small (", packet.getSize(), " bytes)");
-        return;
-    }
-
-    const WowDate now = unpackWowPackedTime(packet.readUInt32());
-    float timeScale = packet.readFloat();
-
-    gameClock_.set(static_cast<float>(now.hour) + static_cast<float>(now.minute) / 60.0f,
-                   timeScale);
-
-    LOG_INFO("Server time: ", now.hour, ":", now.minute, ", timeSpeed=", timeScale,
-             " (1 game day = ", 24.0f / (gameClock_.speed() * 60.0f), " real hours)");
 }
 
 void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
@@ -1477,6 +1452,10 @@ uint32_t GameHandler::getSecondsUntilDailyReset() const {
     return socialHandler_->getSecondsUntilDailyReset();
 }
 
+float GameHandler::getGameTime() const {
+    return realmTimeHandler_->gameHours();
+}
+
 void GameHandler::requestPlayedTime() {
     socialHandler_->requestPlayedTime();
 }
@@ -1918,8 +1897,9 @@ void GameHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMa
     inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
 }
 
-void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries) {
-    inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries);
+void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
+                                                const std::array<uint16_t, 19>& enchantIds) {
+    inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
 }
 
 void GameHandler::emitOtherPlayerEquipment(uint64_t guid) {

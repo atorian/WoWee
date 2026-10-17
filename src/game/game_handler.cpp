@@ -16,6 +16,7 @@
 #include "game/inventory_handler.hpp"
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -127,6 +128,7 @@ GameHandler::GameHandler(GameServices& services)
         *this, *this, *services_.events, services_.accountDataDir);
     actionBarHandler_ = std::make_unique<ActionBarHandler>(*this, *this, *services_.events, *this);
     petHandler_ = std::make_unique<PetHandler>(*this, *this, *services_.events, *chatHandler_, *this);
+    realmTimeHandler_ = std::make_unique<RealmTimeHandler>(*services_.events, services_.steadyNow);
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.

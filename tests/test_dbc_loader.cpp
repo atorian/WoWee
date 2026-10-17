@@ -415,7 +415,8 @@ TEST_CASE("resolveEnchantItemVisuals walks enchant to effect model paths", "[dbc
     REQUIRE(effects.load(effectData));
 
     auto models = resolveEnchantItemVisuals(40, &sie, &visuals, &effects, nullptr);
-    REQUIRE(models[0] == "Spells\\Enchantments\\Sparkle_A.mdx");
+    // Named as the archives hold it, not as the table wrote it.
+    REQUIRE(models[0] == "Spells\\Enchantments\\Sparkle_A.m2");
     for (size_t i = 1; i < models.size(); ++i) REQUIRE(models[i].empty());
 
     // An enchant with no visual (ItemVisual 0) yields nothing rather than slot 0's model.

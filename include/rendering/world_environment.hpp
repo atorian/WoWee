@@ -1,6 +1,9 @@
 #pragma once
 
+#include "rendering/wind_field.hpp"
+
 #include <cstdint>
+#include <optional>
 
 namespace wowee {
 namespace rendering {
@@ -27,6 +30,21 @@ struct WorldEnvironment {
     float weatherIntensity = 0.0f;
     /// The player is a ghost: the world is drawn desaturated.
     bool ghost = false;
+
+    /// What realmSeconds holds when no realm has said what time it is.
+    static constexpr double kNoRealmTime = -1.0;
+    /// The realm's calendar clock, seconds since 1970 (the game's RealmClock),
+    /// or kNoRealmTime. Every client of a realm reads the same value at the
+    /// same moment, which is what lets the wind be the same on all of them;
+    /// without it the wind follows this machine's clock.
+    double realmSeconds = kNoRealmTime;
+    [[nodiscard]] bool hasRealmTime() const { return realmSeconds >= 0.0; }
+    /// The subzone under the player, 0 when nothing knows. A wind row's
+    /// "areas" match it, over its zone's row.
+    uint32_t areaId = 0;
+    /// A fixed wind, for an offline scene that wants to draw a particular one.
+    /// The client leaves it empty and the zone's wind blows.
+    std::optional<WindOverride> wind;
 };
 
 } // namespace rendering

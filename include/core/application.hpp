@@ -320,6 +320,9 @@ private:
     /// interface has settled into what it will actually look like.
     static constexpr int kScreenshotFrame = 30;
     int screenshotFrames_ = 0;
+    /// WOWEE_ENTITY_STREAM_PROBE has dressed all its players. Until then a
+    /// WOWEE_SCREENSHOT would show them half-made or not at all, so waits.
+    bool entityStreamProbeComplete_ = false;
     /// WOWEE_RECORD: a recording from start-up, then quit. See runFrame.
     int envRecordFrames_ = 0;
     std::chrono::steady_clock::time_point envRecordStart_{};

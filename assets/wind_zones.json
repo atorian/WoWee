@@ -1,0 +1,37 @@
+// The wind, per zone. Read by the renderer at its first update; the format is
+// described at the top of include/pipeline/wind_zones.hpp.
+//
+// The wind is a deterministic function of the realm's clock and the zone, so
+// every client of a realm sees the same wind without the server knowing.
+//
+//   regimes  kinds of wind: speeds in yards per second, gusts a minute and
+//            how much a gust multiplies the speed.
+//   default  everywhere no row names. "direction" is the way the wind blows
+//            toward, in degrees: 0 toward the renderer's +x (the game's
+//            west), 90 toward +y (its north). "weights" is how much of the
+//            time each regime holds; "dwellSeconds" how long one holds.
+//   zones    rows of { "name", "zones": [ids] and/or "areas": [subzone ids],
+//            and any of "direction", "weights", "dwellSeconds",
+//            "gusts": { "perMinuteScale", "strengthScale" } } - everything
+//            else comes from "default". "areas" wins over "zones".
+//   weather  what the realm's rain, snow or storm does: "favour" a regime or
+//            "force" one.
+//
+// The default is calibrated to the sway the shaders were tuned at: the
+// middle of "light", 2 yards a second, moves everything exactly as it moved
+// before there was a wind, along one direction now. 37 degrees is the
+// direction the grass alone used to have.
+{
+  "regimes": {
+    "calm":   { "speed": [0.0, 0.5],  "gusts": { "perMinute": 0, "strength": 1.0 } },
+    "light":  { "speed": [1.0, 3.0],  "gusts": { "perMinute": 1, "strength": 1.3 } },
+    "strong": { "speed": [4.0, 7.0],  "gusts": { "perMinute": 3, "strength": 1.6 } },
+    "storm":  { "speed": [8.0, 14.0], "gusts": { "perMinute": 6, "strength": 2.0 } }
+  },
+  "default": { "direction": 37, "weights": { "light": 1 }, "dwellSeconds": [120, 400] },
+  "zones": [],
+  "weather": {
+    "rain":  { "favour": "strong" },
+    "storm": { "force": "storm" }
+  }
+}

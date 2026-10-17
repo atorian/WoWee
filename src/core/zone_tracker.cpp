@@ -32,6 +32,7 @@ void ZoneTracker::update(const rendering::TerrainManager* terrain, const glm::ve
         if (mapId != lastResolvedZoneMapId_) {
             lastResolvedZoneMapId_ = mapId;
             lastResolvedZoneId_ = 0;
+            areaId_ = 0;
         }
     }
 
@@ -40,6 +41,7 @@ void ZoneTracker::update(const rendering::TerrainManager* terrain, const glm::ve
     if (terrain) {
         if (const auto areaId = terrain->getAreaIdAt(playerPosition.x, playerPosition.y)) {
             onOutdoorPvpObjective_ = zoneManager_->isOutdoorPvpArea(*areaId);
+            areaId_ = *areaId;
             lastResolvedZoneId_ = zoneManager_->resolveAreaZoneId(*areaId);
             zoneId_ = lastResolvedZoneId_;
             return;

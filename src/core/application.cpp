@@ -16,6 +16,7 @@
 #include "core/character_paths.hpp"
 #include "ui/settings_schema.hpp"
 #include "pipeline/m2_asset_loader.hpp"
+#include "core/enchant_visual.hpp"
 #include "core/coordinates.hpp"
 #include "ui/minimap_projection.hpp"
 #include "core/profiler.hpp"
@@ -107,6 +108,7 @@
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/chat_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
 #include "core/map_scope.hpp"
@@ -709,6 +711,48 @@ bool Application::initialize() {
                             return false;
                         }
                         characters->playAnimation(instance, animId, true);
+                    }
+                    // WOWEE_PROBE_WEAPON=<ItemDisplayInfo id> puts that weapon
+                    // in the right hand (a character model is the one to
+                    // probe then), and WOWEE_PROBE_ENCHANT=<enchant id> the
+                    // enchant's glow on it - through the routine that dresses
+                    // every player's weapons in game.
+                    if (const char* weapon = std::getenv("WOWEE_PROBE_WEAPON"); weapon && *weapon) {
+                        constexpr uint32_t kRightHand = 1;
+                        const auto displayId = static_cast<uint32_t>(std::stoul(weapon));
+                        auto items = assetManager->loadDBC("ItemDisplayInfo.dbc");
+                        const int32_t row = items ? items->findRecordById(displayId) : -1;
+                        if (row < 0) {
+                            LOG_ERROR("Model probe: weapon display ", displayId, " is not in ItemDisplayInfo");
+                            return false;
+                        }
+                        const auto art = pipeline::readItemDisplayArt(*items, static_cast<uint32_t>(row));
+                        const std::string weaponPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
+                        pipeline::M2Model weaponModel;
+                        if (art.modelFile.empty() ||
+                            !pipeline::loadM2WithSkin(*assetManager, weaponPath, weaponModel)) {
+                            LOG_ERROR("Model probe: weapon display ", displayId, " model '", weaponPath,
+                                      "' did not load");
+                            return false;
+                        }
+                        const std::string weaponTexture = art.textureName.empty() ? std::string()
+                            : "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
+                        if (!characters->attachWeapon(instance, kRightHand, weaponModel, 0xFFFF0302,
+                                                      weaponTexture)) {
+                            LOG_ERROR("Model probe: ", path, " cannot hold weapon display ", displayId);
+                            return false;
+                        }
+                        uint32_t enchant = 0;
+                        if (const char* e = std::getenv("WOWEE_PROBE_ENCHANT"); e && *e)
+                            enchant = static_cast<uint32_t>(std::stoul(e));
+                        uint32_t nextEffectModel = 0xFFFF0310;
+                        attachEnchantVisuals(
+                            *characters, *assetManager, instance, kRightHand, enchant,
+                            [&](const std::string& p, pipeline::M2Model& m) {
+                                return pipeline::loadM2WithSkin(*assetManager, p, m);
+                            },
+                            [&] { return nextEffectModel++; });
+                        LOG_INFO("Model probe: weapon ", weaponPath, " enchant ", enchant);
                     }
                 } else {
                     if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
@@ -3690,9 +3734,13 @@ void Application::presentWorldToRenderer(float deltaTime) {
 
     rendering::WorldEnvironment environment;
     environment.zoneId = zoneTracker_->zoneId();
+    environment.areaId = zoneTracker_->areaId();
     if (gameHandler) {
         environment.mapId = gameHandler->getCurrentMapId();
         environment.gameTime = gameHandler->getGameTime();
+        if (const auto realm = gameHandler->realmTime().realmSeconds()) {
+            environment.realmSeconds = *realm;
+        }
         environment.raining = gameHandler->isRaining();
         environment.weatherType = gameHandler->getWeatherType();
         environment.weatherIntensity = gameHandler->getWeatherIntensity();
@@ -3859,6 +3907,9 @@ void Application::prepareFrame() {
         static std::vector<float> times;
         static std::array<uint32_t, 19> fixtureEquipment{};
         static std::array<uint8_t, 19> fixtureTypes{};
+        // WOWEE_PROBE_ENCHANT=<SpellItemEnchantment id> puts that enchant on
+        // every main hand, the way another player's visible-item fields do.
+        static std::array<uint32_t, 19> fixtureEnchants{};
         static uint32_t fixtureMount = 0;
         const bool expanded = std::getenv("WOWEE_ENTITY_STREAM_EXPANDED") != nullptr;
         static constexpr uint64_t firstGuid = 0x1234000000000000ULL;
@@ -3902,6 +3953,8 @@ void Application::prepareFrame() {
             }
             fixtureEquipment = equipment;
             fixtureTypes = types;
+            if (const char* enchant = std::getenv("WOWEE_PROBE_ENCHANT"); enchant && *enchant)
+                fixtureEnchants[15] = static_cast<uint32_t>(std::stoul(enchant));
             if (expanded) {
                 if (auto dbc = assetManager->loadDBC("CreatureDisplayInfo.dbc")) {
                     for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
@@ -3929,7 +3982,9 @@ void Application::prepareFrame() {
                     appearance, 0, (mulgore ? -257.98f : 405.0f) + i / 6,
                     (mulgore ? -2917.58f : 5818.0f) + i % 6,
                     mulgore ? 52.9968f : 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid + i, equipment, types);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid + i, {.displayInfoIds = equipment, .inventoryTypes = types,
+                                    .enchantIds = fixtureEnchants});
             }
             renderer->getCamera()->setPosition(std::getenv("WOWEE_MULGORE_PROBE")
                 ? glm::vec3(-2930.58f, -256.98f, 55.0f)
@@ -3953,10 +4008,15 @@ void Application::prepareFrame() {
                 entitySpawner_->despawnPlayer(firstGuid + 1);
                 entitySpawner_->queuePlayerSpawn(firstGuid, 2, 0, 0, 0,
                     405.0f, 5818.0f, 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid, fixtureEquipment, fixtureTypes);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid, {.displayInfoIds = fixtureEquipment, .inventoryTypes = fixtureTypes,
+                                .enchantIds = fixtureEnchants});
                 entitySpawner_->queuePlayerSpawn(firstGuid + playerCount, 1, 1, 0, 0,
                     409.0f, 5820.0f, 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid + playerCount, fixtureEquipment, fixtureTypes);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid + playerCount,
+                    {.displayInfoIds = fixtureEquipment, .inventoryTypes = fixtureTypes,
+                     .enchantIds = fixtureEnchants});
                 entitySpawner_->setRemotePlayerMountDisplayId(firstGuid, fixtureMount);
                 entitySpawner_->setRemotePlayerMountDisplayId(firstGuid + playerCount, fixtureMount);
             }
@@ -3989,6 +4049,7 @@ void Application::prepareFrame() {
                          " max_ms=", times.back());
                 if (spawned != playerCount) LOG_ERROR("Entity stream probe lost players");
                 complete = true;
+                entityStreamProbeComplete_ = true;
             }
         }
     }
@@ -5044,7 +5105,10 @@ void Application::renderFrame(const FramePlan& plan) {
     // row counted in one place and not the other comes out as a sheet taller
     // than what is on it, which nothing but looking will catch. The in-game
     // screenshot key cannot reach the login screen, which is where that card is.
-    if (const char* shot = std::getenv("WOWEE_SCREENSHOT"); shot != nullptr && !plan.loading) {
+    const bool probeDressing =
+        std::getenv("WOWEE_ENTITY_STREAM_PROBE") != nullptr && !entityStreamProbeComplete_;
+    if (const char* shot = std::getenv("WOWEE_SCREENSHOT");
+        shot != nullptr && !plan.loading && !probeDressing) {
         // Let the interface settle first: ImGui sizes much of its layout from
         // what it measured last frame, and hides a window outright for its
         // first frame or two while it fits itself.

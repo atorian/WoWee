@@ -2342,7 +2342,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
+void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                               const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (scene_->instances.empty() || models.empty()) return;
@@ -2498,9 +2498,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // well - and one mapped copy across frames in flight let a CPU write
         // land inside the previous frame's reads. A foliage batch that lost
         // its alpha test that way casts the whole leaf quad, which is the
-        // canopy's outline in solid black instead of its cutout.
-        const glm::ivec4 passFlags{foliagePass ? 1 : 0, foliagePass ? 1 : 0,
-                                   foliagePass ? 1 : 0, 0};
+        // canopy's outline in solid black instead of its cutout. The flags are
+        // set per draw below, in ShadowPush.
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
@@ -2523,6 +2522,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                                           model.boundMin.z, model.boundMax.z,
                                           model.isStandingCloth);
             const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
+            // Bent in the wind only where the main pass bends it: foliage,
+            // mode 1. Ground clutter (mode 2) plays its own animation there
+            // and takes no shader wind, and its shadow swaying anyway was a
+            // shadow moving under a plant that did not.
+            const bool windBent = foliagePass && sway.mode == 1;
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -2568,15 +2572,23 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                     // The instance's own origin is what gives the wind its
                     // per-tree phase; the height and amplitude beside it are
                     // the model's.
+                    //
+                    // The wind's direction is turned into the model's own
+                    // space here, where the main pass turns it on the GPU:
+                    // the sway is applied before the model matrix.
                     const glm::vec3 origin = glm::vec3(instance.modelMatrix[3]);
+                    const float fade = windBent
+                        ? m2WindDistanceFade(glm::length(origin - cachedCamPos_)) : 0.0f;
+                    const ShadowWindPush casterWind = windBent
+                        ? shadowWindFor(wind, instance.modelMatrix) : ShadowWindPush{};
                     ShadowPush push{
                         .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
-                        .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
+                        .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y * fade),
                         .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0,
-                                            passFlags.z,
+                                            windBent ? 1 : 0,
                                             batch.drawState.alphaTest == 4 ? 224 : 0),
-                        .wind = glm::vec4(globalTime,
-                            m2WindDistanceFade(glm::length(origin - cachedCamPos_)), 0.0f, 0.0f)};
+                        .wind = casterWind.wind,
+                        .windPhases = casterWind.phases};
                     vkCmdPushConstants(cmd, shadowPipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                        0, sizeof(ShadowPush), &push);

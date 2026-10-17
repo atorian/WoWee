@@ -27,6 +27,7 @@
 #include "network/packet.hpp"
 #include "network/world_connection.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -145,7 +146,9 @@ public:
     /// Fails the test if it never is.
     void pump();
     /// Let this much game time pass, a frame at a time - for the timers the
-    /// game counts down by the frame's delta.
+    /// game counts down by the frame's delta. The game's monotonic clock
+    /// (GameServices::steadyNow) moves with every frame, here and in pump(),
+    /// so what it keeps running on real time sees the same seconds pass.
     void advance(float seconds);
 
     /// What the game sent, as logical opcodes, in order.
@@ -198,6 +201,11 @@ public:
     /// SMSG_UPDATE_OBJECT creating an item object, as 3.3.5a writes one: no
     /// movement, then its entry and stack count.
     static std::vector<uint8_t> createItemBody(uint64_t guid, uint32_t entry, uint32_t stack);
+    /// SMSG_ITEM_QUERY_SINGLE_RESPONSE describing one item template, field for
+    /// field as AzerothCore writes it: this display and inventory type, the
+    /// rest a plain item with no stats, spells or sockets.
+    static std::vector<uint8_t> itemTemplateBody(uint32_t entry, const std::string& name,
+                                                 uint32_t displayInfoId, uint32_t inventoryType);
     /// SMSG_UPDATE_OBJECT with one VALUES block for an object.
     static std::vector<uint8_t> valuesBody(uint64_t guid, const Fields& fields);
     /// Put the player's own object in view - what the realm's fields for the
@@ -216,6 +224,11 @@ private:
     bool connectionsRefused_ = false;
     std::vector<AddonEvent> addonEvents_;
     PlayerSpec player_;
+    /// The game's monotonic clock, advanced a frame at a time.
+    std::chrono::steady_clock::time_point now_{std::chrono::hours(1)};
+
+    /// One frame of the game, and of its clock.
+    void frame(float seconds);
 };
 
 /// A body under construction, little-endian as the wire is.
