@@ -70,6 +70,45 @@ TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path, const pip
     return cache.insert(key, std::move(texture), bytes, info);
 }
 
+NormalMapFormat normalMapFormatFor(const VkContext& ctx) {
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(ctx.getPhysicalDevice(), VK_FORMAT_BC7_UNORM_BLOCK, &props);
+    if ((props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0) return NormalMapFormat::Bc7;
+    static bool said = false;
+    if (!said) {
+        said = true;
+        LOG_WARNING("Normal maps: this device cannot sample BC7, so they are kept as RGBA8 - four times "
+                    "the video memory");
+    }
+    return NormalMapFormat::Rgba8;
+}
+
+TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map) {
+    if (!map.valid()) return {};
+    std::vector<const uint8_t*> levels;
+    std::vector<uint32_t> sizes;
+    for (const auto& level : map.levels) {
+        levels.push_back(level.data());
+        sizes.push_back(static_cast<uint32_t>(level.size()));
+    }
+    const VkFormat format =
+        map.format == NormalMapFormat::Bc7 ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_R8G8B8A8_UNORM;
+    auto texture = std::make_shared<VkTexture>();
+    if (!texture->uploadMips(ctx, levels.data(), sizes.data(), static_cast<uint32_t>(levels.size()), map.width,
+                             map.height, format) ||
+        !giveCachedSampler(ctx, *texture)) {
+        if (firstFailure("upload:" + key.path + "#normals")) {
+            LOG_WARNING("Texture cache: the normal map of '", key.path, "' (", map.width, "x", map.height,
+                        ") did not upload to the GPU; drawn without one");
+        }
+        return {};
+    }
+    const uint64_t bytes = texture->allocatedBytes();
+    return ctx.textures().insert(key, std::move(texture), bytes,
+                                 {.hasAlpha = false, .alphaIsSilhouette = false,
+                                  .heightVariance = map.heightVariance});
+}
+
 TextureRef cachePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba, uint32_t width,
                        uint32_t height, TextureInfo info) {
     auto texture = std::make_shared<VkTexture>();

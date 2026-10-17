@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/normal_map_encoding.hpp"
+
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -37,10 +39,9 @@ public:
     /// Runs on a worker: the texture to derive from, or nothing if it cannot
     /// be read.
     using Source = std::function<std::optional<Pixels>()>;
-    /// Runs on a worker: the normal/height map of `rgba`, and the variance of
-    /// its heights. Empty on failure.
-    using Derive = std::function<std::vector<uint8_t>(const uint8_t* rgba, uint32_t width,
-                                                      uint32_t height, float& variance)>;
+    /// Runs on a worker: the normal/height map of `rgba`, encoded for the GPU
+    /// with its mips and the variance of its heights. Invalid on failure.
+    using Derive = std::function<EncodedNormalMap(std::vector<uint8_t> rgba, uint32_t width, uint32_t height)>;
 
     struct Request {
         std::string key;
@@ -50,11 +51,8 @@ public:
     };
     struct Result {
         std::string key;
-        /// RGBA8: the normal in rgb, the height in a.
-        std::vector<uint8_t> pixels;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        float variance = 0.0f;
+        /// The normal in rgb, the height in a, ready to upload.
+        EncodedNormalMap map;
         /// The source could not be read or the map not derived. Said in the
         /// log by the builder, once per key; the owner stops asking.
         bool failed = false;

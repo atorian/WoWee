@@ -109,15 +109,13 @@ void NormalMapBuilder::work() {
             if (!source || source->rgba.empty() || source->width == 0 || source->height == 0) {
                 failure = "its texture could not be read";
             } else {
-                result.pixels = derive_(source->rgba.data(), source->width, source->height, result.variance);
-                result.width = source->width;
-                result.height = source->height;
-                if (result.pixels.empty()) failure = "nothing was derived from it";
+                result.map = derive_(std::move(source->rgba), source->width, source->height);
+                if (!result.map.valid()) failure = "nothing was derived from it";
             }
         } catch (const std::exception& e) {
             // bad_alloc among them: the map is skipped, the worker lives on.
             failure = e.what();
-            result.pixels.clear();
+            result.map = {};
         }
         if (!failure.empty()) {
             result.failed = true;

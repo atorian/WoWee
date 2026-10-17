@@ -7,6 +7,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/terrain_manager.hpp"
+#include "rendering/texture_upload.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -50,8 +51,8 @@ struct WorldLoader::PreparedMap {
         std::optional<rendering::InteriorLight> interior;
     };
     std::vector<Doodad> doodads;
-    std::unordered_map<std::string, pipeline::BLPImage> wmoTextures, m2Textures, normals;
-    std::unordered_map<std::string, float> variances;
+    std::unordered_map<std::string, pipeline::BLPImage> wmoTextures, m2Textures;
+    std::unordered_map<std::string, rendering::EncodedNormalMap> normals;
     std::string error;
     bool instance() const { return wdt.isWMOOnly() && !wdt.rootWMOPath.empty(); }
 };
@@ -162,14 +163,17 @@ std::unique_ptr<WorldLoader::Session> WorldLoader::begin(Entry entry, JobGroup& 
         return session;
     }
     auto* assets = assetManager_;
-    load_->future = jobs.submit([assets, name = load_->mapName](const JobGroup::Token& token) {
-        return prepareMap(*assets, name, token);
+    const auto normalMaps = renderer_->getVkContext()
+        ? rendering::normalMapFormatFor(*renderer_->getVkContext())
+        : rendering::NormalMapFormat::Rgba8;
+    load_->future = jobs.submit([assets, name = load_->mapName, normalMaps](const JobGroup::Token& token) {
+        return prepareMap(*assets, name, normalMaps, token);
     });
     return session;
 }
 
 std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::AssetManager& assets,
-        const std::string& mapName, const JobGroup::Token& token) {
+        const std::string& mapName, rendering::NormalMapFormat normalMaps, const JobGroup::Token& token) {
     auto result = std::make_shared<PreparedMap>();
     const std::string wdtPath = "World\\Maps\\" + mapName + "\\" + mapName + ".wdt";
     if (!token.current()) return result;
@@ -209,10 +213,9 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
         auto image = assets.loadTexture(key, true);
         if (image.isValid()) {
             const auto pixels = image.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(image) : image.data;
-            float variance = 0;
-            auto normal = pixels.empty() ? pipeline::BLPImage{} :
-                rendering::WMORenderer::generateNormalHeightMapPixels(pixels.data(), image.width, image.height, variance);
-            if (normal.isValid()) { result->normals[key] = std::move(normal); result->variances[key] = variance; }
+            auto normal = pixels.empty() ? rendering::EncodedNormalMap{} :
+                rendering::WMORenderer::prepareNormalHeightMap(pixels.data(), image.width, image.height, normalMaps);
+            if (normal.valid()) result->normals[key] = std::move(normal);
         } else LOG_WARNING("Instance texture unavailable: ", key, "; renderer will use its fallback");
         result->wmoTextures[key] = std::move(image);
     }
@@ -339,14 +342,14 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                         : ctx(c), wmo(w), m2(m) {
                         if (ctx) ctx->beginUploadBatch();
                         wmo->setPredecodedBLPCache(&p.wmoTextures);
-                        wmo->setPredecodedNormalMapCache(&p.normals, &p.variances);
+                        wmo->setPredecodedNormalMapCache(&p.normals);
                         wmo->setDeferNormalMaps(true);
                         m2->setPredecodedBLPCache(&p.m2Textures);
                     }
                     ~UploadScope() {
                         m2->setPredecodedBLPCache(nullptr);
                         wmo->setPredecodedBLPCache(nullptr);
-                        wmo->setPredecodedNormalMapCache(nullptr, nullptr);
+                        wmo->setPredecodedNormalMapCache(nullptr);
                         wmo->setDeferNormalMaps(false);
                         if (ctx) ctx->endUploadBatch();
                     }

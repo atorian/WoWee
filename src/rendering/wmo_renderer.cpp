@@ -2736,19 +2736,19 @@ void WMORenderer::WMOInstance::updateModelMatrix() {
     invModelMatrix = glm::inverse(modelMatrix);
 }
 
-pipeline::BLPImage WMORenderer::generateNormalHeightMapPixels(
-        const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance) {
-    pipeline::BLPImage result;
+EncodedNormalMap WMORenderer::prepareNormalHeightMap(const uint8_t* pixels, uint32_t width, uint32_t height,
+                                                     NormalMapFormat format) {
     // Two, where the character renderer asks for five: stone and wood at the
     // distance a wall is seen from, which a stronger gradient only roughens.
+    float variance = 0.0f;
     std::vector<uint8_t> output = rendering::generateNormalHeightMap(
-        pixels, width, height, kWmoNormalMapStrength, outVariance);
-    if (output.empty()) return result;
-    result.width = static_cast<int>(width);
-    result.height = static_cast<int>(height);
-    result.channels = 4;
-    result.data = std::move(output);
-    return result;
+        pixels, width, height, kWmoNormalMapStrength, variance);
+    if (output.empty()) return {};
+    return encodeNormalMap(std::move(output), width, height, format, variance);
+}
+
+NormalMapFormat WMORenderer::normalMapFormat() const {
+    return vkCtx_ ? normalMapFormatFor(*vkCtx_) : NormalMapFormat::Rgba8;
 }
 
 TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
@@ -2763,23 +2763,9 @@ TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
     if (predecodedNormalMapCache_) {
         auto normalIt = predecodedNormalMapCache_->find(resolvedPath);
         if (normalIt != predecodedNormalMapCache_->end()) {
-            float variance = 0.0f;
-            if (predecodedNormalMapVariances_) {
-                auto varianceIt = predecodedNormalMapVariances_->find(resolvedPath);
-                if (varianceIt != predecodedNormalMapVariances_->end()) {
-                    variance = varianceIt->second;
-                    predecodedNormalMapVariances_->erase(varianceIt);
-                }
-            }
-            const pipeline::BLPImage normalPixels = std::move(normalIt->second);
+            const EncodedNormalMap prepared = std::move(normalIt->second);
             predecodedNormalMapCache_->erase(normalIt);
-            if (normalPixels.isValid()) {
-                return cachePixels(*vkCtx_, key, normalPixels.data.data(),
-                                   static_cast<uint32_t>(normalPixels.width),
-                                   static_cast<uint32_t>(normalPixels.height),
-                                   {.hasAlpha = false, .alphaIsSilhouette = false,
-                                    .heightVariance = variance});
-            }
+            if (prepared.valid()) return cacheNormalMap(*vkCtx_, key, prepared);
         }
     }
     // Streaming defers what the workers did not prepare: the building draws
@@ -2798,14 +2784,11 @@ TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
     const std::vector<uint8_t> pixels =
         decoded->isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(*decoded) : decoded->data;
     if (pixels.empty()) return {};
-    float variance = 0.0f;
-    const pipeline::BLPImage normalPixels = generateNormalHeightMapPixels(
+    const EncodedNormalMap prepared = prepareNormalHeightMap(
         pixels.data(), static_cast<uint32_t>(decoded->width), static_cast<uint32_t>(decoded->height),
-        variance);
-    if (!normalPixels.isValid()) return {};
-    return cachePixels(*vkCtx_, key, normalPixels.data.data(), static_cast<uint32_t>(normalPixels.width),
-                       static_cast<uint32_t>(normalPixels.height),
-                       {.hasAlpha = false, .alphaIsSilhouette = false, .heightVariance = variance});
+        normalMapFormat());
+    if (!prepared.valid()) return {};
+    return cacheNormalMap(*vkCtx_, key, prepared);
 }
 
 WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {

@@ -176,11 +176,18 @@ if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_frame_targets PRIVATE Vulkan::Vulkan)
 endif()
 
+# Normal/height maps encoded for the GPU: BC7 blocks that read back close to
+# what was derived, a mip chain down to one texel.
+wowee_add_test(test_normal_map_encoding
+    SOURCES test_normal_map_encoding.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
+
 # Normal maps built on the builder's own few workers from a bounded queue,
 # nearest first. The derivation is a stand-in.
 wowee_add_test(test_normal_map_builder
     SOURCES test_normal_map_builder.cpp ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_builder.cpp)
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_builder.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
 
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count

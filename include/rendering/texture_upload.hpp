@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/normal_map_encoding.hpp"
 #include "rendering/texture_cache.hpp"
 
 #include <vulkan/vulkan.h>
@@ -30,6 +31,15 @@ bool giveCachedSampler(VkContext& ctx, VkTexture& texture);
 /// when it fails to upload or is refused: the caller draws its fallback.
 [[nodiscard]] TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path,
                                             const pipeline::BLPImage& image);
+
+/// How this device keeps normal maps: BC7 where it can sample it, RGBA8
+/// where it cannot.
+[[nodiscard]] NormalMapFormat normalMapFormatFor(const VkContext& ctx);
+
+/// Upload a normal/height map encoded on a worker, every level as it was
+/// made, and hand it to the cache under `key` with its height variance.
+/// Empty, said once per key, on failure or refusal.
+[[nodiscard]] TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map);
 
 /// Upload RGBA8 pixels with generated mips and hand them to the cache under
 /// `key`. Empty, said once per key, on failure or refusal.

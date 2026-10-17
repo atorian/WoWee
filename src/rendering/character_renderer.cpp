@@ -611,11 +611,15 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     // first, rather than a thread for each of them.
     normalMapBuilder_ = std::make_unique<NormalMapBuilder>(
         kNormalMapWorkers, kNormalMapQueue,
-        [](const uint8_t* rgba, uint32_t width, uint32_t height, float& variance) {
+        [format = normalMapFormatFor(*vkCtx_)](std::vector<uint8_t> rgba, uint32_t width, uint32_t height) {
             // Five, where the WMO renderer asks for two: this is skin and
             // cloth seen close up, and it wants the gradient exaggerated.
-            return rendering::generateNormalHeightMap(rgba, width, height, kCharacterNormalMapStrength,
-                                                      variance);
+            // Encoded here too, on the worker: the main thread only uploads.
+            float variance = 0.0f;
+            std::vector<uint8_t> normals = rendering::generateNormalHeightMap(
+                rgba.data(), width, height, kCharacterNormalMapStrength, variance);
+            if (normals.empty()) return EncodedNormalMap{};
+            return encodeNormalMap(std::move(normals), width, height, format, variance);
         });
 
     core::Logger::getInstance().info("Character renderer initialized (Vulkan)");
@@ -932,10 +936,8 @@ void CharacterRenderer::processPendingNormalMaps(int budget) {
         }
         TextureRef texture = cache.find({result.key, TextureForm::Decoded, 0});
         if (!texture) continue;
-        TextureRef normals = cachePixels(*vkCtx_, {result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey},
-                                         result.pixels.data(), result.width, result.height,
-                                         {.hasAlpha = false, .alphaIsSilhouette = false,
-                                          .heightVariance = result.variance});
+        TextureRef normals = cacheNormalMap(
+            *vkCtx_, {result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey}, result.map);
         if (normals) cache.setNormalMap(texture, std::move(normals));
     }
     if (!finished.empty()) vkCtx_->endUploadBatch();

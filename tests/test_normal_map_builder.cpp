@@ -46,9 +46,13 @@ NormalMapBuilder::Source pixels(Gate* gate = nullptr) {
 }
 
 NormalMapBuilder::Derive flat() {
-    return [](const uint8_t*, uint32_t w, uint32_t h, float& variance) {
-        variance = 0.5f;
-        return std::vector<uint8_t>(static_cast<size_t>(w) * h * 4, 255);
+    return [](std::vector<uint8_t>, uint32_t w, uint32_t h) {
+        wowee::rendering::EncodedNormalMap map;
+        map.width = w;
+        map.height = h;
+        map.heightVariance = 0.5f;
+        map.levels.push_back(std::vector<uint8_t>(static_cast<size_t>(w) * h * 4, 255));
+        return map;
     };
 }
 
@@ -124,9 +128,9 @@ TEST_CASE("a map whose texture cannot be read comes back failed rather than neve
             CHECK(r.failed);
         } else {
             CHECK_FALSE(r.failed);
-            CHECK(r.width == 4);
-            CHECK(r.pixels.size() == 4 * 4 * 4);
-            CHECK(r.variance == 0.5f);
+            CHECK(r.map.width == 4);
+            CHECK(r.map.bytes() == 4 * 4 * 4);
+            CHECK(r.map.heightVariance == 0.5f);
         }
     }
 }
