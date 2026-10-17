@@ -15,11 +15,10 @@
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/cloud_coverage.hpp"
-#include "rendering/sky_sun.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/weather.hpp"
 #include "rendering/lightning.hpp"
@@ -994,7 +993,6 @@ bool Renderer::initialize(RenderSurface* surface) {
     }
     // Expose sub-components via renderer accessors
     skybox = nullptr;  // Owned by skySystem; access via skySystem->getSkybox()
-    celestial = nullptr;
     starField = nullptr;
     clouds = nullptr;
     lensFlare = nullptr;
@@ -1148,7 +1146,6 @@ void Renderer::shutdown() {
 
     // Individual sky components are owned by skySystem; just null the aliases
     skybox = nullptr;
-    celestial = nullptr;
     starField = nullptr;
     clouds = nullptr;
     lensFlare = nullptr;
@@ -1336,8 +1333,7 @@ void Renderer::applyMsaaChange() {
     if (skySystem) {
         if (auto* sb = skySystem->getSkybox()) sb->recreatePipelines();
         if (auto* sf = skySystem->getStarField()) sf->recreatePipelines();
-        if (auto* ce = skySystem->getCelestial()) ce->recreatePipelines();
-        if (auto* sun = skySystem->getSun()) sun->recreatePipelines();
+        if (auto* bodies = skySystem->getBodies()) bodies->recreatePipelines();
         if (auto* cl = skySystem->getClouds()) cl->recreatePipelines();
         if (auto* lf = skySystem->getLensFlare()) lf->recreatePipelines();
     }
@@ -2074,53 +2070,76 @@ float Renderer::sampleSunOcclusion(const glm::vec3& sunDir) const {
     return 0.0f;
 }
 
-void Renderer::updateSunGlare(float deltaTime) {
+void Renderer::updateGlares(float deltaTime) {
     namespace sc = sky_celestial;
-    float sky = 0.0f;
-    float seen = 0.0f;
+    float sunSky = 0.0f, sunSeen = 0.0f, moonSeen = 0.0f;
     if (lightingManager) {
         const float day = lightingManager->getTimeOfDayHours() / 24.0f;
-        const sc::SunDisc disc = sc::sunDisc(day);
-        // Its hours, then what stands in front of it in the sky (0x7ef6e0).
-        sky = sc::lookup(sc::kSunGlareHours, day);
-        if (skySystem && skySystem->getClouds() && skySystem->getClouds()->isEnabled()) {
-            const Clouds* clouds = skySystem->getClouds();
-            sky *= 1.0f - cloud_coverage::coverageToward(disc.direction, clouds->getDensity(),
-                                                         clouds->getWindOffset());
-        }
+        // What every glare shares (0x7ef6e0): a sky model over the sky, and
+        // water over the camera.
+        float shared = 1.0f;
         float skyModel = 0.0f;
         for (const auto& layer : lightingManager->getSkyboxLayers()) {
             skyModel = std::max(skyModel, layer.weight);
         }
-        sky *= 1.0f - std::clamp(skyModel, 0.0f, 1.0f);
+        shared *= 1.0f - std::clamp(skyModel, 0.0f, 1.0f);
         if (const auto depth = cameraWaterDepth(); depth && *depth > 0.0f) {
-            sky *= 1.0f - std::clamp(0.1f * *depth, 0.0f, 1.0f);
+            shared *= 1.0f - std::clamp(0.1f * *depth, 0.0f, 1.0f);
         }
-        // And whether the eye can see the disc, asked only when there is
-        // anything to see.
-        seen = sky > 0.0f ? sky * (1.0f - sampleSunOcclusion(disc.direction)) : 0.0f;
+        const Clouds* clouds = skySystem ? skySystem->getClouds() : nullptr;
+        const auto coverageToward = [&](const glm::vec3& dir) {
+            if (!clouds || !clouds->isEnabled()) return 0.0f;
+            return cloud_coverage::coverageToward(dir, clouds->getDensity(), clouds->getWindOffset());
+        };
+        // Each body's own hours and the cloud in front of it; then whether the
+        // eye can see its disc, asked only when there is anything to see.
+        const sc::SkyDisc sun = sc::sunDisc(day);
+        sunSky = shared * sc::lookup(sc::kSunGlareHours, day) *
+                 sc::sunGlareThroughCloud(coverageToward(sun.direction));
+        sunSeen = sunSky > 0.0f ? sunSky * (1.0f - sampleSunOcclusion(sun.direction)) : 0.0f;
+        const sc::SkyDisc moon = sc::moonDisc(day);
+        const float moonSky = shared * sc::lookup(sc::kMoonGlareHours, day) *
+                              sc::moonGlareThroughCloud(coverageToward(moon.direction));
+        moonSeen = moonSky > 0.0f ? moonSky * (1.0f - sampleSunOcclusion(moon.direction)) : 0.0f;
     }
-    sunGlare_ = sc::easeGlare(sunGlare_, seen, deltaTime);
-    sunGlareSky_ = sc::easeGlare(sunGlareSky_, sky, deltaTime);
+    sunGlare_ = sc::easeGlare(sc::kSunGlare, sunGlare_, sunSeen, deltaTime);
+    sunGlareSky_ = sc::easeGlare(sc::kSunGlare, sunGlareSky_, sunSky, deltaTime);
+    moonGlare_ = sc::easeGlare(sc::kMoonGlare, moonGlare_, moonSeen, deltaTime);
 }
 
-void Renderer::drawSunGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+void Renderer::drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     namespace sc = sky_celestial;
-    if (!skySystem || !skySystem->getSun() || !camera || !lightingManager) return;
-    if (sunGlare_ <= 0.0f) return;
-    const sc::SunDisc disc = sc::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f);
-    const float facing = glm::dot(glm::normalize(camera->getForward()), disc.direction);
-    const sc::GlareShape shape = sc::glareShape(facing);
-    const float alpha = shape.alpha * sunGlare_ * sc::weatherFade(environment_.weatherIntensity);
-    skySystem->getSun()->renderGlare(cmd, perFrameSet, disc.direction, shape.size,
-                                     lightingManager->getLightingParams().sunColor, alpha);
+    SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
+    if (!bodies || !camera || !lightingManager) return;
+    const float day = lightingManager->getTimeOfDayHours() / 24.0f;
+    const glm::vec3 forward = glm::normalize(camera->getForward());
+    const glm::vec3& colour = lightingManager->getLightingParams().sunColor;
+    const float weather = sc::weatherFade(environment_.weatherIntensity);
+    if (sunGlare_ > 0.0f) {
+        const sc::SkyDisc sun = sc::sunDisc(day);
+        const sc::GlareShape shape = sc::sunGlareShape(glm::dot(forward, sun.direction));
+        bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Sun, sun.direction, shape.size,
+                            colour, shape.alpha * sunGlare_ * weather);
+    }
+    if (moonGlare_ > 0.0f) {
+        const sc::SkyDisc moon = sc::moonDisc(day);
+        const sc::GlareShape shape =
+            sc::moonGlareShape(glm::dot(forward, moon.direction), moon.scale);
+        bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Moon, moon.direction, shape.size,
+                            colour, shape.alpha * moonGlare_ * weather);
+    }
 }
 
 void Renderer::logSunDiagnostic(const SkyParams& params) {
     if (!skySystem || !camera) return;
-    const SkySun* skySun = skySystem->getSun();
-    SkySun::DiscDraw sun = skySun ? skySun->lastDiscDraw() : SkySun::DiscDraw{};
-    if (skySystem->celestialSkipped()) sun = {.drawn = false, .skipped = "under a sky model"};
+    const SkyBodies* bodies = skySystem->getBodies();
+    SkyBodies::DiscDraw sun =
+        bodies ? bodies->lastDiscDraw(SkyBodies::Body::Sun) : SkyBodies::DiscDraw{};
+    SkyBodies::DiscDraw moon =
+        bodies ? bodies->lastDiscDraw(SkyBodies::Body::Moon) : SkyBodies::DiscDraw{};
+    if (skySystem->celestialSkipped()) {
+        sun = moon = {.drawn = false, .skipped = "under a sky model"};
+    }
 
     const glm::vec3 sunDir = params.sunDisc.direction;
     const SunOnScreen screen =
@@ -2138,6 +2157,7 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
         .occlusionStep = static_cast<int>(sunGlare_ * 4.0f + 0.5f),
         .hourStep = static_cast<int>(params.timeOfDay * 4.0f),
         .weather = params.weatherIntensity > 0.01f,
+        .moonDrawn = moon.drawn,
     };
     if (state == sunDiagLast_ || globalTime - sunDiagLoggedAt_ < 0.5) return;
     sunDiagLast_ = state;
@@ -2154,7 +2174,10 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
              " inView=", inView, " uv=(", screen.uv.x, ",", screen.uv.y, ")",
              " fromView=", fromView,
              " colour=", v3(params.sunColor), " alpha=", sun.alpha,
-             " glare=", sunGlare_, " glareSky=", sunGlareSky_, " clouds=", params.cloudDensity,
+             " glare=", sunGlare_, " glareSky=", sunGlareSky_,
+             " moon=", moon.drawn ? "drawn" : moon.skipped,
+             " moonElev=", glm::degrees(std::asin(glm::clamp(params.moonDisc.direction.z, -1.0f, 1.0f))),
+             " moonGlare=", moonGlare_, " clouds=", params.cloudDensity,
              " weather=", params.weatherIntensity,
              " fog=", volumetricThisFrame_ ? fogExtinction_ : 0.0f,
              " msaa=", int(vkCtx ? vkCtx->getMsaaSamples() : 1));
@@ -2165,7 +2188,7 @@ void Renderer::update(float deltaTime) {
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
 
-    updateSunGlare(deltaTime);
+    updateGlares(deltaTime);
 
     auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
@@ -3263,7 +3286,7 @@ void Renderer::renderWorld() {
             if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
             if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
-            drawSunGlare(cmd, perFrameSet);
+            drawGlares(cmd, perFrameSet);
 
             renderUnderwaterOverlay(cmd);
             renderPostSceneOverlays(cmd);
@@ -3479,7 +3502,7 @@ void Renderer::renderWorld() {
         if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
-        drawSunGlare(currentCmd, perFrameSet);
+        drawGlares(currentCmd, perFrameSet);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
         if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");

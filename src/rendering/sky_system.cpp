@@ -1,11 +1,10 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/sky_sun.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
@@ -34,17 +33,10 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
         return false;
     }
 
-    // Celestial bodies - sun + 2 moons (Vulkan)
-    celestial_ = std::make_unique<Celestial>();
-    if (!celestial_->initialize(ctx, perFrameLayout)) {
-        LOG_ERROR("Failed to initialize celestial bodies");
-        return false;
-    }
-
-    // The sun's disc and glare, as the client draws them.
-    sun_ = std::make_unique<SkySun>();
-    if (!sun_->initialize(ctx, perFrameLayout)) {
-        LOG_ERROR("Failed to initialize the sun's disc and glare");
+    // The sun and the moon, discs and glares, as the client draws them.
+    bodies_ = std::make_unique<SkyBodies>();
+    if (!bodies_->initialize(ctx, perFrameLayout)) {
+        LOG_ERROR("Failed to initialize the sun and moon");
         return false;
     }
 
@@ -85,15 +77,13 @@ void SkySystem::shutdown() {
     if (lensFlare_)  lensFlare_->shutdown();
     if (clouds_)     clouds_->shutdown();
     if (starField_)  starField_->shutdown();
-    if (celestial_)  celestial_->shutdown();
-    if (sun_)        sun_->shutdown();
+    if (bodies_)     bodies_->shutdown();
     if (skybox_)     skybox_->shutdown();
 
     lensFlare_.reset();
     clouds_.reset();
     starField_.reset();
-    celestial_.reset();
-    sun_.reset();
+    bodies_.reset();
     skybox_.reset();
 
     initialized_ = false;
@@ -105,7 +95,6 @@ void SkySystem::update(float deltaTime) {
     }
 
     if (skybox_)    skybox_->update(deltaTime);
-    if (celestial_) celestial_->update(deltaTime);
     if (starField_) starField_->update(deltaTime);
     if (clouds_)    clouds_->update(deltaTime);
 }
@@ -153,18 +142,15 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         }
     }
 
-    // --- The sun's disc, on its own path, then the moons ---
-    if (sun_) {
-        sun_->renderDisc(cmd, perFrameSet, params.sunDisc, params.sunColor,
-                         sky_celestial::weatherFade(params.weatherIntensity));
-    }
-    if (celestial_) {
-        // Gate moon visibility on how dark the DBC sky actually is. The
-        // hardcoded 19:00 night window can precede sky darkening by hours,
-        // and full-brightness moons on a daylight sky read as extra suns.
-        float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
-        float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
-        celestial_->render(cmd, perFrameSet, params.timeOfDay, params.gameTime, nightFactor);
+    // --- The sun's disc, then the moon's, each on its own path (0x7f0b43) ---
+    // Both in the sun's colour and put out by weather alike; each is gone when
+    // its path takes it under the horizon.
+    if (bodies_) {
+        const float weather = sky_celestial::weatherFade(params.weatherIntensity);
+        bodies_->renderDisc(cmd, perFrameSet, SkyBodies::Body::Sun, params.sunDisc,
+                            params.sunColor, weather);
+        bodies_->renderDisc(cmd, perFrameSet, SkyBodies::Body::Moon, params.moonDisc,
+                            params.sunColor, weather);
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
@@ -188,17 +174,7 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void SkySystem::loadTextures(pipeline::AssetManager* assets) {
-    if (sun_) sun_->loadTextures(assets);
-}
-
-void SkySystem::setMoonPhaseCycling(bool enabled) {
-    if (celestial_) celestial_->setMoonPhaseCycling(enabled);
-}
-void SkySystem::setBlueChildPhase(float phase) {
-    if (celestial_) celestial_->setBlueChildPhase(phase);
-}
-float SkySystem::getBlueChildPhase() const {
-    return celestial_ ? celestial_->getBlueChildPhase() : 0.25f;
+    if (bodies_) bodies_->loadTextures(assets);
 }
 
 } // namespace rendering

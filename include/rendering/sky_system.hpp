@@ -13,11 +13,10 @@ namespace rendering {
 class Camera;
 class VkContext;
 class Skybox;
-class Celestial;
 class StarField;
 class Clouds;
 class LensFlare;
-class SkySun;
+class SkyBodies;
 class LightingManager;
 
 /**
@@ -26,11 +25,12 @@ class LightingManager;
 struct SkyParams {
     // Sun/moon positioning
     glm::vec3 directionalDir{0.0f, -1.0f, 0.3f};
-    /// The sun's disc and glare colour: LightingParams' sunColor, not the
-    /// light the sun casts.
+    /// The sun's and the moon's disc and glare colour: LightingParams'
+    /// sunColor, not the light the sun casts.
     glm::vec3 sunColor{1.0f, 0.97f, 0.87f};
-    /// Where the disc stands at this hour - its own path, not the light's.
-    sky_celestial::SunDisc sunDisc;
+    /// Where each disc stands at this hour - its own path, not the light's.
+    sky_celestial::SkyDisc sunDisc;
+    sky_celestial::SkyDisc moonDisc;
 
     // Sky colors (for skybox tinting/blending)
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};
@@ -45,7 +45,7 @@ struct SkyParams {
     float weatherIntensity = 0.0f;  // 0-1 (rain/snow intensity, attenuates lens flare)
     // How much of the sun's glare the camera sees, eased, 0 to 1: its hours,
     // the cloud and weather in front of it, a sky model over it and whatever
-    // stands between it and the eye (Renderer::updateSunGlare). The lens
+    // stands between it and the eye (Renderer::updateGlares). The lens
     // flare is drawn by it. Zero for a pass that is not the camera's own.
     float sunGlareVisibility = 0.0f;
 
@@ -62,12 +62,12 @@ struct SkyParams {
 /**
  * Unified sky rendering system
  *
- * Coordinates skybox (authoritative), celestial bodies (sun + 2 moons),
- * and fallback procedural stars. Driven by lighting system data.
+ * Coordinates skybox (authoritative), the sun and the moon, and fallback
+ * procedural stars. Driven by lighting system data.
  *
  * Architecture:
  * - Skybox is PRIMARY (includes baked stars from M2 models)
- * - Celestial renders sun + White Lady + Blue Child
+ * - SkyBodies draws the sun's and the moon's discs, as the client does
  * - StarField is DEBUG/FALLBACK only (disabled when skybox has stars)
  */
 class SkySystem {
@@ -111,28 +111,14 @@ public:
     void setDebugSkyMode(bool enabled) { debugSkyMode_ = enabled; }
     [[nodiscard]] bool isDebugSkyMode() const { return debugSkyMode_; }
 
-    /**
-     * Get sun position in world space (for lens flare, shadows, etc.)
-     */
-
-    /**
-     * Enable/disable moon phase cycling
-     */
-    void setMoonPhaseCycling(bool enabled);
-
-    void setBlueChildPhase(float phase);
-
-    [[nodiscard]] float getBlueChildPhase() const;
-
     // Component accessors (for direct control if needed)
     [[nodiscard]] Skybox*    getSkybox()    const { return skybox_.get(); }
-    [[nodiscard]] Celestial* getCelestial() const { return celestial_.get(); }
     [[nodiscard]] StarField* getStarField() const { return starField_.get(); }
     [[nodiscard]] Clouds*    getClouds()    const { return clouds_.get(); }
     [[nodiscard]] LensFlare* getLensFlare() const { return lensFlare_.get(); }
-    [[nodiscard]] SkySun*    getSun()       const { return sun_.get(); }
+    [[nodiscard]] SkyBodies* getBodies()    const { return bodies_.get(); }
 
-    /// The sun's textures, once the client's data is open.
+    /// The sun's and the moon's textures, once the client's data is open.
     void loadTextures(pipeline::AssetManager* assets);
 
     /// Whether the last render() drew the sun, and if not why - including
@@ -141,11 +127,10 @@ public:
 
 private:
     std::unique_ptr<Skybox>    skybox_;      // Authoritative sky
-    std::unique_ptr<Celestial> celestial_;   // Sun + 2 moons
     std::unique_ptr<StarField> starField_;   // Fallback procedural stars
     std::unique_ptr<Clouds>    clouds_;      // Cloud layer
     std::unique_ptr<LensFlare> lensFlare_;   // Sun lens flare
-    std::unique_ptr<SkySun>    sun_;         // Sun disc and glare
+    std::unique_ptr<SkyBodies> bodies_;      // Sun and moon, discs and glares
 
     bool proceduralStarsEnabled_ = false;
     bool debugSkyMode_ = false;

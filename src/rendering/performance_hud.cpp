@@ -6,7 +6,7 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
@@ -350,25 +350,14 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Text("Time: %02d:%02d", hours, minutes);
             ImGui::Text("Auto: %s", skybox->isTimeProgressionEnabled() ? "YES" : "NO");
 
-            // Celestial info
-            auto* celestial = renderer->getCelestial();
-            if (celestial) {
-                ImGui::Text("Sun/Moon: %s", celestial->isEnabled() ? "YES" : "NO");
-
-                // Moon phase info
-                float phase = celestial->getMoonPhase();
-                const char* phaseName = "Unknown";
-                if (phase < 0.0625f || phase >= 0.9375f) phaseName = "New";
-                else if (phase < 0.1875f) phaseName = "Wax Cresc";
-                else if (phase < 0.3125f) phaseName = "1st Qtr";
-                else if (phase < 0.4375f) phaseName = "Wax Gibb";
-                else if (phase < 0.5625f) phaseName = "Full";
-                else if (phase < 0.6875f) phaseName = "Wan Gibb";
-                else if (phase < 0.8125f) phaseName = "Last Qtr";
-                else phaseName = "Wan Cresc";
-
-                ImGui::Text("Moon: %s (%.0f%%)", phaseName, phase * 100.0f);
-                ImGui::Text("Cycling: %s", celestial->isMoonPhaseCycling() ? "YES" : "NO");
+            // The sun's and the moon's discs: drawn, or why not.
+            if (auto* bodies = renderer->getSkyBodies()) {
+                const auto line = [&](const char* name, SkyBodies::Body body) {
+                    const auto& draw = bodies->lastDiscDraw(body);
+                    ImGui::Text("%s: %s", name, draw.drawn ? "drawn" : draw.skipped);
+                };
+                line("Sun", SkyBodies::Body::Sun);
+                line("Moon", SkyBodies::Body::Moon);
             }
 
             // Star field info

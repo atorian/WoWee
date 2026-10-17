@@ -65,7 +65,6 @@
 #include "core/resource_monitor.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"

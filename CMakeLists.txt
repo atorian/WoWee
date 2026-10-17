@@ -1007,8 +1007,7 @@ set(WOWEE_SOURCES
     src/rendering/liquid_scene.cpp
     src/rendering/wind_waves.cpp
     src/rendering/skybox.cpp
-    src/rendering/celestial.cpp
-    src/rendering/sky_sun.cpp
+    src/rendering/sky_bodies.cpp
     src/rendering/starfield.cpp
     src/rendering/clouds.cpp
     src/rendering/lens_flare.cpp
@@ -1344,7 +1343,7 @@ set(WOWEE_HEADERS
     include/rendering/performance_hud.hpp
     include/rendering/water_renderer.hpp
     include/rendering/skybox.hpp
-    include/rendering/celestial.hpp
+    include/rendering/sky_bodies.hpp
     include/rendering/starfield.hpp
     include/rendering/clouds.hpp
     include/rendering/lens_flare.hpp

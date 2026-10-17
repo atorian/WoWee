@@ -77,12 +77,42 @@ inline constexpr DayKey kSunScale[] = {
 /// The client draws sky objects twelve units from the eye.
 inline constexpr float kSkyDistance = 12.0f;
 
+/// The moon's angle from the zenith (0x7ef1b4, table 0xd391a0): 35 degrees
+/// at midnight, under the horizon from 04:00 to 22:00. Up from about 22:18 to
+/// 03:24.
+inline constexpr DayKey kMoonZenithAngle[] = {
+    {0.0f, 0.610865f}, {0.003472f, 0.610865f}, {0.166667f, 1.745329f},
+    {0.916667f, 1.745329f}, {0.996528f, 0.610865f}};
+/// Its azimuth, the sun's: 45 degrees all night.
+inline constexpr float kMoonAzimuth = 0.785398f;
+/// Its size, 1.75 times this: one and a half through the day it is not seen,
+/// one at midnight.
+inline constexpr DayKey kMoonScale[] = {
+    {0.041667f, 1.0f}, {0.166667f, 1.5f}, {0.916667f, 1.5f}, {0.999306f, 1.0f}};
+inline constexpr float kMoonScaleFactor = 1.75f;
+
+/// A body's path across the sky and its size, as the client keys them. The
+/// sun and the moon run the same code on their own tables.
+struct BodyPath {
+    std::span<const DayKey> zenithAngle;
+    float azimuth;
+    std::span<const DayKey> scale;
+    float scaleFactor;
+};
+inline constexpr BodyPath kSunPath{kSunZenithAngle, kSunAzimuth, kSunScale, 1.0f};
+inline constexpr BodyPath kMoonPath{kMoonZenithAngle, kMoonAzimuth, kMoonScale,
+                                    kMoonScaleFactor};
+
 /// The glare's own hours: in from 06:30 to 07:30, out from 19:30 to 21:00.
 inline constexpr DayKey kSunGlareHours[] = {
     {0.270833f, 0.0f}, {0.3125f, 1.0f}, {0.8125f, 1.0f}, {0.875f, 0.0f}};
+/// The moon's glare: from 22:45 to 03:15, fading in and out over the hour
+/// either side.
+inline constexpr DayKey kMoonGlareHours[] = {
+    {0.083333f, 1.0f}, {0.135417f, 0.0f}, {0.947917f, 0.0f}, {0.999306f, 1.0f}};
 
-/// Where the disc stands and how it is cut by the horizon.
-struct SunDisc {
+/// Where a disc stands and how it is cut by the horizon.
+struct SkyDisc {
     /// Toward the disc, unit, in render space.
     glm::vec3 direction{0.0f, 0.0f, 1.0f};
     /// The disc's centre height over the horizon at the sky distance, as the
@@ -92,31 +122,33 @@ struct SunDisc {
     float scale = 1.0f;
 };
 
-inline SunDisc sunDisc(float day) {
-    const float theta = lookup(kSunZenithAngle, day);
+inline SkyDisc skyDisc(const BodyPath& path, float day) {
+    const float theta = lookup(path.zenithAngle, day);
     const float sinTheta = cosPi(theta * 0.31831f - 0.5f);
     const float cosTheta = cosPi(theta * 0.31831f);
-    const float sinPhi = cosPi(kSunAzimuth * 0.31831f - 0.5f);
-    const float cosPhi = cosPi(kSunAzimuth * 0.31831f);
+    const float sinPhi = cosPi(path.azimuth * 0.31831f - 0.5f);
+    const float cosPhi = cosPi(path.azimuth * 0.31831f);
     // The client's world axes: x north, y west, z up.
     const glm::vec3 canonical(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);
-    SunDisc disc;
+    SkyDisc disc;
     disc.direction = glm::normalize(core::coords::canonicalToRender(glm::normalize(canonical)));
     disc.horizonHeight = kSkyDistance * cosTheta;
-    disc.scale = lookup(kSunScale, day);
+    disc.scale = path.scaleFactor * lookup(path.scale, day);
     return disc;
 }
+inline SkyDisc sunDisc(float day) { return skyDisc(kSunPath, day); }
+inline SkyDisc moonDisc(float day) { return skyDisc(kMoonPath, day); }
 
 /// How much of the disc shows at a point `local` of its height above its
 /// centre (-0.5 bottom edge, 0.5 top edge): none under the horizon, fading in
 /// over the 0.4 units above it (0x7edee0, alpha = clamp(2.5 h, 0, 1)).
-inline float discHorizonAlpha(const SunDisc& disc, float local) {
+inline float discHorizonAlpha(const SkyDisc& disc, float local) {
     const float h = disc.horizonHeight + local * disc.scale;
     return std::clamp(2.5f * h, 0.0f, 1.0f);
 }
 
 /// Whether any of the disc is above the horizon.
-inline bool discAboveHorizon(const SunDisc& disc) {
+inline bool discAboveHorizon(const SkyDisc& disc) {
     return disc.horizonHeight + 0.5f * disc.scale > 0.0f;
 }
 
@@ -126,22 +158,46 @@ inline float weatherFade(float weatherIntensity) {
     return 1.0f - std::min(1.0f, 4.0f * std::max(weatherIntensity, 0.0f));
 }
 
-/// The glare as the camera sees it (0x7ef6e0), from `facing`, the cosine
-/// between the view direction and the direction to the sun.
+/// A glare as the camera sees it (0x7ef6e0), from `facing`, the cosine
+/// between the view direction and the direction to the body.
 struct GlareShape {
     float size = 3.0f;   ///< width at the sky distance
     float alpha = 0.5f;  ///< before visibility
 };
-inline GlareShape glareShape(float facing) {
-    const float f = (std::max(facing, 0.7f) - 0.7f) / 0.3f;
+inline float glareFacing(float facing) { return (std::max(facing, 0.7f) - 0.7f) / 0.3f; }
+/// The sun's grows from 3 to 20 and brightens by half as the view turns onto it.
+inline GlareShape sunGlareShape(float facing) {
+    const float f = glareFacing(facing);
     return {.size = 3.0f + (20.0f - 3.0f) * f, .alpha = 0.5f + 0.5f * f};
 }
+/// The moon's is twice the moon at any angle and brightens from a tenth.
+inline GlareShape moonGlareShape(float facing, float moonScale) {
+    const float f = glareFacing(facing);
+    return {.size = 2.0f * moonScale, .alpha = 0.1f + 0.9f * f};
+}
 
-/// The glare's visibility eased toward a target: up at 4 a second, down at
-/// 1.51515 a second, from zero (0x7ef6e0).
-inline float easeGlare(float current, float target, float dt) {
-    if (target > current) return std::min(current + 4.0f * dt, target);
-    return std::max(current - 1.51515f * dt, target);
+/// A glare's hours and how fast its visibility follows its target.
+struct GlareRules {
+    std::span<const DayKey> hours;
+    float riseRate;  ///< a second
+    float fallRate;  ///< a second
+};
+inline constexpr GlareRules kSunGlare{kSunGlareHours, 4.0f, 1.51515f};
+inline constexpr GlareRules kMoonGlare{kMoonGlareHours, 3.0303f, 1.51515f};
+
+/// A glare's visibility eased toward a target, from zero (0x7ef6e0).
+inline float easeGlare(const GlareRules& rules, float current, float target, float dt) {
+    if (target > current) return std::min(current + rules.riseRate * dt, target);
+    return std::max(current - rules.fallRate * dt, target);
+}
+
+/// What the cloud in front of a body leaves of its glare, from the cloud's
+/// coverage there (0x7f1020, 0x7f1040): the sun's is dimmed by it; the moon's
+/// is brightest through half cover and gone under clear sky and thick cloud
+/// alike - the client's own formula, unexplained.
+inline float sunGlareThroughCloud(float coverage) { return 1.0f - coverage; }
+inline float moonGlareThroughCloud(float coverage) {
+    return 1.0f - std::abs(2.0f * coverage - 1.0f);
 }
 
 /// How much the scene's direct and ambient light are dimmed when looking at

@@ -1,4 +1,4 @@
-#include "rendering/sky_sun.hpp"
+#include "rendering/sky_bodies.hpp"
 
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -21,14 +21,11 @@ namespace {
 constexpr float kSpriteDistance = 800.0f;
 constexpr float kUnitsPerClientUnit = kSpriteDistance / sky_celestial::kSkyDistance;
 
-constexpr const char* kDiscTexture = "Textures\\sunCenter.blp";
-constexpr const char* kGlareTexture = "Textures\\sunGlare.blp";
-
 }  // namespace
 
-SkySun::~SkySun() { shutdown(); }
+SkyBodies::~SkyBodies() { shutdown(); }
 
-VkPipeline SkySun::buildPipeline(bool glare) {
+VkPipeline SkyBodies::buildPipeline(bool glare) {
     VkDevice device = vkCtx_->getDevice();
     auto shaders = loadShaderPair(device, "assets/shaders/sky_sprite.vert.spv",
                                   "assets/shaders/sky_sprite.frag.spv", "sky sprite");
@@ -45,7 +42,7 @@ VkPipeline SkySun::buildPipeline(bool glare) {
         .setDynamicStates(viewportAndScissorDynamic());
     if (glare) {
         // Over the world, added, and not depth tested: the caller's visibility
-        // says whether the sun can be seen.
+        // says whether the body can be seen.
         builder.setDepthTest(false, false, VK_COMPARE_OP_ALWAYS)
             .setColorBlendAttachment(PipelineBuilder::blendAdditive());
     } else {
@@ -56,9 +53,14 @@ VkPipeline SkySun::buildPipeline(bool glare) {
     return builder.build(device, vkCtx_->getPipelineCache());
 }
 
-bool SkySun::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
+bool SkyBodies::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     vkCtx_ = ctx;
     VkDevice device = vkCtx_->getDevice();
+
+    discSprite(Body::Sun).path = "Textures\\sunCenter.blp";
+    glareSprite(Body::Sun).path = "Textures\\sunGlare.blp";
+    discSprite(Body::Moon).path = "Textures\\moon.blp";
+    glareSprite(Body::Moon).path = "Textures\\moonGlare.blp";
 
     VkDescriptorSetLayoutBinding sampler{};
     sampler.binding = 0;
@@ -68,43 +70,43 @@ bool SkySun::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     textureSetLayout_ = createDescriptorSetLayout(device, {sampler});
 
     VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                  .descriptorCount = 2};
+                                  .descriptorCount = kSpriteCount};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 2;
+    poolInfo.maxSets = kSpriteCount;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     if (!textureSetLayout_ ||
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool_) != VK_SUCCESS) {
-        LOG_ERROR("SkySun: could not create its texture descriptors - no sun disc or glare");
+        LOG_ERROR("SkyBodies: could not create its texture descriptors - no sun or moon drawn");
         return false;
     }
-    VkDescriptorSetLayout layouts[2] = {textureSetLayout_, textureSetLayout_};
+    VkDescriptorSetLayout layouts[kSpriteCount];
+    for (auto& layout : layouts) layout = textureSetLayout_;
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPool_;
-    allocInfo.descriptorSetCount = 2;
+    allocInfo.descriptorSetCount = kSpriteCount;
     allocInfo.pSetLayouts = layouts;
-    VkDescriptorSet sets[2] = {};
+    VkDescriptorSet sets[kSpriteCount] = {};
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        LOG_ERROR("SkySun: could not allocate its texture sets - no sun disc or glare");
+        LOG_ERROR("SkyBodies: could not allocate its texture sets - no sun or moon drawn");
         return false;
     }
-    discSetAllocated_ = sets[0];
-    glareSetAllocated_ = sets[1];
+    for (int i = 0; i < kSpriteCount; ++i) sprites_[i].allocated = sets[i];
 
     VkPushConstantRange push{};
     push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     push.size = sizeof(SpritePush);
     pipelineLayout_ = createPipelineLayout(device, {perFrameLayout, textureSetLayout_}, {push});
     if (!pipelineLayout_) {
-        LOG_ERROR("SkySun: could not create its pipeline layout - no sun disc or glare");
+        LOG_ERROR("SkyBodies: could not create its pipeline layout - no sun or moon drawn");
         return false;
     }
     discPipeline_ = buildPipeline(false);
     glarePipeline_ = buildPipeline(true);
     if (!discPipeline_ || !glarePipeline_) {
-        LOG_ERROR("SkySun: could not build its pipelines - no sun disc or glare");
+        LOG_ERROR("SkyBodies: could not build its pipelines - no sun or moon drawn");
         return false;
     }
 
@@ -127,47 +129,43 @@ bool SkySun::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     return vertexBuffer_ && indexBuffer_;
 }
 
-bool SkySun::loadTexture(pipeline::AssetManager* assets, const char* path, VkTexture& texture,
-                         VkDescriptorSet set, VkDescriptorSet& published) {
-    published = VK_NULL_HANDLE;
-    if (!set) return false;
-    const pipeline::BLPImage blp = assets->loadTexture(path);
+void SkyBodies::loadSprite(pipeline::AssetManager* assets, Sprite& sprite) {
+    if (sprite.set || !sprite.allocated) return;
+    const pipeline::BLPImage blp = assets->loadTexture(sprite.path);
     if (!blp.isValid()) {
-        LOG_WARNING("SkySun: ", path, " did not load - that part of the sun is not drawn");
-        return false;
+        LOG_WARNING("SkyBodies: ", sprite.path, " did not load - that sprite is not drawn");
+        return;
     }
     VkDevice device = vkCtx_->getDevice();
-    if (!texture.upload(*vkCtx_, blp.data.data(), blp.width, blp.height,
-                        VK_FORMAT_R8G8B8A8_UNORM, true)) {
-        LOG_WARNING("SkySun: ", path, " could not be uploaded - that part of the sun is not drawn");
-        return false;
+    if (!sprite.texture.upload(*vkCtx_, blp.data.data(), blp.width, blp.height,
+                               VK_FORMAT_R8G8B8A8_UNORM, true)) {
+        LOG_WARNING("SkyBodies: ", sprite.path, " could not be uploaded - that sprite is not drawn");
+        return;
     }
-    texture.createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                          VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    if (!texture.isValid()) {
-        LOG_WARNING("SkySun: ", path, " is not sampleable - that part of the sun is not drawn");
-        return false;
+    sprite.texture.createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                 VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    if (!sprite.texture.isValid()) {
+        LOG_WARNING("SkyBodies: ", sprite.path, " is not sampleable - that sprite is not drawn");
+        return;
     }
-    VkDescriptorImageInfo image = texture.descriptorInfo();
+    VkDescriptorImageInfo image = sprite.texture.descriptorInfo();
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = set;
+    write.dstSet = sprite.allocated;
     write.dstBinding = 0;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &image;
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-    published = set;
-    return true;
+    sprite.set = sprite.allocated;
 }
 
-void SkySun::loadTextures(pipeline::AssetManager* assets) {
+void SkyBodies::loadTextures(pipeline::AssetManager* assets) {
     if (!vkCtx_ || !assets) return;
-    if (!discSet_) loadTexture(assets, kDiscTexture, discTexture_, discSetAllocated_, discSet_);
-    if (!glareSet_) loadTexture(assets, kGlareTexture, glareTexture_, glareSetAllocated_, glareSet_);
+    for (Sprite& sprite : sprites_) loadSprite(assets, sprite);
 }
 
-void SkySun::recreatePipelines() {
+void SkyBodies::recreatePipelines() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     destroy(device, discPipeline_);
@@ -175,18 +173,19 @@ void SkySun::recreatePipelines() {
     discPipeline_ = buildPipeline(false);
     glarePipeline_ = buildPipeline(true);
     if (!discPipeline_ || !glarePipeline_) {
-        LOG_ERROR("SkySun: could not rebuild its pipelines - no sun disc or glare");
+        LOG_ERROR("SkyBodies: could not rebuild its pipelines - no sun or moon drawn");
     }
 }
 
-void SkySun::shutdown() {
+void SkyBodies::shutdown() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator allocator = vkCtx_->getAllocator();
     vkDeviceWaitIdle(device);
-    discTexture_.destroy(device, allocator);
-    glareTexture_.destroy(device, allocator);
-    discSet_ = glareSet_ = discSetAllocated_ = glareSetAllocated_ = VK_NULL_HANDLE;
+    for (Sprite& sprite : sprites_) {
+        sprite.texture.destroy(device, allocator);
+        sprite.set = sprite.allocated = VK_NULL_HANDLE;
+    }
     destroy(allocator, vertexBuffer_, vertexAlloc_);
     destroy(allocator, indexBuffer_, indexAlloc_);
     destroy(device, discPipeline_);
@@ -197,8 +196,8 @@ void SkySun::shutdown() {
     vkCtx_ = nullptr;
 }
 
-void SkySun::bindAndDraw(VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorSet perFrameSet,
-                         VkDescriptorSet textureSet, const SpritePush& push) {
+void SkyBodies::bindAndDraw(VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorSet perFrameSet,
+                            VkDescriptorSet textureSet, const SpritePush& push) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const VkDescriptorSet sets[2] = {perFrameSet, textureSet};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 2, sets,
@@ -212,32 +211,35 @@ void SkySun::bindAndDraw(VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorS
     vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
 }
 
-void SkySun::renderDisc(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                        const sky_celestial::SunDisc& disc, const glm::vec3& colour,
-                        float alpha) {
-    lastDiscDraw_ = {.drawn = false, .skipped = "", .direction = disc.direction, .alpha = alpha};
-    if (!discPipeline_) { lastDiscDraw_.skipped = "no pipeline"; return; }
-    if (!discSet_) { lastDiscDraw_.skipped = "no texture"; return; }
-    if (!sky_celestial::discAboveHorizon(disc)) { lastDiscDraw_.skipped = "below the horizon"; return; }
-    if (alpha <= 0.0f) { lastDiscDraw_.skipped = "put out by weather"; return; }
+void SkyBodies::renderDisc(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Body body,
+                           const sky_celestial::SkyDisc& disc, const glm::vec3& colour,
+                           float alpha) {
+    DiscDraw& report = lastDiscDraw_[static_cast<int>(body)];
+    report = {.drawn = false, .skipped = "", .direction = disc.direction, .alpha = alpha};
+    const Sprite& sprite = discSprite(body);
+    if (!discPipeline_) { report.skipped = "no pipeline"; return; }
+    if (!sprite.set) { report.skipped = "no texture"; return; }
+    if (!sky_celestial::discAboveHorizon(disc)) { report.skipped = "below the horizon"; return; }
+    if (alpha <= 0.0f) { report.skipped = "put out by weather"; return; }
 
     SpritePush push{};
     push.model = skyBillboard(disc.direction * kSpriteDistance, disc.scale * kUnitsPerClientUnit);
     push.colour = glm::vec4(colour, alpha);
     push.horizon = glm::vec4(disc.horizonHeight, disc.scale, 1.0f, 0.0f);
-    bindAndDraw(cmd, discPipeline_, perFrameSet, discSet_, push);
-    lastDiscDraw_.drawn = true;
+    bindAndDraw(cmd, discPipeline_, perFrameSet, sprite.set, push);
+    report.drawn = true;
 }
 
-void SkySun::renderGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                         const glm::vec3& direction, float size, const glm::vec3& colour,
-                         float alpha) {
-    if (!glarePipeline_ || !glareSet_ || alpha <= 0.0f) return;
+void SkyBodies::renderGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Body body,
+                            const glm::vec3& direction, float size, const glm::vec3& colour,
+                            float alpha) {
+    const Sprite& sprite = glareSprite(body);
+    if (!glarePipeline_ || !sprite.set || alpha <= 0.0f) return;
     SpritePush push{};
     push.model = skyBillboard(direction * kSpriteDistance, size * kUnitsPerClientUnit);
     push.colour = glm::vec4(colour, alpha);
     push.horizon = glm::vec4(0.0f);
-    bindAndDraw(cmd, glarePipeline_, perFrameSet, glareSet_, push);
+    bindAndDraw(cmd, glarePipeline_, perFrameSet, sprite.set, push);
 }
 
 }  // namespace rendering

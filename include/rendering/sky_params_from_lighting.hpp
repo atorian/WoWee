@@ -30,6 +30,7 @@ inline SkyParams skyParamsFromLighting(float timeOfDay, float gameTime,
     params.timeOfDay = timeOfDay;
     params.gameTime = gameTime;
     params.sunDisc = sky_celestial::sunDisc(timeOfDay / 24.0f);
+    params.moonDisc = sky_celestial::moonDisc(timeOfDay / 24.0f);
     if (lighting) {
         params.directionalDir = lighting->directionalDir;
         params.sunColor = lighting->sunColor;

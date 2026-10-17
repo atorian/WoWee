@@ -37,7 +37,7 @@ TEST_CASE("The sun is above the horizon by day and under it by night", "[sky_cel
     }
     // At 21:00 the centre has set and only the top of the large evening disc
     // is left above the horizon.
-    const sc::SunDisc nine = sc::sunDisc(dayAt(21.0f));
+    const sc::SkyDisc nine = sc::sunDisc(dayAt(21.0f));
     CHECK(elevationDegrees(nine.direction) < 0.0f);
     CHECK(sc::discAboveHorizon(nine));
     for (const float hour : {7.0f, 9.0f, 12.0f, 16.5f, 19.5f}) {
@@ -49,7 +49,7 @@ TEST_CASE("The sun is above the horizon by day and under it by night", "[sky_cel
 
 TEST_CASE("The sun stands nearly overhead at midday and is larger at its ends",
           "[sky_celestial]") {
-    const sc::SunDisc noon = sc::sunDisc(dayAt(12.0f));
+    const sc::SkyDisc noon = sc::sunDisc(dayAt(12.0f));
     CHECK(elevationDegrees(noon.direction) > 80.0f);
     // Twice the size at sunrise and sunset as through the day.
     CHECK(sc::sunDisc(dayAt(6.0f)).scale == Catch::Approx(2.0f * noon.scale));
@@ -67,7 +67,7 @@ TEST_CASE("The sun rises and sets on the same side of the sky", "[sky_celestial]
 TEST_CASE("The disc fades in over the last stretch above the horizon", "[sky_celestial]") {
     // A disc whose centre sits on the horizon: its bottom half is hidden, its
     // top edge has 0.5 units of clearance and shows in full only above 0.4.
-    sc::SunDisc onHorizon;
+    sc::SkyDisc onHorizon;
     onHorizon.horizonHeight = 0.0f;
     onHorizon.scale = 1.0f;
     CHECK(sc::discHorizonAlpha(onHorizon, -0.25f) == 0.0f);
@@ -93,22 +93,59 @@ TEST_CASE("Weather puts out the sun once it is a quarter of the way in", "[sky_c
 }
 
 TEST_CASE("The glare grows and brightens as the view turns onto the sun", "[sky_celestial]") {
-    const sc::GlareShape aside = sc::glareShape(0.2f);
-    const sc::GlareShape onto = sc::glareShape(1.0f);
+    const sc::GlareShape aside = sc::sunGlareShape(0.2f);
+    const sc::GlareShape onto = sc::sunGlareShape(1.0f);
     CHECK(onto.size > 6.0f * aside.size);
     CHECK(onto.alpha == Catch::Approx(2.0f * aside.alpha));
     // Nothing changes until the sun is within about 45 degrees of the view.
-    CHECK(sc::glareShape(0.5f).size == aside.size);
+    CHECK(sc::sunGlareShape(0.5f).size == aside.size);
 }
 
 TEST_CASE("The glare comes up in a quarter second and goes in two thirds", "[sky_celestial]") {
     float v = 0.0f;
-    for (int i = 0; i < 25; ++i) v = sc::easeGlare(v, 1.0f, 0.01f);
+    for (int i = 0; i < 25; ++i) v = sc::easeGlare(sc::kSunGlare, v, 1.0f, 0.01f);
     CHECK(v == Catch::Approx(1.0f));
-    for (int i = 0; i < 33; ++i) v = sc::easeGlare(v, 0.0f, 0.01f);
+    for (int i = 0; i < 33; ++i) v = sc::easeGlare(sc::kSunGlare, v, 0.0f, 0.01f);
     CHECK(v > 0.0f);
-    for (int i = 0; i < 34; ++i) v = sc::easeGlare(v, 0.0f, 0.01f);
+    for (int i = 0; i < 34; ++i) v = sc::easeGlare(sc::kSunGlare, v, 0.0f, 0.01f);
     CHECK(v == 0.0f);
+}
+
+TEST_CASE("The moon is up around midnight on the sun's side of the sky", "[sky_celestial]") {
+    // Up from about 22:18 to 03:24, under the horizon all day.
+    for (const float hour : {23.0f, 0.0f, 1.0f, 2.5f}) {
+        CAPTURE(hour);
+        CHECK(sc::discAboveHorizon(sc::moonDisc(dayAt(hour))));
+    }
+    for (const float hour : {5.0f, 12.0f, 18.0f, 21.5f}) {
+        CAPTURE(hour);
+        CHECK_FALSE(sc::discAboveHorizon(sc::moonDisc(dayAt(hour))));
+    }
+    // About 55 degrees up at midnight (56 through the client's cubic cosine),
+    // on the azimuth the sun rises and sets on.
+    const glm::vec3 midnight = sc::moonDisc(dayAt(0.0f)).direction;
+    CHECK(elevationDegrees(midnight) == Catch::Approx(55.0f).margin(1.5f));
+    const glm::vec3 sunrise = sc::sunDisc(dayAt(7.0f)).direction;
+    CHECK(glm::dot(glm::normalize(glm::vec2(midnight)), glm::normalize(glm::vec2(sunrise))) ==
+          Catch::Approx(1.0f).margin(1e-4));
+}
+
+TEST_CASE("The moon's glare shows round midnight and is twice the moon", "[sky_celestial]") {
+    CHECK(sc::lookup(sc::kMoonGlareHours, dayAt(0.0f)) == 1.0f);
+    CHECK(sc::lookup(sc::kMoonGlareHours, dayAt(12.0f)) == 0.0f);
+    CHECK(sc::lookup(sc::kMoonGlareHours, dayAt(4.0f)) == 0.0f);
+    CHECK(sc::lookup(sc::kMoonGlareHours, dayAt(22.0f)) == 0.0f);
+    const float scale = sc::moonDisc(dayAt(0.0f)).scale;
+    // The same size at any angle, unlike the sun's.
+    CHECK(sc::moonGlareShape(0.2f, scale).size == Catch::Approx(2.0f * scale));
+    CHECK(sc::moonGlareShape(1.0f, scale).size == Catch::Approx(2.0f * scale));
+    CHECK(sc::moonGlareShape(1.0f, scale).alpha == Catch::Approx(1.0f));
+    CHECK(sc::moonGlareShape(0.2f, scale).alpha == Catch::Approx(0.1f));
+    // Brightest through half cover; none through clear sky or thick cloud.
+    CHECK(sc::moonGlareThroughCloud(0.5f) == 1.0f);
+    CHECK(sc::moonGlareThroughCloud(0.0f) == 0.0f);
+    CHECK(sc::moonGlareThroughCloud(1.0f) == 0.0f);
+    CHECK(sc::sunGlareThroughCloud(0.0f) == 1.0f);
 }
 
 TEST_CASE("Looking straight at the sun dims the scene's light by a third", "[sky_celestial]") {

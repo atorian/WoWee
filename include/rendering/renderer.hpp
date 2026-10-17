@@ -45,7 +45,7 @@ class TerrainManager;
 class WaterRenderer;
 class Skybox;
 class SkyBackground;
-class Celestial;
+class SkyBodies;
 class StarField;
 class Clouds;
 class LensFlare;
@@ -179,7 +179,7 @@ public:
     LiquidScene& liquidScene() { return liquidScene_; }
     const LiquidScene& liquidScene() const { return liquidScene_; }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
-    Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
+    SkyBodies* getSkyBodies() const { return skySystem ? skySystem->getBodies() : nullptr; }
     StarField* getStarField() const { return skySystem ? skySystem->getStarField() : nullptr; }
     Clouds* getClouds() const { return skySystem ? skySystem->getClouds() : nullptr; }
     LensFlare* getLensFlare() const { return skySystem ? skySystem->getLensFlare() : nullptr; }
@@ -326,16 +326,19 @@ private:
     /// The sun's glare, eased as WoW.exe eases it (sky_celestial::easeGlare):
     /// its hours, the cloud in front of the sun, a sky model over it, and the
     /// line from the eye to the disc. Whether the glare, the lens flare and
-    /// the dimming of the scene show. updateSunGlare() each frame.
+    /// the dimming of the scene show. updateGlares() each frame.
     float sunGlare_ = 0.0f;
     /// The same without the line of sight - how much the sky around the sun
     /// shines, for the air and the rays, which a tree in front does not stop.
     float sunGlareSky_ = 0.0f;
-    void updateSunGlare(float deltaTime);
-    /// The glare sprite over the finished world (SkySun::renderGlare): as
-    /// large and bright as the view is turned onto the sun, by sunGlare_ and
-    /// what the weather leaves of it.
-    void drawSunGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    /// The moon's glare, by its own hours, cloud rule and easing. It does not
+    /// dim the scene; the client never reads it for that.
+    float moonGlare_ = 0.0f;
+    void updateGlares(float deltaTime);
+    /// The glare sprites over the finished world (SkyBodies::renderGlare): the
+    /// sun's as large and bright as the view is turned onto it, the moon's
+    /// twice the moon; each by its visibility and what the weather leaves.
+    void drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     /// The line from the eye toward `sunDir`, blocked (1) or clear (0), asked of
     /// the terrain, the buildings, the models and where the camera is: the
@@ -355,6 +358,7 @@ private:
         int occlusionStep = -1;  ///< quarters
         int hourStep = -1;       ///< quarter hours
         bool weather = false;
+        bool moonDrawn = false;
         bool operator==(const SunDiagState&) const = default;
     };
     SunDiagState sunDiagLast_;
@@ -378,7 +382,6 @@ private:
     /// both, so it ends before either goes.
     LiquidScene::Subscription waterSubscription_;
     std::unique_ptr<Skybox> skybox;
-    std::unique_ptr<Celestial> celestial;
     std::unique_ptr<StarField> starField;
     std::unique_ptr<Clouds> clouds;
     std::unique_ptr<LensFlare> lensFlare;
