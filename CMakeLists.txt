@@ -987,6 +987,7 @@ set(WOWEE_SOURCES
     src/rendering/rt_lighting.cpp
     src/rendering/performance_hud.cpp
     src/rendering/water_renderer.cpp
+    src/rendering/liquid_scene.cpp
     src/rendering/skybox.cpp
     src/rendering/celestial.cpp
     src/rendering/starfield.cpp

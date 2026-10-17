@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/liquid_scene.hpp"
+
 #include <vector>
 #include <memory>
 #include <optional>
@@ -10,60 +12,19 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline {
-    struct ADTTerrain;
-    struct LiquidData;
-    struct WMOLiquid;
-}
-
 namespace rendering {
 
 class Camera;
 class VkContext;
 
 /**
- * Water surface for a single map chunk
- */
-struct WaterSurface {
-    glm::vec3 position;
-    glm::vec3 origin;
-    glm::vec3 stepX;
-    glm::vec3 stepY;
-    float minHeight;
-    float maxHeight;
-    uint16_t liquidType;
-
-    int tileX = -1, tileY = -1;
-    uint32_t wmoId = 0;
-
-    uint8_t xOffset = 0;
-    uint8_t yOffset = 0;
-    uint8_t width = 8;
-    uint8_t height = 8;
-
-    std::vector<float> heights;
-    std::vector<uint8_t> mask;
-
-    // Vulkan render data
-    ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-    ::VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VmaAllocation indexAlloc = VK_NULL_HANDLE;
-    int indexCount = 0;
-
-    // Per-surface material UBO
-    ::VkBuffer materialUBO = VK_NULL_HANDLE;
-    VmaAllocation materialAlloc = VK_NULL_HANDLE;
-
-    // Material descriptor set (set 1)
-    VkDescriptorSet materialSet = VK_NULL_HANDLE;
-
-    [[nodiscard]] bool hasHeightData() const { return !heights.empty(); }
-};
-
-/**
  * Water renderer (Vulkan) with planar reflections, Gerstner waves,
  * GGX specular, shoreline foam, and subsurface scattering.
+ *
+ * Draws the liquid a LiquidScene holds and nothing else: it is told of each
+ * surface as it comes and goes (LiquidSceneListener) and keeps only the GPU
+ * copy. What the water is and where - for swimming, the camera, footsteps -
+ * is the scene's to answer.
  */
 // Matches set 2 binding 3 in water.frag.glsl. Keep kMaxWakePoints in step with
 // the MAX_WAKE_POINTS constant declared there.
@@ -75,21 +36,17 @@ struct WaterFrameUBOData {
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
 };
 
-class WaterRenderer {
+class WaterRenderer : public LiquidSceneListener {
 public:
     WaterRenderer();
-    ~WaterRenderer();
+    ~WaterRenderer() override;
 
     bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void shutdown();
 
-    void loadFromTerrain(const pipeline::ADTTerrain& terrain, bool append = false,
-                         int tileX = -1, int tileY = -1);
-
-    void loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix, uint32_t wmoId);
-    void removeWMO(uint32_t wmoId);
-    void removeTile(int tileX, int tileY);
-    void clear();
+    // LiquidSceneListener: the GPU copy of each surface.
+    void liquidSurfaceAdded(const LiquidSurface& surface) override;
+    void liquidSurfaceRemoved(LiquidSurfaceId id) override;
 
     void recreatePipelines();
 
@@ -117,9 +74,6 @@ public:
     bool beginReflectionPass(VkCommandBuffer cmd);
     void endReflectionPass(VkCommandBuffer cmd);
 
-    // Get the dominant water height near a position (for reflection plane)
-    std::optional<float> getDominantWaterHeight(const glm::vec3& cameraPos) const;
-
     // Compute reflected view matrix for a given water height
     static glm::mat4 computeReflectedView(const Camera& camera, float waterHeight);
     // Compute oblique clip projection to clip below-water geometry in reflection
@@ -138,7 +92,7 @@ public:
     VkRenderPass getReflectionRenderPass() const { return reflectionRenderPass; }
     VkExtent2D getReflectionExtent() const { return {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}; }
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
-    bool hasSurfaces() const { return !surfaces.empty(); }
+    bool hasSurfaces() const { return !drawn_.empty(); }
 
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
     bool isEnabled() const { return renderingEnabled; }
@@ -152,29 +106,45 @@ public:
     // which is deliberately smaller than the frame.
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
-    /// Where a point sits on a surface, if that surface has water there:
-    /// the projection and the render mask, which every query asks first.
-    std::optional<glm::vec2> wateredGridPosition(const WaterSurface& surface,
-                                                 float glX, float glY) const;
-
-    std::optional<float> getWaterHeightAt(float glX, float glY) const;
-    /// Like getWaterHeightAt but only returns water surfaces whose height is
-    /// close to the query Z (within maxAbove units above). Avoids false
-    /// underwater detection from elevated WMO water far above the camera.
-    std::optional<float> getNearestWaterHeightAt(float glX, float glY, float queryZ, float maxAbove = 15.0f) const;
-    std::optional<uint16_t> getWaterTypeAt(float glX, float glY) const;
-    bool isWmoWaterAt(float glX, float glY) const;
-
-    int getSurfaceCount() const { return static_cast<int>(surfaces.size()); }
+    /// Surfaces with geometry on the GPU.
+    int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
 private:
-    void createWaterMesh(WaterSurface& surface);
-    void destroyWaterMesh(WaterSurface& surface);
+    /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
+    struct DrawnSurface {
+        LiquidSurfaceId id = 0;
+        glm::vec3 origin{0.0f};
+        glm::vec3 stepX{0.0f};
+        glm::vec3 stepY{0.0f};
+        float minHeight = 0.0f;
+        float maxHeight = 0.0f;
+        uint16_t liquidType = 0;
+        uint32_t wmoId = 0;
+        uint8_t width = 0;
+        uint8_t height = 0;
+
+        ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VmaAllocation vertexAlloc = VK_NULL_HANDLE;
+        ::VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VmaAllocation indexAlloc = VK_NULL_HANDLE;
+        int indexCount = 0;
+
+        // Per-surface material UBO
+        ::VkBuffer materialUBO = VK_NULL_HANDLE;
+        VmaAllocation materialAlloc = VK_NULL_HANDLE;
+
+        // Material descriptor set (set 1)
+        VkDescriptorSet materialSet = VK_NULL_HANDLE;
+    };
+
+    void createWaterMesh(DrawnSurface& drawn, const LiquidSurface& surface);
+    void destroyWaterMesh(DrawnSurface& drawn);
+    void destroyAllDrawn();
 
     glm::vec4 getLiquidColor(uint16_t liquidType) const;
     float getLiquidAlpha(uint16_t liquidType) const;
 
-    void updateMaterialUBO(WaterSurface& surface);
+    void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();
     VkExtent2D refractionCaptureExtent() const;
     void createSceneHistoryResources(VkExtent2D extent, VkFormat colorFormat, VkFormat depthFormat);
@@ -257,7 +227,7 @@ private:
     VkPipeline water1xPipeline = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> water1xFramebuffers;
 
-    std::vector<WaterSurface> surfaces;
+    std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
     bool refractionEnabled = false;
     VkExtent2D renderExtent_{.width = 0, .height = 0};

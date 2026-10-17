@@ -2063,6 +2063,15 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_liquid_scene ────────────────────────────────────────
+# The map's liquid: where the water stands and how high, which body each
+# stretch of it belongs to as tiles stream in and out, and what the water
+# renderer is told about it.
+wowee_add_test(test_liquid_scene
+    SOURCES test_liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface

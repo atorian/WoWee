@@ -17,7 +17,7 @@ namespace rendering {
 class TerrainManager;
 class WMORenderer;
 class M2Renderer;
-class WaterRenderer;
+class LiquidScene;
 
 class CameraController {
 public:
@@ -56,7 +56,7 @@ public:
     void setTerrainManager(TerrainManager* tm) { terrainManager = tm; }
     void setWMORenderer(WMORenderer* wmo) { wmoRenderer = wmo; }
     void setM2Renderer(M2Renderer* m2) { m2Renderer = m2; }
-    void setWaterRenderer(WaterRenderer* wr) { waterRenderer = wr; }
+    void setLiquidScene(const LiquidScene* scene) { liquidScene = scene; }
 
     /// Holds the view still while something else owns the finger that is
     /// moving the mouse. The on-screen stick is that something: SDL reports the
@@ -422,7 +422,7 @@ private:
 
     WMORenderer* wmoRenderer = nullptr;
     M2Renderer* m2Renderer = nullptr;
-    WaterRenderer* waterRenderer = nullptr;
+    const LiquidScene* liquidScene = nullptr;
     CharacterRenderer* characterRenderer = nullptr;
     uint32_t playerInstanceId = 0;
 

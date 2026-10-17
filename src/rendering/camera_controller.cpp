@@ -21,7 +21,7 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/character_renderer.hpp"
 #include "game/opcodes.hpp"
 #include "core/logger.hpp"
@@ -330,8 +330,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // Enter swim only when water is deep enough (waist-deep+),
         // not for shallow wading.
         std::optional<float> waterH;
-        if (waterRenderer) {
-            waterH = waterRenderer->getWaterHeightAt(targetPos.x, targetPos.y);
+        if (liquidScene) {
+            waterH = liquidScene->heightAt(targetPos.x, targetPos.y);
         }
         constexpr float MAX_SWIM_DEPTH_FROM_SURFACE = 12.0f;
         // Hysteresis: starting to swim needs deeper water than continuing to
@@ -354,8 +354,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             inWater = false;
         } else if (waterH && targetPos.z < *waterH) {
             std::optional<uint16_t> waterType;
-            if (waterRenderer) {
-                waterType = waterRenderer->getWaterTypeAt(targetPos.x, targetPos.y);
+            if (liquidScene) {
+                waterType = liquidScene->typeAt(targetPos.x, targetPos.y);
             }
             bool isOcean = false;
             if (waterType && *waterType != 0) {
@@ -2194,10 +2194,10 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // over which the near plane can be half in the water. Lifting eases the
     // camera back a little and dropping draws it in, so the character stays
     // framed rather than sliding down the screen.
-    if (waterRenderer && actualDist >= MIN_DISTANCE + 0.1f) {
+    if (liquidScene && actualDist >= MIN_DISTANCE + 0.1f) {
         const float band = std::max(0.05f, camera->getNearPlane()
                                            * std::tan(glm::radians(camera->getFovDegrees()) * 0.5f));
-        auto surfaceZ = waterRenderer->getNearestWaterHeightAt(
+        auto surfaceZ = liquidScene->nearestHeightAt(
             actualCam.x, actualCam.y, actualCam.z, 30.0f);
         // Clear of the band, not resting on its edge.
         //
@@ -2421,15 +2421,15 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
 
     // Check for water at feet position
     std::optional<float> waterH;
-    if (waterRenderer) {
-        waterH = waterRenderer->getWaterHeightAt(newPos.x, newPos.y);
+    if (liquidScene) {
+        waterH = liquidScene->heightAt(newPos.x, newPos.y);
     }
     constexpr float MAX_SWIM_DEPTH_FROM_SURFACE = 12.0f;
     bool inWater = false;
     if (waterH && feetZ < *waterH) {
         std::optional<uint16_t> waterType;
-        if (waterRenderer) {
-            waterType = waterRenderer->getWaterTypeAt(newPos.x, newPos.y);
+        if (liquidScene) {
+            waterType = liquidScene->typeAt(newPos.x, newPos.y);
         }
         bool isOcean = false;
         if (waterType && *waterType != 0) {
@@ -3480,8 +3480,8 @@ void CameraController::reset() {
                     score += (slopeAccum / static_cast<float>(slopeSamples)) * 2.0f;
                 }
             }
-            if (waterRenderer) {
-                auto wh = waterRenderer->getWaterHeightAt(x, y);
+            if (liquidScene) {
+                auto wh = liquidScene->heightAt(x, y);
                 if (wh && *h < *wh - 0.2f) {
                     score += 8.0f;
                 }
