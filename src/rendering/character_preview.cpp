@@ -699,8 +699,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         for (const auto& up : underwearPaths) baseLayers_.push_back(up);
 
         if (layers.size() > 1) {
-            VkTexture* compositeTex = charRenderer_->compositeTextures(layers);
-            if (compositeTex != nullptr) {
+            TextureRef compositeTex = charRenderer_->compositeTextures(layers);
+            if (compositeTex) {
                 for (size_t ti = 0; ti < model.textures.size(); ti++) {
                     if (model.textures[ti].type == 1) {
                         charRenderer_->setModelTexture(PREVIEW_MODEL_ID, static_cast<uint32_t>(ti), compositeTex);
@@ -710,8 +710,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
             }
         } else {
             // Single layer (body skin only, no face/underwear overlays) - load directly
-            VkTexture* skinTex = charRenderer_->loadTexture(bodySkinPath_);
-            if (skinTex != nullptr) {
+            TextureRef skinTex = charRenderer_->loadTexture(bodySkinPath_);
+            if (skinTex) {
                 for (size_t ti = 0; ti < model.textures.size(); ti++) {
                     if (model.textures[ti].type == 1) {
                         charRenderer_->setModelTexture(PREVIEW_MODEL_ID, static_cast<uint32_t>(ti), skinTex);
@@ -724,8 +724,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     // If hair scalp texture was found, ensure it's loaded for type-6 slot
     if (!hairScalpPath.empty()) {
-        VkTexture* hairTex = charRenderer_->loadTexture(hairScalpPath);
-        if (hairTex != nullptr) {
+        TextureRef hairTex = charRenderer_->loadTexture(hairScalpPath);
+        if (hairTex) {
             for (size_t ti = 0; ti < model.textures.size(); ti++) {
                 if (model.textures[ti].type == 6) {
                     charRenderer_->setModelTexture(PREVIEW_MODEL_ID, static_cast<uint32_t>(ti), hairTex);
@@ -790,7 +790,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     attachWeapons(equipment);
 
     charRenderer_->clearTextureSlotOverride(instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_));
-    charRenderer_->setGroupTextureOverride(instanceId_, 15, nullptr);
+    charRenderer_->setGroupTextureOverride(instanceId_, 15, {});
 
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc || !displayInfoDbc->isLoaded()) {
@@ -924,9 +924,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     {
         uint32_t did = findDisplayId({6});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(
-            gg > 0 ? core::equippedGeoset(core::equipment::kBeltBase, gg) : 0,
-            core::equipment::kBeltBase);
+        geosetBelt = pickGeoset(core::beltGeoset(gg), core::equipment::kBeltBase);
     }
 
     eraseGroup(4);
@@ -951,9 +949,12 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         hasInvType({16}) ? core::cloakGeoset(capeGG) : core::kGeosetNoCape,
         core::kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape); // Cloak mesh toggle (visual may still be limited)
-    if (hasInvType({19})) {
-        uint16_t geosetTabard = pickGeoset(core::kGeosetDefaultTabard, 0);
-        if (geosetTabard != 0) geosets.insert(geosetTabard);
+    // The tabard flap, group 12. This asked for 1201, which is no flap.
+    eraseGroup(12);
+    if (const uint16_t geosetTabard =
+            pickGeoset(core::tabardGeoset(getGeosetGroup(findDisplayId({19}), geosetGroup1Field)), 0);
+        geosetTabard != 0) {
+        geosets.insert(geosetTabard);
     }
 
     // Keep hair visible in the preview. The in-world renderer can hide hair
@@ -990,8 +991,8 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     }
 
     if (!regionLayers.empty()) {
-        VkTexture* newTex = charRenderer_->compositeWithRegions(bodySkinPath_, baseLayers_, regionLayers);
-        if (newTex != nullptr) {
+        TextureRef newTex = charRenderer_->compositeWithRegions(bodySkinPath_, baseLayers_, regionLayers);
+        if (newTex) {
             charRenderer_->setTextureSlotOverride(instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_), newTex);
         }
     }
@@ -1029,10 +1030,10 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
                         }
                     }
                 }
-                VkTexture* whiteTex = charRenderer_->loadTexture("");
+                const TextureRef& whiteTex = charRenderer_->whiteTexture();
                 for (const auto& c : candidates) {
-                    VkTexture* capeTex = charRenderer_->loadTexture(c);
-                    if (capeTex != nullptr && capeTex != whiteTex) {
+                    TextureRef capeTex = charRenderer_->loadTexture(c);
+                    if (capeTex && capeTex != whiteTex) {
                         charRenderer_->setGroupTextureOverride(instanceId_, 15, capeTex);
                         if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
@@ -1079,7 +1080,7 @@ bool CharacterPreview::setBakedSkin(const std::string& bakePath) {
     if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
         if (md->vertices.size() > kShippedCharacterVertexCeiling) return false;
     }
-    VkTexture* tex = charRenderer_->loadTexture(bakePath);
+    TextureRef tex = charRenderer_->loadTexture(bakePath);
     if (!tex) return false;
     charRenderer_->setTextureSlotOverride(
         instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_), tex);
@@ -1172,7 +1173,7 @@ bool CharacterPreview::loadCreature(
         for (size_t ti = 0; ti < data->textures.size(); ++ti) {
             for (const auto& [texType, path] : skins) {
                 if (data->textures[ti].type != texType) continue;
-                if (VkTexture* tex = charRenderer_->loadTexture(path)) {
+                if (TextureRef tex = charRenderer_->loadTexture(path)) {
                     charRenderer_->setModelTexture(PREVIEW_MODEL_ID,
                                                    static_cast<uint32_t>(ti), tex);
                 }
@@ -1286,12 +1287,8 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
                                                           effectsDbc.get());
 
     for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
-        const std::string& modelName = effectModels[visualSlot];
-        if (modelName.empty()) continue;
-
-        std::string m2Path = modelName;
-        size_t dot = m2Path.rfind('.');
-        m2Path = (dot != std::string::npos ? m2Path.substr(0, dot) : m2Path) + ".m2";
+        const std::string& m2Path = effectModels[visualSlot];
+        if (m2Path.empty()) continue;
 
         pipeline::M2Model effectModel;
         if (!loadPreviewM2(m2Path, effectModel)) {
@@ -1404,7 +1401,8 @@ void CharacterPreview::update(float deltaTime) {
         // doll rigid and its equipped weapons invisible.
         const glm::vec3 cameraPos = camera_ ? camera_->getPosition()
                                             : previewStandPosition_;
-        charRenderer_->update(deltaTime, cameraPos);
+        const glm::mat4 view = camera_ ? camera_->getViewMatrix() : glm::mat4(1.0f);
+        charRenderer_->update(deltaTime, cameraPos, camera_ ? &view : nullptr);
     }
 }
 

@@ -516,12 +516,13 @@ void rescan(App& app) {
 }
 
 void initPanelDefaults(App& app) {
-    // Where the client itself looks when nobody has said otherwise. Data/
-    // beside the working directory was eight minutes of extraction the client
-    // would never find, with nothing on screen saying where it went.
-    const fs::path userData = wowee::core::userDataRoot();
+    // Where the client itself looks when nobody has said otherwise: Data/
+    // beside it. Data/ beside the working directory was eight minutes of
+    // extraction the client would never find, and the per-user folder after
+    // that put gigabytes on the system drive of a client installed elsewhere.
+    const fs::path dataRoot = wowee::core::defaultDataRoot();
     const std::string out =
-        userData.empty() ? (fs::current_path() / "Data").string() : userData.string();
+        dataRoot.empty() ? (fs::current_path() / "Data").string() : dataRoot.string();
     std::snprintf(app.outputDir, sizeof(app.outputDir), "%s", out.c_str());
 }
 

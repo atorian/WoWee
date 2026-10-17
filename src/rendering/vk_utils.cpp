@@ -99,9 +99,28 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo,
-            &result.image, &result.allocation, nullptr) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create VMA image (", width, "x", height, ")");
+    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo,
+            &result.image, &result.allocation, nullptr); r != VK_SUCCESS) {
+        // What the driver had left says whether this is memory or something
+        // else: the caller decides what the frame does without the image.
+        const VkPhysicalDeviceMemoryProperties* props = nullptr;
+        vmaGetMemoryProperties(allocator, &props);
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(allocator, budgets);
+        uint64_t usage = 0, budget = 0;
+        for (uint32_t i = 0; props && i < props->memoryHeapCount; ++i) {
+            if ((props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) continue;
+            if (budgets[i].budget > budget) {
+                budget = budgets[i].budget;
+                usage = budgets[i].usage;
+            }
+        }
+        const char* file = where.file_name();
+        if (const char* slash = std::strrchr(file, '/')) file = slash + 1;
+        LOG_ERROR("Failed to create a ", width, "x", height, " image (format ", static_cast<int>(format),
+                  ", ", mipLevels, " mips, ", static_cast<int>(samples), "x) for ", file, ":", where.line(),
+                  ": ", vkResultName(r), " (", static_cast<int>(r), "); video memory ",
+                  usage / (1024 * 1024), " MB in use of a ", budget / (1024 * 1024), " MB budget");
         return result;
     }
 

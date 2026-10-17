@@ -30,6 +30,7 @@
 #include "rendering/minimap.hpp"
 #include "rendering/world_map.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/terrain_renderer.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_controller.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -533,10 +534,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 wr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
                 wr->setPOMEnabled(settingsPanel_.pendingPOM);
                 wr->setPOMQuality(settingsPanel_.pendingPOMQuality);
-                if (auto* cr = renderer->getCharacterRenderer()) {
+                auto* cr = renderer->getCharacterRenderer();
+                auto* tr = renderer->getTerrainRenderer();
+                if (cr && tr) {
                     cr->setNormalMappingEnabled(settingsPanel_.pendingNormalMapping);
                     cr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
-                    // Both told before this is done with. The two renderers are
+                    tr->setNormalMappingEnabled(settingsPanel_.pendingNormalMapping);
+                    tr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
+                    // All told before this is done with. The renderers are
                     // built one after the other in the same function today, so
                     // the character one is never missing while the WMO one is
                     // here - but marking it applied from inside the outer guard

@@ -22,6 +22,26 @@ namespace rendering {
 
 VkContext* VkContext::sInstance_ = nullptr;
 
+/// What the texture cache needs of the device: retirement after every frame
+/// slot has fenced, and the driver's budget for the heap textures live in.
+class VkContext::ContextTextureDevice : public TextureDevice {
+public:
+    explicit ContextTextureDevice(VkContext& context) : context_(context) {}
+    void retireAfterFrames(std::function<void()> release) override {
+        context_.deferAfterAllFrameFences(std::move(release));
+    }
+    [[nodiscard]] std::optional<uint64_t> textureHeapBudget() const override {
+        if (const auto heap = context_.deviceLocalHeap()) return heap->budgetBytes;
+        return std::nullopt;
+    }
+
+private:
+    VkContext& context_;
+};
+
+TextureCache& VkContext::textures() { return *textureCache_; }
+const TextureCache& VkContext::textures() const { return *textureCache_; }
+
 // Hash a VkSamplerCreateInfo into a 64-bit key for the sampler cache.
 // FNV-1a chosen for speed and low collision rate on small structured data.
 // Constants from: http://www.isthe.com/chongo/tech/comp/fnv/
@@ -75,6 +95,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE;
 }
 
+// Here rather than in the header, where the texture device is incomplete.
+VkContext::VkContext() = default;
+
 VkContext::~VkContext() {
     shutdown();
 }
@@ -87,6 +110,8 @@ bool VkContext::initialize(SDL_Window* window) {
     if (!selectPhysicalDevice()) return false;
     if (!createLogicalDevice()) return false;
     if (!createAllocator()) return false;
+    textureDevice_ = std::make_unique<ContextTextureDevice>(*this);
+    textureCache_ = std::make_unique<TextureCache>(*textureDevice_, TextureCache::configFromEnvironment());
 
     // Pipeline cache: try to load from disk, fall back to empty cache.
     // Not fatal - if it fails we just skip caching.
@@ -114,6 +139,11 @@ void VkContext::shutdown() {
     if (device) {
         vkDeviceWaitIdle(device);
     }
+
+    // Every renderer has given its textures back by now; what the cache still
+    // holds is unreferenced and goes through the flush below.
+    textureCache_.reset();
+    textureDevice_.reset();
 
     // Late owners (including character-selection previews) may retire after
     // Renderer::shutdown. Their callbacks own their handles and pools, so
@@ -704,6 +734,13 @@ bool VkContext::createLogicalDevice() {
         vkbPhysicalDevice_.enable_extension_if_present(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     checkpointsSupported_ = vkbPhysicalDevice_.enable_extension_if_present(
         VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    // What the driver will actually let this process keep in each heap, and
+    // what it already holds there, other processes and the driver's own share
+    // included. Without it the allocator only knows what it allocated itself,
+    // and a budget can only be guessed from the heap's size - which on a
+    // 12 GB card shared with the desktop is not what is available.
+    memoryBudgetSupported_ =
+        vkbPhysicalDevice_.enable_extension_if_present(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
     // Hardware ray queries for the ray traced lighting. All three extensions
     // and both features, or none: the lighting falls back to its compute
@@ -1064,6 +1101,9 @@ bool VkContext::createAllocator() {
     allocInfo.vulkanApiVersion = std::min(instanceApiVersion_, vmaCeiling);
     // Acceleration structure builds take their inputs by device address.
     if (hardwareRayQuery_) allocInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    // vmaGetHeapBudgets then reads the driver's figures rather than estimating
+    // them from what this allocator handed out.
+    if (memoryBudgetSupported_) allocInfo.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     if (instanceApiVersion_ > vmaCeiling) {
         LOG_INFO("Instance is Vulkan ", VK_VERSION_MAJOR(instanceApiVersion_), ".",
                  VK_VERSION_MINOR(instanceApiVersion_), " but VMA was built for ",
@@ -1077,6 +1117,93 @@ bool VkContext::createAllocator() {
     }
 
     LOG_INFO("VMA allocator created");
+    if (const auto heap = deviceLocalHeap()) {
+        if (memoryBudgetSupported_) {
+            LOG_INFO("Video memory: ", heap->budgetBytes / (1024 * 1024), " MB budget of a ",
+                     heap->sizeBytes / (1024 * 1024), " MB heap, ",
+                     heap->usageBytes / (1024 * 1024), " MB in use");
+        } else {
+            LOG_WARNING("Video memory: the device has no VK_EXT_memory_budget, so the budget of ",
+                        heap->budgetBytes / (1024 * 1024), " MB is the allocator's estimate from the ",
+                        heap->sizeBytes / (1024 * 1024),
+                        " MB heap and does not see the desktop or other processes");
+        }
+    }
+    return true;
+}
+
+std::vector<GpuHeapReading> VkContext::gpuHeaps() const {
+    std::vector<GpuHeapReading> out;
+    if (!allocator) return out;
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(allocator, &props);
+    if (!props) return out;
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(allocator, budgets);
+    out.reserve(props->memoryHeapCount);
+    for (uint32_t i = 0; i < props->memoryHeapCount; ++i) {
+        GpuHeapReading heap;
+        heap.index = i;
+        heap.deviceLocal = (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        heap.sizeBytes = props->memoryHeaps[i].size;
+        heap.budgetBytes = budgets[i].budget;
+        heap.usageBytes = budgets[i].usage;
+        heap.fromDriver = memoryBudgetSupported_;
+        out.push_back(heap);
+    }
+    return out;
+}
+
+std::optional<GpuHeapReading> VkContext::deviceLocalHeap() const {
+    std::optional<GpuHeapReading> largest;
+    for (const auto& heap : gpuHeaps()) {
+        if (!heap.deviceLocal) continue;
+        if (!largest || heap.sizeBytes > largest->sizeBytes) largest = heap;
+    }
+    return largest;
+}
+
+std::optional<GpuMemoryByUse> VkContext::gpuMemoryByUse() const {
+    if (!allocator) return std::nullopt;
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(allocator, &props);
+    if (!props) return std::nullopt;
+    std::vector<bool> deviceLocal(props->memoryTypeCount, false);
+    for (uint32_t t = 0; t < props->memoryTypeCount; ++t) {
+        const uint32_t heap = props->memoryTypes[t].heapIndex;
+        deviceLocal[t] = (props->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+    }
+    char* json = nullptr;
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    if (!json) return std::nullopt;
+    auto result = classifyGpuAllocations(json, deviceLocal);
+    vmaFreeStatsString(allocator, json);
+    if (!result) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_WARNING("Video memory: the allocator's detailed map did not parse; the breakdown "
+                        "by use is not shown");
+        }
+    }
+    return result;
+}
+
+bool VkContext::writeGpuMemoryMap(const std::string& path) const {
+    if (!allocator) return false;
+    char* json = nullptr;
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    if (!json) {
+        LOG_WARNING("Video memory map: the allocator wrote no statistics for ", path);
+        return false;
+    }
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (file) file << json;
+    vmaFreeStatsString(allocator, json);
+    if (!file) {
+        LOG_WARNING("Video memory map: could not write ", path);
+        return false;
+    }
     return true;
 }
 
@@ -1641,8 +1768,11 @@ bool VkContext::createDepthBuffer() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth image");
+    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr);
+        r != VK_SUCCESS) {
+        depthImage = VK_NULL_HANDLE;
+        depthAllocation = VK_NULL_HANDLE;
+        frameTargetFailed("depth buffer", r);
         return false;
     }
 
@@ -1655,8 +1785,9 @@ bool VkContext::createDepthBuffer() {
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
 
-    if (vkCreateImageView(device, &viewInfo, nullptr, &depthImageView) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &depthImageView); r != VK_SUCCESS) {
+        depthImageView = VK_NULL_HANDLE;
+        frameTargetFailed("depth buffer view", r);
         return false;
     }
 
@@ -1709,8 +1840,11 @@ bool VkContext::createMsaaColorImage() {
         // Retry without TRANSIENT (some drivers reject it at high sample counts)
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         allocInfo.preferredFlags = 0;
-        if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr) != VK_SUCCESS) {
-            LOG_ERROR("Failed to create MSAA color image");
+        if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr);
+            r != VK_SUCCESS) {
+            msaaColorImage_ = VK_NULL_HANDLE;
+            msaaColorAllocation_ = VK_NULL_HANDLE;
+            frameTargetFailed("multisampled colour image", r);
             return false;
         }
     }
@@ -1724,8 +1858,9 @@ bool VkContext::createMsaaColorImage() {
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
 
-    if (vkCreateImageView(device, &viewInfo, nullptr, &msaaColorView_) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create MSAA color image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &msaaColorView_); r != VK_SUCCESS) {
+        msaaColorView_ = VK_NULL_HANDLE;
+        frameTargetFailed("multisampled colour view", r);
         return false;
     }
 
@@ -1755,8 +1890,11 @@ bool VkContext::createDepthResolveImage() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth resolve image");
+    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr);
+        r != VK_SUCCESS) {
+        depthResolveImage = VK_NULL_HANDLE;
+        depthResolveAllocation = VK_NULL_HANDLE;
+        frameTargetFailed("depth resolve image", r);
         return false;
     }
 
@@ -1768,8 +1906,9 @@ bool VkContext::createDepthResolveImage() {
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(device, &viewInfo, nullptr, &depthResolveImageView) != VK_SUCCESS) {
-        LOG_ERROR("Failed to create depth resolve image view");
+    if (VkResult r = vkCreateImageView(device, &viewInfo, nullptr, &depthResolveImageView); r != VK_SUCCESS) {
+        depthResolveImageView = VK_NULL_HANDLE;
+        frameTargetFailed("depth resolve view", r);
         return false;
     }
 
@@ -1823,7 +1962,27 @@ static VkSubpassDependency sceneAttachmentDependency() {
     return dependency;
 }
 
+void VkContext::frameTargetFailed(const char* target, VkResult result) {
+    if (auto line = frameTargets_.failed(target, result, swapchainExtent.width, swapchainExtent.height,
+                                         deviceLocalHeap())) {
+        LOG_ERROR(*line);
+    }
+}
+
 bool VkContext::createSwapchainRenderTargets(const char* verb) {
+    // Until every target below exists no frame is recorded against them
+    // (beginFrame hands out no command buffer); a failure leaves the swapchain
+    // dirty, and the next frame tries again.
+    frameTargets_.rebuilding();
+    if (!createSwapchainTargetSet(verb)) {
+        swapchainDirty = true;
+        return false;
+    }
+    if (auto line = frameTargets_.made()) LOG_WARNING(*line);
+    return true;
+}
+
+bool VkContext::createSwapchainTargetSet(const char* verb) {
     if (!createDepthBuffer()) return false;
 
     // Create MSAA color image if needed
@@ -2006,8 +2165,11 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
             fbInfo.height = swapchainExtent.height;
             fbInfo.layers = 1;
 
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
+            if (VkResult r = vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]);
+                r != VK_SUCCESS) {
+                swapchainFramebuffers[i] = VK_NULL_HANDLE;
                 LOG_ERROR("Failed to ", verb, " MSAA swapchain framebuffer ", i);
+                frameTargetFailed("multisampled swapchain framebuffer", r);
                 return false;
             }
         }
@@ -2077,8 +2239,11 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
             fbInfo.height = swapchainExtent.height;
             fbInfo.layers = 1;
 
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
+            if (VkResult r = vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]);
+                r != VK_SUCCESS) {
+                swapchainFramebuffers[i] = VK_NULL_HANDLE;
                 LOG_ERROR("Failed to ", verb, " swapchain framebuffer ", i);
+                frameTargetFailed("swapchain framebuffer", r);
                 return false;
             }
         }
@@ -2841,6 +3006,9 @@ void VkContext::resetFrameSyncState() {
 VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     if (deviceLost_) return VK_NULL_HANDLE;
     if (swapchain == VK_NULL_HANDLE) return VK_NULL_HANDLE;  // Swapchain lost; recreate pending
+    // A target the frame would render into is missing: nothing is recorded
+    // against the incomplete set, and the rebuild is tried again next frame.
+    if (!frameTargets_.usable()) return VK_NULL_HANDLE;
 
     auto& frame = frames[currentFrame];
 

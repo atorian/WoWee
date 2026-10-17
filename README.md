@@ -391,7 +391,7 @@ custom binary and catalog formats.
 | `Enter` or `/` | Open chat |
 | `/unstuck` | Recover when terrain or WMO collision traps the character |
 | `Escape` | Close windows, deselect, or open the game menu |
-| `F1` | Performance HUD (debug builds only) |
+| ``Ctrl+` `` | Performance HUD: frame rate, latency, memory, threads and caches over the last ten minutes |
 
 Keys are listed and can be rebound in the game's **Key Bindings** panel, from
 the menu `Escape` opens.

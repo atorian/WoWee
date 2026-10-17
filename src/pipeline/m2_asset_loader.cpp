@@ -22,7 +22,7 @@ bool loadM2WithSkin(AssetManager& assets, const std::string& m2Path, M2Model& ou
         auto skinData = assets.readFile(skinPathForM2(m2Path));
         if (!skinData.empty()) M2Loader::loadSkin(skinData, outModel);
     }
-    return outModel.isValid();
+    return outModel.hasContent();
 }
 
 std::string animPathForM2(const std::string& m2Path, uint32_t animId, uint32_t variationIndex) {

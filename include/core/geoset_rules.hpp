@@ -37,7 +37,7 @@ constexpr uint16_t kGeosetBareSleeves      = 801;   // Group  8: no chest armor 
 constexpr uint16_t kGeosetBareKnees       = 901;   // Group  9: no flare at the knee
 constexpr uint16_t kGeosetBareShirtTail   = 1001;  // Group 10: no tail below the belt
 constexpr uint16_t kGeosetBareThighs      = 1101;  // Group 11: no skirt or thigh plate
-constexpr uint16_t kGeosetDefaultTabard    = 1201;  // Group 12: tabard base
+constexpr uint16_t kGeosetNoTabard         = 1201;  // Group 12: no tabard flap
 constexpr uint16_t kGeosetBarePants        = 1301;  // Group 13: no leggings
 constexpr uint16_t kGeosetNoCape           = 1501;  // Group 15: no cape
 constexpr uint16_t kGeosetWithCape         = 1502;  // Group 15: with cape
@@ -223,8 +223,37 @@ constexpr uint16_t kBootsBare  = kGeosetBareShins;     ///< group 5
 constexpr uint16_t kGlovesBare = kGeosetBareForearms;  ///< group 4
 constexpr uint16_t kWristBare  = kGeosetBareSleeves;   ///< group 8, same as chest
 constexpr uint16_t kBeltBase   = 1801;                 ///< group 18, the buckle
-constexpr uint16_t kTabardBase = 1200;                 ///< group 12
+constexpr uint16_t kTabardBare = kGeosetNoTabard;      ///< group 12
 }  // namespace equipment
+
+/// The tabard flap a character shows: the variant its tabard names, or none.
+///
+/// Group 12 follows the same convention as every other equipment group: 1201
+/// is no flap and the tabard's GeosetGroup1 counts on from it. Measured against
+/// the 3.3.5 tables, 86 of the 87 tabards set that column to 1 - 1202, the one
+/// group 12 mesh every stock character model carries, and the only one - and
+/// the 87th, a barber's cape, sets 0 and has no flap.
+///
+/// The base used to be written as 1200, so a tabard asked for 1201, which
+/// means none and resolves to nothing; and the player paths did not read the
+/// column at all and asked for 1201 outright. Nobody's tabard flap was drawn.
+///
+/// `geosetGroupValue` is the worn tabard's GeosetGroup1, 0 with no tabard.
+constexpr uint16_t tabardGeoset(uint32_t geosetGroupValue) {
+    return equippedGeoset(equipment::kTabardBare, geosetGroupValue);
+}
+
+/// The waist and buckle a character shows: the variant its belt names, or the
+/// base variant with no belt.
+///
+/// The base is not nothing on every model - on the Legion human male 1801 is
+/// the waist itself, and leaving it out opens a gap between the torso and the
+/// legs. The stock models carry no 1801, and there it resolves to nothing.
+///
+/// `geosetGroupValue` is the worn belt's GeosetGroup1, 0 with no belt.
+constexpr uint16_t beltGeoset(uint32_t geosetGroupValue) {
+    return equippedGeoset(equipment::kBeltBase, geosetGroupValue);
+}
 
 /// An item's three ItemDisplayInfo GeosetGroup columns, in order. Zero where
 /// there is no item.

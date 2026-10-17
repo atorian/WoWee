@@ -3,6 +3,7 @@
 #include "core/frame_plan.hpp"
 #include "core/world_load_progress.hpp"
 #include "core/job_group.hpp"
+#include "rendering/normal_map_encoding.hpp"
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -127,8 +128,10 @@ private:
     [[nodiscard]] float secondsSince(std::chrono::steady_clock::time_point start) const;
     void fail(const std::string& reason);
     std::string resolveMapName(uint32_t mapId);
+    /// `normalMaps`: how this device keeps building normal maps, which the
+    /// worker encodes them as.
     static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,
-        const std::string& mapName, const JobGroup::Token& token);
+        const std::string& mapName, rendering::NormalMapFormat normalMaps, const JobGroup::Token& token);
     std::optional<Entry> pendingWorldEntry_;
 
     // Map.dbc name cache (loaded once per session)

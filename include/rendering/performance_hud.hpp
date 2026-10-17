@@ -5,6 +5,7 @@
 
 namespace wowee {
 
+namespace core { class ResourceTelemetry; }
 namespace rendering {
 class Renderer;
 class Camera;
@@ -72,10 +73,17 @@ public:
     /// How long the camera controller's update took, in milliseconds. It runs
     /// in the client, ahead of the renderer's update.
     void setCameraUpdateMs(double ms) { cameraUpdateMs_ = ms; }
+    /// The client's memory, threads, caches and latency over time, drawn as
+    /// the RESOURCES section. Kept by the client, which outlives the HUD's
+    /// drawing; null draws no section.
+    void setResourceTelemetry(const core::ResourceTelemetry* telemetry) { resources_ = telemetry; }
 
 private:
+    void renderResources() const;
+
     std::string zoneName_;
     double cameraUpdateMs_ = 0.0;
+    const core::ResourceTelemetry* resources_ = nullptr;
     /**
      * Calculate average FPS from frame time history
      */

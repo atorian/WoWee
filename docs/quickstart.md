@@ -86,7 +86,7 @@ For local AzerothCore setup, see `docs/server-setup.md`.
 - `Enter`: Chat
 - `/`: Chat slash command
 - `Escape`: Game menu (Key Bindings, Video, Sound, Interface)
-- `F1`: Performance HUD (debug builds only)
+- ``Ctrl+` ``: Performance HUD (frame rate, latency, memory, threads, caches)
 
 A controller also works: left stick moves, right stick looks, face buttons and D-pad are action slots, and Back turns the right stick into a pointer. Its buttons are listed in the Key Bindings panel.
 

@@ -1,5 +1,6 @@
 #include "core/entity_spawner.hpp"
 #include "core/helm_visual.hpp"
+#include "core/enchant_visual.hpp"
 #include "core/weapon_sheath.hpp"
 #include "core/geoset_rules.hpp"
 #include "core/character_paths.hpp"
@@ -157,7 +158,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     const std::string pelvisPath = defaultPelvisPath(raceId, genderId);
 
     // Composite base skin + face + underwear overlays
-    rendering::VkTexture* compositeTex = nullptr;
+    rendering::TextureRef compositeTex;
     {
         std::vector<std::string> layers;
         layers.push_back(bodySkinPath);
@@ -171,7 +172,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         }
     }
 
-    rendering::VkTexture* hairTex = nullptr;
+    rendering::TextureRef hairTex;
     if (!hairTexturePath.empty()) {
         hairTex = charRenderer->loadTexture(hairTexturePath);
     }
@@ -179,7 +180,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // ears, eyes and eyelashes from. CharSections names it in the skin row's
     // second texture, which the tables the game shipped leave blank - so on a
     // stock model this still falls through to the underwear art it always used.
-    rendering::VkTexture* skinExtraTex = nullptr;
+    rendering::TextureRef skinExtraTex;
     if (!skinExtraPath.empty()) skinExtraTex = charRenderer->loadTexture(skinExtraPath);
     else if (!underwearPaths.empty()) skinExtraTex = charRenderer->loadTexture(underwearPaths[0]);
     else skinExtraTex = charRenderer->loadTexture(pelvisPath);
@@ -240,10 +241,10 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     spawns_->onlinePlayerAppearance_[guid] = std::move(st);
 }
 
-void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
-                                          const std::array<uint32_t, 19>& displayInfoIds,
-                                          const std::array<uint8_t, 19>& inventoryTypes) {
+void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized()) return;
+    const auto& displayInfoIds = equipment.displayInfoIds;
+    const auto& inventoryTypes = equipment.inventoryTypes;
 
     // Skip local player - equipment handled by GameScreen::updateCharacterGeosets/Textures
     // via consumeOnlineEquipmentDirty(), which fires on the same server update.
@@ -255,7 +256,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     // If the player isn't spawned yet, store equipment until spawn.
     auto appIt = spawns_->onlinePlayerAppearance_.find(guid);
     if (!spawns_->playerInstances_.count(guid) || appIt == spawns_->onlinePlayerAppearance_.end()) {
-        spawns_->pendingOnlinePlayerEquipment_[guid] = {displayInfoIds, inventoryTypes};
+        spawns_->pendingOnlinePlayerEquipment_[guid] = equipment;
         return;
     }
 
@@ -448,8 +449,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     {
         uint32_t did = findDisplayIdByInvType({6});
         uint32_t gg1 = getGeosetGroup(did, geosetGroup1Field);
-        geosetBelt = pickGeoset(gg1 > 0 ? equippedGeoset(equipment::kBeltBase, gg1) : 0,
-                                equipment::kBeltBase);
+        geosetBelt = pickGeoset(beltGeoset(gg1), equipment::kBeltBase);
     }
 
     eraseGroup(4);
@@ -475,8 +475,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         hasInvType({16}) ? cloakGeoset(capeGG) : kGeosetNoCape,
         kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape);
-    // Tabard (invType 19)
-    if (hasInvType({19})) geosets.insert(kGeosetDefaultTabard);
+    // Tabard (invType 19) -> the flap, group 12. It asked for 1201 outright,
+    // which is no flap, so no other player's tabard was ever drawn.
+    eraseGroup(12);
+    const uint16_t geosetTabard =
+        pickGeoset(tabardGeoset(getGeosetGroup(findDisplayIdByInvType({19}), geosetGroup1Field)), 0);
+    if (geosetTabard != 0) geosets.insert(geosetTabard);
 
     // Hide hair under helmets: replace style-specific scalp with bald scalp
     // HEAD slot is index 0 in the 19-element equipment array
@@ -590,12 +594,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
                         }
                     }
 
-                    const rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
-                    rendering::VkTexture* capeTexture = nullptr;
+                    rendering::TextureRef capeTexture;
                     for (const auto& candidate : capeCandidates) {
-                        rendering::VkTexture* tex = charRenderer->loadTexture(candidate);
-                        if (tex && tex != whiteTex) {
-                            capeTexture = tex;
+                        rendering::TextureRef tex = charRenderer->loadTexture(candidate);
+                        if (tex && tex != charRenderer->whiteTexture()) {
+                            capeTexture = std::move(tex);
                             break;
                         }
                     }
@@ -626,7 +629,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     const PlayerTextureSlots& slots = slotsIt->second;
     if (slots.skin < 0) return;
 
-    rendering::VkTexture* newTex = charRenderer->compositeWithRegions(st.bodySkinPath, st.underwearPaths, regionLayers);
+    rendering::TextureRef newTex = charRenderer->compositeWithRegions(st.bodySkinPath, st.underwearPaths, regionLayers);
     if (newTex) {
         charRenderer->setTextureSlotOverride(st.instanceId, static_cast<uint16_t>(slots.skin), newTex);
     }
@@ -695,6 +698,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
             continue;  // attachWeapon says why
         }
         st.weapons[hand] = {.attached = true, .inventoryType = inventoryType};
+        // The enchant it shows, the way the player's own weapons get theirs.
+        attachEnchantVisuals(
+            *charRenderer, *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
+            [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
+            [this] { return assets_.nextWeaponModelId_++; });
     }
 }
 

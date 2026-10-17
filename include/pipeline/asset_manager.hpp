@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cache_stats.hpp"
 #include "pipeline/archive_layer.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -170,6 +171,11 @@ public:
      * Get file cache stats
      */
     [[nodiscard]] size_t getFileCacheSize() const { return fileCacheTotalBytes; }
+    /// The files kept in memory once read, in bytes, against the budget the
+    /// least recently used are evicted to stay under. Any thread.
+    [[nodiscard]] core::CacheStats fileCacheStats() const;
+    /// The DBC tables kept parsed. Their bytes are not counted.
+    [[nodiscard]] size_t dbcCacheEntries() const;
     [[nodiscard]] size_t getFileCacheHits() const { return fileCacheHits; }
     [[nodiscard]] size_t getFileCacheMisses() const { return fileCacheMisses; }
 
@@ -279,9 +285,16 @@ private:
     // THREAD-SAFE: atomic - incremented from any thread after releasing cacheMutex.
     mutable std::atomic<size_t> fileCacheHits{0};
     mutable std::atomic<size_t> fileCacheMisses{0};
-    mutable size_t fileCacheBudget = 1024 * 1024 * 1024;  // Dynamic, starts at 1GB
+    /// 1 GB, or WOWEE_FILE_CACHE_MB; set once by setupFileCacheBudget.
+    mutable size_t fileCacheBudget = 1024 * 1024 * 1024;
 
     void setupFileCacheBudget();
+
+    /// Whether a file read is kept in the file cache for the next read of it.
+    /// Not when what the bytes become is held elsewhere - a texture on the
+    /// GPU, a parsed DBC - and the bytes would only be a second copy.
+    enum class KeepBytes { Yes, No };
+    [[nodiscard]] std::vector<uint8_t> readFileBytes(const std::string& normalizedPath, KeepBytes keep) const;
 
     /**
      * Try to load a PNG override for a BLP path.

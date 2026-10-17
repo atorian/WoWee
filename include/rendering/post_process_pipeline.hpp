@@ -62,6 +62,16 @@ public:
     [[nodiscard]] VkImage getSceneColorImage() const;
     [[nodiscard]] VkImage getSceneDepthImage() const;
     [[nodiscard]] bool sceneDepthIsMsaa() const;
+    /// Single-sampled views of the off-screen scene target - its colour and
+    /// its depth, resolved where the scene is multisampled - for a pass that
+    /// draws over the finished scene in the scene pass's own formats and
+    /// layouts (the water). Null when there is no off-screen scene, or when a
+    /// multisampled one has no resolved depth to test against.
+    [[nodiscard]] VkImageView getSceneResolvedColorView() const;
+    [[nodiscard]] VkImageView getSceneResolvedDepthView() const;
+    /// Moves on whenever a scene target is made or destroyed, so a framebuffer
+    /// built over the views above knows when to be built again.
+    [[nodiscard]] uint64_t sceneTargetGeneration() const { return sceneTargetGeneration_; }
 
 
     /// True when FXAA alone (no FSR2) needs its own off-screen pass.
@@ -147,6 +157,7 @@ private:
     VkContext* vkCtx_ = nullptr;
 
     std::function<void(VkCommandBuffer)> sceneClosedHook_;
+    uint64_t sceneTargetGeneration_ = 0;
     // Per-frame state set during executePostProcessing
     VkCommandBuffer currentCmd_ = VK_NULL_HANDLE;
     Camera* camera_ = nullptr;

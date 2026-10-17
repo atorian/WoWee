@@ -6,7 +6,7 @@
 #include "pipeline/grass_profile.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -140,9 +140,15 @@ TerrainManager::~TerrainManager() {
     stopWorkers();
 }
 
+void TerrainManager::setWMORenderer(WMORenderer* renderer) {
+    wmoRenderer = renderer;
+    if (renderer) wmoNormalMapFormat_ = renderer->normalMapFormat();
+}
+
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
     assetManager = assets;
     terrainRenderer = renderer;
+    if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
 
     if (!assetManager) {
         LOG_ERROR("Asset manager is null");
@@ -888,19 +894,17 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                     // that cost already was.
                     auto blp = assetManager->loadTexture(blpKey, true);
                     if (blp.isValid()) {
-                        float variance = 0.0f;
                         const std::vector<uint8_t> decoded =
                             blp.isBlockCompressed()
                                 ? pipeline::BLPLoader::decodeBaseLevel(blp)
                                 : blp.data;
-                        auto normalPixels = decoded.empty()
-                            ? pipeline::BLPImage{}
-                            : WMORenderer::generateNormalHeightMapPixels(
+                        auto normals = decoded.empty()
+                            ? EncodedNormalMap{}
+                            : WMORenderer::prepareNormalHeightMap(
                                   decoded.data(), static_cast<uint32_t>(blp.width),
-                                  static_cast<uint32_t>(blp.height), variance);
-                        if (normalPixels.isValid()) {
-                            pending->preloadedWMONormalMaps[blpKey] = std::move(normalPixels);
-                            pending->preloadedWMONormalMapVariances[blpKey] = variance;
+                                  static_cast<uint32_t>(blp.height), wmoNormalMapFormat_);
+                        if (normals.valid()) {
+                            pending->preloadedWMONormalMaps[blpKey] = std::move(normals);
                         }
                         pending->preloadedWMOTextures[blpKey] = std::move(blp);
                     }
@@ -925,12 +929,21 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
     // Pre-load terrain texture BLP data on background thread so finalizeTile
     // doesn't block the main thread with file I/O.
+    // Their relief is derived here too, from a decoded copy, unless a tile
+    // loaded earlier already left it in the cache.
+    TextureCache* textureCache = terrainRenderer && terrainRenderer->getVkContext()
+        ? &terrainRenderer->getVkContext()->textures() : nullptr;
     for (const auto& texPath : pending->terrain.textures) {
         if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The
         // normal-map source below still decodes: it reads the pixels.
-        pending->preloadedTextures[texPath] = assetManager->loadTexture(texPath, true);
+        pipeline::BLPImage blp = assetManager->loadTexture(texPath, true);
+        if (blp.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
+            EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
+            if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
+        }
+        pending->preloadedTextures[texPath] = std::move(blp);
     }
 
     LOG_DEBUG("Prepared tile [", x, ",", y, "]: ",
@@ -989,6 +1002,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 one.clear();
                 one.emplace(it->first, std::move(it->second));
                 terrainRenderer->uploadPreloadedTextures(one);
+                if (auto normals = pending->preloadedTerrainNormalMaps.find(it->first);
+                    normals != pending->preloadedTerrainNormalMaps.end()) {
+                    terrainRenderer->uploadPreloadedNormalMap(normals->first, normals->second);
+                    pending->preloadedTerrainNormalMaps.erase(normals);
+                }
                 if (std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
             }
@@ -1026,18 +1044,15 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         }
 
         // Load water after all terrain chunks are uploaded
-        if (!ft.terrainWaterDone && waterRenderer) {
+        if (!ft.terrainWaterDone) {
             ft.terrainWaterDone = true;
-            size_t beforeSurfaces = waterRenderer->getSurfaceCount();
-            waterRenderer->loadFromTerrain(pending->terrain, true, x, y);
-            size_t afterSurfaces = waterRenderer->getSurfaceCount();
-            if (afterSurfaces > beforeSurfaces) {
-                LOG_INFO("Water: tile [", x, ",", y, "] added ", afterSurfaces - beforeSurfaces,
-                         " surfaces (total: ", afterSurfaces, ")");
+            if (liquidScene) {
+                liquidScene->addTerrainTile(pending->terrain, x, y);
+            } else {
+                LOG_WARNING("Water: no liquid scene for tile [", x, ",", y,
+                            "] - its water is neither drawn nor swum in");
             }
             return false;
-        } else if (!waterRenderer) {
-            LOG_WARNING("Water: waterRenderer is null during tile [", x, ",", y, "] finalization!");
         }
 
         // Ensure M2 renderer has asset manager
@@ -1148,9 +1163,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             // Diffuse decode and normal/height generation were completed by the
             // terrain worker. The main thread only uploads those prepared pixels.
             wmoRenderer->setPredecodedBLPCache(&pending->preloadedWMOTextures);
-            wmoRenderer->setPredecodedNormalMapCache(
-                &pending->preloadedWMONormalMaps,
-                &pending->preloadedWMONormalMapVariances);
+            wmoRenderer->setPredecodedNormalMapCache(&pending->preloadedWMONormalMaps);
             wmoRenderer->setDeferNormalMaps(true);
 
             // One model per step, and a large model spread across several
@@ -1174,7 +1187,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             }
             wmoRenderer->setDeferNormalMaps(false);
             wmoRenderer->setPredecodedBLPCache(nullptr);
-            wmoRenderer->setPredecodedNormalMapCache(nullptr, nullptr);
+            wmoRenderer->setPredecodedNormalMapCache(nullptr);
             if (ft.wmoModelIndex < pending->wmoModels.size()) return false;
         }
         ft.phase = FinalizationPhase::WMO_INSTANCES;
@@ -1218,7 +1231,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     }
                 }
                 // Load WMO liquids incrementally (canals, pools, etc.)
-                if (waterRenderer) {
+                if (liquidScene) {
                     uint32_t wmoInstId = ft.wmoInstanceIds.back();
                     glm::mat4 modelMatrix = glm::mat4(1.0f);
                     modelMatrix = glm::translate(modelMatrix, wmoReady.position);
@@ -1230,12 +1243,13 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         const auto& group = groups[ft.wmoLiquidGroupIndex];
                         ft.wmoLiquidGroupIndex++;
                         if (!group.liquid.hasLiquid()) continue;
-                        if (group.flags & 0x2000) {
-                            uint16_t lt = group.liquid.materialId;
-                            uint8_t basicType = (lt == 0) ? 0 : ((lt - 1) % 4);
-                            if (basicType < 2) continue;
-                        }
-                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId);
+                        // Every group's liquid, indoor ones included. Water in an
+                        // interior group used to be dropped here without a word -
+                        // Orgrimmar's valleys are interior groups of its WMO, and
+                        // their ponds were only drawn while their MOMT index read
+                        // as slime. The client draws them as "WMO Water -
+                        // Interior", which wmoGroupLiquidType already names.
+                        liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId);
                         liquidGroupsLoaded++;
                     }
                     // More liquid groups remain on this WMO - yield
@@ -1642,6 +1656,15 @@ void TerrainManager::processOneReadyTile() {
     }
 }
 
+core::CacheStats TerrainManager::tileCacheStats() const {
+    std::lock_guard<std::mutex> lock(tileCacheMutex_);
+    core::CacheStats stats;
+    stats.entries = tileCache_.size();
+    for (const auto& [coord, cached] : tileCache_) stats.bytes += cached.bytes;
+    stats.budgetBytes = tileCacheBudgetBytes_;
+    return stats;
+}
+
 std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coord) {
     std::lock_guard<std::mutex> lock(tileCacheMutex_);
     auto it = tileCache_.find(coord);
@@ -1669,8 +1692,8 @@ void TerrainManager::unloadTile(int x, int y) {
                 terrainRenderer->removeTile(x, y);
             }
             // If past TERRAIN phase, water was already loaded - remove it
-            if (fit->phase != FinalizationPhase::TERRAIN && waterRenderer) {
-                waterRenderer->removeTile(x, y);
+            if (fit->phase != FinalizationPhase::TERRAIN && liquidScene) {
+                liquidScene->removeTile(x, y);
             }
             // Clean up any M2/WMO instances that were already created
             if (m2Renderer && !fit->m2InstanceIds.empty()) {
@@ -1678,7 +1701,7 @@ void TerrainManager::unloadTile(int x, int y) {
             }
             if (wmoRenderer && !fit->wmoInstanceIds.empty()) {
                 for (uint32_t id : fit->wmoInstanceIds) {
-                    if (waterRenderer) waterRenderer->removeWMO(id);
+                    if (liquidScene) liquidScene->removeWmo(id);
                 }
                 wmoRenderer->removeInstances(fit->wmoInstanceIds);
             }
@@ -1722,8 +1745,8 @@ void TerrainManager::unloadTile(int x, int y) {
     if (wmoRenderer) {
         for (uint32_t id : tile->wmoInstanceIds) {
             // Remove WMO liquids associated with this instance
-            if (waterRenderer) {
-                waterRenderer->removeWMO(id);
+            if (liquidScene) {
+                liquidScene->removeWmo(id);
             }
         }
         wmoRenderer->removeInstances(tile->wmoInstanceIds);
@@ -1736,8 +1759,8 @@ void TerrainManager::unloadTile(int x, int y) {
     }
 
     // Remove water surfaces for this tile
-    if (waterRenderer) {
-        waterRenderer->removeTile(x, y);
+    if (liquidScene) {
+        liquidScene->removeTile(x, y);
     }
 
     loadedTiles.erase(it);

@@ -13,6 +13,20 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
+    ivec4 localLightMeta;
+    vec4 volumetricParams;
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    vec4 fogSkyTop;
+    vec4 fogSkyMiddle;
+    vec4 fogSkyBand1;
+    vec4 fogSkyBand2;
+    mat4 contactSpaceMatrix;
+    vec4 contactParams;
+    vec4 windDirLean;  // wind.glsli
+    vec4 windPhases;
+    vec4 windTravel;
 };
 
 // Per-draw push constants (batch-level data only)
@@ -81,6 +95,8 @@ layout(location = 10) flat out vec4 vInteriorDirect;
 layout(location = 11) flat out uvec4 vLocalLights;
 
 #include "sphere_map.glsli"
+#define WIND_PER_FRAME
+#include "wind.glsli"
 
 // Matches m2WindDistanceFade in m2_sway.hpp, used by the shadow pass.
 float m2WindDistanceFade(vec3 origin, vec3 cameraPos) {
@@ -136,27 +152,8 @@ void main() {
     // animation has no way to know about.
     float windFade = m2WindDistanceFade(model[3].xyz, viewPos.xyz);
     if (push.isFoliage == 1 && windFade > 0.0) {
-        float windTime = fogParams.z;
-        vec3 worldRef = model[3].xyz;
         float amp = push.swayAmp * heightFactor * windFade;
-
-        // Layer 1: Trunk sway - slow, large amplitude
-        float trunkPhase = windTime * 0.8 + dot(worldRef.xy, vec2(0.1, 0.13));
-        float trunkSwayX = sin(trunkPhase) * 0.35 * amp;
-        float trunkSwayY = cos(trunkPhase * 0.7) * 0.25 * amp;
-
-        // Layer 2: Branch sway - medium frequency, per-branch phase
-        float branchPhase = windTime * 1.7 + dot(worldRef.xy, vec2(0.37, 0.71));
-        float branchSwayX = sin(branchPhase + pos.y * 0.4) * 0.15 * amp;
-        float branchSwayY = cos(branchPhase * 1.1 + pos.x * 0.3) * 0.12 * amp;
-
-        // Layer 3: Leaf flutter - fast, small amplitude, per-vertex
-        float leafPhase = windTime * 4.5 + dot(aPos, vec3(1.7, 2.3, 0.9));
-        float leafFlutterX = sin(leafPhase) * 0.06 * amp;
-        float leafFlutterY = cos(leafPhase * 1.3) * 0.05 * amp;
-
-        pos.x += trunkSwayX + branchSwayX + leafFlutterX;
-        pos.y += trunkSwayY + branchSwayY + leafFlutterY;
+        pos.xy += foliageWindSway(perFrameFoliageWind(model), pos.xyz, aPos, model[3].xy, amp);
     }
 
     // Cloth: a banner, a flag, a tapestry. Mode 3 hangs, mode 4 stands.
@@ -170,12 +167,9 @@ void main() {
     // both reach z=0. The client separates them by how wide the geometry is
     // down at the ground, a spar against a full hem, and says which this is.
     //
-    // Two rates: a slow sway of the whole cloth and a smaller ripple across it,
-    // so it breathes rather than swinging like a sign. The amplitude is a
-    // twentieth of the cloth's own drop, set on the client side.
+    // The amplitude is a twentieth of the cloth's own drop, set on the client
+    // side; how it moves is wind.glsli's.
     if (push.isFoliage == 3 || push.isFoliage == 4) {
-        float windTime = fogParams.z;
-        vec3 worldRef = model[3].xyz;
         float span = max(push.plantHeight, 0.01);
         float clothBase = push.swayRefHeight - span;
         float held = (push.isFoliage == 4)
@@ -183,34 +177,7 @@ void main() {
                    : clamp((push.swayRefHeight - pos.z) / span, 0.0, 1.0);
         held *= held;
         float amp = push.swayAmp * held;
-
-        // Per banner rather than per vertex, so two on the same wall are not
-        // in step - the phase comes from where the instance stands.
-        float phase = windTime * 1.1 + dot(worldRef.xy, vec2(0.21, 0.17));
-        vec3 sway = vec3(
-            (sin(phase) * 0.7 + sin(phase * 2.7 + pos.y * 1.9) * 0.25) * amp,
-            (cos(phase * 0.9) * 0.6 + cos(phase * 3.1 + pos.x * 1.7) * 0.2) * amp,
-            // A little in and out as well, so the cloth is not a flat sheet
-            // sliding sideways.
-            sin(phase * 1.6 + pos.x * 1.3) * 0.12 * amp);
-
-        // Away from the wall, never into it.
-        //
-        // A banner hangs flush against stone, so any motion toward its own
-        // back face goes through the masonry - a quarter of it was still
-        // enough to show. The whole perpendicular component is taken out and a
-        // third of it given back outward only: the cloth billows away from the
-        // wall and slides in its own plane, and the half-cycle that used to
-        // push it backwards now does nothing at all.
-        //
-        // Outward is each face's own normal, so a two-sided banner puffs
-        // slightly rather than parting - which is what a cloth in a draught
-        // does anyway.
-        vec3 clothN = normalize(norm.xyz);
-        float perp = dot(sway, clothN);
-        sway -= clothN * perp;
-        sway += clothN * max(perp, 0.0) * 0.35;
-        pos.xyz += sway;
+        pos.xyz += clothWindSway(perFrameClothWind(model), pos.xyz, norm.xyz, model[3].xy, amp);
     }
 
     vec4 worldPos = model * pos;

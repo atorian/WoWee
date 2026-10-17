@@ -1,8 +1,7 @@
-#include "core/coordinates.hpp"
-#include "rendering/water_surface_grid.hpp"
-#include "rendering/water_mask.hpp"
 #include "rendering/water_renderer.hpp"
-#include "rendering/water_mask.hpp"
+#include "rendering/liquid_ripple_frames.hpp"
+#include <chrono>
+#include "pipeline/asset_manager.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -10,8 +9,6 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
-#include "pipeline/adt_loader.hpp"
-#include "pipeline/wmo_loader.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -31,7 +28,21 @@ struct WaterMaterialUBO {
     float shimmerStrength;
     float alphaScale;
     float bodyFloor;   // least the water's own colour shows, however shallow
+    /// The liquid's ripple frames at binding 1: x frames (0 - none, the
+    /// shader's own ripple), y frames a second, z yards one repeat of the
+    /// texture covers, w how steep the ripple is.
+    glm::vec4 ripple{0.0f};
 };
+static_assert(sizeof(WaterMaterialUBO) == 48, "water.frag.glsl's WaterMaterial block is 48 bytes");
+
+// The ripple's pace and size. LiquidType.dbc names the frames but no rate or
+// scale for them that is known, so these are matched by eye: the lake and
+// sea sets are thirty frames, a two-second loop; one repeat of the texture
+// covers two of a chunk's cells; and the slope is what reads as a fine chop
+// rather than a corrugated sheet.
+constexpr float kRippleFramesPerSecond = 15.0f;
+constexpr float kRippleYardsPerRepeat = 2.0f * (33.33333f / 8.0f);
+constexpr float kRippleSlope = 2.5f;
 
 // Push constants matching water.vert.glsl
 struct WaterPushConstants {
@@ -43,7 +54,8 @@ struct WaterPushConstants {
     glm::vec2 screenSize;  // target size, for screen-space UVs
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
-    float pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
+    float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
+    float pad1 = 0.0f, pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
@@ -69,24 +81,32 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     matBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     matBinding.descriptorCount = 1;
     matBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // binding 1: the liquid's animated ripple frames (sampler2DArray)
+    VkDescriptorSetLayoutBinding rippleBinding{};
+    rippleBinding.binding = 1;
+    rippleBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    rippleBinding.descriptorCount = 1;
+    rippleBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    materialSetLayout = createDescriptorSetLayout(device, { matBinding });
+    materialSetLayout = createDescriptorSetLayout(device, { matBinding, rippleBinding });
     if (!materialSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create material set layout");
         return false;
     }
 
     // --- Descriptor pool ---
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = MAX_WATER_SETS;
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = MAX_WATER_SETS;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = MAX_WATER_SETS;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     poolInfo.maxSets = MAX_WATER_SETS;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create descriptor pool");
@@ -210,8 +230,102 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
 
+    // What a liquid with no ripple frames samples: one flat frame, mid grey,
+    // whose slope is nothing. The material says there are no frames, so the
+    // shader draws its own ripple instead; this only keeps the binding valid.
+    {
+        const std::vector<std::vector<uint8_t>> flat{{128}};
+        if (!flatRipple_.uploadArray(*vkCtx, flat, 1, 1, 1, VK_FORMAT_R8_UNORM, 1)) {
+            LOG_ERROR("WaterRenderer: failed to create the flat ripple texture");
+            return false;
+        }
+    }
+    VkSamplerCreateInfo rippleSamplerInfo{};
+    rippleSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    rippleSamplerInfo.magFilter = VK_FILTER_LINEAR;
+    rippleSamplerInfo.minFilter = VK_FILTER_LINEAR;
+    rippleSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    rippleSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    rippleSamplerInfo.anisotropyEnable = VK_TRUE;
+    rippleSamplerInfo.maxAnisotropy = 8.0f;
+    rippleSamplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(device, &rippleSamplerInfo, nullptr, &rippleSampler_) != VK_SUCCESS) {
+        LOG_ERROR("WaterRenderer: failed to create the ripple sampler");
+        return false;
+    }
+
     LOG_INFO("Water renderer initialized (Vulkan)");
     return true;
+}
+
+void WaterRenderer::setLiquidAssets(pipeline::AssetManager* assets,
+                                    const pipeline::LiquidTypeTable* types) {
+    assets_ = assets;
+    liquidTypes_ = types;
+    if (!drawn_.empty()) {
+        LOG_WARNING("Water: liquid textures supplied with ", drawn_.size(),
+                    " surfaces already drawn - those keep the shader's own ripple");
+    }
+    preloadRipples();
+}
+
+const WaterRenderer::RippleSet* WaterRenderer::rippleFor(uint16_t liquidType) {
+    if (!liquidTypes_ || !assets_ || !vkCtx) return nullptr;
+    const pipeline::LiquidTypeInfo* info = liquidTypes_->find(liquidType);
+    if (!info || info->texturePattern.empty()) return nullptr;
+    const std::string& pattern = info->texturePattern;
+    if (auto it = rippleSets_.find(pattern); it != rippleSets_.end()) {
+        return it->second.texture ? &it->second : nullptr;
+    }
+
+    // Tried once whatever the answer: a set that is not there is said and
+    // drawn with the shader's own ripple from then on.
+    RippleSet& set = rippleSets_[pattern];
+    std::string whyNot;
+    const auto started = std::chrono::steady_clock::now();
+    // The set ends at the first frame number with no file. Asked as a
+    // question rather than a load, which would report the frame after the
+    // last as a missing texture.
+    const auto frames = loadLiquidRippleFrames(
+        pattern,
+        [this](const std::string& path) {
+            return assets_->fileExists(path) ? assets_->loadTexture(path) : pipeline::BLPImage{};
+        },
+        whyNot);
+    if (!frames) {
+        LOG_WARNING("Water: no ripple for ", info->name, " (liquid ", liquidType, "): ", whyNot,
+                    " - drawn with the shader's own ripple");
+        return nullptr;
+    }
+    auto texture = std::make_unique<VkTexture>();
+    if (!texture->uploadArray(*vkCtx, frames->levels, frames->width, frames->height,
+                              frames->frames, VK_FORMAT_R8_UNORM, 1)) {
+        LOG_WARNING("Water: the ripple of ", info->name, " (", pattern, ") did not upload - "
+                    "drawn with the shader's own ripple");
+        return nullptr;
+    }
+    set.texture = std::move(texture);
+    set.frames = frames->frames;
+    LOG_INFO("Water: ripple for ", info->name, " - ", frames->frames, " frames of ",
+             frames->width, "x", frames->height, " from the ",
+             frames->fromAlpha ? "alpha" : "colour", " of ", pattern, ", ",
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                 .count(), "ms");
+    return &set;
+}
+
+void WaterRenderer::preloadRipples() {
+    if (!liquidTypes_) return;
+    // Every water and sea in the table, now, while the world is still
+    // loading: decoding a set's frames takes a noticeable fraction of a
+    // second, and the first tile with that water used to pay it.
+    for (const auto& [id, info] : liquidTypes_->rows()) {
+        if (info.basic == pipeline::LiquidBasic::Water || info.basic == pipeline::LiquidBasic::Ocean) {
+            rippleFor(static_cast<uint16_t>(id));
+        }
+    }
 }
 
 void WaterRenderer::recreatePipelines() {
@@ -323,13 +437,13 @@ void WaterRenderer::setRefractionEnabled(bool enabled) {
 }
 
 void WaterRenderer::shutdown() {
-    clear();
+    destroyAllDrawn();
 
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
     vkDeviceWaitIdle(device);
 
-    // clear() defers surface destruction, and those lambdas free descriptor sets
+    // destroyAllDrawn() defers surface destruction, and those lambdas free descriptor sets
     // from the pools destroyed just below. Drain them here, while the pools are
     // still valid - otherwise they linger until some later subsystem's flush
     // runs them against a dead pool.
@@ -344,6 +458,12 @@ void WaterRenderer::shutdown() {
     destroy(device, sceneSetLayout);
     destroy(device, materialDescPool);
     destroy(device, materialSetLayout);
+    rippleSets_.clear();
+    flatRipple_.destroy(device, vkCtx->getAllocator());
+    if (rippleSampler_) {
+        vkDestroySampler(device, rippleSampler_, nullptr);
+        rippleSampler_ = VK_NULL_HANDLE;
+    }
 
     vkCtx = nullptr;
 }
@@ -580,13 +700,13 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
     });
 }
 
-void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
-    glm::vec4 color = getLiquidColor(surface.liquidType);
-    float alpha = getLiquidAlpha(surface.liquidType);
+void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
+    glm::vec4 color = getLiquidColor(surface.basicType);
+    float alpha = getLiquidAlpha(surface.basicType);
 
     // WMO liquid material override
     if (surface.wmoId != 0) {
-        const uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
+        const uint8_t basicType = surface.basicType;
         if (basicType == 2) {
             // Magma - bright orange-red, opaque
             color = glm::vec4(1.0f, 0.35f, 0.05f, 1.0f);
@@ -606,7 +726,7 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
     // thinned below open water.
     float alphaScale = canalProfile ? 1.15f : 1.00f;
     float bodyFloor = 0.0f;
-    if (canalProfile && (surface.liquidType == 0 || (surface.liquidType - 1) % 4 < 2)) {
+    if (canalProfile && surface.basicType < 2) {
         color = glm::vec4(0.08f, 0.30f, 0.40f, 1.0f);
         bodyFloor = 0.45f;
     }
@@ -617,6 +737,10 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
     mat.shimmerStrength = shimmerStrength;
     mat.alphaScale = alphaScale;
     mat.bodyFloor = bodyFloor;
+    if (surface.ripple) {
+        mat.ripple = glm::vec4(static_cast<float>(surface.ripple->frames), kRippleFramesPerSecond,
+                               kRippleYardsPerRepeat, kRippleSlope);
+    }
 
     // Create UBO
     VkBufferCreateInfo bufCI{};
@@ -643,453 +767,73 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
         bufInfo.offset = 0;
         bufInfo.range = sizeof(WaterMaterialUBO);
 
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = surface.materialSet;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write.pBufferInfo = &bufInfo;
+        VkDescriptorImageInfo rippleInfo{};
+        rippleInfo.sampler = rippleSampler_;
+        rippleInfo.imageView = surface.ripple ? surface.ripple->texture->getImageView()
+                                              : flatRipple_.getImageView();
+        rippleInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 0, nullptr);
+        VkWriteDescriptorSet writes[2]{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = surface.materialSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo = &bufInfo;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = surface.materialSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &rippleInfo;
+
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 2, writes, 0, nullptr);
     } else {
         LOG_WARNING("Water: failed to allocate material descriptor set (pool exhaustion?)");
     }
 }
 
 // ==============================================================
-// Data loading (preserved from GL version - no GL calls)
+// The scene's surfaces, on the GPU
 // ==============================================================
 
-void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool append,
-                                     int tileX, int tileY) {
-    constexpr float TILE_SIZE = 33.33333f / 8.0f;
+void WaterRenderer::liquidSurfaceAdded(const LiquidSurface& surface) {
+    DrawnSurface drawn;
+    drawn.id = surface.id;
+    drawn.origin = surface.origin;
+    drawn.stepX = surface.stepX;
+    drawn.stepY = surface.stepY;
+    drawn.minHeight = surface.minHeight;
+    drawn.maxHeight = surface.maxHeight;
+    drawn.liquidType = surface.liquidType;
+    drawn.basicType = surface.basicType();
+    drawn.wmoId = surface.wmoId;
+    drawn.width = surface.width;
+    drawn.height = surface.height;
 
-    if (!append) {
-        clear();
-    }
+    createWaterMesh(drawn, surface);
+    // A surface with no cell of liquid has nothing to draw; the scene still
+    // knows of it.
+    if (drawn.indexCount == 0) return;
+    // Water and sea ripple with their frames. Magma and slime keep their own
+    // flowing surface in the shader: their frames are a colour, not a ripple.
+    if (drawn.basicType < 2) drawn.ripple = rippleFor(surface.liquidType);
+    if (vkCtx) updateMaterialUBO(drawn);
+    drawn_.push_back(drawn);
+}
 
-    // ── Pass 1: collect layers into merge groups keyed by {liquidType, roundedHeight} ──
-    struct ChunkLayerInfo {
-        int chunkX, chunkY;
-        const pipeline::ADTTerrain::WaterLayer* layer;
-    };
-
-    struct MergeKey {
-        uint16_t liquidType;
-        int32_t roundedHeight;  // minHeight * 2, rounded to int
-        bool operator==(const MergeKey& o) const {
-            return liquidType == o.liquidType && roundedHeight == o.roundedHeight;
-        }
-    };
-
-    struct MergeKeyHash {
-        size_t operator()(const MergeKey& k) const {
-            return std::hash<uint64_t>()((uint64_t(k.liquidType) << 32) | uint32_t(k.roundedHeight));
-        }
-    };
-
-    std::unordered_map<MergeKey, std::vector<ChunkLayerInfo>, MergeKeyHash> mergeGroups;
-
-    for (int chunkIdx = 0; chunkIdx < 256; chunkIdx++) {
-        const auto& chunkWater = terrain.waterData[chunkIdx];
-        if (!chunkWater.hasWater()) continue;
-
-        int chunkX = chunkIdx % 16;
-        int chunkY = chunkIdx / 16;
-
-        for (const auto& layer : chunkWater.layers) {
-            MergeKey key;
-            key.liquidType = layer.liquidType;
-            key.roundedHeight = static_cast<int32_t>(std::round(layer.minHeight * 2.0f));
-            mergeGroups[key].push_back({.chunkX = chunkX, .chunkY = chunkY, .layer = &layer});
-        }
-    }
-
-    // Tile origin = NW corner = chunk(0,0) position
-    const auto& chunk00 = terrain.getChunk(0, 0);
-
-    // Stormwind water lowering check
-    bool isStormwindArea = (tileX >= 28 && tileX <= 50 && tileY >= 28 && tileY <= 52);
-    float tileWorldX = 0, tileWorldY = 0;
-    glm::vec2 moonwellPos2D(0.0f);
-    if (isStormwindArea) {
-        tileWorldX = (32.0f - tileX) * core::coords::TILE_SIZE;
-        tileWorldY = (32.0f - tileY) * core::coords::TILE_SIZE;
-        moonwellPos2D = glm::vec2(-8755.9f, 1108.9f);
-    }
-
-    int totalSurfaces = 0;
-
-    // Merge threshold: groups with more than this many chunks get merged into
-    // one tile-wide surface.  Small groups (shore, lakes) stay per-chunk so
-    // their original mask / height data is preserved exactly.
-    constexpr size_t MERGE_THRESHOLD = 4;
-
-    // ── Pass 2: create surfaces ──
-    for (auto& [key, chunkLayers] : mergeGroups) {
-
-        // ── Small group → per-chunk surfaces (original code path) ──
-        if (chunkLayers.size() <= MERGE_THRESHOLD) {
-            for (const auto& info : chunkLayers) {
-                const auto& layer = *info.layer;
-                const auto& terrainChunk = terrain.getChunk(info.chunkX, info.chunkY);
-
-                WaterSurface surface;
-                surface.position = glm::vec3(
-                    terrainChunk.position[0],
-                    terrainChunk.position[1],
-                    layer.minHeight
-                );
-                surface.origin = glm::vec3(
-                    // Same axis convention as terrain_mesh.cpp vertices:
-                    // MH2O rows (y) advance along render X, columns (x)
-                    // along render Y.
-                    surface.position.x - (static_cast<float>(layer.y) * TILE_SIZE),
-                    surface.position.y - (static_cast<float>(layer.x) * TILE_SIZE),
-                    layer.minHeight
-                );
-                // stepX walks the mesh grid's x (MH2O column → render Y),
-                // stepY walks the grid's y (MH2O row → render X).
-                surface.stepX = glm::vec3(0.0f, -TILE_SIZE, 0.0f);
-                surface.stepY = glm::vec3(-TILE_SIZE, 0.0f, 0.0f);
-
-                surface.minHeight = layer.minHeight;
-                surface.maxHeight = layer.maxHeight;
-                surface.liquidType = layer.liquidType;
-                // Keep mask coordinates in the MH2O chunk's native x/y order;
-                // only the world-space origin needs the terrain axis conversion.
-                surface.xOffset = layer.x;
-                surface.yOffset = layer.y;
-                surface.width = layer.width;
-                surface.height = layer.height;
-
-                size_t numVertices = (layer.width + 1) * (layer.height + 1);
-                bool useFlat = true;
-                if (layer.heights.size() == numVertices) {
-                    bool sane = true;
-                    for (float h : layer.heights) {
-                        if (!std::isfinite(h) || std::abs(h) > 50000.0f) { sane = false; break; }
-                        if (h < layer.minHeight - 8.0f || h > layer.maxHeight + 8.0f) { sane = false; break; }
-                    }
-                    if (sane) { useFlat = false; surface.heights = layer.heights; }
-                }
-                if (useFlat) surface.heights.resize(numVertices, layer.minHeight);
-
-                if (isStormwindArea && layer.minHeight > 94.0f) {
-                    float distToMoonwell = glm::distance(glm::vec2(tileWorldX, tileWorldY), moonwellPos2D);
-                    if (distToMoonwell > 300.0f) {
-                        for (float& h : surface.heights) h -= 1.0f;
-                        surface.minHeight -= 1.0f;
-                        surface.maxHeight -= 1.0f;
-                    }
-                }
-
-                surface.mask = layer.mask;
-                surface.tileX = tileX;
-                surface.tileY = tileY;
-
-                createWaterMesh(surface);
-                if (surface.indexCount > 0 && vkCtx) {
-                    updateMaterialUBO(surface);
-                }
-                surfaces.push_back(std::move(surface));
-                totalSurfaces++;
-            }
-            continue;
-        }
-
-        // ── Large group → merged tile-wide surface ──
-        WaterSurface surface;
-
-        float groupHeight = key.roundedHeight / 2.0f;
-
-        surface.width = 128;
-        surface.height = 128;
-        surface.xOffset = 0;
-        surface.yOffset = 0;
-        surface.liquidType = key.liquidType;
-        surface.tileX = tileX;
-        surface.tileY = tileY;
-
-        // Origin = chunk(0,0) position (NW corner of tile)
-        surface.origin = glm::vec3(chunk00.position[0], chunk00.position[1], groupHeight);
-        surface.position = surface.origin;
-        surface.stepX = glm::vec3(-TILE_SIZE, 0.0f, 0.0f);
-        surface.stepY = glm::vec3(0.0f, -TILE_SIZE, 0.0f);
-
-        surface.minHeight = groupHeight;
-        surface.maxHeight = groupHeight;
-
-        // Initialize height grid (129×129) with group height
-        constexpr int MERGED_W = 128;
-        const int gridW = MERGED_W + 1;  // 129
-        const int gridH = MERGED_W + 1;
-        surface.heights.resize(gridW * gridH, groupHeight);
-
-        // Initialize mask (128×128 sub-tiles)
-        // Mask uses LSB bit order: tileIndex = row * 128 + col
-        const int maskBytes = (MERGED_W * MERGED_W + 7) / 8;
-        // Ocean water (basicType 1) at sea level fills each chunk that declares
-        // it, whatever its own bitmap says - an ocean layer's sub-rect is often
-        // sparse and the gaps read as holes in open sea.
-        //
-        // Each chunk that declares it, not the whole tile. This used to seed
-        // the entire 128×128 mask, on the reading that depth testing against
-        // the terrain would hide the water wherever there was land. That holds
-        // only for land *above* sea level. Somewhere the ground drops below it
-        // the water is drawn over the top with nothing to occlude it, and a
-        // chunk that declares no liquid at all got a surface anyway: the
-        // Caverns of Time, a hole in a coastal tile in Tanaris, was roofed with
-        // ocean. Any cave below sea level on an ocean tile had the same.
-        uint8_t basicType = (key.liquidType == 0) ? 0 : ((key.liquidType - 1) % 4);
-        bool isOcean = (basicType == 1) && (std::abs(groupHeight) < 1.0f);
-        surface.mask.resize(maskBytes, 0x00);
-
-        // ── Fill from each contributing chunk ──
-        for (const auto& info : chunkLayers) {
-            const auto& layer = *info.layer;
-
-            // Merged grid offset for this chunk.
-            // Grid x is the row axis (render X): chunk row (idx/16) and MH2O y.
-            // Grid y is the column axis (render Y): chunk col (idx%16) and MH2O x.
-            int baseGx = info.chunkY * 8;
-            int baseGy = info.chunkX * 8;
-
-            // Copy heights
-            int layerGridW = layer.width + 1;
-            size_t numVertices = static_cast<size_t>(layerGridW) * (layer.height + 1);
-            bool useFlat = true;
-            if (layer.heights.size() == numVertices) {
-                bool sane = true;
-                for (float h : layer.heights) {
-                    if (!std::isfinite(h) || std::abs(h) > 50000.0f) { sane = false; break; }
-                    if (h < layer.minHeight - 8.0f || h > layer.maxHeight + 8.0f) { sane = false; break; }
-                }
-                if (sane) useFlat = false;
-            }
-
-            for (int ly = 0; ly <= layer.height; ly++) {
-                for (int lx = 0; lx <= layer.width; lx++) {
-                    int mgx = baseGx + layer.y + ly;
-                    int mgy = baseGy + layer.x + lx;
-                    if (mgx >= gridW || mgy >= gridH) continue;
-
-                    float h;
-                    if (!useFlat) {
-                        int layerIdx = ly * layerGridW + lx;
-                        h = layer.heights[layerIdx];
-                    } else {
-                        h = layer.minHeight;
-                    }
-
-                    surface.heights[mgy * gridW + mgx] = h;
-                    if (h < surface.minHeight) surface.minHeight = h;
-                    if (h > surface.maxHeight) surface.maxHeight = h;
-                }
-            }
-
-            // Which of this chunk's sixty-four sub-tiles are drawn. The rule
-            // lives in water_mask.hpp so it can be checked without a device;
-            // this places the answer, in the chunk-row-to-render-X order the
-            // merged grid uses.
-            const uint64_t chunkMask = chunkWaterMask(
-                layer.mask, layer.x, layer.y, layer.width, layer.height, isOcean);
-            for (int row = 0; row < 8; row++) {
-                for (int col = 0; col < 8; col++) {
-                    if (!(chunkMask & (uint64_t{1} << (row * 8 + col)))) continue;
-                    const int mx = baseGx + row;
-                    const int my = baseGy + col;
-                    if (mx >= MERGED_W || my >= MERGED_W) continue;
-                    const int mergedTileIdx = my * MERGED_W + mx;
-                    surface.mask[mergedTileIdx / 8] |=
-                        static_cast<uint8_t>(1 << (mergedTileIdx % 8));
-                }
-            }
-        }
-
-        // Stormwind water lowering
-        if (isStormwindArea && surface.minHeight > 94.0f) {
-            float distToMoonwell = glm::distance(glm::vec2(tileWorldX, tileWorldY), moonwellPos2D);
-            if (distToMoonwell > 300.0f) {
-                for (float& h : surface.heights) h -= 1.0f;
-                surface.minHeight -= 1.0f;
-                surface.maxHeight -= 1.0f;
-            }
-        }
-
-        createWaterMesh(surface);
-        if (surface.indexCount > 0 && vkCtx) {
-            updateMaterialUBO(surface);
-        }
-        surfaces.push_back(std::move(surface));
-        totalSurfaces++;
-    }
-
-    if (totalSurfaces > 0) {
-        LOG_INFO("Water: Loaded ", totalSurfaces, " surfaces from tile [", tileX, ",", tileY,
-                 "] (", mergeGroups.size(), " groups), total surfaces: ", surfaces.size());
+void WaterRenderer::liquidSurfaceRemoved(LiquidSurfaceId id) {
+    for (auto it = drawn_.begin(); it != drawn_.end(); ++it) {
+        if (it->id != id) continue;
+        destroyWaterMesh(*it);
+        drawn_.erase(it);
+        return;
     }
 }
 
-void WaterRenderer::removeTile(int tileX, int tileY) {
-    int removed = 0;
-    auto it = surfaces.begin();
-    while (it != surfaces.end()) {
-        if (it->tileX == tileX && it->tileY == tileY) {
-            destroyWaterMesh(*it);
-            it = surfaces.erase(it);
-            removed++;
-        } else {
-            ++it;
-        }
-    }
-    if (removed > 0) {
-        LOG_DEBUG("Water: Removed ", removed, " surfaces for tile [", tileX, ",", tileY, "], remaining: ", surfaces.size());
-    }
-}
-
-void WaterRenderer::loadFromWMO([[maybe_unused]] const pipeline::WMOLiquid& liquid,
-                                 [[maybe_unused]] const glm::mat4& modelMatrix,
-                                 [[maybe_unused]] uint32_t wmoId) {
-    if (!liquid.hasLiquid() || liquid.xTiles == 0 || liquid.yTiles == 0) return;
-    if (liquid.xVerts < 2 || liquid.yVerts < 2) return;
-    if (liquid.xTiles != liquid.xVerts - 1 || liquid.yTiles != liquid.yVerts - 1) return;
-    if (liquid.xTiles > 64 || liquid.yTiles > 64) return;
-
-    WaterSurface surface;
-    surface.tileX = -1;
-    surface.tileY = -1;
-    surface.wmoId = wmoId;
-    surface.liquidType = liquid.materialId;
-    surface.xOffset = 0;
-    surface.yOffset = 0;
-    surface.width = static_cast<uint8_t>(std::min<uint32_t>(255, liquid.xTiles));
-    surface.height = static_cast<uint8_t>(std::min<uint32_t>(255, liquid.yTiles));
-
-    constexpr float WMO_LIQUID_TILE_SIZE = 4.1666625f;
-    const glm::vec3 localBase(liquid.basePosition.x, liquid.basePosition.y, liquid.basePosition.z);
-    const glm::vec3 localStepX(WMO_LIQUID_TILE_SIZE, 0.0f, 0.0f);
-    const glm::vec3 localStepY(0.0f, WMO_LIQUID_TILE_SIZE, 0.0f);
-
-    surface.origin = glm::vec3(modelMatrix * glm::vec4(localBase, 1.0f));
-    surface.stepX = glm::vec3(modelMatrix * glm::vec4(localStepX, 0.0f));
-    surface.stepY = glm::vec3(modelMatrix * glm::vec4(localStepY, 0.0f));
-    surface.position = surface.origin;
-
-    float stepXLen = glm::length(surface.stepX);
-    float stepYLen = glm::length(surface.stepY);
-    glm::vec3 planeN = glm::cross(surface.stepX, surface.stepY);
-    float planeNLenSq = glm::dot(planeN, planeN);
-    float nz = (planeNLenSq > 1e-8f) ? std::abs(planeN.z * glm::inversesqrt(planeNLenSq)) : 0.0f;
-    float spanX = stepXLen * static_cast<float>(surface.width);
-    float spanY = stepYLen * static_cast<float>(surface.height);
-    if (stepXLen < 0.2f || stepXLen > 12.0f ||
-        stepYLen < 0.2f || stepYLen > 12.0f ||
-        nz < 0.60f || spanX > 450.0f || spanY > 450.0f) return;
-
-    const int gridWidth = static_cast<int>(surface.width) + 1;
-    const int gridHeight = static_cast<int>(surface.height) + 1;
-    const int vertexCount = gridWidth * gridHeight;
-
-    // WMO liquid base heights sit ~2 units above the visual waterline.
-    constexpr float WMO_WATER_Z_OFFSET = -1.0f;
-    float adjustedZ = surface.origin.z + WMO_WATER_Z_OFFSET;
-    surface.heights.assign(vertexCount, adjustedZ);
-    surface.minHeight = adjustedZ;
-    surface.maxHeight = adjustedZ;
-    surface.origin.z = adjustedZ;
-    surface.position.z = adjustedZ;
-
-    if (surface.origin.z > 2000.0f || surface.origin.z < -500.0f) return;
-
-    // Build tile mask from MLIQ flags
-    size_t tileCount = static_cast<size_t>(surface.width) * static_cast<size_t>(surface.height);
-    size_t maskBytes = (tileCount + 7) / 8;
-    surface.mask.assign(maskBytes, 0x00);
-    for (size_t t = 0; t < tileCount; t++) {
-        bool hasLiquid = true;
-        int tx = static_cast<int>(t) % surface.width;
-        int ty = static_cast<int>(t) / surface.width;
-
-        // Standard WoW check: low nibble 0x0F = "don't render"
-        if (t < liquid.flags.size()) {
-            if ((liquid.flags[t] & 0x0F) == 0x0F) {
-                hasLiquid = false;
-            }
-        }
-        // Suppress water tiles that extend into enclosed WMO areas
-        // (e.g. Stormwind barracks stairway where canal water pokes through)
-        // Render coords: x=wowY(west), y=wowX(north)
-        if (hasLiquid) {
-            glm::vec3 tileWorld = surface.origin +
-                surface.stepX * (static_cast<float>(tx) + 0.5f) +
-                surface.stepY * (static_cast<float>(ty) + 0.5f);
-            // Stormwind Barracks / Stockade stairway:
-            // Stockade entrance at approximately render (-8768, 848)
-            if (tileWorld.x > -8790.0f && tileWorld.x < -8735.0f &&
-                tileWorld.y > 828.0f && tileWorld.y < 878.0f) {
-                hasLiquid = false;
-            }
-        }
-        if (hasLiquid) {
-            size_t byteIdx = t / 8;
-            size_t bitIdx = t % 8;
-            surface.mask[byteIdx] |= (1 << bitIdx);
-        }
-    }
-
-    createWaterMesh(surface);
-
-    // Count how many tiles passed the flag check and compute bounds
-    size_t activeTiles = 0;
-    float minWX = 1e9f, maxWX = -1e9f, minWY = 1e9f, maxWY = -1e9f;
-    for (size_t t = 0; t < tileCount; t++) {
-        size_t byteIdx = t / 8;
-        size_t bitIdx = t % 8;
-        if (surface.mask[byteIdx] & (1 << bitIdx)) {
-            activeTiles++;
-            int atx = static_cast<int>(t) % surface.width;
-            int aty = static_cast<int>(t) / surface.width;
-            glm::vec3 tw = surface.origin +
-                surface.stepX * (static_cast<float>(atx) + 0.5f) +
-                surface.stepY * (static_cast<float>(aty) + 0.5f);
-            if (tw.x < minWX) minWX = tw.x;
-            if (tw.x > maxWX) maxWX = tw.x;
-            if (tw.y < minWY) minWY = tw.y;
-            if (tw.y > maxWY) maxWY = tw.y;
-        }
-    }
-    LOG_DEBUG("WMO water: origin=(", surface.origin.x, ",", surface.origin.y, ",", surface.origin.z,
-             ") tiles=", static_cast<int>(surface.width), "x", static_cast<int>(surface.height),
-             " active=", activeTiles, "/", tileCount,
-             " wmoId=", wmoId, " indexCount=", surface.indexCount,
-             " bounds x=[", minWX, "..", maxWX, "] y=[", minWY, "..", maxWY, "]");
-
-    if (surface.indexCount > 0) {
-        if (vkCtx) updateMaterialUBO(surface);
-        surfaces.push_back(std::move(surface));
-    }
-}
-
-void WaterRenderer::removeWMO(uint32_t wmoId) {
-    if (wmoId == 0) return;
-    auto it = surfaces.begin();
-    while (it != surfaces.end()) {
-        if (it->wmoId == wmoId) {
-            destroyWaterMesh(*it);
-            it = surfaces.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void WaterRenderer::clear() {
-    for (auto& surface : surfaces) {
-        destroyWaterMesh(surface);
-    }
-    surfaces.clear();
+void WaterRenderer::destroyAllDrawn() {
+    for (auto& drawn : drawn_) destroyWaterMesh(drawn);
+    drawn_.clear();
 }
 
 // ==============================================================
@@ -1102,10 +846,10 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // waited for the GPU to finish with it.
     uploadFrameUBO();
     VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
-    if (!renderingEnabled || surfaces.empty() || !pipeline) {
-        if (renderDiagCounter_++ % 300 == 0 && !surfaces.empty()) {
+    if (!renderingEnabled || drawn_.empty() || !pipeline) {
+        if (renderDiagCounter_++ % 300 == 0 && !drawn_.empty()) {
             LOG_WARNING("Water: render skipped - enabled=", renderingEnabled,
-                        " surfaces=", surfaces.size(),
+                        " surfaces=", drawn_.size(),
                         " pipeline=", (pipeline ? "ok" : "null"),
                         " use1x=", use1x);
         }
@@ -1115,7 +859,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkDescriptorSet activeSceneSet = sceneHistory[fi].sceneSet;
     if (!activeSceneSet) {
         if (renderDiagCounter_++ % 300 == 0) {
-            LOG_WARNING("Water: render skipped - sceneSet is null, surfaces=", surfaces.size());
+            LOG_WARNING("Water: render skipped - sceneSet is null, surfaces=", drawn_.size());
         }
         return;
     }
@@ -1131,7 +875,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              2, 1, &activeSceneSet, 0, nullptr);
 
-    for (const auto& surface : surfaces) {
+    for (const auto& surface : drawn_) {
         if (surface.vertexBuffer == VK_NULL_HANDLE || surface.indexCount == 0) continue;
         if (!surface.materialSet) continue;
 
@@ -1158,7 +902,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
         bool isWmoWater = (surface.wmoId != 0);
         bool canalProfile = isWmoWater || (surface.liquidType == 5);
-        uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
+        const uint8_t basicType = surface.basicType;
         // WMO water gets no wave displacement - prevents visible slosh at
         // geometry edges (bridges, docks) where water is far below the surface.
         float waveAmp = isWmoWater ? 0.0f : (basicType == 1 ? 0.35f : 0.08f);
@@ -1178,6 +922,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // against a near plane of 0.05 while the camera's is 0.5.
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
+        push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1342,7 +1087,7 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
 // Mesh creation (Vulkan upload instead of GL)
 // ==============================================================
 
-void WaterRenderer::createWaterMesh(WaterSurface& surface) {
+void WaterRenderer::createWaterMesh(DrawnSurface& drawn, const LiquidSurface& surface) {
     const int gridWidth = surface.width + 1;
     const int gridHeight = surface.height + 1;
     constexpr float VISUAL_WATER_Z_BIAS = 0.02f;
@@ -1378,11 +1123,7 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
     // Generate indices respecting render mask (same logic as GL version)
     for (int y = 0; y < gridHeight - 1; y++) {
         for (int x = 0; x < gridWidth - 1; x++) {
-            const bool renderTile =
-                waterCellRendered(surface.mask, surface.wmoId, surface.width,
-                                  surface.xOffset, surface.yOffset, x, y);
-
-            if (!renderTile) continue;
+            if (!surface.cellHasLiquid(x, y)) continue;
 
             int topLeft = y * gridWidth + x;
             int topRight = topLeft + 1;
@@ -1399,7 +1140,7 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
     }
 
     if (indices.empty()) return;
-    surface.indexCount = static_cast<int>(indices.size());
+    drawn.indexCount = static_cast<int>(indices.size());
 
     if (!vkCtx) return;
 
@@ -1407,18 +1148,18 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
     VkDeviceSize vbSize = vertices.size() * sizeof(float);
     AllocatedBuffer vb = uploadBuffer(*vkCtx, vertices.data(), vbSize,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    surface.vertexBuffer = vb.buffer;
-    surface.vertexAlloc = vb.allocation;
+    drawn.vertexBuffer = vb.buffer;
+    drawn.vertexAlloc = vb.allocation;
 
     // Upload index buffer
     VkDeviceSize ibSize = indices.size() * sizeof(uint32_t);
     AllocatedBuffer ib = uploadBuffer(*vkCtx, indices.data(), ibSize,
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    surface.indexBuffer = ib.buffer;
-    surface.indexAlloc = ib.allocation;
+    drawn.indexBuffer = ib.buffer;
+    drawn.indexAlloc = ib.allocation;
 }
 
-void WaterRenderer::destroyWaterMesh(WaterSurface& surface) {
+void WaterRenderer::destroyWaterMesh(DrawnSurface& surface) {
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();
@@ -1461,111 +1202,7 @@ void WaterRenderer::destroyWaterMesh(WaterSurface& surface) {
     });
 }
 
-// ==============================================================
-// Query functions (data-only, no GL)
-// ==============================================================
-
-/// Where a point sits on a surface, if that surface has water there at all.
-///
-/// Every water query starts with the same pair of questions: does the point
-/// fall on this surface, and does its render mask say the cell it lands in
-/// holds water. Three of them asked it separately - the height, the nearest
-/// height and the liquid type - and the cell arithmetic between the two halves
-/// was written out each time.
-///
-/// The cell is clamped at the far edge because a grid of `width` cells has
-/// `width + 1` corners: a point exactly on the last corner belongs to the last
-/// cell, not to one past it.
-std::optional<glm::vec2> WaterRenderer::wateredGridPosition(const WaterSurface& surface,
-                                                            float glX, float glY) const {
-    const auto grid = surfaceGridPosition(surface.origin, surface.stepX, surface.stepY,
-                                          surface.width, surface.height, glX, glY);
-    if (!grid) return std::nullopt;
-
-    const int ix = std::min(static_cast<int>(grid->x), static_cast<int>(surface.width) - 1);
-    const int iy = std::min(static_cast<int>(grid->y), static_cast<int>(surface.height) - 1);
-    if (!waterCellRendered(surface.mask, surface.wmoId, surface.width,
-                           surface.xOffset, surface.yOffset, ix, iy)) {
-        return std::nullopt;
-    }
-    return grid;
-}
-
-std::optional<float> WaterRenderer::getWaterHeightAt(float glX, float glY) const {
-    std::optional<float> best;
-
-    for (const auto& surface : surfaces) {
-        const auto grid = wateredGridPosition(surface, glX, glY);
-        if (!grid) continue;
-
-        const auto sampled = sampleGridHeight(surface.heights, surface.width,
-                                              surface.height, grid->x, grid->y);
-        if (!sampled) continue;
-        const float h = *sampled;
-
-        if (!best || h > *best) best = h;
-    }
-
-    return best;
-}
-
-std::optional<float> WaterRenderer::getNearestWaterHeightAt(float glX, float glY, float queryZ, float maxAbove) const {
-    std::optional<float> best;
-    float bestDist = 1e9f;
-
-    for (const auto& surface : surfaces) {
-        const auto grid = wateredGridPosition(surface, glX, glY);
-        if (!grid) continue;
-
-        const auto sampled = sampleGridHeight(surface.heights, surface.width,
-                                              surface.height, grid->x, grid->y);
-        if (!sampled) continue;
-        const float h = *sampled;
-
-        // Only consider water that's above queryZ but not too far above
-        if (h < queryZ - 2.0f) continue;  // water below camera, skip
-        if (h > queryZ + maxAbove) continue;  // water way above camera, skip
-
-        float dist = std::abs(h - queryZ);
-        if (!best || dist < bestDist) {
-            best = h;
-            bestDist = dist;
-        }
-    }
-
-    return best;
-}
-
-std::optional<uint16_t> WaterRenderer::getWaterTypeAt(float glX, float glY) const {
-    std::optional<float> bestHeight;
-    std::optional<uint16_t> bestType;
-
-    for (const auto& surface : surfaces) {
-        if (!wateredGridPosition(surface, glX, glY)) continue;
-
-        float h = surface.minHeight;
-        if (!bestHeight || h > *bestHeight) {
-            bestHeight = h;
-            bestType = surface.liquidType;
-        }
-    }
-
-    return bestType;
-}
-
-bool WaterRenderer::isWmoWaterAt(float glX, float glY) const {
-    for (const auto& surface : surfaces) {
-        if (surface.wmoId == 0) continue;
-        if (surfaceGridPosition(surface.origin, surface.stepX, surface.stepY,
-                                surface.width, surface.height, glX, glY)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-glm::vec4 WaterRenderer::getLiquidColor(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
+glm::vec4 WaterRenderer::getLiquidColor(uint8_t basicType) const {
     switch (basicType) {
         case 0:  return glm::vec4(0.10f, 0.28f, 0.55f, 1.0f); // inland: richer blue
         case 1:  return glm::vec4(0.04f, 0.16f, 0.38f, 1.0f); // ocean: deep blue
@@ -1575,8 +1212,7 @@ glm::vec4 WaterRenderer::getLiquidColor(uint16_t liquidType) const {
     }
 }
 
-float WaterRenderer::getLiquidAlpha(uint16_t liquidType) const {
-    uint8_t basicType = (liquidType == 0) ? 0 : ((liquidType - 1) % 4);
+float WaterRenderer::getLiquidAlpha(uint8_t basicType) const {
     switch (basicType) {
         case 1:  return 0.72f;  // ocean
         case 2:  return 0.75f;  // magma
@@ -1987,38 +1623,6 @@ void WaterRenderer::updateWake(float deltaTime, const glm::vec2& pos,
 // ==============================================================
 // Mirror camera computations
 // ==============================================================
-
-std::optional<float> WaterRenderer::getDominantWaterHeight(const glm::vec3& cameraPos) const {
-    if (surfaces.empty()) return std::nullopt;
-
-    // Find the water surface closest to the camera (XY distance)
-    float bestDist = std::numeric_limits<float>::max();
-    float bestHeight = 0.0f;
-    bool found = false;
-
-    for (const auto& surface : surfaces) {
-        // Skip magma/slime - only reflect water/ocean
-        uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
-        if (basicType >= 2) continue;
-
-        // Compute center of surface in world space
-        glm::vec3 center = surface.origin +
-            surface.stepX * (static_cast<float>(surface.width) * 0.5f) +
-            surface.stepY * (static_cast<float>(surface.height) * 0.5f);
-
-        float dx = cameraPos.x - center.x;
-        float dy = cameraPos.y - center.y;
-        float dist = dx * dx + dy * dy;
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestHeight = surface.minHeight;
-            found = true;
-        }
-    }
-
-    if (!found) return std::nullopt;
-    return bestHeight;
-}
 
 glm::mat4 WaterRenderer::computeReflectedView(const Camera& camera, float waterHeight) {
     // In this engine, Z is up. Water height is stored in the Z component.

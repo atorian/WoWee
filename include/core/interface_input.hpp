@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/client_shortcuts.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <functional>
@@ -36,8 +38,11 @@ public:
     /// `camera` zooms on the wheel when no interface takes it. A key nothing
     /// in the interface wanted, and that the client's own screens are not
     /// typing into, goes to `unclaimedKey` - the client's development keys.
+    /// A press that is one of the client's own shortcuts goes to `shortcut`
+    /// first and nowhere else (clientShortcutFor).
     void dispatch(CharacterSession* session, rendering::CameraController* camera,
-                  const std::function<void(const SDL_Event&)>& unclaimedKey);
+                  const std::function<void(const SDL_Event&)>& unclaimedKey,
+                  const std::function<void(ClientShortcut)>& shortcut);
 
 private:
     struct Kept {

@@ -298,18 +298,16 @@ void EntitySpawner::queueGameObjectSpawn(uint64_t guid, uint32_t entry, uint32_t
     spawns_->pendingGameObjectSpawns_.push_back({guid, entry, displayId, x, y, z, orientation, scale, token});
 }
 
-void EntitySpawner::queuePlayerEquipment(uint64_t guid,
-                                          const std::array<uint32_t, 19>& displayInfoIds,
-                                          const std::array<uint8_t, 19>& inventoryTypes) {
+void EntitySpawner::queuePlayerEquipment(uint64_t guid, const WornEquipment& equipment) {
     if (!spawns_) return;
     spawns_->jobs_.replace(JobGroup::Channel::Equipment, guid);
     for (auto& queued : spawns_->deferredEquipmentQueue_) {
         if (queued.first == guid) {
-            queued.second = {displayInfoIds, inventoryTypes};
+            queued.second = equipment;
             return;
         }
     }
-    spawns_->deferredEquipmentQueue_.push_back({guid, {displayInfoIds, inventoryTypes}});
+    spawns_->deferredEquipmentQueue_.push_back({guid, equipment});
 }
 
 // --- Across a reconnect ---
@@ -1329,7 +1327,6 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         (hasGroup3 || hasGroup4 || hasGroup5 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15)) {
         bool hasRenderableCape = false;
         std::string capeTexturePath;  // first found cape texture for override
-        bool hasEquippedTabard = false;
         bool hasHumanoidExtra = false;
         uint8_t extraRaceId = 0;
         uint8_t extraSexId = 0;
@@ -1351,7 +1348,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
+        uint32_t equipChestGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0, equipTabardGG = 0;
         ItemGeosetColumns chestColumns, legsColumns;
         if (itDisplayData != assets_.displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
@@ -1360,7 +1357,6 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 hasHumanoidExtra = true;
                 extraRaceId = itExtra->second.raceId;
                 extraSexId = itExtra->second.sexId;
-                hasEquippedTabard = (itExtra->second.equipDisplayId[9] != 0);
                 const uint32_t hairKey = appearanceKey(
                     extraRaceId, extraSexId, itExtra->second.hairStyleId);
                 auto itHairGeo = assets_.hairGeosetMap_.find(hairKey);
@@ -1453,6 +1449,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     equipFeetGG = readGG(itExtra->second.equipDisplayId[6]);
                     equipGlovesGG = readGG(itExtra->second.equipDisplayId[8]);
                     equipCapeGG = readGG(itExtra->second.equipDisplayId[10]);
+                    equipTabardGG = readGG(itExtra->second.equipDisplayId[9]);
                 }
             }
         }
@@ -1551,36 +1548,10 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
             if (sleeveSid != 0) normalizedGeosets.insert(sleeveSid);
         }
 
-        // Show tabard mesh only when CreatureDisplayInfoExtra equips one.
-        if (hasGroup12 && hasEquippedTabard) {
-            uint16_t wantTabard = kGeosetDefaultTabard;  // Default fallback
-
-            // Try to read tabard geoset variant from ItemDisplayInfo.dbc (slot 9)
-            if (hasHumanoidExtra && itDisplayData != assets_.displayDataMap_.end() &&
-                itDisplayData->second.extraDisplayId != 0) {
-                auto itExtra = assets_.humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
-                if (itExtra != assets_.humanoidExtraMap_.end()) {
-                    uint32_t tabardDisplayId = itExtra->second.equipDisplayId[9];
-                    if (tabardDisplayId != 0) {
-                        auto itemDisplayDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
-                        const auto* idiL = pipeline::getActiveDBCLayout()
-                            ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                        if (itemDisplayDbc && idiL) {
-                            int32_t tabardIdx = itemDisplayDbc->findRecordById(tabardDisplayId);
-                            if (tabardIdx >= 0) {
-                                // Get geoset variant from ItemDisplayInfo GeosetGroup1 field
-                                const uint32_t ggField = (*idiL)["GeosetGroup1"];
-                                uint32_t tabardGG = itemDisplayDbc->getUInt32(static_cast<uint32_t>(tabardIdx), ggField);
-                                if (tabardGG > 0) {
-                                    wantTabard = equippedGeoset(equipment::kTabardBase, tabardGG);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            uint16_t tabardSid = resolveGeoset(wantTabard, allGeosets);
+        // The tabard flap, by the same rule as the player: the variant the
+        // tabard in CreatureDisplayInfoExtra's slot 9 names, or none.
+        if (hasGroup12) {
+            uint16_t tabardSid = resolveGeoset(tabardGeoset(equipTabardGG), allGeosets);
             if (tabardSid != 0) normalizedGeosets.insert(tabardSid);
         }
 
@@ -1633,9 +1604,8 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         // Apply cape texture override so the cloak mesh shows the actual cape
         // instead of the default body texture.
         if (hasRenderableCape && !capeTexturePath.empty()) {
-            rendering::VkTexture* capeTex = charRenderer->loadTexture(capeTexturePath);
-            const rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
-            if (capeTex && capeTex != whiteTex) {
+            rendering::TextureRef capeTex = charRenderer->loadTexture(capeTexturePath);
+            if (capeTex && capeTex != charRenderer->whiteTexture()) {
                 charRenderer->setGroupTextureOverride(instanceId, 15, capeTex);
                 if (const auto* md2 = charRenderer->getModelData(modelId)) {
                     for (size_t ti = 0; ti < md2->textures.size(); ti++) {
@@ -1669,11 +1639,11 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
             const auto* md = charRenderer->getModelData(modelId);
             if (md) {
                     // Look up hair texture (section 3) via cache
-                    rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
+                    const rendering::TextureRef& whiteTex = charRenderer->whiteTexture();
                     std::string hairPath = lookupCharSection(
                         extra.raceId, extra.sexId, 3, extra.hairStyleId, extra.hairColorId, 0);
                     if (!hairPath.empty()) {
-                        rendering::VkTexture* hairTex = charRenderer->loadTexture(hairPath);
+                        rendering::TextureRef hairTex = charRenderer->loadTexture(hairPath);
                         if (hairTex && hairTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 6) {
@@ -1705,8 +1675,8 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                             extraPath = lookupCharSection(
                                 extra.raceId, extra.sexId, 0, 0, extra.skinId, 0);
                         }
-                        rendering::VkTexture* extraTex =
-                            extraPath.empty() ? nullptr : charRenderer->loadTexture(extraPath);
+                        rendering::TextureRef extraTex =
+                            extraPath.empty() ? rendering::TextureRef{} : charRenderer->loadTexture(extraPath);
                         if (extraTex && extraTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 8) {
@@ -1757,7 +1727,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         std::string skinPath = lookupCharSection(
                             extra.raceId, extra.sexId, 0, 0, extra.skinId, 0);
                         if (!skinPath.empty()) {
-                            rendering::VkTexture* skinTex = charRenderer->loadTexture(skinPath);
+                            rendering::TextureRef skinTex = charRenderer->loadTexture(skinPath);
                             if (skinTex) {
                                 for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                     uint32_t tt = md->textures[ti].type;
@@ -2134,7 +2104,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             }
 
             if (!skinPath.empty()) {
-                rendering::VkTexture* skinTex = charRenderer->loadTexture(skinPath);
+                rendering::TextureRef skinTex = charRenderer->loadTexture(skinPath);
                 if (skinTex) {
                     charRenderer->setModelTexture(modelId, static_cast<uint32_t>(ti), skinTex);
                     LOG_DEBUG("Applied creature skin texture: ", skinPath, " to slot ", ti);

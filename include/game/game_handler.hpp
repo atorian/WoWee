@@ -28,7 +28,6 @@
 #include "game/movement_handler.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
-#include "game/game_clock.hpp"
 #include "game/world_login.hpp"
 #include "network/packet.hpp"
 #include "core/logger.hpp"
@@ -64,6 +63,7 @@ namespace wowee::game {
     class SocialHandler;
     class WardenHandler;
     class AccountDataHandler;
+    class RealmTimeHandler;
 }
 
 namespace wowee {
@@ -373,8 +373,8 @@ public:
     void mirrorAurasByGuid(uint64_t guid, const std::vector<AuraSlot>& auras) override {
         spellHandler_->mirrorAurasByGuid(guid, auras);
     }
-    const std::unordered_map<uint64_t, std::array<uint32_t, 19>>& inspectedPlayerItems() const override {
-        return inventoryHandler_->inspectedPlayerItemEntries();
+    const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const override {
+        return inventoryHandler_->inspectedItemEntries(guid);
     }
     bool showingHelm() const override { return helmVisible_; }
     bool showingCloak() const override { return cloakVisible_; }
@@ -1476,8 +1476,9 @@ public:
     // format is a packed bitfield, the sky divided by 86400 as though it were
     // seconds, GetGameTime split it as hours, and SMSG_SERVERTIME wrote a unix
     // timestamp into the same field.
-    float getGameTime() const { return gameClock_.hours(); }
-    float getTimeSpeed() const { return gameClock_.speed(); }
+    //
+    // RealmTimeHandler's; a facade for the callers that have not moved.
+    float getGameTime() const;
 
     // Global Cooldown (GCD) - set when the server sends a spellId=0 cooldown entry
     float getGCDRemaining() const;
@@ -3235,6 +3236,9 @@ public:
     /// The character's action bar.
     ActionBarHandler& actionBar() { return *actionBarHandler_; }
     const ActionBarHandler& actionBar() const { return *actionBarHandler_; }
+    /// What time it is on the realm: the world's hour and the calendar moment.
+    RealmTimeHandler& realmTime() { return *realmTimeHandler_; }
+    const RealmTimeHandler& realmTime() const { return *realmTimeHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3460,7 +3464,8 @@ public:
     void rebuildOnlineInventory();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
-    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries);
+    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
+                                       const std::array<uint16_t, 19>& enchantIds) override;
     void detectInventorySlotBases(const FlatFieldMap& fields);
     bool applyInventoryFields(const FlatFieldMap& fields);
     void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
@@ -3718,6 +3723,7 @@ private:
     std::unique_ptr<ActionBarHandler> actionBarHandler_;
     std::unique_ptr<PetHandler> petHandler_;
     std::unique_ptr<ReputationHandler> reputationHandler_;
+    std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -4181,13 +4187,6 @@ private:
     uint32_t playerRestedXp_ = 0;
     bool isResting_ = false;
     uint32_t serverPlayerLevel_ = 1;
-
-    // ---- Server time tracking (for deterministic celestial/sky systems) ----
-    /// The realm's time of day, advanced from the last hour the server sent.
-    /// Reads -1 until the server has sent one, which every consumer takes as
-    /// "fall back to the local clock".
-    GameClock gameClock_;
-    void handleLoginSetTimeSpeed(network::Packet& packet);
 
     // ---- Weather state (SMSG_WEATHER) ----
     uint32_t weatherType_ = 0;       // 0=clear, 1=rain, 2=snow, 3=storm

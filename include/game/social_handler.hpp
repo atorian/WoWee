@@ -66,9 +66,10 @@ public:
     /// A party member's auras, for the frames that read every unit's.
     virtual void mirrorAurasByGuid(uint64_t guid, const std::vector<AuraSlot>& auras) = 0;
     virtual void cacheInspectedPlayerEquipment(uint64_t guid,
-                                               const std::array<uint32_t, 19>& itemEntries) = 0;
-    [[nodiscard]] virtual const std::unordered_map<uint64_t, std::array<uint32_t, 19>>&
-    inspectedPlayerItems() const = 0;
+                                               const std::array<uint32_t, 19>& itemEntries,
+                                               const std::array<uint16_t, 19>& enchantIds) = 0;
+    /// The equipment last inspected on this player; null when none is held.
+    [[nodiscard]] virtual const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const = 0;
     /// The player's own equipment is drawn again (the helm went on or off).
     virtual void markOnlineEquipmentDirty() = 0;
     virtual void setGuildBankMoney(uint64_t money) = 0;

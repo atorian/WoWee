@@ -11,6 +11,7 @@
 #include "game/update_field_table.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -354,4 +355,104 @@ TEST_CASE("a spell bought from a trainer is in the spell book when the interface
     CHECK(h.game().getKnownSpells().count(kSpell) == 1);
     CHECK(h.addonEvents("SPELLS_CHANGED").size() == 1);
     CHECK(h.addonEvents("TRAINER_UPDATE").size() == 1);
+}
+
+// The glow on a weapon comes from the enchant on it. Another player's
+// enchants arrive in their visible-item fields, beside each item's entry -
+// 3.3.5a's PLAYER_VISIBLE_ITEM_n_ENCHANTMENT, the permanent enchant in the
+// low half and the temporary one in the high - and the client is told them
+// with what the player wears. It was told the items alone, so nobody else's
+// weapon ever glowed.
+namespace {
+
+constexpr uint64_t kOtherPlayer = 0x0000000000000777ull;
+constexpr uint32_t kBlade = 19019;
+constexpr uint32_t kBladeDisplay = 30606;
+constexpr uint32_t kCrusader = 1900;       // permanent: a weapon enchant
+constexpr uint32_t kInstantPoison = 323;   // temporary: a poison on the blade
+constexpr int kMainHand = static_cast<int>(wowee::game::EquipSlot::MAIN_HAND);
+// 3.3.5a's PLAYER_VISIBLE_ITEM_1_ENTRYID; each slot is an entry and an
+// enchantment field.
+constexpr uint16_t kVisibleItem1 = 283;
+constexpr uint16_t kMainHandEntryField = kVisibleItem1 + kMainHand * 2;
+constexpr uint16_t kMainHandEnchantField = kMainHandEntryField + 1;
+
+/// The last time the client was told what this player wears.
+struct WornAnnounced {
+    explicit WornAnnounced(GameHarness& h)
+        : sub(h.events().subscribe<ev::PlayerEquipmentResolved>(
+              [this](const ev::PlayerEquipmentResolved& e) {
+                  if (e.guid == kOtherPlayer) last = e;
+              })) {}
+    std::optional<ev::PlayerEquipmentResolved> last;
+    wowee::core::EventBus::Subscription sub;
+};
+
+}  // namespace
+
+TEST_CASE("another player's weapon shows the enchant their visible-item fields carry",
+          "[inventory][enchant][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    WornAnnounced worn(h);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::createObjectBody(kOtherPlayer, wowee::game::ObjectType::PLAYER,
+                                            {{fieldIndex(UF::UNIT_FIELD_HEALTH), 100},
+                                             {fieldIndex(UF::UNIT_FIELD_MAXHEALTH), 100},
+                                             {kMainHandEntryField, kBlade},
+                                             {kMainHandEnchantField, kCrusader}},
+                                            h.player().x + 5.0f, h.player().y, h.player().z));
+    h.pump();
+    // The blade is known by its entry until its template comes back.
+    h.receive(Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE,
+              GameHarness::itemTemplateBody(kBlade, "Test Blade", kBladeDisplay, 13));
+    h.pump();
+
+    REQUIRE(worn.last);
+    CHECK(worn.last->displayIds[kMainHand] == kBladeDisplay);
+    CHECK(worn.last->enchantIds[kMainHand] == kCrusader);
+
+    // A poison put on the blade shows over the enchant...
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::valuesBody(kOtherPlayer,
+                                      {{kMainHandEnchantField, kCrusader | (kInstantPoison << 16)}}));
+    h.pump();
+    CHECK(worn.last->enchantIds[kMainHand] == kInstantPoison);
+    CHECK(worn.last->displayIds[kMainHand] == kBladeDisplay);
+
+    // ...and when it wears off the enchant is back.
+    h.receive(Opcode::SMSG_UPDATE_OBJECT,
+              GameHarness::valuesBody(kOtherPlayer, {{kMainHandEnchantField, kCrusader}}));
+    h.pump();
+    CHECK(worn.last->enchantIds[kMainHand] == kCrusader);
+}
+
+TEST_CASE("the player's own weapon shows a poison over its enchant, and the enchant once it is gone",
+          "[inventory][enchant][harness]") {
+    GameHarness h;
+    h.enterWorld();
+    h.playerInView();
+    auto& inventory = h.game().inventory();
+
+    // 3.3.5a's ITEM_FIELD_ENCHANTMENT_1_1 and _2_1: the permanent enchant
+    // slot's id and the temporary one's.
+    constexpr uint16_t kPermanentEnchantField = 22;
+    constexpr uint16_t kTemporaryEnchantField = 25;
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, createItem(kSword, 25, 1));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kSword, {{kPermanentEnchantField, kCrusader}}));
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(h.player().guid, inMainHand(kSword)));
+    h.pump();
+    const uint64_t held = inventory.getEquipSlotGuid(kMainHand);
+    REQUIRE(held == kSword);
+    CHECK(inventory.shownEnchantId(held) == kCrusader);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kSword, {{kTemporaryEnchantField, kInstantPoison}}));
+    h.pump();
+    CHECK(inventory.shownEnchantId(held) == kInstantPoison);
+
+    h.receive(Opcode::SMSG_UPDATE_OBJECT, values(kSword, {{kTemporaryEnchantField, 0}}));
+    h.pump();
+    CHECK(inventory.shownEnchantId(held) == kCrusader);
 }

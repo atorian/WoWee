@@ -2,7 +2,6 @@
 #include "pipeline/base_fallback.hpp"
 #include "pipeline/dds_loader.hpp"
 #include "core/logger.hpp"
-#include "core/memory_monitor.hpp"
 #include "core/profiler.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -113,37 +112,26 @@ bool AssetManager::switchDataPath(const std::string& newDataPath) {
 }
 
 void AssetManager::setupFileCacheBudget() {
-    auto& memMonitor = core::MemoryMonitor::getInstance();
-    size_t recommendedBudget = memMonitor.getRecommendedCacheBudget();
-    size_t dynamicBudget = (recommendedBudget * 3) / 4;
-
-    const size_t envFixedMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MB");
-    const size_t envMaxMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MAX_MB");
-
-    const size_t minBudgetBytes = 256ull * 1024ull * 1024ull;
+    // A fixed budget, not a share of the memory free at startup. Three
+    // quarters of half the free RAM, up to 12 GB, was what this cache was
+    // given on a desktop - files the client had already parsed into models
+    // and textures held a second time, in a process that died of bad_alloc
+    // in a crowded city. What it keeps now is the files read for their own
+    // sake; a gigabyte of those is the whole of a city's models many times.
 #ifdef __ANDROID__
-    // Half of available RAM is a desktop rule. Android does not let one app
-    // have that: it enforces a per-app limit far below the machine's memory and
-    // kills the process rather than swapping when it is passed. A phone with
-    // 8 GB was handing this cache 840 MB, which is both more than the app may
-    // hold and a good way to be killed the moment it goes to the background.
-    const size_t defaultMaxBudgetBytes = 384ull * 1024ull * 1024ull;
+    // Android enforces a per-app limit far below the machine's memory and
+    // kills the process rather than swapping when it is passed.
+    constexpr size_t kDefaultBudgetMB = 384;
 #else
-    const size_t defaultMaxBudgetBytes = 12288ull * 1024ull * 1024ull;  // 12 GB max for file cache
+    constexpr size_t kDefaultBudgetMB = 1024;
 #endif
-    const size_t maxBudgetBytes = (envMaxMB > 0)
-        ? (envMaxMB * 1024ull * 1024ull)
-        : defaultMaxBudgetBytes;
+    constexpr size_t kMinBudgetBytes = 256ull * 1024ull * 1024ull;
 
-    if (envFixedMB > 0) {
-        fileCacheBudget = envFixedMB * 1024ull * 1024ull;
-        if (fileCacheBudget < minBudgetBytes) {
-            fileCacheBudget = minBudgetBytes;
-        }
+    fileCacheBudget = kDefaultBudgetMB * 1024ull * 1024ull;
+    if (const size_t envFixedMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MB"); envFixedMB > 0) {
+        fileCacheBudget = std::max(envFixedMB * 1024ull * 1024ull, kMinBudgetBytes);
         LOG_WARNING("Asset file cache fixed via WOWEE_FILE_CACHE_MB=", envFixedMB,
                     " (effective ", fileCacheBudget / (1024 * 1024), " MB)");
-    } else {
-        fileCacheBudget = std::clamp(dynamicBudget, minBudgetBytes, maxBudgetBytes);
     }
 }
 
@@ -338,7 +326,25 @@ BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed)
     // preference to the .blp beside them.
     BLPImage ddsImage = tryLoadDdsOverride(normalizedPath);
     if (ddsImage.isValid()) {
-        return ddsImage;
+        // The blocks go only to a caller that asked for them. The rest read
+        // RGBA8 from `data`, as the .blp beside it gives it them: handed the
+        // blocks, the character renderer uploaded an empty `data` and drew
+        // every upscaled glow on a weapon or a creature as a white card.
+        if (keepCompressed || !ddsImage.isBlockCompressed()) return ddsImage;
+        std::vector<uint8_t> pixels = BLPLoader::decodeBaseLevel(ddsImage);
+        if (!pixels.empty()) {
+            ddsImage.data = std::move(pixels);
+            ddsImage.mipmaps.clear();
+            ddsImage.mipLevels = 1;
+            return ddsImage;
+        }
+        static std::mutex logMtx;
+        static std::unordered_set<std::string> loggedUndecodable;
+        std::lock_guard<std::mutex> lock(logMtx);
+        if (loggedUndecodable.insert(normalizedPath).second) {
+            LOG_WARNING("DDS override for ", normalizedPath,
+                        " could not be decoded to RGBA8 - the .blp is used instead");
+        }
     }
 
     BLPImage pngImage = tryLoadPngOverride(normalizedPath);
@@ -346,7 +352,10 @@ BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed)
         return pngImage;
     }
 
-    std::vector<uint8_t> blpData = readFile(normalizedPath);
+    // Not kept in the file cache: decoded and uploaded, the texture is the
+    // GPU texture cache's from here on, and the file's bytes would only be a
+    // second copy of it in system memory.
+    std::vector<uint8_t> blpData = readFileBytes(normalizedPath, KeepBytes::No);
     if (blpData.empty()) {
         static std::mutex logMtx;
         static std::unordered_set<std::string> loggedMissingTextures;
@@ -509,7 +518,8 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
     // Try binary DBC from extracted MPQs first (preferred source).
     std::string dbcPath = "DBFilesClient\\" + name;
     {
-        dbcData = readFile(dbcPath);
+        // The parsed table is cached (dbcCache); its file's bytes are not.
+        dbcData = readFileBytes(normalizePath(dbcPath), KeepBytes::No);
     }
 
     // If asset_extract was run with --emit-json-dbc, the DBC's directory
@@ -719,7 +729,8 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     std::vector<uint8_t> dbcData;
     {
         std::string dbcPath = "DBFilesClient\\" + name;
-        dbcData = readFile(dbcPath);
+        // The parsed table is cached (dbcCache); its file's bytes are not.
+        dbcData = readFileBytes(normalizePath(dbcPath), KeepBytes::No);
     }
 
     // Fall back to expansion-specific CSV
@@ -787,8 +798,13 @@ std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
     if (!initialized) {
         return {};
     }
+    return readFileBytes(normalizePath(path), KeepBytes::Yes);
+}
 
-    std::string normalized = normalizePath(path);
+std::vector<uint8_t> AssetManager::readFileBytes(const std::string& normalized, KeepBytes keep) const {
+    if (!initialized) {
+        return {};
+    }
 
     // Check cache first (shared lock allows concurrent reads)
     uint64_t generation = 0;
@@ -829,7 +845,7 @@ std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
 
     // Add to cache if within budget
     size_t fileSize = data.size();
-    if (fileSize > 0 && fileSize < fileCacheBudget / 2) {
+    if (keep == KeepBytes::Yes && fileSize > 0 && fileSize < fileCacheBudget / 2) {
         std::lock_guard<std::shared_mutex> cacheLock(cacheMutex);
         // Read through a layer that has since been replaced.
         if (generation != cacheGeneration_) return data;
@@ -863,6 +879,16 @@ std::vector<uint8_t> AssetManager::readFileOptional(const std::string& path) con
         return {};
     }
     return readFile(path);
+}
+
+core::CacheStats AssetManager::fileCacheStats() const {
+    std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    return {fileCache.size(), fileCacheTotalBytes, fileCacheBudget};
+}
+
+size_t AssetManager::dbcCacheEntries() const {
+    std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    return dbcCache.size();
 }
 
 void AssetManager::clearDBCCache() {

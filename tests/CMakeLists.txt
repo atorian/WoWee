@@ -144,6 +144,51 @@ endfunction()
 wowee_add_test(test_event_bus
     SOURCES test_event_bus.cpp ${TEST_COMMON_SOURCES})
 
+# The resource telemetry behind the performance HUD's graphs and the resource
+# log line: its history, its frame summaries, and the warnings a crash log
+# should end with, once per crossing. No logger: the owner logs what it says.
+wowee_add_test(test_resource_telemetry
+    SOURCES test_resource_telemetry.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
+
+# What the video memory is used for, from the allocator's detailed map: each
+# allocation by its usage flags, in VRAM or system memory. No device.
+wowee_add_test(test_gpu_memory
+    SOURCES test_gpu_memory.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/gpu_memory.cpp)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_gpu_memory PRIVATE Vulkan::Vulkan)
+endif()
+
+# The renderers' one texture cache: one entry per key, one budget, eviction of
+# only what nothing references, nothing freed before its frames have fenced.
+# The device is a fake; no GPU.
+wowee_add_test(test_texture_cache
+    SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
+
+# Frames recorded only against a complete set of frame targets; a failure to
+# make one said once per stretch with the result, the size and the budget.
+wowee_add_test(test_frame_targets
+    SOURCES test_frame_targets.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/frame_targets.cpp)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_frame_targets PRIVATE Vulkan::Vulkan)
+endif()
+
+# Normal/height maps encoded for the GPU: BC7 blocks that read back close to
+# what was derived, a mip chain down to one texel.
+wowee_add_test(test_normal_map_encoding
+    SOURCES test_normal_map_encoding.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
+
+# Normal maps built on the builder's own few workers from a bounded queue,
+# nearest first. The derivation is a stand-in.
+wowee_add_test(test_normal_map_builder
+    SOURCES test_normal_map_builder.cpp ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_builder.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_encoding.cpp)
+
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)
@@ -175,8 +220,11 @@ wowee_add_test(test_asset_inventory
 # and did not: one looked in a macOS-only place, the other wrote beside the
 # terminal's working directory. Also what counts as installed, since the
 # manifest is written last and a folder without one is a run that stopped.
+# config_paths for where the executable is, which is where the assets go.
 wowee_add_test(test_data_paths
-    SOURCES test_data_paths.cpp)
+    SOURCES test_data_paths.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+            ${TEST_COMMON_SOURCES})
 
 # ── test_log_privacy ────────────────────────────────────────
 # The home directory, and with it the account name, written as ~ in the log.
@@ -883,7 +931,8 @@ wowee_add_test(test_tile_size_agreement
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_chunk_surface ───────────────────────────────────────
 # Where a point inside a terrain chunk sits in the world. The clutter and
@@ -893,7 +942,8 @@ wowee_add_test(test_chunk_surface
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_spline_body ─────────────────────────────────────────
 # The body of SMSG_MONSTER_MOVE, whose head two parsers shared and neither
@@ -1271,6 +1321,21 @@ target_include_directories(test_dds_sidecar SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE
 target_link_libraries(test_dds_sidecar PRIVATE catch2_main)
 add_test(NAME dds_sidecar COMMAND test_dds_sidecar)
 register_test_target(test_dds_sidecar)
+
+# ── test_dds_override ────────────────────────────────────────
+# The sidecar as AssetManager::loadTexture hands it over: RGBA8 to a caller
+# that did not ask for blocks. The character renderer did not, was handed
+# them anyway, and drew every upscaled glow on a weapon as a white card.
+wowee_add_test(test_dds_override
+    SOURCES test_dds_override.cpp)
+target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
+
+# ── test_asset_file_cache ────────────────────────────────────
+# A texture read to be uploaded is not kept a second time in the file cache;
+# a model file read for its own sake is.
+wowee_add_test(test_asset_file_cache
+    SOURCES test_asset_file_cache.cpp)
+target_link_libraries(test_asset_file_cache PRIVATE wowee_pipeline wowee_base)
 
 # ── test_blp_alpha_scan ──────────────────────────────────────
 # M2 textures were decoded to RGBA8 so something could walk every fourth byte
@@ -1670,6 +1735,7 @@ wowee_add_test(test_open_formats
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_terrain_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_open_format_emitter ─────────────────────────────────
@@ -1682,6 +1748,7 @@ add_executable(test_open_format_emitter
     ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -1776,6 +1843,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -2044,6 +2112,48 @@ endif()
 wowee_add_test(test_m2_sway
     SOURCES test_m2_sway.cpp)
 
+# ── test_wind_field ──────────────────────────────────────────
+# The one wind over the trees, their shadows, the cloth and the grass: two
+# clients reading the same realm clock in the same zone blow the same wind,
+# a change eases in without a tree jumping, and wind_zones.json's rows match
+# the places they name.
+wowee_add_test(test_wind_field
+    SOURCES test_wind_field.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/wind_field.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_scene ────────────────────────────────────────
+# The map's liquid: where the water stands and how high, which body each
+# stretch of it belongs to as tiles stream in and out, and what the water
+# renderer is told about it.
+wowee_add_test(test_liquid_scene
+    SOURCES test_liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_types ────────────────────────────────────────
+# What each liquid is: LiquidType.dbc through its layout, the client's rule
+# for a WMO group's liquid, MCLQ's ocean - and what the scene then says.
+wowee_add_test(test_liquid_types
+    SOURCES test_liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types_dbc.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_ripple_frames ────────────────────────────────
+# A liquid's animated frames made ready to draw: which there are, which
+# channel holds the ripple, and the mip chain.
+wowee_add_test(test_liquid_ripple_frames
+    SOURCES test_liquid_ripple_frames.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_ripple_frames.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface
@@ -2104,6 +2214,7 @@ wowee_add_test(test_m2_billboard_model
     SOURCES test_m2_billboard_model.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
             ../src/rendering/m2_model_classifier.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp
             ${TEST_COMMON_SOURCES})
 target_compile_definitions(test_m2_billboard_model PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
@@ -2387,6 +2498,7 @@ wowee_add_test(test_camera_water_depth
 wowee_add_test(test_interior_light
     SOURCES test_interior_light.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_m2_view_distance ────────────────────────────────────
@@ -2720,7 +2832,8 @@ wowee_add_test(test_raid_mark_names
 wowee_add_test(test_adt_truncation
     SOURCES test_adt_truncation.cpp
             ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_blp_truncation ──────────────────────────────────────
 # What the BLP loader does with a texture that lies about its own sizes. The
@@ -2748,7 +2861,8 @@ wowee_add_test(test_adt_alpha
     SOURCES test_adt_alpha.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_terrain ─────────────────────────────────
 # Whether grass grows at a point, answered from the ADT's own ground-effect
@@ -2761,7 +2875,8 @@ wowee_add_test(test_grass_terrain
             ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_population ──────────────────────────────
 # Blades generated from terrain suitability. Most of these cases are one
@@ -2953,7 +3068,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

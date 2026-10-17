@@ -3,6 +3,9 @@
 #include <algorithm>
 
 #include "rendering/frames_in_flight.hpp"
+#include "rendering/frame_targets.hpp"
+#include "rendering/gpu_memory.hpp"
+#include "rendering/texture_cache.hpp"
 #include "rendering/vk_utils.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -11,6 +14,9 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <mutex>
 
@@ -60,7 +66,7 @@ public:
     /// code that never fired.
     [[nodiscard]] uint32_t uiTextureGeneration() const { return uiTextureGeneration_; }
 
-    VkContext() = default;
+    VkContext();
     ~VkContext();
 
     VkContext(const VkContext&) = delete;
@@ -206,6 +212,27 @@ public:
         gpuTimings() const { return gpuTimings_; }
     [[nodiscard]] bool hasDedicatedTransferQueue() const { return hasDedicatedTransfer_; }
     [[nodiscard]] VmaAllocator getAllocator() const { return allocator; }
+
+    /// Each memory heap's budget and what this process holds in it. Cheap
+    /// enough for every frame; empty before the allocator exists.
+    [[nodiscard]] std::vector<GpuHeapReading> gpuHeaps() const;
+    /// The device-local heap the textures and targets live in: the largest.
+    [[nodiscard]] std::optional<GpuHeapReading> deviceLocalHeap() const;
+    /// What every live allocation is for, by its usage flags. Walks every
+    /// allocation the allocator holds - tens of milliseconds in a city - so it
+    /// is for a sample every few seconds, never a frame.
+    [[nodiscard]] std::optional<GpuMemoryByUse> gpuMemoryByUse() const;
+    /// Write the allocator's detailed map, every allocation with its size,
+    /// usage and name, to `path`. A diagnostic; false, logged, on failure.
+    bool writeGpuMemoryMap(const std::string& path) const;
+    /// Whether the heap budgets come from the driver (VK_EXT_memory_budget).
+    [[nodiscard]] bool isMemoryBudgetSupported() const { return memoryBudgetSupported_; }
+
+    /// The renderers' textures, under one budget. Exists from initialize() to
+    /// shutdown(); every TextureRef has to be given back before shutdown.
+    [[nodiscard]] TextureCache& textures();
+    [[nodiscard]] const TextureCache& textures() const;
+
     [[nodiscard]] VkSurfaceKHR getSurface() const { return surface; }
     [[nodiscard]] VkPipelineCache getPipelineCache() const { return pipelineCache_; }
 
@@ -354,7 +381,15 @@ private:
     /// be separate copies of the same two hundred and sixty lines. `verb` is
     /// only the word in the failure messages, so a log still says which of
     /// the two was running.
+    ///
+    /// Frames are recorded only once it has succeeded (frameTargets_); on a
+    /// failure the swapchain stays dirty and the next frame tries again.
     bool createSwapchainRenderTargets(const char* verb);
+    bool createSwapchainTargetSet(const char* verb);
+    /// Say that a frame target could not be made, with the result, the size
+    /// asked for and the heap's budget - once per stretch of failures.
+    void frameTargetFailed(const char* target, VkResult result);
+    FrameTargets frameTargets_;
 
     bool createImGuiResources();
     void destroyImGuiResources();
@@ -450,6 +485,11 @@ private:
     /// barriers around the copy. Detected, so the staging path stays for
     /// devices without it.
     bool hostImageCopySupported_ = false;
+    /// VK_EXT_memory_budget: the heap budgets are the driver's, not an estimate.
+    bool memoryBudgetSupported_ = false;
+    class ContextTextureDevice;
+    std::unique_ptr<ContextTextureDevice> textureDevice_;
+    std::unique_ptr<TextureCache> textureCache_;
     PFN_vkCopyMemoryToImageEXT copyMemoryToImage_ = nullptr;
     PFN_vkTransitionImageLayoutEXT transitionImageLayoutHost_ = nullptr;
 

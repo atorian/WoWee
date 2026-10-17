@@ -24,6 +24,9 @@
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
+#include "pipeline/wind_zones.hpp"
+#include "rendering/wind_field.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "pipeline/grass_population.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -172,6 +175,9 @@ public:
     std::unique_ptr<TerrainManager> takeTerrainSession();
     void releaseTerrainSession(TerrainManager* session);
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
+    /// The map's liquid: where it is, how high, what kind, which body.
+    LiquidScene& liquidScene() { return liquidScene_; }
+    const LiquidScene& liquidScene() const { return liquidScene_; }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
     Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
     StarField* getStarField() const { return skySystem ? skySystem->getStarField() : nullptr; }
@@ -259,6 +265,24 @@ private:
     // the scene pass itself (see renderWorld).
     bool waterDrawsInContinuePass() const;
 
+    /// The single-sampled water pass over an off-screen, multisampled scene:
+    /// a framebuffer of the water's 1x pass on the post-process target's
+    /// resolved colour and depth. Built in beginFrame, once the frame's target
+    /// is settled and before the passes are chosen, and again whenever that
+    /// target or the water pass is rebuilt.
+    void updateOffscreenWater1xFramebuffer();
+    /// Built, and over the target and pass that exist now.
+    [[nodiscard]] bool offscreenWater1xReady() const;
+    void destroyOffscreenWater1xFramebuffer();
+    VkFramebuffer offscreenWater1xFb_ = VK_NULL_HANDLE;
+    uint64_t offscreenWater1xGeneration_ = 0;
+    /// The target generation a failure was last reported for, so it is said
+    /// once rather than every frame.
+    uint64_t offscreenWater1xFailedGeneration_ = ~uint64_t{0};
+    VkRenderPass offscreenWater1xPass_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xColor_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xDepth_ = VK_NULL_HANDLE;
+
     /// Ghost tint, brightness and the minimap, in that order, at the end of
     /// the scene pass. The threaded and single-threaded paths both finish this
     /// way and differ only in which command buffer they are recording into.
@@ -308,12 +332,23 @@ private:
     /// That line, asked of the terrain, the buildings and where the camera is.
     [[nodiscard]] float sampleSunOcclusion() const;
 
+    /// LiquidType.dbc, read in initializeRenderers; the scene and the water
+    /// hold pointers to it, so it is declared before both.
+    pipeline::LiquidTypeTable liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+    bool liquidTypesLoaded_ = false;
+    /// The map's liquid, which the water renderer draws and everything else
+    /// asks about. It exists whether or not the water can be drawn, and is
+    /// declared before the terrain session that fills it so it outlives it.
+    LiquidScene liquidScene_;
     // A standalone scene owns its default session. The client transfers that
     // session into MapScope as soon as the renderers have been initialized.
     std::unique_ptr<TerrainManager> standaloneTerrain_;
     TerrainManager* terrainManager = nullptr;
     core::JobGroup::Token mapJobToken_;
     std::unique_ptr<WaterRenderer> waterRenderer;
+    /// The water renderer's subscription to liquidScene_; declared after
+    /// both, so it ends before either goes.
+    LiquidScene::Subscription waterSubscription_;
     std::unique_ptr<Skybox> skybox;
     std::unique_ptr<Celestial> celestial;
     std::unique_ptr<StarField> starField;
@@ -583,6 +618,9 @@ private:
     // what the frame did without it. See pass_ablation.hpp for why the GPU's
     // own timestamps cannot answer that on this platform.
     std::unique_ptr<PassAblation> passAblation_;
+    /// The ablation run has the water, or only its reflection, switched off.
+    [[nodiscard]] bool waterAblated() const;
+    [[nodiscard]] bool waterReflectionAblated() const;
     bool passAblationReported_ = false;
     bool worldDrawnLastFrame_ = false;
     std::chrono::steady_clock::time_point lastFrameStart_{};
@@ -695,6 +733,15 @@ private:
     // AreaTable parentage and runs per blade sample without it.
     pipeline::GrassBiomeSet grassBiomes_;
     bool grassBiomesLoaded_ = false;
+    // The wind over the player's zone (WindField), from assets/wind_zones.json
+    // read on the first update and the realm's clock in environment_.
+    WindField wind_;
+    pipeline::WindZoneTable windZones_;
+    bool windZonesLoaded_ = false;
+    /// That the world is drawn without the realm's clock has been said.
+    bool windUnsyncedSaid_ = false;
+    bool windRealmSynced_ = false;
+    void updateWind(float deltaTime);
     std::unordered_map<uint32_t, uint32_t> grassBiomeForArea_;
     // Session totals, reported once at shutdown. The log is bounded and the
     // per-rebuild lines rotate out of it whenever the player stands still for

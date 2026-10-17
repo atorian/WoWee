@@ -5,6 +5,7 @@
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/character_paths.hpp"
 #include "core/helm_visual.hpp"
+#include "core/enchant_visual.hpp"
 #include "core/weapon_sheath.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/logger.hpp"
@@ -168,8 +169,8 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
             layers.push_back(up);
         }
         if (layers.size() > 1) {
-            rendering::VkTexture* compositeTex = charRenderer->compositeTextures(layers);
-            if (compositeTex != nullptr) {
+            rendering::TextureRef compositeTex = charRenderer->compositeTextures(layers);
+            if (compositeTex) {
                 // Find type-1 (skin) texture slot and replace with composite
                 // We need model texture info - walk slots via charRenderer
                 // Use the model slot ID to find the right texture index
@@ -190,7 +191,7 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
 
     // Override hair texture on GPU (type-6 slot) after model load
     if (!texInfo.hairTexturePath.empty()) {
-        rendering::VkTexture* hairTex = charRenderer->loadTexture(texInfo.hairTexturePath);
+        rendering::TextureRef hairTex = charRenderer->loadTexture(texInfo.hairTexturePath);
         if (hairTex) {
             auto* modelData = charRenderer->getModelData(modelSlotId);
             if (modelData) {
@@ -259,51 +260,13 @@ void AppearanceComposer::applyEnchantVisuals(uint32_t charInstanceId, int equipS
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (!charRenderer || !gameHandler_ || !assetManager_ || !entitySpawner_) return;
 
-    charRenderer->detachWeaponEffects(charInstanceId, attachmentId);
-
-    uint64_t itemGuid = gameHandler_->getEquipSlotGuid(equipSlotIndex);
-    if (itemGuid == 0) return;
-
-    // A temporary enchant (sharpening stone, oil) masks the permanent one's visual.
-    auto [permEnchantId, tempEnchantId] = gameHandler_->getItemEnchantIds(itemGuid);
-    uint32_t enchantId = (tempEnchantId != 0) ? tempEnchantId : permEnchantId;
-    if (enchantId == 0) return;
-
-    auto sieDbc     = assetManager_->loadDBC("SpellItemEnchantment.dbc");
-    auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
-    auto effectsDbc = assetManager_->loadDBC("ItemVisualEffects.dbc");
-    if (!sieDbc || !sieDbc->isLoaded() || !visualsDbc || !visualsDbc->isLoaded() ||
-        !effectsDbc || !effectsDbc->isLoaded()) {
-        return;
-    }
-
-    const auto* sieL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
-    auto effectModels = pipeline::resolveEnchantItemVisuals(enchantId, sieDbc.get(),
-                                                            visualsDbc.get(), effectsDbc.get(), sieL);
-
-    for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
-        const std::string& modelName = effectModels[visualSlot];
-        if (modelName.empty()) continue;
-
-        // DBC stores .mdx paths; the shipped assets are .m2.
-        std::string m2Path = modelName;
-        size_t dotPos = m2Path.rfind('.');
-        m2Path = (dotPos != std::string::npos ? m2Path.substr(0, dotPos) : m2Path) + ".m2";
-
-        pipeline::M2Model effectModel;
-        if (!loadWeaponM2(m2Path, effectModel)) {
-            LOG_WARNING("Enchant visual: failed to load ", m2Path);
-            continue;
-        }
-
-        uint32_t effectModelId = entitySpawner_->allocateWeaponModelId();
-        if (charRenderer->attachWeaponEffect(charInstanceId, attachmentId, visualSlot,
-                                             effectModel, effectModelId)) {
-            LOG_INFO("Enchant visual: ", m2Path, " on attachment ", attachmentId,
-                     " (enchant ", enchantId, ", visual slot ", visualSlot, ")");
-        }
-    }
+    const auto& inventory = gameHandler_->inventory();
+    const uint64_t itemGuid = inventory.getEquipSlotGuid(equipSlotIndex);
+    const uint32_t enchantId = itemGuid != 0 ? inventory.shownEnchantId(itemGuid) : 0;
+    attachEnchantVisuals(
+        *charRenderer, *assetManager_, charInstanceId, attachmentId, enchantId,
+        [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
+        [this] { return entitySpawner_->allocateWeaponModelId(); });
 }
 
 bool AppearanceComposer::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel) {

@@ -16,6 +16,7 @@
 #include "core/character_paths.hpp"
 #include "ui/settings_schema.hpp"
 #include "pipeline/m2_asset_loader.hpp"
+#include "core/enchant_visual.hpp"
 #include "core/coordinates.hpp"
 #include "ui/minimap_projection.hpp"
 #include "core/profiler.hpp"
@@ -61,6 +62,7 @@
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/performance_hud.hpp"
+#include "core/resource_monitor.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
@@ -106,6 +108,7 @@
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/chat_handler.hpp"
+#include "game/realm_time_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
 #include "core/map_scope.hpp"
@@ -340,7 +343,7 @@ bool Application::initialize() {
         // installed data first, because that is the directory a player can
         // reach without a terminal, then beside the binary for a checkout.
         for (const std::filesystem::path& where :
-             {core::userDataRoot() / "gamecontrollerdb.txt",
+             {core::defaultDataRoot() / "gamecontrollerdb.txt",
               std::filesystem::path("assets/gamecontrollerdb.txt")}) {
             std::error_code ec;
             if (!std::filesystem::exists(where, ec)) continue;
@@ -708,6 +711,48 @@ bool Application::initialize() {
                             return false;
                         }
                         characters->playAnimation(instance, animId, true);
+                    }
+                    // WOWEE_PROBE_WEAPON=<ItemDisplayInfo id> puts that weapon
+                    // in the right hand (a character model is the one to
+                    // probe then), and WOWEE_PROBE_ENCHANT=<enchant id> the
+                    // enchant's glow on it - through the routine that dresses
+                    // every player's weapons in game.
+                    if (const char* weapon = std::getenv("WOWEE_PROBE_WEAPON"); weapon && *weapon) {
+                        constexpr uint32_t kRightHand = 1;
+                        const auto displayId = static_cast<uint32_t>(std::stoul(weapon));
+                        auto items = assetManager->loadDBC("ItemDisplayInfo.dbc");
+                        const int32_t row = items ? items->findRecordById(displayId) : -1;
+                        if (row < 0) {
+                            LOG_ERROR("Model probe: weapon display ", displayId, " is not in ItemDisplayInfo");
+                            return false;
+                        }
+                        const auto art = pipeline::readItemDisplayArt(*items, static_cast<uint32_t>(row));
+                        const std::string weaponPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
+                        pipeline::M2Model weaponModel;
+                        if (art.modelFile.empty() ||
+                            !pipeline::loadM2WithSkin(*assetManager, weaponPath, weaponModel)) {
+                            LOG_ERROR("Model probe: weapon display ", displayId, " model '", weaponPath,
+                                      "' did not load");
+                            return false;
+                        }
+                        const std::string weaponTexture = art.textureName.empty() ? std::string()
+                            : "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
+                        if (!characters->attachWeapon(instance, kRightHand, weaponModel, 0xFFFF0302,
+                                                      weaponTexture)) {
+                            LOG_ERROR("Model probe: ", path, " cannot hold weapon display ", displayId);
+                            return false;
+                        }
+                        uint32_t enchant = 0;
+                        if (const char* e = std::getenv("WOWEE_PROBE_ENCHANT"); e && *e)
+                            enchant = static_cast<uint32_t>(std::stoul(e));
+                        uint32_t nextEffectModel = 0xFFFF0310;
+                        attachEnchantVisuals(
+                            *characters, *assetManager, instance, kRightHand, enchant,
+                            [&](const std::string& p, pipeline::M2Model& m) {
+                                return pipeline::loadM2WithSkin(*assetManager, p, m);
+                            },
+                            [&] { return nextEffectModel++; });
+                        LOG_INFO("Model probe: weapon ", weaponPath, " enchant ", enchant);
                     }
                 } else {
                     if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
@@ -1591,6 +1636,8 @@ void Application::run() {
         LOG_WARNING("Frame timing profile enabled (WOWEE_FRAME_PROFILE=1) - "
                     "the per-stage breakdown will be reported at warning");
     }
+    resourceMonitor_ = std::make_unique<ResourceMonitor>(frameProfileEnabled_);
+    performanceHUD_->setResourceTelemetry(&resourceMonitor_->telemetry());
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
     // platform will give for as long as the loop runs. See frame_pacer.hpp
@@ -1717,6 +1764,9 @@ void Application::pace() {
 void Application::frameFinished() {
     stageStatFrames_ += 1;
     reportStageTimes();
+    std::optional<uint32_t> latencyMs;
+    if (gameHandler && gameHandler->isInWorld()) latencyMs = gameHandler->getLatencyMs();
+    resourceMonitor_->frameFinished(renderer.get(), assetManager.get(), latencyMs);
 }
 
 void Application::afterTransitions() {
@@ -1930,22 +1980,10 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
 }
 
 void Application::keyForClient(const SDL_Event& event) {
-    // The development keys are not built into a release.
+    // A key nothing in the interface took. The client's own shortcuts never
+    // get here: they are taken before the interface sees them
+    // (clientShortcut).
     //
-    // They are not bindings the player chose and not anything the interface
-    // knows about, so a stray F-key silently changing how the world is drawn
-    // is a bug report about rendering rather than about a keystroke.
-    // Independent ifs rather than a chain, so either can be compiled out on
-    // its own; the scancodes are mutually exclusive anyway.
-#ifndef NDEBUG
-    // F1: Toggle performance HUD
-    if (event.key.scancode == SDL_SCANCODE_F1) {
-        if (performanceHUD_) {
-            performanceHUD_->toggle();
-            bool enabled = performanceHUD_->isEnabled();
-            LOG_INFO("Performance HUD: ", enabled ? "ON" : "OFF");
-        }
-    }
     // No F4 shadow toggle.
     //
     // setShadowsEnabled ignores what it is passed and holds shadows on,
@@ -1954,7 +1992,7 @@ void Application::keyForClient(const SDL_Event& event) {
     // the opposite in the log every time: it read the flag back to decide what
     // to print, the flag never moved, and every press logged "Shadows: OFF"
     // while they stayed on.
-#endif
+    //
     // F8: Debug WMO floor at current position
     if (event.key.scancode == SDL_SCANCODE_F8 && event.key.repeat == 0) {
         if (renderer && renderer->getWMORenderer()) {
@@ -1962,6 +2000,17 @@ void Application::keyForClient(const SDL_Event& event) {
             LOG_WARNING("F8: WMO floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
             renderer->getWMORenderer()->debugDumpGroupsAtPosition(pos.x, pos.y, pos.z);
         }
+    }
+}
+
+void Application::clientShortcut(ClientShortcut shortcut) {
+    switch (shortcut) {
+        case ClientShortcut::TogglePerformanceHud:
+            performanceHUD_->toggle();
+            LOG_INFO("Performance HUD: ", performanceHUD_->isEnabled() ? "ON" : "OFF");
+            break;
+        case ClientShortcut::None:
+            break;
     }
 }
 
@@ -3685,9 +3734,13 @@ void Application::presentWorldToRenderer(float deltaTime) {
 
     rendering::WorldEnvironment environment;
     environment.zoneId = zoneTracker_->zoneId();
+    environment.areaId = zoneTracker_->areaId();
     if (gameHandler) {
         environment.mapId = gameHandler->getCurrentMapId();
         environment.gameTime = gameHandler->getGameTime();
+        if (const auto realm = gameHandler->realmTime().realmSeconds()) {
+            environment.realmSeconds = *realm;
+        }
         environment.raining = gameHandler->isRaining();
         environment.weatherType = gameHandler->getWeatherType();
         environment.weatherIntensity = gameHandler->getWeatherIntensity();
@@ -3854,6 +3907,9 @@ void Application::prepareFrame() {
         static std::vector<float> times;
         static std::array<uint32_t, 19> fixtureEquipment{};
         static std::array<uint8_t, 19> fixtureTypes{};
+        // WOWEE_PROBE_ENCHANT=<SpellItemEnchantment id> puts that enchant on
+        // every main hand, the way another player's visible-item fields do.
+        static std::array<uint32_t, 19> fixtureEnchants{};
         static uint32_t fixtureMount = 0;
         const bool expanded = std::getenv("WOWEE_ENTITY_STREAM_EXPANDED") != nullptr;
         static constexpr uint64_t firstGuid = 0x1234000000000000ULL;
@@ -3897,6 +3953,8 @@ void Application::prepareFrame() {
             }
             fixtureEquipment = equipment;
             fixtureTypes = types;
+            if (const char* enchant = std::getenv("WOWEE_PROBE_ENCHANT"); enchant && *enchant)
+                fixtureEnchants[15] = static_cast<uint32_t>(std::stoul(enchant));
             if (expanded) {
                 if (auto dbc = assetManager->loadDBC("CreatureDisplayInfo.dbc")) {
                     for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
@@ -3924,7 +3982,9 @@ void Application::prepareFrame() {
                     appearance, 0, (mulgore ? -257.98f : 405.0f) + i / 6,
                     (mulgore ? -2917.58f : 5818.0f) + i % 6,
                     mulgore ? 52.9968f : 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid + i, equipment, types);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid + i, {.displayInfoIds = equipment, .inventoryTypes = types,
+                                    .enchantIds = fixtureEnchants});
             }
             renderer->getCamera()->setPosition(std::getenv("WOWEE_MULGORE_PROBE")
                 ? glm::vec3(-2930.58f, -256.98f, 55.0f)
@@ -3948,10 +4008,15 @@ void Application::prepareFrame() {
                 entitySpawner_->despawnPlayer(firstGuid + 1);
                 entitySpawner_->queuePlayerSpawn(firstGuid, 2, 0, 0, 0,
                     405.0f, 5818.0f, 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid, fixtureEquipment, fixtureTypes);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid, {.displayInfoIds = fixtureEquipment, .inventoryTypes = fixtureTypes,
+                                .enchantIds = fixtureEnchants});
                 entitySpawner_->queuePlayerSpawn(firstGuid + playerCount, 1, 1, 0, 0,
                     409.0f, 5820.0f, 650.0f, 0.0f);
-                entitySpawner_->queuePlayerEquipment(firstGuid + playerCount, fixtureEquipment, fixtureTypes);
+                entitySpawner_->queuePlayerEquipment(
+                    firstGuid + playerCount,
+                    {.displayInfoIds = fixtureEquipment, .inventoryTypes = fixtureTypes,
+                     .enchantIds = fixtureEnchants});
                 entitySpawner_->setRemotePlayerMountDisplayId(firstGuid, fixtureMount);
                 entitySpawner_->setRemotePlayerMountDisplayId(firstGuid + playerCount, fixtureMount);
             }
@@ -3984,6 +4049,7 @@ void Application::prepareFrame() {
                          " max_ms=", times.back());
                 if (spawned != playerCount) LOG_ERROR("Entity stream probe lost players");
                 complete = true;
+                entityStreamProbeComplete_ = true;
             }
         }
     }
@@ -4042,7 +4108,8 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                                               camera->getProjectionMatrix());
             // A model probed as a creature (WOWEE_PROBE_CHARACTER) moves, and
             // its emitters follow, the way Renderer::update has them in game.
-            renderer->getCharacterRenderer()->update(dt, camera->getPosition());
+            const glm::mat4 view = camera->getViewMatrix();
+            renderer->getCharacterRenderer()->update(dt, camera->getPosition(), &view);
             if (auto* emitters = renderer->getCharacterEmitters()) emitters->update(dt);
         }
     }
@@ -4949,7 +5016,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
             if (!std::getenv("WOWEE_FOUNTAIN_PROBE") && !std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
-                !std::getenv("WOWEE_SHADOW_PROBE_SCENE"))
+                !std::getenv("WOWEE_SHADOW_PROBE_SCENE") && !std::getenv("WOWEE_MODEL_PROBE"))
                 uiManager->render(view, authHandler.get(), gameHandler.get());
         });
 
@@ -5018,9 +5085,9 @@ void Application::renderFrame(const FramePlan& plan) {
         }
     };
 
-    // The offline stream fixture draws its uploads through the real world path.
+    // The offline fixtures draw through the real world path.
     const bool drawWorld = view == FrameView::World || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
-        std::getenv("WOWEE_FOUNTAIN_PROBE");
+        std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
     renderer->setWorldInView(view == FrameView::World);
     screenRecording_->update();
     runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
@@ -5038,7 +5105,10 @@ void Application::renderFrame(const FramePlan& plan) {
     // row counted in one place and not the other comes out as a sheet taller
     // than what is on it, which nothing but looking will catch. The in-game
     // screenshot key cannot reach the login screen, which is where that card is.
-    if (const char* shot = std::getenv("WOWEE_SCREENSHOT"); shot != nullptr && !plan.loading) {
+    const bool probeDressing =
+        std::getenv("WOWEE_ENTITY_STREAM_PROBE") != nullptr && !entityStreamProbeComplete_;
+    if (const char* shot = std::getenv("WOWEE_SCREENSHOT");
+        shot != nullptr && !plan.loading && !probeDressing) {
         // Let the interface settle first: ImGui sizes much of its layout from
         // what it measured last frame, and hides a window outright for its
         // first frame or two while it fits itself.
@@ -5888,8 +5958,8 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
 
     // Once, for archives already downloaded to the old place, so they are not
     // fetched again.
-    const fs::path oldDirectory = userDataRoot() / "realm_patches" / dirName;
-    if (!userDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
+    const fs::path oldDirectory = perUserDataRoot() / "realm_patches" / dirName;
+    if (!perUserDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
         fs::create_directories(directory.parent_path(), ec);
         // A rename only, which is instant on one drive. Across drives it fails,
         // and copying gigabytes here would hold up the login for minutes, so

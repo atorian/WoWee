@@ -93,6 +93,9 @@ public:
     virtual void drawInterface(float deltaTime, const FramePlan& plan) = 0;
     /// Interface: a key nothing in the interface took (the development keys).
     virtual void keyForClient(const SDL_Event& event) = 0;
+    /// Interface: one of the client's own shortcuts was pressed. The press
+    /// went nowhere else - see clientShortcutFor.
+    virtual void clientShortcut(ClientShortcut shortcut) = 0;
     /// Present: the world handed to the renderer, after the player's controls
     /// have moved the camera.
     virtual void present(float deltaTime, const FramePlan& plan) = 0;

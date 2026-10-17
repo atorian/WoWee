@@ -17,12 +17,14 @@
 #include <atomic>
 #include "rendering/character_renderer.hpp"
 #include <stdexcept>
+#include "rendering/m2_billboard.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"
 #include "rendering/m2_uv_transform.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/normal_map.hpp"
+#include "rendering/texture_upload.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "core/thread_pool.hpp"
@@ -64,6 +66,18 @@ namespace wowee {
 namespace rendering {
 
 namespace {
+/// Normal maps: the workers that derive them, how many may wait, and how
+/// often the instances are walked for maps to ask for.
+constexpr size_t kNormalMapWorkers = 2;
+constexpr size_t kNormalMapQueue = 64;
+constexpr uint32_t kNormalMapScanFrames = 10;
+/// Smaller textures - eyes, glints - are not worth a map.
+constexpr uint32_t kMinNormalMapSize = 32;
+/// The strength a character's normal map is derived with, and so the variant
+/// its cache key carries: the WMO renderer derives from other files at two.
+constexpr float kCharacterNormalMapStrength = 5.0f;
+constexpr uint8_t kCharacterNormalMapStrengthKey = static_cast<uint8_t>(kCharacterNormalMapStrength);
+
 // The main pass's push constants: character.vert reads the model matrix and
 // character.frag the interior light.
 struct CharacterPushConstants {
@@ -79,12 +93,6 @@ constexpr float kInteriorLightRequeryDistance = 0.5f;
 // The WMO is asked a yard above an instance's feet, as the camera controller
 // asks for the player: a group's floor and the bottom of its box coincide.
 constexpr float kInteriorLightProbeHeight = 1.0f;
-
-size_t approxTextureBytesWithMips(int w, int h) {
-    if (w <= 0 || h <= 0) return 0;
-    size_t base = static_cast<size_t>(w) * static_cast<size_t>(h) * 4ull;
-    return base + (base / 3);  // ~4/3 for mip chain
-}
 
 std::string normalizeTexturePathKey(std::string key) {
     std::replace(key.begin(), key.end(), '/', '\\');
@@ -597,11 +605,22 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     charVert.destroy();
     charFrag.destroy();
 
-    createFallbackTextures(device);
+    createFallbackTextures();
 
-    // Diagnostics-only: cache lifetime is currently tied to renderer lifetime.
-    textureCacheBudgetBytes_ = envSizeMBOrDefault("WOWEE_CHARACTER_TEX_CACHE_MB", 4096) * 1024ull * 1024ull;
-    LOG_INFO("Character texture cache budget: ", textureCacheBudgetBytes_ / (1024 * 1024), " MB");
+    // Two workers, sixty-four waiting: a crowd's worth of surfaces nearest
+    // first, rather than a thread for each of them.
+    normalMapBuilder_ = std::make_unique<NormalMapBuilder>(
+        kNormalMapWorkers, kNormalMapQueue,
+        [format = normalMapFormatFor(*vkCtx_)](std::vector<uint8_t> rgba, uint32_t width, uint32_t height) {
+            // Five, where the WMO renderer asks for two: this is skin and
+            // cloth seen close up, and it wants the gradient exaggerated.
+            // Encoded here too, on the worker: the main thread only uploads.
+            float variance = 0.0f;
+            std::vector<uint8_t> normals = rendering::generateNormalHeightMap(
+                rgba.data(), width, height, kCharacterNormalMapStrength, variance);
+            if (normals.empty()) return EncodedNormalMap{};
+            return encodeNormalMap(std::move(normals), width, height, format, variance);
+        });
 
     core::Logger::getInstance().info("Character renderer initialized (Vulkan)");
     return true;
@@ -613,13 +632,8 @@ void CharacterRenderer::shutdown() {
     LOG_INFO("CharacterRenderer::shutdown instances=", scene_->instances.size(),
              " models=", models.size(), " override=", (void*)renderPassOverride_);
 
-    // Wait for any in-flight background normal map generation threads
-    {
-        std::unique_lock<std::mutex> lock(normalMapResultsMutex_);
-        normalMapDoneCV_.wait(lock, [this] {
-            return pendingNormalMapCount_.load(std::memory_order_acquire) == 0;
-        });
-    }
+    // Its workers finish the map in hand and stop; nothing they made is used.
+    normalMapBuilder_.reset();
 
     VkDevice device = vkCtx_->getDevice();
     DeferredResources retired(*vkCtx_);
@@ -634,31 +648,14 @@ void CharacterRenderer::shutdown() {
         destroyInstanceBones(pair.second, /*defer=*/true);
     }
 
-    for (auto& [path, entry] : textureCache) {
-        auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
-        auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
-        retired.add([texture, normal]() {});
-    }
-    textureCache.clear();
-    for (auto* texture : {&whiteTexture_, &transparentTexture_, &flatNormalTexture_}) {
-        auto owner = std::shared_ptr<VkTexture>(std::move(*texture));
-        retired.add([owner]() {});
-    }
-    texturePropsByPtr_.clear();
-    normalMapByTexPtr_.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-
-    // Clean up composite cache
-    compositeCache_.clear();
-    failedTextureCache_.clear();
     failedTextureRetryAt_.clear();
+    normalMapsFailed_.clear();
     textureLookupSerial_ = 0;
 
+    // The models and instances give their textures back to the shared cache,
+    // which retires them after the frames that may still read them.
     whiteTexture_.reset();
-    transparentTexture_.reset();
     flatNormalTexture_.reset();
-
     models.clear();
     scene_->instances.clear();
 
@@ -717,20 +714,6 @@ void CharacterRenderer::clear() {
     LOG_INFO("CharacterRenderer::clear instances=", scene_->instances.size(),
              " models=", models.size());
 
-    // Wait for any in-flight background normal map generation threads
-    {
-        std::unique_lock<std::mutex> lock(normalMapResultsMutex_);
-        normalMapDoneCV_.wait(lock, [this] {
-            return pendingNormalMapCount_.load(std::memory_order_acquire) == 0;
-        });
-    }
-    // Discard any completed results that haven't been uploaded
-    {
-        std::lock_guard<std::mutex> lock(normalMapResultsMutex_);
-        completedNormalMaps_.clear();
-    }
-
-
     // Destroy GPU resources for all models
     for (auto& pair : models) {
         destroyModelGPU(pair.second, /*defer=*/true);
@@ -738,23 +721,12 @@ void CharacterRenderer::clear() {
 
     clearInstances();
 
-    for (auto& [path, entry] : textureCache) {
-        auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
-        auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
-        vkCtx_->deferAfterAllFrameFences([texture, normal]() {});
-    }
-    textureCache.clear();
-    texturePropsByPtr_.clear();
-    normalMapByTexPtr_.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
+    // The models' and instances' textures go back to the shared cache with
+    // them. Maps still being built are attached to whatever asks for the same
+    // texture next, or dropped if nothing does.
     loggedTextureLoadFails_.clear();
     failedTextureRetryAt_.clear();
     textureLookupSerial_ = 0;
-
-    // Clear composite and failed caches
-    compositeCache_.clear();
-    failedTextureCache_.clear();
 
     // Fallback textures, ring offsets and per-frame pools stay alive. Their
     // per-slot reset happens only after beginFrame has fenced that slot.
@@ -766,28 +738,15 @@ void CharacterRenderer::clearInstances() {
     *scene_ = InstanceState{};
 }
 
-void CharacterRenderer::createFallbackTextures(VkDevice device) {
+void CharacterRenderer::createFallbackTextures() {
     // White: default diffuse when no texture is assigned
-    {
-        uint8_t white[] = {255, 255, 255, 255};
-        whiteTexture_ = std::make_unique<VkTexture>();
-        whiteTexture_->upload(*vkCtx_, white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-        whiteTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    }
-    // Transparent: placeholder for optional overlay layers (e.g. hair highlights)
-    {
-        uint8_t transparent[] = {0, 0, 0, 0};
-        transparentTexture_ = std::make_unique<VkTexture>();
-        transparentTexture_->upload(*vkCtx_, transparent, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-        transparentTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    }
+    const uint8_t white[] = {255, 255, 255, 255};
+    whiteTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, white, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false,
+                                VK_SAMPLER_ADDRESS_MODE_REPEAT);
     // Flat normal: neutral normal map (128,128,255) + 0.5 height in alpha channel
-    {
-        uint8_t flatNormal[] = {128, 128, 255, 128};
-        flatNormalTexture_ = std::make_unique<VkTexture>();
-        flatNormalTexture_->upload(*vkCtx_, flatNormal, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-        flatNormalTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    }
+    const uint8_t flatNormal[] = {128, 128, 255, 128};
+    flatNormalTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, flatNormal, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                     false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 }
 
 void CharacterRenderer::destroyModelGPU(M2ModelGPU& gpuModel, bool defer) {
@@ -822,104 +781,98 @@ void CharacterRenderer::destroyInstanceBones(CharacterInstance& inst, bool defer
     releaseInstanceBones(*vkCtx_, boneDescPool_, boneDescPoolGeneration_, inst, defer);
 }
 
-std::unique_ptr<VkTexture> CharacterRenderer::generateNormalHeightMap(
-        const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance) {
-    if (!vkCtx_ || width == 0 || height == 0) return nullptr;
+size_t CharacterRenderer::pendingNormalMapJobs() const {
+    if (!normalMapBuilder_) return 0;
+    const auto stats = normalMapBuilder_->stats();
+    return stats.queued + stats.running + stats.finished;
+}
 
-    // Use the CPU-only static method, then upload to GPU
-    std::vector<uint8_t> dummy(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    std::memcpy(dummy.data(), pixels, dummy.size());
-    auto result = generateNormalHeightMapCPU("", std::move(dummy), width, height);
-    outVariance = result.variance;
+void CharacterRenderer::requestNormalMaps() {
+    if (!normalMapBuilder_ || !normalMappingEnabled_ || !assetManager) return;
 
-    auto tex = std::make_unique<VkTexture>();
-    if (!tex->upload(*vkCtx_, result.pixels.data(), width, height, VK_FORMAT_R8G8B8A8_UNORM, true)) {
-        return nullptr;
+    // Every texture the instances draw with that came from a file and has no
+    // normal map yet, at the distance of the nearest instance drawing it.
+    // Composited skins have none by design (see compositeTextures), and the
+    // fallbacks are not files.
+    std::unordered_map<const TextureRef*, float> wanted;
+    const auto consider = [&](const TextureRef& texture, float distance) {
+        if (!texture || texture.key().form != TextureForm::Decoded) return;
+        if (texture.normalMap() != nullptr) return;
+        const VkTexture* image = texture.get();
+        if (!image || image->getWidth() < kMinNormalMapSize || image->getHeight() < kMinNormalMapSize) return;
+        if (normalMapsFailed_.count(texture.key().path) != 0) return;
+        auto [it, inserted] = wanted.emplace(&texture, distance);
+        if (!inserted) it->second = std::min(it->second, distance);
+    };
+    for (const auto& [id, instance] : scene_->instances) {
+        if (!instance.visible) continue;
+        auto model = models.find(instance.modelId);
+        if (model == models.end()) continue;
+        const float distance = glm::distance(instance.position, lastCameraPos_);
+        for (const TextureRef& texture : model->second.textureIds) consider(texture, distance);
+        for (const auto& [slot, texture] : instance.textureSlotOverrides) consider(texture, distance);
+        for (const auto& [group, texture] : instance.groupTextureOverrides) consider(texture, distance);
     }
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                        VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    return tex;
-}
+    if (wanted.empty()) return;
 
-// Static, thread-safe CPU-only normal map generation (no GPU access)
-bool CharacterRenderer::queueNormalMapGeneration(const std::string& cacheKey,
-                                                std::vector<uint8_t> pixels,
-                                                uint32_t width, uint32_t height) {
-    // Every surface this renderer draws derives its normal map from its own
-    // diffuse art, and this is the one place that starts that work. It used to
-    // be spelled out inside the file-loading path alone - so a texture that
-    // never came from a file never got one, and a character's body is exactly
-    // that: composited in memory from a skin, a face and whatever armour is
-    // worn. The largest lit surface on screen was the one surface with no
-    // normal map, which reads as the lighting working everywhere except on
-    // people.
-    if (width < 32 || height < 32) return false;
-    // Use acq_rel so the increment is visible to shutdown()'s acquire load
-    // before the thread body begins (relaxed could delay visibility and cause
-    // shutdown() to see 0 and proceed while a thread is still running).
-    pendingNormalMapCount_.fetch_add(1, std::memory_order_acq_rel);
-    auto* self = this;
-    std::thread([self, ck = cacheKey, px = std::move(pixels), width, height]() mutable {
-        // try-catch guarantees the counter is decremented even if the compute
-        // throws (e.g., bad_alloc). Without this, shutdown() would deadlock
-        // waiting for a count that never reaches zero.
-        try {
-            auto result = generateNormalHeightMapCPU(std::move(ck), std::move(px),
-                                                     width, height);
-            {
-                std::lock_guard<std::mutex> lock(self->normalMapResultsMutex_);
-                self->completedNormalMaps_.push_back(std::move(result));
-            }
-        } catch (const std::exception& e) {
-            LOG_ERROR("Normal map generation failed: ", e.what());
+    // Two references to one image are one request; the builder keeps the
+    // nearest and refuses the rest once its queue is full.
+    std::vector<std::pair<float, const TextureRef*>> order;
+    order.reserve(wanted.size());
+    std::unordered_set<std::string> seen;
+    for (const auto& [texture, distance] : wanted) order.emplace_back(distance, texture);
+    std::sort(order.begin(), order.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    TextureCache& cache = vkCtx_->textures();
+    for (const auto& [distance, texture] : order) {
+        const std::string& path = texture->key().path;
+        if (!seen.insert(path).second) continue;
+        // Built before, and kept while the texture was away: no need to again.
+        if (TextureRef built = cache.find({path, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey})) {
+            cache.setNormalMap(*texture, std::move(built));
+            continue;
         }
-        if (self->pendingNormalMapCount_.fetch_sub(1, std::memory_order_release) == 1) {
-            self->normalMapDoneCV_.notify_one();
-        }
-    }).detach();
-    return true;
+        pipeline::AssetManager* assets = assetManager;
+        const auto submitted = normalMapBuilder_->submit(
+            {.key = path,
+             .priority = distance,
+             // On a worker: the file decoded and keyed exactly as the
+             // texture itself was, so the map matches what is drawn.
+             .source = [assets, path]() -> std::optional<NormalMapBuilder::Pixels> {
+                 pipeline::BLPImage image = prepareTexture(assets, path);
+                 if (!image.isValid() || image.data.empty()) return std::nullopt;
+                 return NormalMapBuilder::Pixels{std::move(image.data), static_cast<uint32_t>(image.width),
+                                                 static_cast<uint32_t>(image.height)};
+             }});
+        if (submitted == NormalMapBuilder::Submitted::Refused) break;  // the rest are farther
+    }
 }
 
-CharacterRenderer::NormalMapResult CharacterRenderer::generateNormalHeightMapCPU(
-        std::string cacheKey, std::vector<uint8_t> srcPixels, uint32_t width, uint32_t height) {
-    NormalMapResult result;
-    result.cacheKey = std::move(cacheKey);
-    result.width = width;
-    result.height = height;
-    result.variance = 0.0f;
-    // Five, where the WMO renderer asks for two: this is skin and cloth seen
-    // close up, and it wants the gradient exaggerated.
-    result.pixels = rendering::generateNormalHeightMap(
-        srcPixels.data(), width, height, /*strength=*/5.0f, result.variance);
-    return result;
-}
-
-VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
+TextureRef CharacterRenderer::loadTexture(const std::string& path) {
     constexpr uint64_t kFailedTextureRetryLookups = 512;
     // Skip empty or whitespace-only paths (type-0 textures have no filename)
-    if (path.empty()) return whiteTexture_.get();
+    if (path.empty()) return whiteTexture_;
     bool allWhitespace = true;
     for (char c : path) {
         if (c != ' ' && c != '\t' && c != '\0' && c != '\n') { allWhitespace = false; break; }
     }
-    if (allWhitespace) return whiteTexture_.get();
+    if (allWhitespace) return whiteTexture_;
 
     std::string key = normalizeTexturePathKey(path);
     const uint64_t lookupSerial = ++textureLookupSerial_;
 
-    // Check cache
-    auto it = textureCache.find(key);
-    if (it != textureCache.end()) {
-        it->second.lastUse = ++textureCacheCounter_;
-        return it->second.texture.get();
-    }
+    // The shared cache, in the form characters draw a file in: decoded, with
+    // the magenta key applied - not the blocks the world's models share.
+    TextureCache& cache = vkCtx_->textures();
+    const TextureKey cacheKey{key, TextureForm::Decoded, 0};
+    if (TextureRef cached = cache.find(cacheKey)) return cached;
     auto failIt = failedTextureRetryAt_.find(key);
     if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second) {
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
     if (!assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
     // Check pre-decoded BLP cache first (populated by background threads)
@@ -938,111 +891,62 @@ VkTexture* CharacterRenderer::loadTexture(const std::string& path) {
     }
     if (!blpImage.isValid()) {
         // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
-        failedTextureCache_.insert(key);
         failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
         if (loggedTextureLoadFails_.insert(key).second) {
-            core::Logger::getInstance().warning("Failed to load texture: ", path);
+            core::Logger::getInstance().warning("Failed to load texture: ", path,
+                                                " - drawn white until a retry finds it");
         }
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
     if (!preparedTexturesOnly_) applyMagentaKeyIfNeeded(blpImage, key);
 
-    size_t approxBytes = approxTextureBytesWithMips(blpImage.width, blpImage.height);
-    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
-        static constexpr size_t kMaxFailedTextureCache = 200000;
-        if (failedTextureCache_.size() < kMaxFailedTextureCache) {
-            // Budget is saturated; avoid repeatedly decoding/uploading this texture.
-            failedTextureCache_.insert(key);
-            failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        }
-        if (textureBudgetRejectWarnings_ < 3) {
-            core::Logger::getInstance().warning(
-                "Character texture cache full (",
-                textureCacheBytes_ / (1024 * 1024), " MB / ",
-                textureCacheBudgetBytes_ / (1024 * 1024), " MB), rejecting texture: ",
-                path);
-        }
-        ++textureBudgetRejectWarnings_;
-        return whiteTexture_.get();
+    // Into the shared cache under one budget. Its normal map is asked for by
+    // processPendingNormalMaps once something is drawn with it, nearest first.
+    TextureRef uploaded = cachePixels(*vkCtx_, cacheKey, blpImage.data.data(),
+                                      static_cast<uint32_t>(blpImage.width),
+                                      static_cast<uint32_t>(blpImage.height),
+                                      {.hasAlpha = hasNonOpaqueAlpha(blpImage.data),
+                                       .alphaIsSilhouette = false,
+                                       .heightVariance = 0.0f});
+    if (!uploaded) {
+        // Refused or failed, as the cache has said; asked for again after the
+        // retry interval rather than decoded every frame meanwhile.
+        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
+        return whiteTexture_;
     }
-
-    bool hasAlpha = false;
-    for (size_t i = 3; i < blpImage.data.size(); i += 4) {
-        if (blpImage.data[i] != 255) {
-            hasAlpha = true;
-            break;
-        }
-    }
-
-    auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx_, blpImage.data.data(), blpImage.width, blpImage.height,
-                VK_FORMAT_R8G8B8A8_UNORM, true);
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    VkTexture* texPtr = tex.get();
-
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = approxBytes;
-    e.lastUse = ++textureCacheCounter_;
-    e.hasAlpha = hasAlpha;
-
-    // Launch normal map generation on background thread - CPU work is pure compute,
-    // only the GPU upload (in processPendingNormalMaps) needs the main thread (~1-2ms).
-    e.normalMapPending = queueNormalMapGeneration(
-        key, std::vector<uint8_t>(blpImage.data.begin(), blpImage.data.end()),
-        blpImage.width, blpImage.height);
-
-    textureCacheBytes_ += e.approxBytes;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
-    textureCache[key] = std::move(e);
-    failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
-
     core::Logger::getInstance().debug("Loaded character texture: ", path, " (", blpImage.width, "x", blpImage.height, ")");
-    return texPtr;
+    return uploaded;
 }
 
 void CharacterRenderer::processPendingNormalMaps(int budget) {
-    if (!vkCtx_) return;
+    if (!vkCtx_ || !normalMapBuilder_) return;
+    TextureCache& cache = vkCtx_->textures();
 
-    // Collect completed results from background threads
-    std::deque<NormalMapResult> ready;
-    {
-        std::lock_guard<std::mutex> lock(normalMapResultsMutex_);
-        if (completedNormalMaps_.empty()) return;
-        int count = std::min(budget, static_cast<int>(completedNormalMaps_.size()));
-        for (int i = 0; i < count; i++) {
-            ready.push_back(std::move(completedNormalMaps_.front()));
-            completedNormalMaps_.pop_front();
+    // Upload what the workers finished and hang each map on its texture, if
+    // the texture is still resident; if it is not, the map has nothing to go
+    // with and is dropped.
+    const auto finished = normalMapBuilder_->takeFinished(static_cast<size_t>(std::max(budget, 0)));
+    if (!finished.empty()) vkCtx_->beginUploadBatch();
+    for (const auto& result : finished) {
+        if (result.failed) {
+            normalMapsFailed_.insert(result.key);  // the builder said why
+            continue;
         }
+        TextureRef texture = cache.find({result.key, TextureForm::Decoded, 0});
+        if (!texture) continue;
+        TextureRef normals = cacheNormalMap(
+            *vkCtx_, {result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey}, result.map);
+        if (normals) cache.setNormalMap(texture, std::move(normals));
     }
+    if (!finished.empty()) vkCtx_->endUploadBatch();
 
-    // GPU upload only (~1-2ms each) - CPU work already done on background thread
-    for (auto& result : ready) {
-        auto it = textureCache.find(result.cacheKey);
-        if (it == textureCache.end()) continue;  // texture was evicted
-
-        vkCtx_->beginUploadBatch();
-        auto tex = std::make_unique<VkTexture>();
-        bool ok = tex->upload(*vkCtx_, result.pixels.data(), result.width, result.height,
-                              VK_FORMAT_R8G8B8A8_UNORM, true);
-        if (ok) {
-            tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                               VK_SAMPLER_ADDRESS_MODE_REPEAT);
-            it->second.heightMapVariance = result.variance;
-            it->second.approxBytes += approxTextureBytesWithMips(result.width, result.height);
-            textureCacheBytes_ += approxTextureBytesWithMips(result.width, result.height);
-            it->second.normalHeightMap = std::move(tex);
-            if (it->second.texture) {
-                normalMapByTexPtr_[it->second.texture.get()] = {
-                    .normalMap = it->second.normalHeightMap.get(), .heightMapVariance = it->second.heightMapVariance};
-            }
-        }
-        vkCtx_->endUploadBatch();
-        it->second.normalMapPending = false;
+    // Ask for what is still missing, nearest first. Not every frame: it walks
+    // every instance's textures.
+    if (++framesSinceNormalMapScan_ >= kNormalMapScanFrames) {
+        framesSinceNormalMapScan_ = 0;
+        requestNormalMaps();
     }
 }
 
@@ -1742,19 +1646,16 @@ void CharacterRenderer::prepareCompositeWithRegions(pipeline::AssetManager* asse
     decoded[key] = buildCompositeRegionsCPU(assets, base, layers, regions, &decoded);
 }
 
-VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
+TextureRef CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
     if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
-    // Composite key is deterministic from layer set; if we've already built it,
-    // reuse the existing GPU texture to keep live instance pointers valid.
+    // Composite key is deterministic from layer set; if it is resident - for
+    // this character or another dressed the same - it is shared.
     const std::string cacheKey = compositeLayersKey(layerPaths);
-    auto cachedComposite = textureCache.find(cacheKey);
-    if (cachedComposite != textureCache.end()) {
-        cachedComposite->second.lastUse = ++textureCacheCounter_;
-        return cachedComposite->second.texture.get();
-    }
+    TextureCache& cache = vkCtx_->textures();
+    if (TextureRef cached = cache.find({cacheKey, TextureForm::Composite, 0})) return cached;
 
     pipeline::BLPImage image;
     if (predecodedBLPCache_) {
@@ -1765,76 +1666,33 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
         LOG_ERROR("Unprepared character composite reached GPU consumer: ", cacheKey);
     }
     if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeLayersCPU(assetManager, layerPaths, predecodedBLPCache_);
-    if (!image.isValid()) return whiteTexture_.get();
-    auto& composite = image.data;
-    const int width = image.width, height = image.height;
-    const bool hasAlpha = hasNonOpaqueAlpha(composite);
+    if (!image.isValid()) return whiteTexture_;
 
-    // Upload composite to GPU via VkTexture
-    auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx_, composite.data(), width, height, VK_FORMAT_R8G8B8A8_UNORM, true);
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    VkTexture* texPtr = tex.get();
-
-    // Store in texture cache with deterministic key.
-    // Keep the first allocation for a key to avoid invalidating raw pointers
-    // held by active render instances.
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = approxTextureBytesWithMips(width, height);
-    e.lastUse = ++textureCacheCounter_;
-    e.hasAlpha = hasAlpha;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
     // No derived normal map for a composited body, and this is why: the
     // derivation reads luminance as height, which holds for stone and bark and
     // does not hold for skin. Every freckle, every painted shadow under a
     // collarbone, becomes a ridge - and on a character that reads as stretch
     // marks. Art authored as a surface gets one; art authored as a person does
     // not.
-    // Checked before emplacing, not after. emplace builds its node from the
-    // arguments and then destroys that node if the key is already present --
-    // and ~VkTexture frees nothing, so the texture goes in, comes back out
-    // destroyed-but-not-freed, and there is no longer a pointer to free it by.
-    if (auto existing = textureCache.find(cacheKey); existing != textureCache.end()) {
-        e.texture->destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
-        existing->second.lastUse = ++textureCacheCounter_;
-        return existing->second.texture.get();
-    }
-    textureCache.emplace(cacheKey, std::move(e));
-
-    core::Logger::getInstance().info("Composite texture created: ", width, "x", height, " from ", layerPaths.size(), " layers");
-    return texPtr;
+    TextureRef composite = cachePixels(*vkCtx_, {cacheKey, TextureForm::Composite, 0}, image.data.data(),
+                                       static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height),
+                                       {.hasAlpha = hasNonOpaqueAlpha(image.data), .alphaIsSilhouette = false,
+                                        .heightVariance = 0.0f});
+    if (!composite) return whiteTexture_;  // refused or failed, as the cache said
+    core::Logger::getInstance().info("Composite texture created: ", image.width, "x", image.height, " from ",
+                                     layerPaths.size(), " layers");
+    return composite;
 }
 
-void CharacterRenderer::clearCompositeCache() {
-    // Just clear the lookup map so next compositeWithRegions() creates fresh textures.
-    // Don't delete GPU textures -- they may still be referenced by models or instances.
-    // Orphaned textures will be cleaned up when their model/instance is destroyed.
-    compositeCache_.clear();
-}
-
-VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
-                                                const std::vector<std::string>& baseLayers,
-                                                const std::vector<std::pair<int, std::string>>& regionLayers) {
-    // Build cache key from all inputs to avoid redundant compositing
+TextureRef CharacterRenderer::compositeWithRegions(const std::string& basePath,
+                                                   const std::vector<std::string>& baseLayers,
+                                                   const std::vector<std::pair<int, std::string>>& regionLayers) {
+    // Build cache key from all inputs to avoid redundant compositing; a
+    // resident composite of the same inputs is shared.
     const std::string cacheKey = compositeRegionsKey(basePath, baseLayers, regionLayers);
-    auto cacheIt = compositeCache_.find(cacheKey);
-    if (cacheIt != compositeCache_.end() && cacheIt->second != nullptr) {
-        return cacheIt->second;
-    }
-
-    // If the lookup map was cleared, recover from the texture cache without
-    // regenerating/replacing the underlying GPU texture.
     std::string storageKey = "__compositeRegions__" + cacheKey;
-    auto cachedComposite = textureCache.find(storageKey);
-    if (cachedComposite != textureCache.end()) {
-        cachedComposite->second.lastUse = ++textureCacheCounter_;
-        VkTexture* texPtr = cachedComposite->second.texture.get();
-        compositeCache_[cacheKey] = texPtr;
-        return texPtr;
-    }
+    TextureCache& cache = vkCtx_->textures();
+    if (TextureRef cached = cache.find({storageKey, TextureForm::Composite, 0})) return cached;
 
     pipeline::BLPImage image;
     if (predecodedBLPCache_) {
@@ -1845,48 +1703,21 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         LOG_ERROR("Unprepared character composite reached GPU consumer: ", storageKey);
     }
     if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeRegionsCPU(assetManager, basePath, baseLayers, regionLayers, predecodedBLPCache_);
-    if (!image.isValid()) return whiteTexture_.get();
-    auto& composite = image.data;
-    const int width = image.width, height = image.height;
-    const bool hasAlpha = hasNonOpaqueAlpha(composite);
+    if (!image.isValid()) return whiteTexture_;
 
-    // Upload to GPU via VkTexture
-    auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx_, composite.data(), width, height, VK_FORMAT_R8G8B8A8_UNORM, true);
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    VkTexture* texPtr = tex.get();
-
-    // Store in texture cache.
-    // Use emplace to avoid replacing an existing texture for this key; replacing
-    // would invalidate pointers currently bound to active instances.
-    TextureCacheEntry entry;
-    entry.texture = std::move(tex);
-    entry.approxBytes = approxTextureBytesWithMips(width, height);
-    entry.lastUse = ++textureCacheCounter_;
-    entry.hasAlpha = hasAlpha;
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha};
-    // Skin again, with armour composited onto it. Same reason as above.
-    // Checked before emplacing: see the note in compositeTexture. Testing
-    // ins.second afterwards is too late -- by then the texture has been moved
-    // into a node that emplace already destroyed, leaking it with no handle
-    // left to free.
-    if (auto existing = textureCache.find(storageKey); existing != textureCache.end()) {
-        entry.texture->destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
-        existing->second.lastUse = ++textureCacheCounter_;
-        compositeCache_[cacheKey] = existing->second.texture.get();
-        return existing->second.texture.get();
-    }
-    textureCache.emplace(storageKey, std::move(entry));
-
-    core::Logger::getInstance().debug("compositeWithRegions: created ", width, "x", height,
+    // Skin again, with armour composited onto it: no normal map, for the
+    // reason compositeTextures gives.
+    TextureRef composite = cachePixels(*vkCtx_, {storageKey, TextureForm::Composite, 0}, image.data.data(),
+                                       static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height),
+                                       {.hasAlpha = hasNonOpaqueAlpha(image.data), .alphaIsSilhouette = false,
+                                        .heightVariance = 0.0f});
+    if (!composite) return whiteTexture_;  // refused or failed, as the cache said
+    core::Logger::getInstance().debug("compositeWithRegions: created ", image.width, "x", image.height,
         " texture with ", regionLayers.size(), " equipment regions");
-    compositeCache_[cacheKey] = texPtr;
-    return texPtr;
+    return composite;
 }
 
-void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, VkTexture* texture) {
+void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, TextureRef texture) {
     auto it = models.find(modelId);
     if (it == models.end()) {
         core::Logger::getInstance().warning("setModelTexture: model ", modelId, " not found");
@@ -1899,12 +1730,18 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
         return;
     }
 
-    gpuModel.textureIds[textureSlot] = texture;
+    gpuModel.textureIds[textureSlot] = std::move(texture);
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
-    if (!model.isValid()) {
-        core::Logger::getInstance().error("Cannot load invalid M2 model");
+    // A mesh, emitters, or both. A model of emitters alone - nearly every
+    // enchant glow, and some creatures - has no batches to draw here and is
+    // still an instance with a skeleton: CharacterEmitters poses its emitters
+    // on that skeleton in M2Renderer. Refusing it for want of a mesh dropped
+    // every weapon enchant on the floor.
+    if (!model.hasContent()) {
+        LOG_ERROR("CharacterRenderer: model '", model.name.empty() ? "<unnamed>" : model.name,
+                  "' (id ", id, ") has no mesh and no emitters; not loaded");
         return false;
     }
 
@@ -1990,8 +1827,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
     // untextured when nothing answered, because CreatureDisplayInfo has no
     // second skin for it to be overwritten with.
     for (const auto& tex : model.textures) {
-        VkTexture* texPtr = tex.type == 0 ? loadTexture(tex.filename) : nullptr;
-        gpuModel.textureIds.push_back(texPtr);
+        gpuModel.textureIds.push_back(tex.type == 0 ? loadTexture(tex.filename) : TextureRef{});
     }
 
     vkCtx_->endUploadBatch();
@@ -2235,7 +2071,98 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 }
 
-void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
+void CharacterRenderer::advanceAnimation(uint32_t instanceId, CharacterInstance& inst, float deltaTime) {
+    // Advance global sequence timer (accumulates independently of animation wrapping)
+    inst.globalSequenceTime += deltaTime * 1000.0f;
+
+    if (!inst.cachedModel || inst.cachedModel->data.sequences.empty()) return;
+    if (inst.currentSequenceIndex < 0) {
+        inst.currentSequenceIndex = 0;
+        inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
+    }
+    const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
+    inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
+    if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
+        if (inst.animationLoop) {
+            // Subtract duration instead of fmod to preserve float precision
+            // fmod() loses precision with large animationTime values
+            inst.animationTime -= static_cast<float>(seq.duration);
+            // Clamp to [0, duration) to handle multiple loops in one frame
+            while (inst.animationTime >= static_cast<float>(seq.duration)) {
+                inst.animationTime -= static_cast<float>(seq.duration);
+            }
+        } else {
+            // One-shot animation finished: return to the caller-specified
+            // resume anim (NPC state emote) or Stand, unless dead
+            if (inst.currentAnimationId != anim::DEATH) {
+                const uint32_t resumeAnim =
+                    inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
+                playAnimation(instanceId, resumeAnim, true);
+            } else {
+                // Stay on last frame of death
+                inst.animationTime = static_cast<float>(seq.duration);
+            }
+        }
+    }
+}
+
+void CharacterRenderer::poseInstances(std::vector<std::reference_wrapper<CharacterInstance>>& instances) {
+    const size_t count = instances.size();
+    if (count < 8 || numAnimThreads_ <= 1) {
+        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
+        return;
+    }
+
+    // Thread bone matrix computation in chunks
+    static const size_t minAnimWorkPerThread = std::max<size_t>(
+        8, envSizeOrDefault("WOWEE_CHAR_ANIM_WORK_PER_THREAD", 16));
+    const size_t maxUsefulThreads = std::max<size_t>(
+        1, (count + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
+    const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
+
+    if (numThreads <= 1) {
+        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
+        return;
+    }
+
+    const size_t chunkSize = count / numThreads;
+    const size_t remainder = count % numThreads;
+
+    auto processRange = [this, &instances](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; i++) {
+            calculateBoneMatrices(instances[i].get());
+        }
+    };
+
+    animFutures_.clear();
+    if (animFutures_.capacity() < numThreads) {
+        animFutures_.reserve(numThreads);
+    }
+
+    // Dispatch all but the last chunk to the shared pool; process the
+    // last chunk on this thread so the pool is never a hard dependency
+    // for finishing this frame's bone work.
+    size_t start = 0;
+    for (size_t t = 0; t + 1 < numThreads; t++) {
+        size_t end = start + chunkSize + (t < remainder ? 1 : 0);
+        animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+            [processRange, start, end]() { processRange(start, end); }));
+        start = end;
+    }
+    processRange(start, count);
+
+    for (auto& f : animFutures_) {
+        f.get();
+    }
+}
+
+void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view) {
+    // What billboard bones turn against this frame; with no view they stay
+    // as authored.
+    boneView_ = view ? std::optional<glm::mat4>(*view) : std::nullopt;
+    // Normal maps are asked for nearest this first (requestNormalMaps).
+    lastCameraPos_ = cameraPos;
+
     // Distance culling for animation updates in dense areas.
     const float animUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_ANIM_RADIUS", 120));
     const float animUpdateRadiusSq = animUpdateRadius * animUpdateRadius;
@@ -2262,9 +2189,9 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
         }
 
-        // Skip weapon instances for animation - their transforms are set by parent
-        // bones. Enchant visuals are the exception: they are pure animated FX.
-        if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
+        // An attachment - a weapon, a helm, an enchant's effect - stands where
+        // its wielder's bones put it, so it is posed below, once they are.
+        if (inst.hasOverrideModelMatrix) continue;
 
         float distSq = glm::distance2(inst.position, cameraPos);
         const bool isSkyBird = inst.cachedModel && inst.cachedModel->isSkyBird;
@@ -2272,40 +2199,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         if (distSq > updateRadiusSq && !inst.isSceneModel) continue;
         inst.posedThisFrame = true;
 
-        // Advance global sequence timer (accumulates independently of animation wrapping)
-        inst.globalSequenceTime += deltaTime * 1000.0f;
-
-        // Always advance animation time (cheap)
-        if (inst.cachedModel && !inst.cachedModel->data.sequences.empty()) {
-            if (inst.currentSequenceIndex < 0) {
-                inst.currentSequenceIndex = 0;
-                inst.currentAnimationId = inst.cachedModel->data.sequences[0].id;
-            }
-            const auto& seq = inst.cachedModel->data.sequences[inst.currentSequenceIndex];
-            inst.animationTime += deltaTime * 1000.0f * inst.animationSpeed;
-            if (seq.duration > 0 && inst.animationTime >= static_cast<float>(seq.duration)) {
-                if (inst.animationLoop) {
-                    // Subtract duration instead of fmod to preserve float precision
-                    // fmod() loses precision with large animationTime values
-                    inst.animationTime -= static_cast<float>(seq.duration);
-                    // Clamp to [0, duration) to handle multiple loops in one frame
-                    while (inst.animationTime >= static_cast<float>(seq.duration)) {
-                        inst.animationTime -= static_cast<float>(seq.duration);
-                    }
-                } else {
-                    // One-shot animation finished: return to the caller-specified
-                    // resume anim (NPC state emote) or Stand, unless dead
-                    if (inst.currentAnimationId != anim::DEATH) {
-                        const uint32_t resumeAnim =
-                            inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
-                        playAnimation(pair.first, resumeAnim, true);
-                    } else {
-                        // Stay on last frame of death
-                        inst.animationTime = static_cast<float>(seq.duration);
-                    }
-                }
-            }
-        }
+        advanceAnimation(pair.first, inst, deltaTime);
 
         // Keep combat-range creatures at the render frame rate. Aggressive
         // throttling used to begin at 10 yards and reached every eighth frame
@@ -2326,58 +2220,13 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         }
     }
 
-    const size_t updatedCount = toUpdate_.size();
+    poseInstances(toUpdate_);
 
-    // Thread bone matrix computation in chunks
-    if (updatedCount >= 8 && numAnimThreads_ > 1) {
-        static const size_t minAnimWorkPerThread = std::max<size_t>(
-            8, envSizeOrDefault("WOWEE_CHAR_ANIM_WORK_PER_THREAD", 16));
-        const size_t maxUsefulThreads = std::max<size_t>(
-            1, (updatedCount + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
-        const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
-
-        if (numThreads <= 1) {
-            for (auto& instRef : toUpdate_) {
-                calculateBoneMatrices(instRef.get());
-            }
-        } else {
-            const size_t chunkSize = updatedCount / numThreads;
-            const size_t remainder = updatedCount % numThreads;
-
-            auto processRange = [this](size_t begin, size_t end) {
-                for (size_t i = begin; i < end; i++) {
-                    calculateBoneMatrices(toUpdate_[i].get());
-                }
-            };
-
-            animFutures_.clear();
-            if (animFutures_.capacity() < numThreads) {
-                animFutures_.reserve(numThreads);
-            }
-
-            // Dispatch all but the last chunk to the shared pool; process the
-            // last chunk on this thread so the pool is never a hard dependency
-            // for finishing this frame's bone work.
-            size_t start = 0;
-            for (size_t t = 0; t + 1 < numThreads; t++) {
-                size_t end = start + chunkSize + (t < remainder ? 1 : 0);
-                animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
-                    [processRange, start, end]() { processRange(start, end); }));
-                start = end;
-            }
-            processRange(start, updatedCount);
-
-            for (auto& f : animFutures_) {
-                f.get();
-            }
-        }
-    } else {
-        for (auto& instRef : toUpdate_) {
-            calculateBoneMatrices(instRef.get());
-        }
-    }
-
-    // Update weapon attachment transforms (after all bone matrices are computed)
+    // Place the attachments on their wielders' bones, now those are posed,
+    // and then pose the attachments themselves. An item model animates on its
+    // own clock - Thunderfury's arcs crackle, a glaive's glow pulses - and
+    // its billboard bones turn against the view from where it now stands.
+    toUpdate_.clear();
     for (auto& pair : scene_->instances) {
         auto& instance = pair.second;
         if (instance.weaponAttachments.empty()) continue;
@@ -2461,6 +2310,8 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
             weapIt->second.posedThisFrame = true;
+            advanceAnimation(wa.weaponInstanceId, weapIt->second, deltaTime);
+            toUpdate_.push_back(std::ref(weapIt->second));
 
             // Enchant visuals ride the weapon, offset to their attachment point on it.
             for (const auto& fx : wa.effects) {
@@ -2472,9 +2323,13 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 // Keep the effect near the character so animation distance culling
                 // (which works off instance position) treats it like its wielder.
                 fxIt->second.position = instance.position;
+                fxIt->second.posedThisFrame = true;
+                advanceAnimation(fx.effectInstanceId, fxIt->second, deltaTime);
+                toUpdate_.push_back(std::ref(fxIt->second));
             }
         }
     }
+    poseInstances(toUpdate_);
 }
 // --- Bone transform calculation ---
 
@@ -2546,6 +2401,10 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     const bool armsOwnSequences = (instance.armSequenceIndex[0] >= 0 || instance.armSequenceIndex[1] >= 0) &&
                                   instance.boneArm.size() == numBones;
 
+    // Model to view, for billboard bones; made when the first one needs it.
+    glm::mat4 viewModel(1.0f), invViewModel(1.0f);
+    bool haveViewModel = false;
+
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
@@ -2577,6 +2436,24 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
             instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * localTransform;
         } else {
             instance.boneMatrices[i] = localTransform;
+        }
+
+        // A billboard bone is rebuilt in view space, after its whole parent
+        // chain and the model's placement, and brought back into model space;
+        // its children follow it - as M2Renderer turns a doodad's. A weapon's
+        // glow card left as authored is a flat sheet through the blade.
+        if (boneView_ && (bone.flags & kM2BoneBillboardMask) != 0) {
+            if (!haveViewModel) {
+                viewModel = *boneView_ * (instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                                          : getModelMatrix(instance));
+                invViewModel = glm::inverse(viewModel);
+                haveViewModel = true;
+            }
+            // localTransform is T(pivot) T R S T(-pivot): its 3x3 is the bone's
+            // own rotation and scale.
+            instance.boneMatrices[i] = invViewModel *
+                m2BillboardBone(bone.flags, viewModel * instance.boneMatrices[i],
+                                glm::mat3(localTransform), bone.pivot);
         }
 
         // Diagnostic: detect bones with extreme translation. Gated so the abs()
@@ -3040,7 +2917,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (sl < gpuModel.data.textures.size())
                             chosenType = gpuModel.data.textures[sl].type;
                     }
-                    VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch).texture;
+                    const VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch).texture->get();
                     // At debug: this canary was for heads resolving to the
                     // white texture, and they resolve to a texture. Twenty-four
                     // of them a session is noise in a log read for faults.
@@ -3082,12 +2959,16 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 }
                 // Resolve texture for this batch (prefer hair textures for hair geosets).
                 const BatchTexture resolved = resolveBatchTexture(instance, gpuModel, batch);
-                VkTexture* texPtr = resolved.texture;
+                // The model's or the instance's reference, so what is read
+                // about the texture - its alpha, its normal map - comes from
+                // its cache entry; nothing is copied, which would take the
+                // cache's lock from this worker.
+                const TextureRef* texRef = resolved.texture;
                 uint8_t wrapFlags = resolved.wrapFlags;
                 const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 auto groupTexIt = instance.groupTextureOverrides.find(batchGroup);
-                if (groupTexIt != instance.groupTextureOverrides.end() && groupTexIt->second != nullptr) {
-                    texPtr = groupTexIt->second;
+                if (groupTexIt != instance.groupTextureOverrides.end() && groupTexIt->second) {
+                    texRef = &groupTexIt->second;
                 }
 
                 // Respect M2 material blend mode for creature/character submeshes.
@@ -3112,7 +2993,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                            (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
 
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
-                if (texPtr == whiteTexture_.get() && !instance.isSceneModel) {
+                if (*texRef == whiteTexture_ && !instance.isSceneModel) {
                     uint16_t group = batchGroup;
                     bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 ||
                                         group == 8 || group == 9 || group == 13);
@@ -3127,15 +3008,15 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         // Do NOT apply skin composite to hair (type 6) batches
                         if (texType != 6) {
                             for (size_t ti = 0; ti < gpuModel.textureIds.size(); ti++) {
-                                VkTexture* candidate = gpuModel.textureIds[ti];
+                                const TextureRef* candidate = &gpuModel.textureIds[ti];
                                 auto itO = instance.textureSlotOverrides.find(static_cast<uint16_t>(ti));
-                                if (itO != instance.textureSlotOverrides.end() && itO->second != nullptr) {
-                                    candidate = itO->second;
+                                if (itO != instance.textureSlotOverrides.end() && itO->second) {
+                                    candidate = &itO->second;
                                 }
-                                if (candidate != whiteTexture_.get() && candidate != nullptr) {
+                                if (*candidate != whiteTexture_ && *candidate) {
                                     if (ti < gpuModel.data.textures.size() &&
                                         (gpuModel.data.textures[ti].type == 1 || gpuModel.data.textures[ti].type == 11)) {
-                                        texPtr = candidate;
+                                        texRef = candidate;
                                         wrapFlags = static_cast<uint8_t>(gpuModel.data.textures[ti].flags & 0x3);
                                         break;
                                     }
@@ -3145,14 +3026,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     }
                 }
 
+                VkTexture* texPtr = texRef->get();
+
                 // Determine material properties
-                bool alphaCutout = false;
-                if (texPtr != nullptr && texPtr != whiteTexture_.get()) {
-                    auto pit = texturePropsByPtr_.find(texPtr);
-                    if (pit != texturePropsByPtr_.end()) {
-                        alphaCutout = pit->second.hasAlpha;
-                    }
-                }
+                const bool alphaCutout = texPtr != nullptr && *texRef != whiteTexture_ && texRef->info().hasAlpha;
                 // A scene means what its materials say. Stormwind's walls are DXT5 with
                 // an unused alpha channel - every texel below the 0.5 cutoff - so
                 // inferring a cutout from "the texture has alpha" discards the whole
@@ -3181,11 +3058,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // Resolve normal/height map for this texture
                 VkTexture* normalMap = flatNormalTexture_.get();
                 float batchHeightVariance = 0.0f;
-                if (texPtr && texPtr != whiteTexture_.get()) {
-                    auto nmIt = normalMapByTexPtr_.find(texPtr);
-                    if (nmIt != normalMapByTexPtr_.end()) {
-                        normalMap = nmIt->second.normalMap;
-                        batchHeightVariance = nmIt->second.heightMapVariance;
+                if (texPtr && *texRef != whiteTexture_) {
+                    if (VkTexture* derived = texRef->normalMap()) {
+                        normalMap = derived;
+                        batchHeightVariance = texRef->normalMapInfo().heightVariance;
                     }
                 }
 
@@ -3230,8 +3106,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     matData.uvTransform2 = stageUVTransform(1);
                     const BatchTexture second = resolveBatchTexture(instance, gpuModel, batch, 1);
                     secondWrapFlags = second.wrapFlags;
-                    if (second.texture && second.texture->isValid() && second.texture != whiteTexture_.get()) {
-                        secondTex = second.texture;
+                    VkTexture* secondImage = second.texture->get();
+                    if (secondImage && secondImage->isValid() && *second.texture != whiteTexture_) {
+                        secondTex = secondImage;
                         matData.hasSecondTexture = 1;
                     } else {
                         // Drawn with the second stage white: the first alone.
@@ -3631,9 +3508,9 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             // binding 0 changes, so the bones stay bound from above.
             VkDescriptorSet texSet = shadowParams_.set;
             if (blendMode == 1) {
-                VkTexture* tex = resolveBatchTexture(inst, gpuModel, batch).texture;
-                if (tex && tex != whiteTexture_.get()) {
-                    texSet = shadowTexDescSet(tex, frameIndex);
+                const TextureRef& tex = *resolveBatchTexture(inst, gpuModel, batch).texture;
+                if (tex && tex != whiteTexture_) {
+                    texSet = shadowTexDescSet(tex.get(), frameIndex);
                 }
             }
             if (texSet != currentTexSet) {
@@ -3755,32 +3632,29 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
     // stage]]. With one texture bound, this used to pick among the stages - a
     // hair slot first, else the first that was not white - which dropped the
     // other stage; the stages are combined now (m2BatchShading).
-    if (b.textureIndex == 0xFFFF) return {.texture = whiteTexture_.get()};
+    if (b.textureIndex == 0xFFFF) return {.texture = &whiteTexture_};
     const uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + stage;
-    if (lookupPos >= gm.data.textureLookup.size()) return {.texture = whiteTexture_.get()};
+    if (lookupPos >= gm.data.textureLookup.size()) return {.texture = &whiteTexture_};
     const uint16_t texSlot = gm.data.textureLookup[lookupPos];
-    if (texSlot >= gm.textureIds.size()) return {.texture = whiteTexture_.get()};
+    if (texSlot >= gm.textureIds.size()) return {.texture = &whiteTexture_};
 
-    VkTexture* texPtr = gm.textureIds[texSlot];
-    const uint32_t texType = (texSlot < gm.data.textures.size()) ? gm.data.textures[texSlot].type : 0;
+    const TextureRef* texPtr = &gm.textureIds[texSlot];
     const uint8_t wrapFlags = texSlot < gm.data.textures.size()
         ? static_cast<uint8_t>(gm.data.textures[texSlot].flags & 0x3)
         : BatchTexture::kRepeatBoth;
-    // Texture slot overrides. A type-1 (skin) override only reaches skin-group
-    // batches, so the skin composite does not bleed onto cloak or hair.
+    // The instance's own texture for this slot, whatever the batch's geoset.
+    //
+    // A type-1 slot is the body - the skin with the armour composited onto it
+    // - and every batch that samples it is a piece of that body. This used to
+    // reach only a list of geoset groups, which left out 10, 11, 12 and 18:
+    // the tail of a doublet, the plate over the thighs, the tabard and the
+    // belt. Those drew the model's texture instead - your own bare skin and
+    // loincloth under a set of plate legs, and on everyone else, whose model
+    // is shared and carries no skin of its own, white. Hair, the cloak and
+    // the eye glow are not type 1; their slots keep them apart.
     auto itO = inst.textureSlotOverrides.find(texSlot);
-    if (itO != inst.textureSlotOverrides.end() && itO->second != nullptr) {
-        if (texType == 1) {
-            const uint16_t grp = b.submeshId / 100;
-            const bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                      grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
-                                      grp == 20);
-            if (isSkinGroup) texPtr = itO->second;
-        } else {
-            texPtr = itO->second;
-        }
-    }
-    return {.texture = texPtr ? texPtr : whiteTexture_.get(), .wrapFlags = wrapFlags};
+    if (itO != inst.textureSlotOverrides.end() && itO->second) texPtr = &itO->second;
+    return {.texture = *texPtr ? texPtr : &whiteTexture_, .wrapFlags = wrapFlags};
 }
 
 glm::mat4 CharacterRenderer::getModelMatrix(const CharacterInstance& instance) const {
@@ -3991,18 +3865,18 @@ void CharacterRenderer::setDrawSkinExtra(uint32_t instanceId, bool enabled) {
     }
 }
 
-void CharacterRenderer::setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, VkTexture* texture) {
+void CharacterRenderer::setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, TextureRef texture) {
     auto it = scene_->instances.find(instanceId);
-    if (it != scene_->instances.end()) {
-        it->second.groupTextureOverrides[geosetGroup] = texture;
-    }
+    if (it == scene_->instances.end()) return;
+    if (texture) it->second.groupTextureOverrides[geosetGroup] = std::move(texture);
+    else it->second.groupTextureOverrides.erase(geosetGroup);
 }
 
-void CharacterRenderer::setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, VkTexture* texture) {
+void CharacterRenderer::setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, TextureRef texture) {
     auto it = scene_->instances.find(instanceId);
-    if (it != scene_->instances.end()) {
-        it->second.textureSlotOverrides[textureSlot] = texture;
-    }
+    if (it == scene_->instances.end()) return;
+    if (texture) it->second.textureSlotOverrides[textureSlot] = std::move(texture);
+    else it->second.textureSlotOverrides.erase(textureSlot);
 }
 
 void CharacterRenderer::clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot) {
@@ -4247,8 +4121,8 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
 
     // Apply weapon texture if provided
     if (!texturePath.empty()) {
-        VkTexture* texPtr = loadTexture(texturePath);
-        if (texPtr != whiteTexture_.get()) {
+        TextureRef texPtr = loadTexture(texturePath);
+        if (texPtr != whiteTexture_) {
             // Item models can keep an authored hilt texture in slot 0 and expose
             // the DBC-selected skin through one or more replaceable slots:
             // 2 = object skin, 3 = weapon blade, 4 = weapon handle.  Applying the
@@ -4508,7 +4382,6 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     auto fxIt = scene_->instances.find(effectInstanceId);
     if (fxIt == scene_->instances.end()) return false;
     fxIt->second.hasOverrideModelMatrix = true;
-    fxIt->second.isEffectModel = true;
     fxIt->second.animationLoop = true;
     fxIt->second.opacity = charIt->second.opacity;
     fxIt->second.stateTint = charIt->second.stateTint;

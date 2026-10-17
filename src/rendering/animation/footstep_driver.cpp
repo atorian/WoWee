@@ -5,7 +5,6 @@
 #include "rendering/character_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/wmo_renderer.hpp"
-#include "rendering/water_renderer.hpp"
 #include "rendering/swim_effects.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -140,13 +139,10 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(const AnimationCon
         return audio::FootstepSurface::WATER;
     }
 
-    auto* waterRenderer = ctx.renderer->getWaterRenderer();
-    if (waterRenderer) {
-        auto waterH = waterRenderer->getWaterHeightAt(p.x, p.y);
-        if (waterH && p.z < (*waterH + 0.25f)) {
-            cachedFootstepSurface_ = audio::FootstepSurface::WATER;
-            return audio::FootstepSurface::WATER;
-        }
+    if (const auto waterH = ctx.renderer->liquidScene().heightAt(p.x, p.y);
+        waterH && p.z < (*waterH + 0.25f)) {
+        cachedFootstepSurface_ = audio::FootstepSurface::WATER;
+        return audio::FootstepSurface::WATER;
     }
 
     auto* wmoRenderer = ctx.renderer->getWMORenderer();
@@ -187,10 +183,9 @@ void FootstepDriver::playWaterStepExtras(const AnimationContext& ctx) const {
         ctx.audio->getMovementSoundManager()->playWaterFootstep(audio::MovementSoundManager::CharacterSize::MEDIUM);
     }
     auto* swimEffects = ctx.renderer->getSwimEffects();
-    auto* waterRenderer = ctx.renderer->getWaterRenderer();
-    if (swimEffects && waterRenderer) {
+    if (swimEffects) {
         const glm::vec3& characterPosition = ctx.renderer->getCharacterPosition();
-        auto wh = waterRenderer->getWaterHeightAt(characterPosition.x, characterPosition.y);
+        auto wh = ctx.renderer->liquidScene().heightAt(characterPosition.x, characterPosition.y);
         if (wh) {
             swimEffects->spawnFootSplash(characterPosition, *wh);
         }

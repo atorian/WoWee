@@ -200,7 +200,9 @@ uint32_t detectEnchantmentGemItemField(const DBCFile* dbc, const DBCFieldMap* si
  * ItemVisualEffects.dbc (M2 path). Slot index is meaningful: it selects which
  * attachment point on the item model the effect hangs from, so gaps are kept.
  *
- * @return Per-slot model paths; empty strings for unused slots.
+ * @return Per-slot model paths as shipped - the table names the .mdx the
+ *         models were authored as, the archives hold .m2 - and empty strings
+ *         for unused slots.
  */
 std::array<std::string, 5> resolveEnchantItemVisuals(uint32_t enchantId,
                                                      const DBCFile* spellItemEnchantment,

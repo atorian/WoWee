@@ -247,7 +247,7 @@ See [Multi-Expansion Guide](EXPANSION_GUIDE.md) for protocol details.
 - View distance is the single largest cost; lower it first
 - Use FSR 1 or FSR 3 upscaling (Video → WoWee → Upscaling) on weaker hardware
 - Cap the frame rate under Video → WoWee → Display to save power and heat
-- Debug builds show a performance HUD on F1
+- Ctrl+` shows a performance HUD
 
 ## Enjoy!
 

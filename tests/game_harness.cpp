@@ -118,6 +118,7 @@ GameHarness::GameHarness(const std::filesystem::path& accountDataDir) {
     services_.emotes = emotes_.get();
     services_.events = &events_;
     services_.cvars = &cvars_;
+    services_.steadyNow = [this] { return now_; };
     services_.makeConnection = [this] {
         // What a live server says without being asked twice: CMSG_PING is
         // answered with SMSG_PONG and the same sequence.
@@ -170,9 +171,8 @@ void GameHarness::pump() {
     // A frame delivers what arrived and handles it within a time budget, so a
     // burst can take a few. A thousand is far past any test's burst and short
     // of hanging the run when something never drains.
-    for (int frame = 0; frame < 1000; ++frame) {
-        game_->update(1.0f / 60.0f);
-        game_->dispatchAddonEvents();
+    for (int frames = 0; frames < 1000; ++frames) {
+        frame(1.0f / 60.0f);
         if (game_->queuedIncomingPacketCount() == 0) return;
     }
     fail("packets still queued after 1000 frames");
@@ -181,9 +181,15 @@ void GameHarness::pump() {
 void GameHarness::advance(float seconds) {
     constexpr float kFrame = 1.0f / 60.0f;
     for (float passed = 0.0f; passed < seconds; passed += kFrame) {
-        game_->update(kFrame);
-        game_->dispatchAddonEvents();
+        frame(kFrame);
     }
+}
+
+void GameHarness::frame(float seconds) {
+    now_ += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(seconds));
+    game_->update(seconds);
+    game_->dispatchAddonEvents();
 }
 
 std::vector<game::LogicalOpcode> GameHarness::sentOpcodes() const {
@@ -294,6 +300,41 @@ std::vector<uint8_t> GameHarness::createItemBody(uint64_t guid, uint32_t entry, 
     b.u8(1);                        // ITEM
     b.u8(0).u8(0);                  // update flags: no movement
     writeFields(b, fields);
+    return b.bytes();
+}
+
+std::vector<uint8_t> GameHarness::itemTemplateBody(uint32_t entry, const std::string& name,
+                                                   uint32_t displayInfoId, uint32_t inventoryType) {
+    Body b;
+    b.u32(entry);
+    b.u32(2).u32(7);                                // Class, SubClass: a one-handed sword
+    b.u32(0xFFFFFFFF);                              // SoundOverrideSubclass
+    b.cstr(name).u8(0).u8(0).u8(0);                 // Name, Name2..Name4
+    b.u32(displayInfoId);
+    b.u32(2);                                       // Quality
+    b.u32(0).u32(0);                                // Flags, Flags2
+    b.u32(10000).u32(2000);                         // BuyPrice, SellPrice
+    b.u32(inventoryType);
+    b.u32(0xFFFFFFFF).u32(0xFFFFFFFF);              // AllowableClass, AllowableRace
+    b.u32(60).u32(55);                              // ItemLevel, RequiredLevel
+    for (int i = 0; i < 8; ++i) b.u32(0);           // RequiredSkill .. MaxCount
+    b.u32(1).u32(0);                                // Stackable, ContainerSlots
+    b.u32(0);                                       // StatsCount
+    b.u32(0).u32(0);                                // ScalingStatDistribution, -Value
+    for (int i = 0; i < 2; ++i) b.f32(0.0f).f32(0.0f).u32(0);  // damage: min, max, type
+    b.u32(0);                                       // Armor
+    for (int i = 0; i < 6; ++i) b.u32(0);           // resistances
+    b.u32(2600).u32(0).f32(0.0f);                   // Delay, AmmoType, RangedModRange
+    for (int s = 0; s < 5; ++s)                     // spells: id, trigger, charges, cooldowns
+        b.u32(0).u32(0).u32(0).u32(0xFFFFFFFF).u32(0).u32(0xFFFFFFFF);
+    b.u32(1).cstr("");                              // Bonding, Description
+    for (int i = 0; i < 10; ++i) b.u32(0);          // PageText .. Block
+    b.u32(0).u32(90).u32(0).u32(0xFFFFFFFF);        // ItemSet, MaxDurability, Area, Map
+    b.u32(0).u32(0);                                // BagFamily, TotemCategory
+    for (int s = 0; s < 3; ++s) b.u32(0).u32(0);    // sockets: colour, content
+    b.u32(0).u32(0).u32(0);                         // SocketBonus, GemProperties, DisenchantSkill
+    b.f32(0.0f);                                    // ArmorDamageModifier
+    b.u32(0).u32(0).u32(0);                         // Duration, ItemLimitCategory, HolidayId
     return b.bytes();
 }
 

@@ -2,6 +2,7 @@
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/rt_scene.hpp"
+#include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -10,6 +11,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -31,6 +33,27 @@ struct TerrainParamsUBO {
     int32_t hasLayer2;
     int32_t hasLayer3;
 };
+
+// The fragment stage's push constants, after the vertex stage's
+// GPUPushConstants. Matches `Surface` in terrain.frag.glsl.
+struct TerrainSurfacePush {
+    /// x: how steep the textures' relief is drawn, 0 for flat ground.
+    glm::vec4 relief{0.0f};
+};
+constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
+
+// The material set's bindings past the seven samplers and the params block:
+// the base texture's relief, then each layer's.
+constexpr uint32_t kFirstNormalMapBinding = 8;
+constexpr uint32_t kMaterialBindingCount = kFirstNormalMapBinding + 4;
+constexpr uint32_t kMaterialSamplerCount = 7 + 4;
+
+/// The Sobel strength the ground's relief is derived with, half a wall's. The
+/// ground is seen at a grazing angle across a whole road at once, where the
+/// WMO renderer's two turned every grain of a cobble into a chiselled edge;
+/// at one, Goldshire's road reads as stones and mortar at the default "Bump
+/// strength", which scales the result in the shader.
+constexpr float kTerrainNormalMapStrength = 1.0f;
 
 TerrainRenderer::TerrainRenderer() = default;
 
@@ -126,19 +149,16 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // --- Create material descriptor set layout (set 1) ---
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
     // binding 7: uniform buffer (TerrainParams)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(8);
-    for (uint32_t i = 0; i < 7; i++) {
+    // bindings 8-11: combined image samplers (base + 3 layer normal maps)
+    std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         materialBindings[i] = {};
         materialBindings[i].binding = i;
-        materialBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        materialBindings[i].descriptorType = i == 7 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                    : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         materialBindings[i].descriptorCount = 1;
         materialBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    materialBindings[7] = {};
-    materialBindings[7].binding = 7;
-    materialBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    materialBindings[7].descriptorCount = 1;
-    materialBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     materialSetLayout = createDescriptorSetLayout(device, materialBindings);
     if (!materialSetLayout) {
@@ -148,7 +168,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     // --- Create descriptor pool ---
     VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 7 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * kMaterialSamplerCount },
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
     };
 
@@ -169,9 +189,13 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
     pushRange.size = sizeof(GPUPushConstants);
+    VkPushConstantRange surfaceRange{};
+    surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    surfaceRange.offset = kSurfacePushOffset;
+    surfaceRange.size = sizeof(TerrainSurfacePush);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
-    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
+    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     if (!pipelineLayout) {
         LOG_ERROR("TerrainRenderer: failed to create pipeline layout");
         return false;
@@ -199,20 +223,16 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     fragShader.destroy();
 
     // --- Create fallback textures ---
-    whiteTexture = std::make_unique<VkTexture>();
-    uint8_t whitePixel[4] = {255, 255, 255, 255};
-    whiteTexture->upload(*vkCtx, whitePixel, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-    whiteTexture->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                 VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    opaqueAlphaTexture = std::make_unique<VkTexture>();
-    uint8_t opaqueAlpha = 255;
-    opaqueAlphaTexture->upload(*vkCtx, &opaqueAlpha, 1, 1, VK_FORMAT_R8_UNORM, false);
-    opaqueAlphaTexture->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    textureCacheBudgetBytes_ =
-        envSizeMBOrDefault("WOWEE_TERRAIN_TEX_CACHE_MB", 4096) * 1024ull * 1024ull;
-    LOG_INFO("Terrain texture cache budget: ", textureCacheBudgetBytes_ / (1024 * 1024), " MB");
+    const uint8_t whitePixel[4] = {255, 255, 255, 255};
+    whiteTexture = adoptPixels(*vkCtx, TextureForm::Owned, whitePixel, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                               false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    const uint8_t opaqueAlpha = 255;
+    opaqueAlphaTexture = adoptPixels(*vkCtx, TextureForm::Owned, &opaqueAlpha, 1, 1, VK_FORMAT_R8_UNORM,
+                                     false, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    // Straight up, for a texture whose relief could not be had.
+    const uint8_t flatNormal[4] = {128, 128, 255, 128};
+    flatNormalTexture = adoptPixels(*vkCtx, TextureForm::Owned, flatNormal, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                    false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
     // Allocate mega vertex/index buffers and indirect draw buffer.
     // All terrain chunks share these buffers, eliminating per-chunk VB/IB rebinds.
@@ -317,17 +337,11 @@ void TerrainRenderer::shutdown() {
     // index buffers outlived the device: twenty thousand of each.
     vkCtx->flushDeferredCleanup();
 
-    for (auto& [path, entry] : textureCache) {
-        if (entry.texture) entry.texture->destroy(device, allocator);
-    }
-    textureCache.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-    failedTextureCache_.clear();
     loggedTextureLoadFails_.clear();
-
-    if (whiteTexture) { whiteTexture->destroy(device, allocator); whiteTexture.reset(); }
-    if (opaqueAlphaTexture) { opaqueAlphaTexture->destroy(device, allocator); opaqueAlphaTexture.reset(); }
+    loggedNormalMapFails_.clear();
+    whiteTexture.reset();
+    opaqueAlphaTexture.reset();
+    flatNormalTexture.reset();
 
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
@@ -359,7 +373,6 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
     }
     LOG_DEBUG("Loading terrain mesh: ", mesh.validChunkCount, " chunks");
 
-    evictProtectFrom_ = textureCacheCounter_ + 1;
     vkCtx->beginUploadBatch();
 
     for (int y = 0; y < 16; y++) {
@@ -417,10 +430,6 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
                                               int& chunkIndex, int maxChunksPerCall) {
     // Batch all GPU uploads (VBs, IBs, textures) into a single command buffer
     // submission with one fence wait, instead of one per buffer/texture.
-    // Nothing this call is handed can be evicted under it: the chunk being
-    // built is not in `chunks` yet, so the in-use scan cannot see its textures.
-    evictProtectFrom_ = textureCacheCounter_ + 1;
-
     vkCtx->beginUploadBatch();
 
     int uploaded = 0;
@@ -488,18 +497,19 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
                                         const std::vector<std::string>& texturePaths,
                                         int tileX, int tileY, int chunkX, int chunkY) {
     if (chunk.layers.empty()) {
-        gpuChunk.baseTexture = whiteTexture.get();
+        gpuChunk.baseTexture = whiteTexture;
         return;
     }
 
     uint32_t baseTexId = chunk.layers[0].textureId;
     if (baseTexId < texturePaths.size()) {
         gpuChunk.baseTexture = loadTexture(texturePaths[baseTexId]);
+        gpuChunk.baseNormalMap = loadNormalMap(texturePaths[baseTexId]);
     } else {
         LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                     "] base textureId ", baseTexId, " >= texturePaths size ",
                     texturePaths.size(), " - white fallback");
-        gpuChunk.baseTexture = whiteTexture.get();
+        gpuChunk.baseTexture = whiteTexture;
     }
 
     // Layer 0 is the base, so the three blended layers are 1..3.
@@ -507,23 +517,21 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
         const auto& layer = chunk.layers[i];
         int li = static_cast<int>(i) - 1;
 
-        VkTexture* layerTex = whiteTexture.get();
+        TextureRef layerTex = whiteTexture;
         if (layer.textureId < texturePaths.size()) {
             layerTex = loadTexture(texturePaths[layer.textureId]);
+            gpuChunk.layerNormalMaps[li] = loadNormalMap(texturePaths[layer.textureId]);
         } else {
             LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                         "] layer[", i, "] textureId ", layer.textureId,
                         " >= texturePaths size ", texturePaths.size(),
                         " - white fallback");
         }
-        gpuChunk.layerTextures[li] = layerTex;
+        gpuChunk.layerTextures[li] = std::move(layerTex);
 
         // A layer with no alpha map covers everything under it.
-        VkTexture* alphaTex = opaqueAlphaTexture.get();
-        if (!layer.alphaData.empty()) {
-            alphaTex = createAlphaTexture(layer.alphaData);
-        }
-        gpuChunk.alphaTextures[li] = alphaTex;
+        gpuChunk.alphaTextures[li] = layer.alphaData.empty() ? opaqueAlphaTexture
+                                                             : createAlphaTexture(layer.alphaData);
         gpuChunk.layerCount = static_cast<int>(i);
     }
 }
@@ -601,173 +609,93 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
     return gpuChunk;
 }
 
-bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
-    if (textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_) return true;
-    if (!vkCtx) return false;
+TextureRef TerrainRenderer::loadTexture(const std::string& path) {
+    TextureCache& cache = vkCtx->textures();
+    const TextureKey key{normalizeTexturePath(path), TextureForm::Stored, 0};
+    if (TextureRef cached = cache.find(key)) return cached;
 
-    // What the live chunks are holding. These are raw pointers into the cache
-    // and each chunk's material descriptor set names the image directly, so
-    // freeing one out from under a chunk is a use-after-free on the GPU.
-    std::unordered_set<const VkTexture*> inUse;
-    inUse.reserve(chunks.size() * 4);
-    for (const auto& c : chunks) {
-        if (c.baseTexture) inUse.insert(c.baseTexture);
-        for (VkTexture* t : c.layerTextures) if (t) inUse.insert(t);
-        for (VkTexture* t : c.alphaTextures) if (t) inUse.insert(t);
-    }
-
-    std::vector<std::pair<uint64_t, std::string>> candidates;
-    candidates.reserve(textureCache.size());
-    for (const auto& [key, entry] : textureCache) {
-        if (entry.lastUse >= evictProtectFrom_) continue;
-        if (inUse.count(entry.texture.get()) != 0) continue;
-        candidates.emplace_back(entry.lastUse, key);
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    std::vector<VkTexture*> retired;
-    size_t freedBytes = 0;
-    for (const auto& [lastUse, key] : candidates) {
-        if (textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_) break;
-        auto it = textureCache.find(key);
-        if (it == textureCache.end()) continue;
-        textureCacheBytes_ -= it->second.approxBytes;
-        freedBytes += it->second.approxBytes;
-        retired.push_back(it->second.texture.release());
-        textureCache.erase(it);
-    }
-
-    if (!retired.empty()) {
-        VkDevice device = vkCtx->getDevice();
-        VmaAllocator allocator = vkCtx->getAllocator();
-        vkCtx->deferAfterAllFrameFences([device, allocator, retired]() {
-            for (VkTexture* tex : retired) {
-                tex->destroy(device, allocator);
-                delete tex;
-            }
-        });
-        // The first one at warning, because until now this never happened: the
-        // cache only grew, and the ground going white on a distant continent
-        // was the first anyone heard of it. After that it is routine.
-        static bool saidFirstEviction = false;
-        if (!saidFirstEviction) {
-            saidFirstEviction = true;
-            LOG_WARNING("Terrain texture cache reached its ",
-                        textureCacheBudgetBytes_ / (1024 * 1024),
-                        " MB budget and is now evicting - freed ", retired.size(),
-                        " textures, ", freedBytes / (1024 * 1024), " MB");
-        }
-        LOG_DEBUG("Terrain texture cache: evicted ", retired.size(), " textures (",
-                  freedBytes / (1024 * 1024), " MB), now ",
-                  textureCacheBytes_ / (1024 * 1024), " MB of ",
-                  textureCacheBudgetBytes_ / (1024 * 1024), " MB");
-    }
-
-    return textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_;
-}
-
-VkTexture* TerrainRenderer::loadTexture(const std::string& path) {
-    auto normalizeKey = [](std::string key) {
-        std::replace(key.begin(), key.end(), '/', '\\');
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return key;
-    };
-    std::string key = normalizeKey(path);
-
-    auto it = textureCache.find(key);
-    if (it != textureCache.end()) {
-        it->second.lastUse = ++textureCacheCounter_;
-        return it->second.texture.get();
-    }
     // Terrain tileset textures are sampled and never read back, so they go
     // up as blocks with the file's own mip levels.
-    pipeline::BLPImage blp = assetManager->loadTexture(key, true);
+    pipeline::BLPImage blp = assetManager->loadTexture(key.path, true);
     if (!blp.isValid()) {
-        // Return white fallback but don't cache the failure - allow retry
-        // on next tile load in case the asset becomes available.
-        if (loggedTextureLoadFails_.insert(key).second) {
-            LOG_WARNING("Failed to load texture: ", path);
+        // White, and asked for again by the next tile that names it, in case
+        // the asset becomes available.
+        if (loggedTextureLoadFails_.insert(key.path).second) {
+            LOG_WARNING("Failed to load texture: ", path, " - white ground where it is laid");
         }
-        return whiteTexture.get();
+        return whiteTexture;
     }
+    // Refused or failed: the cache has said so.
+    if (TextureRef uploaded = cacheStoredTexture(*vkCtx, key.path, blp)) return uploaded;
+    return whiteTexture;
+}
 
-    const size_t approxBytes = blp.approxUploadBytes();
-    if (!evictTexturesFor(approxBytes)) {
-        // Everything in the cache is under a live chunk, so there is nothing
-        // to give back. White ground is what this looks like, and it used to
-        // be permanent: the cache only ever grew, so the first tile to fill it
-        // condemned every tile after it, and the complaint stopped after three
-        // lines. Said once per texture now, because it is no longer a state
-        // the client cannot leave.
-        if (loggedTextureLoadFails_.insert("budget:" + key).second) {
-            LOG_WARNING("Terrain texture cache full (", textureCacheBytes_ / (1024 * 1024),
-                        " MB / ", textureCacheBudgetBytes_ / (1024 * 1024),
-                        " MB) and nothing in it is evictable - white ground for: ", path);
-        }
-        return whiteTexture.get();
+EncodedNormalMap TerrainRenderer::deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format) {
+    if (!blp.isValid()) return {};
+    const std::vector<uint8_t> decoded =
+        blp.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(blp) : blp.data;
+    const auto width = static_cast<uint32_t>(blp.width);
+    const auto height = static_cast<uint32_t>(blp.height);
+    if (decoded.size() < static_cast<size_t>(width) * height * 4) return {};
+    float variance = 0.0f;
+    std::vector<uint8_t> rgba =
+        generateNormalHeightMap(decoded.data(), width, height, kTerrainNormalMapStrength, variance);
+    if (rgba.empty()) return {};
+    return encodeNormalMap(std::move(rgba), width, height, format, variance);
+}
+
+TextureKey TerrainRenderer::normalMapKey(const std::string& path) {
+    return {normalizeTexturePath(path), TextureForm::NormalHeight,
+            static_cast<uint8_t>(kTerrainNormalMapStrength)};
+}
+
+NormalMapFormat TerrainRenderer::normalMapFormat() const {
+    return vkCtx ? normalMapFormatFor(*vkCtx) : NormalMapFormat::Rgba8;
+}
+
+void TerrainRenderer::uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map) {
+    // Held by nothing until a chunk binds it, as the textures above are.
+    const TextureKey key = normalMapKey(path);
+    if (!map.valid() || vkCtx->textures().find(key)) return;
+    (void)cacheNormalMap(*vkCtx, key, map);
+}
+
+TextureRef TerrainRenderer::loadNormalMap(const std::string& path) {
+    const TextureKey key = normalMapKey(path);
+    if (TextureRef cached = vkCtx->textures().find(key)) return cached;
+    if (loggedNormalMapFails_.count(key.path) != 0) return {};
+
+    // The loading worker derives it ahead of the tile; it is missing here
+    // only when the cache let it go before the chunk was bound.
+    const EncodedNormalMap map =
+        deriveNormalMap(assetManager->loadTexture(key.path, true), normalMapFormat());
+    if (!map.valid()) {
+        loggedNormalMapFails_.insert(key.path);
+        LOG_WARNING("Terrain: no relief could be derived from '", path,
+                    "' - the ground there is lit flat");
+        return {};
     }
-
-    auto tex = std::make_unique<VkTexture>();
-    if (!tex->uploadBLP(*vkCtx, blp)) {
-        LOG_WARNING("Failed to upload texture to GPU: ", path);
-        return whiteTexture.get();
-    }
-    tex->createSampler(vkCtx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                        VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    VkTexture* raw = tex.get();
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = approxBytes;
-    e.lastUse = ++textureCacheCounter_;
-    textureCacheBytes_ += e.approxBytes;
-    textureCache[key] = std::move(e);
-
-    return raw;
+    // Refused or failed: the cache has said so, and the ground is lit flat.
+    return cacheNormalMap(*vkCtx, key, map);
 }
 
 void TerrainRenderer::uploadPreloadedTextures(
     const std::unordered_map<std::string, pipeline::BLPImage>& textures) {
-    auto normalizeKey = [](std::string key) {
-        std::replace(key.begin(), key.end(), '/', '\\');
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return key;
-    };
-    // Batch all texture uploads into a single command buffer submission
-    evictProtectFrom_ = textureCacheCounter_ + 1;
+    // Into the shared cache ahead of the chunks that will name them, in one
+    // submission. Held by nothing until those chunks bind them, so a full
+    // cache may evict one again before then; loadTexture then reads it anew.
+    TextureCache& cache = vkCtx->textures();
     vkCtx->beginUploadBatch();
-
     for (const auto& [path, blp] : textures) {
-        std::string key = normalizeKey(path);
-        if (textureCache.find(key) != textureCache.end()) continue;
         if (!blp.isValid()) continue;
-
-        // This path added to the cache without consulting the budget at all,
-        // so the preload for one tile could carry it past the limit and the
-        // next loadTexture would find no room.
-        if (!evictTexturesFor(blp.approxUploadBytes())) continue;
-
-        auto tex = std::make_unique<VkTexture>();
-        if (!tex->uploadBLP(*vkCtx, blp)) continue;
-        tex->createSampler(vkCtx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-        TextureCacheEntry e;
-        e.texture = std::move(tex);
-        e.approxBytes = blp.approxUploadBytes();
-        e.lastUse = ++textureCacheCounter_;
-        textureCacheBytes_ += e.approxBytes;
-        textureCache[key] = std::move(e);
+        if (cache.find({normalizeTexturePath(path), TextureForm::Stored, 0})) continue;
+        (void)cacheStoredTexture(*vkCtx, path, blp);
     }
-
     vkCtx->endUploadBatch();
 }
 
-VkTexture* TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alphaData) {
-    if (alphaData.empty()) return opaqueAlphaTexture.get();
+TextureRef TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alphaData) {
+    if (alphaData.empty()) return opaqueAlphaTexture;
 
     std::vector<uint8_t> expanded;
     const uint8_t* src = alphaData.data();
@@ -777,34 +705,12 @@ VkTexture* TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alpha
         src = expanded.data();
     }
 
-    auto tex = std::make_unique<VkTexture>();
-    if (!tex->upload(*vkCtx, src, 64, 64, VK_FORMAT_R8_UNORM, false)) {
-        return opaqueAlphaTexture.get();
-    }
-    tex->createSampler(vkCtx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-
-    VkTexture* raw = tex.get();
-    // One per chunk layer, under a key nothing ever looks up again, so these
-    // are dead the moment their chunk is unloaded - and nothing freed them.
-    // ownedAlphaTextures was meant to, and was never filled. Eviction is what
-    // collects them now, which is why they are counted against the budget
-    // rather than added to it in silence.
-    //
-    // Not refused when the cache is full, unlike a tileset texture: 4KB is
-    // never what filled it, and a chunk without its alpha map draws its top
-    // layer over everything below.
-    evictTexturesFor(64 * 64);
-    static uint64_t alphaCounter = 0;
-    std::string key = "__alpha_" + std::to_string(++alphaCounter);
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = 64 * 64;
-    e.lastUse = ++textureCacheCounter_;
-    textureCacheBytes_ += e.approxBytes;
-    textureCache[key] = std::move(e);
-
-    return raw;
+    // One per chunk layer and the chunk's alone: counted against the shared
+    // budget, gone with the chunk. Never refused, since a chunk without its
+    // alpha map draws its top layer over everything below.
+    TextureRef alpha = adoptPixels(*vkCtx, TextureForm::Owned, src, 64, 64, VK_FORMAT_R8_UNORM, false,
+                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    return alpha ? alpha : opaqueAlphaTexture;
 }
 
 VkDescriptorSet TerrainRenderer::allocateMaterialSet() {
@@ -856,11 +762,18 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
         return false;
     }
 
-    VkDescriptorImageInfo imageInfos[7];
-    imageInfos[0] = pick(chunk.baseTexture, white)->descriptorInfo();
-    for (int i = 0; i < 3; i++) {
-        imageInfos[1 + i] = pick(chunk.layerTextures[i], white)->descriptorInfo();
-        imageInfos[4 + i] = pick(chunk.alphaTextures[i], opaque)->descriptorInfo();
+    // The flat normal is the relief's fallback, and a white one stands in
+    // for it: lit flat but for a slight tilt, never unbound.
+    VkTexture* flat = pick(flatNormalTexture.get(), white);
+
+    // Indexed by binding; 7 is the params block.
+    VkDescriptorImageInfo imageInfos[kMaterialBindingCount] = {};
+    imageInfos[0] = pick(chunk.baseTexture.get(), white)->descriptorInfo();
+    imageInfos[kFirstNormalMapBinding] = pick(chunk.baseNormalMap.get(), flat)->descriptorInfo();
+    for (uint32_t i = 0; i < 3; i++) {
+        imageInfos[1 + i] = pick(chunk.layerTextures[i].get(), white)->descriptorInfo();
+        imageInfos[4 + i] = pick(chunk.alphaTextures[i].get(), opaque)->descriptorInfo();
+        imageInfos[kFirstNormalMapBinding + 1 + i] = pick(chunk.layerNormalMaps[i].get(), flat)->descriptorInfo();
     }
 
     VkDescriptorBufferInfo bufInfo{};
@@ -868,23 +781,22 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     bufInfo.offset = 0;
     bufInfo.range = sizeof(TerrainParamsUBO);
 
-    VkWriteDescriptorSet writes[8] = {};
-    for (int i = 0; i < 7; i++) {
+    VkWriteDescriptorSet writes[kMaterialBindingCount] = {};
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
-        writes[i].dstBinding = static_cast<uint32_t>(i);
+        writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].pImageInfo = &imageInfos[i];
+        if (i == 7) {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[i].pBufferInfo = &bufInfo;
+        } else {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo = &imageInfos[i];
+        }
     }
-    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[7].dstSet = set;
-    writes[7].dstBinding = 7;
-    writes[7].descriptorCount = 1;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[7].pBufferInfo = &bufInfo;
 
-    vkUpdateDescriptorSets(vkCtx->getDevice(), 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(vkCtx->getDevice(), kMaterialBindingCount, writes, 0, nullptr);
     return true;
 }
 
@@ -934,6 +846,10 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(GPUPushConstants), &push);
     LocalLightSet pushedLights = push.localLights;
+    TerrainSurfacePush surface{};
+    surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                       kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
 
     Frustum frustum;
     if (frustumCullingEnabled) {
@@ -1197,9 +1113,6 @@ void TerrainRenderer::clear() {
     }
     chunks.clear();
     renderedChunks = 0;
-    // No chunk is holding anything now, so nothing needs protecting from the
-    // next upload's point of view either.
-    evictProtectFrom_ = 0;
 }
 
 void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk) {
@@ -1216,7 +1129,7 @@ void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline:
     glm::vec3 overlays(0.0f);
     float coverage = 0.0f;
     for (int i = 0; i < 3 && i + 1 < static_cast<int>(chunk.layers.size()); ++i) {
-        const VkTexture* tex = gpuChunk.layerTextures[i];
+        const VkTexture* tex = gpuChunk.layerTextures[i].get();
         const auto& alpha = chunk.layers[i + 1].alphaData;
         if (!tex) continue;
         float cover = 1.0f; // The renderer binds opaque alpha for an absent map.
@@ -1260,11 +1173,9 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     VkDescriptorPool pool = materialDescPool;
     VkDescriptorSet materialSet = chunk.materialSet;
 
-    // The per-chunk alpha maps are not freed here. They live in the texture
-    // cache like everything else - createAlphaTexture puts them there - and
-    // the eviction pass collects them once no chunk points at them. The vector
-    // that used to be released here was never filled by anything, so this loop
-    // had been freeing nothing for as long as it existed.
+    // The textures are let go below: the shared cache keeps a tileset texture
+    // for the next tile that wants it and retires the chunk's own alpha maps,
+    // either way only after the frames that may still sample them.
 
     chunk.vertexBuffer = VK_NULL_HANDLE;
     chunk.vertexAlloc = VK_NULL_HANDLE;
@@ -1273,9 +1184,11 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.paramsUBO = VK_NULL_HANDLE;
     chunk.paramsAlloc = VK_NULL_HANDLE;
     chunk.materialSet = VK_NULL_HANDLE;
-    chunk.baseTexture = nullptr;
-    for (VkTexture*& t : chunk.layerTextures) t = nullptr;
-    for (VkTexture*& t : chunk.alphaTextures) t = nullptr;
+    chunk.baseTexture.reset();
+    for (TextureRef& t : chunk.layerTextures) t.reset();
+    for (TextureRef& t : chunk.alphaTextures) t.reset();
+    chunk.baseNormalMap.reset();
+    for (TextureRef& t : chunk.layerNormalMaps) t.reset();
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsUBO, paramsAlloc, pool, materialSet]() {

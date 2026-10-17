@@ -171,6 +171,29 @@ int main(int argc, char** argv) {
                     trackStr(l.attenuationStart, false).c_str(), trackStr(l.attenuationEnd, false).c_str(),
                     trackStr(l.visibility, false).c_str());
     }
+    std::printf("particle emitters: %zu\n", model.particleEmitters.size());
+    for (size_t i = 0; i < model.particleEmitters.size(); ++i) {
+        const auto& e = model.particleEmitters[i];
+        std::printf("  [%zu] bone %u type %u blend %u flags 0x%x  t %s  cells %ux%u"
+                    "  rate %s  life %s  speed %s\n",
+                    i, e.bone, e.emitterType, e.blendingType, e.flags,
+                    textureAt(model, e.texture).c_str(), e.textureCols, e.textureRows,
+                    trackStr(e.emissionRate, false).c_str(), trackStr(e.lifespan, false).c_str(),
+                    trackStr(e.emissionSpeed, false).c_str());
+    }
+    std::printf("ribbons: %zu\n", model.ribbonEmitters.size());
+    for (size_t i = 0; i < model.ribbonEmitters.size(); ++i) {
+        const auto& r = model.ribbonEmitters[i];
+        const unsigned blend = r.materialIndex < model.materials.size()
+            ? model.materials[r.materialIndex].blendMode : 0xFFFFu;
+        std::printf("  [%zu] bone %u  t %s  material %u (blend %u)  above %s below %s"
+                    "  alpha %s  visible %s  edges/s %.1f life %.2f\n",
+                    i, r.bone, textureAt(model, r.textureIndex).c_str(), r.materialIndex, blend,
+                    trackStr(r.heightAboveTrack, false).c_str(),
+                    trackStr(r.heightBelowTrack, false).c_str(),
+                    trackStr(r.alphaTrack, false).c_str(), trackStr(r.visibilityTrack, false).c_str(),
+                    r.edgesPerSecond, r.edgeLifetime);
+    }
     std::printf("billboard bones:");
     for (size_t i = 0; i < model.bones.size(); ++i)
         if (model.bones[i].flags & 0x78) std::printf(" %zu(0x%x)", i, model.bones[i].flags);

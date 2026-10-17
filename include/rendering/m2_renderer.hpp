@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/texture_cache.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/spatial_grid.hpp"
@@ -16,6 +17,7 @@
 #include "rendering/game_object_animation.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/local_lights.hpp"
+#include "rendering/wind_field.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -113,7 +115,6 @@ struct M2ModelGPU {
         /// failed. Empty once it has it. A hidden batch is never bound, so its
         /// descriptor and material can be rewritten when a retry succeeds.
         std::string pendingTextureKey;
-        uint32_t pendingTextureFlags = 0;
         float loadedOpacity = 1.0f; ///< what batchOpacity becomes once the texture arrives
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
@@ -229,6 +230,11 @@ struct M2ModelGPU {
     [[nodiscard]] bool hasEmitters() const {
         return !particleEmitters.empty() || !ribbonEmitters.empty();
     }
+
+    /// Every texture the model's batches, emitters and ribbons point at,
+    /// held for as long as the model is: those keep raw VkTexture* into the
+    /// shared cache, which these references keep resident.
+    std::vector<TextureRef> textureRefs;
 
     // Texture transform data for UV animation
     std::vector<pipeline::M2TextureTransform> textureTransforms;
@@ -641,9 +647,11 @@ public:
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
     /**
-     * Render depth-only pass for shadow casting
+     * Render depth-only pass for shadow casting. `wind` is the frame's wind,
+     * the same numbers the main pass reads from GPUPerFrameData, so a tree's
+     * shadow bends with the tree.
      */
-    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
+    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
                       bool resetDescriptors = true);
 
@@ -795,7 +803,7 @@ public:
     /// from that batch's own wrap flags.
     VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
     /// Take what the loaded texture says about itself onto the batch.
-    void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch) const;
+    void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const;
     /// Point a batch's descriptor set at its texture.
     void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
     /// Ask again for textures that failed to load, and show the batches that
@@ -1208,44 +1216,19 @@ private:
     size_t modelCacheLimit_ = 6000;
     uint32_t modelLimitRejectWarnings_ = 0;
 
-    VkTexture* loadTexture(const std::string& path, uint32_t texFlags = 0);
+    /// A model texture from the shared cache, loading it if it is not there;
+    /// white when it cannot be had. The image is shared with every other
+    /// renderer, so how a batch wraps or biases it is the batch's sampler's
+    /// business (batchImageInfo), not the texture's.
+    TextureRef loadTexture(const std::string& path);
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
 
-    struct TextureCacheEntry {
-        std::unique_ptr<VkTexture> texture;
-        size_t approxBytes = 0;
-        uint64_t lastUse = 0;
-    };
-    std::unordered_map<std::string, TextureCacheEntry> textureCache;
-    struct TextureProperties {
-        bool hasAlpha = false;
-        bool alphaIsSilhouette = false;
-    };
-    std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
-    size_t textureCacheBytes_ = 0;
-    uint64_t textureCacheCounter_ = 0;
-    size_t textureCacheBudgetBytes_ = 2048ull * 1024 * 1024;
-    /// Make room for `bytesNeeded` by dropping textures nothing is looking at,
-    /// oldest first. Returns what it actually freed.
-    ///
-    /// The cache hands out raw VkTexture* and a model's batches, particle
-    /// emitters and ribbons all keep one, so age alone cannot decide: a
-    /// referenced texture would leave those pointers dangling whatever
-    /// lastUse says about it. What model unloading leaves behind is exactly
-    /// what this collects.
-    size_t evictUnreferencedTextures(size_t bytesNeeded);
-
-    std::unordered_set<std::string> failedTextureCache_;
-    /// Keys refused for want of budget rather than because the file is bad.
-    /// Cleared when eviction frees something, so they are retried at once
-    /// instead of waiting out a timer set when the cache was full.
-    std::unordered_set<std::string> budgetRejected_;
+    /// When a key that would not load, or found no room, is next worth a read.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
     uint64_t textureLookupSerial_ = 0;
-    uint32_t textureBudgetRejectWarnings_ = 0;
-    std::unique_ptr<VkTexture> whiteTexture_;
-    std::unique_ptr<VkTexture> glowTexture_;
+    TextureRef whiteTexture_;
+    TextureRef glowTexture_;
     VkDescriptorSet glowTexDescSet_ = VK_NULL_HANDLE;  // cached glow texture descriptor (allocated once)
 
     // Optional query-space culling for collision/raycast hot paths.

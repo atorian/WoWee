@@ -196,6 +196,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     eraseGroup(13);
     eraseGroup(15);
     eraseGroup(12);
+    eraseGroup(18);
 
     // CharGeosets mapping (verified via vertex bounding boxes):
     //   Group 4 (401+) = GLOVES (forearm area, Z~1.1-1.4)
@@ -268,9 +269,22 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     geosets.insert((hasEquippedType({16}) && cloakShown) ? core::cloakGeoset(capeGG)
                                                          : core::kGeosetNoCape);
 
-    // Tabard: inventoryType 19 → group 12
-    if (hasEquippedType({19})) {
-        geosets.insert(core::kGeosetDefaultTabard);
+    // Tabard: inventoryType 19 → group 12, the flap. This asked for 1201
+    // outright, which is no flap, so your own tabard was never drawn.
+    if (const uint16_t tabard = pickGeoset(core::tabardGeoset(
+            getGeosetGroup(findEquippedDisplayId({19}), geosetGroup1Field)));
+        tabard != 0) {
+        geosets.insert(tabard);
+    }
+
+    // Belt: inventoryType 6 → group 18, the buckle - or the base variant, which
+    // on the Legion models is the waist itself. Other players and the portrait
+    // have always had this; your own character's set had no group 18 at all,
+    // so wore no buckle.
+    if (const uint16_t belt = pickGeoset(core::beltGeoset(
+            getGeosetGroup(findEquippedDisplayId({6}), geosetGroup1Field)));
+        belt != 0) {
+        geosets.insert(belt);
     }
 
     // Hide hair under a helm: drop the style scalp and put the bald cap on.
@@ -326,19 +340,32 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
     }
 
-    // Groups 17 and 18 are the Death Knight / Night Elf eye glow. Nothing here
-    // should ever select one, and the renderer only auto-skips them when no
-    // geoset filter is applied - with a filter, whatever is in this set is what
-    // gets drawn. Glowing eyes on a character that should not have them come
-    // from exactly this, so say so rather than leaving it to be spotted.
-    for (uint16_t g : geosets) {
-        const uint16_t group = g / 100;
-        if (group == 17 || group == 18) {
-            LOG_WARNING("Player geosets include eye-glow geoset ", g,
-                        " (group ", group, ") - this will draw glowing eyes");
+    // Group 17 is the eye glow, which only a night elf's bare set asks for.
+    // The renderer only auto-skips it when no geoset filter is applied - with a
+    // filter, whatever is in this set is what gets drawn. Glowing eyes on a
+    // character that should not have them come from exactly this, so say so
+    // rather than leaving it to be spotted. (Group 18 is the belt, and was
+    // listed here too until the belt was drawn on your own character.)
+    uint8_t raceId = 0;
+    if (auto* gh = app.getGameHandler()) {
+        if (const auto* ch = gh->getActiveCharacter()) raceId = static_cast<uint8_t>(ch->race);
+    }
+    if (!core::raceHasGlowingEyes(raceId)) {
+        for (uint16_t g : geosets) {
+            if (core::geosetGroup(g) == 17) {
+                LOG_WARNING("Player geosets include eye-glow geoset ", g,
+                            " for race ", static_cast<int>(raceId), " - this will draw glowing eyes");
+            }
         }
     }
 
+    {
+        std::vector<uint16_t> sorted(geosets.begin(), geosets.end());
+        std::sort(sorted.begin(), sorted.end());
+        std::string list;
+        for (uint16_t g : sorted) list += " " + std::to_string(g);
+        LOG_INFO("Player geosets:", list);
+    }
     charRenderer->setActiveGeosets(instanceId, geosets);
 }
 
@@ -400,13 +427,29 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
         }
     }
 
-    // Re-composite: base skin + underwear + equipment regions
-    // Clear composite cache first to prevent stale textures from being reused
-    charRenderer->clearCompositeCache();
+    // What the body is dressed in, as one line: the first question about a
+    // piece of armour drawn wrong on your own character is which art it
+    // asked for, and nothing said.
+    {
+        std::string worn;
+        for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
+            const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
+            if (slot.empty() || slot.item.displayInfoId == 0) continue;
+            worn += " " + std::to_string(s) + ":" + std::to_string(slot.item.displayInfoId) +
+                    "/" + std::to_string(slot.item.inventoryType);
+        }
+        std::string regions;
+        for (const auto& [region, path] : regionLayers) regions += " " + std::to_string(region) + "=" + path;
+        LOG_INFO("Player appearance: worn (slot:display/invType)", worn, "; regions", regions);
+    }
+
+    // Re-composite: base skin + underwear + equipment regions. A composite of
+    // exactly these inputs is shared from the texture cache; any other set of
+    // inputs is another key and composited afresh.
     // Use per-instance texture override (not model-level) to avoid deleting cached composites.
     uint32_t instanceId = renderer->getCharacterInstanceId();
-    auto* newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
-    if (newTex != nullptr && instanceId != 0) {
+    rendering::TextureRef newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
+    if (newTex && instanceId != 0) {
         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);
     }
 
@@ -442,10 +485,9 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
                                        (ch->gender == game::Gender::NONBINARY && ch->useFemaleModel);
                         }
                     }
-                    const rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
                     for (const auto& capePath : pipeline::capeTextureCandidates(capeName, isFemale)) {
-                        auto* capeTex = charRenderer->loadTexture(capePath);
-                        if (capeTex == nullptr || capeTex == whiteTex) continue;
+                        rendering::TextureRef capeTex = charRenderer->loadTexture(capePath);
+                        if (!capeTex || capeTex == charRenderer->whiteTexture()) continue;
                         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(cloakSlot), capeTex);
                         LOG_INFO("Cloak texture applied: ", capePath);
                         break;

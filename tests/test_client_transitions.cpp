@@ -591,3 +591,53 @@ TEST_CASE("a cast while the client reconnects is refused at once and never sent"
     REQUIRE(h.loop().reconnecting() == nullptr);
     CHECK(h.server().countSent(Opcode::CMSG_CAST_SPELL) == 0);
 }
+
+TEST_CASE("control and the grave key show the performance HUD and reach nothing in the interface; "
+          "F1 is the interface's", "[client][harness][input]") {
+    using wowee::core::ClientShortcut;
+    ClientHarness h;
+    h.enterWorld();
+    // Every key the test presses bound to a command that notes the press, as
+    // a character's bindings bind them - F1 is TARGETSELF on most.
+    h.runInInterface(
+        "__WoweeBindingScripts = __WoweeBindingScripts or {}\n"
+        "HarnessKeysHeard = {}\n"
+        "HarnessBindingsBefore = {}\n"
+        "for _, key in ipairs({'F1', '`', 'CTRL-`', 'CTRL-SHIFT-`'}) do\n"
+        "  local command = 'HARNESSKEY_' .. key\n"
+        "  HarnessBindingsBefore[key] = GetBindingAction(key) or ''\n"
+        "  __WoweeBindingScripts[command] = function(keystate)\n"
+        "    if keystate == 'down' then table.insert(HarnessKeysHeard, key) end\n"
+        "  end\n"
+        "  SetBinding(key, command)\n"
+        "end\n");
+
+    h.pressKey(SDLK_GRAVE, SDL_KMOD_LCTRL);
+    h.releaseKey(SDLK_GRAVE, SDL_KMOD_LCTRL);
+    h.pressKey(SDLK_GRAVE, SDL_KMOD_RCTRL);
+    h.releaseKey(SDLK_GRAVE, SDL_KMOD_RCTRL);
+    h.frame();
+    // Either control key: shown, then hidden again. The interface heard neither.
+    CHECK(h.clientShortcuts() == std::vector<ClientShortcut>{ClientShortcut::TogglePerformanceHud,
+                                                             ClientShortcut::TogglePerformanceHud});
+    CHECK(h.interfaceAnswers("#HarnessKeysHeard == 0"));
+
+    // F1, the plain grave key and another chord on it are the interface's.
+    const auto ctrlShift = static_cast<SDL_Keymod>(SDL_KMOD_LCTRL | SDL_KMOD_LSHIFT);
+    h.pressKey(SDLK_F1);
+    h.releaseKey(SDLK_F1);
+    h.pressKey(SDLK_GRAVE);
+    h.releaseKey(SDLK_GRAVE);
+    h.pressKey(SDLK_GRAVE, ctrlShift);
+    h.releaseKey(SDLK_GRAVE, ctrlShift);
+    h.frame();
+    CHECK(h.clientShortcuts().size() == 2);
+    CHECK(h.interfaceAnswers("#HarnessKeysHeard == 3 and HarnessKeysHeard[1] == 'F1' and "
+                             "HarnessKeysHeard[2] == '`' and HarnessKeysHeard[3] == 'CTRL-SHIFT-`'"));
+
+    // The binding table outlives the harness; the next case gets it as it was.
+    h.runInInterface(
+        "for key, command in pairs(HarnessBindingsBefore) do\n"
+        "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
+        "end\n");
+}

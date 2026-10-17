@@ -386,8 +386,21 @@ struct M2Model {
     // Flags
     uint32_t globalFlags;
 
+    /// A mesh to draw.
     [[nodiscard]] bool isValid() const {
         return !vertices.empty() && !indices.empty();
+    }
+
+    /// Particles or ribbons of its own.
+    [[nodiscard]] bool hasEmitters() const {
+        return !particleEmitters.empty() || !ribbonEmitters.empty();
+    }
+
+    /// Something to show: a mesh, emitters, or both. Nearly every enchant
+    /// glow (Spells\Enchantments\*Glow*) is emitters and no mesh at all, so
+    /// asking for a mesh alone turns them away.
+    [[nodiscard]] bool hasContent() const {
+        return isValid() || hasEmitters();
     }
 };
 

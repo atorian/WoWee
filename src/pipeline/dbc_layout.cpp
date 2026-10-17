@@ -313,7 +313,12 @@ std::array<std::string, 5> resolveItemVisualModels(uint32_t itemVisualId,
 
         int32_t effectRow = itemVisualEffects->findRecordById(effectId);
         if (effectRow < 0) continue;
-        models[slot] = itemVisualEffects->getString(static_cast<uint32_t>(effectRow), 1);
+        std::string path = itemVisualEffects->getString(static_cast<uint32_t>(effectRow), 1);
+        if (path.empty()) continue;
+        // The table names the .mdx the effect was authored as; the archives
+        // hold it as .m2.
+        if (const size_t dot = path.rfind('.'); dot != std::string::npos) path.resize(dot);
+        models[slot] = path + ".m2";
     }
     return models;
 }

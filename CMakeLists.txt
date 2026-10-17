@@ -660,12 +660,17 @@ set(WOWEE_SOURCES
     src/core/login_server_renewal.cpp
     src/core/realm_address.cpp
     src/core/interface_input.cpp
+    src/core/client_shortcuts.cpp
+    src/core/process_stats.cpp
+    src/core/resource_telemetry.cpp
+    src/core/resource_monitor.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
     src/core/entity_spawner_processing.cpp
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
+    src/core/enchant_visual.cpp
     src/core/world_loader.cpp
     src/core/map_scope.cpp
     src/core/character_session.cpp
@@ -736,6 +741,8 @@ set(WOWEE_SOURCES
     src/game/account_data_handler.cpp
     src/game/action_bar_handler.cpp
     src/game/pet_handler.cpp
+    src/game/realm_clock.cpp
+    src/game/realm_time_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp
@@ -799,6 +806,8 @@ set(WOWEE_SOURCES
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
     src/pipeline/wmo_loader.cpp
+    src/pipeline/liquid_types.cpp
+    src/pipeline/liquid_types_dbc.cpp
     src/pipeline/adt_loader.cpp
     src/pipeline/wdt_loader.cpp
     src/pipeline/wowee_terrain_loader.cpp
@@ -960,6 +969,12 @@ set(WOWEE_SOURCES
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
     src/rendering/vk_context.cpp
+    src/rendering/gpu_memory.cpp
+    src/rendering/frame_targets.cpp
+    src/rendering/texture_cache.cpp
+    src/rendering/texture_upload.cpp
+    src/rendering/normal_map_builder.cpp
+    src/rendering/normal_map_encoding.cpp
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
@@ -985,6 +1000,8 @@ set(WOWEE_SOURCES
     src/rendering/rt_lighting.cpp
     src/rendering/performance_hud.cpp
     src/rendering/water_renderer.cpp
+    src/rendering/liquid_scene.cpp
+    src/rendering/liquid_ripple_frames.cpp
     src/rendering/skybox.cpp
     src/rendering/celestial.cpp
     src/rendering/starfield.cpp
@@ -1017,12 +1034,14 @@ set(WOWEE_SOURCES
     src/rendering/loot_sparkles.cpp
     src/rendering/corpse_bones.cpp
     src/rendering/grass_renderer.cpp
+    src/rendering/wind_field.cpp
     src/pipeline/adt_alpha.cpp
     src/pipeline/grass_terrain.cpp
     src/pipeline/grass_population.cpp
     src/pipeline/grass_profile.cpp
     src/pipeline/grass_biomes.cpp
     src/pipeline/grass_clearing.cpp
+    src/pipeline/wind_zones.cpp
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
@@ -2702,6 +2721,12 @@ add_executable(wowee_editor
 
     # Rendering core
     src/rendering/vk_context.cpp
+    src/rendering/gpu_memory.cpp
+    src/rendering/frame_targets.cpp
+    src/rendering/texture_cache.cpp
+    src/rendering/texture_upload.cpp
+    src/rendering/normal_map_builder.cpp
+    src/rendering/normal_map_encoding.cpp
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp

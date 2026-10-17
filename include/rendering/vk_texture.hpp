@@ -8,6 +8,7 @@
 #include <vk_mem_alloc.h>
 #include <string>
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace wowee {
@@ -37,6 +38,15 @@ public:
         uint32_t mipCount, uint32_t width, uint32_t height,
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM);
 
+    /// Upload a 2D array texture: `layers` images of one size, sampled as a
+    /// sampler2DArray. `levels[i]` is mip level i of every layer, one layer
+    /// after another, each `bytesPerTexel` per texel - the caller builds the
+    /// chain, which for small single-channel layers is cheaper than a blit.
+    bool uploadArray(VkContext& ctx, const std::vector<std::vector<uint8_t>>& levels,
+        uint32_t width, uint32_t height, uint32_t layers, VkFormat format,
+        uint32_t bytesPerTexel,
+        std::source_location where = std::source_location::current());
+
     /// Upload a loaded BLP, whichever form it came back in.
     ///
     /// A texture the loader kept compressed goes up as BC1/BC2/BC3 with the
@@ -46,7 +56,11 @@ public:
     ///
     /// Returns false if the image is invalid or the device cannot sample the
     /// block format, so a caller can fall back to loading it decoded.
-    bool uploadBLP(VkContext& ctx, const pipeline::BLPImage& image);
+    ///
+    /// `skipLevels` leaves out that many of the largest mips of a compressed
+    /// file - a quarter of the memory each - for when the full image does not
+    /// fit. Ignored for one the loader decoded.
+    bool uploadBLP(VkContext& ctx, const pipeline::BLPImage& image, uint32_t skipLevels = 0);
 
     /// Mean colour of the visible texels and the fraction that are visible,
     /// taken by uploadBLP (BLPImage::averageColor). White and fully covered
@@ -105,6 +119,9 @@ public:
     [[nodiscard]] uint32_t getHeight() const { return image_.extent.height; }
     [[nodiscard]] VkFormat getFormat() const { return image_.format; }
     [[nodiscard]] uint32_t getMipLevels() const { return mipLevels_; }
+    /// What the image's memory actually takes on the device, alignment and
+    /// all - what the texture cache charges it. Zero before an upload.
+    [[nodiscard]] uint64_t allocatedBytes() const;
     /// Whether this texture can be sampled - which needs a view as well.
     ///
     /// The view was not checked, and it is the handle that can be missing on

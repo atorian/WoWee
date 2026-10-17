@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include "core/cache_stats.hpp"
 #include "core/job_group.hpp"
 
 #include "core/coordinates.hpp"
@@ -10,6 +11,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/normal_map_encoding.hpp"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -29,7 +31,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace rendering { class TerrainRenderer; class Camera; class WaterRenderer; class M2Renderer; class WMORenderer; }
+namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; }
 
 namespace rendering {
 
@@ -129,16 +131,19 @@ struct PendingTile {
     // Pre-loaded terrain texture BLP data (loaded on background thread to avoid
     // blocking file I/O on the main thread during finalizeTile)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedTextures;
+    // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
+    // a texture whose relief was already in the cache.
+    std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
 
     // Pre-decoded M2 model textures (decoded on background thread)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedM2Textures;
 
     // Pre-decoded WMO textures (decoded on background thread)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedWMOTextures;
-    // CPU-generated normal/height pixels for those WMO textures. Keeping this
-    // work on terrain workers avoids multi-second main-thread backfill stalls.
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedWMONormalMaps;
-    std::unordered_map<std::string, float> preloadedWMONormalMapVariances;
+    // Normal/height maps for those WMO textures, derived and encoded with
+    // their mips. Keeping this work on terrain workers avoids multi-second
+    // main-thread backfill stalls.
+    std::unordered_map<std::string, EncodedNormalMap> preloadedWMONormalMaps;
 };
 
 /**
@@ -273,9 +278,11 @@ public:
      */
     void getGroundEffectDoodads(uint32_t effectId, std::vector<std::string>& outModels,
                                 std::vector<uint32_t>& outWeights) const;
-    void setWaterRenderer(WaterRenderer* renderer) { waterRenderer = renderer; }
+    /// Where the tiles' and buildings' liquid goes as they stream in and out.
+    void setLiquidScene(LiquidScene* scene) { liquidScene = scene; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
-    void setWMORenderer(WMORenderer* renderer) { wmoRenderer = renderer; }
+    /// Also fixes how the workers encode the normal maps they prepare for it.
+    void setWMORenderer(WMORenderer* renderer);
     /// Where a committed tile's sound emitters go - fires, torches, fountains,
     /// water - as a position and AmbientSoundManager's type code. Unset, the
     /// emitters are not gathered at all.
@@ -364,6 +371,9 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
+    /// The prepared tiles kept in memory to be finalized again without
+    /// reading them from disk, against the budget they are kept under.
+    [[nodiscard]] core::CacheStats tileCacheStats() const;
     [[nodiscard]] int getPendingTileCount() const {
         std::lock_guard<std::mutex> lock(queueMutex);
         return static_cast<int>(pendingTiles.size());
@@ -432,9 +442,14 @@ private:
 
     pipeline::AssetManager* assetManager = nullptr;
     TerrainRenderer* terrainRenderer = nullptr;
-    WaterRenderer* waterRenderer = nullptr;
+    LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
+    /// How the workers encode WMO normal maps: the device's, read once when
+    /// the renderer is set rather than from the workers.
+    NormalMapFormat wmoNormalMapFormat_ = NormalMapFormat::Rgba8;
+    /// The same for the ground's relief, read when the terrain renderer is set.
+    NormalMapFormat terrainNormalMapFormat_ = NormalMapFormat::Rgba8;
     AmbientEmitterSink ambientEmitterSink_;
 
     std::string mapName = "Azeroth";
@@ -514,7 +529,7 @@ private:
     std::unordered_map<TileCoord, CachedTile, TileCoord::Hash> tileCache_;
     std::list<TileCoord> tileCacheLru_;
     size_t tileCacheBudgetBytes_ = 8ull * 1024 * 1024 * 1024; // Dynamic, set at init based on RAM
-    std::mutex tileCacheMutex_;
+    mutable std::mutex tileCacheMutex_;
 
     std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
     void logMissingAdtOnce(const std::string& adtPath);

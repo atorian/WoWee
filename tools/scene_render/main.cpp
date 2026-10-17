@@ -14,6 +14,13 @@
 //     "hour": 12.0,                       // the realm clock; the sky and the light
 //     "weather": "none",                  // none | rain | snow | storm
 //     "weatherIntensity": 0.0,
+//     "realmTime": 0.0,                   // the realm's calendar clock, seconds since
+//                                         //   1970, that the wind is drawn from; it
+//                                         //   runs on with the frames
+//     "wind": { "direction": 37.0,        // a fixed wind instead of the zone's:
+//               "speed": 2.0 },           //   degrees it blows toward (0 render +x,
+//                                         //   90 render +y), yards a second; 2 is the
+//                                         //   speed the sway is tuned at
 //     "server": [5815.0, 629.0, 647.0],   // where it stands, as the realm and
 //                                         //   .gps give positions,
 //     "origin": [5815.0, 629.0, 647.0],   //   or in render coordinates
@@ -26,11 +33,16 @@
 //         "scale": 1.0 }
 //     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
-//                 "lookAt": [0, 0, 2] },  // from the origin; or "yaw"/"pitch"
+//                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
+//                 "velocity": [0, 6, 0],  // optional: after the frames above, it
+//                 "motionFrames": 10 },   //   moves this fast (render yards/s) for
+//                                         //   this many more before the kept one
 //     "fov": 60.0,
 //     "size": [1280, 720],
 //     "frames": 30,                       // drawn before the one that is kept
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
+//     "msaa": 1,                          // samples: 1, 2, 4 or 8
+//     "fxaa": false,                      // FXAA, drawn through its own target
 //     "minimap": false                    // the minimap disc in the corner
 //   }
 //
@@ -41,12 +53,14 @@
 #include "rendering/minimap.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/post_process_pipeline.hpp"
 #include "rendering/render_surface.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -119,6 +133,17 @@ bool openAssets(pipeline::AssetManager& assets) {
     }
     if (!assets.initialize(assetPath)) return false;
     if (assetPath != dataPath) assets.setBaseFallbackPath(dataPath, expansion);
+
+    // The expansion's DBC column layouts, as the client sets them: the
+    // renderer reads tables through them (LiquidType.dbc among them).
+    static pipeline::DBCLayout layouts;
+    const std::string layoutsPath = expansionPath + "/dbc_layouts.json";
+    if (layouts.loadFromJson(layoutsPath)) {
+        pipeline::setActiveDBCLayout(&layouts);
+    } else {
+        std::fprintf(stderr, "scene_render: no DBC layouts at %s - tables are read without "
+                             "them\n", layoutsPath.c_str());
+    }
     return true;
 }
 
@@ -187,6 +212,37 @@ uint32_t weatherType(const std::string& name) {
     if (name == "snow") return 2;
     if (name == "storm") return 3;
     return 0;
+}
+
+/// What the scene left in video memory, by use, and what each texture cache
+/// counts itself as holding: the world's share of a city, without a realm.
+/// WOWEE_GPU_MEMORY_DUMP names a file for the allocator's whole map.
+void reportVideoMemory(const rendering::Renderer& renderer) {
+    const rendering::VkContext* vk = renderer.getVkContext();
+    if (!vk) return;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    if (const auto heap = vk->deviceLocalHeap()) {
+        LOG_INFO("scene_render: video memory ", heap->usageBytes / kMiB, " MB of ",
+                 heap->budgetBytes / kMiB, " MB budget");
+    }
+    if (const auto byUse = vk->gpuMemoryByUse()) {
+        for (size_t i = 0; i < rendering::kGpuMemoryUseCount; ++i) {
+            const auto use = static_cast<rendering::GpuMemoryUse>(i);
+            LOG_INFO("scene_render: video memory for ", rendering::gpuMemoryUseName(use), ": ",
+                     byUse->deviceLocal(use) / kMiB, " MB");
+        }
+    }
+    const auto textures = vk->textures().stats();
+    LOG_INFO("scene_render: texture cache ", textures.bytes / kMiB, " MB in ", textures.entries,
+             " entries, budget ", textures.budgetBytes / kMiB, " MB, ", textures.refusals, " refused");
+    for (size_t i = 0; i < rendering::kTextureFormCount; ++i) {
+        const auto form = static_cast<rendering::TextureForm>(i);
+        LOG_INFO("scene_render: texture cache ", rendering::textureFormName(form), ": ",
+                 textures.form(form).bytes / kMiB, " MB in ", textures.form(form).entries, " entries");
+    }
+    if (const char* path = std::getenv("WOWEE_GPU_MEMORY_DUMP"); path && *path) {
+        if (vk->writeGpuMemoryMap(path)) LOG_INFO("scene_render: allocator map written to ", path);
+    }
 }
 
 int render(const json& scene, const std::string& outPath, pipeline::AssetManager& assets,
@@ -258,8 +314,40 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     environment.weatherType = weatherType(scene.value("weather", std::string("none")));
     environment.weatherIntensity = scene.value("weatherIntensity", 0.0f);
     environment.raining = environment.weatherType == 1 || environment.weatherType == 3;
+    // A realm clock of the scene's own, so the wind - drawn from it - is the
+    // same on every run rather than whatever this machine's clock says.
+    const double realmTime = scene.value("realmTime", 0.0);
+    environment.realmSeconds = realmTime;
+    if (scene.contains("wind")) {
+        const json& wind = scene["wind"];
+        if (!wind.is_object() || !wind.contains("direction") || !wind["direction"].is_number() ||
+            !wind.contains("speed") || !wind["speed"].is_number() || wind["speed"].get<float>() < 0.0f) {
+            std::fprintf(stderr, "scene_render: \"wind\" wants { \"direction\": degrees, "
+                                 "\"speed\": yards a second, zero or more }\n");
+            return 1;
+        }
+        environment.wind = rendering::WindOverride{wind["direction"].get<float>(),
+                                                   wind["speed"].get<float>()};
+    }
     renderer.setWorldEnvironment(environment);
     renderer.setWorldInView(true);
+
+    // Anti-aliasing as the settings panel sets it: the sample count, and
+    // FXAA, which puts the scene in an off-screen target of its own.
+    const int msaa = scene.value("msaa", 1);
+    if (msaa != 1 && msaa != 2 && msaa != 4 && msaa != 8) {
+        std::fprintf(stderr, "scene_render: \"msaa\" is 1, 2, 4 or 8 samples\n");
+        return 1;
+    }
+    if (msaa > 1) renderer.setMsaaSamples(static_cast<VkSampleCountFlagBits>(msaa));
+    if (scene.value("fxaa", false)) {
+        if (auto* post = renderer.getPostProcessPipeline()) {
+            post->setFXAAEnabled(true);
+        } else {
+            std::fprintf(stderr, "scene_render: \"fxaa\" asked for but there is no post-processing\n");
+            return 1;
+        }
+    }
 
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
     // on its own threads: with it on, the frames wait for it as well.
@@ -267,19 +355,38 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     constexpr float kStep = 1.0f / 30.0f;
     const auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
-    for (int frame = 0, extra = 0; frame < frames || (waitTerrain && extra < 600 &&
-                                                       terrain->getRemainingTileCount() > 0);
-         ++frame) {
-        if (frame >= frames) ++extra;
+    int frame = 0;
+    auto drawFrame = [&]() {
+        environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
+        renderer.setWorldEnvironment(environment);
         renderer.update(kStep);
         renderer.beginFrame();
         renderer.renderWorld();
         renderer.endFrame();
+        ++frame;
+    };
+    for (int extra = 0; frame < frames || (waitTerrain && extra < 600 &&
+                                           terrain->getRemainingTileCount() > 0);) {
+        if (frame >= frames) ++extra;
+        drawFrame();
+    }
+
+    // Then, if asked, the camera on the move for the last few frames. What a
+    // pass keeps of an earlier frame - the water's refraction once kept the
+    // whole finished picture - only shows while the view is changing.
+    if (cam.contains("velocity")) {
+        const glm::vec3 velocity = vec3(cam["velocity"]);
+        const int motionFrames = std::max(1, cam.value("motionFrames", 10));
+        for (int i = 1; i <= motionFrames; ++i) {
+            camera->setPosition(eye + velocity * (kStep * static_cast<float>(i)));
+            drawFrame();
+        }
     }
     if (!renderer.captureScreenshot(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;
     }
+    reportVideoMemory(renderer);
     return 0;
 }
 

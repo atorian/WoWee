@@ -1,0 +1,13 @@
+// Dalaran's centre at noon, the city and the tiles around it streamed in:
+// the world's share of the video memory a crowded city costs, measured
+// without a realm (reportVideoMemory in the log).
+{
+  "map": "Northrend", "mapId": 571, "zoneId": 4395,
+  "hour": 12.0,
+  "server": [5804.0, 624.0, 647.0],
+  "terrain": true,
+  "terrainRadius": 1,
+  "camera": { "offset": [-30, -30, 15], "lookAt": [0, 0, 2] },
+  "size": [1280, 720],
+  "frames": 60
+}

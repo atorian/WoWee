@@ -58,9 +58,15 @@ public:
                           float x, float y, float z, float orientation);
     void queueGameObjectSpawn(uint64_t guid, uint32_t entry, uint32_t displayId,
                               float x, float y, float z, float orientation, float scale = 1.0f);
-    void queuePlayerEquipment(uint64_t guid,
-                              const std::array<uint32_t, 19>& displayInfoIds,
-                              const std::array<uint8_t, 19>& inventoryTypes);
+    /// What a player wears, per slot in the visible-item order (head, neck,
+    /// shoulders ... tabard): the display to draw, its inventory type and the
+    /// enchant it shows (game::events::PlayerEquipmentResolved).
+    struct WornEquipment {
+        std::array<uint32_t, 19> displayInfoIds{};
+        std::array<uint8_t, 19> inventoryTypes{};
+        std::array<uint32_t, 19> enchantIds{};
+    };
+    void queuePlayerEquipment(uint64_t guid, const WornEquipment& equipment);
 
     // Immediate despawn
     void despawnCreature(uint64_t guid);
@@ -549,8 +555,7 @@ private:
         uint32_t instanceId = 0;
         std::vector<std::pair<int, std::string>> regions;
         std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> models;
-        std::array<uint32_t, 19> displayInfoIds;
-        std::array<uint8_t, 19> inventoryTypes;
+        WornEquipment equipment;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
     };
     struct AsyncEquipmentLoad {
@@ -711,9 +716,7 @@ private:
     void spawnOnlinePlayer(uint64_t guid, uint8_t raceId, uint8_t genderId,
                            uint32_t appearanceBytes, uint8_t facialFeatures,
                            float x, float y, float z, float orientation);
-    void setOnlinePlayerEquipment(uint64_t guid,
-                                  const std::array<uint32_t, 19>& displayInfoIds,
-                                  const std::array<uint8_t, 19>& inventoryTypes);
+    void setOnlinePlayerEquipment(uint64_t guid, const WornEquipment& equipment);
     void spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_t displayId,
                                float x, float y, float z, float orientation, float scale = 1.0f);
     struct AssetCaches {
@@ -795,8 +798,8 @@ public:
     std::vector<AsyncNpcCompositeLoad> asyncNpcCompositeLoads_;
     std::unordered_map<uint64_t, uint32_t> playerInstances_;  // guid → render instanceId
     std::unordered_map<uint64_t, OnlinePlayerAppearanceState> onlinePlayerAppearance_;
-    std::unordered_map<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>> pendingOnlinePlayerEquipment_;
-    std::deque<std::pair<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>>> deferredEquipmentQueue_;
+    std::unordered_map<uint64_t, WornEquipment> pendingOnlinePlayerEquipment_;
+    std::deque<std::pair<uint64_t, WornEquipment>> deferredEquipmentQueue_;
     std::vector<AsyncEquipmentLoad> asyncEquipmentLoads_;
     const PreparedEquipmentUpdate* preparedEquipmentUpdate_ = nullptr;
     std::unordered_map<std::string, JobGroup::Future<PreparedEquipmentUpdate>> asyncAttachmentLoads_;

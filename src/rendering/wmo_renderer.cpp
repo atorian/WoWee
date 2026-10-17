@@ -14,6 +14,7 @@
 #include "rendering/wmo_group_containment.hpp"
 #include <cstdlib>
 #include "rendering/normal_map.hpp"
+#include "rendering/texture_upload.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
@@ -44,6 +45,12 @@ namespace wowee {
 namespace rendering {
 
 namespace {
+/// The strength a building's normal map is derived with (Sobel gradient
+/// scale), and so the variant its cache key carries: the character renderer
+/// derives from the same files at another strength.
+constexpr float kWmoNormalMapStrength = 2.0f;
+constexpr uint8_t kWmoNormalMapStrengthKey = static_cast<uint8_t>(kWmoNormalMapStrength);
+
 /// Where a WMO surface stops being a floor and becomes a wall, as the absolute
 /// z of its normal: cos 49.46 degrees.
 ///
@@ -306,24 +313,16 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     fragShader.destroy();
 
     // --- Create fallback white texture ---
-    whiteTexture_ = std::make_unique<VkTexture>();
-    uint8_t whitePixel[4] = {255, 255, 255, 255};
-    whiteTexture_->upload(*vkCtx_, whitePixel, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-    whiteTexture_->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                  VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    const uint8_t whitePixel[4] = {255, 255, 255, 255};
+    whiteTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, whitePixel, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
     // --- Create flat normal placeholder texture ---
     // (128,128,255,128) = flat normal pointing up (0,0,1), mid-height
-    flatNormalTexture_ = std::make_unique<VkTexture>();
-    uint8_t flatNormalPixel[4] = {128, 128, 255, 128};
-    flatNormalTexture_->upload(*vkCtx_, flatNormalPixel, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-    flatNormalTexture_->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                       VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    textureCacheBudgetBytes_ =
-        envSizeMBOrDefault("WOWEE_WMO_TEX_CACHE_MB", 8192) * 1024ull * 1024ull;
+    const uint8_t flatNormalPixel[4] = {128, 128, 255, 128};
+    flatNormalTexture_ = adoptPixels(*vkCtx_, TextureForm::Owned, flatNormalPixel, 1, 1,
+                                     VK_FORMAT_R8G8B8A8_UNORM, false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
     modelCacheLimit_ = envSizeMBOrDefault("WOWEE_WMO_MODEL_LIMIT", 4000);
-    core::Logger::getInstance().info("WMO texture cache budget: ",
-                                     textureCacheBudgetBytes_ / (1024 * 1024), " MB");
     core::Logger::getInstance().info("WMO model cache limit: ", modelCacheLimit_);
 
     core::Logger::getInstance().info("WMO renderer initialized (Vulkan)");
@@ -366,23 +365,13 @@ void WMORenderer::shutdown() {
     }
     scene_->loadingModels_.clear();
 
-    // Free cached textures
-    for (auto& [path, entry] : textureCache) {
-        if (entry.texture) entry.texture->destroy(device, allocator);
-        if (entry.normalHeightMap) entry.normalHeightMap->destroy(device, allocator);
-    }
-    textureCache.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-    failedTextureCache_.clear();
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
-    textureBudgetRejectWarnings_ = 0;
 
-    // Free white texture and flat normal texture
-    if (whiteTexture_) { whiteTexture_->destroy(device, allocator); whiteTexture_.reset(); }
-    if (flatNormalTexture_) { flatNormalTexture_->destroy(device, allocator); flatNormalTexture_.reset(); }
+    // Give back the fallbacks; the models' own textures go with the models.
+    whiteTexture_.reset();
+    flatNormalTexture_.reset();
 
     loadedModels.clear();
     scene_->instances.clear();
@@ -442,8 +431,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // models that have texture paths but no resolved non-white textures.
         if (assetManager && !model.textures.empty()) {
             bool hasResolvedTexture = false;
-            for (VkTexture* tex : existingIt->second.textures) {
-                if (tex != nullptr && tex != whiteTexture_.get()) {
+            for (const TextureRef& tex : existingIt->second.textures) {
+                if (tex && tex != whiteTexture_) {
                     hasResolvedTexture = true;
                     break;
                 }
@@ -533,8 +522,9 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             }
             const auto& texPath = model.textures[i];
             core::Logger::getInstance().debug("    Loading texture ", i, ": ", texPath);
-            VkTexture* tex = loadTexture(texPath);
-            modelData.textures.push_back(tex);
+            LoadedTexture loaded = loadTexture(texPath);
+            modelData.textures.push_back(std::move(loaded.diffuse));
+            modelData.normalMaps.push_back(std::move(loaded.normalHeight));
             // Store lowercase texture name for material detection
             std::string lowerPath = texPath;
             std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
@@ -703,17 +693,22 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // matches; see rendering/wmo_batch_merge.hpp.
         std::vector<WmoBatchState> batchStates;
         std::vector<VkTexture*> batchTextures;
+        /// Which of the model's textures each batch draws, UINT32_MAX for none.
+        std::vector<uint32_t> batchTextureIndices;
         batchStates.reserve(groupRes.batches.size());
         batchTextures.reserve(groupRes.batches.size());
+        batchTextureIndices.reserve(groupRes.batches.size());
 
         for (const auto& batch : groupRes.batches) {
             VkTexture* tex = whiteTexture_.get();
             uint32_t pendingTexture = UINT32_MAX;
+            uint32_t usedTexture = UINT32_MAX;
 
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t texIndex = modelData.materialTextureIndices[batch.materialId];
                 if (texIndex < modelData.textures.size()) {
-                    tex = modelData.textures[texIndex];
+                    tex = modelData.textures[texIndex].get();
+                    usedTexture = texIndex;
                     if (!tex) tex = whiteTexture_.get();
                     if (tex == whiteTexture_.get() && texIndex < modelData.textureNames.size() &&
                         !modelData.textureNames[texIndex].empty()) {
@@ -818,12 +813,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                                     .pendingTexture = pendingTexture,
                                     .exteriorLighting = wmoUsesExteriorLighting(groupRes.groupFlags, matFlags) });
             batchTextures.push_back(tex);
+            batchTextureIndices.push_back(usedTexture);
         }
 
         std::vector<GroupResources::MergedBatch> merged;
         for (const auto& members : groupWmoBatches(batchStates)) {
             const WmoBatchState& state = batchStates[members.front()];
             VkTexture* tex = batchTextures[members.front()];
+            const uint32_t texIndex = batchTextureIndices[members.front()];
             GroupResources::MergedBatch mb;
             mb.texture = tex;
             mb.pendingTextureIndex = state.pendingTexture;
@@ -840,7 +837,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             mb.clothCentreY = state.clothCentreY;
             mb.exteriorLighting = state.exteriorLighting;
             if (mb.hasTexture) {
-                attachNormalHeightMap(mb);
+                attachNormalHeightMap(modelData, texIndex, mb);
             }
             for (size_t i : members) {
                 const auto& batch = groupRes.batches[i];
@@ -1308,26 +1305,16 @@ void WMORenderer::clearAll() {
             }
         }
 
-        // Free cached textures
-        for (auto& [path, entry] : textureCache) {
-            auto texture = std::shared_ptr<VkTexture>(std::move(entry.texture));
-            auto normal = std::shared_ptr<VkTexture>(std::move(entry.normalHeightMap));
-            vkCtx_->deferAfterAllFrameFences([texture, normal]() {});
-        }
-
         // Deferred groups return individual descriptor sets; keep their pool.
 
     }
 
+    // The models' textures go back to the shared cache with them, to be found
+    // again by the next map or evicted when room is wanted.
     loadedModels.clear();
-    textureCache.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-    failedTextureCache_.clear();
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
-    textureBudgetRejectWarnings_ = 0;
     scene_->floorCacheWork_.reset();
     scene_->precomputedFloorGrid.clear();
 
@@ -2311,15 +2298,13 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
     }
 }
 
-void WMORenderer::attachNormalHeightMap(GroupResources::MergedBatch& mb) const {
+void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texIndex,
+                                        GroupResources::MergedBatch& mb) const {
     if (!mb.texture || mb.texture == whiteTexture_.get()) return;
-    for (const auto& [cacheKey, cacheEntry] : textureCache) {
-        if (cacheEntry.texture.get() == mb.texture) {
-            mb.normalHeightMap = cacheEntry.normalHeightMap.get();
-            mb.heightMapVariance = cacheEntry.heightMapVariance;
-            return;
-        }
-    }
+    if (texIndex >= model.normalMaps.size() || !model.normalMaps[texIndex]) return;
+    const TextureRef& normals = model.normalMaps[texIndex];
+    mb.normalHeightMap = normals.get();
+    mb.heightMapVariance = normals.info().heightVariance;
 }
 
 void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
@@ -2450,8 +2435,8 @@ void WMORenderer::retryPendingTextures() {
             }
             // loadTexture decides when a failed path is worth reading again;
             // asking before then is a lookup that hands back white.
-            VkTexture* tex = loadTexture(model.textureNames[texIndex]);
-            if (!tex || tex == whiteTexture_.get()) {
+            LoadedTexture loaded = loadTexture(model.textureNames[texIndex]);
+            if (!loaded.diffuse || loaded.diffuse == whiteTexture_) {
                 ++p;
                 continue;
             }
@@ -2461,11 +2446,12 @@ void WMORenderer::retryPendingTextures() {
             const VkDescriptorSet oldSet = mb.materialSet;
             const ::VkBuffer oldUbo = mb.materialUBO;
             const VmaAllocation oldUboAlloc = mb.materialUBOAlloc;
-            model.textures[texIndex] = tex;
-            mb.texture = tex;
+            mb.texture = loaded.diffuse.get();
+            model.textures[texIndex] = std::move(loaded.diffuse);
+            if (texIndex < model.normalMaps.size()) model.normalMaps[texIndex] = std::move(loaded.normalHeight);
             mb.hasTexture = true;
             mb.pendingTextureIndex = UINT32_MAX;
-            attachNormalHeightMap(mb);
+            attachNormalHeightMap(model, texIndex, mb);
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
             VkDevice device = vkCtx_->getDevice();
@@ -2490,55 +2476,6 @@ void WMORenderer::retryPendingTextures() {
             ++m;
         }
     }
-}
-
-size_t WMORenderer::evictUnreferencedTextures(size_t bytesNeeded) {
-    if (textureCache.empty() || bytesNeeded == 0) return 0;
-
-    // Free a slab rather than exactly what was asked for: finding what is in
-    // use walks every model, and one sweep should serve many loads.
-    constexpr size_t kEvictionSlab = 64ull * 1024 * 1024;
-    bytesNeeded = std::max(bytesNeeded, kEvictionSlab);
-
-    // What a loaded or half-loaded model points at, which its descriptor sets
-    // and the ray-traced scene's albedo lookups rely on.
-    std::unordered_set<const VkTexture*> inUse;
-    auto collect = [&](const ModelData& model) {
-        for (const VkTexture* tex : model.textures) {
-            if (tex) inUse.insert(tex);
-        }
-        for (const auto& group : model.groups) {
-            for (const auto& mb : group.mergedBatches) {
-                if (mb.texture) inUse.insert(mb.texture);
-            }
-        }
-    };
-    for (const auto& [id, model] : loadedModels) collect(model);
-    for (const auto& [id, model] : scene_->loadingModels_) collect(model);
-
-    std::vector<std::pair<uint64_t, std::string>> candidates;
-    candidates.reserve(textureCache.size());
-    for (const auto& [key, entry] : textureCache) {
-        if (!entry.texture || inUse.count(entry.texture.get()) != 0) continue;
-        candidates.emplace_back(entry.lastUse, key);
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    size_t freed = 0;
-    for (const auto& [lastUse, key] : candidates) {
-        if (freed >= bytesNeeded) break;
-        auto it = textureCache.find(key);
-        if (it == textureCache.end()) continue;
-        freed += it->second.approxBytes;
-        textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
-        // A frame in flight may still sample it; it dies once every slot has
-        // fenced. std::function needs a copyable capture.
-        auto doomed = std::make_shared<TextureCacheEntry>(std::move(it->second));
-        vkCtx_->deferAfterAllFrameFences([doomed]() mutable { doomed.reset(); });
-        textureCache.erase(it);
-    }
-    return freed;
 }
 
 VkDescriptorSet WMORenderer::allocateMaterialSet() {
@@ -2799,42 +2736,65 @@ void WMORenderer::WMOInstance::updateModelMatrix() {
     invModelMatrix = glm::inverse(modelMatrix);
 }
 
-pipeline::BLPImage WMORenderer::generateNormalHeightMapPixels(
-        const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance) {
-    pipeline::BLPImage result;
+EncodedNormalMap WMORenderer::prepareNormalHeightMap(const uint8_t* pixels, uint32_t width, uint32_t height,
+                                                     NormalMapFormat format) {
     // Two, where the character renderer asks for five: stone and wood at the
     // distance a wall is seen from, which a stronger gradient only roughens.
+    float variance = 0.0f;
     std::vector<uint8_t> output = rendering::generateNormalHeightMap(
-        pixels, width, height, /*strength=*/2.0f, outVariance);
-    if (output.empty()) return result;
-    result.width = static_cast<int>(width);
-    result.height = static_cast<int>(height);
-    result.channels = 4;
-    result.data = std::move(output);
-    return result;
+        pixels, width, height, kWmoNormalMapStrength, variance);
+    if (output.empty()) return {};
+    return encodeNormalMap(std::move(output), width, height, format, variance);
 }
 
-std::unique_ptr<VkTexture> WMORenderer::generateNormalHeightMap(
-        const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance) {
-    if (!vkCtx_) return nullptr;
-    auto normalPixels = generateNormalHeightMapPixels(pixels, width, height, outVariance);
-    if (!normalPixels.isValid()) return nullptr;
+NormalMapFormat WMORenderer::normalMapFormat() const {
+    return vkCtx_ ? normalMapFormatFor(*vkCtx_) : NormalMapFormat::Rgba8;
+}
 
-    // Upload the CPU-generated pixels to the GPU with mipmaps.
-    auto tex = std::make_unique<VkTexture>();
-    if (!tex->upload(*vkCtx_, normalPixels.data.data(), width, height,
-                     VK_FORMAT_R8G8B8A8_UNORM, true)) {
-        return nullptr;
+TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
+                                            const pipeline::BLPImage* decoded) {
+    if (!normalMappingEnabled_ && !pomEnabled_) return {};
+    TextureCache& cache = vkCtx_->textures();
+    const TextureKey key{resolvedPath, TextureForm::NormalHeight, kWmoNormalMapStrengthKey};
+    if (TextureRef cached = cache.find(key)) return cached;
+
+    // Prefer what the terrain workers made alongside the decoded diffuse: the
+    // Sobel/blur pass then never runs on the render thread.
+    if (predecodedNormalMapCache_) {
+        auto normalIt = predecodedNormalMapCache_->find(resolvedPath);
+        if (normalIt != predecodedNormalMapCache_->end()) {
+            const EncodedNormalMap prepared = std::move(normalIt->second);
+            predecodedNormalMapCache_->erase(normalIt);
+            if (prepared.valid()) return cacheNormalMap(*vkCtx_, key, prepared);
+        }
     }
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                        VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    return tex;
+    // Streaming defers what the workers did not prepare: the building draws
+    // flat until its textures are next loaded, rather than stall the frame.
+    if (deferNormalMaps_) return {};
+
+    // Made here, from the file decoded and thrown away rather than kept. The
+    // diffuse may have come from the cache - another renderer's load - in
+    // which case the file is read again for its pixels.
+    pipeline::BLPImage file;
+    if (!decoded) {
+        file = assetManager->loadTexture(resolvedPath, true);
+        if (!file.isValid()) return {};
+        decoded = &file;
+    }
+    const std::vector<uint8_t> pixels =
+        decoded->isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(*decoded) : decoded->data;
+    if (pixels.empty()) return {};
+    const EncodedNormalMap prepared = prepareNormalHeightMap(
+        pixels.data(), static_cast<uint32_t>(decoded->width), static_cast<uint32_t>(decoded->height),
+        normalMapFormat());
+    if (!prepared.valid()) return {};
+    return cacheNormalMap(*vkCtx_, key, prepared);
 }
 
-VkTexture* WMORenderer::loadTexture(const std::string& path) {
+WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
     constexpr uint64_t kFailedTextureRetryLookups = 512;
     if (!assetManager || !vkCtx_) {
-        return whiteTexture_.get();
+        return {whiteTexture_, {}};
     }
 
     auto normalizeKey = [](std::string key) {
@@ -2850,7 +2810,7 @@ VkTexture* WMORenderer::loadTexture(const std::string& path) {
     key = normalizeKey(key);
     if (key.rfind(".\\", 0) == 0) key = key.substr(2);
     while (!key.empty() && key.front() == '\\') key.erase(key.begin());
-    if (key.empty()) return whiteTexture_.get();
+    if (key.empty()) return {whiteTexture_, {}};
 
     auto hasKnownExt = [](const std::string& p) {
         if (p.size() < 4) return false;
@@ -2899,12 +2859,12 @@ VkTexture* WMORenderer::loadTexture(const std::string& path) {
         if (seen.insert(c).second) uniqueCandidates.push_back(c);
     }
 
-    // Cache lookup across all candidate keys
+    // Cache lookup across all candidate keys: the shared cache, so a texture
+    // a doodad or the ground already loaded is the same image here.
+    TextureCache& cache = vkCtx_->textures();
     for (const auto& c : uniqueCandidates) {
-        auto it = textureCache.find(c);
-        if (it != textureCache.end()) {
-            it->second.lastUse = ++textureCacheCounter_;
-            return it->second.texture.get();
+        if (TextureRef cached = cache.find({c, TextureForm::Stored, 0})) {
+            return {std::move(cached), loadNormalHeightMap(c, nullptr)};
         }
     }
 
@@ -2919,7 +2879,7 @@ VkTexture* WMORenderer::loadTexture(const std::string& path) {
         attemptedCandidates.push_back(c);
     }
     if (attemptedCandidates.empty()) {
-        return whiteTexture_.get();
+        return {whiteTexture_, {}};
     }
 
     // Try loading all candidates until one succeeds
@@ -2950,119 +2910,33 @@ VkTexture* WMORenderer::loadTexture(const std::string& path) {
     }
     if (!blp.isValid()) {
         for (const auto& c : attemptedCandidates) {
-            failedTextureCache_.insert(c);
             failedTextureRetryAt_[c] = lookupSerial + kFailedTextureRetryLookups;
         }
         if (loggedTextureLoadFails_.insert(key).second) {
-            core::Logger::getInstance().warning("WMO: Failed to load texture: ", path);
+            core::Logger::getInstance().warning("WMO: Failed to load texture: ", path,
+                                                " - drawn white until a retry finds it");
         }
         // Do not cache failures as white. MPQ reads can fail transiently
         // during streaming/contention, and caching white here permanently
         // poisons the texture for this session.
-        return whiteTexture_.get();
+        return {whiteTexture_, {}};
     }
 
     core::Logger::getInstance().debug("WMO texture: ", path, " size=", blp.width, "x", blp.height);
 
-    size_t approxBytes = blp.approxUploadBytes();
-    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
-        // Make room before refusing, as the M2 cache does. Without this the
-        // first textures to arrive kept their place for the session and every
-        // building streamed in after the cache filled was drawn white.
-        evictUnreferencedTextures(approxBytes);
-    }
-    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
+    // Into the shared cache. Refused when everything resident is in use (the
+    // cache says so): asked for again after the retry interval, like a failed
+    // read, by retryPendingTextures.
+    TextureRef diffuse = cacheStoredTexture(*vkCtx_, resolvedKey, blp);
+    if (!diffuse) {
         for (const auto& c : attemptedCandidates) {
-            failedTextureCache_.insert(c);
             failedTextureRetryAt_[c] = lookupSerial + kFailedTextureRetryLookups;
         }
-        if (textureBudgetRejectWarnings_ < 3) {
-            core::Logger::getInstance().warning(
-                "WMO texture cache full (", textureCacheBytes_ / (1024 * 1024),
-                " MB / ", textureCacheBudgetBytes_ / (1024 * 1024),
-                " MB), rejecting texture: ", path);
-        }
-        ++textureBudgetRejectWarnings_;
-        return whiteTexture_.get();
+        return {whiteTexture_, {}};
     }
-
-    // Create Vulkan texture
-    auto texture = std::make_unique<VkTexture>();
-    if (!texture->uploadBLP(*vkCtx_, blp)) {
-        core::Logger::getInstance().warning("WMO: Failed to upload texture to GPU: ", path);
-        return whiteTexture_.get();
-    }
-    texture->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
-
-    // Prefer normal/height pixels generated by terrain workers. This preserves
-    // advanced materials without running the Sobel/blur pass on the render
-    // thread. Non-streamed loads retain the synchronous fallback.
-    float nhVariance = 0.0f;
-    std::unique_ptr<VkTexture> nhMap;
-    if (normalMappingEnabled_ || pomEnabled_) {
-        if (predecodedNormalMapCache_ && !resolvedKey.empty()) {
-            auto normalIt = predecodedNormalMapCache_->find(resolvedKey);
-            if (normalIt != predecodedNormalMapCache_->end()) {
-                auto& normalPixels = normalIt->second;
-                auto uploaded = std::make_unique<VkTexture>();
-                if (normalPixels.isValid() &&
-                    uploaded->upload(*vkCtx_, normalPixels.data.data(),
-                                     static_cast<uint32_t>(normalPixels.width),
-                                     static_cast<uint32_t>(normalPixels.height),
-                                     VK_FORMAT_R8G8B8A8_UNORM, true)) {
-                    uploaded->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
-                    nhMap = std::move(uploaded);
-                    if (predecodedNormalMapVariances_) {
-                        auto varianceIt = predecodedNormalMapVariances_->find(resolvedKey);
-                        if (varianceIt != predecodedNormalMapVariances_->end()) {
-                            nhVariance = varianceIt->second;
-                            predecodedNormalMapVariances_->erase(varianceIt);
-                        }
-                    }
-                }
-                predecodedNormalMapCache_->erase(normalIt);
-            }
-        }
-        if (!nhMap && !deferNormalMaps_) {
-            // Decoded here and thrown away, rather than kept and uploaded.
-            // The Sobel pass has always needed pixels; what changes is that
-            // the texture itself no longer has to be RGBA8 to provide them.
-            const std::vector<uint8_t> decoded =
-                blp.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(blp)
-                                        : blp.data;
-            if (!decoded.empty()) {
-                nhMap = generateNormalHeightMap(decoded.data(), blp.width, blp.height,
-                                                nhVariance);
-            }
-        }
-        if (nhMap) {
-            approxBytes *= 2;  // account for normal map in budget
-        }
-    }
-
-    // Cache it
-    TextureCacheEntry e;
-    VkTexture* rawPtr = texture.get();
-    e.approxBytes = approxBytes;
-    e.lastUse = ++textureCacheCounter_;
-    e.texture = std::move(texture);
-    e.normalHeightMap = std::move(nhMap);
-    e.heightMapVariance = nhVariance;
-    textureCacheBytes_ += e.approxBytes;
-    if (!resolvedKey.empty()) {
-        textureCache[resolvedKey] = std::move(e);
-        failedTextureCache_.erase(resolvedKey);
-        failedTextureRetryAt_.erase(resolvedKey);
-    } else {
-        textureCache[key] = std::move(e);
-        failedTextureCache_.erase(key);
-        failedTextureRetryAt_.erase(key);
-    }
+    failedTextureRetryAt_.erase(resolvedKey);
     core::Logger::getInstance().debug("WMO: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
-
-    return rawPtr;
+    return {std::move(diffuse), loadNormalHeightMap(resolvedKey, &blp)};
 }
 
 // Ray-AABB intersection (slab method)

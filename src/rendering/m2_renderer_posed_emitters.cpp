@@ -54,7 +54,12 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
                 VkTexture* tex = gpuModel.particleTextures[ei];
                 if (!tex || !tex->isValid()) tex = whiteTexture_.get();
                 if (!tex || !tex->isValid()) continue;
-                VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
+                // Wrapped as the model's slot says: the image is shared, and
+                // its own sampler is the cache's, not this emitter's.
+                const uint16_t slot = model.particleEmitters[ei].texture;
+                const uint8_t wrap = slot < model.textures.size()
+                    ? static_cast<uint8_t>(model.textures[slot].flags & 0x3) : 0;
+                VkDescriptorImageInfo imgInfo = batchImageInfo(*tex, wrap);
                 VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 write.dstSet = gpuModel.particleTexSets[ei];
                 write.dstBinding = 0;
@@ -104,7 +109,9 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
                     VkTexture* tex = gpuModel.ribbonTextures[ri];
                     if (!tex || !tex->isValid()) tex = whiteTexture_.get();
                     if (!tex || !tex->isValid()) continue;
-                    VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
+                    const uint8_t wrap = texDirect < model.textures.size()
+                        ? static_cast<uint8_t>(model.textures[texDirect].flags & 0x3) : 0;
+                    VkDescriptorImageInfo imgInfo = batchImageInfo(*tex, wrap);
                     VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                     write.dstSet = gpuModel.ribbonTexSets[ri];
                     write.dstBinding = 0;
@@ -140,7 +147,9 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
         std::string path = model.textures[index].filename;
         if (const size_t nul = path.find('\0'); nul != std::string::npos) path.resize(nul);
         if (path.empty()) return;
-        textures[index] = loadTexture(path, model.textures[index].flags);
+        TextureRef texture = loadTexture(path);
+        textures[index] = texture.get();
+        gpu.textureRefs.push_back(std::move(texture));
     };
     std::vector<uint32_t> bones;
     for (const auto& em : model.particleEmitters) {

@@ -1155,7 +1155,7 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
         std::array<uint32_t, 19> items{};
         std::array<uint16_t, 19> enchantIds{};
         if (parseInspectEquipmentPayload(packet, guid, items, enchantIds)) {
-            queries_.cacheInspectedPlayerEquipment(guid, items);
+            queries_.cacheInspectedPlayerEquipment(guid, items, enchantIds);
 
             auto entity = queries_.entities().getEntity(guid);
             std::string playerName = "Target";
@@ -1240,14 +1240,11 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
                      " unparsed payload bytes=", packet.getRemainingSize());
         }
 
-        const auto& inspected = queries_.inspectedPlayerItems();
-        auto gearIt = inspected.find(guid);
-        if (gearIt != inspected.end()) {
-            inspectResult_.itemEntries = gearIt->second;
-        }
+        const auto* inspected = queries_.inspectedItemEntries(guid);
+        if (inspected) inspectResult_.itemEntries = *inspected;
 
         LOG_INFO("SMSG_INSPECT_TALENT (TBC): ", playerName,
-                 " gearCached=", (gearIt != inspected.end() ? "yes" : "no"),
+                 " gearCached=", (inspected ? "yes" : "no"),
                  " payload bytes remaining=", packet.getRemainingSize());
         if (frameXml_.frameXmlListening()) {
             char guidBuf[32];
@@ -1405,12 +1402,10 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
     // paperdoll however well equipped they were.
     if (sawGear) {
         inspectResult_.itemEntries = itemEntries;
-        queries_.cacheInspectedPlayerEquipment(guid, itemEntries);
+        queries_.cacheInspectedPlayerEquipment(guid, itemEntries, enchantIds);
     } else {
-        const auto& inspected = queries_.inspectedPlayerItems();
-        auto gearIt = inspected.find(guid);
-        inspectResult_.itemEntries =
-            (gearIt != inspected.end()) ? gearIt->second : std::array<uint32_t, 19>{};
+        const auto* inspected = queries_.inspectedItemEntries(guid);
+        inspectResult_.itemEntries = inspected ? *inspected : std::array<uint32_t, 19>{};
     }
 
     LOG_INFO("Inspect results for ", playerName, ": ", totalTalents, " talents, ",
@@ -3067,6 +3062,10 @@ void SocialHandler::handleTurnInPetitionResults(network::Packet& packet) {
 void SocialHandler::handleQueryTimeResponse(network::Packet& packet) {
     QueryTimeResponseData data;
     if (!QueryTimeResponseParser::parse(packet, data)) return;
+
+    // The first word is the server's wall clock, to the second - what the
+    // realm clock keeps time from.
+    events_.publish(events::ServerTimeReceived{data.serverTime});
 
     // The second word is how long until the daily quests reset -
     // GetNextDailyQuestsResetTime() minus now, in AzerothCore's own terms. It

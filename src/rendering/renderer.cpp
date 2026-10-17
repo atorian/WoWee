@@ -776,6 +776,10 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.projection = camera->getProjectionMatrix();
     currentFrameData.viewPos = glm::vec4(camera->getPosition(), 1.0f);
     currentFrameData.fogParams.z = globalTime;
+    const WindGpu wind = wind_.gpu();
+    currentFrameData.windDirLean = wind.dirLean;
+    currentFrameData.windPhases = wind.phases;
+    currentFrameData.windTravel = wind.travel;
 
     currentFrameData.fogSkyTop.w = 0.0f;
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
@@ -1099,6 +1103,8 @@ void Renderer::shutdown() {
     }
 
     LOG_DEBUG("Renderer::shutdown - waterRenderer...");
+    waterSubscription_.reset();
+    destroyOffscreenWater1xFramebuffer();
     if (waterRenderer) {
         waterRenderer->shutdown();
         waterRenderer.reset();
@@ -1427,6 +1433,9 @@ void Renderer::beginFrame() {
     // Post-process resource management (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_) postProcessPipeline_->manageResources();
 
+    // With MSAA, the water's pass over that target, rebuilt if the target was.
+    updateOffscreenWater1xFramebuffer();
+
     // The target that call may have just created or destroyed decides where
     // the water draws, and with it where the spray and the minimap go. Asked
     // again here, after the answer can have changed, rather than only at the
@@ -1439,7 +1448,11 @@ void Renderer::beginFrame() {
         // Pixels, like the extent below: a window with a surface behind it is
         // never rebuilt from the size the desktop places it at.
         if (surface_->getDrawableWidth() == 0 || surface_->getDrawableHeight() == 0) return;
-        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
+        // A swapchain or a frame target that could not be made skips the
+        // frame: the context has said why, and tries again next frame. The
+        // rebuilds below would size themselves from a swapchain that is not
+        // there, and recording against it is what crashed the driver.
+        if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) return;
         // Rebuild water resources that reference swapchain extent/views
         if (waterRenderer) {
             waterRenderer->recreatePipelines();
@@ -1656,7 +1669,7 @@ void Renderer::endFrame() {
     // renderWorld already took the copy at the one point in the frame where the
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
-    if (!waterDrawsInContinuePass()
+    if (!waterDrawsInContinuePass() && !waterAblated()
         && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(
@@ -2144,6 +2157,8 @@ void Renderer::update(float deltaTime) {
         }
     }
 
+    updateWind(deltaTime);
+
     endPhase("weather/character anim");
     // Update terrain streaming
     if (terrainManager && camera) {
@@ -2180,8 +2195,8 @@ void Renderer::update(float deltaTime) {
     }
 
     // Update swim effects
-    if (swimEffects && camera && waterRenderer) {
-        swimEffects->update(*camera, viewerMotion_, characterPosition, *waterRenderer, deltaTime);
+    if (swimEffects && camera) {
+        swimEffects->update(*camera, viewerMotion_, characterPosition, liquidScene_, deltaTime);
     }
 
     // Surface disturbance the character leaves in the water. The droplet spray
@@ -2194,7 +2209,7 @@ void Renderer::update(float deltaTime) {
         bool wading = false;
 
         if (viewerMotion_.moving) {
-            if (auto waterH = waterRenderer->getWaterHeightAt(charPos.x, charPos.y)) {
+            if (auto waterH = liquidScene_.heightAt(charPos.x, charPos.y)) {
                 if (swimming) {
                     // A wake only exists where the swimmer meets the surface -
                     // diving deep leaves the surface undisturbed.
@@ -2250,7 +2265,8 @@ void Renderer::update(float deltaTime) {
 
     // Update character animations (runs in parallel with M2 animation above)
     if (characterRenderer && camera) {
-        characterRenderer->update(deltaTime, camera->getPosition());
+        const glm::mat4 characterView = camera->getViewMatrix();
+        characterRenderer->update(deltaTime, camera->getPosition(), &characterView);
     }
     endPhase("characters");
 
@@ -2423,6 +2439,42 @@ void Renderer::setGrassDistance(float yards) {
     // matches it any more.
     grassBuilder_ = pipeline::GrassPopulationBuilder{};
     grassWindowValid_ = false;
+}
+
+void Renderer::updateWind(float deltaTime) {
+    // The table, read once. Missing or malformed, it says so itself and a
+    // built-in light wind blows instead.
+    if (!windZonesLoaded_) {
+        windZonesLoaded_ = true;
+        windZones_ = pipeline::loadWindZonesFile("assets/wind_zones.json");
+    }
+
+    WindInputs inputs;
+    if (environment_.hasRealmTime()) {
+        inputs.clockSeconds = environment_.realmSeconds;
+        if (!windRealmSynced_ && windUnsyncedSaid_) {
+            LOG_INFO("Wind: the realm's clock has arrived; the wind is the realm's from now");
+        }
+        windRealmSynced_ = true;
+    } else {
+        // Not shared, but still a wind: the slots and phases come from this
+        // machine's clock instead. Before the world is on screen there is no
+        // realm to have a clock yet, which is not worth a line.
+        windRealmSynced_ = false;
+        inputs.clockSeconds = std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (worldInView_ && !windUnsyncedSaid_) {
+            windUnsyncedSaid_ = true;
+            LOG_WARNING("Wind: the world is drawn without the realm's clock; the wind follows "
+                        "this machine's clock, so other players see a different one");
+        }
+    }
+    inputs.weatherType = environment_.weatherType;
+    inputs.weatherIntensity = environment_.weatherIntensity;
+    inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
+    inputs.fixedWind = environment_.wind;
+    wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
+                 windZones_);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
@@ -2605,10 +2657,10 @@ void Renderer::updateGrassPopulation() {
             // Any water over this chunk. Sampled once here rather than per
             // blade: a pond's surface is flat, and three hundred thousand
             // height queries a rebuild is not.
-            if (waterRenderer) {
+            {
                 const float cx = chunk->position[0] - 4.0f * kUnitSize;
                 const float cy = chunk->position[1] - 4.0f * kUnitSize;
-                if (const auto level = waterRenderer->getWaterHeightAt(cx, cy)) {
+                if (const auto level = liquidScene_.heightAt(cx, cy)) {
                     context.waterHeight = *level;
                     context.hasWater = true;
                 }
@@ -3093,7 +3145,7 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
-            if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+            if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
@@ -3306,7 +3358,7 @@ void Renderer::renderWorld() {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
-        if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+        if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
             waterRenderer->setRenderExtent(activeRenderExtent_);
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
@@ -3358,7 +3410,7 @@ void Renderer::renderWorld() {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled()) {
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
@@ -3373,8 +3425,20 @@ void Renderer::renderWorld() {
         VkExtent2D waterExtent = activeRenderExtent_;
         if (msaaOn) {
             contRp.renderPass = waterRenderer->getWater1xRenderPass();
-            contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
-            waterExtent = vkCtx->getSwapchainExtent();
+            // Into the image the scene was resolved into: the swapchain's own,
+            // or the post-processing target's, which FXAA or the upscaler
+            // then read with the water in it.
+            const bool offscreenScene = postProcessPipeline_ &&
+                postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+            if (offscreenScene) {
+                // Ready, or waterDrawsInContinuePass would not have sent the
+                // water here.
+                contRp.framebuffer = offscreenWater1xFb_;
+                waterExtent = postProcessPipeline_->getSceneRenderExtent();
+            } else {
+                contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
+                waterExtent = vkCtx->getSwapchainExtent();
+            }
         } else {
             contRp.renderPass = vkCtx->getSceneContinueRenderPass();
             contRp.framebuffer = activeFramebuffer_;
@@ -3392,7 +3456,9 @@ void Renderer::renderWorld() {
         vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
         waterRenderer->setRenderExtent(waterExtent);
-        waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        if (!waterAblated()) {
+            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        }
 
         // What is blended goes over the water, not under it. Drawn in the scene
         // pass it was in the refraction copy and then covered by the sheet, so
@@ -3460,9 +3526,9 @@ void Renderer::syncSwimEffectsTargetPass() {
     // on screen behind it painted straight over the terrain it draws. The
     // spray at least only lost against water it was thrown off.
     //
-    // Only when water has actually left the scene pass. Where it has not - MSAA
-    // onto an off-screen scene, or no continuation pass at all - water is drawn
-    // before this and the minimap is already on top of it.
+    // Only when water has actually left the scene pass. Where it has not - no
+    // continuation pass, or MSAA without a resolved depth to test against -
+    // water is drawn before this and the minimap is already on top of it.
     if (minimap) {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
@@ -3470,13 +3536,13 @@ void Renderer::syncSwimEffectsTargetPass() {
 }
 
 std::optional<float> Renderer::cameraWaterDepth() const {
-    if (!waterRenderer || !camera) return std::nullopt;
+    if (!camera) return std::nullopt;
     const glm::vec3 camPos = camera->getPosition();
-    if (waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) return std::nullopt;
+    if (liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) return std::nullopt;
     // Far enough for deep ocean; see renderUnderwaterOverlay for what the
     // default 15 units did.
     constexpr float kUnderwaterReach = 400.0f;
-    const auto waterH = waterRenderer->getNearestWaterHeightAt(
+    const auto waterH = liquidScene_.nearestHeightAt(
         camPos.x, camPos.y, camPos.z, kUnderwaterReach);
     if (!waterH) return std::nullopt;
     // That reach also finds a lake over a dry cave; the ground tells the two
@@ -3497,7 +3563,7 @@ void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
     // client happened to be recording with decided which of the two the
     // player got, and on the fallback path crossing the surface showed a
     // bare line with no water either side of it.
-if (overlaySystem_ && waterRenderer && camera) {
+if (overlaySystem_ && camera) {
         glm::vec3 camPos = camera->getPosition();
         // The default vertical reach of this query is 15 units, meant to
         // stop water on a cliff above being mistaken for water the camera
@@ -3506,7 +3572,7 @@ if (overlaySystem_ && waterRenderer && camera) {
         // overlay stopped, and the scene snapped bright at a fixed depth.
         // Deep ocean is far deeper than that, so reach much further here.
         constexpr float kUnderwaterReach = 400.0f;
-        auto waterH = waterRenderer->getNearestWaterHeightAt(
+        auto waterH = liquidScene_.nearestHeightAt(
             camPos.x, camPos.y, camPos.z, kUnderwaterReach);
         // How far the eye is under the surface. The tint used to wait
         // until 1.5 units down and then apply to the whole screen at
@@ -3533,7 +3599,7 @@ if (overlaySystem_ && waterRenderer && camera) {
                 lastLog = globalTime;
                 LOG_INFO("underwater: camZ=", camPos.z, " waterZ=", *waterH,
                          " eyeDepth=", eyeDepth, " band=", kCrossingBand,
-                         " wmoWater=", waterRenderer->isWmoWaterAt(camPos.x, camPos.y) ? 1 : 0,
+                         " wmoWater=", liquidScene_.isWmoLiquidAt(camPos.x, camPos.y) ? 1 : 0,
                          " drawing=", (eyeDepth > 0.0f) ? 1 : 0);
             }
         }
@@ -3553,9 +3619,9 @@ if (overlaySystem_ && waterRenderer && camera) {
         // whose ray enters the world above the surface comes out untouched -
         // so the band above the surface costs nothing where there is no water.
         if (waterH && eyeDepth > -kCrossingBand
-                   && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
+                   && !liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) {
             bool canal = false;
-            if (auto lt = waterRenderer->getWaterTypeAt(camPos.x, camPos.y))
+            if (auto lt = liquidScene_.typeAt(camPos.x, camPos.y))
                 canal = (*lt == 5 || *lt == 13 || *lt == 17);
             // Until the eye passes the surface the view is darkened by
             // looking through the water plane itself, which is strong -
@@ -3640,13 +3706,82 @@ bool Renderer::fadedCharactersAfterWater() const {
 bool Renderer::waterDrawsInContinuePass() const {
     if (!waterRenderer || !vkCtx) return false;
     if (vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
-        // The 1x water pass targets the swapchain directly, so it cannot serve a
-        // frame whose scene went to an off-screen post-processing target.
+        if (!waterRenderer->hasWater1xPass()) return false;
+        // With the scene in an off-screen post-processing target (FXAA, FSR)
+        // the 1x pass draws into that target's resolved images instead of the
+        // swapchain's. It used to be unable to, and the water then stayed in
+        // the scene pass with its refraction copy taken from the finished
+        // frame - its own last output, so everything standing in or over the
+        // water left a trail of copies behind it as the camera moved.
         const bool offscreenScene =
             postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
-        return !offscreenScene && waterRenderer->hasWater1xPass();
+        return !offscreenScene || offscreenWater1xReady();
     }
     return vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+}
+
+bool Renderer::offscreenWater1xReady() const {
+    if (!offscreenWater1xFb_ || !waterRenderer || !postProcessPipeline_) return false;
+    return offscreenWater1xGeneration_ == postProcessPipeline_->sceneTargetGeneration() &&
+           offscreenWater1xPass_ == waterRenderer->getWater1xRenderPass() &&
+           offscreenWater1xColor_ == postProcessPipeline_->getSceneResolvedColorView() &&
+           offscreenWater1xDepth_ == postProcessPipeline_->getSceneResolvedDepthView();
+}
+
+void Renderer::updateOffscreenWater1xFramebuffer() {
+    if (!waterRenderer || !vkCtx || !postProcessPipeline_) return;
+    if (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT) return;
+    if (offscreenWater1xReady()) return;
+    destroyOffscreenWater1xFramebuffer();
+
+    const VkRenderPass pass = waterRenderer->getWater1xRenderPass();
+    const VkImageView color = postProcessPipeline_->getSceneResolvedColorView();
+    const VkImageView depth = postProcessPipeline_->getSceneResolvedDepthView();
+    const uint64_t generation = postProcessPipeline_->sceneTargetGeneration();
+    if (!pass || postProcessPipeline_->getSceneFramebuffer() == VK_NULL_HANDLE) return;
+    if (!color || !depth) {
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_WARNING("Water: the off-screen scene has no resolved depth - water stays in the "
+                        "multisampled scene pass and refracts the previous frame (trails behind "
+                        "anything moving over it)");
+        }
+        return;
+    }
+
+    const VkExtent2D extent = postProcessPipeline_->getSceneRenderExtent();
+    const VkImageView attachments[2] = {color, depth};
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = pass;
+    fbInfo.attachmentCount = 2;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = extent.width;
+    fbInfo.height = extent.height;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(vkCtx->getDevice(), &fbInfo, nullptr, &offscreenWater1xFb_) != VK_SUCCESS) {
+        offscreenWater1xFb_ = VK_NULL_HANDLE;
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_ERROR("Water: could not build its pass over the off-screen scene (", extent.width,
+                      "x", extent.height, ") - water stays in the multisampled scene pass and "
+                      "refracts the previous frame");
+        }
+        return;
+    }
+    offscreenWater1xGeneration_ = generation;
+    offscreenWater1xPass_ = pass;
+    offscreenWater1xColor_ = color;
+    offscreenWater1xDepth_ = depth;
+}
+
+void Renderer::destroyOffscreenWater1xFramebuffer() {
+    if (!offscreenWater1xFb_ || !vkCtx) return;
+    // A frame still in flight may have recorded it.
+    VkDevice device = vkCtx->getDevice();
+    VkFramebuffer fb = offscreenWater1xFb_;
+    vkCtx->deferAfterAllFrameFences([device, fb]() { vkDestroyFramebuffer(device, fb, nullptr); });
+    offscreenWater1xFb_ = VK_NULL_HANDLE;
 }
 
 // initPostProcess(), resizePostProcess(), shutdownPostProcess() removed -
@@ -3696,12 +3831,36 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         terrainRenderer->initializeShadow(shadowRenderPass);
     }
 
+    // What each liquid id in the map data is, read once: the scene says what
+    // kind a liquid is by it, and the water finds each liquid's ripple frames
+    // by it. Before any tile or building is loaded.
+    if (!liquidTypesLoaded_) {
+        liquidTypesLoaded_ = true;
+        const auto dbc = assetManager->loadDBC("LiquidType.dbc");
+        const pipeline::DBCLayout* layouts = pipeline::getActiveDBCLayout();
+        if (dbc && dbc->isLoaded()) {
+            liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
+                *dbc, layouts ? layouts->getLayout("LiquidType") : nullptr, "LiquidType.dbc");
+            LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
+        } else {
+            LOG_WARNING("Liquid types: LiquidType.dbc did not load - only the four basic "
+                        "liquids are known, drawn without their textures");
+            liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+        }
+        liquidScene_.setLiquidTypes(&liquidTypes_);
+    }
+
     // Create water renderer if not already created
     if (!waterRenderer) {
         waterRenderer = std::make_unique<WaterRenderer>();
         if (!waterRenderer->initialize(vkCtx, perFrameSetLayout)) {
-            LOG_ERROR("Failed to initialize water renderer");
+            LOG_ERROR("Failed to initialize water renderer - liquid is not drawn, "
+                      "though it can still be swum in");
             waterRenderer.reset();
+        } else {
+            waterRenderer->setLiquidAssets(assetManager, &liquidTypes_);
+            // Told of whatever the scene already holds before this returns.
+            waterSubscription_ = liquidScene_.subscribe(*waterRenderer);
         }
     }
 
@@ -3721,8 +3880,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             LOG_ERROR("M2Renderer initialization failed");
         m2Renderer->setRtScene(rtScene_.get());
         m2Renderer->setWaterHeightQuery([this](float x, float y, float z) -> std::optional<float> {
-            return waterRenderer ? waterRenderer->getNearestWaterHeightAt(x, y, z, 3.0f)
-                                 : std::nullopt;
+            return liquidScene_.nearestHeightAt(x, y, z, 3.0f);
         });
         if (swimEffects) {
             swimEffects->setM2Renderer(m2Renderer.get());
@@ -3796,10 +3954,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             terrainManager = nullptr;
             return false;
         }
-        // Set water renderer for terrain streaming
-        if (waterRenderer) {
-            terrainManager->setWaterRenderer(waterRenderer.get());
-        }
+        // The liquid streams in with the terrain and the buildings.
+        terrainManager->setLiquidScene(&liquidScene_);
         // Set M2 renderer for doodad loading during streaming
         if (m2Renderer) {
             terrainManager->setM2Renderer(m2Renderer.get());
@@ -4257,8 +4413,17 @@ void Renderer::setSecondaryViewportScissor(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
+bool Renderer::waterAblated() const {
+    return passAblation_ && passAblation_->skip(AblationPass::Water);
+}
+
+bool Renderer::waterReflectionAblated() const {
+    return waterAblated() || (passAblation_ && passAblation_->skip(AblationPass::WaterReflection));
+}
+
 void Renderer::renderReflectionPass() {
     if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
+    if (waterReflectionAblated()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 
     // Select the current frame's pre-bound reflection descriptor set
@@ -4272,7 +4437,7 @@ void Renderer::renderReflectionPass() {
 
     // Find dominant water height near camera
     const glm::vec3 camPos = camera->getPosition();
-    auto waterH = waterRenderer->getDominantWaterHeight(camPos);
+    auto waterH = liquidScene_.dominantWaterHeight(camPos);
     if (!waterH) return;
 
     float waterHeight = *waterH;
@@ -4470,7 +4635,8 @@ void Renderer::renderShadowMap(bool contact) {
         wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
     if (m2Renderer) {
-        m2Renderer->renderShadow(currentCmd, passMatrix, globalTime, passCenter, shadowCullRadius, !contact);
+        m2Renderer->renderShadow(currentCmd, passMatrix, wind_.gpu(), passCenter, shadowCullRadius,
+                                 !contact);
     }
     if (characterRenderer) {
         characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !contact);

@@ -221,7 +221,7 @@ Streaming: `TerrainManager::unloadTile(int x, int y)` (`include/rendering/terrai
 - `./test.sh` — unit tests + clang-tidy. `--asan`, `--lint`, `FIX=1 ./test.sh --lint`.
 - `WOWEE_WARNINGS_AS_ERRORS` is **ON** by default. A warning fails the build.
 - 160 tests via CTest, from 156 Catch2 v3 suites in `tests/`.
-- Debug HUD: `PerformanceHUD` (`include/rendering/performance_hud.hpp`), F1 to toggle, `setShowTerrain(bool)` etc. — add grass counters here, do not build a new overlay.
+- Debug HUD: `PerformanceHUD` (`include/rendering/performance_hud.hpp`), Ctrl+` to toggle, `setShowTerrain(bool)` etc. — add grass counters here, do not build a new overlay.
 
 ---
 

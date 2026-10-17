@@ -313,7 +313,7 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
         }
         if (model.vertices.empty() || !characterRenderer->loadModel(model, modelId)) return;
         if (!texturePath.empty()) {
-            if (auto* texture = characterRenderer->loadTexture(texturePath))
+            if (TextureRef texture = characterRenderer->loadTexture(texturePath))
                 characterRenderer->setModelTexture(modelId, 0, texture);
         }
     }

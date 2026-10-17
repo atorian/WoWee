@@ -2,6 +2,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
@@ -568,23 +569,13 @@ void M2Renderer::clear() {
     scene_->particleInstanceIndices_.clear();
     scene_->lightInstanceIndices_.clear();
 
-    // Clear texture cache so stale textures don't block loads for the next
-    // character/map.  Without this, the old session's textures fill the cache
-    // budget and failedTextureRetryAt_ blocks legitimate reloads, causing an
-    // infinite model-load loop on character switch.
-    for (auto& [path, entry] : textureCache) {
-        auto retired = std::shared_ptr<VkTexture>(std::move(entry.texture));
-        vkCtx_->deferAfterAllFrameFences([retired]() {});
-    }
-    textureCache.clear();
-    texturePropsByPtr_.clear();
-    textureCacheBytes_ = 0;
-    textureCacheCounter_ = 0;
-    failedTextureCache_.clear();
+    // The models' textures went back to the shared cache with the models,
+    // where nothing references them and eviction makes room from them first.
+    // The retry timers go too, so the next character or map reads what failed
+    // here afresh instead of waiting them out.
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
-    textureBudgetRejectWarnings_ = 0;
 }
 
 void M2Renderer::clearInstances() {
@@ -746,111 +737,17 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     reapedModelIds_.push_back(modelId);
 }
 
-size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
-    if (textureCache.empty() || bytesNeeded == 0) return 0;
-
-    // Free a slab rather than exactly what was asked for.
-    //
-    // Working out what is evictable means walking every loaded model, because
-    // the in-use set is what those models point at. Doing that per texture is
-    // a walk per load for as long as the cache sits at its ceiling - which is
-    // exactly when textures are streaming in fastest. One sweep that frees a
-    // slab serves the next few hundred loads instead.
-    constexpr size_t kEvictionSlab = 64ull * 1024 * 1024;
-    bytesNeeded = std::max(bytesNeeded, kEvictionSlab);
-
-    // What a loaded model still points at. A batch, a particle emitter and a
-    // ribbon each keep a raw pointer into this cache, and the per-frame
-    // particle and ribbon groups are rebuilt from those - so anything a model
-    // refers to is off limits however old it is.
-    std::unordered_set<const VkTexture*> inUse;
-    inUse.reserve(textureCache.size());
-    for (const auto& [modelId, model] : models) {
-        for (const auto& batch : model.batches) {
-            if (batch.texture) inUse.insert(batch.texture);
-            if (batch.secondTexture) inUse.insert(batch.secondTexture);
-        }
-        for (const VkTexture* tex : model.particleTextures) {
-            if (tex) inUse.insert(tex);
-        }
-        for (const VkTexture* tex : model.ribbonTextures) {
-            if (tex) inUse.insert(tex);
-        }
-    }
-    for (const auto& [handle, posedModel] : posedEmitterModels_) {
-        for (const VkTexture* tex : posedModel.gpu.particleTextures) {
-            if (tex) inUse.insert(tex);
-        }
-        for (const VkTexture* tex : posedModel.gpu.ribbonTextures) {
-            if (tex) inUse.insert(tex);
-        }
-    }
-
-    std::vector<std::pair<uint64_t, std::string>> candidates;
-    candidates.reserve(textureCache.size());
-    for (const auto& [key, entry] : textureCache) {
-        if (!entry.texture || inUse.count(entry.texture.get()) != 0) continue;
-        candidates.emplace_back(entry.lastUse, key);
-    }
-    if (candidates.empty()) return 0;
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    size_t freed = 0;
-    size_t dropped = 0;
-    for (const auto& [lastUse, key] : candidates) {
-        if (freed >= bytesNeeded) break;
-        auto it = textureCache.find(key);
-        if (it == textureCache.end()) continue;
-        freed += it->second.approxBytes;
-        textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
-        texturePropsByPtr_.erase(it->second.texture.get());
-        // A command buffer submitted a frame or two ago may still be reading
-        // it, so the texture outlives this call and dies once every frame slot
-        // has fenced. std::function needs a copyable capture, hence the shared
-        // pointer around what was a unique one.
-        auto doomed = std::shared_ptr<VkTexture>(it->second.texture.release());
-        vkCtx_->deferAfterAllFrameFences([doomed]() mutable { doomed.reset(); });
-        textureCache.erase(it);
-        ++dropped;
-    }
-
-    if (freed > 0) {
-        // Whatever was refused while the cache was full can be asked for again
-        // now. Only those: a texture that failed because its file is missing
-        // is not worth retrying every time something else is evicted.
-        for (const auto& key : budgetRejected_) {
-            failedTextureCache_.erase(key);
-            failedTextureRetryAt_.erase(key);
-        }
-        budgetRejected_.clear();
-        LOG_INFO("M2 texture cache: evicted ", dropped, " unreferenced texture(s), freed ",
-                 freed / (1024 * 1024), " MB (now ", textureCacheBytes_ / (1024 * 1024),
-                 " MB / ", textureCacheBudgetBytes_ / (1024 * 1024), " MB)");
-    }
-    return freed;
-}
-
-VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
+TextureRef M2Renderer::loadTexture(const std::string& path) {
     constexpr uint64_t kFailedTextureRetryLookups = 512;
-    auto normalizeKey = [](std::string key) {
-        std::replace(key.begin(), key.end(), '/', '\\');
-        std::transform(key.begin(), key.end(), key.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return key;
-    };
-    std::string key = normalizeKey(path);
+    const std::string key = normalizeTexturePath(path);
     const uint64_t lookupSerial = ++textureLookupSerial_;
 
-    // Check cache
-    auto it = textureCache.find(key);
-    if (it != textureCache.end()) {
-        it->second.lastUse = ++textureCacheCounter_;
-        return it->second.texture.get();
-    }
+    // The shared cache: a texture a building or the ground loaded is the same
+    // image here.
+    if (TextureRef cached = vkCtx_->textures().find({key, TextureForm::Stored, 0})) return cached;
     auto failIt = failedTextureRetryAt_.find(key);
     if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second) {
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
     // Check pre-decoded BLP cache first (populated by background worker threads)
@@ -869,86 +766,33 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     }
     if (!blp.isValid()) {
         // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
-        failedTextureCache_.insert(key);
         failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
         if (loggedTextureLoadFails_.insert(key).second) {
-            LOG_WARNING("M2: Failed to load texture: ", path);
+            LOG_WARNING("M2: Failed to load texture: ", path, " - its batches stay hidden until a retry finds it");
         }
-        return whiteTexture_.get();
+        return whiteTexture_;
     }
 
-    const size_t approxBytes = blp.approxUploadBytes();
-    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
-        // Make room before giving up. lastUse has been recorded on every hit
-        // and every insert since this cache was written and nothing ever read
-        // it: over budget, the newest texture the player looked at was refused
-        // and handed back the white one, permanently, while whatever filled
-        // the cache first kept its place. A tree whose leaf sheet was refused
-        // renders nothing in the main pass and casts the shadow of a solid
-        // quad, and the retry timer below is what made that come and go.
-        evictUnreferencedTextures(approxBytes);
+    // Into the shared cache, with whether the texture actually uses alpha and
+    // whether that alpha is a silhouette, read from the blocks once
+    // (cacheStoredTexture). No black key from the texture's name: every
+    // texture whose file name held "lamp", "fire", "glow", "candle" and the
+    // like had its dark pixels discarded - 975 batches, the client keying
+    // none of them.
+    //
+    // The image's own sampler is the cache's. A batch samples it through a
+    // sampler built from its own wrap flags and the sky's mip bias
+    // (batchImageInfo), since other models and renderers share the image.
+    TextureRef uploaded = cacheStoredTexture(*vkCtx_, key, blp);
+    if (!uploaded) {
+        // Refused or failed, as the cache has said; asked for again after the
+        // retry interval rather than decoded every frame meanwhile.
+        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
+        return whiteTexture_;
     }
-    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
-        static constexpr size_t kMaxFailedTextureCache = 200000;
-        budgetRejected_.insert(key);
-        if (failedTextureCache_.size() < kMaxFailedTextureCache) {
-            // Cache budget-rejected keys too; without this we repeatedly decode/load
-            // the same textures every frame once budget is saturated.
-            failedTextureCache_.insert(key);
-            failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        }
-        if (textureBudgetRejectWarnings_ < 3) {
-            LOG_WARNING("M2 texture cache full (", textureCacheBytes_ / (1024 * 1024),
-                        " MB / ", textureCacheBudgetBytes_ / (1024 * 1024),
-                        " MB), rejecting texture: ", path);
-        }
-        ++textureBudgetRejectWarnings_;
-        return whiteTexture_.get();
-    }
-
-    // Whether the texture actually uses alpha. Reads the DXT blocks when the
-    // loader kept them, and every fourth decoded byte when it did not; the two
-    // agree, which tests/test_blp_alpha_scan.cpp checks against the assets.
-    // This was the only thing forcing M2 textures to be decoded.
-    const bool hasAlpha = blp.hasTransparency();
-
-    // And whether that alpha is a silhouette or an atlas leftover, which is
-    // what an opaque batch has to know before anything keys on it.
-    const bool alphaIsSilhouette = blp.alphaIsSilhouette();
-
-    // Create Vulkan texture
-    auto tex = std::make_unique<VkTexture>();
-    tex->uploadBLP(*vkCtx_, blp);
-
-    // The texture's own sampler is only what makes it valid on its own. A
-    // batch samples it through a sampler built from that batch's wrap flags
-    // (batchImageInfo), since another model can use the same image with
-    // different ones.
-    VkSamplerAddressMode wrapS = (texFlags & 0x1) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    VkSamplerAddressMode wrapT = (texFlags & 0x2) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT,
-                       16.0f, skyMode_ ? m2SkyMipBias() : 0.0f);
-
-    VkTexture* texPtr = tex.get();
-
-    TextureCacheEntry e;
-    e.texture = std::move(tex);
-    e.approxBytes = approxBytes;
-    e.lastUse = ++textureCacheCounter_;
-    textureCacheBytes_ += e.approxBytes;
-    textureCache[key] = std::move(e);
-    failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
-    // No black key from the texture's name. Every texture whose file name
-    // held "lamp", "fire", "glow", "candle" and the like had its dark pixels
-    // discarded on opaque and alpha-blended layers - 975 batches, the
-    // client keying none of them: Dalaran's lamp glass lost its leading and
-    // showed the dark inside of the lamp through the holes.
-    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha,
-                                  .alphaIsSilhouette = alphaIsSilhouette};
     LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
-
-    return texPtr;
+    return uploaded;
 }
 
 uint32_t M2Renderer::getTotalTriangleCount() const {
