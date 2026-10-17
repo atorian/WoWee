@@ -48,6 +48,11 @@ struct SkyParams {
     // stands between it and the eye (Renderer::updateGlares). The lens
     // flare is drawn by it. Zero for a pass that is not the camera's own.
     float sunGlareVisibility = 0.0f;
+    // Whether the sun's and moon's discs are drawn. Not in the sky captured for
+    // the distant haze: a far building hazes toward the captured sky at its
+    // own pixel, and with the discs in the capture a moon rising behind a
+    // misty inn showed through the inn's walls.
+    bool drawBodies = true;
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours

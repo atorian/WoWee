@@ -3008,6 +3008,7 @@ void Renderer::renderSkyBackground(float timeOfDay,
         lightingManager ? &lightingManager->getLightingParams() : nullptr,
         useOriginalSkybox);
     params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
+    params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
     skySystem->render(currentCmd, skyPerFrameDescSets[slot], *camera, params);
     if (drawSkyModels) {
         skyboxModelRenderer_->prepareRender(slot, *camera);

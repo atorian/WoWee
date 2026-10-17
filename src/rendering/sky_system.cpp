@@ -145,7 +145,7 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // --- The sun's disc, then the moon's, each on its own path (0x7f0b43) ---
     // Both in the sun's colour and put out by weather alike; each is gone when
     // its path takes it under the horizon.
-    if (bodies_) {
+    if (bodies_ && params.drawBodies) {
         const float weather = sky_celestial::weatherFade(params.weatherIntensity);
         bodies_->renderDisc(cmd, perFrameSet, SkyBodies::Body::Sun, params.sunDisc,
                             params.sunColor, weather);
