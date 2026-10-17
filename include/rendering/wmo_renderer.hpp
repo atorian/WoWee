@@ -177,7 +177,8 @@ public:
     /// it is away, so without this it would sit invisible-but-solid over the
     /// tower, and a player could stand on a zeppelin that is on another
     /// continent. Hidden instances are skipped by drawing and by every spatial
-    /// query, which is where collision comes from.
+    /// query, which is where collision comes from. Its child doodads
+    /// (addDoodadToInstance) are hidden and shown with it, in the M2 renderer.
     void setInstanceHidden(uint32_t instanceId, bool hidden);
 
     /**

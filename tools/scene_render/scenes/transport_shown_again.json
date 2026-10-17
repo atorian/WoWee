@@ -1,0 +1,14 @@
+// The Stormwind ship back on this map halfway through: hidden for the first
+// fifteen frames, then shown, sails and all. At sea where the map has no
+// tiles, as transport_hidden.json is, so only the ship is counted.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1519,
+  "hour": 12.0,
+  "server": [-8650.0, 9000.0, 0.0],
+  "models": [
+    { "path": "World\\wmo\\transports\\transport_ship\\transportship.wmo",
+      "doodads": true, "hidden": true, "shownAtFrame": 15 }
+  ],
+  "size": [640, 360],
+  "frames": 30
+}

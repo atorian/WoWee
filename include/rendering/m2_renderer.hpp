@@ -341,6 +341,8 @@ struct M2Instance {
     /// Ended by finishInstance: its mesh is not drawn and its emitters stop,
     /// while the particles it made fly out their lives.
     bool finishing = false;
+    /// Out of the world for now; see M2Renderer::setInstanceHidden.
+    bool hidden = false;
 
     /// Lit while the player is pressing on this instance: 0 none, 1 full.
     ///
@@ -693,6 +695,16 @@ public:
     void setInstanceHighlight(uint32_t instanceId, float amount);
     /// See M2Instance::fade.
     void setInstanceFade(uint32_t instanceId, float alpha);
+    /// Take an instance out of the world without removing it, or put it back.
+    ///
+    /// A hidden instance is not drawn in any pass, is not handed to the GPU
+    /// cull, lights nothing, emits no particles or ribbons - what it had out
+    /// goes with it - and is no floor or wall. Its clock stops and its
+    /// transform still follows its owner, so shown again it carries on from
+    /// where it was. A ship's sails are hidden with the hull whose route is on
+    /// the other map (WMORenderer::setInstanceHidden).
+    void setInstanceHidden(uint32_t instanceId, bool hidden);
+    void setInstancesHidden(const std::vector<uint32_t>& instanceIds, bool hidden);
     /// Take the light off whatever has it, whichever instance that was.
     void clearInstanceHighlights();
     /// Set the animation sequence by animation ID (e.g. anim::OPEN, anim::CLOSE).

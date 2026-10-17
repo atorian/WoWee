@@ -2521,7 +2521,7 @@ void M2Renderer::syncRtScene() {
     for (auto& inst : scene_->instances) {
         auto it = models.find(inst.modelId);
         const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
-        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f;
+        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && !inst.hidden;
         // Still ours, not claimed by another instance this pass (a copied
         // M2Instance carries its original's id), and placing the same mesh.
         const bool valid = inst.rtInstance != RtScene::kInvalid &&

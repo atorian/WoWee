@@ -2098,6 +2098,29 @@ target_link_libraries(scene_render PRIVATE wowee_render)
 target_precompile_headers(scene_render REUSE_FROM wowee_render)
 wowee_apply_client_flags(scene_render)
 
+# Scenes drawn as tests: what the world's M2 renderer drew in the kept frame,
+# as scene_render reports it. They need a Vulkan device and the game data in
+# bin/Data, and are skipped without either.
+if(WOWEE_BUILD_TESTS)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/scratch)
+    function(wowee_add_scene_test name scene pass_regex)
+        add_test(NAME ${name}
+                 COMMAND scene_render ${CMAKE_SOURCE_DIR}/tools/scene_render/scenes/${scene}
+                         ${CMAKE_BINARY_DIR}/scratch/${name}.png
+                 WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+        set_tests_properties(${name} PROPERTIES
+            PASS_REGULAR_EXPRESSION "${pass_regex}"
+            SKIP_REGULAR_EXPRESSION "no Vulkan device;no assets under")
+    endfunction()
+    # A ship whose route is on the other map: its hull is hidden, and its sails
+    # and the rest of its doodads go with it rather than hanging over the sea.
+    wowee_add_scene_test(scene_hidden_transport transport_hidden.json
+                         "world M2 draw calls: 0 in")
+    # Brought back, it is drawn whole again.
+    wowee_add_scene_test(scene_transport_shown_again transport_shown_again.json
+                         "world M2 draw calls: [1-9][0-9]* in")
+endif()
+
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer
 # on this machine's Vulkan device, without a realm to stand in. Built from the

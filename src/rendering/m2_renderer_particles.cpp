@@ -488,7 +488,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     auto& draws = ribbonDraws_;
 
     const auto addInstanceRibbons = [&](const M2Instance& inst) {
-        if (!inst.cachedModel) return;
+        if (!inst.cachedModel || inst.hidden) return;
         const auto& gpu = *inst.cachedModel;
         if (gpu.ribbonEmitters.empty()) return;
 
