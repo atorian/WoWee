@@ -100,7 +100,10 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.skyBand1Color = sampleColorBand(profile.colorBands[P::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile.colorBands[P::SKY_BAND2_COLOR], timeHalfMinutes);
     params.sunColor = sampleColorBand(profile.colorBands[P::SUN_COLOR], timeHalfMinutes);
-    params.sunHaloColor = sampleColorBand(profile.colorBands[P::SUN_HALO_COLOR], timeHalfMinutes);
+    params.cloudSunlitColor =
+        sampleColorBand(profile.colorBands[P::CLOUD_SUNLIT_COLOR], timeHalfMinutes);
+    params.cloudFillColor = sampleColorBand(profile.colorBands[P::CLOUD_FILL_COLOR], timeHalfMinutes);
+    params.cloudBaseColor = sampleColorBand(profile.colorBands[P::CLOUD_BASE_COLOR], timeHalfMinutes);
 
     // The fog distance is stored in the same thirty-sixths of a yard as the
     // light positions, and was being used raw: Tirisfal's 12000 became 12000
@@ -142,7 +145,9 @@ inline LightingParams blendTowardStorm(const LightingParams& clear, const Lighti
     out.skyBand1Color = glm::mix(clear.skyBand1Color, storm.skyBand1Color, w);
     out.skyBand2Color = glm::mix(clear.skyBand2Color, storm.skyBand2Color, w);
     out.sunColor = glm::mix(clear.sunColor, storm.sunColor, w);
-    out.sunHaloColor = glm::mix(clear.sunHaloColor, storm.sunHaloColor, w);
+    out.cloudSunlitColor = glm::mix(clear.cloudSunlitColor, storm.cloudSunlitColor, w);
+    out.cloudFillColor = glm::mix(clear.cloudFillColor, storm.cloudFillColor, w);
+    out.cloudBaseColor = glm::mix(clear.cloudBaseColor, storm.cloudBaseColor, w);
     out.fogStart = glm::mix(clear.fogStart, storm.fogStart, w);
     out.fogEnd = glm::mix(clear.fogEnd, storm.fogEnd, w);
     out.cloudDensity = glm::mix(clear.cloudDensity, storm.cloudDensity, w);
@@ -177,7 +182,9 @@ inline std::optional<LightingParams> blendLightingParams(
         sum.skyBand1Color += p.skyBand1Color * w;
         sum.skyBand2Color += p.skyBand2Color * w;
         sum.sunColor += p.sunColor * w;
-        sum.sunHaloColor += p.sunHaloColor * w;
+        sum.cloudSunlitColor += p.cloudSunlitColor * w;
+        sum.cloudFillColor += p.cloudFillColor * w;
+        sum.cloudBaseColor += p.cloudBaseColor * w;
         sum.fogStart += p.fogStart * w;
         sum.fogEnd += p.fogEnd * w;
         sum.fogDensity += p.fogDensity * w;
@@ -197,7 +204,9 @@ inline std::optional<LightingParams> blendLightingParams(
     sum.skyBand1Color *= inv;
     sum.skyBand2Color *= inv;
     sum.sunColor *= inv;
-    sum.sunHaloColor *= inv;
+    sum.cloudSunlitColor *= inv;
+    sum.cloudFillColor *= inv;
+    sum.cloudBaseColor *= inv;
     sum.fogStart *= inv;
     sum.fogEnd *= inv;
     sum.fogDensity *= inv;

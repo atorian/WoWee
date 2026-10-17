@@ -70,11 +70,11 @@ bool Clouds::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     const auto& fragStage = shaders.fragStage;
 
     // ------------------------------------------------------------------ push constants
-    // Fragment-only push: 3 x vec4 = 48 bytes
+    // Fragment-only push: 5 x vec4 = 80 bytes
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset     = 0;
-    pushRange.size       = sizeof(CloudPush); // 48 bytes
+    pushRange.size       = sizeof(CloudPush); // 80 bytes
 
     // ------------------------------------------------------------------ pipeline layout
     pipelineLayout_ = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -129,27 +129,22 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
         return;
     }
 
-    // Derive cloud base color from DBC horizon band, slightly brightened
-    glm::vec3 cloudBaseColor = params.skyBand1Color * 1.1f;
-    cloudBaseColor = glm::clamp(cloudBaseColor, glm::vec3(0.0f), glm::vec3(1.0f));
-
-    // Sun direction (opposite of light direction). Guard the hemisphere like
-    // Celestial/SkySystem do - directionalDir's sign convention is not stable,
-    // and a flipped vector puts the cloud scatter glow opposite the real sun.
-    glm::vec3 sunDir = -glm::normalize(params.directionalDir);
-    if (sunDir.z < 0.0f) sunDir = -sunDir;
-    float sunAboveHorizon = glm::clamp(sunDir.z, 0.0f, 1.0f);
-
-    // Sun intensity based on elevation
-    float sunIntensity = sunAboveHorizon;
-
-    // Ambient light - brighter during day, dimmer at night
-    float ambient = glm::mix(0.3f, 0.7f, sunAboveHorizon);
+    // Lit as WoW.exe lights its cloud texture (0x7efae0): the zone's three
+    // cloud colours, and the light from the sun by day and the moon by night -
+    // the sun's cloud position from 04:50 to 22:10, the moon's otherwise. The
+    // colour was the sky's horizon band brightened, lit from the directional
+    // light with a fixed warm scatter and silver lining on top.
+    const float day = params.timeOfDay / 24.0f;
+    const bool sunLit = day >= 0.201389f && day < 0.923611f;
+    const glm::vec3 lightDir = sunLit ? params.sunDisc.direction : params.moonDisc.direction;
 
     CloudPush push{};
-    push.cloudColor    = glm::vec4(cloudBaseColor, 1.0f);
-    push.sunDirDensity = glm::vec4(sunDir, density_);
-    push.windAndLight  = glm::vec4(windOffset_, sunIntensity, ambient, 0.0f);
+    push.sunlitColor     = glm::vec4(params.cloudSunlitColor, 1.0f);
+    push.fillColor       = glm::vec4(params.cloudFillColor, 1.0f);
+    push.baseColor       = glm::vec4(params.cloudBaseColor, 1.0f);
+    push.lightDirDensity = glm::vec4(lightDir, density_);
+    push.windAndWeather  = glm::vec4(windOffset_, sky_celestial::stormWeight(params.weatherIntensity),
+                                     0.0f, 0.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
 

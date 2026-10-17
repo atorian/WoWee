@@ -63,17 +63,17 @@ std::vector<uint8_t> lightParamsDbc() {
 uint32_t stormNoonColour(uint32_t channel) { return 0x806090 + channel; }
 
 /// Tirisfal's noon, as the client's LightIntBand has it: the light the sun
-/// casts, a cool pinkish white; the sun's disc, a pale green; and the glow of
-/// the sky around it, a darker green.
+/// casts, a cool pinkish white; the sun's disc, a pale green; and the clouds'
+/// sunlit colour, a darker green.
 constexpr uint32_t NOON_SUN_LIGHT = 0xd0afca;  // channel 0
 constexpr uint32_t NOON_SUN_DISC = 0xc3eac3;   // channel 9
-constexpr uint32_t NOON_SUN_HALO = 0x386b54;   // channel 10
+constexpr uint32_t NOON_CLOUD_SUNLIT = 0x386b54;  // channel 10
 
 uint32_t noonColour(uint32_t channel) {
     switch (channel) {
         case 0: return NOON_SUN_LIGHT;
         case 9: return NOON_SUN_DISC;
-        case 10: return NOON_SUN_HALO;
+        case 10: return NOON_CLOUD_SUNLIT;
         default: return 0x30a060 + channel;
     }
 }
@@ -138,7 +138,7 @@ void requireSameLight(const LightingParams& a, const LightingParams& b) {
     CHECK(same(a.skyBand1Color, b.skyBand1Color));
     CHECK(same(a.skyBand2Color, b.skyBand2Color));
     CHECK(same(a.sunColor, b.sunColor));
-    CHECK(same(a.sunHaloColor, b.sunHaloColor));
+    CHECK(same(a.cloudSunlitColor, b.cloudSunlitColor));
     CHECK(a.fogStart == Catch::Approx(b.fogStart).margin(1e-2));
     CHECK(a.fogEnd == Catch::Approx(b.fogEnd).margin(1e-2));
 }
@@ -174,8 +174,8 @@ TEST_CASE("The sky is handed the zone's sun colour, not the light it casts", "[l
     };
     CHECK(matches(sky.sunColor, rgb(NOON_SUN_DISC)));
     CHECK_FALSE(matches(sky.sunColor, lit.diffuseColor));
-    // Channel 10, the zone's tint round the sun, is the air's forward glow.
-    CHECK(matches(lit.sunHaloColor, rgb(NOON_SUN_HALO)));
+    // Channel 10 is the clouds' sunlit colour - not the sun's.
+    CHECK(matches(lit.cloudSunlitColor, rgb(NOON_CLOUD_SUNLIT)));
 }
 
 TEST_CASE("Weather blends the light toward the storm row, all the way at a quarter", "[light]") {

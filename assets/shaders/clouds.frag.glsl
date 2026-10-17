@@ -20,9 +20,11 @@ layout(set = 0, binding = 0) uniform PerFrame {
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
-    vec4 cloudColor;      // xyz = DBC-derived base cloud color, w = unused
-    vec4 sunDirDensity;   // xyz = sun direction, w = density
-    vec4 windAndLight;    // x = windOffset, y = sunIntensity, z = ambient, w = unused
+    vec4 sunlitColor;      // xyz = LightIntBand 10, the side facing the light
+    vec4 fillColor;        // xyz = LightIntBand 11, more of it where the cloud is thin
+    vec4 baseColor;        // xyz = LightIntBand 12, everywhere
+    vec4 lightDirDensity;  // xyz = toward the sun by day, the moon by night; w = density
+    vec4 windAndWeather;   // x = windOffset, y = the storm weight
 } push;
 
 layout(location = 0) in vec3 vWorldDir;
@@ -47,44 +49,32 @@ void main() {
     float altitude = dir.z;
     if (altitude < 0.0) discard;
 
-    vec3 sunDir = normalize(push.sunDirDensity.xyz);
-    float density = push.sunDirDensity.w;
-    float windOffset = push.windAndLight.x;
-    float sunIntensity = push.windAndLight.y;
-    float ambient = push.windAndLight.z;
+    vec3 lightDir = normalize(push.lightDirDensity.xyz);
+    float density = push.lightDirDensity.w;
+    float windOffset = push.windAndWeather.x;
+    float storm = push.windAndWeather.y;
 
     CloudShape s = cloudShapeAt(dir, density, windOffset);
     float cloud = s.cloud;
-    float cumulus = s.cumulus;
     float shape = s.shape;
     vec2 p = s.p;
     vec2 q = s.q;
     if (cloud < 0.01) discard;
 
-    // --- Lighting ---
-    float sunUp = clamp(sunDir.z, 0.0, 1.0);      // day factor
-    float sunView = max(dot(dir, sunDir), 0.0);   // view alignment with the sun
-
-    // Self-shadowing: re-sample the shape a step toward the sun; if the cloud
-    // is denser upstream, this point sits in its own shadow.
-    float towardSun = cloudFbm(p + q * 1.4 + sunDir.xy * 0.35, 5);
-    float shadow = clamp(1.0 - (towardSun - shape) * 2.2, 0.35, 1.0);
-
-    // Thick cores read darker - sunlight doesn't penetrate deep cloud
-    float coreDarken = mix(1.0, 0.55, cumulus * cumulus);
-
-    vec3 baseColor = push.cloudColor.rgb;
-    vec3 shadowColor = baseColor * ambient * 0.75;
-    vec3 litColor = baseColor * (ambient + sunIntensity * 0.85 * sunUp);
-    vec3 cloudRgb = mix(shadowColor, litColor, shadow) * coreDarken;
-
-    // Forward scattering: thin cloud near the sun glows warm
-    float scatter = pow(sunView, 6.0) * sunIntensity * sunUp;
-    cloudRgb += vec3(1.0, 0.92, 0.82) * (1.0 - cumulus) * scatter * 0.9;
-
-    // Silver lining on sunlit cloud edges
-    float edge = smoothstep(0.0, 0.35, cloud) * (1.0 - smoothstep(0.35, 0.85, cloud));
-    cloudRgb += vec3(1.0, 0.95, 0.88) * edge * scatter * 0.6;
+    // --- Lighting, as WoW.exe lights its cloud texture (0x7efae0) ---
+    // The base colour everywhere, the fill by how thin the cloud is - a
+    // quarter of it at the densest, three quarters at the thinnest - and the
+    // sunlit colour where the cloud faces the light, less of it in a storm.
+    //
+    // Where the client takes N.L off its texture's slope toward the light,
+    // this layer has no texture: the slope is the shape re-sampled a step
+    // toward the light, lower upstream lit and higher upstream in shadow.
+    float towardLight = cloudFbm(p + q * 1.4 + lightDir.xy * 0.35, 5);
+    float facing = clamp(1.0 - (towardLight - shape) * 2.2, 0.0, 1.0);
+    float thinness = (64.0 + 127.5 * (1.0 - cloud)) / 255.0;
+    vec3 cloudRgb = push.baseColor.rgb + thinness * push.fillColor.rgb +
+                    push.sunlitColor.rgb * facing * (1.0 - 0.75 * storm);
+    cloudRgb = min(cloudRgb, vec3(1.0));
 
     // --- Edge softness for alpha ---
     float alpha = cloud * smoothstep(0.0, 0.25, cloud);

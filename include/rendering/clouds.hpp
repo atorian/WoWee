@@ -63,11 +63,13 @@ public:
 private:
     // Push constant block - must match clouds.frag.glsl
     struct CloudPush {
-        glm::vec4 cloudColor;     // xyz = DBC-derived base cloud color, w = unused
-        glm::vec4 sunDirDensity;  // xyz = sun direction, w = density
-        glm::vec4 windAndLight;   // x = windOffset, y = sunIntensity, z = ambient, w = unused
+        glm::vec4 sunlitColor;    // xyz = LightIntBand 10, the side facing the light
+        glm::vec4 fillColor;      // xyz = LightIntBand 11, more of it where the cloud is thin
+        glm::vec4 baseColor;      // xyz = LightIntBand 12, everywhere
+        glm::vec4 lightDirDensity;  // xyz = toward the sun by day, the moon by night; w = density
+        glm::vec4 windAndWeather;   // x = windOffset, y = the storm weight, zw unused
     };
-    static_assert(sizeof(CloudPush) == 48, "CloudPush size mismatch");
+    static_assert(sizeof(CloudPush) == 80, "CloudPush size mismatch");
 
     void generateMesh();
     void createBuffers();

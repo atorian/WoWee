@@ -4948,7 +4948,8 @@ void Renderer::renderVolumetricFog() {
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
     if (lightingManager) {
-        in.sunHaloColor = lightingManager->getLightingParams().sunHaloColor;
+        // The air's forward glow in the light tables' sunlit-cloud colour.
+        in.sunHaloColor = lightingManager->getLightingParams().cloudSunlitColor;
         in.sunGlareDirection =
             sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
         in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(environment_.weatherIntensity);

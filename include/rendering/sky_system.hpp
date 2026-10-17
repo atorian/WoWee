@@ -31,6 +31,10 @@ struct SkyParams {
     /// Where each disc stands at this hour - its own path, not the light's.
     sky_celestial::SkyDisc sunDisc;
     sky_celestial::SkyDisc moonDisc;
+    /// The clouds' sunlit, fill and base colours (LightParams' cloud* fields).
+    glm::vec3 cloudSunlitColor{1.0f, 0.78f, 0.54f};
+    glm::vec3 cloudFillColor{0.55f, 0.55f, 0.6f};
+    glm::vec3 cloudBaseColor{0.35f, 0.35f, 0.4f};
 
     // Sky colors (for skybox tinting/blending)
     glm::vec3 skyTopColor{0.5f, 0.7f, 1.0f};
