@@ -196,6 +196,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     eraseGroup(13);
     eraseGroup(15);
     eraseGroup(12);
+    eraseGroup(18);
 
     // CharGeosets mapping (verified via vertex bounding boxes):
     //   Group 4 (401+) = GLOVES (forearm area, Z~1.1-1.4)
@@ -268,9 +269,22 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
     geosets.insert((hasEquippedType({16}) && cloakShown) ? core::cloakGeoset(capeGG)
                                                          : core::kGeosetNoCape);
 
-    // Tabard: inventoryType 19 → group 12
-    if (hasEquippedType({19})) {
-        geosets.insert(core::kGeosetDefaultTabard);
+    // Tabard: inventoryType 19 → group 12, the flap. This asked for 1201
+    // outright, which is no flap, so your own tabard was never drawn.
+    if (const uint16_t tabard = pickGeoset(core::tabardGeoset(
+            getGeosetGroup(findEquippedDisplayId({19}), geosetGroup1Field)));
+        tabard != 0) {
+        geosets.insert(tabard);
+    }
+
+    // Belt: inventoryType 6 → group 18, the buckle - or the base variant, which
+    // on the Legion models is the waist itself. Other players and the portrait
+    // have always had this; your own character's set had no group 18 at all,
+    // so wore no buckle.
+    if (const uint16_t belt = pickGeoset(core::beltGeoset(
+            getGeosetGroup(findEquippedDisplayId({6}), geosetGroup1Field)));
+        belt != 0) {
+        geosets.insert(belt);
     }
 
     // Hide hair under a helm: drop the style scalp and put the bald cap on.
@@ -326,16 +340,22 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         }
     }
 
-    // Groups 17 and 18 are the Death Knight / Night Elf eye glow. Nothing here
-    // should ever select one, and the renderer only auto-skips them when no
-    // geoset filter is applied - with a filter, whatever is in this set is what
-    // gets drawn. Glowing eyes on a character that should not have them come
-    // from exactly this, so say so rather than leaving it to be spotted.
-    for (uint16_t g : geosets) {
-        const uint16_t group = g / 100;
-        if (group == 17 || group == 18) {
-            LOG_WARNING("Player geosets include eye-glow geoset ", g,
-                        " (group ", group, ") - this will draw glowing eyes");
+    // Group 17 is the eye glow, which only a night elf's bare set asks for.
+    // The renderer only auto-skips it when no geoset filter is applied - with a
+    // filter, whatever is in this set is what gets drawn. Glowing eyes on a
+    // character that should not have them come from exactly this, so say so
+    // rather than leaving it to be spotted. (Group 18 is the belt, and was
+    // listed here too until the belt was drawn on your own character.)
+    uint8_t raceId = 0;
+    if (auto* gh = app.getGameHandler()) {
+        if (const auto* ch = gh->getActiveCharacter()) raceId = static_cast<uint8_t>(ch->race);
+    }
+    if (!core::raceHasGlowingEyes(raceId)) {
+        for (uint16_t g : geosets) {
+            if (core::geosetGroup(g) == 17) {
+                LOG_WARNING("Player geosets include eye-glow geoset ", g,
+                            " for race ", static_cast<int>(raceId), " - this will draw glowing eyes");
+            }
         }
     }
 

@@ -245,6 +245,42 @@ TEST_CASE("the belt's base variant is the waist, not nothing", "[geoset]") {
     CHECK(equippedGeoset(wowee::core::equipment::kBeltBase, 1) == 1802);
 }
 
+TEST_CASE("a worn tabard shows its flap and no tabard shows none", "[geoset]") {
+    // Group 12 as every stock 3.3.5 character model carries it - orc, human,
+    // dwarf, blood elf, draenei, tauren and the rest: the flap, 1202, alone.
+    const std::unordered_set<uint16_t> model{0, 401, 501, 702, 801, 1202, 1301, 1501};
+
+    SECTION("a tabard draws the flap") {
+        // GeosetGroup1 of a tabard's ItemDisplayInfo row. 86 of the 87 tabards
+        // in the 3.3.5 tables hold 1 there (Tabard_A_01Crusader among them).
+        // The players asked for 1201 and the NPCs for 1200+1, which both mean
+        // none, and nobody's flap was drawn.
+        CHECK(resolveGeoset(tabardGeoset(1), model) == 1202);
+    }
+
+    SECTION("no tabard draws nothing in group 12") {
+        CHECK(resolveGeoset(tabardGeoset(0), model) == 0);
+    }
+
+    SECTION("a model that has no flap is not given a substitute for none") {
+        // The skeleton female and the Northrend skeleton carry no group 12.
+        const std::unordered_set<uint16_t> noFlap{0, 401, 501, 1301};
+        CHECK(resolveGeoset(tabardGeoset(1), noFlap) == 0);
+    }
+}
+
+TEST_CASE("a worn belt shows its buckle and no belt shows the waist", "[geoset]") {
+    // The stock models carry the buckle, 1802, and no waist; the Legion human
+    // male carries the waist, 1801, and buckles after it.
+    const std::unordered_set<uint16_t> stock{0, 1802};
+    const std::unordered_set<uint16_t> legion{0, 1801, 1802, 1803};
+
+    CHECK(resolveGeoset(beltGeoset(1), stock) == 1802);
+    CHECK(resolveGeoset(beltGeoset(0), stock) == 0);
+    CHECK(resolveGeoset(beltGeoset(0), legion) == 1801);
+    CHECK(resolveGeoset(beltGeoset(2), legion) == 1803);
+}
+
 TEST_CASE("each of an item's columns drives its own group below the belt", "[geoset]") {
     // The geosets the stock 3.3.5 human female carries in these groups.
     const std::unordered_set<uint16_t> model{902, 903, 1002, 1102, 1104, 1301, 1302};
