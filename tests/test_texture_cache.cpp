@@ -207,6 +207,33 @@ TEST_CASE("a texture only its owner can find goes with the owner's last referenc
     CHECK(images.destroyed == std::set<std::string>{"alpha"});
 }
 
+TEST_CASE("a texture's normal map stays as long as the texture and goes with it", "[texture_cache]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(8 * kMiB));
+
+    TextureRef skin = cache.insert(stored("skin.blp"), images.make("skin"), 2 * kMiB);
+    cache.setNormalMap(skin, cache.insert({"skin.blp", TextureForm::NormalHeight, 5}, images.make("skin normals"),
+                                          2 * kMiB, {.hasAlpha = false, .alphaIsSilhouette = false,
+                                                     .heightVariance = 0.25f}));
+    REQUIRE(skin.normalMap() != nullptr);
+    CHECK(skin.normalMapInfo().heightVariance == 0.25f);
+
+    // Nothing references the normal map but the skin: room is not made from it.
+    TextureRef other = cache.insert(stored("other"), images.make("other"), 4 * kMiB);
+    REQUIRE(other);
+    CHECK(cache.find({"skin.blp", TextureForm::NormalHeight, 5}));
+
+    // The skin let go and evicted: its normal map is let go with it, and goes
+    // when room is wanted.
+    skin.reset();
+    other.reset();
+    TextureRef big = cache.insert(stored("big"), images.make("big"), 8 * kMiB);
+    REQUIRE(big);
+    device.fencesPassed();
+    CHECK(images.destroyed == std::set<std::string>{"skin", "skin normals", "other"});
+}
+
 TEST_CASE("a second upload of a resident key is retired and the first shared", "[texture_cache]") {
     FakeDevice device;
     Images images;

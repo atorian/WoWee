@@ -238,7 +238,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
         charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
 
         // --- Apply skin to type-1 slots ---
-        rendering::VkTexture* skinTex = nullptr;
+        rendering::TextureRef skinTex;
 
         if (info.hasBakedSkin) {
             // Baked skin: load from pre-decoded cache
@@ -247,7 +247,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
 
         if (info.hasComposite) {
             // Composite with face/underwear/equipment regions on top of base skin
-            rendering::VkTexture* compositeTex = nullptr;
+            rendering::TextureRef compositeTex;
             if (!info.regionLayers.empty()) {
                 compositeTex = charRenderer->compositeWithRegions(info.basePath,
                     info.overlayPaths, info.regionLayers);
@@ -257,11 +257,12 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
                 for (const auto& op : info.overlayPaths) skinLayers.push_back(op);
                 compositeTex = charRenderer->compositeTextures(skinLayers);
             }
-            if (compositeTex) skinTex = compositeTex;
+            if (compositeTex) skinTex = std::move(compositeTex);
         } else if (info.hasSimpleSkin) {
             // Simple skin: just base texture, no compositing
-            auto* baseTex = charRenderer->loadTexture(info.basePath);
-            if (baseTex) skinTex = baseTex;
+            if (rendering::TextureRef baseTex = charRenderer->loadTexture(info.basePath)) {
+                skinTex = std::move(baseTex);
+            }
         }
 
         if (skinTex) {
@@ -272,9 +273,8 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
 
         // --- Apply hair texture to type-6 slots ---
         if (!info.hairTexturePath.empty()) {
-            rendering::VkTexture* hairTex = charRenderer->loadTexture(info.hairTexturePath);
-            rendering::VkTexture* whTex = charRenderer->loadTexture("");
-            if (hairTex && hairTex != whTex) {
+            rendering::TextureRef hairTex = charRenderer->loadTexture(info.hairTexturePath);
+            if (hairTex && hairTex != charRenderer->whiteTexture()) {
                 for (uint32_t slot : info.hairTextureSlots) {
                     charRenderer->setModelTexture(info.modelId, slot, hairTex);
                 }
@@ -1933,7 +1933,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
                 const bool emptyNamedSlot = slot.type == 0 && slot.filename.empty() &&
                     !skins.empty() && &path == &skins[std::min(forcedSlot, skins.size() - 1)].second;
                 if (slot.type != type && !emptyNamedSlot) continue;
-                if (auto* texture = cr->loadTexture(path))
+                if (rendering::TextureRef texture = cr->loadTexture(path))
                     cr->setModelTexture(modelId, static_cast<uint32_t>(ti), texture);
                 if (emptyNamedSlot) ++forcedSlot;
                 break;

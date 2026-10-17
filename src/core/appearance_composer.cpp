@@ -168,8 +168,8 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
             layers.push_back(up);
         }
         if (layers.size() > 1) {
-            rendering::VkTexture* compositeTex = charRenderer->compositeTextures(layers);
-            if (compositeTex != nullptr) {
+            rendering::TextureRef compositeTex = charRenderer->compositeTextures(layers);
+            if (compositeTex) {
                 // Find type-1 (skin) texture slot and replace with composite
                 // We need model texture info - walk slots via charRenderer
                 // Use the model slot ID to find the right texture index
@@ -190,7 +190,7 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
 
     // Override hair texture on GPU (type-6 slot) after model load
     if (!texInfo.hairTexturePath.empty()) {
-        rendering::VkTexture* hairTex = charRenderer->loadTexture(texInfo.hairTexturePath);
+        rendering::TextureRef hairTex = charRenderer->loadTexture(texInfo.hairTexturePath);
         if (hairTex) {
             auto* modelData = charRenderer->getModelData(modelSlotId);
             if (modelData) {

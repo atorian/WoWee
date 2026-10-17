@@ -400,13 +400,13 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
         }
     }
 
-    // Re-composite: base skin + underwear + equipment regions
-    // Clear composite cache first to prevent stale textures from being reused
-    charRenderer->clearCompositeCache();
+    // Re-composite: base skin + underwear + equipment regions. A composite of
+    // exactly these inputs is shared from the texture cache; any other set of
+    // inputs is another key and composited afresh.
     // Use per-instance texture override (not model-level) to avoid deleting cached composites.
     uint32_t instanceId = renderer->getCharacterInstanceId();
-    auto* newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
-    if (newTex != nullptr && instanceId != 0) {
+    rendering::TextureRef newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
+    if (newTex && instanceId != 0) {
         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);
     }
 
@@ -442,10 +442,9 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
                                        (ch->gender == game::Gender::NONBINARY && ch->useFemaleModel);
                         }
                     }
-                    const rendering::VkTexture* whiteTex = charRenderer->loadTexture("");
                     for (const auto& capePath : pipeline::capeTextureCandidates(capeName, isFemale)) {
-                        auto* capeTex = charRenderer->loadTexture(capePath);
-                        if (capeTex == nullptr || capeTex == whiteTex) continue;
+                        rendering::TextureRef capeTex = charRenderer->loadTexture(capePath);
+                        if (!capeTex || capeTex == charRenderer->whiteTexture()) continue;
                         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(cloakSlot), capeTex);
                         LOG_INFO("Cloak texture applied: ", capePath);
                         break;

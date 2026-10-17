@@ -26,6 +26,10 @@ struct TextureEntry {
     TextureEntry* idlePrev = nullptr;
     TextureEntry* idleNext = nullptr;
     bool idle = false;
+    /// The normal map made from this texture, a reference this entry holds.
+    /// Atomic because a frame recording on a worker thread reads it while the
+    /// main thread may attach one.
+    std::atomic<TextureEntry*> normalMap{nullptr};
 };
 
 } // namespace detail
@@ -68,7 +72,9 @@ std::string normalizeTexturePath(std::string_view path) {
 TextureRef::TextureRef(TextureEntry* entry) : entry_(entry) {}
 
 TextureRef::TextureRef(const TextureRef& other) : entry_(other.entry_) {
-    if (entry_) entry_->cache->addRef(entry_);
+    if (!entry_) return;
+    if (entry_->cache) entry_->cache->addRef(entry_);
+    else ++entry_->refs;  // outlived its cache: nobody else touches it
 }
 
 TextureRef::TextureRef(TextureRef&& other) noexcept : entry_(std::exchange(other.entry_, nullptr)) {}
@@ -92,10 +98,22 @@ TextureRef& TextureRef::operator=(TextureRef&& other) noexcept {
 TextureRef::~TextureRef() { reset(); }
 
 void TextureRef::reset() {
-    if (TextureEntry* entry = std::exchange(entry_, nullptr)) entry->cache->release(entry);
+    if (TextureEntry* entry = std::exchange(entry_, nullptr)) TextureCache::release(entry);
 }
 
 VkTexture* TextureRef::get() const { return entry_ ? entry_->texture.get() : nullptr; }
+
+VkTexture* TextureRef::normalMap() const {
+    if (!entry_) return nullptr;
+    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    return normal ? normal->texture.get() : nullptr;
+}
+
+TextureInfo TextureRef::normalMapInfo() const {
+    if (!entry_) return {};
+    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    return normal ? normal->info : TextureInfo{};
+}
 
 const TextureInfo& TextureRef::info() const {
     static const TextureInfo kNone{};
@@ -103,6 +121,11 @@ const TextureInfo& TextureRef::info() const {
 }
 
 uint64_t TextureRef::bytes() const { return entry_ ? entry_->bytes : 0; }
+
+const TextureKey& TextureRef::key() const {
+    static const TextureKey kNone{};
+    return entry_ ? entry_->key : kNone;
+}
 
 // ---- TextureCache -------------------------------------------------------------
 
@@ -130,6 +153,18 @@ TextureCache::TextureCache(TextureDevice& device, Config config)
 
 TextureCache::~TextureCache() {
     std::lock_guard<std::mutex> lock(mutex_);
+    // First the links of what nobody holds: a normal map kept only by its
+    // texture's entry is not still referenced by anyone.
+    for (bool released = true; released;) {
+        released = false;
+        for (auto& [key, entry] : named_) {
+            if (entry->refs != 0) continue;
+            if (TextureEntry* normal = entry->normalMap.exchange(nullptr)) {
+                releaseLocked(normal);
+                released = true;
+            }
+        }
+    }
     size_t held = 0;
     std::string example;
     const auto sweep = [&](auto& map) {
@@ -221,6 +256,11 @@ void TextureCache::touchLocked(TextureEntry* entry) {
 
 void TextureCache::retireLocked(TextureEntry* entry) {
     unlinkIdleLocked(entry);
+    // Its normal map goes back with it, to be evicted in turn when room is
+    // wanted - or found again by whoever loads the texture next.
+    if (TextureEntry* normal = entry->normalMap.exchange(nullptr, std::memory_order_acq_rel)) {
+        releaseLocked(normal);
+    }
     auto& form = forms_[static_cast<size_t>(entry->key.form)];
     form.entries -= 1;
     form.bytes -= entry->bytes;
@@ -344,15 +384,20 @@ void TextureCache::addRef(TextureEntry* entry) {
 }
 
 void TextureCache::release(TextureEntry* entry) {
-    std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
-    if (entry->cache) lock.lock();
-    if (--entry->refs > 0) return;
-    if (!entry->cache) {
-        // Outlived its cache (logged when the cache went): the entry is this
-        // reference's to free, its image is not.
-        delete entry;
+    if (TextureCache* cache = entry->cache) {
+        std::lock_guard<std::mutex> lock(cache->mutex_);
+        cache->releaseLocked(entry);
         return;
     }
+    // Outlived its cache (logged when the cache went): the entry is the last
+    // reference's to free; its image, and any normal map's, are not.
+    if (--entry->refs > 0) return;
+    if (TextureEntry* normal = entry->normalMap.exchange(nullptr)) release(normal);
+    delete entry;
+}
+
+void TextureCache::releaseLocked(TextureEntry* entry) {
+    if (--entry->refs > 0) return;
     if (entry->named) {
         linkIdleLocked(entry);
         return;
@@ -360,6 +405,17 @@ void TextureCache::release(TextureEntry* entry) {
     // Nobody can ask for it again.
     retireLocked(entry);
     owned_.erase(entry);
+}
+
+void TextureCache::setNormalMap(const TextureRef& texture, TextureRef normalMap) {
+    if (!texture.entry_ || !normalMap.entry_) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The reference moves into the texture's entry rather than being counted
+    // again.
+    TextureEntry* normal = std::exchange(normalMap.entry_, nullptr);
+    if (TextureEntry* old = texture.entry_->normalMap.exchange(normal, std::memory_order_acq_rel)) {
+        releaseLocked(old);
+    }
 }
 
 void TextureCache::releaseUnused() {

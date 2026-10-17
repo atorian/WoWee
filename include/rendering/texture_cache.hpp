@@ -107,8 +107,18 @@ public:
     VkTexture* operator->() const { return get(); }
     explicit operator bool() const { return entry_ != nullptr; }
     [[nodiscard]] const TextureInfo& info() const;
+    /// What it is cached under; an empty path for one only its owner holds.
+    [[nodiscard]] const TextureKey& key() const;
     /// What the entry counts as costing on the GPU.
     [[nodiscard]] uint64_t bytes() const;
+
+    /// The normal map made from this texture (TextureCache::setNormalMap),
+    /// null until there is one. Kept by the texture's entry, so it lives as
+    /// long as the texture and is released with it. Safe to read while the
+    /// main thread attaches one.
+    [[nodiscard]] VkTexture* normalMap() const;
+    /// Its TextureInfo (heightVariance); empty without one.
+    [[nodiscard]] TextureInfo normalMapInfo() const;
 
     void reset();
 
@@ -206,6 +216,11 @@ public:
     [[nodiscard]] TextureRef adopt(TextureForm form, std::shared_ptr<VkTexture> texture,
                                    uint64_t bytes, TextureInfo info = {});
 
+    /// Make `normalMap` the normal map of `texture`: the texture's entry
+    /// holds it from now on and lets it go when it is evicted, so the one is
+    /// resident for as long as the other. Replaces one attached before.
+    void setNormalMap(const TextureRef& texture, TextureRef normalMap);
+
     /// Retire every entry nothing references - leaving a map, say, when
     /// nothing of it will be asked for again.
     void releaseUnused();
@@ -216,7 +231,10 @@ public:
 private:
     friend class TextureRef;
     void addRef(detail::TextureEntry* entry);
-    void release(detail::TextureEntry* entry);
+    /// A reference given back, by whichever cache the entry belongs to - or
+    /// by none, for one that outlived its cache.
+    static void release(detail::TextureEntry* entry);
+    void releaseLocked(detail::TextureEntry* entry);
 
     /// Under the lock.
     [[nodiscard]] uint64_t effectiveBudgetLocked() const;

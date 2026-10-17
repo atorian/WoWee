@@ -1,6 +1,7 @@
 #pragma once
 
-#include "core/cache_stats.hpp"
+#include "rendering/normal_map_builder.hpp"
+#include "rendering/texture_cache.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/interior_light.hpp"
@@ -172,8 +173,10 @@ public:
 
     /// Counts the head-batch diagnostic lines so it stops after a few.
     int headBatchCanaryCount_ = 0;
-    void setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, VkTexture* texture);
-    void setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, VkTexture* texture);
+    /// The instance holds `texture` while it draws with it; an empty one
+    /// clears the group's override.
+    void setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, TextureRef texture);
+    void setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, TextureRef texture);
     void clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot);
     void setInstanceVisible(uint32_t instanceId, bool visible);
     void removeInstance(uint32_t instanceId);
@@ -277,16 +280,8 @@ public:
 
     [[nodiscard]] size_t getInstanceCount() const { return scene_->instances.size(); }
     [[nodiscard]] size_t getModelCount() const { return models.size(); }
-    /// The textures loaded and composited for characters, with their normal
-    /// maps, in estimated GPU bytes, against the budget eviction keeps them
-    /// under. Main thread.
-    [[nodiscard]] core::CacheStats textureCacheStats() const {
-        return {textureCache.size(), textureCacheBytes_, textureCacheBudgetBytes_};
-    }
-    /// Normal maps being derived in the background and not yet finished.
-    [[nodiscard]] int pendingNormalMapJobs() const {
-        return pendingNormalMapCount_.load(std::memory_order_relaxed);
-    }
+    /// Normal maps queued, being derived, or derived and not yet uploaded.
+    [[nodiscard]] size_t pendingNormalMapJobs() const;
 
     // Normal mapping settings. There are no parallax settings: characters are
     // drawn without parallax whatever the world uses (see the material setup).
@@ -344,8 +339,9 @@ private:
         glm::vec3 visualBoundMax{0.0f};
         float visualBoundRadius = 0.0f;
 
-        // Textures loaded from BLP (indexed by texture array position)
-        std::vector<VkTexture*> textureIds;
+        // Textures loaded from BLP (indexed by texture array position), held
+        // for as long as the model is.
+        std::vector<TextureRef> textureIds;
 
         // Cached batch render order sorted by (priorityPlane, materialLayer).
         // Built once at load time - the sort only depends on the model's static
@@ -395,11 +391,12 @@ private:
         /// where the instance has been set up to composite it - the player.
         bool drawSkinExtra = false;
 
-        // Per-geoset-group texture overrides (group → VkTexture*)
-        std::unordered_map<uint16_t, VkTexture*> groupTextureOverrides;
+        // Per-geoset-group texture overrides (group → texture), held by the
+        // instance.
+        std::unordered_map<uint16_t, TextureRef> groupTextureOverrides;
 
-        // Per-texture-slot overrides (slot → VkTexture*)
-        std::unordered_map<uint16_t, VkTexture*> textureSlotOverrides;
+        // Per-texture-slot overrides (slot → texture), held by the instance.
+        std::unordered_map<uint16_t, TextureRef> textureSlotOverrides;
 
         // Weapon attachments (weapons parented to this instance's bones)
         std::vector<WeaponAttachment> weaponAttachments;
@@ -471,33 +468,31 @@ private:
 public:
     /**
      * Build a composited character skin texture by alpha-blending overlay
-     * layers onto a base skin BLP. Returns the resulting VkTexture*.
+     * layers onto a base skin BLP. A composite already made from the same
+     * layers is shared. White when it cannot be made.
      */
-    VkTexture* compositeTextures(const std::vector<std::string>& layerPaths);
+    TextureRef compositeTextures(const std::vector<std::string>& layerPaths);
 
     /**
-     * Build a composited character skin with explicit region-based equipment overlays.
+     * Build a composited character skin with explicit region-based equipment
+     * overlays; shared like compositeTextures.
      */
-    VkTexture* compositeWithRegions(const std::string& basePath,
-                                const std::vector<std::string>& baseLayers,
-                                const std::vector<std::pair<int, std::string>>& regionLayers);
+    TextureRef compositeWithRegions(const std::string& basePath,
+                                    const std::vector<std::string>& baseLayers,
+                                    const std::vector<std::pair<int, std::string>>& regionLayers);
 
-    /** Clear the composite texture cache (forces re-compositing on next call). */
-    void clearCompositeCache();
+    /** A BLP texture from the shared cache, decoded the way characters key it; white on failure. */
+    TextureRef loadTexture(const std::string& path);
+    [[nodiscard]] const TextureRef& whiteTexture() const { return whiteTexture_; }
 
-    /** Load a BLP texture from MPQ and return VkTexture* (cached). */
-    VkTexture* loadTexture(const std::string& path);
-    [[nodiscard]] VkTexture* getTransparentTexture() const { return transparentTexture_.get(); }
-
-    /** Replace a loaded model's texture at the given slot. */
-    void setModelTexture(uint32_t modelId, uint32_t textureSlot, VkTexture* texture);
+    /** Replace a loaded model's texture at the given slot; the model holds it. */
+    void setModelTexture(uint32_t modelId, uint32_t textureSlot, TextureRef texture);
 
 
 
 private:
     // Create 1×1 fallback textures used when real textures are missing or still loading.
-    // Called during both init and clear to ensure valid descriptor bindings at all times.
-    void createFallbackTextures(VkDevice device);
+    void createFallbackTextures();
 
     VkContext* vkCtx_ = nullptr;
     VkRenderPass renderPassOverride_ = VK_NULL_HANDLE;
@@ -579,72 +574,35 @@ private:
     uint32_t materialUboAlignment_ = 256;  // minUniformBufferOffsetAlignment
     static constexpr uint32_t MATERIAL_RING_CAPACITY = 4096;
 
-    // Texture cache
-    struct TextureCacheEntry {
-        std::unique_ptr<VkTexture> texture;
-        std::unique_ptr<VkTexture> normalHeightMap;
-        float heightMapVariance = 0.0f;
-        size_t approxBytes = 0;
-        uint64_t lastUse = 0;
-        bool hasAlpha = false;
-        bool normalMapPending = false;  // deferred normal map generation
-    };
-    std::unordered_map<std::string, TextureCacheEntry> textureCache;
-    struct NormalMapInfo {
-        VkTexture* normalMap = nullptr;
-        float heightMapVariance = 0.0f;
-    };
-    std::unordered_map<VkTexture*, NormalMapInfo> normalMapByTexPtr_;
-    struct TextureProperties {
-        bool hasAlpha = false;
-    };
-    std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
-    std::unordered_map<std::string, VkTexture*> compositeCache_;  // key → texture for reuse
-    std::unordered_set<std::string> failedTextureCache_;  // negative cache for budget exhaustion
+    /// When a path that would not load, or found no room, is next worth a read.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;  // dedup warning logs
     uint64_t textureLookupSerial_ = 0;
-    size_t textureCacheBytes_ = 0;
-    uint64_t textureCacheCounter_ = 0;
-    size_t textureCacheBudgetBytes_ = 1024ull * 1024 * 1024;
-    uint32_t textureBudgetRejectWarnings_ = 0;
-    std::unique_ptr<VkTexture> whiteTexture_;
-    std::unique_ptr<VkTexture> transparentTexture_;
-    std::unique_ptr<VkTexture> flatNormalTexture_;
+    // Fallbacks, held in the shared cache like any other texture.
+    TextureRef whiteTexture_;
+    TextureRef flatNormalTexture_;
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
 
     uint32_t nextInstanceId = 1;
     uint64_t nextModelLoadSerial_ = 1;
 
-    // Normal map generation (same algorithm as WMO renderer)
-    std::unique_ptr<VkTexture> generateNormalHeightMap(
-        const uint8_t* pixels, uint32_t width, uint32_t height, float& outVariance);
-
-    // Background normal map generation - CPU work on thread pool, GPU upload on main thread
-    struct NormalMapResult {
-        std::string cacheKey;
-        std::vector<uint8_t> pixels;  // RGBA normal map output
-        uint32_t width, height;
-        float variance;
-    };
-    // Completed results ready for GPU upload (populated by background threads)
-    std::mutex normalMapResultsMutex_;
-    std::condition_variable normalMapDoneCV_;  // signaled when pendingNormalMapCount_ reaches 0
-    std::deque<NormalMapResult> completedNormalMaps_;
-    std::atomic<int> pendingNormalMapCount_{0};  // in-flight background tasks
-
-    // Pure CPU normal map generation (thread-safe, no GPU access)
-    /// Start deriving a normal/height map for a texture already in the cache.
-    /// Called for every surface this renderer draws, whether it came from a
-    /// file or was composited in memory.
-    bool queueNormalMapGeneration(const std::string& cacheKey,
-                                  std::vector<uint8_t> pixels,
-                                  uint32_t width, uint32_t height);
-
-    static NormalMapResult generateNormalHeightMapCPU(
-        std::string cacheKey, std::vector<uint8_t> pixels, uint32_t width, uint32_t height);
+    /// Derives the normal/height maps of the textures characters are drawn
+    /// with, on two workers of its own from a bounded queue, nearest first.
+    /// Asked by processPendingNormalMaps from what the instances draw.
+    std::unique_ptr<NormalMapBuilder> normalMapBuilder_;
+    /// Keys whose map could not be built; not asked for again.
+    std::unordered_set<std::string> normalMapsFailed_;
+    /// Where the camera was at the last update: what "nearest" is measured from.
+    glm::vec3 lastCameraPos_{0.0f};
+    /// Frames since the instances were last walked for maps to ask for.
+    uint32_t framesSinceNormalMapScan_ = 0;
+    /// Ask the builder for the maps the drawn instances lack, nearest first.
+    void requestNormalMaps();
 public:
+    /// Upload up to `budget` finished normal maps and attach each to its
+    /// texture, and every few frames ask for the ones still missing. Main
+    /// thread, once a frame.
     void processPendingNormalMaps(int budget = 4);
 private:
 
@@ -672,7 +630,8 @@ private:
     /// to the image, which another model may tile where this one clamps.
     struct BatchTexture {
         static constexpr uint8_t kRepeatBoth = 0x3;
-        VkTexture* texture = nullptr;
+        /// The model's or the instance's reference; never null.
+        const TextureRef* texture = nullptr;
         uint8_t wrapFlags = kRepeatBoth;
     };
 

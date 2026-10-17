@@ -966,6 +966,7 @@ set(WOWEE_SOURCES
     src/rendering/gpu_memory.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp
+    src/rendering/normal_map_builder.cpp
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
@@ -2711,6 +2712,7 @@ add_executable(wowee_editor
     src/rendering/gpu_memory.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp
+    src/rendering/normal_map_builder.cpp
     src/rendering/vk_utils.cpp
     src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp

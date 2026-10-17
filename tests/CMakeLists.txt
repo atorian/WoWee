@@ -167,6 +167,12 @@ wowee_add_test(test_texture_cache
     SOURCES test_texture_cache.cpp ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/rendering/texture_cache.cpp)
 
+# Normal maps built on the builder's own few workers from a bounded queue,
+# nearest first. The derivation is a stand-in.
+wowee_add_test(test_normal_map_builder
+    SOURCES test_normal_map_builder.cpp ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/rendering/normal_map_builder.cpp)
+
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)

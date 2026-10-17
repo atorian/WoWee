@@ -130,10 +130,8 @@ ResourceSample ResourceMonitor::sample(const rendering::Renderer* renderer,
         out.counts.push_back({"WMO models", wmo->getModelCount()});
     }
     if (const auto* characters = renderer->getCharacterRenderer()) {
-        out.caches.push_back({"character textures", characters->textureCacheStats()});
         out.counts.push_back({"character models", characters->getModelCount()});
-        out.counts.push_back({"normal-map jobs",
-                              static_cast<uint64_t>(std::max(characters->pendingNormalMapJobs(), 0))});
+        out.counts.push_back({"normal-map jobs", static_cast<uint64_t>(characters->pendingNormalMapJobs())});
     }
     return out;
 }
