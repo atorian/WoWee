@@ -2104,9 +2104,9 @@ void Renderer::update(float deltaTime) {
     // Characters, creatures and their weapons take the light of the interior
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
-        characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
-        });
+        characterRenderer->updateInteriorLight(
+            [this](const glm::vec3& p) { return wmoRenderer->interiorLightAt(p.x, p.y, p.z); },
+            wmoRenderer->contentRevision());
     }
 
     // Update lighting system

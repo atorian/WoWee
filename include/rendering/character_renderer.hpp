@@ -144,10 +144,13 @@ public:
     void setInstanceAnimationSpeed(uint32_t instanceId, float speed);
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
     /// Look up again, for each instance that has moved since it was last
-    /// looked up, the light of the WMO interior group it stands in.
-    /// `interiorLightAt` answers for a world position; no value is outdoors.
+    /// looked up or whose buildings have changed since, the light of the WMO
+    /// interior group it stands in. `interiorLightAt` answers for a world
+    /// position, no value being outdoors; `worldRevision` changes whenever the
+    /// buildings it answers from do (WMORenderer::contentRevision).
     void updateInteriorLight(
-        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
+        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt,
+        uint64_t worldRevision);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
     /// How far the camera's closeness fades the instance - the player, with
@@ -428,8 +431,8 @@ private:
 
         /// The light of the WMO interior group the instance stands in, if any.
         InteriorLightGPU interiorLight;
-        /// Where interiorLight was looked up, once it has been.
-        std::optional<glm::vec3> interiorLightOrigin;
+        /// Where interiorLight was looked up, and against which buildings.
+        InteriorLightProbe interiorLightProbe;
 
         // A scene rather than a character: the glue-screen backdrops. Two things
         // follow. Their origin can sit hundreds of units from their geometry, so

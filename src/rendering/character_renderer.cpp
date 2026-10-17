@@ -3690,18 +3690,19 @@ bool CharacterRenderer::isShown(const CharacterInstance& instance) const {
 }
 
 void CharacterRenderer::updateInteriorLight(
-        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt) {
+        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt,
+        uint64_t worldRevision) {
     for (auto& [id, instance] : scene_->instances) {
         // A weapon's position stays where it was created; it is carried by
         // the matrix its parent's bone gives it.
         const glm::vec3 origin = instance.hasOverrideModelMatrix
             ? glm::vec3(instance.overrideModelMatrix[3])
             : instance.position;
-        if (instance.interiorLightOrigin &&
-            glm::distance(*instance.interiorLightOrigin, origin) < kInteriorLightRequeryDistance) {
+        if (!instance.interiorLightProbe.stale(origin, worldRevision,
+                                               kInteriorLightRequeryDistance)) {
             continue;
         }
-        instance.interiorLightOrigin = origin;
+        instance.interiorLightProbe.record(origin, worldRevision);
         instance.interiorLight = packInteriorLight(
             interiorLightAt(origin + glm::vec3(0.0f, 0.0f, kInteriorLightProbeHeight)));
     }

@@ -270,3 +270,27 @@ TEST_CASE("a WMO with an all-zero ambient leaves the frame's ambient on models i
     REQUIRE(interior_light::interiorDirect(gpu.ambient, gpu.direct, glm::vec3(1.0f)) ==
             glm::vec3(0.5f));
 }
+
+TEST_CASE("a unit told it was outdoors before its building loaded asks again once it has",
+          "[interior_light]") {
+    // Brill's innkeeper stands still. Placed before the inn had streamed in,
+    // the lookup said "outdoors", and with nothing but movement to ask again
+    // she kept the outdoor light under the inn's roof - drawn dark.
+    using wowee::rendering::InteriorLightProbe;
+    constexpr float kRequery = 0.5f;
+    const glm::vec3 innkeeper(2254.0f, 289.0f, 34.6f);
+
+    InteriorLightProbe probe;
+    REQUIRE(probe.stale(innkeeper, 7, kRequery));  // never asked
+    probe.record(innkeeper, 7);
+    CHECK_FALSE(probe.stale(innkeeper, 7, kRequery));  // standing still, nothing changed
+
+    // The inn's model finishes loading: the buildings have changed.
+    CHECK(probe.stale(innkeeper, 8, kRequery));
+    probe.record(innkeeper, 8);
+    CHECK_FALSE(probe.stale(innkeeper, 8, kRequery));
+
+    // Moving still counts, a step inside the requery distance does not.
+    CHECK_FALSE(probe.stale(innkeeper + glm::vec3(0.3f, 0.0f, 0.0f), 8, kRequery));
+    CHECK(probe.stale(innkeeper + glm::vec3(0.6f, 0.0f, 0.0f), 8, kRequery));
+}
