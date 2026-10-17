@@ -81,10 +81,7 @@ public:
     bool beginReflectionPass(VkCommandBuffer cmd);
     void endReflectionPass(VkCommandBuffer cmd);
 
-    // Compute reflected view matrix for a given water height
-    static glm::mat4 computeReflectedView(const Camera& camera, float waterHeight);
-    // Compute oblique clip projection to clip below-water geometry in reflection
-    static glm::mat4 computeObliqueProjection(const glm::mat4& proj, const glm::mat4& view, float waterHeight);
+    // The mirrored camera's matrices: water_reflection.hpp.
 
     // Update the reflection UBO with reflected viewProj matrix
     void updateReflectionUBO(const glm::mat4& reflViewProj);

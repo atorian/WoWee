@@ -1006,6 +1006,7 @@ set(WOWEE_SOURCES
     src/rendering/water_renderer.cpp
     src/rendering/liquid_scene.cpp
     src/rendering/wind_waves.cpp
+    src/rendering/water_reflection.cpp
     src/rendering/skybox.cpp
     src/rendering/sky_bodies.cpp
     src/rendering/starfield.cpp

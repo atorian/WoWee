@@ -14,6 +14,7 @@
 #include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/water_reflection.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
@@ -4558,9 +4559,8 @@ void Renderer::renderReflectionPass() {
     if (camPos.z < waterHeight + 0.5f) return;
 
     // Compute reflected view and oblique projection
-    glm::mat4 reflView = WaterRenderer::computeReflectedView(*camera, waterHeight);
-    glm::mat4 reflProj = WaterRenderer::computeObliqueProjection(
-        camera->getProjectionMatrix(), reflView, waterHeight);
+    glm::mat4 reflView = mirroredView(camera->getPosition(), camera->getForward(), waterHeight);
+    glm::mat4 reflProj = obliqueReflectionProjection(camera->getProjectionMatrix(), reflView, waterHeight);
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -4583,25 +4583,12 @@ void Renderer::renderReflectionPass() {
     if (!waterRenderer->beginReflectionPass(currentCmd)) return;
 
     if (canRenderScene) {
-        // Render scene into reflection texture (sky + terrain + WMO only for perf)
-        if (skySystem) {
-            // The same fill as the camera's sky, so a field added to one is in
-            // the other: this was a third copy, and it gave the water the
-            // sun's cast light for the sun's own colour.
-            auto* reflSkybox = skySystem->getSkybox();
-            const float timeOfDay = lightingManager
-                ? lightingManager->getTimeOfDayHours()
-                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
-            // No server hour, no weather and the procedural sky: the reflection
-            // has never drawn the sky model or the weather's dimming.
-            rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
-                timeOfDay, -1.0f, 0.0f,
-                lightingManager ? &lightingManager->getLightingParams() : nullptr, false);
-            // A flare is an artefact of the lens, so it belongs to the camera
-            // and not to what the water is showing it.
-            skyParams.sunGlareVisibility = 0.0f;
-            skySystem->render(currentCmd, reflDescSet, *camera, skyParams);
-        }
+        // What stands above the water: the ground and the buildings. Not the
+        // sky - the water reflects that itself, along each pixel's own
+        // reflected ray, from the sky the camera sees (skyAlong in
+        // water.frag). The sky drawn here was a procedural one with no sky
+        // model and no weather, and where the reflection held it, it stood
+        // in for the real one as a grey wash over the sea.
         if (terrainRenderer && terrainEnabled) {
             terrainRenderer->render(currentCmd, reflDescSet, *camera);
         }

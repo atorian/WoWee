@@ -2152,6 +2152,13 @@ wowee_add_test(test_wind_waves
             ${CMAKE_SOURCE_DIR}/src/rendering/wind_waves.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_water_reflection ────────────────────────────────────
+# The mirrored camera sees what stands above the water and nothing of the bed.
+wowee_add_test(test_water_reflection
+    SOURCES test_water_reflection.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/water_reflection.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface

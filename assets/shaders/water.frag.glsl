@@ -374,6 +374,25 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     }
     return color;
 }
+
+// The sky seen along `dir`: the sky as drawn this frame where that way is on
+// screen - its clouds, the sun's glow, the colours of the hour - and the
+// atmosphere's gradient where it is not. A way below the horizon, which a
+// steep wave can reflect, takes the horizon.
+vec3 skyAlong(vec3 dir) {
+    dir = normalize(vec3(dir.xy, max(dir.z, 0.0)));
+    vec3 gradient = atmosphereSkyColor(dir, normalize(-lightDir.xyz), fogSkyTop.rgb,
+                                       fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+    if (fogSkyMiddle.w < 0.5) return gradient;
+    vec4 clip = projection * view * vec4(viewPos.xyz + dir * 1000.0, 1.0);
+    if (clip.w <= 0.0) return gradient;
+    vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+    float onScreen = smoothstep(0.0, 0.05, uv.x) * smoothstep(1.0, 0.95, uv.x)
+                   * smoothstep(0.0, 0.05, uv.y) * smoothstep(1.0, 0.95, uv.y);
+    if (onScreen <= 0.0) return gradient;
+    return mix(gradient, textureLod(uSceneSky, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb, onScreen);
+}
+
 void main() {
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
@@ -648,11 +667,16 @@ void main() {
     }
 
     // ============================================================
-    // Planar reflection - subtle, not mirror-like
+    // Reflection
     // ============================================================
-    // reflWeight starts at 0; only contributes where we have valid reflection data
-    float reflAmount = 0.0;
-    vec3 envReflect = vec3(0.0);
+    // What the surface reflects: the scene above it where the planar
+    // reflection holds it, and the sky everywhere else. The sky is what makes
+    // a sea look like one - at dusk the water is the colour of the sky, and
+    // the waves show as its lighter and darker faces. It was left out, and the
+    // planar image halved and kept to a third of the Fresnel weight, so the
+    // water reflected a tenth of what it does and read as a blue sheet.
+    float reflValidity = 0.0;
+    vec3 planarReflect = vec3(0.0);
 
     vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
     if (reflClip.w > 0.1) {
@@ -668,11 +692,12 @@ void main() {
         vec3 texReflect = texture(ReflectionColor, reflUV).rgb;
 
         float reflBrightness = dot(texReflect, vec3(0.299, 0.587, 0.114));
-        float reflValidity = smoothstep(0.002, 0.05, reflBrightness) * edgeFade;
-
-        envReflect = texReflect * 0.5;
-        reflAmount = reflValidity * 0.4;
+        reflValidity = smoothstep(0.002, 0.05, reflBrightness) * edgeFade;
+        planarReflect = texReflect;
     }
+    // The planar image holds only what stands above the water, on black
+    // (renderReflectionPass); where it holds nothing, the sky.
+    vec3 reflected = mix(skyAlong(reflect(-viewDir, norm)), planarReflect, reflValidity);
 
     // ============================================================
     // GGX Specular
@@ -736,11 +761,11 @@ void main() {
     vec3 sssColor = vec3(0.05, 0.55, 0.35) * sss * lightColor.rgb;
 
     // ============================================================
-    // Combine - reflection only where valid, no dark fallback
+    // Combine: what comes up through the water, and what the surface
+    // reflects, by water's Fresnel - a fiftieth looking straight down, all of
+    // it at the horizon.
     // ============================================================
-    // reflAmount is 0 where no valid reflection data exists - no dark arc
-    float reflectWeight = clamp(fresnel * reflAmount, 0.0, 0.30);
-    vec3 color = mix(refractedColor, envReflect, reflectWeight);
+    vec3 color = mix(refractedColor, reflected, fresnel);
     // The sun's glint and the light it puts through the crests need the sun:
     // in shadow there is nothing for the surface to reflect.
     color += (specular + sssColor) * sunReach;
@@ -931,6 +956,10 @@ void main() {
     float baseAlpha = mix(waterAlpha, min(1.0, waterAlpha * 1.5), depthFade);
     float alpha = mix(baseAlpha, min(1.0, baseAlpha * 1.3), fresnel) * alphaScale;
     alpha = clamp(alpha, 0.15, 0.92);
+    // What the surface reflects is not seen through: by the horizon the
+    // water is all reflection, and alpha below one let the bed under it back
+    // through the sky's colour.
+    alpha = mix(alpha, 1.0, fresnel);
     // Wet sand is a band on the beach, not a film of water, so it needs enough
     // presence to darken what is under it; foam has to be close to opaque or it
     // does not read at all.

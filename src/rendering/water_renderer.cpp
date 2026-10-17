@@ -1493,50 +1493,6 @@ void WaterRenderer::updateWake(float deltaTime, const glm::vec2& pos,
     
 }
 
-// ==============================================================
-// Mirror camera computations
-// ==============================================================
-
-glm::mat4 WaterRenderer::computeReflectedView(const Camera& camera, float waterHeight) {
-    // In this engine, Z is up. Water height is stored in the Z component.
-    // Mirror camera position across Z = waterHeight plane.
-
-    glm::vec3 camPos = camera.getPosition();
-    glm::vec3 reflPos = camPos;
-    reflPos.z = 2.0f * waterHeight - camPos.z;
-
-    // Get camera forward and reflect the Z component
-    glm::vec3 forward = camera.getForward();
-    forward.z = -forward.z;
-    glm::vec3 reflTarget = reflPos + forward;
-
-    glm::vec3 up(0.0f, 0.0f, 1.0f);
-    return glm::lookAt(reflPos, reflTarget, up);
-}
-
-glm::mat4 WaterRenderer::computeObliqueProjection(const glm::mat4& proj, const glm::mat4& view,
-                                                    float waterHeight) {
-    // Clip plane: everything below waterHeight in world space
-    // Z is up, so the clip plane normal is (0, 0, 1)
-    glm::vec4 clipPlaneWorld(0.0f, 0.0f, 1.0f, -waterHeight);
-    glm::vec4 clipPlaneView = glm::transpose(glm::inverse(view)) * clipPlaneWorld;
-
-    // Lengyel's oblique near-plane projection matrix modification
-    glm::mat4 result = proj;
-    glm::vec4 q;
-    q.x = (glm::sign(clipPlaneView.x) + result[2][0]) / result[0][0];
-    q.y = (glm::sign(clipPlaneView.y) + result[2][1]) / result[1][1];
-    q.z = -1.0f;
-    q.w = (1.0f + result[2][2]) / result[3][2];
-
-    glm::vec4 c = clipPlaneView * (2.0f / glm::dot(clipPlaneView, q));
-    result[0][2] = c.x;
-    result[1][2] = c.y;
-    result[2][2] = c.z + 1.0f;
-    result[3][2] = c.w;
-
-    return result;
-}
 
 // ==============================================================
 // Separate 1x water pass (used when MSAA is active)
