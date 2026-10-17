@@ -800,6 +800,7 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
+        currentFrameData.sunHaloColor = glm::vec4(lp.sunHaloColor, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -4473,24 +4474,18 @@ void Renderer::renderReflectionPass() {
     if (canRenderScene) {
         // Render scene into reflection texture (sky + terrain + WMO only for perf)
         if (skySystem) {
-            rendering::SkyParams skyParams;
+            // The same fill as the camera's sky, so a field added to one is in
+            // the other: this was a third copy, and it gave the water the
+            // sun's cast light for the sun's own colour.
             auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = lightingManager
+            const float timeOfDay = lightingManager
                 ? lightingManager->getTimeOfDayHours()
                 : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
-            if (lightingManager) {
-                const auto& lp = lightingManager->getLightingParams();
-                skyParams.directionalDir = lp.directionalDir;
-                skyParams.sunColor = lp.diffuseColor;
-                skyParams.skyTopColor = lp.skyTopColor;
-                skyParams.skyMiddleColor = lp.skyMiddleColor;
-                skyParams.skyBand1Color = lp.skyBand1Color;
-                skyParams.skyBand2Color = lp.skyBand2Color;
-                skyParams.cloudDensity = lp.cloudDensity;
-                skyParams.fogDensity = lp.fogDensity;
-                skyParams.horizonGlow = lp.horizonGlow;
-            }
-            // weatherIntensity left at default 0 for reflection pass (no game handler in scope)
+            // No server hour, no weather and the procedural sky: the reflection
+            // has never drawn the sky model or the weather's dimming.
+            rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
+                timeOfDay, -1.0f, 0.0f,
+                lightingManager ? &lightingManager->getLightingParams() : nullptr, false);
             // A flare is an artefact of the lens, so it belongs to the camera
             // and not to what the water is showing it.
             skyParams.sunOcclusion = 1.0f;
@@ -4881,12 +4876,11 @@ void Renderer::recordSunShafts() {
             // Rain and snow put a lid over it.
             if (weather) strength *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
 
-            // The sun's own light from LightParams, brightness and all. It was
-            // normalized to its brightest channel and mixed half with white,
-            // so every zone's sun streamed the same near-white rays: Tirisfal's
-            // overcast sun poured as much light as Elwynn's noon, and its blue
-            // cast was gone.
-            in.tint = glm::min(lp.diffuseColor, glm::vec3(1.0f));
+            // The rays are the eye looking into the sun, so they take the
+            // sun's own colour from LightParams - pale green over Tirisfal,
+            // blue over Duskwood. They were the light it casts, normalized
+            // and mixed half with white, the same near-white everywhere.
+            in.tint = glm::min(lp.sunColor, glm::vec3(1.0f));
             in.sunUV = sun.uv;
             in.strength = strength;
         }

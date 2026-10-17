@@ -57,6 +57,10 @@ struct GPUPerFrameData {
     glm::vec4 windDirLean{1.0f, 0.0f, 0.0f, 0.0f}; // xy toward (world, unit), z lean, w swing
     glm::vec4 windPhases{0.0f};  // x trunk, y branch, z leaf phase, w branch/leaf scale
     glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
+    // The glow of the sky around the sun (LightParams' sunHaloColor), for the
+    // procedural sky the haze falls back to (sky_atmosphere.glsli). Appended
+    // after the wind so no shader's offsets move.
+    glm::vec4 sunHaloColor{0.0f};  // rgb = halo, w = unused
 };
 
 // Push constants for the model matrix (most common case)

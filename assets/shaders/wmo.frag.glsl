@@ -24,6 +24,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogSkyBand2;
     mat4 contactSpaceMatrix;
     vec4 contactParams;
+    vec4 windDirLean;   // the wind, unread here; declared to reach sunHaloColor
+    vec4 windPhases;
+    vec4 windTravel;
+    vec4 sunHaloColor;  // rgb = the sky's glow around the sun (LightIntBand 10)
 };
 
 #include "rt_lighting.glsli"
@@ -179,7 +183,8 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
         sky = textureLod(uSceneSky, uv, 0.0).rgb;
     } else {
         sky = atmosphereSkyColor(ray, normalize(-lightDir.xyz), fogSkyTop.rgb,
-                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb,
+                                 sunHaloColor.rgb);
         sky = sky * air.a + air.rgb;
     }
     if (fogFactor < 1.0 && fogSkyTop.w > 0.0)
@@ -405,7 +410,7 @@ void main() {
         vec3 glass = result * baseBrightness;
 
         vec3 reflectTint = atmosphereSkyColor(reflectDir, ldir, fogSkyTop.rgb,
-            fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
+            fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb, sunHaloColor.rgb);
         vec4 reflectedScene = rtReflectionAt(FragPos, vertexNormal);
         reflectTint = mix(reflectTint, reflectedScene.rgb, reflectedScene.a);
         glass = mix(glass, reflectTint, 0.2 + fresnel * 0.65);

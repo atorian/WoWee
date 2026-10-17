@@ -150,8 +150,8 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
         float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
         celestial_->render(cmd, perFrameSet, params.timeOfDay,
-                           &params.directionalDir, &params.sunColor, params.gameTime,
-                           nightFactor);
+                           &params.directionalDir, params.sunColor, params.sunHaloColor,
+                           params.gameTime, nightFactor);
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
@@ -170,7 +170,7 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // --- Lens flare (attenuated by atmosphere) ---
     if (lensFlare_) {
         glm::vec3 sunPos = getSunPosition(params);
-        lensFlare_->render(cmd, camera, sunPos, params.timeOfDay,
+        lensFlare_->render(cmd, camera, sunPos, params.sunColor, params.timeOfDay,
                            params.fogDensity, params.cloudDensity,
                            params.weatherIntensity, params.sunOcclusion);
     }

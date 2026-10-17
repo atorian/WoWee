@@ -18,8 +18,9 @@ struct SkyPushConstants {
     glm::vec4 horizonColor;   // DBC skyBand1Color
     glm::vec4 fogColor;       // DBC skyBand2Color / fogColor blend
     glm::vec4 sunDirAndTime;  // xyz = sun direction, w = timeOfDay
+    glm::vec4 sunHaloColor;   // DBC sun halo (LightIntBand channel 10), w unused
 };
-static_assert(sizeof(SkyPushConstants) == 80, "SkyPushConstants size mismatch");
+static_assert(sizeof(SkyPushConstants) == 96, "SkyPushConstants size mismatch");
 
 Skybox::Skybox() = default;
 
@@ -40,11 +41,11 @@ bool Skybox::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     const auto& vertStage = shaders.vertStage;
     const auto& fragStage = shaders.fragStage;
 
-    // Push constant range: 5 x vec4 = 80 bytes
+    // Push constant range: 6 x vec4 = 96 bytes
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(SkyPushConstants);  // 80 bytes
+    pushRange.size = sizeof(SkyPushConstants);  // 96 bytes
 
     // Create pipeline layout with perFrameLayout (set 0) + push constants
     pipelineLayout = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -133,6 +134,7 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     push.horizonColor  = glm::vec4(params.skyBand1Color, 1.0f);
     push.fogColor      = glm::vec4(params.skyBand2Color, 1.0f);
     push.sunDirAndTime = glm::vec4(sunDir, params.timeOfDay);
+    push.sunHaloColor  = glm::vec4(params.sunHaloColor, 1.0f);
 
     // Bind pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
