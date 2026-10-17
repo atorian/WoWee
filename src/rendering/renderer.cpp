@@ -2109,6 +2109,50 @@ void Renderer::drawSunGlare(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
                                      lightingManager->getLightingParams().sunColor, alpha);
 }
 
+void Renderer::logSunDiagnostic(const SkyParams& params) {
+    if (!skySystem || !camera) return;
+    const SkySun* skySun = skySystem->getSun();
+    SkySun::DiscDraw sun = skySun ? skySun->lastDiscDraw() : SkySun::DiscDraw{};
+    if (skySystem->celestialSkipped()) sun = {.drawn = false, .skipped = "under a sky model"};
+
+    const glm::vec3 sunDir = params.sunDisc.direction;
+    const SunOnScreen screen =
+        sunScreenPosition(camera->getViewMatrix(), camera->getProjectionMatrix(), sunDir);
+    const bool inView = screen.inFront && screen.uv.x >= 0.0f && screen.uv.x <= 1.0f &&
+                        screen.uv.y >= 0.0f && screen.uv.y <= 1.0f;
+    const float fromView = glm::degrees(std::acos(
+        glm::clamp(glm::dot(glm::normalize(camera->getForward()), sunDir), -1.0f, 1.0f)));
+
+    const SunDiagState state{
+        .drawn = sun.drawn,
+        .skipped = sun.skipped,
+        .inView = inView,
+        .angleStep = static_cast<int>(fromView / 5.0f),
+        .occlusionStep = static_cast<int>(sunGlare_ * 4.0f + 0.5f),
+        .hourStep = static_cast<int>(params.timeOfDay * 4.0f),
+        .weather = params.weatherIntensity > 0.01f,
+    };
+    if (state == sunDiagLast_ || globalTime - sunDiagLoggedAt_ < 0.5) return;
+    sunDiagLast_ = state;
+    sunDiagLoggedAt_ = globalTime;
+
+    const auto v3 = [](const glm::vec3& c) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "(%.2f %.2f %.2f)", c.r, c.g, c.b);
+        return std::string(buf);
+    };
+    LOG_INFO("sun: ", sun.drawn ? "drawn" : "not drawn - ", sun.drawn ? "" : sun.skipped,
+             " hour=", params.timeOfDay,
+             " elev=", glm::degrees(std::asin(glm::clamp(sunDir.z, -1.0f, 1.0f))),
+             " inView=", inView, " uv=(", screen.uv.x, ",", screen.uv.y, ")",
+             " fromView=", fromView,
+             " colour=", v3(params.sunColor), " alpha=", sun.alpha,
+             " glare=", sunGlare_, " glareSky=", sunGlareSky_, " clouds=", params.cloudDensity,
+             " weather=", params.weatherIntensity,
+             " fog=", volumetricThisFrame_ ? fogExtinction_ : 0.0f,
+             " msaa=", int(vkCtx ? vkCtx->getMsaaSamples() : 1));
+}
+
 void Renderer::update(float deltaTime) {
     ZoneScopedN("Renderer::update");
     globalTime += deltaTime;
@@ -3142,6 +3186,7 @@ void Renderer::renderWorld() {
                     useOriginalSkybox);
                 skyParams.sunGlareVisibility = sunGlare_;
                 skySystem->render(cmd, perFrameSet, *camera, skyParams);
+                logSunDiagnostic(skyParams);
                 if (drawSkyModels) {
                     skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
                 }
@@ -3359,6 +3404,7 @@ void Renderer::renderWorld() {
                 useOriginalSkybox);
             skyParams.sunGlareVisibility = sunGlare_;
             skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
+            logSunDiagnostic(skyParams);
             if (drawSkyModels) {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
                 skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);

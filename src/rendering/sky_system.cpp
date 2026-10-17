@@ -138,7 +138,8 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         renderProceduralStars = !params.skyboxHasStars;
     }
 
-    if (params.useOriginalSkybox && !renderProceduralStars) {
+    celestialSkipped_ = params.useOriginalSkybox && !renderProceduralStars;
+    if (celestialSkipped_) {
         if (starField_) starField_->setEnabled(false);
         return;
     }

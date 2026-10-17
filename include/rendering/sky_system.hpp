@@ -135,6 +135,10 @@ public:
     /// The sun's textures, once the client's data is open.
     void loadTextures(pipeline::AssetManager* assets);
 
+    /// Whether the last render() drew the sun, and if not why - including
+    /// when a sky model standing in for the client's sky left it out.
+    [[nodiscard]] bool celestialSkipped() const { return celestialSkipped_; }
+
 private:
     std::unique_ptr<Skybox>    skybox_;      // Authoritative sky
     std::unique_ptr<Celestial> celestial_;   // Sun + 2 moons
@@ -145,6 +149,7 @@ private:
 
     bool proceduralStarsEnabled_ = false;
     bool debugSkyMode_ = false;
+    bool celestialSkipped_ = false;
     bool initialized_ = false;
 };
 

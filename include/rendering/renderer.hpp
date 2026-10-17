@@ -342,6 +342,23 @@ private:
     /// client's fallback for its occlusion query (0x9abc60).
     [[nodiscard]] float sampleSunOcclusion(const glm::vec3& sunDir) const;
 
+    /// The sun as the camera's sky drew it: whether the disc was drawn and,
+    /// if not, why; where it stands and whether it is in view; what it was
+    /// drawn with; and what might hide it. INFO, on a change, at most twice a
+    /// second - for the report of a sun that is not there.
+    void logSunDiagnostic(const SkyParams& params);
+    struct SunDiagState {
+        bool drawn = false;
+        const char* skipped = nullptr;
+        bool inView = false;
+        int angleStep = -1;      ///< from the view direction, 5-degree steps
+        int occlusionStep = -1;  ///< quarters
+        int hourStep = -1;       ///< quarter hours
+        bool weather = false;
+        bool operator==(const SunDiagState&) const = default;
+    };
+    SunDiagState sunDiagLast_;
+    double sunDiagLoggedAt_ = -1.0;
 
     /// LiquidType.dbc, read in initializeRenderers; the scene and the water
     /// hold pointers to it, so it is declared before both.
