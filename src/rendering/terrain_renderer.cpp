@@ -46,8 +46,10 @@ constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
 // The material set's bindings past the seven samplers and the params block:
 // the base texture's relief, then each layer's.
 constexpr uint32_t kFirstNormalMapBinding = 8;
-constexpr uint32_t kMaterialBindingCount = kFirstNormalMapBinding + 4;
-constexpr uint32_t kMaterialSamplerCount = 7 + 4;
+// Then the chunk's own normals, which the ground is lit from.
+constexpr uint32_t kNormalGridBinding = kFirstNormalMapBinding + 4;
+constexpr uint32_t kMaterialBindingCount = kNormalGridBinding + 1;
+constexpr uint32_t kMaterialSamplerCount = 7 + 4 + 1;
 
 /// The Sobel strength the ground's relief is derived with, half a wall's. The
 /// ground is seen at a grazing angle across a whole road at once, where the
@@ -156,6 +158,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
     // binding 7: uniform buffer (TerrainParams)
     // bindings 8-11: combined image samplers (base + 3 layer normal maps)
+    // binding 12: combined image sampler (the chunk's normals)
     std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
     for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         materialBindings[i] = {};
@@ -421,6 +424,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
 
             registerRtChunk(gpuChunk, chunk);
             chunks.push_back(std::move(gpuChunk));
+            chunkAtStale_ = true;
         }
     }
 
@@ -490,6 +494,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
 
         registerRtChunk(gpuChunk, chunk);
         chunks.push_back(std::move(gpuChunk));
+        chunkAtStale_ = true;
         uploaded++;
     }
 
@@ -589,9 +594,20 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
     indices.insert(indices.end(), chunk.lodIndices.begin(), chunk.lodIndices.end());
     gpuChunk.lods[0] = {0, gpuChunk.indexCount};
     for (size_t level = 1; level < gpuChunk.lods.size(); ++level) {
-        const auto& range = chunk.lods[level - 1];
+        const auto& range = chunk.lods[level];
         gpuChunk.lods[level] = {gpuChunk.indexCount + range.first, range.count};
     }
+    for (size_t level = 0; level < gpuChunk.skirts.size(); ++level) {
+        for (size_t edge = 0; edge < 4; ++edge) {
+            const auto& range = chunk.skirts[level][edge];
+            gpuChunk.skirts[level][edge] = {gpuChunk.indexCount + range.first, range.count};
+        }
+    }
+    gpuChunk.chunkX = chunk.chunkX;
+    gpuChunk.chunkY = chunk.chunkY;
+    gpuChunk.lodErrors = chunk.lodError;
+    gpuChunk.offeredLods = chunk.offeredLods();
+    gpuChunk.normalGrid = createNormalGridTexture(chunk.normalGrid);
 
     VkDeviceSize vbSize = chunk.vertices.size() * sizeof(pipeline::TerrainVertex);
     AllocatedBuffer vb = uploadBuffer(*vkCtx, chunk.vertices.data(), vbSize,
@@ -731,6 +747,33 @@ TextureRef TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alpha
     return alpha ? alpha : opaqueAlphaTexture;
 }
 
+TextureRef TerrainRenderer::createNormalGridTexture(const std::vector<uint8_t>& normalGrid) {
+    constexpr int n = pipeline::ChunkMesh::kNormalGridSize;
+    if (normalGrid.size() != static_cast<size_t>(n * n * 4)) {
+        static bool told = false;
+        if (!told) {
+            told = true;
+            LOG_WARNING("Terrain chunk without a normal image (", normalGrid.size(),
+                        " bytes) - lit as flat ground");
+        }
+        return flatNormalTexture;
+    }
+    // Linear between texels, which is the light interpolated between the
+    // vertices; clamped, so a chunk's edge reads its own edge normals.
+    TextureRef grid = adoptPixels(*vkCtx, TextureForm::Owned, normalGrid.data(), n, n,
+                                  VK_FORMAT_R8G8B8A8_UNORM, false, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    if (!grid) {
+        // Memory pressure fails many chunks at once; the first says so.
+        static bool told = false;
+        if (!told) {
+            told = true;
+            LOG_WARNING("Terrain chunk normal image could not be made - those chunks are lit as flat ground");
+        }
+        return flatNormalTexture;
+    }
+    return grid;
+}
+
 VkDescriptorSet TerrainRenderer::allocateMaterialSet() {
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -788,6 +831,7 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     VkDescriptorImageInfo imageInfos[kMaterialBindingCount] = {};
     imageInfos[0] = pick(chunk.baseTexture.get(), white)->descriptorInfo();
     imageInfos[kFirstNormalMapBinding] = pick(chunk.baseNormalMap.get(), flat)->descriptorInfo();
+    imageInfos[kNormalGridBinding] = pick(chunk.normalGrid.get(), flat)->descriptorInfo();
     for (uint32_t i = 0; i < 3; i++) {
         imageInfos[1 + i] = pick(chunk.layerTextures[i].get(), white)->descriptorInfo();
         imageInfos[4 + i] = pick(chunk.alphaTextures[i].get(), opaque)->descriptorInfo();
@@ -820,35 +864,19 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
 
 namespace {
 
-/// How big a level's triangles are across the ground, in yards. Level 0 fans
-/// four triangles from each 4.17-yard quad's centre, 2.95 yards to a side;
-/// level 1 splits the quad in two; levels 2 and 3 double the quad each.
-constexpr float kLodTriangleYards[pipeline::kTerrainLodLevels] = {2.95f, 4.17f, 8.33f, 16.67f};
-/// A chunk drops to the next level where the finer level's triangles would
-/// come out smaller than this on screen. Below it a triangle is mostly the
-/// edges of partly covered pixels - shaded again for every one under MSAA -
-/// and adds no shape a viewer can see.
-constexpr float kLodMinTrianglePixels = 8.0f;
-/// Each level spans at least this much distance. Two neighbouring chunks'
-/// distances differ by at most a chunk's diagonal (47 yards), so with every
-/// band wider than twice that, neighbours are never more than one level
-/// apart - and level 0, which has no skirts, never meets level 2.
-constexpr float kLodMinBandYards = 100.0f;
+/// The most a coarser level may move the ground on screen, in pixels: how
+/// far its surface strays from the full mesh (ChunkMesh::lodError), seen
+/// from the chunk's nearest point. Under a pixel the shape cannot be told
+/// from the full mesh's; the light is the same at every level, from the
+/// chunk's normal image.
+constexpr float kLodMaxErrorPixels = 1.0f;
+
+/// A chunk's place on the map: tile * 16 + chunk along each axis.
+uint64_t chunkMapKey(int gx, int gy) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(gx)) << 32) | static_cast<uint32_t>(gy);
+}
 
 }  // namespace
-
-int TerrainRenderer::lodLevelAt(float distance, float focalPixels) const {
-    if (!lodEnabled_ || !(focalPixels > 0.0f)) return 0;
-    int level = 0;
-    float switchAt = 0.0f;
-    for (int next = 1; next < pipeline::kTerrainLodLevels; ++next) {
-        switchAt = std::max(kLodTriangleYards[next - 1] * focalPixels / kLodMinTrianglePixels,
-                            switchAt + kLodMinBandYards);
-        if (distance < switchAt) break;
-        level = next;
-    }
-    return level;
-}
 
 void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
     if (chunks.empty() || !pipeline) {
@@ -931,7 +959,22 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         megaBuffersBound = true;
     }
 
-    for (const auto& chunk : chunks) {
+    // Where each chunk is, by its place on the map, for its neighbours.
+    if (chunkAtStale_) {
+        chunkAt_.clear();
+        chunkAt_.reserve(chunks.size());
+        for (uint32_t i = 0; i < chunks.size(); ++i) {
+            chunkAt_[chunkMapKey(chunks[i].tileX * 16 + chunks[i].chunkX,
+                                 chunks[i].tileY * 16 + chunks[i].chunkY)] = i;
+        }
+        chunkAtStale_ = false;
+    }
+
+    // First every chunk's level, so each can see its neighbours'.
+    frameLevels_.assign(chunks.size(), -1);
+    frameDrawn_.clear();
+    for (uint32_t i = 0; i < chunks.size(); ++i) {
+        const auto& chunk = chunks[i];
         if (!chunk.isValid() || !chunk.materialSet) continue;
 
         float dx = chunk.boundingSphereCenter.x - camPos.x;
@@ -950,6 +993,23 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
             continue;
         }
 
+        // The coarsest level the chunk offers whose error stays under a
+        // pixel, seen from the chunk's nearest point, height included: from
+        // Dalaran's height the ground below is further than it is across.
+        const float nearest =
+            glm::length(chunk.boundingSphereCenter - camPos) - chunk.boundingSphereRadius;
+        frameLevels_[i] = static_cast<int8_t>(
+            lodEnabled_ ? pipeline::terrainLodFor(chunk.lodErrors, chunk.offeredLods, nearest, focalPixels,
+                                                  kLodMaxErrorPixels)
+                        : 0);
+        frameDrawn_.push_back(i);
+        if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
+    }
+
+    for (const uint32_t i : frameDrawn_) {
+        const auto& chunk = chunks[i];
+        const int level = frameLevels_[i];
+
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &chunk.materialSet, 0, nullptr);
 
@@ -964,13 +1024,8 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                                offsetof(GPUPushConstants, localLights), sizeof(LocalLightSet), &pushedLights);
         }
 
-        // The coarsest level whose triangles still come out big enough on
-        // screen, or the next finer one the chunk offers.
-        int level = lodLevelAt(std::sqrt(distSq), focalPixels);
-        while (level > 0 && chunk.lods[static_cast<size_t>(level)].count == 0) --level;
-        const auto& lod = chunk.lods[static_cast<size_t>(level)];
-
-        if (useMegaBuffers && chunk.megaBaseVertex >= 0) {
+        const bool inMega = useMegaBuffers && chunk.megaBaseVertex >= 0;
+        if (inMega) {
             // Rebound if a fallback chunk bound its own buffers since. The mega
             // buffers are bound once before the loop, and a chunk without a
             // place in them binds its own - which stays bound for whatever comes
@@ -983,19 +1038,41 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                 vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
                 megaBuffersBound = true;
             }
-            vkCmdDrawIndexed(cmd, lod.count, 1,
-                             chunk.megaFirstIndex + lod.first, chunk.megaBaseVertex, 0);
         } else {
             // Fallback: per-chunk VB/IB bind + direct draw
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, lod.count, 1, lod.first, 0, 0);
             megaBuffersBound = false;
         }
-        renderedTriangles_ += lod.count / 3;
+        const auto draw = [&](const TerrainChunkGPU::LodRange& range) {
+            if (range.count == 0) return;
+            if (inMega) {
+                vkCmdDrawIndexed(cmd, range.count, 1, chunk.megaFirstIndex + range.first,
+                                 chunk.megaBaseVertex, 0);
+            } else {
+                vkCmdDrawIndexed(cmd, range.count, 1, range.first, 0, 0);
+            }
+            renderedTriangles_ += range.count / 3;
+        };
+
+        draw(chunk.lods[static_cast<size_t>(level)]);
+        // A skirt only where the neighbour across the edge is drawn at
+        // another level: there the two edges are different lines. Between
+        // chunks at the same level they are one line, and a skirt hanging
+        // below it is ground shaded for nothing.
+        const int gx = chunk.tileX * 16 + chunk.chunkX;
+        const int gy = chunk.tileY * 16 + chunk.chunkY;
+        const int neighbourX[4] = {gx, gx, gx - 1, gx + 1};
+        const int neighbourY[4] = {gy - 1, gy + 1, gy, gy};
+        for (size_t edge = 0; edge < 4; ++edge) {
+            const auto found = chunkAt_.find(chunkMapKey(neighbourX[edge], neighbourY[edge]));
+            if (found == chunkAt_.end()) continue;
+            const int neighbourLevel = frameLevels_[found->second];
+            if (neighbourLevel < 0 || neighbourLevel == level) continue;
+            draw(chunk.skirts[static_cast<size_t>(level)][edge]);
+        }
         renderedChunks++;
-        if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
     }
 
 }
@@ -1165,6 +1242,7 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         }
     }
     if (removed > 0) {
+        chunkAtStale_ = true;
         LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
 }
@@ -1176,6 +1254,7 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
+    chunkAtStale_ = true;
     renderedChunks = 0;
 }
 
@@ -1253,6 +1332,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     for (TextureRef& t : chunk.alphaTextures) t.reset();
     chunk.baseNormalMap.reset();
     for (TextureRef& t : chunk.layerNormalMaps) t.reset();
+    chunk.normalGrid.reset();
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsUBO, paramsAlloc, pool, materialSet]() {

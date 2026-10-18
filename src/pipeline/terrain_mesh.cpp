@@ -77,7 +77,9 @@ ChunkMesh TerrainMeshGenerator::generateChunkMesh(const MapChunk& chunk, int chu
 
     // Generate triangle indices (checks for holes)
     mesh.indices = generateIndices(chunk);
-    // The far levels and their skirts, after the full mesh.
+    // The light comes from the full mesh's normals whatever level is drawn.
+    mesh.normalGrid = generateNormalGrid(mesh.vertices);
+    // The far levels and every level's skirts, after the full mesh.
     generateLods(chunk, mesh);
 
     // Debug: verify mesh integrity (one-time)
@@ -348,40 +350,99 @@ void TerrainMeshGenerator::generateLods(const MapChunk& chunk, ChunkMesh& mesh) 
     };
 
     std::vector<TerrainIndex> level;
-    for (int lod = 1; lod < kTerrainLodLevels; ++lod) {
-        const int stride = 1 << (lod - 1);
+    // Per cell of the level being built: 0 a hole, 1 split along a-d, 2
+    // along b-c. What the error below is measured against.
+    std::vector<uint8_t> cellSplit;
+    for (int lod = 0; lod < kTerrainLodLevels; ++lod) {
+        const int stride = lod == 0 ? 1 : 1 << (lod - 1);
         const int cells = 8 / stride;
         level.clear();
 
-        // The surface: two triangles a cell, split along the diagonal whose
-        // ends are closer in height, which strays least from the full mesh.
-        // A cell that is all hole is left open; one that is part hole cannot
-        // be drawn at this level, and neither can any coarser one.
+        // The surface - level 0's is `indices` - two triangles a cell, split
+        // along the diagonal whose ends are closer in height, which strays
+        // least from the full mesh. A cell that is all hole is left open; one
+        // that is part hole cannot be drawn at this level, and neither can
+        // any coarser one.
         bool offered = true;
-        for (int cy = 0; cy < cells && offered; ++cy) {
-            for (int cx = 0; cx < cells; ++cx) {
-                int holes = 0;
-                for (int y = cy * stride; y < (cy + 1) * stride; ++y)
-                    for (int x = cx * stride; x < (cx + 1) * stride; ++x) holes += chunk.isHole(y, x) ? 1 : 0;
-                if (holes == stride * stride) continue;
-                if (holes > 0) { offered = false; break; }
+        if (lod > 0) {
+            cellSplit.assign(static_cast<size_t>(cells * cells), 0);
+            for (int cy = 0; cy < cells && offered; ++cy) {
+                for (int cx = 0; cx < cells; ++cx) {
+                    int holes = 0;
+                    for (int y = cy * stride; y < (cy + 1) * stride; ++y)
+                        for (int x = cx * stride; x < (cx + 1) * stride; ++x) holes += chunk.isHole(y, x) ? 1 : 0;
+                    if (holes == stride * stride) continue;
+                    if (holes > 0) { offered = false; break; }
 
-                const auto a = static_cast<TerrainIndex>(outerVertex(cy * stride, cx * stride));
-                const auto b = static_cast<TerrainIndex>(outerVertex(cy * stride, (cx + 1) * stride));
-                const auto c = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, cx * stride));
-                const auto d = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, (cx + 1) * stride));
-                if (std::abs(height(a) - height(d)) <= std::abs(height(b) - height(c))) {
-                    level.insert(level.end(), {a, b, d, a, d, c});
-                } else {
-                    level.insert(level.end(), {a, b, c, b, d, c});
+                    const auto a = static_cast<TerrainIndex>(outerVertex(cy * stride, cx * stride));
+                    const auto b = static_cast<TerrainIndex>(outerVertex(cy * stride, (cx + 1) * stride));
+                    const auto c = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, cx * stride));
+                    const auto d = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, (cx + 1) * stride));
+                    if (std::abs(height(a) - height(d)) <= std::abs(height(b) - height(c))) {
+                        level.insert(level.end(), {a, b, d, a, d, c});
+                        cellSplit[static_cast<size_t>(cy * cells + cx)] = 1;
+                    } else {
+                        level.insert(level.end(), {a, b, c, b, d, c});
+                        cellSplit[static_cast<size_t>(cy * cells + cx)] = 2;
+                    }
                 }
             }
-        }
-        if (!offered) break;
+            if (!offered) break;
 
-        // The skirts, one strip a segment of this level's edge, left off
-        // where the ground beside it is a hole.
+            // The error: the furthest the full mesh's vertices - outer and
+            // inner - lie above or below this level's surface. Both surfaces
+            // are flat between those vertices and this level's own are some
+            // of them, so the furthest they part is at one of them.
+            float error = mesh.lodError[static_cast<size_t>(lod - 1)];
+            for (int vertex = 0; vertex < 145; ++vertex) {
+                const int row = vertex / 17;
+                const int col = vertex % 17;
+                const float gx = col > 8 ? static_cast<float>(col - 9) + 0.5f : static_cast<float>(col);
+                const float gy = col > 8 ? static_cast<float>(row) + 0.5f : static_cast<float>(row);
+                // The cell it is in, and the one before it too where it lies
+                // on their shared side: beside a hole only one of them is drawn.
+                const float sx = gx / static_cast<float>(stride);
+                const float sy = gy / static_cast<float>(stride);
+                const int cxHigh = std::min(static_cast<int>(sx), cells - 1);
+                const int cyHigh = std::min(static_cast<int>(sy), cells - 1);
+                const int cxLow = (sx == std::floor(sx) && sx > 0.0f) ? static_cast<int>(sx) - 1 : cxHigh;
+                const int cyLow = (sy == std::floor(sy) && sy > 0.0f) ? static_cast<int>(sy) - 1 : cyHigh;
+                for (int cy = cyLow; cy <= cyHigh; ++cy) {
+                    for (int cx = cxLow; cx <= cxHigh; ++cx) {
+                        const uint8_t split = cellSplit[static_cast<size_t>(cy * cells + cx)];
+                        if (split == 0) continue;
+                        const float u = sx - static_cast<float>(cx);
+                        const float v = sy - static_cast<float>(cy);
+                        const float hA = height(outerVertex(cy * stride, cx * stride));
+                        const float hB = height(outerVertex(cy * stride, (cx + 1) * stride));
+                        const float hC = height(outerVertex((cy + 1) * stride, cx * stride));
+                        const float hD = height(outerVertex((cy + 1) * stride, (cx + 1) * stride));
+                        float surface;
+                        if (split == 1) {
+                            surface = u >= v ? hA + (hB - hA) * u + (hD - hB) * v
+                                             : hA + (hC - hA) * v + (hD - hC) * u;
+                        } else {
+                            surface = u + v <= 1.0f ? hA + (hB - hA) * u + (hC - hA) * v
+                                                    : hD + (hC - hD) * (1.0f - u) + (hB - hD) * (1.0f - v);
+                        }
+                        error = std::max(error, std::abs(height(vertex) - surface));
+                    }
+                }
+            }
+            mesh.lodError[static_cast<size_t>(lod)] = error;
+        }
+
+        auto& surfaceRange = mesh.lods[static_cast<size_t>(lod)];
+        surfaceRange.first = static_cast<uint32_t>(mesh.lodIndices.size());
+        surfaceRange.count = static_cast<uint32_t>(level.size());
+        mesh.lodIndices.insert(mesh.lodIndices.end(), level.begin(), level.end());
+
+        // The skirts, an edge at a time - drawn only where the neighbour is
+        // at another level - one strip a segment of this level's edge, left
+        // off where the ground beside it is a hole.
         for (int edge = 0; edge < 4; ++edge) {
+            auto& skirtRange = mesh.skirts[static_cast<size_t>(lod)][static_cast<size_t>(edge)];
+            skirtRange.first = static_cast<uint32_t>(mesh.lodIndices.size());
             for (int i = 0; i + stride <= 8; i += stride) {
                 bool open = true;
                 for (int cell = i; cell < i + stride; ++cell) open = open && edgeCellIsHole(chunk, edge, cell);
@@ -390,15 +451,66 @@ void TerrainMeshGenerator::generateLods(const MapChunk& chunk, ChunkMesh& mesh) 
                 const auto top1 = static_cast<TerrainIndex>(edgeVertex(edge, i + stride));
                 const TerrainIndex low0 = skirtVertex(edge, i);
                 const TerrainIndex low1 = skirtVertex(edge, i + stride);
-                level.insert(level.end(), {top0, top1, low1, top0, low1, low0});
+                mesh.lodIndices.insert(mesh.lodIndices.end(), {top0, top1, low1, top0, low1, low0});
             }
+            skirtRange.count = static_cast<uint32_t>(mesh.lodIndices.size()) - skirtRange.first;
         }
-
-        auto& range = mesh.lods[static_cast<size_t>(lod - 1)];
-        range.first = static_cast<uint32_t>(mesh.lodIndices.size());
-        range.count = static_cast<uint32_t>(level.size());
-        mesh.lodIndices.insert(mesh.lodIndices.end(), level.begin(), level.end());
     }
+}
+
+std::vector<uint8_t> TerrainMeshGenerator::generateNormalGrid(const std::vector<TerrainVertex>& vertices) {
+    constexpr int n = ChunkMesh::kNormalGridSize;
+    std::array<glm::vec3, n * n> grid{};
+    std::array<bool, n * n> known{};
+    // Outer vertex (row r, column c) on texel (2c, 2r); inner (y, x) on
+    // (2x + 1, 2y + 1) - the same layout as the alpha maps' coordinates.
+    for (int vertex = 0; vertex < 145 && vertex < static_cast<int>(vertices.size()); ++vertex) {
+        const int row = vertex / 17;
+        const int col = vertex % 17;
+        const int tx = col > 8 ? 2 * (col - 9) + 1 : 2 * col;
+        const int ty = col > 8 ? 2 * row + 1 : 2 * row;
+        const auto& normal = vertices[static_cast<size_t>(vertex)].normal;
+        grid[static_cast<size_t>(ty * n + tx)] = glm::vec3(normal[0], normal[1], normal[2]);
+        known[static_cast<size_t>(ty * n + tx)] = true;
+    }
+    // The texels between: the average of their neighbours, which are always
+    // two outer and up to two inner vertices.
+    for (int ty = 0; ty < n; ++ty) {
+        for (int tx = 0; tx < n; ++tx) {
+            if (known[static_cast<size_t>(ty * n + tx)]) continue;
+            glm::vec3 sum(0.0f);
+            const int offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+            for (const auto& o : offsets) {
+                const int x = tx + o[0], y = ty + o[1];
+                if (x < 0 || y < 0 || x >= n || y >= n || !known[static_cast<size_t>(y * n + x)]) continue;
+                sum += grid[static_cast<size_t>(y * n + x)];
+            }
+            grid[static_cast<size_t>(ty * n + tx)] = sum;
+        }
+    }
+    std::vector<uint8_t> out(static_cast<size_t>(n * n * 4));
+    for (size_t i = 0; i < grid.size(); ++i) {
+        const float len = glm::length(grid[i]);
+        const glm::vec3 unit = len > 1e-6f ? grid[i] / len : glm::vec3(0.0f, 0.0f, 1.0f);
+        for (int k = 0; k < 3; ++k) {
+            out[i * 4 + static_cast<size_t>(k)] =
+                static_cast<uint8_t>(std::lround(std::clamp(unit[k] * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f));
+        }
+        out[i * 4 + 3] = 255;
+    }
+    return out;
+}
+
+int terrainLodFor(const std::array<float, kTerrainLodLevels>& errorYards, uint32_t offeredLods,
+                  float distance, float focalPixels, float maxErrorPixels) {
+    const float d = std::max(distance, 1.0f);
+    int chosen = 0;
+    for (int level = 1; level < kTerrainLodLevels; ++level) {
+        if (!(offeredLods & (1u << level))) break;
+        if (errorYards[static_cast<size_t>(level)] * focalPixels / d > maxErrorPixels) break;
+        chosen = level;
+    }
+    return chosen;
 }
 
 void TerrainMeshGenerator::decompressNormal(const int8_t* compressedNormal, float* normal) {

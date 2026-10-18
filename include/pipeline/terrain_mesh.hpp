@@ -49,23 +49,48 @@ struct ChunkMesh {
     /// read this one.
     std::vector<TerrainIndex> indices;
 
-    /// The coarser levels, 1 to kTerrainLodLevels-1, for ground far enough
-    /// away that level 0's triangles would be a pixel or two across: each a
-    /// range of `lodIndices` holding its surface and then its skirts. A level
-    /// whose count is 0 is not offered - its quads would have to cover only
-    /// part of a hole.
+    /// Each coarser level's surface, as a range of `lodIndices` (level 0's is
+    /// `indices`, and its range here is empty). A coarser level whose count
+    /// is 0 is not offered - its cells would have to cover only part of a
+    /// hole.
     struct IndexRange {
         uint32_t first = 0;
         uint32_t count = 0;
     };
     std::vector<TerrainIndex> lodIndices;
-    std::array<IndexRange, kTerrainLodLevels - 1> lods{};
+    std::array<IndexRange, kTerrainLodLevels> lods{};
+    /// Each level's skirt along each edge (row 0, row 8, column 0, column 8),
+    /// as ranges of `lodIndices`. A skirt is drawn only along an edge whose
+    /// neighbour is drawn at another level: between two chunks at the same
+    /// level the edges are the same line and nothing shows through.
+    std::array<std::array<IndexRange, 4>, kTerrainLodLevels> skirts{};
+    /// How far each level's surface strays up or down from the full mesh, at
+    /// worst, in yards: 0 for level 0, and never less for a level than for
+    /// the one before. What a level costs the picture, seen from a distance,
+    /// is this projected to the screen (terrainLodFor).
+    std::array<float, kTerrainLodLevels> lodError{};
     /// Where the skirt vertices start in `vertices`: each edge's nine outer
     /// vertices again, lowered by the skirt depth, edge after edge (north,
     /// south, west, east in grid terms: row 0, row 8, column 0, column 8).
-    /// The skirts hang from a coarse level's edges so that where it meets a
-    /// finer neighbour the sky does not show through the seam.
+    /// Every level hangs skirts from its edges, so that two neighbours drawn
+    /// at different levels never let the sky show through their seam.
     uint32_t skirtFirstVertex = 0;
+
+    /// The chunk's surface normals as a 17x17 RGBA8 image (rgb = normal *
+    /// 0.5 + 0.5): the outer vertices on even texels, the inner ones on odd,
+    /// the texels between the average of their neighbours. The ground is lit
+    /// from this rather than from its vertices, so a coarse level keeps the
+    /// light and shade of every vertex it no longer draws.
+    static constexpr int kNormalGridSize = 17;
+    std::vector<uint8_t> normalGrid;
+
+    /// The levels the chunk offers, bit per level; level 0 always.
+    [[nodiscard]] uint32_t offeredLods() const {
+        uint32_t mask = 1u;
+        for (int level = 1; level < kTerrainLodLevels; ++level)
+            if (lods[static_cast<size_t>(level)].count > 0) mask |= 1u << level;
+        return mask;
+    }
 
     // Chunk position in world space
     float worldX;
@@ -88,6 +113,15 @@ struct ChunkMesh {
     [[nodiscard]] size_t getVertexCount() const { return vertices.size(); }
     [[nodiscard]] size_t getTriangleCount() const { return indices.size() / 3; }
 };
+
+/// The level a chunk is drawn at from `distance` yards (its nearest point)
+/// by a camera whose vertical focal length is `focalPixels`: the coarsest
+/// offered level whose error comes out no larger than `maxErrorPixels` on
+/// screen. Flat ground drops to its coarsest level close in; a mountain
+/// keeps its detail as far as its shape can be seen.
+[[nodiscard]] int terrainLodFor(const std::array<float, kTerrainLodLevels>& errorYards,
+                                uint32_t offeredLods, float distance, float focalPixels,
+                                float maxErrorPixels);
 
 /**
  * Complete terrain tile mesh (16x16 chunks)
@@ -174,10 +208,14 @@ private:
     static std::vector<TerrainIndex> generateIndices(const MapChunk& chunk);
 
     /**
-     * The coarser levels of detail and their skirts: appends the skirt
-     * vertices to `mesh.vertices` and fills `mesh.lodIndices` and `mesh.lods`.
+     * The coarser levels of detail, every level's skirts and each level's
+     * error: appends the skirt vertices to `mesh.vertices` and fills
+     * `mesh.lodIndices`, `mesh.lods` and `mesh.lodError`.
      */
     static void generateLods(const MapChunk& chunk, ChunkMesh& mesh);
+
+    /// The 17x17 normal image from the 145 vertices' normals.
+    static std::vector<uint8_t> generateNormalGrid(const std::vector<TerrainVertex>& vertices);
 
 
     /**

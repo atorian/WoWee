@@ -43,13 +43,22 @@ struct TerrainChunkGPU {
     /// Level 0, the full mesh, at the start of the index buffer: what the
     /// shadow pass and anything else that wants the true ground draws.
     uint32_t indexCount = 0;
-    /// Each level of detail's range of the index buffer, level 0 first; a
-    /// level with no indices is not offered and the next finer one is drawn.
+    /// Each level of detail's surface in the index buffer, level 0 first; a
+    /// level with no indices is not offered.
     struct LodRange {
         uint32_t first = 0;
         uint32_t count = 0;
     };
     std::array<LodRange, pipeline::kTerrainLodLevels> lods{};
+    /// Each level's skirt along each edge (row 0, row 8, column 0, column 8),
+    /// drawn where the neighbour across that edge is at another level.
+    std::array<std::array<LodRange, 4>, pipeline::kTerrainLodLevels> skirts{};
+    /// How far each level strays from the ground, in yards (ChunkMesh::lodError).
+    std::array<float, pipeline::kTerrainLodLevels> lodErrors{};
+    uint32_t offeredLods = 1u;
+    /// The chunk's normals as an image (ChunkMesh::normalGrid), which the
+    /// ground is lit from at every level.
+    TextureRef normalGrid;
 
     // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
@@ -76,6 +85,9 @@ struct TerrainChunkGPU {
 
     // Owning tile coordinates (for per-tile removal)
     int tileX = -1, tileY = -1;
+    /// The chunk's place in its tile (ChunkMesh::chunkX/chunkY): with the
+    /// tile, where its neighbours are.
+    int chunkX = 0, chunkY = 0;
 
     // Bounding sphere for frustum culling
     float boundingSphereRadius = 0.0f;
@@ -211,13 +223,9 @@ public:
     [[nodiscard]] int getTriangleCount() const;
 
     /// The height in pixels of the image the terrain is drawn into, which the
-    /// level of detail is chosen against: a chunk drops a level where the
-    /// finer one's triangles would be smaller than kLodMinTrianglePixels.
+    /// level of detail is chosen against: a chunk is drawn at the coarsest
+    /// level whose error stays within kLodMaxErrorPixels on screen.
     void setLodViewportHeight(uint32_t pixels) { lodViewportHeight_ = pixels; }
-    /// The level of detail a chunk this far from a camera with this vertical
-    /// focal length (in pixels) is drawn at, before falling back over levels
-    /// the chunk does not offer. Level 0 throughout when LOD is off.
-    [[nodiscard]] int lodLevelAt(float distance, float focalPixels) const;
     [[nodiscard]] VkContext* getVkContext() const { return vkCtx; }
 
     /// Where chunks register their geometry for the ray traced lighting.
@@ -234,6 +242,9 @@ private:
     /// again here, on this thread. Empty when it cannot be had.
     TextureRef loadNormalMap(const std::string& path);
     TextureRef createAlphaTexture(const std::vector<uint8_t>& alphaData);
+    /// The chunk's normal image; the flat normal when it has none, which the
+    /// log says once.
+    TextureRef createNormalGridTexture(const std::vector<uint8_t>& normalGrid);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
     VkDescriptorSet allocateMaterialSet();
@@ -308,6 +319,14 @@ private:
     float maxViewDistance_ = 1200.0f;
     /// WOWEE_TERRAIN_LOD=0 draws every chunk at level 0, to compare against.
     bool lodEnabled_ = true;
+    /// Where each chunk is in `chunks`, by its place on the map, so a chunk
+    /// can ask its neighbours' levels; rebuilt after the list changes.
+    std::unordered_map<uint64_t, uint32_t> chunkAt_;
+    bool chunkAtStale_ = true;
+    /// This frame's level for each chunk in `chunks`, -1 where it is not drawn.
+    std::vector<int8_t> frameLevels_;
+    /// The visible chunks of this frame, in `chunks` order, with their levels.
+    std::vector<uint32_t> frameDrawn_;
     uint32_t lodViewportHeight_ = 0;
     uint64_t renderedTriangles_ = 0;
     int renderedChunks = 0;

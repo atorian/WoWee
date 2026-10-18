@@ -53,6 +53,20 @@ layout(set = 1, binding = 9) uniform sampler2D uLayer1Normal;
 layout(set = 1, binding = 10) uniform sampler2D uLayer2Normal;
 layout(set = 1, binding = 11) uniform sampler2D uLayer3Normal;
 
+// The chunk's own normals, every vertex's, as a 17x17 image (ChunkMesh::
+// normalGrid): outer vertices on even texels, inner on odd. The ground is lit
+// from these rather than from the vertices drawn, so a far chunk drawn with a
+// handful of them keeps the light and shade of all 145.
+layout(set = 1, binding = 12) uniform sampler2D uChunkNormal;
+
+// LayerUV runs over the alpha maps' texel centres, (offset * 63/8 + 0.5) / 64
+// for a grid offset of 0 to 8; the normal image's texel centres for the same
+// offset are (offset * 2 + 0.5) / 17.
+vec3 chunkNormal(vec2 layerUV) {
+    vec2 offset = (layerUV * 64.0 - 0.5) * (8.0 / 63.0);
+    return normalize(texture(uChunkNormal, (offset * 2.0 + 0.5) / 17.0).xyz * 2.0 - 1.0);
+}
+
 // After the vertex stage's model matrix and lights (GPUPushConstants).
 layout(push_constant) uniform Surface {
     layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
@@ -175,7 +189,10 @@ void main() {
     if (hasLayer2 != 0) finalColor += texture(uLayer2Texture, TexCoord) * weights.y;
     if (hasLayer3 != 0) finalColor += texture(uLayer3Texture, TexCoord) * weights.z;
 
-    vec3 vertexNormal = normalize(Normal);
+    // The surface normal from the chunk's normal image, the same whichever
+    // level of detail drew this pixel. `Normal`, the drawn vertices' own, is
+    // what the image was made of.
+    vec3 vertexNormal = chunkNormal(LayerUV);
     vec3 norm = vertexNormal;
 
     // The relief of each layer, blended as its colour is. It is read from
