@@ -10,7 +10,6 @@
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/weather.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -389,21 +388,17 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
 
     // Weather info
     if (showRenderer) {
-        auto* weather = renderer->getWeather();
-        if (weather) {
+        {
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "WEATHER");
             ImGui::Separator();
 
-            const char* typeName = "None";
-            using WeatherType = rendering::Weather::Type;
-            auto type = weather->getWeatherType();
-            if (type == WeatherType::RAIN) typeName = "Rain";
-            else if (type == WeatherType::SNOW) typeName = "Snow";
-
-            ImGui::Text("Type: %s", typeName);
-            if (weather->isEnabled()) {
-                ImGui::Text("Particles: %d", weather->getParticleCount());
-                ImGui::Text("Intensity: %.0f%%", weather->getIntensity() * 100.0f);
+            const auto& target = renderer->weatherTarget();
+            const std::string kind(pipeline::weatherKindName(target.kind));
+            ImGui::Text("Type: %s", kind.c_str());
+            if (renderer->weatherMix().any()) {
+                ImGui::Text("Particles: %u", renderer->precipitationCount());
+                ImGui::Text("Intensity: %.0f%%", renderer->weatherMix().strength() * 100.0f);
+                ImGui::Text("Open to sky: %.0f%%", renderer->skyExposure() * 100.0f);
             }
 
             auto* lightning = renderer->getLightning();

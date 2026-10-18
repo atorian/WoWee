@@ -1,0 +1,66 @@
+// What the shelter map says of the place the camera stands (ShelterMap's
+// probe, shelter_probe.comp.glsl): whether the sky is over it, and how much of
+// the sky its surroundings leave it.
+//
+// The includer declares, before including this,
+//     float shelterTop(vec2 xy);
+// the highest surface over a point of the map, or kNoShelter where nothing
+// was drawn there or the point is off the map.
+//
+// test_shelter_probe.cpp compiles this file as C++ against glm, to run it:
+// keep it to what both languages read the same way - no swizzles, no `out`
+// parameters, no arrays, no vector times a bare literal.
+
+const float kNoShelter = -1e9;
+/// A surface this far over the eye still counts as under it: the ground the
+/// camera stands just above in a crouch, a step it is level with.
+const float kShelterOverheadMargin = 0.3;
+/// Bearings the sky view is looked along, and how many steps out each.
+const int kSkyViewBearings = 16;
+const int kSkyViewSteps = 12;
+
+/// How far out step `i` of a bearing looks: a yard, then wider steps out to
+/// some forty - near enough to find a street's walls, far enough for a
+/// courtyard's, inside the map's half extent.
+float skyViewReach(int i) {
+    float f = float(i);
+    return 1.0 + 0.35 * f * f;
+}
+
+/// How open to the sky the eye is, 0-1: the share of the five texels by five
+/// round it with nothing over it. `texel` is a texel's size in yards.
+float shelterExposure(vec3 eye, float texel) {
+    int open = 0;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            float top = shelterTop(vec2(eye.x + float(dx) * texel, eye.y + float(dy) * texel));
+            if (top < eye.z + kShelterOverheadMargin) open += 1;
+        }
+    }
+    return float(open) / 25.0;
+}
+
+/// How much of the sky the eye sees past what stands round it, 0-1 - the sky
+/// view factor, 1 - mean(sin^2 horizon) over the bearings: 1 in an open
+/// field, about a half in a street between walls as high as it is wide, less
+/// in an alley. What is over the eye itself is shelterExposure's: a porch roof
+/// over the camera is not a wall.
+float shelterSkyView(vec3 eye) {
+    float hidden = 0.0;
+    for (int b = 0; b < kSkyViewBearings; ++b) {
+        float angle = 6.2831853 * float(b) / float(kSkyViewBearings);
+        float dirX = cos(angle);
+        float dirY = sin(angle);
+        float horizon = 0.0;
+        for (int i = 0; i < kSkyViewSteps; ++i) {
+            float reach = skyViewReach(i);
+            float top = shelterTop(vec2(eye.x + dirX * reach, eye.y + dirY * reach));
+            if (top <= kNoShelter) continue;
+            if (i == 0 && top >= eye.z + kShelterOverheadMargin) continue;
+            horizon = max(horizon, atan(top - eye.z, reach));
+        }
+        float s = sin(horizon);
+        hidden += s * s;
+    }
+    return 1.0 - hidden / float(kSkyViewBearings);
+}

@@ -148,6 +148,16 @@ void AnimationCallbackHandler::setupCallbacks() {
         cr->setInstanceVisible(instId, !entered);
     });
 
+    // A thunderstorm rolling in: a low rumble through the camera, as hard as
+    // the storm.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::WeatherChanged>(
+        [this](const game::events::WeatherChanged& e) {
+            if (e.kind != pipeline::WeatherKind::Thunderstorm || e.previous == e.kind || e.intensity <= 0.3f) return;
+            if (auto* camera = playerView_.getCameraController()) {
+                camera->triggerShake(0.03f + e.intensity * 0.04f, 6.0f, 0.6f);
+            }
+        }));
+
     // Charge callback - warrior rushes toward target
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::ChargeStarted>(
         [this](const game::events::ChargeStarted& e) {

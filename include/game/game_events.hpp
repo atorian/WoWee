@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/refusal.hpp"
+#include "pipeline/weather_kind.hpp"
 
 #include <array>
 #include <cstdint>
@@ -427,6 +428,17 @@ struct PlayerEquipmentResolved {
 /// reply to CMSG_QUERY_TIME. The realm clock keeps time from it.
 struct ServerTimeReceived {
     uint32_t unixSeconds = 0;
+};
+
+/// The realm said what the weather is where the character stands
+/// (SMSG_WEATHER): a new kind, or the same one harder or softer.
+struct WeatherChanged {
+    pipeline::WeatherKind kind = pipeline::WeatherKind::Clear;
+    float intensity = 0.0f;  ///< 0-1
+    /// It arrives at once rather than coming over.
+    bool abrupt = false;
+    /// The kind it was before.
+    pipeline::WeatherKind previous = pipeline::WeatherKind::Clear;
 };
 
 } // namespace wowee::game::events

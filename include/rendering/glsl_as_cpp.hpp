@@ -44,6 +44,7 @@ inline float pow(float x, float y) { return std::pow(x, y); }
 inline float sin(float x) { return std::sin(x); }
 inline float cos(float x) { return std::cos(x); }
 inline float acos(float x) { return std::acos(x); }
+inline float atan(float y, float x) { return std::atan2(y, x); }
 inline float cosh(float x) { return std::cosh(x); }
 inline float tanh(float x) { return std::tanh(x); }
 

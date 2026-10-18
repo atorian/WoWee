@@ -30,10 +30,10 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/terrain_manager.hpp"
-// The four the moved graphics settings reach into: doodads and particles,
-// the weather, and the sampler the texture filtering level sets.
+// What the moved graphics settings reach into: doodads and particles, and
+// the sampler the texture filtering level sets. The weather is the
+// renderer's own.
 #include "rendering/m2_renderer.hpp"
-#include "rendering/weather.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/character_renderer.hpp"
@@ -1240,8 +1240,7 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         // amount, which is what the weather system takes. Off is no weather.
         if (renderer) {
             constexpr float kWeatherSteps = 3.0f;
-            if (auto* w = renderer->getWeather())
-                w->setDensityScale(static_cast<float>(pendingWeatherDetail) / kWeatherSteps);
+            renderer->setWeatherDetail(static_cast<float>(pendingWeatherDetail) / kWeatherSteps);
         }
     } else if (key == "environmentdetail") {
         if (renderer) {

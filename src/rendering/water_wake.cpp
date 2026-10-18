@@ -357,7 +357,7 @@ void WaterWake::record(VkCommandBuffer cmd) {
 
     WakePushGPU push{};
     // Where the field's texel (0, 0) corner falls in the sea bed's map.
-    const SeaBedFrame& bed = seaBed_->frame();
+    const OverheadFrame& bed = seaBed_->frame();
     const glm::vec2 bedCorner = bed.centre - glm::vec2(bed.halfExtent);
     const glm::vec2 corner = glm::vec2(cornerTexel_) * kTexelYards;
     const float bedSpan = 2.0f * bed.halfExtent;

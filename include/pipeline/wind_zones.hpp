@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pipeline/weather_kind.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -85,10 +87,11 @@ public:
     [[nodiscard]] const std::vector<WindZoneRow>& zoneRows() const { return rows_; }
     /// The index of a regime by name, or empty.
     [[nodiscard]] std::optional<size_t> regimeIndex(std::string_view name) const;
-    /// What the realm's weather does: 1 rain, 2 snow, 3 storm (WorldEnvironment's
-    /// numbering). Anything else, or a kind the file says nothing about, does
-    /// nothing.
-    [[nodiscard]] WindWeatherRule weatherRule(uint32_t weatherType) const;
+    /// What the realm's weather does: the file's "rain" for rain and black
+    /// rain, "snow" for snow and black snow, "storm" for thunderstorms and
+    /// sandstorms. Clear skies and fog, or a kind the file says nothing about,
+    /// do nothing.
+    [[nodiscard]] WindWeatherRule weatherRule(WeatherKind kind) const;
 
 private:
     friend WindZoneTable parseWindZones(std::string_view jsonText, const std::string& origin);

@@ -23,7 +23,9 @@
 #include "rendering/cloud_coverage.hpp"
 #include "rendering/sky_bodies.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/weather.hpp"
+#include "rendering/shelter_map.hpp"
+#include "rendering/precipitation.hpp"
+#include "rendering/lens_weather.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "core/profiler.hpp"
@@ -795,9 +797,9 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
     currentFrameData.fogSkyBand1.w = viewDistance_; // common horizontal geometry range
 
-    // Lighting from LightingManager
+    // Lighting from LightingManager, with the weather's haze over it.
     if (lightingManager) {
-        const auto& lp = lightingManager->getLightingParams();
+        const auto& lp = *weatherLight();
         currentFrameData.lightDir = glm::vec4(
             lp.directionalDir, wmoNightGlow(lightingManager->getTimeOfDayHours() / 24.0f));
         // Looking into the sun dims the scene's light by up to a third, as the
@@ -821,6 +823,10 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
+
+        // A haze of the weather's own is its own colour, not the sky's
+        // behind it.
+        currentFrameData.fogSkyTop.w *= 1.0f - 0.9f * std::max(weather_.mix().sand, weather_.mix().mist);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -997,9 +1003,12 @@ bool Renderer::initialize(RenderSurface* surface) {
     clouds = nullptr;
     lensFlare = nullptr;
 
-    weather = std::make_unique<Weather>();
-    if (!weather->initialize(vkCtx, perFrameSetLayout))
-        LOG_WARNING("Weather effect initialization failed (non-fatal)");
+    lensWeather_ = std::make_unique<LensWeather>();
+    if (!lensWeather_->initialize(vkCtx)) {
+        LOG_WARNING("Lens weather unavailable - no rain, snow or sand drawn on the camera");
+        lensWeather_->shutdown();
+        lensWeather_.reset();
+    }
 
     lightning = std::make_unique<Lightning>();
     if (!lightning->initialize(vkCtx, perFrameSetLayout))
@@ -1093,6 +1102,7 @@ bool Renderer::initialize(RenderSurface* surface) {
     renderGraph_->registerResource("volumetric_fog");
     renderGraph_->registerResource("ocean_surface");
     renderGraph_->registerResource("sea_bed");
+    renderGraph_->registerResource("shelter");
     renderGraph_->registerResource("reflection_texture");
     renderGraph_->registerResource("scene_color");
     renderGraph_->registerResource("scene_depth");
@@ -1156,8 +1166,17 @@ void Renderer::shutdown() {
     clouds = nullptr;
     lensFlare = nullptr;
 
-    if (weather) {
-        weather.reset();
+    if (precipitation_) {
+        precipitation_->shutdown();
+        precipitation_.reset();
+    }
+    if (shelter_) {
+        shelter_->shutdown();
+        shelter_.reset();
+    }
+    if (lensWeather_) {
+        lensWeather_->shutdown();
+        lensWeather_.reset();
     }
 
     if (lightning) {
@@ -1326,11 +1345,15 @@ void Renderer::applyMsaaChange() {
     if (characterRenderer) characterRenderer->recreatePipelines();
     if (questMarkerRenderer) questMarkerRenderer->recreatePipelines();
     if (footprintRenderer) footprintRenderer->recreatePipelines();
-    if (weather) weather->recreatePipelines();
     if (lightning) lightning->recreatePipelines();
     if (swimEffects) {
         syncSwimEffectsTargetPass();
         swimEffects->recreatePipelines();
+    }
+    if (precipitation_) {
+        syncSwimEffectsTargetPass();
+        precipitation_->recreatePipelines();
+        precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
     }
     if (mountDust) mountDust->recreatePipelines();
     if (chargeEffect) chargeEffect->recreatePipelines();
@@ -1510,6 +1533,8 @@ void Renderer::beginFrame() {
     // This slot's fence has just been waited on, so a frame it copied for the
     // recording two frames ago is complete.
     collectRecordedFrame();
+    // And so is the probe of the shelter round the camera it took.
+    if (shelter_) shelter_->collect(vkCtx->getCurrentFrame());
     // The sun's and moon's occlusion answers from this slot's last frame, read
     // now its fence is passed, and its queries reset before any pass begins.
     if (skySystem && skySystem->getBodies()) {
@@ -1709,8 +1734,10 @@ void Renderer::endFrame() {
     }
 
     // The picture is finished and out of every pass that drew it: the one
-    // point where the shafts can copy it down, before the overlay pass opens.
+    // point where the shafts and the lens can copy it down, before the
+    // overlay pass opens.
     recordSunShafts();
+    recordLensWeather();
 
     const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
     if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
@@ -1733,6 +1760,8 @@ void Renderer::endFrame() {
 
         // Under the interface, over everything else.
         if (sunShafts_) sunShafts_->composite(currentCmd, vkCtx->getCurrentFrame());
+        // What the weather left on the lens, over the shafts as over the rest.
+        if (lensWeather_) lensWeather_->composite(currentCmd, vkCtx->getCurrentFrame());
 
         // The interface's pipelines are built against the overlay pass, so it
         // always records inline here rather than into a scene-pass secondary.
@@ -2085,7 +2114,7 @@ void Renderer::drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     const float day = lightingManager->getTimeOfDayHours() / 24.0f;
     const glm::vec3 forward = glm::normalize(camera->getForward());
     const glm::vec3& colour = lightingManager->getLightingParams().sunColor;
-    const float weather = sc::weatherFade(environment_.weatherIntensity);
+    const float weather = sc::weatherFade(weatherStrength());
     // First ask, of the finished depth, how much of each disc the world
     // hides; the answer comes back a frame slot later (updateGlares).
     const uint32_t frame = vkCtx->getCurrentFrame();
@@ -2210,6 +2239,14 @@ void Renderer::update(float deltaTime) {
             wmoRenderer->contentRevision());
     }
 
+    // The weather drawn this frame, coming toward the realm's or the dev
+    // panel's. Before the light, which blends toward the storm row by it.
+    weather_.setTransitionSeconds(weatherControls_.transitionSeconds);
+    weather_.update(deltaTime, weatherControls_.weather.value_or(WeatherTarget{
+                                   .kind = environment_.weatherKind,
+                                   .intensity = environment_.weatherIntensity,
+                                   .abrupt = environment_.weatherAbrupt}));
+
     // Update lighting system
     if (lightingManager) {
         // Indoors only inside one of a WMO's interior groups. Being inside any
@@ -2226,37 +2263,9 @@ void Renderer::update(float deltaTime) {
 
         endPhase("pre-lighting");
         lightingManager->update(characterPosition, environment_.mapId, resolvedZoneId,
-                                environment_.gameTime, environment_.weatherIntensity, isUnderwater);
+                                environment_.gameTime, weatherStrength(), isUnderwater);
+        hazeLightForWeather();
         endPhase("lighting");
-
-        // Sync weather visual renderer with game state
-        if (weather) {
-            const uint32_t wType = environment_.weatherType;
-            const float wInt = environment_.weatherIntensity;
-            if (resolvedZoneId == 10) {
-                // Duskwood's defining effect is persistent ground fog. Some
-                // realms continuously report rain here; suppress those streak
-                // particles so they cannot replace the authored fog ambience.
-                weather->setWeatherType(Weather::Type::NONE);
-                weather->setIntensity(0.0f);
-            } else if (wType != 0) {
-                // Server-driven weather (SMSG_WEATHER) - authoritative
-                if (wType == 1)      weather->setWeatherType(Weather::Type::RAIN);
-                else if (wType == 2) weather->setWeatherType(Weather::Type::SNOW);
-                else if (wType == 3) weather->setWeatherType(Weather::Type::STORM);
-                else                 weather->setWeatherType(Weather::Type::NONE);
-                weather->setIntensity(wInt);
-            } else {
-                // No server weather - use zone-based weather configuration
-                weather->updateZoneWeather(resolvedZoneId, deltaTime);
-            }
-            weather->setEnabled(!insideWmo);
-
-            // Lightning flash disabled
-            if (lightning) {
-                lightning->setEnabled(false);
-            }
-        }
     }
 
     updateWind(deltaTime);
@@ -2286,15 +2295,9 @@ void Renderer::update(float deltaTime) {
                                      camera->getProjectionMatrix());
     }
 
-    // Update weather particles
-    if (weather && camera) {
-        weather->update(*camera, deltaTime);
-    }
-
-    // Update lightning (storm / heavy rain)
-    if (lightning && camera && lightning->isEnabled()) {
-        lightning->update(deltaTime, *camera);
-    }
+    // What falls, what is on the lens, and the lightning: after the wind,
+    // which carries all of it.
+    updateWeather(deltaTime);
 
     // Update swim effects
     if (swimEffects && camera) {
@@ -2574,10 +2577,12 @@ void Renderer::updateWind(float deltaTime) {
                         "this machine's clock, so other players see a different one");
         }
     }
-    inputs.weatherType = environment_.weatherType;
-    inputs.weatherIntensity = environment_.weatherIntensity;
+    // The weather being drawn, the dev panel's when it has one; and its wind
+    // over a scene's.
+    inputs.weatherKind = weather_.target().kind;
+    inputs.weatherIntensity = weather_.target().intensity;
     inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
-    inputs.fixedWind = environment_.wind;
+    inputs.fixedWind = weatherControls_.wind ? weatherControls_.wind : environment_.wind;
     wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
                  windZones_);
     if (waterRenderer) {
@@ -3053,8 +3058,8 @@ void Renderer::renderSkyBackground(float timeOfDay,
     // Render only the background, including authored sky layers and the air.
     skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
-        timeOfDay, environment_.gameTime, environment_.weatherIntensity,
-        lightingManager ? &lightingManager->getLightingParams() : nullptr,
+        timeOfDay, environment_.gameTime, weatherStrength(),
+        lightingManager ? weatherLight() : nullptr,
         useOriginalSkybox);
     params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
     params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
@@ -3239,13 +3244,13 @@ void Renderer::renderWorld() {
             if (skySystem && camera && !skipSky) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
-                    environment_.gameTime, environment_.weatherIntensity,
-                    lightingManager ? &lightingManager->getLightingParams() : nullptr,
+                    environment_.gameTime, weatherStrength(),
+                    lightingManager ? weatherLight() : nullptr,
                     useOriginalSkybox);
                 // As much as the glare shows, weather included, as the client
                 // puts its glare out (0x7f37c3).
                 skyParams.sunGlareVisibility =
-                    sunGlare_ * sky_celestial::weatherFade(environment_.weatherIntensity);
+                    sunGlare_ * sky_celestial::weatherFade(weatherStrength());
                 skySystem->render(cmd, perFrameSet, *camera, skyParams);
                 logSunDiagnostic(skyParams);
                 if (drawSkyModels) {
@@ -3304,7 +3309,9 @@ void Renderer::renderWorld() {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
-            if (weather && camera) weather->render(cmd, perFrameSet);
+            if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+                precipitation_->render(cmd, perFrameSet, frameIdx);
+            }
             if (lightning && camera && lightning->isEnabled()) lightning->render(cmd, perFrameSet);
             if (swimEffects && camera && !swimEffectsDrawWithWater_) {
                 swimEffects->render(cmd, perFrameSet);
@@ -3460,11 +3467,11 @@ void Renderer::renderWorld() {
         if (skySystem && camera && !skipSky) {
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
-                environment_.gameTime, environment_.weatherIntensity,
-                lightingManager ? &lightingManager->getLightingParams() : nullptr,
+                environment_.gameTime, weatherStrength(),
+                lightingManager ? weatherLight() : nullptr,
                 useOriginalSkybox);
             skyParams.sunGlareVisibility =
-                sunGlare_ * sky_celestial::weatherFade(environment_.weatherIntensity);
+                sunGlare_ * sky_celestial::weatherFade(weatherStrength());
             skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
             logSunDiagnostic(skyParams);
             if (drawSkyModels) {
@@ -3521,7 +3528,9 @@ void Renderer::renderWorld() {
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
         }
-        if (weather && camera) weather->render(currentCmd, perFrameSet);
+        if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+            precipitation_->render(currentCmd, perFrameSet, frameIdx);
+        }
         if (lightning && camera && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
         if (swimEffects && camera && !swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
@@ -3638,6 +3647,8 @@ void Renderer::renderWorld() {
         if (swimEffects && camera && swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
         }
+        // Rain over the water, ringing on it, not hidden under its sheet.
+        if (precipitation_ && precipitationDrawsWithWater_) precipitation_->render(currentCmd, perFrameSet, frameIdx);
 
         // And the minimap, last of all: it is the interface rather than the
         // world, and nothing in the world belongs over it.
@@ -3677,6 +3688,8 @@ void Renderer::syncSwimEffectsTargetPass() {
     }
 
     if (swimEffects) swimEffects->setTargetPass(pass, samples);
+    // Rain is blended over the world like the spray, and goes with it.
+    if (precipitation_) precipitation_->setTargetPass(pass, samples);
     // Blended doodads follow the water out of the scene pass for the same
     // reason. Built by refreshSwimEffectsPass, which retires the old pipelines.
     blendedAfterWaterPass_ = swimEffectsDrawWithWater_ ? pass : VK_NULL_HANDLE;
@@ -4020,6 +4033,29 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             LOG_ERROR("Failed to create the sea bed map - liquid is not drawn, "
                       "though it can still be swum in");
         }
+    }
+
+    // Where rain and snow cannot reach, drawn by the same casters, and what
+    // falls, which reads it.
+    if (!shelter_) {
+        shelter_ = std::make_unique<ShelterMap>();
+        if (!shelter_->initialize(vkCtx, shadowRenderPass)) {
+            shelter_->shutdown();
+            shelter_.reset();
+        }
+    }
+    if (!precipitation_ && shelter_) {
+        precipitation_ = std::make_unique<Precipitation>();
+        syncSwimEffectsTargetPass();
+        if (!precipitation_->initialize(vkCtx, perFrameSetLayout, *shelter_)) {
+            precipitation_->shutdown();
+            precipitation_.reset();
+        } else {
+            precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
+            precipitation_->setDensityScale(weatherDetail_);
+        }
+    } else if (!shelter_) {
+        LOG_ERROR("No shelter map - rain, snow and sand are not drawn");
     }
 
     // Create water renderer if not already created
@@ -4449,6 +4485,10 @@ void Renderer::refreshSwimEffectsPass() {
     const bool blendedMoved = m2Renderer && m2Renderer->afterWaterPass() != blendedAfterWaterPass_;
     // Faded characters go wherever the blended world goes, after it.
     const bool fadedMoved = characterRenderer && characterRenderer->fadedPass() != blendedAfterWaterPass_;
+    if (precipitation_ && precipitationDrawsWithWater_ != swimEffectsDrawWithWater_) {
+        precipitation_->recreatePipelines();
+        precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
+    }
     if (!sprayMoved && !minimapMoved && !blendedMoved && !fadedMoved) return;
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
@@ -4779,7 +4819,7 @@ void Renderer::renderShadowMap(bool contact) {
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
-    if (!contact) shadowDescriptorsReset_ = true;
+    if (!contact) wmoCasterSetsReset_ = m2CasterSetsReset_ = true;
     if (terrainRenderer && !contact) {
         terrainRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
@@ -4989,7 +5029,7 @@ void Renderer::renderSeaBedPass() {
     }
 
     seaBed_->begin(nearby, *water);
-    const SeaBedFrame& frame = seaBed_->drawing();
+    const OverheadFrame& frame = seaBed_->drawing();
     // The casters cull by the matrix's footprint and by distance; the map's
     // corners are its half extent and a half again from its middle.
     const glm::vec3 centre(frame.centre, frame.ceiling);
@@ -5004,8 +5044,8 @@ void Renderer::renderSeaBedPass() {
         } else if (wmoRenderer) {
             // The sun's pass reset the casters' texture sets this frame if
             // it drew them; if it did not, this is the first, and resets.
-            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !shadowDescriptorsReset_);
-            shadowDescriptorsReset_ = true;
+            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
+            wmoCasterSetsReset_ = true;
         }
         seaBed_->endView(currentCmd, view);
     };
@@ -5014,6 +5054,161 @@ void Renderer::renderSeaBedPass() {
     drawView(SeaBedView::BuildingsFromBelow);
     seaBed_->finish(currentCmd, globalTime, windToward);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "sea bed");
+}
+
+const LightingParams* Renderer::weatherLight() const {
+    if (weatherLight_) return weatherLight_.get();
+    return lightingManager ? &lightingManager->getLightingParams() : nullptr;
+}
+
+void Renderer::hazeLightForWeather() {
+    if (!lightingManager) return;
+    if (!weatherLight_) weatherLight_ = std::make_unique<LightingParams>();
+    LightingParams p = lightingManager->getLightingParams();
+    // Rain and snow bring no haze of their own: the light blends toward the
+    // zone's storm row by them, and that row's fog says how close they bring
+    // it. Blowing sand is the colour of sand in the day's light; the fog
+    // weather's mist is grey.
+    const WeatherMix& w = weather_.mix();
+    if (w.sand > 0.0f || w.mist > 0.0f) {
+        const glm::vec3 lit = p.ambientColor + p.diffuseColor * 0.5f;
+        const glm::vec3 sandHaze = glm::vec3(0.80f, 0.64f, 0.42f) * lit;
+        const glm::vec3 mistHaze = glm::mix(p.fogColor, glm::vec3(glm::dot(lit, glm::vec3(1.0f / 3.0f))), 0.5f);
+        const auto haze = [&](const glm::vec3& c, float sandShare, float mistShare) {
+            return glm::mix(glm::mix(c, sandHaze, w.sand * sandShare), mistHaze, w.mist * mistShare);
+        };
+        p.fogColor = haze(p.fogColor, 0.85f, 0.6f);
+        // The sky hazes too, the horizon most, so the hills are not cut out
+        // against a clear sky behind the dust.
+        p.skyTopColor = haze(p.skyTopColor, 0.6f, 0.4f);
+        p.skyMiddleColor = haze(p.skyMiddleColor, 0.8f, 0.5f);
+        p.skyBand1Color = haze(p.skyBand1Color, 0.85f, 0.6f);
+        p.skyBand2Color = haze(p.skyBand2Color, 0.85f, 0.6f);
+        p.cloudFillColor = haze(p.cloudFillColor, 0.6f, 0.4f);
+        p.cloudBaseColor = haze(p.cloudBaseColor, 0.6f, 0.4f);
+        p.fogStart = glm::mix(glm::mix(p.fogStart, 2.0f, w.sand), 10.0f, w.mist * 0.8f);
+        p.fogEnd = glm::mix(glm::mix(p.fogEnd, 140.0f, w.sand), 220.0f, w.mist * 0.8f);
+    }
+    *weatherLight_ = p;
+}
+
+void Renderer::setWeatherDetail(float scale) {
+    weatherDetail_ = std::clamp(scale, 0.0f, 1.0f);
+    if (precipitation_) precipitation_->setDensityScale(weatherDetail_);
+}
+
+float Renderer::skyExposure() const {
+    return shelter_ ? shelter_->exposure() : 1.0f;
+}
+
+float Renderer::skyView() const {
+    return shelter_ ? shelter_->skyView() : 1.0f;
+}
+
+uint32_t Renderer::precipitationCount() const {
+    return precipitation_ ? precipitation_->drawnCount() : 0;
+}
+
+void Renderer::updateWeather(float deltaTime) {
+    ZoneScopedN("Renderer::updateWeather");
+    if (!camera) return;
+    const WeatherMix& mix = weather_.mix();
+    const glm::vec3 eye = camera->getPosition();
+    const WindState& wind = wind_.state();
+    const glm::vec2 windVelocity = wind.direction * wind.speed * wind.gust;
+
+    if (precipitation_) {
+        PrecipitationFrame frame;
+        if (weatherControls_.precipitation) frame.mix = mix;
+        frame.camera = eye;
+        frame.wind = windVelocity;
+        frame.dt = deltaTime;
+        frame.water = &liquidScene_;
+        frame.now = globalTime;
+        frame.openSky = skyView();
+        frame.viewport = activeRenderExtent_.width > 0 ? activeRenderExtent_ : vkCtx->getSwapchainExtent();
+        precipitation_->setSplashesEnabled(weatherControls_.splashes);
+        precipitation_->update(frame);
+    }
+
+    // The lens: how squarely it faces into what falls - rain falls along the
+    // wind, at its own speed downward - and into the wind for the sand.
+    const glm::vec3 forward = camera->getForward();
+    const glm::vec3 fall = glm::normalize(glm::vec3(windVelocity * 0.9f, -10.0f));
+    const float windSpeed = glm::length(windVelocity);
+    const glm::vec3 windDir = windSpeed > 0.1f ? glm::vec3(windVelocity / windSpeed, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+    LensInputs lens;
+    if (weatherControls_.lens) {
+        // Fewer reach a camera walled in, as fewer fall in its view.
+        const float walledIn = glm::mix(0.5f, 1.0f, skyView());
+        lens.rain = mix.rain * walledIn;
+        lens.snow = mix.snow * walledIn;
+        lens.sand = mix.sand * walledIn;
+    }
+    lens.exposure = skyExposure();
+    lens.facingFall = glm::smoothstep(-0.25f, 0.6f, glm::dot(forward, -fall));
+    lens.facingWind = glm::smoothstep(-0.2f, 0.7f, glm::dot(forward, -windDir));
+    // Across the screen as the wind crosses the view.
+    const glm::vec2 across(glm::dot(windDir, camera->getRight()), -glm::dot(windDir, camera->getUp()));
+    lensWindOnScreen_ = across * std::clamp(std::max(windSpeed, 9.0f) * 0.15f, 0.0f, 3.0f);
+    lens.windOnScreen = lensWindOnScreen_;
+    const auto eyeDepth = cameraWaterDepth();
+    lens.underwater = eyeDepth && *eyeDepth > 0.0f;
+    if (!weatherControls_.lens) lensDrops_.clear();
+    lensDrops_.update(deltaTime, lens, camera->getAspectRatio());
+
+    // Lightning over a thunderstorm, as often as it is heavy.
+    if (lightning) {
+        const bool storm = weatherControls_.lightning && mix.thunder > 0.05f;
+        lightning->setEnabled(storm);
+        if (storm) {
+            lightning->setIntensity(mix.thunder);
+            lightning->update(deltaTime, *camera);
+        }
+    }
+}
+
+void Renderer::renderShelterPass() {
+    ZoneScopedN("Renderer::renderShelterPass");
+    if (!shelter_ || !camera || currentCmd == VK_NULL_HANDLE) return;
+    const glm::vec3 eye = camera->getPosition();
+    // What is loaded, as a number that moves when any of it streams in or out.
+    uint64_t world = wmoRenderer ? wmoRenderer->contentRevision() : 0;
+    world = world * 1000003u + (wmoRenderer ? wmoRenderer->getInstanceCount() : 0);
+    world = world * 1000003u + (m2Renderer ? m2Renderer->getInstanceCount() : 0);
+    world = world * 1000003u + static_cast<uint64_t>(terrainRenderer ? terrainRenderer->getChunkCount() : 0);
+    if (shelter_->wantsDrawing(eye, globalTime, world)) {
+        shelter_->begin(currentCmd, eye, world);
+        const glm::mat4 matrix = shelter_->matrix();
+        const glm::vec3 centre(shelter_->drawing().centre, eye.z);
+        // The map's corners are its half extent and a half again from its
+        // middle.
+        const float reach = ShelterMap::kHalfExtent * 1.415f;
+        // The ground, the buildings and the doodads - a tree's crown keeps
+        // the rain off as a roof does. Not the characters.
+        if (terrainRenderer) terrainRenderer->renderShadow(currentCmd, matrix, centre, reach);
+        if (wmoRenderer) {
+            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
+            wmoCasterSetsReset_ = true;
+        }
+        if (m2Renderer) {
+            m2Renderer->renderShadow(currentCmd, matrix, wind_.gpu(), centre, reach, !m2CasterSetsReset_);
+            m2CasterSetsReset_ = true;
+        }
+        shelter_->end(currentCmd, globalTime);
+        if (vkCtx) vkCtx->gpuMark(currentCmd, "shelter");
+    }
+    shelter_->probe(currentCmd, vkCtx->getCurrentFrame(), eye);
+}
+
+void Renderer::recordLensWeather() {
+    if (!lensWeather_ || currentCmd == VK_NULL_HANDLE) return;
+    const auto& images = vkCtx->getSwapchainImages();
+    // The world's picture only: a loading screen is not seen through the lens.
+    const bool onScreen = worldDrawnThisFrame_ && currentImageIndex < images.size();
+    lensWeather_->record(currentCmd, vkCtx->getCurrentFrame(), onScreen ? images[currentImageIndex] : VK_NULL_HANDLE,
+                         vkCtx->getSwapchainExtent(), lensDrops_, lensWindOnScreen_,
+                         std::fmod(globalTime, 1000.0f));
 }
 
 void Renderer::renderVolumetricFog() {
@@ -5064,7 +5259,7 @@ void Renderer::renderVolumetricFog() {
         in.sunHaloColor = lightingManager->getLightingParams().cloudSunlitColor;
         in.sunGlareDirection =
             sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
-        in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(environment_.weatherIntensity);
+        in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
     }
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
@@ -5101,7 +5296,7 @@ void Renderer::recordSunShafts() {
             // As much as the sky round the sun shines: the glare's hours, the
             // cloud in front, a sky model over it and the weather. Not its line
             // of sight - the rays are what a tree in front lets through.
-            strength *= sunGlareSky_ * sky_celestial::weatherFade(environment_.weatherIntensity);
+            strength *= sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
             // In view, or streaming in from just past an edge, fading out as
             // it goes half a screen beyond one.
             const glm::vec2 past = glm::max(glm::abs(sun.uv - 0.5f) - 0.5f, glm::vec2(0.0f));
@@ -5130,7 +5325,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
-    shadowDescriptorsReset_ = false;
+    wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");
@@ -5192,6 +5387,16 @@ void Renderer::buildFrameGraph() {
         });
     renderGraph_->setPassEnabled("sea_bed", seaBed_ && waterRenderer && waterRenderer->hasSurfaces() &&
                                                 !waterAblated());
+
+    // Where rain and snow cannot reach → read by the precipitation. After
+    // the shadow pass too, for the same casters' texture sets. Only while
+    // something falls or blows.
+    auto shelterRes = renderGraph_->findResource("shelter");
+    renderGraph_->addPass("shelter", {shadowDepth}, {shelterRes},
+        [this](VkCommandBuffer) {
+            renderShelterPass();
+        });
+    renderGraph_->setPassEnabled("shelter", shelter_ && weather_.mix().any());
 
     // The sea → outputs the surface every water surface is carried by and
     // lit from. Only while there is water to draw; the sea's clock and its

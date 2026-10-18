@@ -788,7 +788,7 @@ void WaterRenderer::destroyAllDrawn() {
 void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const Camera& camera, float /*time*/, bool use1x, uint32_t frameIndex) {
     // The sea bed as it was last drawn - this frame, if it was drawn in it.
-    const SeaBedFrame& bed = seaBed_->frame();
+    const OverheadFrame& bed = seaBed_->frame();
     frameUBO_.seaBedMatrix = bed.viewProjection();
     frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f, 0.0f);
     frameUBO_.wakeArea = wake_.area();    // The wake as it stands, into this frame's slot - safe now, the frame has

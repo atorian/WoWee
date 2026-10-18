@@ -12,8 +12,12 @@
 //   {
 //     "map": "Northrend", "mapId": 571, "zoneId": 4395,
 //     "hour": 12.0,                       // the realm clock; the sky and the light
-//     "weather": "none",                  // none | rain | snow | storm
-//     "weatherIntensity": 0.0,
+//     "weather": "clear",                 // clear | fog | rain | snow | sandstorm |
+//                                         //   thunderstorm | blackrain | blacksnow
+//     "weatherIntensity": 0.0,            //   0-1; there from the first frame
+//     "lens": true,                       // what the weather leaves on the camera's
+//                                         //   lens - it gathers over the frames
+//     "splashes": true,                   // rain splashing where it lands
 //     "realmTime": 0.0,                   // the realm's calendar clock, seconds since
 //                                         //   1970, that the wind is drawn from; it
 //                                         //   runs on with the frames
@@ -259,13 +263,6 @@ bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetM
     return true;
 }
 
-uint32_t weatherType(const std::string& name) {
-    if (name == "rain") return 1;
-    if (name == "snow") return 2;
-    if (name == "storm") return 3;
-    return 0;
-}
-
 /// What the scene left in video memory, by use, and what each texture cache
 /// counts itself as holding: the world's share of a city, without a realm.
 /// WOWEE_GPU_MEMORY_DUMP names a file for the allocator's whole map.
@@ -369,9 +366,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     environment.mapId = scene.value("mapId", 571u);
     environment.zoneId = scene.value("zoneId", 0u);
     environment.gameTime = scene.value("hour", 12.0f);
-    environment.weatherType = weatherType(scene.value("weather", std::string("none")));
+    const std::string weatherName = scene.value("weather", std::string("clear"));
+    const auto weatherKind = pipeline::weatherKindFromName(weatherName == "none" ? "clear" : weatherName);
+    if (!weatherKind) {
+        std::fprintf(stderr, "scene_render: \"weather\" is one of clear, fog, rain, snow, sandstorm, "
+                             "thunderstorm, blackrain, blacksnow - not \"%s\"\n", weatherName.c_str());
+        return 1;
+    }
+    environment.weatherKind = *weatherKind;
     environment.weatherIntensity = scene.value("weatherIntensity", 0.0f);
-    environment.raining = environment.weatherType == 1 || environment.weatherType == 3;
+    // What of it is drawn, as the weather dev panel switches it.
+    renderer.weatherControls().lens = scene.value("lens", true);
+    renderer.weatherControls().splashes = scene.value("splashes", true);
     // A realm clock of the scene's own, so the wind - drawn from it - is the
     // same on every run rather than whatever this machine's clock says.
     const double realmTime = scene.value("realmTime", 0.0);
@@ -455,6 +461,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             camera->setPosition(eye + velocity * (kStep * static_cast<float>(i)));
             drawFrame();
         }
+    }
+    if (renderer.weatherMix().any()) {
+        const auto& mix = renderer.weatherMix();
+        LOG_WARNING("scene_render: weather rain ", mix.rain, " snow ", mix.snow, " sand ", mix.sand,
+                    "; ", renderer.precipitationCount(), " drops drawn; camera open to the sky ",
+                    renderer.skyExposure(), ", sky in view ", renderer.skyView(), "; ",
+                    renderer.lensDrops().drops().size(), " on the lens, frost ",
+                    renderer.lensDrops().frost(), ", dust ", renderer.lensDrops().dust());
     }
     if (!renderer.captureScreenshot(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
