@@ -609,12 +609,21 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     if (waitTerrain) {
         environment.realmSeconds = realmTime;
         renderer.setWorldEnvironment(environment);
+        // In when nothing is waiting and nothing more has arrived for a second
+        // of frames: the manager asks for the tiles round the scene over its
+        // first frames, so an empty queue on the first one is not yet the end.
+        constexpr int kSettledFrames = 30;
         int waited = 0;
-        for (; waited < 600 && (waited == 0 || terrain->getRemainingTileCount() > 0); ++waited) {
+        int settled = 0;
+        int lastLoaded = -1;
+        for (; waited < 600 && settled < kSettledFrames; ++waited) {
             renderer.update(0.0f);
             renderer.beginFrame();
             renderer.renderWorld();
             renderer.endFrame();
+            const int loaded = terrain->getLoadedTileCount();
+            settled = terrain->getRemainingTileCount() == 0 && loaded == lastLoaded ? settled + 1 : 0;
+            lastLoaded = loaded;
         }
         if (terrain->getRemainingTileCount() > 0) {
             std::fprintf(stderr, "scene_render: %d terrain tiles still streaming after %d frames; "
