@@ -47,8 +47,10 @@ client (`WOWEE_BENCHMARK_DIR` overrides) and its summary line to the log:
 
 `WOWEE_BENCHMARK_MSAA=1|2|4|8` runs at that sample count without changing the
 saved setting - what the scene costs in pixels against what it costs in
-geometry. The scene counts include terrain chunks drawn and the M2 and WMO
-draw calls.
+geometry. `WOWEE_BENCHMARK_TERRAIN_DISTANCE=<400-2400>` does the same for the
+terrain's draw distance alone. The setup lines say the terrain draw distance
+the run had, and the scene counts include terrain chunks drawn and the M2
+and WMO draw calls.
 
 Vsync and the frame cap are the player's settings and the run keeps them; a
 CPU-bound frame is not affected, but a fast one is held to the display.
@@ -261,6 +263,40 @@ calls, 2660 M2 draw calls. Dalaran has no grass (0.00 ms inline).
   The water waves are the surprise: 4.1 ms every frame in a city with no sea
   in view, from the ocean state the wind's waves added (`61cd56c` and after).
 - Recording inline costs 3.7 fps against the parallel workers.
+
+### Dalaran by terrain draw distance
+
+What a terrain LOD could win, measured before building one: the terrain's
+draw distance alone cut from the saved 2400 yards to 800
+(`WOWEE_BENCHMARK_TERRAIN_DISTANCE`; buildings and doodads keep theirs), at
+8x and 1x. The scene pass now has a mark of its own at its start, so its
+clear is no longer read as terrain - it is 0.09 ms at 8x, 0.02 at 1x.
+
+| MSAA | terrain to | fps | p50 | p95 | terrain chunks | terrain GPU | GPU avg | CPU waits for GPU |
+|---|---|---|---|---|---|---|---|---|
+| 8x | 2400 | 33.4 | 28.9 | 34.7 | 4922 | 11.03 | 28.7 | 5.07 |
+| 8x | 800 | 41.2 | 22.0 | 30.3 | 474 | 1.99 | 19.8 | 0.02 |
+| 1x | 2400 | 37.4 | 24.6 | 33.0 | 4922 | 5.73 | 22.2 | 0.02 |
+| 1x | 800 | 39.7 | 22.7 | 35.3 | 475 | 1.45 | 17.4 | 0.01 |
+
+- **Nine tenths of the chunks, and of the terrain's cost, lie beyond 800
+  yards**: 9.0 of 11.0 ms at 8x, 4.3 of 5.7 at 1x. The far ground is where
+  8x costs most - 5.3 ms more than 1x at 2400 yards, 0.5 at 800 - which is
+  the mark of triangles a pixel or two across: every one a partly covered
+  pixel touches is shaded again under MSAA.
+- **The win is GPU time, and the frame then belongs to the CPU**: at 8x and
+  800 yards the CPU stops waiting for the GPU (5.07 -> 0.02 ms) and the
+  frame is the CPU's 22-23 ms. At 1x, CPU-bound already, the shorter
+  distance moves the frame little.
+- A distance cut is the ceiling for a LOD at these ranges - a LOD still
+  draws the far chunks, at a fraction of the triangles. Even so: terrain
+  LOD would take the 8x frame from GPU-bound to CPU-bound, worth up to
+  about 8 fps here, and the CPU's own list (shadow casters, water waves,
+  RT sync) is what decides the frame after that.
+
+The 1x-at-2400 run came in 3 fps under the earlier one of the same setting
+(37.4 against 40.4), with no other client running: the spread between runs
+is larger at 1x, where the CPU sets the frame.
 
 scene_render's static Dalaran scene (`dalaran.json`, 1280x720, hidden window)
 is held by its swapchain's FIFO present at 60 fps: `acquire image` takes 8 ms

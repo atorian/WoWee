@@ -1835,6 +1835,18 @@ void Application::startBenchmarkFromEnvironment() {
                         "saved anti-aliasing");
         }
     }
+    // The terrain's draw distance alone for this run, the buildings' and the
+    // doodads' kept: how much the far ground costs, which is what a terrain
+    // LOD would win back.
+    if (const char* distance = std::getenv("WOWEE_BENCHMARK_TERRAIN_DISTANCE"); distance && *distance) {
+        const float yards = std::strtof(distance, nullptr);
+        if (std::isfinite(yards) && yards >= 400.0f && yards <= 2400.0f) {
+            benchmarkTerrainDistance_ = yards;
+        } else {
+            LOG_WARNING("WOWEE_BENCHMARK_TERRAIN_DISTANCE=", distance, " is not 400 to 2400 yards; "
+                        "the run keeps the saved view distance");
+        }
+    }
     benchmark_ = std::make_unique<BenchmarkRun>(*route, timing);
     LOG_WARNING("Benchmark '", route->name, "': offline world entry, at least ", timing.settleSeconds,
                 " s for the world to settle, then one lap of the route in ", timing.flySeconds,
@@ -1878,6 +1890,10 @@ void Application::benchmarkFrameEnded(float frameSeconds) {
     if (benchmarkMsaa_ && renderer && !benchmark_->recording() &&
         benchmark_->phase() != BenchmarkRun::Phase::Finished) {
         renderer->setMsaaSamples(static_cast<VkSampleCountFlagBits>(*benchmarkMsaa_));
+    }
+    if (benchmarkTerrainDistance_ && renderer && renderer->getTerrainRenderer() &&
+        !benchmark_->recording() && benchmark_->phase() != BenchmarkRun::Phase::Finished) {
+        renderer->getTerrainRenderer()->setViewDistance(*benchmarkTerrainDistance_);
     }
 
     if (benchmark_->recording() && renderer) {
@@ -1934,6 +1950,10 @@ void Application::benchmarkFrameEnded(float frameSeconds) {
             if (*vk->gpuTimingCaveat() != '\0') setup.push_back(vk->gpuTimingCaveat());
         }
         if (renderer) setup.push_back("shadow distance: " + std::to_string(static_cast<int>(renderer->getShadowDistance())));
+        if (const auto* terrainDraw = renderer ? renderer->getTerrainRenderer() : nullptr) {
+            setup.push_back("terrain draw distance: " +
+                            std::to_string(static_cast<int>(terrainDraw->viewDistance())));
+        }
         const auto lines = benchmark_->report(setup);
         const char* dirText = std::getenv("WOWEE_BENCHMARK_DIR");
         const std::filesystem::path dir = dirText && *dirText ? dirText : "logs";

@@ -186,6 +186,7 @@ public:
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
     void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
+    [[nodiscard]] float viewDistance() const { return maxViewDistance_; }
 
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}
     void clearShadowMap() {}

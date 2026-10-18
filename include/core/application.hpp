@@ -325,6 +325,8 @@ private:
     bool benchmarkEntered_ = false;
     /// WOWEE_BENCHMARK_MSAA: the run's sample count, over the saved one.
     std::optional<int> benchmarkMsaa_;
+    /// WOWEE_BENCHMARK_TERRAIN_DISTANCE: the terrain's draw distance alone.
+    std::optional<float> benchmarkTerrainDistance_;
     /// Starts the run WOWEE_BENCHMARK asks for; the client closes when it
     /// cannot (an unknown route), with the reason in the log.
     void startBenchmarkFromEnvironment();

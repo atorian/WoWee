@@ -1689,6 +1689,10 @@ void Renderer::beginFrame() {
         ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS
         : VK_SUBPASS_CONTENTS_INLINE;
     vkCmdBeginRenderPass(currentCmd, &rpInfo, subpassMode);
+    // The pass's start - clearing its colour and depth, every sample of them
+    // under MSAA - ends here. Without this mark it was read as part of the
+    // first pass drawn in it, terrain.
+    vkCtx->gpuMark(currentCmd, "scene pass begin");
 
     if (!parallelRecordingEnabled_) {
         // Fallback: set dynamic viewport and scissor on primary (inline mode)

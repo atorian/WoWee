@@ -31,12 +31,17 @@ export WOWEE_BENCHMARK="$route" WOWEE_BENCHMARK_SECONDS="$seconds"
 cd "$(dirname "$bin")"
 log="logs/benchmark-run.log"
 mkdir -p logs
+started="logs/.benchmark-started"
+touch "$started"
 WOWEE_LOG_FILE="benchmark-run.log" "./$(basename "$bin")" > /dev/null 2>&1 || true
-if ! grep -q "Benchmark report written to" "$log"; then
+# The report file itself, not the log's line about it: the log's last lines
+# can still be in the logger's buffer when the client exits.
+report="$(find logs -maxdepth 1 -name "benchmark-$route-*.txt" -newer "$started" | sort | tail -1)"
+rm -f "$started"
+if [[ -z "$report" ]]; then
     echo "benchmark: no report - the end of $(pwd)/$log:" >&2
     tail -20 "$log" >&2
     exit 1
 fi
-grep -o "Benchmark finished: .*" "$log" | tail -1
-report="$(grep -o "Benchmark report written to .*" "$log" | tail -1 | sed 's/Benchmark report written to //')"
+grep "^summary:" "$report"
 echo "report: $(pwd)/$report"
