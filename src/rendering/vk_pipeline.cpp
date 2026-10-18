@@ -19,6 +19,16 @@ PipelineBuilder& PipelineBuilder::setShaders(
     return *this;
 }
 
+PipelineBuilder& PipelineBuilder::setTessellation(VkPipelineShaderStageCreateInfo control,
+    VkPipelineShaderStageCreateInfo evaluation, uint32_t patchControlPoints)
+{
+    shaderStages_.push_back(control);
+    shaderStages_.push_back(evaluation);
+    topology_ = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    patchControlPoints_ = patchControlPoints;
+    return *this;
+}
+
 PipelineBuilder& PipelineBuilder::setVertexInput(
     const std::vector<VkVertexInputBindingDescription>& bindings,
     const std::vector<VkVertexInputAttributeDescription>& attributes)
@@ -217,6 +227,13 @@ VkPipeline PipelineBuilder::build(VkDevice device, VkPipelineCache cache) const 
     pipelineInfo.basePipelineIndex = -1;
     pipelineInfo.renderPass = renderPass_;
     pipelineInfo.subpass = subpass_;
+
+    VkPipelineTessellationStateCreateInfo tessellation{};
+    if (patchControlPoints_ > 0) {
+        tessellation.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+        tessellation.patchControlPoints = patchControlPoints_;
+        pipelineInfo.pTessellationState = &tessellation;
+    }
 
     // A dynamic rendering pipeline carries its attachment formats instead of a
     // render pass, and leaves renderPass VK_NULL_HANDLE. Declared out here so

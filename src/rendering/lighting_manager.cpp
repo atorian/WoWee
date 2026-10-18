@@ -6,6 +6,7 @@
 #include "rendering/daylight_fill.hpp"
 #include "rendering/light_params_eval.hpp"
 #include "rendering/light_volume_order.hpp"
+#include "rendering/sky_celestial.hpp"
 #include <glm/gtc/constants.hpp>
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -22,9 +23,6 @@ namespace rendering {
 
 
 constexpr uint16_t kHalfMinutesPerDay = LIGHT_HALF_MINUTES_PER_DAY;
-
-// Maximum volumes to blend (top 2-4)
-constexpr size_t MAX_BLEND_VOLUMES = 2;
 
 LightingManager::LightingManager() {
     // Set fallback lighting (Elwynn Forest-ish outdoor daytime)
@@ -129,11 +127,26 @@ bool LightingManager::loadLightDbc(pipeline::AssetManager* assetManager) {
         volume.lightParamsIdStormUnderwater =
             dbc->getUInt32(i, lL ? (*lL)["LightParamsIDStormUnderwater"] : 10);
 
+        // A row at the origin is the map's global light, not a volume: the
+        // light the map has everywhere, which the volumes are laid over and
+        // which shows where none reaches (light_volume_order.hpp). Its radii
+        // mean nothing - Northrend's is a yard - so it is told by its place.
+        if (dbcX == 0.0f && dbcY == 0.0f && dbcZ == 0.0f) {
+            const auto [it, inserted] = globalLightByMap_.try_emplace(volume.mapId, volume);
+            if (!inserted) {
+                LOG_WARNING("Light.dbc: map ", volume.mapId, " has a second global light, ",
+                            volume.lightId, ", after ", it->second.lightId,
+                            "; the first is used and this one lights nothing");
+            }
+            continue;
+        }
+
         // Add to map-specific list
         lightVolumesByMap_[volume.mapId].push_back(volume);
     }
 
-    LOG_INFO("Loaded ", lightVolumesByMap_.size(), " maps with lighting volumes");
+    LOG_INFO("Loaded ", lightVolumesByMap_.size(), " maps with lighting volumes, ",
+             globalLightByMap_.size(), " with a global light");
     return true;
 }
 
@@ -295,7 +308,7 @@ bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
 
 void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                               float gameTime,
-                              bool isRaining, bool isUnderwater) {
+                              float weatherIntensity, bool isUnderwater) {
     if (!initialized_) return;
 
     // Update time
@@ -319,18 +332,17 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     }
     // else: manualTime_ is set, use timeOfDay_ as-is
 
-    // Duskwood's visible sky is permanently late-night even while the global
-    // world clock continues normally for gameplay and every other zone.
-    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(zoneId, timeOfDay_ * 24.0f);
-
-    // Convert visual time to half-minutes (WoW DBC format: 0-2879).
-    const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
-    uint16_t timeHalfMinutes = static_cast<uint16_t>(visualDayFraction * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
+    // The hour in half-minutes (WoW DBC format: 0-2879). One clock for every
+    // zone, as the client has: Duskwood's gloom and Tirisfal's overcast are in
+    // their LightParams curves, not in a different hour.
+    uint16_t timeHalfMinutes = static_cast<uint16_t>(timeOfDay_ * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
 
     // Update player position and map
     currentPlayerPos_ = playerPos;
 
-    // Find light volumes for blending
+    // The lights this point is lit by, each with its share. The point is the
+    // character's; the client's own (0xd38b24) is written through a pointer
+    // that has not been traced, so whether it is the camera's is not known.
     activeVolumes_ = findLightVolumes(playerPos, mapId);
 
     // Smoothing by real time. This assumed sixty frames a second, so on a
@@ -365,13 +377,18 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // model are two layers. Several rows share a model with different flags -
     // DeathKnightFireSkyBox is 38 and 39 without the combine flag and 40 with
     // it - and whether the client's sky is drawn under it is the row's say.
+    //
+    // The weights are each light's share of the point's light, the map's
+    // global light included: the client gathers the slots inside the very
+    // lerp that lays one light over another (0x7ed4c0), so a sky model fades
+    // out across a volume's edge exactly as its colours do.
     {
         std::vector<std::pair<uint32_t, float>> target;
         if (!isIndoors_) {
-            const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
-            for (size_t i = 0; i < blendCount; ++i) {
-                const auto& wv = activeVolumes_[i];
-                const uint32_t paramsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
+            for (const auto& wv : activeVolumes_) {
+                // The clear row's sky model, storm or not: the client blends a
+                // storm's colours and fog but keeps the clear row's skybox.
+                const uint32_t paramsId = selectLightParamsId(*wv.volume, false, isUnderwater);
                 auto profileIt = lightParamsProfiles_.find(paramsId);
                 if (profileIt == lightParamsProfiles_.end() ||
                     profileIt->second.lightSkyboxId == 0) continue;
@@ -420,38 +437,49 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
 
     std::optional<LightingParams> blended;
     {
-        // The first MAX_BLEND_VOLUMES only: the list is the whole
-        // neighbourhood now, and those are the ones whose weights were
-        // normalized to sum to one.
-        std::array<WeightedLightingParams, MAX_BLEND_VOLUMES> parts;
-        size_t partCount = 0;
-        const size_t blendCount = std::min(activeVolumes_.size(), MAX_BLEND_VOLUMES);
-        for (size_t i = 0; i < blendCount; ++i) {
-            const auto& wv = activeVolumes_[i];
-            const uint32_t lightParamsId = selectLightParamsId(*wv.volume, isRaining, isUnderwater);
+        // Every light by its share: laying them over each other with lerps,
+        // as the client does, is the same as this sum, since each lerp is
+        // linear in what lies under it (light_volume_order.hpp).
+        std::vector<WeightedLightingParams> parts;
+        parts.reserve(activeVolumes_.size());
+        const float storm = sky_celestial::stormWeight(weatherIntensity);
+        for (const auto& wv : activeVolumes_) {
+            const uint32_t lightParamsId = selectLightParamsId(*wv.volume, false, isUnderwater);
             auto it = lightParamsProfiles_.find(lightParamsId);
             if (it == lightParamsProfiles_.end()) continue;
-            parts[partCount++] = {
-                .params = sampleLightParams(it->second, timeHalfMinutes, fallbackParams_),
-                .weight = wv.weight};
+            LightingParams params = sampleLightParams(it->second, timeHalfMinutes, fallbackParams_);
+            // Toward the storm row by the weather, as the client blends them
+            // (0x7ec220) - it switched to the storm row outright when it rained,
+            // so the first drop changed the whole sky at once.
+            if (storm > 0.0f) {
+                const uint32_t stormId = selectLightParamsId(*wv.volume, true, isUnderwater);
+                auto stormIt = lightParamsProfiles_.find(stormId);
+                if (stormId != lightParamsId && stormIt != lightParamsProfiles_.end()) {
+                    params = blendTowardStorm(
+                        params, sampleLightParams(stormIt->second, timeHalfMinutes, fallbackParams_),
+                        storm);
+                }
+            }
+            parts.push_back({.params = params, .weight = wv.weight});
 
             // Debug logging for fog params (first few samples only)
             static int debugCount = 0;
             if (debugCount < 3) {
-                const LightingParams& p = parts[partCount - 1].params;
+                const LightingParams& p = parts.back().params;
                 LOG_INFO("Fog params: start=", p.fogStart, " end=", p.fogEnd,
                          " color=(", p.fogColor.r, ",", p.fogColor.g, ",", p.fogColor.b, ")");
                 debugCount++;
             }
         }
-        blended = blendLightingParams(std::span(parts.data(), partCount));
+        blended = blendLightingParams(parts);
     }
 
     if (blended) {
         newParams = *blended;
     } else {
-        // No light volume, or none naming a LightParams row: the fallback,
-        // with time-based animation
+        // No light at all - a map with no global light, outside its volumes
+        // (said once in findLightVolumes), or lights naming no LightParams
+        // row: the fallback, with time-based animation
         newParams = fallbackParams_;
         newParams.directionalDir = sunLightDirection(timeOfDay_);
 
@@ -465,8 +493,6 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             newParams.ambientColor.b += nightness * 0.1f;
         }
     }
-
-    applyZoneAmbienceOverride(zoneId, newParams);
 
     // Keep the authored fog colour. The surface shaders blend it toward the
     // actual sky band along each camera ray; one CPU-side mid-sky tint made
@@ -524,13 +550,23 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
                               0.7152f * newParams.skyTopColor.g +
                               0.0722f * newParams.skyTopColor.b;
         const std::string topSkybox = skyboxLayers_.empty() ? std::string() : skyboxLayers_.front().path;
-        uint32_t firstVolume = 0, secondVolume = 0;
-        if (!activeVolumes_.empty()) firstVolume = activeVolumes_[0].volume->lightId;
-        if (activeVolumes_.size() > 1) secondVolume = activeVolumes_[1].volume->lightId;
+        // The two lights with the largest shares, the global light included.
+        const WeightedVolume* first = nullptr;
+        const WeightedVolume* second = nullptr;
+        for (const auto& wv : activeVolumes_) {
+            if (!first || wv.weight > first->weight) {
+                second = first;
+                first = &wv;
+            } else if (!second || wv.weight > second->weight) {
+                second = &wv;
+            }
+        }
+        const uint32_t firstVolume = first ? first->volume->lightId : 0;
+        const uint32_t secondVolume = second ? second->volume->lightId : 0;
         const bool changed =
             zoneId != diagZoneId_ || topSkybox != diagSkyboxPath_ ||
             firstVolume != diagFirstVolume_ || secondVolume != diagSecondVolume_ ||
-            std::abs(visualTimeOfDayHours_ - diagVisualHours_) > 0.02f ||
+            std::abs(getTimeOfDayHours() - diagHours_) > 0.02f ||
             std::abs(skyLuma - diagSkyLuma_) > 0.01f;
         // Rate-limited as well as change-gated, because a change is not rare:
         // walking through the falloff between two volumes moves the target
@@ -540,15 +576,16 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         ++diagCallsSinceLog_;
         if (changed && diagCallsSinceLog_ >= 30) {
             diagCallsSinceLog_ = 0;
-            LOG_INFO("sky: zone=", zoneId, " hour=", visualTimeOfDayHours_,
+            LOG_INFO("sky: zone=", zoneId, " hour=", getTimeOfDayHours(),
                      " skyLuma=", skyLuma, " volumes=", firstVolume, "/", secondVolume,
-                     " inRange=", activeVolumes_.size(),
+                     " shares=", first ? first->weight : 0.0f, "/", second ? second->weight : 0.0f,
+                     " lights=", activeVolumes_.size(),
                      " skybox=", topSkybox.empty() ? "-" : topSkybox);
             diagZoneId_ = zoneId;
             diagSkyboxPath_ = topSkybox;
             diagFirstVolume_ = firstVolume;
             diagSecondVolume_ = secondVolume;
-            diagVisualHours_ = visualTimeOfDayHours_;
+            diagHours_ = getTimeOfDayHours();
             diagSkyLuma_ = skyLuma;
         }
     }
@@ -563,6 +600,13 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.skyMiddleColor = glm::mix(currentParams_.skyMiddleColor, newParams.skyMiddleColor, blendFactor);
     currentParams_.skyBand1Color = glm::mix(currentParams_.skyBand1Color, newParams.skyBand1Color, blendFactor);
     currentParams_.skyBand2Color = glm::mix(currentParams_.skyBand2Color, newParams.skyBand2Color, blendFactor);
+    currentParams_.sunColor = glm::mix(currentParams_.sunColor, newParams.sunColor, blendFactor);
+    currentParams_.cloudSunlitColor =
+        glm::mix(currentParams_.cloudSunlitColor, newParams.cloudSunlitColor, blendFactor);
+    currentParams_.cloudFillColor =
+        glm::mix(currentParams_.cloudFillColor, newParams.cloudFillColor, blendFactor);
+    currentParams_.cloudBaseColor =
+        glm::mix(currentParams_.cloudBaseColor, newParams.cloudBaseColor, blendFactor);
     currentParams_.fogStart = glm::mix(currentParams_.fogStart, newParams.fogStart, blendFactor);
     currentParams_.fogEnd = glm::mix(currentParams_.fogEnd, newParams.fogEnd, blendFactor);
     currentParams_.fogDensity = glm::mix(currentParams_.fogDensity, newParams.fogDensity, blendFactor);
@@ -579,70 +623,56 @@ bool LightingManager::skyModelsHideProceduralSky(
 }
 
 std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const {
-    auto it = lightVolumesByMap_.find(mapId);
-    if (it == lightVolumesByMap_.end()) {
-        return {};
-    }
-
-    const std::vector<LightVolume>& volumes = it->second;
-    if (volumes.empty()) {
-        return {};
-    }
-
-    // Collect all volumes with weight > 0
-    std::vector<WeightedVolume> weighted;
-    weighted.reserve(volumes.size());
-
-    for (const auto& volume : volumes) {
-        glm::vec3 toPlayer = playerPos - volume.position;
-        float distSq = glm::dot(toPlayer, toPlayer);
-
+    // The volumes the point stands in, with their own weights, in the order
+    // the client lays them down (light_volume_order.hpp).
+    //
+    // This took the two heaviest, renormalised them to sum to one and fell
+    // back to a built-in light where none reached. So a zone's light held
+    // whole to the last yard of its falloff and then the sky over Sholazar,
+    // flown above its volumes, switched to a pale blue that no file has.
+    struct InRange {
+        const LightVolume* volume = nullptr;
         float weight = 0.0f;
-        if (distSq <= volume.innerRadius * volume.innerRadius) {
-            // Inside inner radius: full weight
-            weight = 1.0f;
-        } else if (distSq < volume.outerRadius * volume.outerRadius) {
-            // Between inner and outer: fade out with smoothstep (sqrt needed for interpolation)
-            float dist = std::sqrt(distSq);
-            float t = (dist - volume.innerRadius) / (volume.outerRadius - volume.innerRadius);
-            t = glm::clamp(t, 0.0f, 1.0f);
-            weight = 1.0f - (t * t * (3.0f - 2.0f * t));  // Smoothstep
-        }
-
-        if (weight > 0.0f) {
-            weighted.push_back({.volume = &volume, .weight = weight});
-        }
-    }
-
-    if (weighted.empty()) {
-        return {};
-    }
-
-    // Keep the top N by weight, ordered by something that cannot change under
-    // the player's feet - see light_volume_order.hpp for why weight alone is
-    // not an order here and what the flicker looked like.
-    const auto moreSpecific = [](const WeightedVolume& a, const WeightedVolume& b) {
-        return lightVolumeOrderedBefore(a.weight, a.volume->outerRadius, a.volume->lightId,
-                                        b.weight, b.volume->outerRadius, b.volume->lightId);
+        LightVolumePlace place;
     };
-    // Sorted in full rather than truncated here. Only the first
-    // MAX_BLEND_VOLUMES are blended, but the skybox is chosen over the whole
-    // list: a volume that names a sky and sits third on weight still says
-    // which sky is overhead, and cutting the list here meant it dropped out
-    // and back in as the player walked.
-    std::sort(weighted.begin(), weighted.end(), moreSpecific);
-
-    // Normalize the ones that will be blended, so their weights sum to 1.0.
-    // The rest keep the weight they were given; nothing reads it but the
-    // skybox walk, which only asks whether they are in range at all.
-    const size_t blended = std::min(weighted.size(), MAX_BLEND_VOLUMES);
-    float totalWeight = 0.0f;
-    for (size_t i = 0; i < blended; ++i) {
-        totalWeight += weighted[i].weight;
+    std::vector<InRange> inRange;
+    if (const auto it = lightVolumesByMap_.find(mapId); it != lightVolumesByMap_.end()) {
+        for (const auto& volume : it->second) {
+            if (volume.outerRadius <= kLightVolumeMinOuterRadius) continue;
+            const glm::vec3 toPlayer = playerPos - volume.position;
+            const float distSq = glm::dot(toPlayer, toPlayer);
+            if (distSq >= volume.outerRadius * volume.outerRadius) continue;
+            const float weight =
+                lightVolumeWeight(std::sqrt(distSq), volume.innerRadius, volume.outerRadius);
+            if (weight <= 0.0f) continue;
+            inRange.push_back({.volume = &volume, .weight = weight,
+                               .place = {.centre = volume.position, .distanceSq = distSq,
+                                         .innerRadius = volume.innerRadius,
+                                         .id = volume.lightId}});
+        }
     }
-    if (totalWeight > 0.0f) {
-        for (size_t i = 0; i < blended; ++i) {
-            weighted[i].weight /= totalWeight;
+    std::sort(inRange.begin(), inRange.end(), [](const InRange& a, const InRange& b) {
+        return lightVolumeLaidBefore(a.place, b.place);
+    });
+
+    std::vector<float> ownWeights;
+    ownWeights.reserve(inRange.size());
+    for (const auto& v : inRange) ownWeights.push_back(v.weight);
+    const LightVolumeShares shares = lightVolumeShares(ownWeights);
+
+    // The map's global light under them all, with what they leave of it.
+    std::vector<WeightedVolume> weighted;
+    weighted.reserve(inRange.size() + 1);
+    if (const auto g = globalLightByMap_.find(mapId); g != globalLightByMap_.end()) {
+        if (shares.global > 0.0f) weighted.push_back({.volume = &g->second, .weight = shares.global});
+    } else if (mapsWithoutGlobalLight_.insert(mapId).second) {
+        LOG_WARNING("Light.dbc: map ", mapId, " has no global light (a row at the origin); "
+                    "outside its volumes the built-in fallback light is drawn, and at their "
+                    "edges the volumes are stretched over what is missing");
+    }
+    for (size_t i = 0; i < inRange.size(); ++i) {
+        if (shares.volumes[i] > 0.0f) {
+            weighted.push_back({.volume = inRange[i].volume, .weight = shares.volumes[i]});
         }
     }
 
@@ -663,14 +693,16 @@ std::vector<LightingManager::WeightedVolume> LightingManager::findLightVolumes(c
     if (mapId != diagLoggedMapId_) {
         diagLoggedMapId_ = mapId;
         std::string named;
-        for (size_t i = 0; i < weighted.size() && i < 3; ++i) {
-            const LightVolume& v = *weighted[i].volume;
+        for (size_t i = 0; i < inRange.size() && i < 3; ++i) {
+            const LightVolume& v = *inRange[i].volume;
             named += " [" + std::to_string(v.lightId) + " inner=" +
                      std::to_string(static_cast<int>(v.innerRadius)) + " outer=" +
                      std::to_string(static_cast<int>(v.outerRadius)) + "]";
         }
-        LOG_INFO("Light volumes on map ", mapId, ": ", weighted.size(),
-                 " in range,", named.empty() ? " none" : named);
+        const auto g = globalLightByMap_.find(mapId);
+        LOG_INFO("Light volumes on map ", mapId, ": ", inRange.size(),
+                 " in range,", named.empty() ? " none" : named, ", global light ",
+                 g == globalLightByMap_.end() ? std::string("none") : std::to_string(g->second.lightId));
     }
 
     return weighted;

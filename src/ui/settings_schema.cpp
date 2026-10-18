@@ -90,8 +90,9 @@ constexpr SettingDesc kSchema[] = {
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
      "How thick the lit mist is, when light shafts are on (Detail).\n"
-     "1 is a light haze; above it the air closes in. Rain, snow, dawn\n"
-     "and foggy zones thicken it further.",
+     "At 1 the houses across a street stand in the mist and the trees\n"
+     "past them are shapes in it; lower clears the air, higher closes\n"
+     "it in. Foggy zones, their weather and the dawn thicken it further.",
      "", 1.0f, "lightshafts!=0"},
 
     // Labelled for what it does, with the term of art in brackets: nobody
@@ -146,8 +147,9 @@ constexpr SettingDesc kSchema[] = {
      "is not there, so a short distance is a visible edge on open ground.", "", 140},
 
     {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
-     "Light stone, wood, cloth and metal by their surface texture, so\n"
-     "they catch the light like the real material rather than flat paint.", "", 1},
+     "Light stone, wood, cloth, metal and the ground by their surface\n"
+     "texture, so they catch the light like the real material rather\n"
+     "than flat paint.", "", 1},
     {"normalmapstrength", "Bump strength", SettingKind::Float, 0, 2, 0.1f, "Detail", "",
      "How pronounced those surface bumps look. 1 is as the textures\n"
      "were made; higher exaggerates them.", "", 0.8f, "normalmapping"},

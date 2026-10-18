@@ -6,6 +6,7 @@
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
+#include "rendering/wmo_lighting.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 
@@ -247,16 +248,20 @@ public:
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
 
     /**
-     * Render depth-only for shadow casting
+     * Render depth-only for shadow casting. The first depth-only pass of a
+     * frame resets the frame slot's texture sets; a later one in the same
+     * frame (the sea bed's map) passes `resetDescriptors` false and reuses
+     * them, as M2Renderer::renderShadow does.
      */
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      bool resetDescriptors = true);
 
     /**
      * Get number of loaded models
      */
     void recreatePipelines();
-    /// The four main-pass pipelines, which initialize() and
+    /// The three main-pass pipelines, which initialize() and
     /// recreatePipelines() both need and each used to describe.
     bool buildMainPassPipelines(VkDevice device,
                                 wowee::rendering::VkShaderModule& vertShader,
@@ -293,7 +298,6 @@ public:
     void setNormalMapStrength(float s) { normalMapStrength_ = s; materialSettingsDirty_ = true; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; materialSettingsDirty_ = true; }
     void setPOMQuality(int q) { pomQuality_ = q; materialSettingsDirty_ = true; }
-    void setWMOOnlyMap(bool v) { wmoOnlyMap_ = v; materialSettingsDirty_ = true; }
     bool isNormalMappingEnabled() const { return normalMappingEnabled_; }
     float getNormalMapStrength() const { return normalMapStrength_; }
     bool isPOMEnabled() const { return pomEnabled_; }
@@ -427,8 +431,13 @@ public:
 
     /// The light of a character or creature at the point: from the floor
     /// under it in the WMO interior group that holds it, or no value when no
-    /// interior group does.
+    /// interior group does. Anywhere in the world, not only near the player.
     [[nodiscard]] std::optional<InteriorLight> interiorLightAt(float glX, float glY, float glZ) const;
+
+    /// Changes whenever the buildings the queries answer from do: an instance
+    /// created or removed, a model finished loading or unloaded. An answer
+    /// kept from an earlier revision may be out of date.
+    [[nodiscard]] uint64_t contentRevision() const { return contentRevision_; }
 
     /**
      * Raycast against WMO bounding boxes for camera collision
@@ -491,25 +500,27 @@ private:
     struct WMOMaterialUBO {
         int32_t hasTexture;        // 0
         int32_t alphaTest;         // 4
-        int32_t unlit;             // 8
-        int32_t isInterior;        // 12
+        int32_t light;             // 8: WmoLight the batch is drawn with
+        int32_t transitionLight;   // 12: WmoLight under it by 1 - MOCV alpha, -1 for none
         float specularIntensity;   // 16
-        int32_t isWindow;          // 20
-        int32_t enableNormalMap;   // 24
-        int32_t enablePOM;         // 28
-        float pomScale;            // 32 (height scale)
-        int32_t pomMaxSamples;     // 36 (max ray-march steps)
-        float heightMapVariance;   // 40 (low variance = skip POM)
-        float normalMapStrength;   // 44 (0=flat, 1=full, 2=exaggerated)
-        int32_t isLava;            // 48 (1=lava/magma UV scroll)
-        float wmoAmbientR;         // 52 (interior ambient color R)
-        float wmoAmbientG;         // 56 (interior ambient color G)
-        float wmoAmbientB;         // 60 (interior ambient color B)
-        int32_t emissive;           // 64 (0 none, 1 lamp glass, 2 firelit)
-        int32_t hasVertexColors;    // 68: the group carries MOCV (MOGP flag 0x4)
-        int32_t receivesExteriorShadows; // 72: exterior light or visible exterior sky
-        int32_t padding2;           // 76
-    };  // 80 bytes total
+        int32_t enableNormalMap;   // 20
+        int32_t enablePOM;         // 24
+        float pomScale;            // 28 (height scale)
+        int32_t pomMaxSamples;     // 32 (max ray-march steps)
+        float heightMapVariance;   // 36 (low variance = skip POM)
+        float normalMapStrength;   // 40 (0=flat, 1=full, 2=exaggerated)
+        int32_t isLava;            // 44 (1=lava/magma UV scroll)
+        float wmoAmbientR;         // 48 (interior ambient color R)
+        float wmoAmbientG;         // 52 (interior ambient color G)
+        float wmoAmbientB;         // 56 (interior ambient color B)
+        int32_t emissive;           // 60 (0 none, 1 lamp glass, 2 firelit)
+        int32_t hasVertexColors;    // 64: the group carries MOCV (MOGP flag 0x4)
+        int32_t receivesExteriorShadows; // 68: wmoReceivesExteriorShadows
+        float sidnR;                // 72: F_SIDN glow colour, 0 without the flag
+        float sidnG;                // 76
+        float sidnB;                // 80
+        int32_t padding[3];         // 84
+    };  // 96 bytes total
 
     /**
      * WMO group GPU resources
@@ -533,6 +544,8 @@ private:
             uint32_t startIndex;   // First index in EBO
             uint32_t indexCount;   // Number of indices to draw
             uint8_t materialId;    // Material/texture reference
+            /// The MOBA run it is in, which picks its light with its material.
+            pipeline::WMOBatchKind kind = pipeline::WMOBatchKind::Exterior;
         };
         std::vector<Batch> batches;
 
@@ -549,9 +562,8 @@ private:
             VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
             bool hasTexture = false;
             bool alphaTest = false;
-            bool unlit = false;
             bool isTransparent = false;     // blendMode >= 2
-            bool isWindow = false;          // F_SIDN or F_WINDOW material
+            uint32_t sidnColor = 0;         // F_SIDN glow colour (BGRA), 0 without
             bool isLava = false;            // lava/magma texture (UV scroll)
             /// Cloth hung in the building's own mesh: where the bar is, how
             /// far the cloth drops below it, and where it hangs.
@@ -568,7 +580,7 @@ private:
             // from behind with a flicker (clock faces). See wmo.frag's emissive
             // branch for how each level is shaded.
             uint8_t emissiveLevel = 0;
-            bool exteriorLighting = false;  // material asks for exterior light (wmo_lighting.hpp)
+            WmoBatchLighting lighting;      // the light it is drawn with (wmo_lighting.hpp)
             // For multi-draw: store index ranges
             struct DrawRange { uint32_t firstIndex; uint32_t indexCount; };
             std::vector<DrawRange> draws;
@@ -685,6 +697,10 @@ private:
         // Material flags (materialId -> flags; 0x01 = unlit)
         std::vector<uint32_t> materialFlags;
 
+        // Material night glow colour (materialId -> MOMT sidnColor, BGRA),
+        // drawn only where the material has F_SIDN.
+        std::vector<uint32_t> materialSidnColors;
+
         // Portal visibility data
         std::vector<PortalData> portals;
         std::vector<glm::vec3> portalVertices;
@@ -769,10 +785,17 @@ private:
         glm::vec3 localPos;
     };
 
+    /// Which instances a query looks at: those inside the collision focus
+    /// around the player, or every one. The focus is for the player's
+    /// collision; a light looked up for a creature across town is not, and
+    /// filtered by it came out "outdoors" for every building more than twenty
+    /// yards from the player.
+    enum class QueryReach { CollisionFocus, Everywhere };
+
     /// The first of a WMO's groups, or only of its interior ones, that holds
     /// a point.
     std::optional<GroupHolding> findGroupHolding(float glX, float glY, float glZ,
-                                                 bool interiorOnly) const;
+                                                 bool interiorOnly, QueryReach reach) const;
 
     /// Whether a point is inside any of a WMO's groups, or only its
     /// interior ones. The two public queries above differ by that flag.
@@ -894,7 +917,6 @@ private:
     // Vulkan pipelines
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
     VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
-    VkPipeline glassPipeline_ = VK_NULL_HANDLE;      // alpha blend + depth write (windows)
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
@@ -950,7 +972,6 @@ private:
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
-    bool wmoOnlyMap_ = false;            // true for dungeon/instance WMO-only maps
 
     // Rendering state
     bool wireframeMode = false;
@@ -972,6 +993,10 @@ private:
 
     // Optional query-space culling for collision/raycast hot paths.
     CollisionFocus collisionFocus;
+
+    /// See contentRevision(). Bumped by markContentChanged().
+    uint64_t contentRevision_ = 1;
+    void markContentChanged() { ++contentRevision_; }
 
     // Uniform grid for fast local collision queries.
     // Collision scratch buffers are thread_local (see wmo_renderer.cpp) for thread-safety.

@@ -403,7 +403,7 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
 }
 
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
-                      VkBuffer target) {
+                      VkBuffer target, VkDeviceSize targetOffset) {
     if (target == VK_NULL_HANDLE || size == 0) return false;
 
     AllocatedBuffer staging = createBuffer(ctx.getAllocator(), size,
@@ -420,17 +420,21 @@ bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
 
     ctx.immediateSubmit([&](VkCommandBuffer cmd) {
         VkBufferCopy region{};
+        region.dstOffset = targetOffset;
         region.size = size;
         vkCmdCopyBuffer(cmd, staging.buffer, target, 1, &region);
     });
 
-    // See the header: the copy may not have been submitted yet, so the staging
-    // buffer goes when the frame it was recorded in is done with it.
-    const VmaAllocator allocator = ctx.getAllocator();
-    AllocatedBuffer pending = staging;
-    ctx.deferAfterFrameFence([allocator, pending]() mutable {
-        destroyBuffer(allocator, pending);
-    });
+    // See the header: inside a batch the copy is only recorded, so the staging
+    // buffer goes to the batch, which frees it once the copy has run. Handed
+    // to the batch it is also what makes the batch submit at all: a batch
+    // with no staging buffers of its own is thrown away unsubmitted, and a
+    // batch holding only copies made here lost every one of them.
+    if (ctx.isInUploadBatch()) {
+        ctx.deferStagingCleanup(staging);
+    } else {
+        destroyBuffer(ctx.getAllocator(), staging);
+    }
     return true;
 }
 

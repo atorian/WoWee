@@ -36,10 +36,13 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     }
 
     // Quest objective progress toast callback
-    if (!questProgressCallbackSet_) {
-        gameHandler.setQuestProgressCallback([this](const std::string& questTitle,
-                                                    const std::string& objectiveName,
-                                                    uint32_t current, uint32_t required) {
+    if (!questProgressSub_) {
+        questProgressSub_ = gameHandler.eventBus().subscribe<game::events::QuestObjectiveProgressed>(
+            [this](const game::events::QuestObjectiveProgressed& e) {
+            const std::string& questTitle = e.questTitle;
+            const std::string& objectiveName = e.objective;
+            const uint32_t current = e.count;
+            const uint32_t required = e.required;
             for (auto& t : questToasts_) {
                 if (t.questTitle == questTitle && t.objectiveName == objectiveName) {
                     t.current  = current;
@@ -51,7 +54,6 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
             if (questToasts_.size() >= 4) questToasts_.erase(questToasts_.begin());
             questToasts_.push_back({.questTitle = questTitle, .objectiveName = objectiveName, .current = current, .required = required, .age = 0.0f});
         });
-        questProgressCallbackSet_ = true;
     }
 
     // Other-player level-up toast callback
@@ -111,12 +113,15 @@ void ToastManager::setupCallbacks(game::GameHandler& gameHandler) {
     }
 
     // Reputation change toast callback
-    if (!repChangeCallbackSet_) {
-        gameHandler.setRepChangeCallback([this](const std::string& name, int32_t delta, int32_t standing) {
+    if (!repChangeSub_) {
+        repChangeSub_ = gameHandler.eventBus().subscribe<game::events::ReputationChanged>(
+            [this](const game::events::ReputationChanged& e) {
+            const std::string& name = e.factionName;
+            const int32_t delta = e.delta;
+            const int32_t standing = e.standing;
             repToasts_.push_back({.factionName = name, .delta = delta, .standing = standing, .age = 0.0f});
             if (repToasts_.size() > 4) repToasts_.erase(repToasts_.begin());
         });
-        repChangeCallbackSet_ = true;
     }
 
     // Quest completion toasts

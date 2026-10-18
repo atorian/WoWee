@@ -37,7 +37,10 @@ audio::VoiceType NPCInteractionCallbackHandler::resolveNpcVoiceType(uint64_t gui
 
 void NPCInteractionCallbackHandler::setupCallbacks() {
     // NPC greeting callback - play voice line
-    gameHandler_.setNpcGreetingCallback([this](uint64_t guid, const glm::vec3& position) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GossipOpenedOnNpc>(
+        [this](const game::events::GossipOpenedOnNpc& e) {
+        const uint64_t guid = e.npcGuid;
+        const glm::vec3 position(e.x, e.y, e.z);
         // Play NPC_WELCOME animation on the NPC
         if (renderer_) {
             auto* cr = renderer_->getCharacterRenderer();
@@ -52,16 +55,17 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
             audio::VoiceType voiceType = resolveNpcVoiceType(guid);
             audioCoordinator_->getNpcVoiceManager()->playGreeting(guid, voiceType, renderPos);
         }
-    });
+    }));
 
-    // NPC farewell callback - play farewell voice line
-    gameHandler_.setNpcFarewellCallback([this](uint64_t guid, const glm::vec3& position) {
-        if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
-            glm::vec3 renderPos = core::coords::canonicalToRender(position);
-            audio::VoiceType voiceType = resolveNpcVoiceType(guid);
-            audioCoordinator_->getNpcVoiceManager()->playFarewell(guid, voiceType, renderPos);
-        }
-    });
+    // NPC farewell - play farewell voice line
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GossipClosedOnNpc>(
+        [this](const game::events::GossipClosedOnNpc& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.npcGuid);
+                audioCoordinator_->getNpcVoiceManager()->playFarewell(e.npcGuid, voiceType, renderPos);
+            }
+        }));
 
     // NPC vendor callback - play vendor voice line
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::VendorOpened>(

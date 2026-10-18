@@ -94,7 +94,6 @@ private:
     };
     static constexpr float QUEST_TOAST_DURATION = 4.0f;
     std::vector<QuestProgressToastEntry> questToasts_;
-    bool questProgressCallbackSet_ = false;
     void renderQuestProgressToasts();
 
     // ---- Nearby player level-up toast ----
@@ -107,6 +106,7 @@ private:
     static constexpr float PLAYER_LEVELUP_TOAST_DURATION = 4.0f;
     std::vector<PlayerLevelUpToastEntry> playerLevelUpToasts_;
     core::EventBus::Subscription otherPlayerLevelUpSub_;
+    core::EventBus::Subscription questProgressSub_;
     void renderPlayerLevelUpToasts(game::GameHandler& gameHandler);
 
     // ---- PvP honor toast ----
@@ -141,7 +141,7 @@ private:
         float age = 0.0f;
     };
     std::vector<RepToastEntry> repToasts_;
-    bool repChangeCallbackSet_ = false;
+    core::EventBus::Subscription repChangeSub_;
     static constexpr float kRepToastLifetime = 3.5f;
     void renderRepToasts(float deltaTime);
 

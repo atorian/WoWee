@@ -11,6 +11,7 @@
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -32,6 +33,27 @@ struct TerrainParamsUBO {
     int32_t hasLayer2;
     int32_t hasLayer3;
 };
+
+// The fragment stage's push constants, after the vertex stage's
+// GPUPushConstants. Matches `Surface` in terrain.frag.glsl.
+struct TerrainSurfacePush {
+    /// x: how steep the textures' relief is drawn, 0 for flat ground.
+    glm::vec4 relief{0.0f};
+};
+constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
+
+// The material set's bindings past the seven samplers and the params block:
+// the base texture's relief, then each layer's.
+constexpr uint32_t kFirstNormalMapBinding = 8;
+constexpr uint32_t kMaterialBindingCount = kFirstNormalMapBinding + 4;
+constexpr uint32_t kMaterialSamplerCount = 7 + 4;
+
+/// The Sobel strength the ground's relief is derived with, half a wall's. The
+/// ground is seen at a grazing angle across a whole road at once, where the
+/// WMO renderer's two turned every grain of a cobble into a chiselled edge;
+/// at one, Goldshire's road reads as stones and mortar at the default "Bump
+/// strength", which scales the result in the shader.
+constexpr float kTerrainNormalMapStrength = 1.0f;
 
 TerrainRenderer::TerrainRenderer() = default;
 
@@ -127,19 +149,16 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // --- Create material descriptor set layout (set 1) ---
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
     // binding 7: uniform buffer (TerrainParams)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(8);
-    for (uint32_t i = 0; i < 7; i++) {
+    // bindings 8-11: combined image samplers (base + 3 layer normal maps)
+    std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         materialBindings[i] = {};
         materialBindings[i].binding = i;
-        materialBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        materialBindings[i].descriptorType = i == 7 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                    : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         materialBindings[i].descriptorCount = 1;
         materialBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    materialBindings[7] = {};
-    materialBindings[7].binding = 7;
-    materialBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    materialBindings[7].descriptorCount = 1;
-    materialBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     materialSetLayout = createDescriptorSetLayout(device, materialBindings);
     if (!materialSetLayout) {
@@ -149,7 +168,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     // --- Create descriptor pool ---
     VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 7 },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * kMaterialSamplerCount },
         { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
     };
 
@@ -170,9 +189,13 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
     pushRange.size = sizeof(GPUPushConstants);
+    VkPushConstantRange surfaceRange{};
+    surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    surfaceRange.offset = kSurfacePushOffset;
+    surfaceRange.size = sizeof(TerrainSurfacePush);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout };
-    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
+    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
     if (!pipelineLayout) {
         LOG_ERROR("TerrainRenderer: failed to create pipeline layout");
         return false;
@@ -206,63 +229,12 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     const uint8_t opaqueAlpha = 255;
     opaqueAlphaTexture = adoptPixels(*vkCtx, TextureForm::Owned, &opaqueAlpha, 1, 1, VK_FORMAT_R8_UNORM,
                                      false, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    // Straight up, for a texture whose relief could not be had.
+    const uint8_t flatNormal[4] = {128, 128, 255, 128};
+    flatNormalTexture = adoptPixels(*vkCtx, TextureForm::Owned, flatNormal, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                    false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
-    // Allocate mega vertex/index buffers and indirect draw buffer.
-    // All terrain chunks share these buffers, eliminating per-chunk VB/IB rebinds.
-    {
-        VmaAllocator allocator = vkCtx->getAllocator();
-
-        // Mega vertex buffer (host-visible for direct write during chunk upload)
-        VkBufferCreateInfo vbCI{};
-        vbCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        vbCI.size = static_cast<VkDeviceSize>(MEGA_VB_MAX_VERTS) * sizeof(pipeline::TerrainVertex);
-        vbCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        VmaAllocationCreateInfo vbAllocCI{};
-        vbAllocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        vbAllocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo vbInfo{};
-        if (vmaCreateBuffer(allocator, &vbCI, &vbAllocCI,
-                &megaVB_, &megaVBAlloc_, &vbInfo) == VK_SUCCESS) {
-            megaVBMapped_ = vbInfo.pMappedData;
-        } else {
-            LOG_WARNING("TerrainRenderer: mega VB allocation failed, per-chunk fallback");
-        }
-
-        // Mega index buffer
-        VkBufferCreateInfo ibCI{};
-        ibCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        ibCI.size = static_cast<VkDeviceSize>(MEGA_IB_MAX_INDICES) * sizeof(uint32_t);
-        ibCI.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        VmaAllocationCreateInfo ibAllocCI{};
-        ibAllocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        ibAllocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo ibInfo{};
-        if (vmaCreateBuffer(allocator, &ibCI, &ibAllocCI,
-                &megaIB_, &megaIBAlloc_, &ibInfo) == VK_SUCCESS) {
-            megaIBMapped_ = ibInfo.pMappedData;
-        } else {
-            LOG_WARNING("TerrainRenderer: mega IB allocation failed, per-chunk fallback");
-        }
-
-        // Indirect draw command buffer
-        VkBufferCreateInfo indCI{};
-        indCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        indCI.size = MAX_INDIRECT_DRAWS * sizeof(VkDrawIndexedIndirectCommand);
-        indCI.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-        VmaAllocationCreateInfo indAllocCI{};
-        indAllocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        indAllocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo indInfo{};
-        if (vmaCreateBuffer(allocator, &indCI, &indAllocCI,
-                &indirectBuffer_, &indirectAlloc_, &indInfo) == VK_SUCCESS) {
-        } else {
-            LOG_WARNING("TerrainRenderer: indirect buffer allocation failed");
-        }
-
-        LOG_INFO("Terrain mega buffers: VB=", vbCI.size / (1024*1024), "MB IB=",
-                 ibCI.size / (1024*1024), "MB indirect=",
-                 indCI.size / 1024, "KB");
-    }
+    // The geometry pages are made as tiles arrive (placeInGeometryPage).
 
     LOG_INFO("Terrain renderer initialized (Vulkan)");
     return true;
@@ -311,8 +283,10 @@ void TerrainRenderer::shutdown() {
     vkCtx->flushDeferredCleanup();
 
     loggedTextureLoadFails_.clear();
+    loggedNormalMapFails_.clear();
     whiteTexture.reset();
     opaqueAlphaTexture.reset();
+    flatNormalTexture.reset();
 
     destroy(device, pipeline);
     destroy(device, wireframePipeline);
@@ -325,12 +299,8 @@ void TerrainRenderer::shutdown() {
     destroy(device, shadowPipelineLayout_);
     destroyShadowParamsSet(device, allocator, shadowParams_);
 
-    // Destroy mega buffers and indirect draw buffer
-    if (megaVB_) { vmaDestroyBuffer(allocator, megaVB_, megaVBAlloc_); megaVB_ = VK_NULL_HANDLE; megaVBAlloc_ = VK_NULL_HANDLE; megaVBMapped_ = nullptr; }
-    if (megaIB_) { vmaDestroyBuffer(allocator, megaIB_, megaIBAlloc_); megaIB_ = VK_NULL_HANDLE; megaIBAlloc_ = VK_NULL_HANDLE; megaIBMapped_ = nullptr; }
-    if (indirectBuffer_) { vmaDestroyBuffer(allocator, indirectBuffer_, indirectAlloc_); indirectBuffer_ = VK_NULL_HANDLE; indirectAlloc_ = VK_NULL_HANDLE; }
-    megaVBUsed_ = 0;
-    megaIBUsed_ = 0;
+    // Every chunk's ranges came back in the flush above; the device is idle.
+    destroyGeometryPages();
 
     vkCtx = nullptr;
 }
@@ -344,6 +314,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
     }
     LOG_DEBUG("Loading terrain mesh: ", mesh.validChunkCount, " chunks");
 
+    releaseEmptyGeometryPages();
     vkCtx->beginUploadBatch();
 
     for (int y = 0; y < 16; y++) {
@@ -399,6 +370,9 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
                                               const std::vector<std::string>& texturePaths,
                                               int tileX, int tileY,
                                               int& chunkIndex, int maxChunksPerCall) {
+    // Pages the tiles that left emptied, now that their frames are done.
+    if (chunkIndex == 0) releaseEmptyGeometryPages();
+
     // Batch all GPU uploads (VBs, IBs, textures) into a single command buffer
     // submission with one fence wait, instead of one per buffer/texture.
     vkCtx->beginUploadBatch();
@@ -475,6 +449,7 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
     uint32_t baseTexId = chunk.layers[0].textureId;
     if (baseTexId < texturePaths.size()) {
         gpuChunk.baseTexture = loadTexture(texturePaths[baseTexId]);
+        gpuChunk.baseNormalMap = loadNormalMap(texturePaths[baseTexId]);
     } else {
         LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                     "] base textureId ", baseTexId, " >= texturePaths size ",
@@ -490,6 +465,7 @@ void TerrainRenderer::bindChunkTextures(TerrainChunkGPU& gpuChunk,
         TextureRef layerTex = whiteTexture;
         if (layer.textureId < texturePaths.size()) {
             layerTex = loadTexture(texturePaths[layer.textureId]);
+            gpuChunk.layerNormalMaps[li] = loadNormalMap(texturePaths[layer.textureId]);
         } else {
             LOG_WARNING("Terrain[", tileX, ",", tileY, "] chunk[", chunkX, ",", chunkY,
                         "] layer[", i, "] textureId ", layer.textureId,
@@ -544,6 +520,10 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
     gpuChunk.indexCount = static_cast<uint32_t>(chunk.indices.size());
     gpuChunk.vertexCount = static_cast<uint32_t>(chunk.vertices.size());
 
+    if (placeInGeometryPage(gpuChunk, chunk)) return gpuChunk;
+
+    // No page could be made: the chunk is drawn from buffers of its own,
+    // which costs it a rebind in both passes but keeps the ground there.
     VkDeviceSize vbSize = chunk.vertices.size() * sizeof(pipeline::TerrainVertex);
     AllocatedBuffer vb = uploadBuffer(*vkCtx, chunk.vertices.data(), vbSize,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -555,27 +535,143 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     gpuChunk.indexBuffer = ib.buffer;
     gpuChunk.indexAlloc = ib.allocation;
-
-    // Also copy into mega buffers for indirect drawing
-    uint32_t vertCount = static_cast<uint32_t>(chunk.vertices.size());
-    uint32_t idxCount = static_cast<uint32_t>(chunk.indices.size());
-    if (megaVBMapped_ && megaIBMapped_ &&
-        megaVBUsed_ + vertCount <= MEGA_VB_MAX_VERTS &&
-        megaIBUsed_ + idxCount <= MEGA_IB_MAX_INDICES) {
-        // Copy vertices
-        auto* vbDst = static_cast<pipeline::TerrainVertex*>(megaVBMapped_) + megaVBUsed_;
-        std::memcpy(vbDst, chunk.vertices.data(), vertCount * sizeof(pipeline::TerrainVertex));
-        // Copy indices
-        auto* ibDst = static_cast<uint32_t*>(megaIBMapped_) + megaIBUsed_;
-        std::memcpy(ibDst, chunk.indices.data(), idxCount * sizeof(uint32_t));
-
-        gpuChunk.megaBaseVertex = static_cast<int32_t>(megaVBUsed_);
-        gpuChunk.megaFirstIndex = megaIBUsed_;
-        megaVBUsed_ += vertCount;
-        megaIBUsed_ += idxCount;
-    }
+    if (gpuChunk.isValid()) ++ownBufferChunks_;
 
     return gpuChunk;
+}
+
+bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk) {
+    const auto vertexCount = static_cast<uint32_t>(chunk.vertices.size());
+    const auto indexCount = static_cast<uint32_t>(chunk.indices.size());
+    if (vertexCount == 0 || indexCount == 0 ||
+        vertexCount > kPageVertices || indexCount > kPageIndices) {
+        return false;
+    }
+
+    // A page with room, else a new one in the first empty slot.
+    int32_t slot = -1;
+    std::optional<uint32_t> firstVertex;
+    std::optional<uint32_t> firstIndex;
+    for (size_t i = 0; i < geometryPages_.size() && slot < 0; ++i) {
+        TerrainGeometryPage* page = geometryPages_[i].get();
+        if (!page || page->vertexRanges.largestFree() < vertexCount ||
+            page->indexRanges.largestFree() < indexCount) {
+            continue;
+        }
+        firstVertex = page->vertexRanges.allocate(vertexCount);
+        firstIndex = page->indexRanges.allocate(indexCount);
+        slot = static_cast<int32_t>(i);
+    }
+    if (slot < 0 && geometryPagesExhausted_) return false;
+    if (slot < 0) {
+        auto page = std::make_shared<TerrainGeometryPage>();
+        VmaAllocator allocator = vkCtx->getAllocator();
+        page->vertices = createBuffer(allocator,
+            static_cast<VkDeviceSize>(kPageVertices) * sizeof(pipeline::TerrainVertex),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        page->indices = createBuffer(allocator,
+            static_cast<VkDeviceSize>(kPageIndices) * sizeof(pipeline::TerrainIndex),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        if (!page->vertices.buffer || !page->indices.buffer) {
+            if (page->vertices.buffer) destroyBuffer(allocator, page->vertices);
+            if (page->indices.buffer) destroyBuffer(allocator, page->indices);
+            geometryPagesExhausted_ = true;
+            LOG_WARNING("Terrain: no geometry page could be allocated (",
+                        geometryStats().pages, " pages resident) - chunks get buffers of"
+                        " their own until a page is let go, at a rebind each per pass");
+            return false;
+        }
+        page->vertexRanges = RangeAllocator(kPageVertices);
+        page->indexRanges = RangeAllocator(kPageIndices);
+        firstVertex = page->vertexRanges.allocate(vertexCount);
+        firstIndex = page->indexRanges.allocate(indexCount);
+        auto empty = std::find(geometryPages_.begin(), geometryPages_.end(), nullptr);
+        if (empty == geometryPages_.end()) {
+            geometryPages_.push_back(std::move(page));
+            slot = static_cast<int32_t>(geometryPages_.size() - 1);
+        } else {
+            *empty = std::move(page);
+            slot = static_cast<int32_t>(empty - geometryPages_.begin());
+        }
+        LOG_INFO("Terrain: geometry page ", slot, " made (", geometryStats().pages,
+                 " resident, ", kTilesPerGeometryPage, " tiles each)");
+    }
+
+    TerrainGeometryPage& page = *geometryPages_[slot];
+    const bool copied =
+        uploadIntoBuffer(*vkCtx, chunk.vertices.data(),
+                         static_cast<VkDeviceSize>(vertexCount) * sizeof(pipeline::TerrainVertex),
+                         page.vertices.buffer,
+                         static_cast<VkDeviceSize>(*firstVertex) * sizeof(pipeline::TerrainVertex)) &&
+        uploadIntoBuffer(*vkCtx, chunk.indices.data(),
+                         static_cast<VkDeviceSize>(indexCount) * sizeof(pipeline::TerrainIndex),
+                         page.indices.buffer,
+                         static_cast<VkDeviceSize>(*firstIndex) * sizeof(pipeline::TerrainIndex));
+    if (!copied) {
+        // Nothing has drawn these ranges, so they come back at once.
+        page.vertexRanges.free(*firstVertex, vertexCount);
+        page.indexRanges.free(*firstIndex, indexCount);
+        LOG_WARNING("Terrain: a chunk's geometry could not be staged into page ", slot,
+                    " - it gets buffers of its own");
+        return false;
+    }
+    gpuChunk.geometryPage = slot;
+    gpuChunk.baseVertex = static_cast<int32_t>(*firstVertex);
+    gpuChunk.firstIndex = *firstIndex;
+    return true;
+}
+
+void TerrainRenderer::releaseEmptyGeometryPages() {
+    // A page is empty only once every chunk in it has been retired behind the
+    // frame fences, so nothing in flight reads it and it can go now.
+    bool spareKept = false;
+    VmaAllocator allocator = vkCtx->getAllocator();
+    for (auto& page : geometryPages_) {
+        if (!page || page->vertexRanges.used() != 0 || page->indexRanges.used() != 0) continue;
+        if (!spareKept) {
+            spareKept = true;
+            continue;
+        }
+        destroyBuffer(allocator, page->vertices);
+        destroyBuffer(allocator, page->indices);
+        page.reset();
+        geometryPagesExhausted_ = false;
+    }
+    while (!geometryPages_.empty() && !geometryPages_.back()) geometryPages_.pop_back();
+}
+
+void TerrainRenderer::destroyGeometryPages() {
+    VmaAllocator allocator = vkCtx->getAllocator();
+    for (auto& page : geometryPages_) {
+        if (!page) continue;
+        destroyBuffer(allocator, page->vertices);
+        destroyBuffer(allocator, page->indices);
+    }
+    geometryPages_.clear();
+    ownBufferChunks_ = 0;
+    geometryPagesExhausted_ = false;
+}
+
+void TerrainRenderer::bindGeometryPage(VkCommandBuffer cmd, const TerrainGeometryPage& page) {
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &page.vertices.buffer, &offset);
+    vkCmdBindIndexBuffer(cmd, page.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+}
+
+TerrainGeometryStats TerrainRenderer::geometryStats() const {
+    TerrainGeometryStats stats;
+    for (const auto& page : geometryPages_) {
+        if (!page) continue;
+        ++stats.pages;
+        stats.vertexCapacity += page->vertexRanges.capacity();
+        stats.verticesUsed += page->vertexRanges.used();
+        stats.indexCapacity += page->indexRanges.capacity();
+        stats.indicesUsed += page->indexRanges.used();
+    }
+    stats.ownBufferChunks = ownBufferChunks_;
+    return stats;
 }
 
 TextureRef TerrainRenderer::loadTexture(const std::string& path) {
@@ -597,6 +693,55 @@ TextureRef TerrainRenderer::loadTexture(const std::string& path) {
     // Refused or failed: the cache has said so.
     if (TextureRef uploaded = cacheStoredTexture(*vkCtx, key.path, blp)) return uploaded;
     return whiteTexture;
+}
+
+EncodedNormalMap TerrainRenderer::deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format) {
+    if (!blp.isValid()) return {};
+    const std::vector<uint8_t> decoded =
+        blp.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(blp) : blp.data;
+    const auto width = static_cast<uint32_t>(blp.width);
+    const auto height = static_cast<uint32_t>(blp.height);
+    if (decoded.size() < static_cast<size_t>(width) * height * 4) return {};
+    float variance = 0.0f;
+    std::vector<uint8_t> rgba =
+        generateNormalHeightMap(decoded.data(), width, height, kTerrainNormalMapStrength, variance);
+    if (rgba.empty()) return {};
+    return encodeNormalMap(std::move(rgba), width, height, format, variance);
+}
+
+TextureKey TerrainRenderer::normalMapKey(const std::string& path) {
+    return {normalizeTexturePath(path), TextureForm::NormalHeight,
+            static_cast<uint8_t>(kTerrainNormalMapStrength)};
+}
+
+NormalMapFormat TerrainRenderer::normalMapFormat() const {
+    return vkCtx ? normalMapFormatFor(*vkCtx) : NormalMapFormat::Rgba8;
+}
+
+void TerrainRenderer::uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map) {
+    // Held by nothing until a chunk binds it, as the textures above are.
+    const TextureKey key = normalMapKey(path);
+    if (!map.valid() || vkCtx->textures().find(key)) return;
+    (void)cacheNormalMap(*vkCtx, key, map);
+}
+
+TextureRef TerrainRenderer::loadNormalMap(const std::string& path) {
+    const TextureKey key = normalMapKey(path);
+    if (TextureRef cached = vkCtx->textures().find(key)) return cached;
+    if (loggedNormalMapFails_.count(key.path) != 0) return {};
+
+    // The loading worker derives it ahead of the tile; it is missing here
+    // only when the cache let it go before the chunk was bound.
+    const EncodedNormalMap map =
+        deriveNormalMap(assetManager->loadTexture(key.path, true), normalMapFormat());
+    if (!map.valid()) {
+        loggedNormalMapFails_.insert(key.path);
+        LOG_WARNING("Terrain: no relief could be derived from '", path,
+                    "' - the ground there is lit flat");
+        return {};
+    }
+    // Refused or failed: the cache has said so, and the ground is lit flat.
+    return cacheNormalMap(*vkCtx, key, map);
 }
 
 void TerrainRenderer::uploadPreloadedTextures(
@@ -682,11 +827,18 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
         return false;
     }
 
-    VkDescriptorImageInfo imageInfos[7];
+    // The flat normal is the relief's fallback, and a white one stands in
+    // for it: lit flat but for a slight tilt, never unbound.
+    VkTexture* flat = pick(flatNormalTexture.get(), white);
+
+    // Indexed by binding; 7 is the params block.
+    VkDescriptorImageInfo imageInfos[kMaterialBindingCount] = {};
     imageInfos[0] = pick(chunk.baseTexture.get(), white)->descriptorInfo();
-    for (int i = 0; i < 3; i++) {
+    imageInfos[kFirstNormalMapBinding] = pick(chunk.baseNormalMap.get(), flat)->descriptorInfo();
+    for (uint32_t i = 0; i < 3; i++) {
         imageInfos[1 + i] = pick(chunk.layerTextures[i].get(), white)->descriptorInfo();
         imageInfos[4 + i] = pick(chunk.alphaTextures[i].get(), opaque)->descriptorInfo();
+        imageInfos[kFirstNormalMapBinding + 1 + i] = pick(chunk.layerNormalMaps[i].get(), flat)->descriptorInfo();
     }
 
     VkDescriptorBufferInfo bufInfo{};
@@ -694,23 +846,22 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     bufInfo.offset = 0;
     bufInfo.range = sizeof(TerrainParamsUBO);
 
-    VkWriteDescriptorSet writes[8] = {};
-    for (int i = 0; i < 7; i++) {
+    VkWriteDescriptorSet writes[kMaterialBindingCount] = {};
+    for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
-        writes[i].dstBinding = static_cast<uint32_t>(i);
+        writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].pImageInfo = &imageInfos[i];
+        if (i == 7) {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[i].pBufferInfo = &bufInfo;
+        } else {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo = &imageInfos[i];
+        }
     }
-    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[7].dstSet = set;
-    writes[7].dstBinding = 7;
-    writes[7].descriptorCount = 1;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[7].pBufferInfo = &bufInfo;
 
-    vkUpdateDescriptorSets(vkCtx->getDevice(), 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(vkCtx->getDevice(), kMaterialBindingCount, writes, 0, nullptr);
     return true;
 }
 
@@ -760,6 +911,10 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(GPUPushConstants), &push);
     LocalLightSet pushedLights = push.localLights;
+    TerrainSurfacePush surface{};
+    surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                       kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
 
     Frustum frustum;
     if (frustumCullingEnabled) {
@@ -773,16 +928,11 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     culledChunks = 0;
     furthestDrawnSq_ = 0.0f;
 
-    // Use mega VB + IB when available.
-    // Bind mega buffers once, then use direct draws with base vertex/index offsets.
-    const bool useMegaBuffers = (megaVB_ && megaIB_);
-    bool megaBuffersBound = false;
-    if (useMegaBuffers) {
-        VkDeviceSize megaOffset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &megaVB_, &megaOffset);
-        vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
-        megaBuffersBound = true;
-    }
+    // The geometry page bound now; a chunk in another page, or one with
+    // buffers of its own, binds anew. Chunks of a tile are listed together and
+    // a tile's go in one page, so this is a bind per page, not per chunk.
+    constexpr int32_t kNothingBound = -2;
+    int32_t boundPage = kNothingBound;
 
     for (const auto& chunk : chunks) {
         if (!chunk.isValid() || !chunk.materialSet) continue;
@@ -817,28 +967,22 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                                offsetof(GPUPushConstants, localLights), sizeof(LocalLightSet), &pushedLights);
         }
 
-        if (useMegaBuffers && chunk.megaBaseVertex >= 0) {
-            // Rebound if a fallback chunk bound its own buffers since. The mega
-            // buffers are bound once before the loop, and a chunk without a
-            // place in them binds its own - which stays bound for whatever comes
-            // next. A chunk after that one then drew its mega offsets against a
-            // single chunk's buffer: firstIndex 6,290,784 into 3,072 bytes,
-            // which is what took the GPU down.
-            if (!megaBuffersBound) {
-                VkDeviceSize megaOffset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &megaVB_, &megaOffset);
-                vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
-                megaBuffersBound = true;
+        if (chunk.geometryPage >= 0) {
+            // Rebound after a chunk with buffers of its own, too: its buffers
+            // stay bound for whatever comes next, and a page's offsets drawn
+            // against one chunk's buffer - firstIndex 6,290,784 into 3,072
+            // bytes - is what once took the GPU down.
+            if (boundPage != chunk.geometryPage) {
+                bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
+                boundPage = chunk.geometryPage;
             }
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1,
-                             chunk.megaFirstIndex, chunk.megaBaseVertex, 0);
+            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.firstIndex, chunk.baseVertex, 0);
         } else {
-            // Fallback: per-chunk VB/IB bind + direct draw
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
-            megaBuffersBound = false;
+            boundPage = kNothingBound;
         }
         renderedChunks++;
         if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
@@ -925,15 +1069,9 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(ShadowPush), &push);
 
-    // Bind mega buffers once for shadow pass (same as opaque)
-    const bool useMegaShadow = (megaVB_ && megaIB_);
-    bool megaShadowBound = false;
-    if (useMegaShadow) {
-        VkDeviceSize megaOffset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &megaVB_, &megaOffset);
-        vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
-        megaShadowBound = true;
-    }
+    // Bound per geometry page, as in the main pass.
+    constexpr int32_t kNothingBound = -2;
+    int32_t boundPage = kNothingBound;
 
     // Culled against the map's own footprint, not a sphere round the player.
     // The map is a box reaching hundreds of yards toward the sun, and a ridge
@@ -968,23 +1106,18 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
         if (ls.z > centreLs.z + (shadowRadius + chunk.boundingSphereRadius) * scaleZ) continue;
         ++shadowChunksDrawn;
 
-        if (useMegaShadow && chunk.megaBaseVertex >= 0) {
-            // Rebound after a fallback chunk, for the reason given in the main
-            // pass above: the mega offsets are meaningless against the buffer a
-            // single chunk left bound.
-            if (!megaShadowBound) {
-                VkDeviceSize megaOffset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &megaVB_, &megaOffset);
-                vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
-                megaShadowBound = true;
+        if (chunk.geometryPage >= 0) {
+            if (boundPage != chunk.geometryPage) {
+                bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
+                boundPage = chunk.geometryPage;
             }
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.megaFirstIndex, chunk.megaBaseVertex, 0);
+            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.firstIndex, chunk.baseVertex, 0);
         } else {
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
-            megaShadowBound = false;
+            boundPage = kNothingBound;
         }
     }
     // How many chunks cast, said when it moves by a quarter: the count is the
@@ -1023,6 +1156,8 @@ void TerrainRenderer::clear() {
     }
     chunks.clear();
     renderedChunks = 0;
+    // A page refused before may fit now that every chunk is going.
+    geometryPagesExhausted_ = false;
 }
 
 void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk) {
@@ -1082,6 +1217,18 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     VmaAllocation paramsAlloc = chunk.paramsAlloc;
     VkDescriptorPool pool = materialDescPool;
     VkDescriptorSet materialSet = chunk.materialSet;
+    // The chunk's ranges in its geometry page, given back once no frame in
+    // flight draws them; until then nothing else is copied over them.
+    std::shared_ptr<TerrainGeometryPage> page;
+    if (chunk.geometryPage >= 0 && chunk.geometryPage < static_cast<int32_t>(geometryPages_.size())) {
+        page = geometryPages_[chunk.geometryPage];
+    }
+    const auto baseVertex = static_cast<uint32_t>(chunk.baseVertex);
+    const uint32_t vertexCount = chunk.vertexCount;
+    const uint32_t firstIndex = chunk.firstIndex;
+    const uint32_t indexCount = chunk.indexCount;
+    if (chunk.geometryPage < 0 && chunk.vertexBuffer && ownBufferChunks_ > 0) --ownBufferChunks_;
+    chunk.geometryPage = -1;
 
     // The textures are let go below: the shared cache keeps a tileset texture
     // for the next tile that wants it and retires the chunk's own alpha maps,
@@ -1097,9 +1244,16 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.baseTexture.reset();
     for (TextureRef& t : chunk.layerTextures) t.reset();
     for (TextureRef& t : chunk.alphaTextures) t.reset();
+    chunk.baseNormalMap.reset();
+    for (TextureRef& t : chunk.layerNormalMaps) t.reset();
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
-                                     paramsUBO, paramsAlloc, pool, materialSet]() {
+                                     paramsUBO, paramsAlloc, pool, materialSet,
+                                     page, baseVertex, vertexCount, firstIndex, indexCount]() {
+        if (page) {
+            page->vertexRanges.free(baseVertex, vertexCount);
+            page->indexRanges.free(firstIndex, indexCount);
+        }
         if (vertexBuffer) {
             AllocatedBuffer ab{}; ab.buffer = vertexBuffer; ab.allocation = vertexAlloc;
             destroyBuffer(allocator, ab);

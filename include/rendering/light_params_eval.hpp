@@ -7,6 +7,7 @@
 /// Header-only, so the rules can be held against hand-built profiles without
 /// the light tables loaded.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -98,6 +99,11 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.skyMiddleColor = sampleColorBand(profile.colorBands[P::SKY_MIDDLE_COLOR], timeHalfMinutes);
     params.skyBand1Color = sampleColorBand(profile.colorBands[P::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile.colorBands[P::SKY_BAND2_COLOR], timeHalfMinutes);
+    params.sunColor = sampleColorBand(profile.colorBands[P::SUN_COLOR], timeHalfMinutes);
+    params.cloudSunlitColor =
+        sampleColorBand(profile.colorBands[P::CLOUD_SUNLIT_COLOR], timeHalfMinutes);
+    params.cloudFillColor = sampleColorBand(profile.colorBands[P::CLOUD_FILL_COLOR], timeHalfMinutes);
+    params.cloudBaseColor = sampleColorBand(profile.colorBands[P::CLOUD_BASE_COLOR], timeHalfMinutes);
 
     // The fog distance is stored in the same thirty-sixths of a yard as the
     // light positions, and was being used raw: Tirisfal's 12000 became 12000
@@ -121,6 +127,31 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.directionalDir =
         sunLightDirection(timeHalfMinutes / static_cast<float>(LIGHT_HALF_MINUTES_PER_DAY));
     return params;
+}
+
+/// A clear row's light blended toward its storm row by `w`
+/// (sky_celestial::stormWeight of the weather), as WoW.exe blends
+/// them (0x7ec220): every colour channel, the fog's distances and the cloud
+/// cover, lerped. The light's direction, the fog density no band holds and
+/// the horizon glow keep the clear row's.
+inline LightingParams blendTowardStorm(const LightingParams& clear, const LightingParams& storm,
+                                       float w) {
+    LightingParams out = clear;
+    out.ambientColor = glm::mix(clear.ambientColor, storm.ambientColor, w);
+    out.diffuseColor = glm::mix(clear.diffuseColor, storm.diffuseColor, w);
+    out.fogColor = glm::mix(clear.fogColor, storm.fogColor, w);
+    out.skyTopColor = glm::mix(clear.skyTopColor, storm.skyTopColor, w);
+    out.skyMiddleColor = glm::mix(clear.skyMiddleColor, storm.skyMiddleColor, w);
+    out.skyBand1Color = glm::mix(clear.skyBand1Color, storm.skyBand1Color, w);
+    out.skyBand2Color = glm::mix(clear.skyBand2Color, storm.skyBand2Color, w);
+    out.sunColor = glm::mix(clear.sunColor, storm.sunColor, w);
+    out.cloudSunlitColor = glm::mix(clear.cloudSunlitColor, storm.cloudSunlitColor, w);
+    out.cloudFillColor = glm::mix(clear.cloudFillColor, storm.cloudFillColor, w);
+    out.cloudBaseColor = glm::mix(clear.cloudBaseColor, storm.cloudBaseColor, w);
+    out.fogStart = glm::mix(clear.fogStart, storm.fogStart, w);
+    out.fogEnd = glm::mix(clear.fogEnd, storm.fogEnd, w);
+    out.cloudDensity = glm::mix(clear.cloudDensity, storm.cloudDensity, w);
+    return out;
 }
 
 struct WeightedLightingParams {
@@ -150,6 +181,10 @@ inline std::optional<LightingParams> blendLightingParams(
         sum.skyMiddleColor += p.skyMiddleColor * w;
         sum.skyBand1Color += p.skyBand1Color * w;
         sum.skyBand2Color += p.skyBand2Color * w;
+        sum.sunColor += p.sunColor * w;
+        sum.cloudSunlitColor += p.cloudSunlitColor * w;
+        sum.cloudFillColor += p.cloudFillColor * w;
+        sum.cloudBaseColor += p.cloudBaseColor * w;
         sum.fogStart += p.fogStart * w;
         sum.fogEnd += p.fogEnd * w;
         sum.fogDensity += p.fogDensity * w;
@@ -168,6 +203,10 @@ inline std::optional<LightingParams> blendLightingParams(
     sum.skyMiddleColor *= inv;
     sum.skyBand1Color *= inv;
     sum.skyBand2Color *= inv;
+    sum.sunColor *= inv;
+    sum.cloudSunlitColor *= inv;
+    sum.cloudFillColor *= inv;
+    sum.cloudBaseColor *= inv;
     sum.fogStart *= inv;
     sum.fogEnd *= inv;
     sum.fogDensity *= inv;

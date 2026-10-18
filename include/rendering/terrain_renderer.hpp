@@ -3,9 +3,12 @@
 #include <cmath>
 
 #include "rendering/texture_cache.hpp"
+#include "rendering/normal_map_encoding.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
+#include "rendering/range_allocator.hpp"
+#include "rendering/vk_utils.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -41,7 +44,7 @@ struct TerrainChunkGPU {
     VmaAllocation indexAlloc = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
 
-    // Material descriptor set (set 1: 7 samplers + params UBO)
+    // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
 
     // Per-chunk params UBO (hasLayer1/2/3)
@@ -53,6 +56,10 @@ struct TerrainChunkGPU {
     TextureRef baseTexture;
     TextureRef layerTextures[3];
     TextureRef alphaTextures[3];
+    /// The relief of the base and layer textures, derived from their colours;
+    /// empty where none could be had, which binds a flat one.
+    TextureRef baseNormalMap;
+    TextureRef layerNormalMaps[3];
     int layerCount = 0;
 
     // World position for culling
@@ -67,16 +74,46 @@ struct TerrainChunkGPU {
     float boundingSphereRadius = 0.0f;
     glm::vec3 boundingSphereCenter = glm::vec3(0.0f);
 
-    // Offsets into mega buffers for indirect drawing (-1 = not in mega buffer)
-    int32_t megaBaseVertex = -1;
-    uint32_t megaFirstIndex = 0;
+    // Where the chunk's geometry lives in a shared page (TerrainGeometryPage):
+    // the page's slot in TerrainRenderer::geometryPages_, or -1 when the chunk
+    // has buffers of its own (vertexBuffer, indexBuffer) because no page had
+    // room and none could be made.
+    int32_t geometryPage = -1;
+    int32_t baseVertex = 0;
+    uint32_t firstIndex = 0;
     uint32_t vertexCount = 0;
 
     // The chunk as the ray traced lighting sees it (RtScene ids, or ~0u).
     uint32_t rtMesh = ~0u;
     uint32_t rtInstance = ~0u;
 
-    [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool isValid() const {
+        return geometryPage >= 0 || (vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE);
+    }
+};
+
+/// One device-local vertex buffer and index buffer that many chunks' geometry
+/// is copied into, each chunk at ranges handed out by the allocators. A
+/// chunk's ranges come back after the frames that may still draw it are done
+/// (deferAfterAllFrameFences), which is why the page is shared with those
+/// deferred frees rather than owned outright: a free may land after the
+/// renderer let the page go, and then it is only bookkeeping.
+struct TerrainGeometryPage {
+    AllocatedBuffer vertices;
+    AllocatedBuffer indices;
+    RangeAllocator vertexRanges;
+    RangeAllocator indexRanges;
+};
+
+/// How the resident terrain's geometry is held, for the frame profile.
+struct TerrainGeometryStats {
+    uint32_t pages = 0;
+    uint64_t vertexCapacity = 0;
+    uint64_t verticesUsed = 0;
+    uint64_t indexCapacity = 0;
+    uint64_t indicesUsed = 0;
+    /// Chunks with buffers of their own because no page could take them.
+    uint32_t ownBufferChunks = 0;
 };
 
 /**
@@ -114,6 +151,31 @@ public:
 
     void uploadPreloadedTextures(const std::unordered_map<std::string, pipeline::BLPImage>& textures);
 
+    /// The relief of a tileset texture, derived from its colours on a loading
+    /// worker and encoded with its mips. Pure: no Vulkan, safe off the main
+    /// thread. Invalid when the texture has no pixels to read.
+    ///
+    /// The ground's relief used to be made in the fragment shader from the
+    /// screen-space derivatives of the shaded colour. A 2x2 pixel quad then
+    /// decided where a cobble's edge was, so the relief changed with every
+    /// sub-pixel move of the camera: blocky noise that crawled over roads and
+    /// grass as the player rode. Derived here it belongs to the texture, is
+    /// filtered by its mips like the colour is, and holds still.
+    [[nodiscard]] static EncodedNormalMap deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format);
+    /// The cache key a tileset texture's relief is kept under.
+    [[nodiscard]] static TextureKey normalMapKey(const std::string& path);
+    /// Puts a normal map made by deriveNormalMap in the shared cache, where
+    /// the chunks that lay its texture find it.
+    void uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map);
+    [[nodiscard]] NormalMapFormat normalMapFormat() const;
+
+    /// The "Surface bumps" setting: the ground lit by its textures' relief, as
+    /// strongly as `strength` asks (1 as derived, 2 twice as steep). Off is
+    /// flat ground lit by its vertex normals alone, as the original client
+    /// draws it.
+    void setNormalMappingEnabled(bool enabled) { normalMappingEnabled_ = enabled; }
+    void setNormalMapStrength(float strength) { normalMapStrength_ = std::clamp(strength, 0.0f, 2.0f); }
+
     /**
      * Render terrain
      * @param cmd Command buffer to record into
@@ -139,6 +201,8 @@ public:
                       const glm::vec3& shadowCenter, float shadowRadius);
 
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
+
+    [[nodiscard]] TerrainGeometryStats geometryStats() const;
 
     void clear();
 
@@ -178,6 +242,10 @@ private:
     /// The tileset texture from the shared cache, loading it if it is not
     /// there; white when it cannot be had.
     TextureRef loadTexture(const std::string& path);
+    /// The tileset texture's relief from the shared cache. Normally the
+    /// loading worker made it; when the cache let it go since, it is derived
+    /// again here, on this thread. Empty when it cannot be had.
+    TextureRef loadNormalMap(const std::string& path);
     TextureRef createAlphaTexture(const std::vector<uint8_t>& alphaData);
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
@@ -240,9 +308,14 @@ private:
     // Fallback textures, held in the shared cache like any other.
     TextureRef whiteTexture;
     TextureRef opaqueAlphaTexture;
+    TextureRef flatNormalTexture;
+    /// Tileset paths whose relief could not be derived, said once each.
+    std::unordered_set<std::string> loggedNormalMapFails_;
 
     // Rendering state
     bool wireframe = false;
+    bool normalMappingEnabled_ = true;
+    float normalMapStrength_ = 0.8f;
     bool frustumCullingEnabled = true;
     bool fogEnabled = true;
     float maxViewDistance_ = 1200.0f;
@@ -250,23 +323,29 @@ private:
     float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;
 
-    // Mega vertex/index buffers for indirect drawing
-    // All terrain chunks share a single VB + IB, eliminating per-chunk rebinds.
-    // Indirect draw commands are built CPU-side each frame for visible chunks.
-    VkBuffer megaVB_ = VK_NULL_HANDLE;
-    VmaAllocation megaVBAlloc_ = VK_NULL_HANDLE;
-    void* megaVBMapped_ = nullptr;
-    VkBuffer megaIB_ = VK_NULL_HANDLE;
-    VmaAllocation megaIBAlloc_ = VK_NULL_HANDLE;
-    void* megaIBMapped_ = nullptr;
-    uint32_t megaVBUsed_ = 0;  // vertices used
-    uint32_t megaIBUsed_ = 0;  // indices used
-    static constexpr uint32_t MEGA_VB_MAX_VERTS   = 1536 * 1024; // ~1.5M verts × 44B ≈ 64MB
-    static constexpr uint32_t MEGA_IB_MAX_INDICES  = 6 * 1024 * 1024; // 6M indices × 4B = 24MB
+    // The chunks' geometry, in pages each holding many tiles, so the draw
+    // loops bind a vertex and an index buffer per page rather than per chunk.
+    // Made when the resident tiles need room and let go when a page empties,
+    // keeping one spare; a slot let go is null, so a chunk's page index stays
+    // put. A tile is 256 chunks of 145 vertices and up to 768 indices.
+    std::vector<std::shared_ptr<TerrainGeometryPage>> geometryPages_;
+    static constexpr uint32_t kTilesPerGeometryPage = 16;
+    static constexpr uint32_t kPageVertices = kTilesPerGeometryPage * 256 * 145;
+    static constexpr uint32_t kPageIndices = kTilesPerGeometryPage * 256 * 768;
+    /// Set, and said once, when a page could not be made: no other is tried
+    /// until a page is let go or the terrain cleared, so a full device is not
+    /// asked again for every chunk.
+    bool geometryPagesExhausted_ = false;
+    uint32_t ownBufferChunks_ = 0;
 
-    VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
-    VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;
-    static constexpr uint32_t MAX_INDIRECT_DRAWS = 8192;
+    /// Copy the chunk's geometry into a page with room, making one if none
+    /// has; false when no page could be made.
+    bool placeInGeometryPage(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk);
+    /// Let go of pages nothing is in any more, keeping one spare.
+    void releaseEmptyGeometryPages();
+    void destroyGeometryPages();
+    /// Binds the page's buffers.
+    static void bindGeometryPage(VkCommandBuffer cmd, const TerrainGeometryPage& page);
 };
 
 } // namespace rendering

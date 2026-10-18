@@ -1,0 +1,152 @@
+// The wind's sea as the water reads it: the surface OceanWaves builds every
+// frame, three cascades of it, each repeating over its own patch.
+//
+// Needs, declared before it: WaterFrameData (oceanCascades, oceanSea,
+// oceanKept, seaBedMatrix, seaBed), the surface itself, `oceanSurface`, a
+// sampler2DArray, and the sea bed's maps, `seaBedMap` and `seaFetchMap`.
+// Layers as ocean_waves.glsli writes them: c the displacement (Dx, Dy, H,
+// Dxy), 3 + c the derivatives (Hx, Hy, Dxx, Dyy), 6 + c their squares.
+
+#include "ocean_spectrum.glsli"
+#include "ocean_fft.glsli"
+#include "sea_bed.glsli"
+
+const float kOceanTexels = 256.0;  // kOceanSize, as a float
+
+/// Deep enough that no wave the cascades hold feels the bed.
+const float kOceanOpenSea = 200.0;
+
+/// One of the sea bed's maps at a point, four texels blended: neither is a
+/// format a device need filter.
+vec2 seaBedMapAt(sampler2D map, vec2 uv) {
+    int texels = textureSize(map, 0).x;
+    vec2 at = uv * float(texels) - 0.5;
+    vec2 base = floor(at);
+    vec2 f = at - base;
+    ivec2 i = ivec2(base);
+    ivec2 last = ivec2(texels - 1);
+    vec2 v00 = texelFetch(map, clamp(i, ivec2(0), last), 0).xy;
+    vec2 v10 = texelFetch(map, clamp(i + ivec2(1, 0), ivec2(0), last), 0).xy;
+    vec2 v01 = texelFetch(map, clamp(i + ivec2(0, 1), ivec2(0), last), 0).xy;
+    vec2 v11 = texelFetch(map, clamp(i + ivec2(1, 1), ivec2(0), last), 0).xy;
+    return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+}
+
+/// What the water at `rest`, its point on the still surface, has under and
+/// upwind of it, by the sea bed's maps (SeaBedMap): how deep it is - below
+/// 0 where the bed stands above this water, a quay, the beach - and how far
+/// the wind has blown over water to reach it. The open sea where the maps
+/// have not been drawn or do not reach, fading to it over their outer tenth
+/// so no line shows where they end.
+struct WaterSite {
+    float depth;
+    float fetch;
+};
+
+WaterSite waterSiteAt(vec3 rest) {
+    WaterSite site;
+    site.depth = kOceanOpenSea;
+    site.fetch = kOceanOpenFetch;
+    if (seaBed.z < 0.5) return site;
+    vec4 clip = seaBedMatrix * vec4(rest.xy, seaBed.x, 1.0);
+    vec2 uv = clip.xy * 0.5 + 0.5;
+    float fromCentre = 2.0 * max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+    if (fromCentre >= 1.0) return site;
+    float toOpen = smoothstep(0.9, 1.0, fromCentre);
+    float bed = seaBed.x - seaBedMapAt(seaBedMap, uv).x * seaBed.y;
+    site.depth = mix(rest.z - bed, kOceanOpenSea, toOpen);
+    // The sea runs on to the open sea where the map runs out; a lake is
+    // taken for no smaller than the map shows it.
+    bool openSea = push.liquidBasicType > 0.5 && push.liquidBasicType < 1.5;
+    float fetch = seaFetchFor(seaBedMapAt(seaFetchMap, uv), openSea, kOceanOpenFetch);
+    site.fetch = mix(fetch, kOceanOpenFetch, toOpen);
+    return site;
+}
+
+/// How much of cascade `c`'s height (kind 0) or slope (kind 1) the water
+/// keeps at `site` (OceanSea::kept, read from its table).
+float oceanKeptEntry(int kind, int c, int row, int step) {
+    if (row < 0 || step < 0) return 0.0;  // no fetch, or no depth: nothing
+    int entry = ((kind * kOceanCascades + c) * kOceanFetchRows + row) * kOceanShoalingSteps + step;
+    return oceanKept[entry >> 2][entry & 3];
+}
+float oceanKeptAt(int kind, int c, WaterSite site) {
+    vec2 depthSlot = oceanShoalingSlot(site.depth);
+    vec2 fetchSlot = oceanFetchSlot(site.fetch);
+    int f = int(fetchSlot.x);
+    int d = int(depthSlot.x);
+    float nearRow = mix(oceanKeptEntry(kind, c, f, d), oceanKeptEntry(kind, c, f, d + 1), depthSlot.y);
+    float farRow = mix(oceanKeptEntry(kind, c, f + 1, d), oceanKeptEntry(kind, c, f + 1, d + 1), depthSlot.y);
+    return mix(nearRow, farRow, fetchSlot.y);
+}
+
+/// Where `rest` falls on cascade `c`'s patch: measured from the cascade's
+/// origin near the player, and on its texels' centres.
+vec2 oceanPatchUv(vec2 rest, int c) {
+    vec4 cascade = oceanCascades[c];
+    return (rest - cascade.xy) * cascade.z + 0.5 / kOceanTexels;
+}
+
+/// Where the still water at `rest` is carried by the waves a mesh `step`
+/// yards apart can carry. A wave of two steps lands its vertices on crest
+/// and trough alike, and is no longer a wave but a slow false plaid of the
+/// mesh's spacing beating against it; the mip whose texel is the step has
+/// filtered those out and keeps the longer ones. Each cascade by how much
+/// of its height water this deep, this far downwind of the shore, keeps.
+vec3 oceanDisplacementAt(vec3 rest, float step) {
+    WaterSite site = waterSiteAt(rest);
+    vec3 displacement = vec3(0.0);
+    for (int c = 0; c < kOceanCascades; ++c) {
+        float kept = oceanKeptAt(0, c, site);
+        if (kept <= 0.0) continue;
+        float texel = oceanCascades[c].w / kOceanTexels;
+        float lod = max(log2(max(step, 1e-4) / texel), 0.0);
+        displacement += kept * textureLod(oceanSurface, vec3(oceanPatchUv(rest.xy, c), float(c)), lod).xyz;
+    }
+    return displacement;
+}
+
+/// The sea at a pixel, for its light: the slope of the surface the water
+/// has been carried into, of the waves the pixel is big enough to show;
+/// the mean square slope of those it is not, which still scatter the sun
+/// and go into the highlight's width (LEAN mapping: the filtered squares
+/// less the square of the filtered slope); the height; and the Jacobian,
+/// how much riding toward the crests has bunched the surface - below a
+/// half, it is breaking. Each cascade by how much of it water this deep,
+/// this far downwind of the shore, keeps; `exposed` is 0 indoors, where
+/// there is no sea at all.
+struct OceanLight {
+    vec2 slope;
+    float unseenSlopeSq;
+    float height;
+    float jacobian;
+};
+
+OceanLight oceanLightAt(vec3 rest, float exposed) {
+    WaterSite site = waterSiteAt(rest);
+    vec4 derivatives = vec4(0.0);
+    float stretchXY = 0.0;
+    float height = 0.0;
+    float unseen = 0.0;
+    for (int c = 0; c < kOceanCascades; ++c) {
+        // Sampled whatever the depth, so the filtering's derivatives are
+        // taken in uniform control flow.
+        vec2 uv = oceanPatchUv(rest.xy, c);
+        vec4 displacement = texture(oceanSurface, vec3(uv, float(c)));
+        vec4 d = texture(oceanSurface, vec3(uv, float(kOceanCascades + c)));
+        vec4 squares = texture(oceanSurface, vec3(uv, float(2 * kOceanCascades + c)));
+        float heightKept = exposed * oceanKeptAt(0, c, site);
+        float slopeKept = exposed * oceanKeptAt(1, c, site);
+        derivatives += d * slopeKept;
+        stretchXY += displacement.w * slopeKept;
+        height += displacement.z * heightKept;
+        unseen += (max(squares.x - d.x * d.x, 0.0) + max(squares.y - d.y * d.y, 0.0)) * slopeKept * slopeKept;
+    }
+    OceanSurface s = oceanSurfaceFrom(vec3(0.0, 0.0, height), derivatives, stretchXY);
+    OceanLight light;
+    light.slope = s.slope;
+    light.unseenSlopeSq = unseen;
+    light.height = height;
+    light.jacobian = s.jacobian;
+    return light;
+}

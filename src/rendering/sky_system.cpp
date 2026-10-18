@@ -1,10 +1,10 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
@@ -33,10 +33,10 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
         return false;
     }
 
-    // Celestial bodies - sun + 2 moons (Vulkan)
-    celestial_ = std::make_unique<Celestial>();
-    if (!celestial_->initialize(ctx, perFrameLayout)) {
-        LOG_ERROR("Failed to initialize celestial bodies");
+    // The sun and the moon, discs and glares, as the client draws them.
+    bodies_ = std::make_unique<SkyBodies>();
+    if (!bodies_->initialize(ctx, perFrameLayout)) {
+        LOG_ERROR("Failed to initialize the sun and moon");
         return false;
     }
 
@@ -77,13 +77,13 @@ void SkySystem::shutdown() {
     if (lensFlare_)  lensFlare_->shutdown();
     if (clouds_)     clouds_->shutdown();
     if (starField_)  starField_->shutdown();
-    if (celestial_)  celestial_->shutdown();
+    if (bodies_)     bodies_->shutdown();
     if (skybox_)     skybox_->shutdown();
 
     lensFlare_.reset();
     clouds_.reset();
     starField_.reset();
-    celestial_.reset();
+    bodies_.reset();
     skybox_.reset();
 
     initialized_ = false;
@@ -95,7 +95,6 @@ void SkySystem::update(float deltaTime) {
     }
 
     if (skybox_)    skybox_->update(deltaTime);
-    if (celestial_) celestial_->update(deltaTime);
     if (starField_) starField_->update(deltaTime);
     if (clouds_)    clouds_->update(deltaTime);
 }
@@ -128,7 +127,8 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         renderProceduralStars = !params.skyboxHasStars;
     }
 
-    if (params.useOriginalSkybox && !renderProceduralStars) {
+    celestialSkipped_ = params.useOriginalSkybox && !renderProceduralStars;
+    if (celestialSkipped_) {
         if (starField_) starField_->setEnabled(false);
         return;
     }
@@ -142,54 +142,35 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         }
     }
 
-    // --- Celestial bodies (sun + White Lady + Blue Child) ---
-    if (celestial_) {
-        // Gate moon visibility on how dark the DBC sky actually is. The
-        // hardcoded 19:00 night window can precede sky darkening by hours,
-        // and full-brightness moons on a daylight sky read as extra suns.
-        float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
-        float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
-        celestial_->render(cmd, perFrameSet, params.timeOfDay,
-                           &params.directionalDir, &params.sunColor, params.gameTime,
-                           nightFactor);
+    // --- The sun's disc, then the moon's, each on its own path (0x7f0b43) ---
+    // Both in the sun's colour and put out by weather alike; each is gone when
+    // its path takes it under the horizon.
+    if (bodies_ && params.drawBodies) {
+        const float weather = sky_celestial::weatherFade(params.weatherIntensity);
+        bodies_->renderDisc(cmd, perFrameSet, SkyBodies::Body::Sun, params.sunDisc,
+                            params.sunColor, weather);
+        bodies_->renderDisc(cmd, perFrameSet, SkyBodies::Body::Moon, params.moonDisc,
+                            params.sunColor, weather);
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
     if (clouds_) {
-        // Sync cloud density with weather/DBC-driven cloud coverage.
-        // Active weather (rain/snow/storm) increases cloud density for visual consistency.
-        float effectiveDensity = params.cloudDensity;
-        if (params.weatherIntensity > 0.05f) {
-            float weatherBoost = params.weatherIntensity * 0.4f;  // storms add up to 0.4 density
-            effectiveDensity = glm::min(1.0f, effectiveDensity + weatherBoost);
-        }
-        clouds_->setDensity(effectiveDensity);
+        // The cover LightParams gives, already blended toward the storm row by
+        // the weather as the client blends it. A fixed 0.4 per unit of weather
+        // was added on top, a second storm over the first.
+        clouds_->setDensity(params.cloudDensity);
         clouds_->render(cmd, perFrameSet, params);
     }
 
-    // --- Lens flare (attenuated by atmosphere) ---
+    // --- Lens flare: around the disc, as much of it as the glare shows ---
     if (lensFlare_) {
-        glm::vec3 sunPos = getSunPosition(params);
-        lensFlare_->render(cmd, camera, sunPos, params.timeOfDay,
-                           params.fogDensity, params.cloudDensity,
-                           params.weatherIntensity, params.sunOcclusion);
+        lensFlare_->render(cmd, camera, params.sunDisc.direction * 800.0f, params.sunColor,
+                           params.sunGlareVisibility);
     }
 }
 
-glm::vec3 SkySystem::getSunPosition(const SkyParams& params) const {
-    // Below the horizon it stays below - see sun_direction.hpp for what the
-    // mirror that used to be here cost.
-    return sunDirectionFromLightDir(params.directionalDir) * 800.0f;
-}
-
-void SkySystem::setMoonPhaseCycling(bool enabled) {
-    if (celestial_) celestial_->setMoonPhaseCycling(enabled);
-}
-void SkySystem::setBlueChildPhase(float phase) {
-    if (celestial_) celestial_->setBlueChildPhase(phase);
-}
-float SkySystem::getBlueChildPhase() const {
-    return celestial_ ? celestial_->getBlueChildPhase() : 0.25f;
+void SkySystem::loadTextures(pipeline::AssetManager* assets) {
+    if (bodies_) bodies_->loadTextures(assets);
 }
 
 } // namespace rendering

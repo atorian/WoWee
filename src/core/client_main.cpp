@@ -250,20 +250,30 @@ static wowee::core::LogLevel readLogLevelFromEnv() {
     return wowee::core::LogLevel::WARNING;
 }
 
-/// Point the client at the per-user data directory, if an extraction is there.
+/// Point the client at the default data directory, if an extraction is there.
 ///
 /// Only when nobody has said otherwise, and only when that directory actually
 /// holds an extraction - so a first run with nothing installed still falls
-/// through to Data/ beside the executable, which is what a development tree
-/// and a portable install both want.
+/// through to Data/ in the working directory.
 ///
-/// This was macOS only, which left the asset manager and the client with no
-/// agreed destination on Linux or Windows at all: the manager wrote wherever
-/// the terminal was and the client looked beside itself.
-static void selectUserDataPath() {
+/// The default was the per-user directory, which on Windows is the system
+/// drive: one that held a manifest - even a stopped build's - was preferred
+/// over the complete Data/ beside the client, which then had no assets and
+/// opened the asset builder, which wrote to C: again. That folder is not read
+/// any more; one with an extraction in it is reported, since it is gigabytes
+/// the player may want back.
+static void selectDefaultDataPath() {
     if (std::getenv("WOW_DATA_PATH")) return;
 
-    const std::filesystem::path dataRoot = wowee::core::userDataRoot();
+    const std::filesystem::path dataRoot = wowee::core::defaultDataRoot();
+    const std::filesystem::path oldRoot = wowee::core::perUserDataRoot();
+    std::error_code ec;
+    if (!oldRoot.empty() && !std::filesystem::equivalent(oldRoot, dataRoot, ec) &&
+        wowee::core::holdsExtraction(oldRoot)) {
+        LOG_WARNING("Assets extracted by an earlier build at ", oldRoot.string(),
+                    " are not read any more - the client reads ", dataRoot.string(),
+                    ". Build or move them there; the old folder can be deleted");
+    }
     if (!wowee::core::holdsExtraction(dataRoot)) return;
 
     wowee::core::setEnvVar("WOW_DATA_PATH", dataRoot.string().c_str(), /*overwrite=*/false);
@@ -354,9 +364,9 @@ int runClient(const ClientProgram& program) {
 
     // After the working directory is settled, and on every platform: this used
     // to sit inside the macOS branch above, so Linux and Windows went on
-    // looking beside the executable for assets the asset manager had written
-    // to their own per-user directory.
-    selectUserDataPath();
+    // looking in the working directory for assets the asset manager had
+    // written somewhere else.
+    selectDefaultDataPath();
 
     try {
         wowee::core::Logger::getInstance().setLogLevel(readLogLevelFromEnv());

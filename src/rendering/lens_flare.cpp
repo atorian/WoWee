@@ -148,7 +148,7 @@ void LensFlare::generateFlareElements() {
     flareElements.clear();
 
     // Main sun glow (at sun position)
-    flareElements.push_back({.position = 0.0f, .size = 0.3f, .color = glm::vec3(1.0f, 0.95f, 0.8f), .brightness = 0.8f});
+    flareElements.push_back({.position = 0.0f, .size = 0.3f, .color = glm::vec3(1.0f), .brightness = 0.8f});
 
     // Flare ghosts along sun-to-center axis
 
@@ -227,23 +227,15 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 }
 
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
-                       float timeOfDay, float fogDensity, float cloudDensity,
-                       float weatherIntensity, float sunOcclusion) {
+                       const glm::vec3& sunColor, float glareVisibility) {
     if (!enabled || pipeline == VK_NULL_HANDLE) {
         return;
     }
 
-    // Nothing reaching the lens, nothing to scatter in it. Everything below
-    // asks where the sun is on screen and how thick the air is; none of it
-    // asks whether the sun can be seen from here, so a flare hung over the
-    // hillside that was covering it and over the ceiling of a building.
-    const float unblocked = 1.0f - glm::clamp(sunOcclusion, 0.0f, 1.0f);
-    if (unblocked < 0.01f) {
-        return;
-    }
-
-    // Only render lens flare during daytime (when sun is visible)
-    if (timeOfDay < 5.0f || timeOfDay > 19.0f) {
+    // Nothing reaching the lens, nothing to scatter in it: as much flare as
+    // the sun's glare shows, and none where it is gone.
+    const float atmosphericFactor = glm::clamp(glareVisibility, 0.0f, 1.0f);
+    if (atmosphericFactor < 0.01f) {
         return;
     }
 
@@ -263,20 +255,6 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
         return;
     }
 
-    // Sun height attenuation - flare weakens when sun is near horizon (sunrise/sunset)
-    float sunHeight = sunDir.z;  // z = up in render space; 0 = horizon, 1 = zenith
-    float heightFactor = glm::smoothstep(-0.05f, 0.25f, sunHeight);
-
-    // Atmospheric attenuation - fog, clouds, and weather reduce lens flare
-    float atmosphericFactor = heightFactor * unblocked;
-    atmosphericFactor *= (1.0f - glm::clamp(fogDensity * 0.8f, 0.0f, 0.9f));       // Heavy fog nearly kills flare
-    atmosphericFactor *= (1.0f - glm::clamp(cloudDensity * 0.6f, 0.0f, 0.7f));     // Clouds attenuate
-    atmosphericFactor *= (1.0f - glm::clamp(weatherIntensity * 0.9f, 0.0f, 0.95f)); // Rain/snow heavily attenuates
-
-    if (atmosphericFactor < 0.01f) {
-        return;
-    }
-
     // Get sun screen position
     glm::vec2 sunScreen = worldToScreen(camera, anchoredSunPos);
     glm::vec2 screenCenter(0.0f, 0.0f);
@@ -293,9 +271,6 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
 
-    // Warm tint at sunrise/sunset - shift flare color toward orange/amber when sun is low
-    float warmTint = 1.0f - glm::smoothstep(0.05f, 0.35f, sunHeight);
-
     // Render each flare element
     for (const auto& element : flareElements) {
         // Calculate position along sun-to-center axis
@@ -304,12 +279,10 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
         // Apply visibility, intensity, and atmospheric attenuation
         float brightness = element.brightness * visibility * intensityMultiplier * atmosphericFactor;
 
-        // Apply warm sunset/sunrise color shift
-        glm::vec3 tintedColor = element.color;
-        if (warmTint > 0.01f) {
-            glm::vec3 warmColor(1.0f, 0.6f, 0.25f);  // amber/orange
-            tintedColor = glm::mix(tintedColor, warmColor, warmTint * 0.5f);
-        }
+        // The sun's light through the element's coating. A fixed amber was
+        // mixed in as the sun got low instead, the same in every zone; the
+        // light tables already turn the sun's colour through the day.
+        const glm::vec3 tintedColor = element.color * sunColor;
 
         // Set push constants
         FlarePushConstants push{};

@@ -45,6 +45,19 @@ layout(set = 1, binding = 7) uniform TerrainParams {
     int hasLayer3;
 };
 
+// Each texture's relief, derived from its colours when the tile loaded
+// (TerrainRenderer::deriveNormalMap): the normal in rgb, along the texture's
+// u and v and out of it.
+layout(set = 1, binding = 8) uniform sampler2D uBaseNormal;
+layout(set = 1, binding = 9) uniform sampler2D uLayer1Normal;
+layout(set = 1, binding = 10) uniform sampler2D uLayer2Normal;
+layout(set = 1, binding = 11) uniform sampler2D uLayer3Normal;
+
+// After the vertex stage's model matrix and lights (GPUPushConstants).
+layout(push_constant) uniform Surface {
+    layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
+} surface;
+
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
@@ -116,6 +129,31 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     }
     return color;
 }
+
+// The ground's normal turned by its textures' relief.
+//
+// The texture coordinates are laid along the world (TerrainMesh): u runs down
+// world y and v down world x. Those two axes, laid onto the surface, are the
+// directions the map's x and y tilt the normal in. Of a heightfield the turned
+// normal is N - h_u T - h_v B whichever way T and B are handed, so only their
+// directions need to be right.
+vec3 reliefNormal(vec3 n, vec3 mapNormal, float strength) {
+    const vec3 uAxis = vec3(0.0, -1.0, 0.0);
+    const vec3 vAxis = vec3(-1.0, 0.0, 0.0);
+    vec3 t = uAxis - n * dot(n, uAxis);
+    if (dot(t, t) < 1e-6) {
+        // A cliff face along u: v still lies on it.
+        vec3 b = normalize(vAxis - n * dot(n, vAxis));
+        t = cross(b, n);
+    }
+    t = normalize(t);
+    vec3 b = cross(n, t);
+    if (dot(b, vAxis) < 0.0) b = -b;
+    vec3 turned = t * (mapNormal.x * strength) + b * (mapNormal.y * strength) + n * mapNormal.z;
+    float len2 = dot(turned, turned);
+    return len2 > 1e-8 ? turned * inversesqrt(len2) : n;
+}
+
 void main() {
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
@@ -129,7 +167,8 @@ void main() {
     if (hasLayer3 != 0) weights.z = texture(uLayer3Alpha, LayerUV).r;
     float total = weights.x + weights.y + weights.z;
     weights /= max(total, 1.0);
-    vec4 finalColor = texture(uBaseTexture, TexCoord) * max(1.0 - total, 0.0);
+    float baseWeight = max(1.0 - total, 0.0);
+    vec4 finalColor = texture(uBaseTexture, TexCoord) * baseWeight;
     // These branches depend only on the chunk's uniform layer count, so UV
     // derivatives remain valid for mip selection across alpha-map boundaries.
     if (hasLayer1 != 0) finalColor += texture(uLayer1Texture, TexCoord) * weights.x;
@@ -139,51 +178,18 @@ void main() {
     vec3 vertexNormal = normalize(Normal);
     vec3 norm = vertexNormal;
 
-    // Derivative-based normal mapping: perturb vertex normal using texture detail.
-    // Fade out with distance and near chunk edges (dFdx/dFdy are invalid across
-    // chunk draw-call boundaries, producing visible seams if not faded).
-    float bumpFade = 1.0 - smoothstep(50.0, 125.0, fragDist);
-    float edgeDist = min(min(LayerUV.x, 1.0 - LayerUV.x), min(LayerUV.y, 1.0 - LayerUV.y));
-    bumpFade *= smoothstep(0.0, 0.06, edgeDist);
-    if (bumpFade > 0.001) {
-        float lum = dot(finalColor.rgb, vec3(0.299, 0.587, 0.114));
-        float dLdx = dFdx(lum);
-        float dLdy = dFdy(lum);
-        vec3 dpdx = dFdx(FragPos);
-        vec3 dpdy = dFdy(FragPos);
-        // Unit tangents, not the raw position derivatives.
-        //
-        // cross(norm, dpdy) is as long as a pixel is wide in world space, and
-        // multiplying a luminance step by it made the perturbation grow with
-        // the size of the pixel's footprint on the ground. Standing in an inn
-        // a pixel covers a centimetre and this is invisible; looking out
-        // across a Dragonblight snowfield it covers tens of yards, so a
-        // luminance step of 0.02 became a perturbation many times longer than
-        // the unit normal it was subtracted from. The normal then pointed
-        // wherever the derivative did - constant across each triangle, because
-        // dFdx of a planar surface is - and the ground broke into hard-edged
-        // facets and streaks. Snow shows it worst: it has no real detail to
-        // enhance, so all that is amplified is sampling noise.
-        //
-        // Normalised, the strength means what it says: how far the normal
-        // tilts per unit of luminance change from one pixel to the next,
-        // whatever the pixel happens to cover.
-        vec3 tangentU = cross(norm, dpdy);
-        vec3 tangentV = cross(dpdx, norm);
-        float lenU = length(tangentU);
-        float lenV = length(tangentV);
-        if (lenU > 1e-6 && lenV > 1e-6) {
-            vec3 perturbation = (dLdx * (tangentU / lenU) + dLdy * (tangentV / lenV))
-                              * (9.0 * bumpFade);
-            // A texture edge is a step, not a slope. Left unbounded, one
-            // crossing a sharp boundary still turns the normal further than
-            // any real ground ever slopes.
-            float amount = length(perturbation);
-            if (amount > 0.7) perturbation *= 0.7 / amount;
-            vec3 candidate = norm - perturbation;
-            float len2 = dot(candidate, candidate);
-            norm = (len2 > 1e-8) ? candidate * inversesqrt(len2) : norm;
-        }
+    // The relief of each layer, blended as its colour is. It is read from
+    // maps made of the textures, not from how the shaded colour changes from
+    // one pixel to the next on screen: that answer belonged to the pixel grid,
+    // so it changed with every sub-pixel move of the camera and crawled over
+    // the ground in 2x2 blocks. The maps' mips flatten it with distance as the
+    // colour's mips soften the colour.
+    if (surface.relief.x > 0.0) {
+        vec3 blended = texture(uBaseNormal, TexCoord).rgb * baseWeight;
+        if (hasLayer1 != 0) blended += texture(uLayer1Normal, TexCoord).rgb * weights.x;
+        if (hasLayer2 != 0) blended += texture(uLayer2Normal, TexCoord).rgb * weights.y;
+        if (hasLayer3 != 0) blended += texture(uLayer3Normal, TexCoord).rgb * weights.z;
+        norm = reliefNormal(vertexNormal, blended * 2.0 - 1.0, surface.relief.x);
     }
 
     vec3 lightDir2 = normalize(-lightDir.xyz);

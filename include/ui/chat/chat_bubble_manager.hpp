@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/event_bus.hpp"
 #include "ui/ui_services.hpp"
 #include <cstdint>
 #include <string>
@@ -23,7 +24,7 @@ public:
     /** Render and tick all active bubbles (projects to screen via camera). */
     void render(game::GameHandler& gameHandler, const UIServices& services);
 
-    /** Register the chat-bubble callback on GameHandler (call once per session). */
+    /** Hear the lines units say aloud (events::UnitSaidAloud); once is enough. */
     void setupCallback(game::GameHandler& gameHandler);
 
     [[nodiscard]] bool empty() const { return bubbles_.empty(); }
@@ -48,6 +49,8 @@ private:
     bool show_ = true;
 
     static constexpr size_t kMaxBubbles = 10;
+
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace ui

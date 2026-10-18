@@ -1,5 +1,6 @@
 #pragma once
 
+#include "pipeline/weather_kind.hpp"
 #include "rendering/wind_field.hpp"
 
 #include <cstdint>
@@ -23,11 +24,11 @@ struct WorldEnvironment {
     /// The realm's time of day in hours; negative for none, when the sky
     /// follows the local clock.
     float gameTime = -1.0f;
-    bool raining = false;
-    /// The realm's weather: 0 for none, when the zone's own weather plays,
-    /// 1 rain, 2 snow, 3 storm.
-    uint32_t weatherType = 0;
+    /// The realm's weather where the player stands (WeatherBlend draws it).
+    pipeline::WeatherKind weatherKind = pipeline::WeatherKind::Clear;
     float weatherIntensity = 0.0f;
+    /// The realm asked for it to arrive at once.
+    bool weatherAbrupt = false;
     /// The player is a ghost: the world is drawn desaturated.
     bool ghost = false;
 

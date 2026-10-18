@@ -523,5 +523,38 @@ struct LootRollEntry {
     std::vector<PlayerRollResult> playerRolls;
 };
 
+/**
+ * A single contact list entry (friend, ignore, or mute).
+ */
+struct ContactEntry {
+    uint64_t    guid     = 0;
+    std::string name;
+    std::string note;
+    uint32_t    flags    = 0;   // 0x1=friend, 0x2=ignore, 0x4=mute
+    /// AzerothCore's FriendStatus, and a bitmask rather than a number:
+    /// 0x01 online, 0x02 away, 0x04 do-not-disturb, 0x08 recruit-a-friend.
+    /// An away friend is 0x03 - online *and* away - which is why this cannot
+    /// be compared for equality. It used to be documented as 0/1/2/3 and read
+    /// that way, so an away friend was shown as busy.
+    uint8_t     status   = 0;
+    uint32_t    areaId   = 0;
+    uint32_t    level    = 0;
+    uint32_t    classId  = 0;
+
+    [[nodiscard]] bool isFriend() const { return (flags & 0x1) != 0; }
+    [[nodiscard]] bool isIgnored() const { return (flags & 0x2) != 0; }
+    [[nodiscard]] bool isOnline()  const { return (status & 0x01) != 0; }
+};
+
+/// A point on the minimap a party member (or the player) pinged.
+struct MinimapPing {
+    uint64_t senderGuid = 0;
+    float    wowX       = 0.0f;  // canonical WoW X (north)
+    float    wowY       = 0.0f;  // canonical WoW Y (west)
+    float    age        = 0.0f;  // seconds since received
+    static constexpr float LIFETIME = 5.0f;
+    [[nodiscard]] bool isExpired() const { return age >= LIFETIME; }
+};
+
 } // namespace game
 } // namespace wowee

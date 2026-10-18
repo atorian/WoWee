@@ -3,6 +3,7 @@
 #include "rendering/frame_sink.hpp"
 #include "rendering/sun_direction.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include "core/env_flag.hpp"
@@ -14,12 +15,17 @@
 #include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/sea_bed.hpp"
+#include "rendering/water_reflection.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
+#include "rendering/cloud_coverage.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/weather.hpp"
+#include "rendering/shelter_map.hpp"
+#include "rendering/precipitation.hpp"
+#include "rendering/lens_weather.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "core/profiler.hpp"
@@ -31,6 +37,7 @@
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/wmo_night_glow.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/grass_profile.hpp"
 #include "pipeline/grass_population.hpp"
@@ -310,6 +317,11 @@ bool Renderer::createPerFrameResources() {
     // Compute as well: the fog volume is lit from this same block.
     bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
                              VK_SHADER_STAGE_COMPUTE_BIT;
+    // And the water's tessellation, which divides and moves it by the camera.
+    if (vkCtx->isTessellationSupported()) {
+        bindings[0].stageFlags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    }
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;
@@ -785,12 +797,23 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
     currentFrameData.fogSkyBand1.w = viewDistance_; // common horizontal geometry range
 
-    // Lighting from LightingManager
+    // Lighting from LightingManager, with the weather's haze over it.
     if (lightingManager) {
-        const auto& lp = lightingManager->getLightingParams();
-        currentFrameData.lightDir = glm::vec4(lp.directionalDir, 0.0f);
-        currentFrameData.lightColor = glm::vec4(lp.diffuseColor, 1.0f);
-        currentFrameData.ambientColor = glm::vec4(lp.ambientColor, 1.0f);
+        const auto& lp = *weatherLight();
+        currentFrameData.lightDir = glm::vec4(
+            lp.directionalDir, wmoNightGlow(lightingManager->getTimeOfDayHours() / 24.0f));
+        // Looking into the sun dims the scene's light by up to a third, as the
+        // client dims its direct and ambient colours (0x781783) - by the glare
+        // the eye can see, so not behind a hill or after dark.
+        float lookingAtSun = 0.0f;
+        if (camera) {
+            const glm::vec3 discDir =
+                sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
+            lookingAtSun = sky_celestial::lookingAtSunDimming(
+                glm::dot(glm::normalize(camera->getForward()), discDir), sunGlare_);
+        }
+        currentFrameData.lightColor = glm::vec4(lp.diffuseColor * (1.0f - lookingAtSun), 1.0f);
+        currentFrameData.ambientColor = glm::vec4(lp.ambientColor * (1.0f - lookingAtSun), 1.0f);
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
@@ -800,6 +823,10 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
+
+        // A haze of the weather's own is its own colour, not the sky's
+        // behind it.
+        currentFrameData.fogSkyTop.w *= 1.0f - 0.9f * std::max(weather_.mix().sand, weather_.mix().mist);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -925,9 +952,6 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.playerPos = glm::vec4(characterPosition, playerSpeed_);
     currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
 
-    // Water ripple gate: swimming and actually moving.
-    currentFrameData.fogParams.w = (viewerMotion_.swimming && viewerMotion_.moving) ? 1.0f : 0.0f;
-
     // Copy to current frame's mapped UBO
     uint32_t frame = vkCtx->getCurrentFrame();
     std::memcpy(perFrameUBOMapped[frame], &currentFrameData, sizeof(GPUPerFrameData));
@@ -975,14 +999,16 @@ bool Renderer::initialize(RenderSurface* surface) {
     }
     // Expose sub-components via renderer accessors
     skybox = nullptr;  // Owned by skySystem; access via skySystem->getSkybox()
-    celestial = nullptr;
     starField = nullptr;
     clouds = nullptr;
     lensFlare = nullptr;
 
-    weather = std::make_unique<Weather>();
-    if (!weather->initialize(vkCtx, perFrameSetLayout))
-        LOG_WARNING("Weather effect initialization failed (non-fatal)");
+    lensWeather_ = std::make_unique<LensWeather>();
+    if (!lensWeather_->initialize(vkCtx)) {
+        LOG_WARNING("Lens weather unavailable - no rain, snow or sand drawn on the camera");
+        lensWeather_->shutdown();
+        lensWeather_.reset();
+    }
 
     lightning = std::make_unique<Lightning>();
     if (!lightning->initialize(vkCtx, perFrameSetLayout))
@@ -1074,6 +1100,9 @@ bool Renderer::initialize(RenderSurface* surface) {
     overlaySystem_ = std::make_unique<OverlaySystem>(vkCtx);
     renderGraph_->registerResource("shadow_depth");
     renderGraph_->registerResource("volumetric_fog");
+    renderGraph_->registerResource("ocean_surface");
+    renderGraph_->registerResource("sea_bed");
+    renderGraph_->registerResource("shelter");
     renderGraph_->registerResource("reflection_texture");
     renderGraph_->registerResource("scene_color");
     renderGraph_->registerResource("scene_depth");
@@ -1103,9 +1132,15 @@ void Renderer::shutdown() {
     }
 
     LOG_DEBUG("Renderer::shutdown - waterRenderer...");
+    waterSubscription_.reset();
+    destroyOffscreenWater1xFramebuffer();
     if (waterRenderer) {
         waterRenderer->shutdown();
         waterRenderer.reset();
+    }
+    if (seaBed_) {
+        seaBed_->shutdown();
+        seaBed_.reset();
     }
 
     LOG_DEBUG("Renderer::shutdown - minimap...");
@@ -1127,13 +1162,21 @@ void Renderer::shutdown() {
 
     // Individual sky components are owned by skySystem; just null the aliases
     skybox = nullptr;
-    celestial = nullptr;
     starField = nullptr;
     clouds = nullptr;
     lensFlare = nullptr;
 
-    if (weather) {
-        weather.reset();
+    if (precipitation_) {
+        precipitation_->shutdown();
+        precipitation_.reset();
+    }
+    if (shelter_) {
+        shelter_->shutdown();
+        shelter_.reset();
+    }
+    if (lensWeather_) {
+        lensWeather_->shutdown();
+        lensWeather_.reset();
     }
 
     if (lightning) {
@@ -1302,11 +1345,15 @@ void Renderer::applyMsaaChange() {
     if (characterRenderer) characterRenderer->recreatePipelines();
     if (questMarkerRenderer) questMarkerRenderer->recreatePipelines();
     if (footprintRenderer) footprintRenderer->recreatePipelines();
-    if (weather) weather->recreatePipelines();
     if (lightning) lightning->recreatePipelines();
     if (swimEffects) {
         syncSwimEffectsTargetPass();
         swimEffects->recreatePipelines();
+    }
+    if (precipitation_) {
+        syncSwimEffectsTargetPass();
+        precipitation_->recreatePipelines();
+        precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
     }
     if (mountDust) mountDust->recreatePipelines();
     if (chargeEffect) chargeEffect->recreatePipelines();
@@ -1315,7 +1362,7 @@ void Renderer::applyMsaaChange() {
     if (skySystem) {
         if (auto* sb = skySystem->getSkybox()) sb->recreatePipelines();
         if (auto* sf = skySystem->getStarField()) sf->recreatePipelines();
-        if (auto* ce = skySystem->getCelestial()) ce->recreatePipelines();
+        if (auto* bodies = skySystem->getBodies()) bodies->recreatePipelines();
         if (auto* cl = skySystem->getClouds()) cl->recreatePipelines();
         if (auto* lf = skySystem->getLensFlare()) lf->recreatePipelines();
     }
@@ -1431,6 +1478,9 @@ void Renderer::beginFrame() {
     // Post-process resource management (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_) postProcessPipeline_->manageResources();
 
+    // With MSAA, the water's pass over that target, rebuilt if the target was.
+    updateOffscreenWater1xFramebuffer();
+
     // The target that call may have just created or destroyed decides where
     // the water draws, and with it where the spray and the minimap go. Asked
     // again here, after the answer can have changed, rather than only at the
@@ -1483,6 +1533,13 @@ void Renderer::beginFrame() {
     // This slot's fence has just been waited on, so a frame it copied for the
     // recording two frames ago is complete.
     collectRecordedFrame();
+    // And so is the probe of the shelter round the camera it took.
+    if (shelter_) shelter_->collect(vkCtx->getCurrentFrame());
+    // The sun's and moon's occlusion answers from this slot's last frame, read
+    // now its fence is passed, and its queries reset before any pass begins.
+    if (skySystem && skySystem->getBodies()) {
+        skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
+    }
     writeRtLightingBindings(vkCtx->getCurrentFrame());
     writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
@@ -1562,11 +1619,11 @@ void Renderer::beginFrame() {
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
     if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
         if (skyProbe && updateSkyboxLayers()) {
-            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getVisualTimeOfDayHours());
+            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
             skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
         }
         const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
-        const float timeOfDay = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
+        const float timeOfDay = lightingManager ? lightingManager->getTimeOfDayHours() : 12.0f;
         renderSkyBackground(timeOfDay, authored, skyModelsHideProceduralSky());
         if (skyProbe) {
             static bool logged = false;
@@ -1664,8 +1721,8 @@ void Renderer::endFrame() {
     // renderWorld already took the copy at the one point in the frame where the
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
-    if (!waterDrawsInContinuePass()
-        && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
+    if (!waterDrawsInContinuePass() && !waterAblated()
+        && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->inView()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(
             currentCmd,
@@ -1677,8 +1734,10 @@ void Renderer::endFrame() {
     }
 
     // The picture is finished and out of every pass that drew it: the one
-    // point where the shafts can copy it down, before the overlay pass opens.
+    // point where the shafts and the lens can copy it down, before the
+    // overlay pass opens.
     recordSunShafts();
+    recordLensWeather();
 
     const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
     if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
@@ -1701,6 +1760,8 @@ void Renderer::endFrame() {
 
         // Under the interface, over everything else.
         if (sunShafts_) sunShafts_->composite(currentCmd, vkCtx->getCurrentFrame());
+        // What the weather left on the lens, over the shafts as over the rest.
+        if (lensWeather_) lensWeather_->composite(currentCmd, vkCtx->getCurrentFrame());
 
         // The interface's pipelines are built against the overlay pass, so it
         // always records inline here rather than into a scene-pass secondary.
@@ -2005,47 +2066,130 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
     return modelId;
 }
 
-float Renderer::sampleSunOcclusion() const {
-    if (!camera) return 1.0f;
-    const glm::vec3 eye = camera->getPosition();
-
-    // The same direction the flare itself is drawn around, from the same rule.
-    const glm::vec3 sunDir = lightingManager
-        ? sunDirectionFromLightDir(lightingManager->getLightingParams().directionalDir)
-        : glm::vec3(0.0f, 0.0f, -1.0f);
-    // Below the horizon there is nothing to be occluded by, and nothing to
-    // flare either - the time-of-day gate in LensFlare covers the same ground.
-    if (sunDir.z <= 0.0f) return 1.0f;
-
-    // Indoors the sun is behind a roof by definition, and a roof is the one
-    // occluder the terrain march below cannot see.
-    if (wmoRenderer && wmoRenderer->isInsideWMO(eye.x, eye.y, eye.z)) return 1.0f;
-
-    // How far to look. Far enough to clear the hill the camera is standing
-    // under, and no further: past a few hundred yards a ridge on the horizon
-    // is the sky's business, not the flare's.
-    constexpr float kReach = 600.0f;
-
-    if (wmoRenderer && wmoRenderer->raycastBoundingBoxes(eye, sunDir, kReach) < kReach) {
-        return 1.0f;
-    }
-
-    // The terrain, marched rather than intersected: the heightmap is what
-    // terrain collision is here, so asking it how high the ground is under each
-    // sample answers the same question an intersection would.
-    //
-    // Geometric steps, because the sample that decides this is almost always
-    // near the eye - the lip of the slope being stood under, or the hillside
-    // the camera has been pushed into - while a sample five hundred yards out
-    // only has to be finer than a mountain. Nineteen of them cover the range.
-    if (terrainManager) {
-        for (float t = 1.0f; t < kReach; t *= 1.4f) {
-            const glm::vec3 p = eye + sunDir * t;
-            const std::optional<float> ground = terrainManager->getHeightAt(p.x, p.y);
-            if (ground && *ground > p.z) return 1.0f;
+void Renderer::updateGlares(float deltaTime) {
+    namespace sc = sky_celestial;
+    float sunSky = 0.0f, sunSeen = 0.0f, moonSeen = 0.0f;
+    if (lightingManager) {
+        const float day = lightingManager->getTimeOfDayHours() / 24.0f;
+        // What every glare shares (0x7ef6e0): a sky model over the sky, and
+        // water over the camera.
+        float shared = 1.0f;
+        float skyModel = 0.0f;
+        for (const auto& layer : lightingManager->getSkyboxLayers()) {
+            skyModel = std::max(skyModel, layer.weight);
         }
+        shared *= 1.0f - std::clamp(skyModel, 0.0f, 1.0f);
+        if (const auto depth = cameraWaterDepth(); depth && *depth > 0.0f) {
+            shared *= 1.0f - std::clamp(0.1f * *depth, 0.0f, 1.0f);
+        }
+        const Clouds* clouds = skySystem ? skySystem->getClouds() : nullptr;
+        const auto coverageToward = [&](const glm::vec3& dir) {
+            if (!clouds || !clouds->isEnabled()) return 0.0f;
+            return cloud_coverage::coverageToward(dir, clouds->getDensity(), clouds->getWindOffset());
+        };
+        // Each body's own hours and the cloud in front of it; then how much of
+        // its disc the world leaves in view, as the GPU last counted it.
+        const SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
+        const auto seenOf = [&](SkyBodies::Body body) {
+            return bodies ? bodies->measuredVisibility(body) : 0.0f;
+        };
+        const sc::SkyDisc sun = sc::sunDisc(day);
+        sunSky = shared * sc::lookup(sc::kSunGlareHours, day) *
+                 sc::sunGlareThroughCloud(coverageToward(sun.direction));
+        sunSeen = sunSky * seenOf(SkyBodies::Body::Sun);
+        const sc::SkyDisc moon = sc::moonDisc(day);
+        const float moonSky = shared * sc::lookup(sc::kMoonGlareHours, day) *
+                              sc::moonGlareThroughCloud(coverageToward(moon.direction));
+        moonSeen = moonSky * seenOf(SkyBodies::Body::Moon);
     }
-    return 0.0f;
+    sunGlare_ = sc::easeGlare(sc::kSunGlare, sunGlare_, sunSeen, deltaTime);
+    sunGlareSky_ = sc::easeGlare(sc::kSunGlare, sunGlareSky_, sunSky, deltaTime);
+    moonGlare_ = sc::easeGlare(sc::kMoonGlare, moonGlare_, moonSeen, deltaTime);
+}
+
+void Renderer::drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    namespace sc = sky_celestial;
+    SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
+    if (!bodies || !camera || !lightingManager) return;
+    const float day = lightingManager->getTimeOfDayHours() / 24.0f;
+    const glm::vec3 forward = glm::normalize(camera->getForward());
+    const glm::vec3& colour = lightingManager->getLightingParams().sunColor;
+    const float weather = sc::weatherFade(weatherStrength());
+    // First ask, of the finished depth, how much of each disc the world
+    // hides; the answer comes back a frame slot later (updateGlares).
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    for (const SkyBodies::Body body : {SkyBodies::Body::Sun, SkyBodies::Body::Moon}) {
+        bodies->queryDiscVisibility(cmd, perFrameSet, body,
+                                    body == SkyBodies::Body::Sun ? sc::sunDisc(day) : sc::moonDisc(day),
+                                    frame, camera->getViewMatrix(), camera->getProjectionMatrix(),
+                                    activeRenderExtent_);
+    }
+    if (sunGlare_ > 0.0f) {
+        const sc::SkyDisc sun = sc::sunDisc(day);
+        const sc::GlareShape shape = sc::sunGlareShape(glm::dot(forward, sun.direction));
+        bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Sun, sun.direction, shape.size,
+                            colour, shape.alpha * sunGlare_ * weather);
+    }
+    if (moonGlare_ > 0.0f) {
+        const sc::SkyDisc moon = sc::moonDisc(day);
+        const sc::GlareShape shape =
+            sc::moonGlareShape(glm::dot(forward, moon.direction), moon.scale);
+        bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Moon, moon.direction, shape.size,
+                            colour, shape.alpha * moonGlare_ * weather);
+    }
+}
+
+void Renderer::logSunDiagnostic(const SkyParams& params) {
+    if (!skySystem || !camera) return;
+    const SkyBodies* bodies = skySystem->getBodies();
+    SkyBodies::DiscDraw sun =
+        bodies ? bodies->lastDiscDraw(SkyBodies::Body::Sun) : SkyBodies::DiscDraw{};
+    SkyBodies::DiscDraw moon =
+        bodies ? bodies->lastDiscDraw(SkyBodies::Body::Moon) : SkyBodies::DiscDraw{};
+    if (skySystem->celestialSkipped()) {
+        sun = moon = {.drawn = false, .skipped = "under a sky model"};
+    }
+
+    const glm::vec3 sunDir = params.sunDisc.direction;
+    const SunOnScreen screen =
+        sunScreenPosition(camera->getViewMatrix(), camera->getProjectionMatrix(), sunDir);
+    const bool inView = screen.inFront && screen.uv.x >= 0.0f && screen.uv.x <= 1.0f &&
+                        screen.uv.y >= 0.0f && screen.uv.y <= 1.0f;
+    const float fromView = glm::degrees(std::acos(
+        glm::clamp(glm::dot(glm::normalize(camera->getForward()), sunDir), -1.0f, 1.0f)));
+
+    const SunDiagState state{
+        .drawn = sun.drawn,
+        .skipped = sun.skipped,
+        .inView = inView,
+        .angleStep = static_cast<int>(fromView / 5.0f),
+        .occlusionStep = static_cast<int>(sunGlare_ * 4.0f + 0.5f),
+        .hourStep = static_cast<int>(params.timeOfDay * 4.0f),
+        .weather = params.weatherIntensity > 0.01f,
+        .moonDrawn = moon.drawn,
+    };
+    if (state == sunDiagLast_ || globalTime - sunDiagLoggedAt_ < 0.5) return;
+    sunDiagLast_ = state;
+    sunDiagLoggedAt_ = globalTime;
+
+    const auto v3 = [](const glm::vec3& c) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "(%.2f %.2f %.2f)", c.r, c.g, c.b);
+        return std::string(buf);
+    };
+    LOG_INFO("sun: ", sun.drawn ? "drawn" : "not drawn - ", sun.drawn ? "" : sun.skipped,
+             " hour=", params.timeOfDay,
+             " elev=", glm::degrees(std::asin(glm::clamp(sunDir.z, -1.0f, 1.0f))),
+             " inView=", inView, " uv=(", screen.uv.x, ",", screen.uv.y, ")",
+             " fromView=", fromView,
+             " colour=", v3(params.sunColor), " alpha=", sun.alpha,
+             " glare=", sunGlare_, " glareSky=", sunGlareSky_,
+             " moon=", moon.drawn ? "drawn" : moon.skipped,
+             " moonElev=", glm::degrees(std::asin(glm::clamp(params.moonDisc.direction.z, -1.0f, 1.0f))),
+             " moonGlare=", moonGlare_, " clouds=", params.cloudDensity,
+             " weather=", params.weatherIntensity,
+             " fog=", volumetricThisFrame_ ? fogExtinction_ : 0.0f,
+             " msaa=", int(vkCtx ? vkCtx->getMsaaSamples() : 1));
 }
 
 void Renderer::update(float deltaTime) {
@@ -2053,15 +2197,7 @@ void Renderer::update(float deltaTime) {
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
 
-    // Ease toward it rather than taking it. The sample is a yes or a no, and
-    // walking a hill edge across the line to the sun would otherwise snap the
-    // flare on and off; a quarter second of travel reads as the sun going
-    // behind something.
-    {
-        const float target = sampleSunOcclusion();
-        const float rate = 1.0f - std::exp(-deltaTime / 0.25f);
-        sunOcclusion_ += (target - sunOcclusion_) * glm::clamp(rate, 0.0f, 1.0f);
-    }
+    updateGlares(deltaTime);
 
     auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
@@ -2098,10 +2234,18 @@ void Renderer::update(float deltaTime) {
     // Characters, creatures and their weapons take the light of the interior
     // group they stand in. WMO doodads are told theirs when they are placed.
     if (characterRenderer && wmoRenderer) {
-        characterRenderer->updateInteriorLight([this](const glm::vec3& p) {
-            return wmoRenderer->interiorLightAt(p.x, p.y, p.z);
-        });
+        characterRenderer->updateInteriorLight(
+            [this](const glm::vec3& p) { return wmoRenderer->interiorLightAt(p.x, p.y, p.z); },
+            wmoRenderer->contentRevision());
     }
+
+    // The weather drawn this frame, coming toward the realm's or the dev
+    // panel's. Before the light, which blends toward the storm row by it.
+    weather_.setTransitionSeconds(weatherControls_.transitionSeconds);
+    weather_.update(deltaTime, weatherControls_.weather.value_or(WeatherTarget{
+                                   .kind = environment_.weatherKind,
+                                   .intensity = environment_.weatherIntensity,
+                                   .abrupt = environment_.weatherAbrupt}));
 
     // Update lighting system
     if (lightingManager) {
@@ -2119,37 +2263,9 @@ void Renderer::update(float deltaTime) {
 
         endPhase("pre-lighting");
         lightingManager->update(characterPosition, environment_.mapId, resolvedZoneId,
-                                environment_.gameTime, environment_.raining, isUnderwater);
+                                environment_.gameTime, weatherStrength(), isUnderwater);
+        hazeLightForWeather();
         endPhase("lighting");
-
-        // Sync weather visual renderer with game state
-        if (weather) {
-            const uint32_t wType = environment_.weatherType;
-            const float wInt = environment_.weatherIntensity;
-            if (resolvedZoneId == 10) {
-                // Duskwood's defining effect is persistent ground fog. Some
-                // realms continuously report rain here; suppress those streak
-                // particles so they cannot replace the authored fog ambience.
-                weather->setWeatherType(Weather::Type::NONE);
-                weather->setIntensity(0.0f);
-            } else if (wType != 0) {
-                // Server-driven weather (SMSG_WEATHER) - authoritative
-                if (wType == 1)      weather->setWeatherType(Weather::Type::RAIN);
-                else if (wType == 2) weather->setWeatherType(Weather::Type::SNOW);
-                else if (wType == 3) weather->setWeatherType(Weather::Type::STORM);
-                else                 weather->setWeatherType(Weather::Type::NONE);
-                weather->setIntensity(wInt);
-            } else {
-                // No server weather - use zone-based weather configuration
-                weather->updateZoneWeather(resolvedZoneId, deltaTime);
-            }
-            weather->setEnabled(!insideWmo);
-
-            // Lightning flash disabled
-            if (lightning) {
-                lightning->setEnabled(false);
-            }
-        }
     }
 
     updateWind(deltaTime);
@@ -2173,26 +2289,27 @@ void Renderer::update(float deltaTime) {
     }
     if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager
-            ? lightingManager->getVisualTimeOfDayHours()
+            ? lightingManager->getTimeOfDayHours()
             : (skybox ? skybox->getTimeOfDay() : 12.0f));
         skyboxModelRenderer_->update(deltaTime, camera->getViewMatrix(),
                                      camera->getProjectionMatrix());
     }
 
-    // Update weather particles
-    if (weather && camera) {
-        weather->update(*camera, deltaTime);
-    }
-
-    // Update lightning (storm / heavy rain)
-    if (lightning && camera && lightning->isEnabled()) {
-        lightning->update(deltaTime, *camera);
-    }
+    // What falls, what is on the lens, and the lightning: after the wind,
+    // which carries all of it.
+    updateWeather(deltaTime);
 
     // Update swim effects
-    if (swimEffects && camera && waterRenderer) {
-        swimEffects->update(*camera, viewerMotion_, characterPosition, *waterRenderer, deltaTime);
+    if (swimEffects && camera) {
+        swimEffects->update(*camera, viewerMotion_, characterPosition, liquidScene_, deltaTime);
     }
+
+    // Whether there is water in view this frame: the sea, its wake, the sea
+    // bed under it and its mirror are worked out only while there is.
+    if (waterRenderer && camera) waterRenderer->updateInView(*camera);
+
+    // What every body in the water leaves in it: the wake round the camera.
+    updateWaterWake(deltaTime);
 
     // Surface disturbance the character leaves in the water. The droplet spray
     // is thrown by SwimEffects above; this is the froth on the surface itself,
@@ -2204,7 +2321,7 @@ void Renderer::update(float deltaTime) {
         bool wading = false;
 
         if (viewerMotion_.moving) {
-            if (auto waterH = waterRenderer->getWaterHeightAt(charPos.x, charPos.y)) {
+            if (auto waterH = liquidScene_.heightAt(charPos.x, charPos.y)) {
                 if (swimming) {
                     // A wake only exists where the swimmer meets the surface -
                     // diving deep leaves the surface undisturbed.
@@ -2464,12 +2581,63 @@ void Renderer::updateWind(float deltaTime) {
                         "this machine's clock, so other players see a different one");
         }
     }
-    inputs.weatherType = environment_.weatherType;
-    inputs.weatherIntensity = environment_.weatherIntensity;
+    // The weather being drawn, the dev panel's when it has one; and its wind
+    // over a scene's.
+    inputs.weatherKind = weather_.target().kind;
+    inputs.weatherIntensity = weather_.target().intensity;
     inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
-    inputs.fixedWind = environment_.wind;
+    inputs.fixedWind = weatherControls_.wind ? weatherControls_.wind : environment_.wind;
     wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
                  windZones_);
+    if (waterRenderer) {
+        const WindState& wind = wind_.state();
+        waterRenderer->advanceWindWaves(deltaTime, wind.speed * wind.gust, wind.direction,
+                                        glm::vec2(characterPosition.x, characterPosition.y));
+    }
+}
+
+void Renderer::updateWaterWake(float deltaTime) {
+    if (!waterRenderer || !camera) return;
+    if (!waterRenderer->inView()) {
+        waterRenderer->restWake(deltaTime);
+        return;
+    }
+    const glm::vec3 eye = camera->getPosition();
+    // The bodies whose middle is within the wake's reach of the camera, and
+    // in water: the player, every NPC and creature the renderer draws.
+    struct InReach {
+        float distance;
+        WaterMover mover;
+    };
+    std::vector<InReach> inReach;
+    if (characterRenderer) {
+        constexpr float kReach = 60.0f;  // the wake's field is 128 yards a side
+        characterRenderer->forEachBody([&](const CharacterRenderer::BodyPlace& body) {
+            const float distance = glm::length(glm::vec2(body.position) - glm::vec2(eye));
+            if (distance > kReach) return;
+            const auto surface = liquidScene_.nearestHeightAt(body.position.x, body.position.y, body.position.z);
+            if (!surface) return;
+            const float bottom = body.position.z + body.boundMin.z;
+            const float top = body.position.z + body.boundMax.z;
+            WaterMover m;
+            m.id = body.instanceId;
+            m.position = glm::vec2(body.position);
+            m.facing = glm::vec2(std::cos(body.yaw), std::sin(body.yaw));
+            const glm::vec2 extent = glm::vec2(body.boundMax - body.boundMin);
+            m.halfLength = 0.5f * std::max(extent.x, extent.y);
+            m.halfWidth = 0.5f * std::min(extent.x, extent.y);
+            m.head = wakeHeadFor(bottom, top, *surface);
+            if (m.head <= 0.0f) return;
+            inReach.push_back({distance, m});
+        });
+    }
+    // Nearest first: if there are more than the wake takes, the furthest go.
+    std::sort(inReach.begin(), inReach.end(),
+              [](const InReach& a, const InReach& b) { return a.distance < b.distance; });
+    std::vector<WaterMover> movers;
+    movers.reserve(inReach.size());
+    for (const InReach& r : inReach) movers.push_back(r.mover);
+    waterRenderer->advanceWake(deltaTime, glm::vec2(eye), movers);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
@@ -2652,10 +2820,10 @@ void Renderer::updateGrassPopulation() {
             // Any water over this chunk. Sampled once here rather than per
             // blade: a pond's surface is flat, and three hundred thousand
             // height queries a rebuild is not.
-            if (waterRenderer) {
+            {
                 const float cx = chunk->position[0] - 4.0f * kUnitSize;
                 const float cy = chunk->position[1] - 4.0f * kUnitSize;
-                if (const auto level = waterRenderer->getWaterHeightAt(cx, cy)) {
+                if (const auto level = liquidScene_.heightAt(cx, cy)) {
                     context.waterHeight = *level;
                     context.hasWater = true;
                 }
@@ -2898,10 +3066,11 @@ void Renderer::renderSkyBackground(float timeOfDay,
     // Render only the background, including authored sky layers and the air.
     skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
-        timeOfDay, environment_.gameTime, environment_.weatherIntensity,
-        lightingManager ? &lightingManager->getLightingParams() : nullptr,
+        timeOfDay, environment_.gameTime, weatherStrength(),
+        lightingManager ? weatherLight() : nullptr,
         useOriginalSkybox);
-    params.sunOcclusion = 1.0f; // Lens flare is an optical overlay, not background haze.
+    params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
+    params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
     skySystem->render(currentCmd, skyPerFrameDescSets[slot], *camera, params);
     if (drawSkyModels) {
         skyboxModelRenderer_->prepareRender(slot, *camera);
@@ -2959,7 +3128,7 @@ void Renderer::renderWorld() {
     // Get time of day for sky-related rendering
     auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
     float timeOfDay = lightingManager
-        ? lightingManager->getVisualTimeOfDayHours()
+        ? lightingManager->getTimeOfDayHours()
         : (skybox ? skybox->getTimeOfDay() : 12.0f);
     // Two questions, apart while the sky crossfades. The sky models are drawn
     // whenever any is up at all. The client's own stars, sun, moons and clouds
@@ -3083,11 +3252,15 @@ void Renderer::renderWorld() {
             if (skySystem && camera && !skipSky) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
-                    environment_.gameTime, environment_.weatherIntensity,
-                    lightingManager ? &lightingManager->getLightingParams() : nullptr,
+                    environment_.gameTime, weatherStrength(),
+                    lightingManager ? weatherLight() : nullptr,
                     useOriginalSkybox);
-                skyParams.sunOcclusion = sunOcclusion_;
+                // As much as the glare shows, weather included, as the client
+                // puts its glare out (0x7f37c3).
+                skyParams.sunGlareVisibility =
+                    sunGlare_ * sky_celestial::weatherFade(weatherStrength());
                 skySystem->render(cmd, perFrameSet, *camera, skyParams);
+                logSunDiagnostic(skyParams);
                 if (drawSkyModels) {
                     skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
                 }
@@ -3140,11 +3313,13 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
-            if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+            if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
                 waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
             }
-            if (weather && camera) weather->render(cmd, perFrameSet);
+            if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+                precipitation_->render(cmd, perFrameSet, frameIdx);
+            }
             if (lightning && camera && lightning->isEnabled()) lightning->render(cmd, perFrameSet);
             if (swimEffects && camera && !swimEffectsDrawWithWater_) {
                 swimEffects->render(cmd, perFrameSet);
@@ -3153,6 +3328,7 @@ void Renderer::renderWorld() {
             if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
             if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
             if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
+            drawGlares(cmd, perFrameSet);
 
             renderUnderwaterOverlay(cmd);
             renderPostSceneOverlays(cmd);
@@ -3204,6 +3380,16 @@ void Renderer::renderWorld() {
                             terrainRenderer ? terrainRenderer->getRenderedChunkCount() : 0,
                             " culled ",
                             terrainRenderer ? terrainRenderer->getCulledChunkCount() : 0);
+                if (terrainRenderer) {
+                    // Whether the resident tiles' geometry fits the shared
+                    // pages, or chunks are drawn from buffers of their own.
+                    const TerrainGeometryStats geo = terrainRenderer->geometryStats();
+                    LOG_WARNING("  terrain geometry: ", terrainRenderer->getChunkCount(),
+                                " chunks resident, ", geo.pages, " pages, vertices ",
+                                geo.verticesUsed, "/", geo.vertexCapacity, ", indices ",
+                                geo.indicesUsed, "/", geo.indexCapacity, ", ",
+                                geo.ownBufferChunks, " chunks with buffers of their own");
+                }
             }
         }
 
@@ -3299,11 +3485,13 @@ void Renderer::renderWorld() {
         if (skySystem && camera && !skipSky) {
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
-                environment_.gameTime, environment_.weatherIntensity,
-                lightingManager ? &lightingManager->getLightingParams() : nullptr,
+                environment_.gameTime, weatherStrength(),
+                lightingManager ? weatherLight() : nullptr,
                 useOriginalSkybox);
-            skyParams.sunOcclusion = sunOcclusion_;
+            skyParams.sunGlareVisibility =
+                sunGlare_ * sky_celestial::weatherFade(weatherStrength());
             skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
+            logSunDiagnostic(skyParams);
             if (drawSkyModels) {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
                 skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);
@@ -3353,12 +3541,14 @@ void Renderer::renderWorld() {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
-        if (waterRenderer && camera && !waterDrawsInContinuePass()) {
+        if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
             waterRenderer->setRenderExtent(activeRenderExtent_);
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
         }
-        if (weather && camera) weather->render(currentCmd, perFrameSet);
+        if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+            precipitation_->render(currentCmd, perFrameSet, frameIdx);
+        }
         if (lightning && camera && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
         if (swimEffects && camera && !swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
@@ -3367,6 +3557,7 @@ void Renderer::renderWorld() {
         if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
         if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
+        drawGlares(currentCmd, perFrameSet);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
         if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
@@ -3405,7 +3596,8 @@ void Renderer::renderWorld() {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled()) {
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && waterRenderer->inView() &&
+            !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
@@ -3420,8 +3612,20 @@ void Renderer::renderWorld() {
         VkExtent2D waterExtent = activeRenderExtent_;
         if (msaaOn) {
             contRp.renderPass = waterRenderer->getWater1xRenderPass();
-            contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
-            waterExtent = vkCtx->getSwapchainExtent();
+            // Into the image the scene was resolved into: the swapchain's own,
+            // or the post-processing target's, which FXAA or the upscaler
+            // then read with the water in it.
+            const bool offscreenScene = postProcessPipeline_ &&
+                postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+            if (offscreenScene) {
+                // Ready, or waterDrawsInContinuePass would not have sent the
+                // water here.
+                contRp.framebuffer = offscreenWater1xFb_;
+                waterExtent = postProcessPipeline_->getSceneRenderExtent();
+            } else {
+                contRp.framebuffer = waterRenderer->getWater1xFramebuffer(currentImageIndex);
+                waterExtent = vkCtx->getSwapchainExtent();
+            }
         } else {
             contRp.renderPass = vkCtx->getSceneContinueRenderPass();
             contRp.framebuffer = activeFramebuffer_;
@@ -3439,7 +3643,9 @@ void Renderer::renderWorld() {
         vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
         waterRenderer->setRenderExtent(waterExtent);
-        waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        if (!waterAblated()) {
+            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+        }
 
         // What is blended goes over the water, not under it. Drawn in the scene
         // pass it was in the refraction copy and then covered by the sheet, so
@@ -3460,6 +3666,8 @@ void Renderer::renderWorld() {
         if (swimEffects && camera && swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
         }
+        // Rain over the water, ringing on it, not hidden under its sheet.
+        if (precipitation_ && precipitationDrawsWithWater_) precipitation_->render(currentCmd, perFrameSet, frameIdx);
 
         // And the minimap, last of all: it is the interface rather than the
         // world, and nothing in the world belongs over it.
@@ -3499,6 +3707,8 @@ void Renderer::syncSwimEffectsTargetPass() {
     }
 
     if (swimEffects) swimEffects->setTargetPass(pass, samples);
+    // Rain is blended over the world like the spray, and goes with it.
+    if (precipitation_) precipitation_->setTargetPass(pass, samples);
     // Blended doodads follow the water out of the scene pass for the same
     // reason. Built by refreshSwimEffectsPass, which retires the old pipelines.
     blendedAfterWaterPass_ = swimEffectsDrawWithWater_ ? pass : VK_NULL_HANDLE;
@@ -3507,9 +3717,9 @@ void Renderer::syncSwimEffectsTargetPass() {
     // on screen behind it painted straight over the terrain it draws. The
     // spray at least only lost against water it was thrown off.
     //
-    // Only when water has actually left the scene pass. Where it has not - MSAA
-    // onto an off-screen scene, or no continuation pass at all - water is drawn
-    // before this and the minimap is already on top of it.
+    // Only when water has actually left the scene pass. Where it has not - no
+    // continuation pass, or MSAA without a resolved depth to test against -
+    // water is drawn before this and the minimap is already on top of it.
     if (minimap) {
         minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                samples);
@@ -3517,13 +3727,13 @@ void Renderer::syncSwimEffectsTargetPass() {
 }
 
 std::optional<float> Renderer::cameraWaterDepth() const {
-    if (!waterRenderer || !camera) return std::nullopt;
+    if (!camera) return std::nullopt;
     const glm::vec3 camPos = camera->getPosition();
-    if (waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) return std::nullopt;
+    if (liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) return std::nullopt;
     // Far enough for deep ocean; see renderUnderwaterOverlay for what the
     // default 15 units did.
     constexpr float kUnderwaterReach = 400.0f;
-    const auto waterH = waterRenderer->getNearestWaterHeightAt(
+    const auto waterH = liquidScene_.nearestHeightAt(
         camPos.x, camPos.y, camPos.z, kUnderwaterReach);
     if (!waterH) return std::nullopt;
     // That reach also finds a lake over a dry cave; the ground tells the two
@@ -3544,7 +3754,7 @@ void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
     // client happened to be recording with decided which of the two the
     // player got, and on the fallback path crossing the surface showed a
     // bare line with no water either side of it.
-if (overlaySystem_ && waterRenderer && camera) {
+if (overlaySystem_ && camera) {
         glm::vec3 camPos = camera->getPosition();
         // The default vertical reach of this query is 15 units, meant to
         // stop water on a cliff above being mistaken for water the camera
@@ -3553,7 +3763,7 @@ if (overlaySystem_ && waterRenderer && camera) {
         // overlay stopped, and the scene snapped bright at a fixed depth.
         // Deep ocean is far deeper than that, so reach much further here.
         constexpr float kUnderwaterReach = 400.0f;
-        auto waterH = waterRenderer->getNearestWaterHeightAt(
+        auto waterH = liquidScene_.nearestHeightAt(
             camPos.x, camPos.y, camPos.z, kUnderwaterReach);
         // How far the eye is under the surface. The tint used to wait
         // until 1.5 units down and then apply to the whole screen at
@@ -3580,7 +3790,7 @@ if (overlaySystem_ && waterRenderer && camera) {
                 lastLog = globalTime;
                 LOG_INFO("underwater: camZ=", camPos.z, " waterZ=", *waterH,
                          " eyeDepth=", eyeDepth, " band=", kCrossingBand,
-                         " wmoWater=", waterRenderer->isWmoWaterAt(camPos.x, camPos.y) ? 1 : 0,
+                         " wmoWater=", liquidScene_.isWmoLiquidAt(camPos.x, camPos.y) ? 1 : 0,
                          " drawing=", (eyeDepth > 0.0f) ? 1 : 0);
             }
         }
@@ -3600,9 +3810,9 @@ if (overlaySystem_ && waterRenderer && camera) {
         // whose ray enters the world above the surface comes out untouched -
         // so the band above the surface costs nothing where there is no water.
         if (waterH && eyeDepth > -kCrossingBand
-                   && !waterRenderer->isWmoWaterAt(camPos.x, camPos.y)) {
+                   && !liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) {
             bool canal = false;
-            if (auto lt = waterRenderer->getWaterTypeAt(camPos.x, camPos.y))
+            if (auto lt = liquidScene_.typeAt(camPos.x, camPos.y))
                 canal = (*lt == 5 || *lt == 13 || *lt == 17);
             // Until the eye passes the surface the view is darkened by
             // looking through the water plane itself, which is strong -
@@ -3687,13 +3897,82 @@ bool Renderer::fadedCharactersAfterWater() const {
 bool Renderer::waterDrawsInContinuePass() const {
     if (!waterRenderer || !vkCtx) return false;
     if (vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
-        // The 1x water pass targets the swapchain directly, so it cannot serve a
-        // frame whose scene went to an off-screen post-processing target.
+        if (!waterRenderer->hasWater1xPass()) return false;
+        // With the scene in an off-screen post-processing target (FXAA, FSR)
+        // the 1x pass draws into that target's resolved images instead of the
+        // swapchain's. It used to be unable to, and the water then stayed in
+        // the scene pass with its refraction copy taken from the finished
+        // frame - its own last output, so everything standing in or over the
+        // water left a trail of copies behind it as the camera moved.
         const bool offscreenScene =
             postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
-        return !offscreenScene && waterRenderer->hasWater1xPass();
+        return !offscreenScene || offscreenWater1xReady();
     }
     return vkCtx->getSceneContinueRenderPass() != VK_NULL_HANDLE;
+}
+
+bool Renderer::offscreenWater1xReady() const {
+    if (!offscreenWater1xFb_ || !waterRenderer || !postProcessPipeline_) return false;
+    return offscreenWater1xGeneration_ == postProcessPipeline_->sceneTargetGeneration() &&
+           offscreenWater1xPass_ == waterRenderer->getWater1xRenderPass() &&
+           offscreenWater1xColor_ == postProcessPipeline_->getSceneResolvedColorView() &&
+           offscreenWater1xDepth_ == postProcessPipeline_->getSceneResolvedDepthView();
+}
+
+void Renderer::updateOffscreenWater1xFramebuffer() {
+    if (!waterRenderer || !vkCtx || !postProcessPipeline_) return;
+    if (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT) return;
+    if (offscreenWater1xReady()) return;
+    destroyOffscreenWater1xFramebuffer();
+
+    const VkRenderPass pass = waterRenderer->getWater1xRenderPass();
+    const VkImageView color = postProcessPipeline_->getSceneResolvedColorView();
+    const VkImageView depth = postProcessPipeline_->getSceneResolvedDepthView();
+    const uint64_t generation = postProcessPipeline_->sceneTargetGeneration();
+    if (!pass || postProcessPipeline_->getSceneFramebuffer() == VK_NULL_HANDLE) return;
+    if (!color || !depth) {
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_WARNING("Water: the off-screen scene has no resolved depth - water stays in the "
+                        "multisampled scene pass and refracts the previous frame (trails behind "
+                        "anything moving over it)");
+        }
+        return;
+    }
+
+    const VkExtent2D extent = postProcessPipeline_->getSceneRenderExtent();
+    const VkImageView attachments[2] = {color, depth};
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = pass;
+    fbInfo.attachmentCount = 2;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = extent.width;
+    fbInfo.height = extent.height;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(vkCtx->getDevice(), &fbInfo, nullptr, &offscreenWater1xFb_) != VK_SUCCESS) {
+        offscreenWater1xFb_ = VK_NULL_HANDLE;
+        if (offscreenWater1xFailedGeneration_ != generation) {
+            offscreenWater1xFailedGeneration_ = generation;
+            LOG_ERROR("Water: could not build its pass over the off-screen scene (", extent.width,
+                      "x", extent.height, ") - water stays in the multisampled scene pass and "
+                      "refracts the previous frame");
+        }
+        return;
+    }
+    offscreenWater1xGeneration_ = generation;
+    offscreenWater1xPass_ = pass;
+    offscreenWater1xColor_ = color;
+    offscreenWater1xDepth_ = depth;
+}
+
+void Renderer::destroyOffscreenWater1xFramebuffer() {
+    if (!offscreenWater1xFb_ || !vkCtx) return;
+    // A frame still in flight may have recorded it.
+    VkDevice device = vkCtx->getDevice();
+    VkFramebuffer fb = offscreenWater1xFb_;
+    vkCtx->deferAfterAllFrameFences([device, fb]() { vkDestroyFramebuffer(device, fb, nullptr); });
+    offscreenWater1xFb_ = VK_NULL_HANDLE;
 }
 
 // initPostProcess(), resizePostProcess(), shutdownPostProcess() removed -
@@ -3743,12 +4022,71 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         terrainRenderer->initializeShadow(shadowRenderPass);
     }
 
+    // The sun's disc and glare textures, from the client's data.
+    if (skySystem) skySystem->loadTextures(assetManager);
+
+    // What each liquid id in the map data is, read once: the scene says what
+    // kind a liquid is by it, and the water finds each liquid's ripple frames
+    // by it. Before any tile or building is loaded.
+    if (!liquidTypesLoaded_) {
+        liquidTypesLoaded_ = true;
+        const auto dbc = assetManager->loadDBC("LiquidType.dbc");
+        const pipeline::DBCLayout* layouts = pipeline::getActiveDBCLayout();
+        if (dbc && dbc->isLoaded()) {
+            liquidTypes_ = pipeline::LiquidTypeTable::fromDbc(
+                *dbc, layouts ? layouts->getLayout("LiquidType") : nullptr, "LiquidType.dbc");
+            LOG_INFO("Liquid types: ", liquidTypes_.size(), " from LiquidType.dbc");
+        } else {
+            LOG_WARNING("Liquid types: LiquidType.dbc did not load - only the four basic "
+                        "liquids are known, drawn without their textures");
+            liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+        }
+        liquidScene_.setLiquidTypes(&liquidTypes_);
+    }
+
+    // What lies under the water, drawn by the shadow pass's casters: before
+    // the water, whose sets bind it.
+    if (!seaBed_) {
+        seaBed_ = std::make_unique<SeaBedMap>();
+        if (!seaBed_->initialize(vkCtx, shadowRenderPass)) {
+            LOG_ERROR("Failed to create the sea bed map - liquid is not drawn, "
+                      "though it can still be swum in");
+        }
+    }
+
+    // Where rain and snow cannot reach, drawn by the same casters, and what
+    // falls, which reads it.
+    if (!shelter_) {
+        shelter_ = std::make_unique<ShelterMap>();
+        if (!shelter_->initialize(vkCtx, shadowRenderPass)) {
+            shelter_->shutdown();
+            shelter_.reset();
+        }
+    }
+    if (!precipitation_ && shelter_) {
+        precipitation_ = std::make_unique<Precipitation>();
+        syncSwimEffectsTargetPass();
+        if (!precipitation_->initialize(vkCtx, perFrameSetLayout, *shelter_)) {
+            precipitation_->shutdown();
+            precipitation_.reset();
+        } else {
+            precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
+            precipitation_->setDensityScale(weatherDetail_);
+        }
+    } else if (!shelter_) {
+        LOG_ERROR("No shelter map - rain, snow and sand are not drawn");
+    }
+
     // Create water renderer if not already created
     if (!waterRenderer) {
         waterRenderer = std::make_unique<WaterRenderer>();
-        if (!waterRenderer->initialize(vkCtx, perFrameSetLayout)) {
-            LOG_ERROR("Failed to initialize water renderer");
+        if (!waterRenderer->initialize(vkCtx, perFrameSetLayout, seaBed_.get())) {
+            LOG_ERROR("Failed to initialize water renderer - liquid is not drawn, "
+                      "though it can still be swum in");
             waterRenderer.reset();
+        } else {
+            // Told of whatever the scene already holds before this returns.
+            waterSubscription_ = liquidScene_.subscribe(*waterRenderer);
         }
     }
 
@@ -3768,8 +4106,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             LOG_ERROR("M2Renderer initialization failed");
         m2Renderer->setRtScene(rtScene_.get());
         m2Renderer->setWaterHeightQuery([this](float x, float y, float z) -> std::optional<float> {
-            return waterRenderer ? waterRenderer->getNearestWaterHeightAt(x, y, z, 3.0f)
-                                 : std::nullopt;
+            return liquidScene_.nearestHeightAt(x, y, z, 3.0f);
         });
         if (swimEffects) {
             swimEffects->setM2Renderer(m2Renderer.get());
@@ -3843,10 +4180,8 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             terrainManager = nullptr;
             return false;
         }
-        // Set water renderer for terrain streaming
-        if (waterRenderer) {
-            terrainManager->setWaterRenderer(waterRenderer.get());
-        }
+        // The liquid streams in with the terrain and the buildings.
+        terrainManager->setLiquidScene(&liquidScene_);
         // Set M2 renderer for doodad loading during streaming
         if (m2Renderer) {
             terrainManager->setM2Renderer(m2Renderer.get());
@@ -4169,6 +4504,10 @@ void Renderer::refreshSwimEffectsPass() {
     const bool blendedMoved = m2Renderer && m2Renderer->afterWaterPass() != blendedAfterWaterPass_;
     // Faded characters go wherever the blended world goes, after it.
     const bool fadedMoved = characterRenderer && characterRenderer->fadedPass() != blendedAfterWaterPass_;
+    if (precipitation_ && precipitationDrawsWithWater_ != swimEffectsDrawWithWater_) {
+        precipitation_->recreatePipelines();
+        precipitationDrawsWithWater_ = swimEffectsDrawWithWater_;
+    }
     if (!sprayMoved && !minimapMoved && !blendedMoved && !fadedMoved) return;
     if (sprayMoved) swimEffects->recreatePipelines();
     if (minimapMoved) minimap->recreatePipelines();
@@ -4304,8 +4643,17 @@ void Renderer::setSecondaryViewportScissor(VkCommandBuffer cmd) {
     vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
+bool Renderer::waterAblated() const {
+    return passAblation_ && passAblation_->skip(AblationPass::Water);
+}
+
+bool Renderer::waterReflectionAblated() const {
+    return waterAblated() || (passAblation_ && passAblation_->skip(AblationPass::WaterReflection));
+}
+
 void Renderer::renderReflectionPass() {
-    if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
+    if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->inView()) return;
+    if (waterReflectionAblated()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 
     // Select the current frame's pre-bound reflection descriptor set
@@ -4319,7 +4667,7 @@ void Renderer::renderReflectionPass() {
 
     // Find dominant water height near camera
     const glm::vec3 camPos = camera->getPosition();
-    auto waterH = waterRenderer->getDominantWaterHeight(camPos);
+    auto waterH = liquidScene_.dominantWaterHeight(camPos);
     if (!waterH) return;
 
     float waterHeight = *waterH;
@@ -4328,9 +4676,8 @@ void Renderer::renderReflectionPass() {
     if (camPos.z < waterHeight + 0.5f) return;
 
     // Compute reflected view and oblique projection
-    glm::mat4 reflView = WaterRenderer::computeReflectedView(*camera, waterHeight);
-    glm::mat4 reflProj = WaterRenderer::computeObliqueProjection(
-        camera->getProjectionMatrix(), reflView, waterHeight);
+    glm::mat4 reflView = mirroredView(camera->getPosition(), camera->getForward(), waterHeight);
+    glm::mat4 reflProj = obliqueReflectionProjection(camera->getProjectionMatrix(), reflView, waterHeight);
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -4353,31 +4700,12 @@ void Renderer::renderReflectionPass() {
     if (!waterRenderer->beginReflectionPass(currentCmd)) return;
 
     if (canRenderScene) {
-        // Render scene into reflection texture (sky + terrain + WMO only for perf)
-        if (skySystem) {
-            rendering::SkyParams skyParams;
-            auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = lightingManager
-                ? lightingManager->getVisualTimeOfDayHours()
-                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
-            if (lightingManager) {
-                const auto& lp = lightingManager->getLightingParams();
-                skyParams.directionalDir = lp.directionalDir;
-                skyParams.sunColor = lp.diffuseColor;
-                skyParams.skyTopColor = lp.skyTopColor;
-                skyParams.skyMiddleColor = lp.skyMiddleColor;
-                skyParams.skyBand1Color = lp.skyBand1Color;
-                skyParams.skyBand2Color = lp.skyBand2Color;
-                skyParams.cloudDensity = lp.cloudDensity;
-                skyParams.fogDensity = lp.fogDensity;
-                skyParams.horizonGlow = lp.horizonGlow;
-            }
-            // weatherIntensity left at default 0 for reflection pass (no game handler in scope)
-            // A flare is an artefact of the lens, so it belongs to the camera
-            // and not to what the water is showing it.
-            skyParams.sunOcclusion = 1.0f;
-            skySystem->render(currentCmd, reflDescSet, *camera, skyParams);
-        }
+        // What stands above the water: the ground and the buildings. Not the
+        // sky - the water reflects that itself, along each pixel's own
+        // reflected ray, from the sky the camera sees (skyAlong in
+        // water.frag). The sky drawn here was a procedural one with no sky
+        // model and no weather, and where the reflection held it, it stood
+        // in for the real one as a grey wash over the sea.
         if (terrainRenderer && terrainEnabled) {
             terrainRenderer->render(currentCmd, reflDescSet, *camera);
         }
@@ -4510,6 +4838,7 @@ void Renderer::renderShadowMap(bool contact) {
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
+    if (!contact) wmoCasterSetsReset_ = m2CasterSetsReset_ = true;
     if (terrainRenderer && !contact) {
         terrainRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
@@ -4638,12 +4967,13 @@ void Renderer::writeFogVolumeBindings(uint32_t i) {
 }
 
 float Renderer::volumetricFogExtinction() const {
-    // Per yard, at and below the layer, near the camera. At this a sixth of
-    // the light is gone over the first hundred yards and two fifths across
-    // the whole volume, which thins its air out by 400 - a haze, not a wall,
-    // before the slider scales it - while a ten-yard shaft near the sun still
-    // lifts what is behind it by a tenth or more.
-    constexpr float kBaseExtinction = 0.002f;
+    // Per yard, at and below the layer, near the camera. At this a quarter of
+    // the light is gone over the first thirty yards along the ground and two
+    // thirds over a hundred, before the zone and the slider scale it: the
+    // houses across a street stand in the mist, the trees past them are
+    // shapes in it. A fifth of this, with the layer thirty yards deep, took a
+    // sixth over a hundred and read as the picture dimmed, not as mist.
+    constexpr float kBaseExtinction = 0.01f;
     float extinction = kBaseExtinction * volumetricFogDensity_;
 
     if (lightingManager) {
@@ -4653,31 +4983,251 @@ float Renderer::volumetricFogExtinction() const {
         // open plain's ends far out and gets less. The player's fog slider
         // divides those distances, so it is multiplied back out to reach the
         // zone's number rather than the slider's.
+        //
+        // The weather comes in here too, and only here: the light blends
+        // toward the zone's storm row as it rains or snows, and that row's
+        // fog is the zone's word on how close the weather brings it. A rain
+        // and snow factor of our own on top - up to three times in a storm -
+        // closed a jungle in to a wall in the first shower.
         const float strength = lightingManager->getFogStrength();
         if (strength > 0.001f && lp.fogEnd > 1.0f) {
             const float authoredEnd = lp.fogEnd * strength;
             extinction *= glm::clamp(900.0f / authoredEnd, 0.6f, 2.0f);
         }
         // Morning mist: thickest around half past six, gone by nine.
-        const float hours = lightingManager->getVisualTimeOfDayHours();
+        const float hours = lightingManager->getTimeOfDayHours();
         const float dawn = 1.0f - glm::smoothstep(0.0f, 2.5f, std::abs(hours - 6.5f));
         extinction *= 1.0f + 0.8f * dawn;
-    }
-
-    if (weather) {
-        const float w = glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
-        switch (weather->getWeatherType()) {
-            case Weather::Type::RAIN:  extinction *= 1.0f + 1.2f * w; break;
-            case Weather::Type::SNOW:  extinction *= 1.0f + 0.8f * w; break;
-            case Weather::Type::STORM: extinction *= 1.0f + 2.0f * w; break;
-            default: break;
-        }
     }
 
     // Indoors the outdoor air mostly stays outside. Not all of it: a hall
     // with torches in it should still show their glow.
     if (viewerMotion_.insideInterior) extinction *= 0.35f;
     return extinction;
+}
+
+void Renderer::renderSeaBedPass() {
+    ZoneScopedN("Renderer::renderSeaBedPass");
+    if (!seaBed_ || !waterRenderer || !camera || currentCmd == VK_NULL_HANDLE) return;
+    // What the last drawing cost, once its timestamps are back. The frame
+    // profile's own report is of one frame every ten seconds, and the map is
+    // drawn in one frame of a few hundred.
+    static const bool frameProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    if (frameProfile && vkCtx) {
+        for (const auto& [label, ms] : vkCtx->gpuTimings()) {
+            if (label && std::strcmp(label, "sea bed") == 0) {
+                LOG_WARNING("Sea bed map drawn in ", ms, "ms of GPU time");
+            }
+        }
+    }
+    // WOWEE_NO_SEA_BED=1: the water as if it were deep everywhere, waves to
+    // the beach and through the piers, to compare against.
+    static const bool noSeaBed = core::envFlagEnabled("WOWEE_NO_SEA_BED", false);
+    if (noSeaBed) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOG_WARNING("Sea bed map off (WOWEE_NO_SEA_BED) - the waves keep their height to every shore");
+        }
+        return;
+    }
+    // Round the camera, which is where the waves are seen.
+    const glm::vec2 nearby(camera->getPosition());
+    const std::optional<float> water =
+        waterRenderer->highestOpenWaterNear(nearby, SeaBedMap::kHalfExtent);
+    if (!water) return;
+    // The wind the fetch is found for: the way it blows, not its gusts.
+    const glm::vec2 windToward = wind_.state().direction;
+    if (!seaBed_->wantsDrawing(nearby, *water, globalTime)) {
+        // The same bed, a wind that has turned: the shore upwind is another.
+        if (seaBed_->wantsFetch(windToward)) {
+            seaBed_->refetch(currentCmd, windToward);
+            if (vkCtx) vkCtx->gpuMark(currentCmd, "sea fetch");
+        }
+        return;
+    }
+
+    seaBed_->begin(nearby, *water);
+    const OverheadFrame& frame = seaBed_->drawing();
+    // The casters cull by the matrix's footprint and by distance; the map's
+    // corners are its half extent and a half again from its middle.
+    const glm::vec3 centre(frame.centre, frame.ceiling);
+    const float reach = SeaBedMap::kHalfExtent * 1.415f;
+    // The ground, and the buildings from above and from below: what the
+    // water stands on and against. Not the doodads (SeaBedMap).
+    const auto drawView = [&](SeaBedView view) {
+        const glm::mat4 matrix = seaBed_->viewMatrix(view);
+        seaBed_->beginView(currentCmd, view);
+        if (view == SeaBedView::GroundFromAbove) {
+            if (terrainRenderer) terrainRenderer->renderShadow(currentCmd, matrix, centre, frame.range);
+        } else if (wmoRenderer) {
+            // The sun's pass reset the casters' texture sets this frame if
+            // it drew them; if it did not, this is the first, and resets.
+            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
+            wmoCasterSetsReset_ = true;
+        }
+        seaBed_->endView(currentCmd, view);
+    };
+    drawView(SeaBedView::GroundFromAbove);
+    drawView(SeaBedView::BuildingsFromAbove);
+    drawView(SeaBedView::BuildingsFromBelow);
+    seaBed_->finish(currentCmd, globalTime, windToward);
+    if (vkCtx) vkCtx->gpuMark(currentCmd, "sea bed");
+}
+
+const LightingParams* Renderer::weatherLight() const {
+    if (weatherLight_) return weatherLight_.get();
+    return lightingManager ? &lightingManager->getLightingParams() : nullptr;
+}
+
+void Renderer::hazeLightForWeather() {
+    if (!lightingManager) return;
+    if (!weatherLight_) weatherLight_ = std::make_unique<LightingParams>();
+    LightingParams p = lightingManager->getLightingParams();
+    // Rain and snow bring no haze of their own: the light blends toward the
+    // zone's storm row by them, and that row's fog says how close they bring
+    // it. Blowing sand is the colour of sand in the day's light; the fog
+    // weather's mist is grey.
+    const WeatherMix& w = weather_.mix();
+    if (w.sand > 0.0f || w.mist > 0.0f) {
+        const glm::vec3 lit = p.ambientColor + p.diffuseColor * 0.5f;
+        const glm::vec3 sandHaze = glm::vec3(0.80f, 0.64f, 0.42f) * lit;
+        const glm::vec3 mistHaze = glm::mix(p.fogColor, glm::vec3(glm::dot(lit, glm::vec3(1.0f / 3.0f))), 0.5f);
+        const auto haze = [&](const glm::vec3& c, float sandShare, float mistShare) {
+            return glm::mix(glm::mix(c, sandHaze, w.sand * sandShare), mistHaze, w.mist * mistShare);
+        };
+        p.fogColor = haze(p.fogColor, 0.85f, 0.6f);
+        // The sky hazes too, the horizon most, so the hills are not cut out
+        // against a clear sky behind the dust.
+        p.skyTopColor = haze(p.skyTopColor, 0.6f, 0.4f);
+        p.skyMiddleColor = haze(p.skyMiddleColor, 0.8f, 0.5f);
+        p.skyBand1Color = haze(p.skyBand1Color, 0.85f, 0.6f);
+        p.skyBand2Color = haze(p.skyBand2Color, 0.85f, 0.6f);
+        p.cloudFillColor = haze(p.cloudFillColor, 0.6f, 0.4f);
+        p.cloudBaseColor = haze(p.cloudBaseColor, 0.6f, 0.4f);
+        p.fogStart = glm::mix(glm::mix(p.fogStart, 2.0f, w.sand), 10.0f, w.mist * 0.8f);
+        p.fogEnd = glm::mix(glm::mix(p.fogEnd, 140.0f, w.sand), 220.0f, w.mist * 0.8f);
+    }
+    *weatherLight_ = p;
+}
+
+void Renderer::setWeatherDetail(float scale) {
+    weatherDetail_ = std::clamp(scale, 0.0f, 1.0f);
+    if (precipitation_) precipitation_->setDensityScale(weatherDetail_);
+}
+
+float Renderer::skyExposure() const {
+    return shelter_ ? shelter_->exposure() : 1.0f;
+}
+
+float Renderer::skyView() const {
+    return shelter_ ? shelter_->skyView() : 1.0f;
+}
+
+uint32_t Renderer::precipitationCount() const {
+    return precipitation_ ? precipitation_->drawnCount() : 0;
+}
+
+void Renderer::updateWeather(float deltaTime) {
+    ZoneScopedN("Renderer::updateWeather");
+    if (!camera) return;
+    const WeatherMix& mix = weather_.mix();
+    const glm::vec3 eye = camera->getPosition();
+    const WindState& wind = wind_.state();
+    const glm::vec2 windVelocity = wind.direction * wind.speed * wind.gust;
+
+    if (precipitation_) {
+        PrecipitationFrame frame;
+        if (weatherControls_.precipitation) frame.mix = mix;
+        frame.camera = eye;
+        frame.wind = windVelocity;
+        frame.dt = deltaTime;
+        frame.water = &liquidScene_;
+        frame.now = globalTime;
+        frame.openSky = skyView();
+        frame.viewport = activeRenderExtent_.width > 0 ? activeRenderExtent_ : vkCtx->getSwapchainExtent();
+        precipitation_->setSplashesEnabled(weatherControls_.splashes);
+        precipitation_->update(frame);
+    }
+
+    // The lens: how squarely it faces into what falls - rain falls along the
+    // wind, at its own speed downward - and into the wind for the sand.
+    const glm::vec3 forward = camera->getForward();
+    const glm::vec3 fall = glm::normalize(glm::vec3(windVelocity * 0.9f, -10.0f));
+    const float windSpeed = glm::length(windVelocity);
+    const glm::vec3 windDir = windSpeed > 0.1f ? glm::vec3(windVelocity / windSpeed, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+    LensInputs lens;
+    if (weatherControls_.lens) {
+        // Fewer reach a camera walled in, as fewer fall in its view.
+        const float walledIn = glm::mix(0.5f, 1.0f, skyView());
+        lens.rain = mix.rain * walledIn;
+        lens.snow = mix.snow * walledIn;
+        lens.sand = mix.sand * walledIn;
+    }
+    lens.exposure = skyExposure();
+    lens.facingFall = glm::smoothstep(-0.25f, 0.6f, glm::dot(forward, -fall));
+    lens.facingWind = glm::smoothstep(-0.2f, 0.7f, glm::dot(forward, -windDir));
+    // Across the screen as the wind crosses the view.
+    const glm::vec2 across(glm::dot(windDir, camera->getRight()), -glm::dot(windDir, camera->getUp()));
+    lensWindOnScreen_ = across * std::clamp(std::max(windSpeed, 9.0f) * 0.15f, 0.0f, 3.0f);
+    lens.windOnScreen = lensWindOnScreen_;
+    const auto eyeDepth = cameraWaterDepth();
+    lens.underwater = eyeDepth && *eyeDepth > 0.0f;
+    if (!weatherControls_.lens) lensDrops_.clear();
+    lensDrops_.update(deltaTime, lens, camera->getAspectRatio());
+
+    // Lightning over a thunderstorm, as often as it is heavy.
+    if (lightning) {
+        const bool storm = weatherControls_.lightning && mix.thunder > 0.05f;
+        lightning->setEnabled(storm);
+        if (storm) {
+            lightning->setIntensity(mix.thunder);
+            lightning->update(deltaTime, *camera);
+        }
+    }
+}
+
+void Renderer::renderShelterPass() {
+    ZoneScopedN("Renderer::renderShelterPass");
+    if (!shelter_ || !camera || currentCmd == VK_NULL_HANDLE) return;
+    const glm::vec3 eye = camera->getPosition();
+    // What is loaded, as a number that moves when any of it streams in or out.
+    uint64_t world = wmoRenderer ? wmoRenderer->contentRevision() : 0;
+    world = world * 1000003u + (wmoRenderer ? wmoRenderer->getInstanceCount() : 0);
+    world = world * 1000003u + (m2Renderer ? m2Renderer->getInstanceCount() : 0);
+    world = world * 1000003u + static_cast<uint64_t>(terrainRenderer ? terrainRenderer->getChunkCount() : 0);
+    if (shelter_->wantsDrawing(eye, globalTime, world)) {
+        shelter_->begin(currentCmd, eye, world);
+        const glm::mat4 matrix = shelter_->matrix();
+        const glm::vec3 centre(shelter_->drawing().centre, eye.z);
+        // The map's corners are its half extent and a half again from its
+        // middle.
+        const float reach = ShelterMap::kHalfExtent * 1.415f;
+        // The ground, the buildings and the doodads - a tree's crown keeps
+        // the rain off as a roof does. Not the characters.
+        if (terrainRenderer) terrainRenderer->renderShadow(currentCmd, matrix, centre, reach);
+        if (wmoRenderer) {
+            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
+            wmoCasterSetsReset_ = true;
+        }
+        if (m2Renderer) {
+            m2Renderer->renderShadow(currentCmd, matrix, wind_.gpu(), centre, reach, !m2CasterSetsReset_);
+            m2CasterSetsReset_ = true;
+        }
+        shelter_->end(currentCmd, globalTime);
+        if (vkCtx) vkCtx->gpuMark(currentCmd, "shelter");
+    }
+    shelter_->probe(currentCmd, vkCtx->getCurrentFrame(), eye);
+}
+
+void Renderer::recordLensWeather() {
+    if (!lensWeather_ || currentCmd == VK_NULL_HANDLE) return;
+    const auto& images = vkCtx->getSwapchainImages();
+    // The world's picture only: a loading screen is not seen through the lens.
+    const bool onScreen = worldDrawnThisFrame_ && currentImageIndex < images.size();
+    lensWeather_->record(currentCmd, vkCtx->getCurrentFrame(), onScreen ? images[currentImageIndex] : VK_NULL_HANDLE,
+                         vkCtx->getSwapchainExtent(), lensDrops_, lensWindOnScreen_,
+                         std::fmod(globalTime, 1000.0f));
 }
 
 void Renderer::renderVolumetricFog() {
@@ -4723,6 +5273,13 @@ void Renderer::renderVolumetricFog() {
     in.time = globalTime;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
+    if (lightingManager) {
+        // The air's forward glow in the light tables' sunlit-cloud colour.
+        in.sunHaloColor = lightingManager->getLightingParams().cloudSunlitColor;
+        in.sunGlareDirection =
+            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
+        in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
+    }
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
 
@@ -4744,8 +5301,10 @@ void Renderer::recordSunShafts() {
         currentImageIndex < images.size() &&
         !(passAblation_ && passAblation_->skip(AblationPass::SunShafts))) {
         const auto& lp = lightingManager->getLightingParams();
-        // The sun the lens flare draws around, from the same rule.
-        const glm::vec3 sunDir = sunDirectionFromLightDir(lp.directionalDir);
+        // Around the disc, where the glare is - not the light's direction,
+        // which never sets.
+        const glm::vec3 sunDir =
+            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
         const SunOnScreen sun = sunScreenPosition(camera->getViewMatrix(),
                                                   camera->getProjectionMatrix(), sunDir);
         if (sun.inFront) {
@@ -4753,21 +5312,20 @@ void Renderer::recordSunShafts() {
             // fully lit walk crosses. Less, because the sky around the sun is
             // already the brightest thing on screen.
             float strength = 0.8f;
-            // Up out of the horizon and gone again as it sets. A sun under the
-            // ground lights nothing to stream from.
-            strength *= glm::smoothstep(-0.02f, 0.1f, sunDir.z);
+            // As much as the sky round the sun shines: the glare's hours, the
+            // cloud in front, a sky model over it and the weather. Not its line
+            // of sight - the rays are what a tree in front lets through.
+            strength *= sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
             // In view, or streaming in from just past an edge, fading out as
             // it goes half a screen beyond one.
             const glm::vec2 past = glm::max(glm::abs(sun.uv - 0.5f) - 0.5f, glm::vec2(0.0f));
             strength *= 1.0f - glm::smoothstep(0.0f, 0.5f, std::max(past.x, past.y));
-            // Rain and snow put a lid over it.
-            if (weather) strength *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
 
-            // The sun's own colour, kept in hue and not in brightness, and
-            // half white: the rays should warm at dusk, not turn orange.
-            const glm::vec3 c = lp.diffuseColor;
-            const float peak = std::max({c.r, c.g, c.b, 1e-3f});
-            in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
+            // The rays are the eye looking into the sun, so they take the
+            // sun's own colour from LightParams - pale green over Tirisfal,
+            // blue over Duskwood. They were the light it casts, normalized
+            // and mixed half with white, the same near-white everywhere.
+            in.tint = glm::min(lp.sunColor, glm::vec3(1.0f));
             in.sunUV = sun.uv;
             in.strength = strength;
         }
@@ -4786,6 +5344,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
+    wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");
@@ -4837,6 +5396,40 @@ void Renderer::buildFrameGraph() {
             renderVolumetricFog();
         });
     renderGraph_->setPassEnabled("volumetric_fog", volumetricThisFrame_);
+
+    // What lies under the water → read by the water for its depth. After
+    // the shadow pass, whose casters' texture sets it reuses.
+    auto seaBedRes = renderGraph_->findResource("sea_bed");
+    renderGraph_->addPass("sea_bed", {shadowDepth}, {seaBedRes},
+        [this](VkCommandBuffer) {
+            renderSeaBedPass();
+        });
+    renderGraph_->setPassEnabled("sea_bed", seaBed_ && waterRenderer && waterRenderer->inView() &&
+                                                !waterAblated());
+
+    // Where rain and snow cannot reach → read by the precipitation. After
+    // the shadow pass too, for the same casters' texture sets. Only while
+    // something falls or blows.
+    auto shelterRes = renderGraph_->findResource("shelter");
+    renderGraph_->addPass("shelter", {shadowDepth}, {shelterRes},
+        [this](VkCommandBuffer) {
+            renderShelterPass();
+        });
+    renderGraph_->setPassEnabled("shelter", shelter_ && weather_.mix().any());
+
+    // The sea → outputs the surface every water surface is carried by and
+    // lit from. Only while there is water in view; the sea's clock and its
+    // wind go on regardless, and it catches up when water comes back.
+    auto oceanSurface = renderGraph_->findResource("ocean_surface");
+    renderGraph_->addPass("ocean_waves", {}, {oceanSurface},
+        [this](VkCommandBuffer) {
+            if (waterRenderer && currentCmd != VK_NULL_HANDLE) {
+                waterRenderer->recordWaves(currentCmd);
+                if (vkCtx) vkCtx->gpuMark(currentCmd, "ocean waves");
+            }
+        });
+    renderGraph_->setPassEnabled("ocean_waves", waterRenderer && waterRenderer->inView() &&
+                                                    !waterAblated());
 
     // Reflection pre-pass → outputs reflection_texture (reads scene, so after shadow)
     renderGraph_->addPass("reflection_pass", {shadowDepth}, {reflTex},

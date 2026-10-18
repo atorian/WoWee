@@ -151,6 +151,30 @@ wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
             ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
 
+# The pipeline cache kept between runs: checked against the device, written
+# whole or not at all.
+wowee_add_test(test_pipeline_cache_file
+    SOURCES test_pipeline_cache_file.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/pipeline_cache_file.cpp)
+target_link_libraries(test_pipeline_cache_file PRIVATE wowee_base)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_pipeline_cache_file PRIVATE Vulkan::Vulkan)
+endif()
+
+# Which textures go up by host image copy: none it would keep out of video memory.
+wowee_add_test(test_host_image_copy
+    SOURCES test_host_image_copy.cpp)
+
+# The ranges the terrain's shared geometry pages hand out and take back.
+wowee_add_test(test_range_allocator
+    SOURCES test_range_allocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/range_allocator.cpp)
+
+# Which of the two memory pressure levels a share of free RAM is.
+wowee_add_test(test_memory_pressure
+    SOURCES test_memory_pressure.cpp)
+target_link_libraries(test_memory_pressure PRIVATE wowee_base)
+
 # What the video memory is used for, from the allocator's detailed map: each
 # allocation by its usage flags, in VRAM or system memory. No device.
 wowee_add_test(test_gpu_memory
@@ -220,8 +244,11 @@ wowee_add_test(test_asset_inventory
 # and did not: one looked in a macOS-only place, the other wrote beside the
 # terminal's working directory. Also what counts as installed, since the
 # manifest is written last and a folder without one is a run that stopped.
+# config_paths for where the executable is, which is where the assets go.
 wowee_add_test(test_data_paths
-    SOURCES test_data_paths.cpp)
+    SOURCES test_data_paths.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+            ${TEST_COMMON_SOURCES})
 
 # ── test_log_privacy ────────────────────────────────────────
 # The home directory, and with it the account name, written as ~ in the log.
@@ -928,7 +955,8 @@ wowee_add_test(test_tile_size_agreement
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_chunk_surface ───────────────────────────────────────
 # Where a point inside a terrain chunk sits in the world. The clutter and
@@ -938,7 +966,8 @@ wowee_add_test(test_chunk_surface
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_spline_body ─────────────────────────────────────────
 # The body of SMSG_MONSTER_MOVE, whose head two parsers shared and neither
@@ -1512,10 +1541,9 @@ register_test_target(test_anim_capability)
 wowee_add_test(test_indoor_shadows
     SOURCES test_indoor_shadows.cpp)
 
-# ── test_zone_ambience ─────────────────────────────────────────
-wowee_add_test(test_zone_ambience
-    SOURCES test_zone_ambience.cpp
-            ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp)
+# ── test_zone_tiles ────────────────────────────────────────────
+wowee_add_test(test_zone_tiles
+    SOURCES test_zone_tiles.cpp)
 
 # ── test_transport_components ────────────────────────────────
 wowee_add_test(test_transport_components
@@ -1730,6 +1758,7 @@ wowee_add_test(test_open_formats
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_terrain_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_open_format_emitter ─────────────────────────────────
@@ -1742,6 +1771,7 @@ add_executable(test_open_format_emitter
     ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
     ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -1836,6 +1866,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
@@ -2115,6 +2146,81 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_weather_mix ─────────────────────────────────────────
+# The weather as it is drawn: a shower coming over in the time it is given,
+# rain turning to snow through both, a storm the realm asks for at once
+# arriving at once.
+wowee_add_test(test_weather_mix
+    SOURCES test_weather_mix.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/weather_mix.cpp)
+
+# ── test_shelter_probe ───────────────────────────────────────
+# What the shelter map says of the camera's place, as its probe works it out
+# on the GPU: under a roof or not, and how much of the sky a street's walls
+# leave it.
+wowee_add_test(test_shelter_probe
+    SOURCES test_shelter_probe.cpp)
+
+# ── test_lens_drops ──────────────────────────────────────────
+# What the weather leaves on the camera's lens: rain gathering while the
+# camera looks into it and drying under a roof, big drops running down,
+# snow melting to water and frosting the edges, grit driven by the wind.
+wowee_add_test(test_lens_drops
+    SOURCES test_lens_drops.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/lens_drops.cpp)
+
+# ── test_liquid_scene ────────────────────────────────────────
+# The map's liquid: where the water stands and how high, which body each
+# stretch of it belongs to as tiles stream in and out, and what the water
+# renderer is told about it.
+wowee_add_test(test_liquid_scene
+    SOURCES test_liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_liquid_types ────────────────────────────────────────
+# What each liquid is: LiquidType.dbc through its layout, the client's rule
+# for a WMO group's liquid, MCLQ's ocean - and what the scene then says.
+wowee_add_test(test_liquid_types
+    SOURCES test_liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/liquid_scene.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types_dbc.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_ocean_spectrum ──────────────────────────────────────
+# The wind's sea as the ocean's compute shaders draw it: steep, downwind,
+# its waves as long and as fast as the sea's.
+wowee_add_test(test_ocean_spectrum
+    SOURCES test_ocean_spectrum.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
+
+# ── test_water_wake ──────────────────────────────────────────
+# The water's answer to what moves through it: water's speeds, Kelvin's wedge.
+wowee_add_test(test_water_wake
+    SOURCES test_water_wake.cpp)
+
+# ── test_sea_bed ─────────────────────────────────────────────
+# What lies under the water: the map's views, and which buildings are its bed.
+wowee_add_test(test_sea_bed
+    SOURCES test_sea_bed.cpp)
+
+# ── test_ocean_fft ───────────────────────────────────────────
+# The sea's surface out of its spectrum, by the compute shaders' own FFT.
+wowee_add_test(test_ocean_fft
+    SOURCES test_ocean_fft.cpp)
+
+# ── test_water_reflection ────────────────────────────────────
+# The mirrored camera sees what stands above the water and nothing of the bed.
+wowee_add_test(test_water_reflection
+    SOURCES test_water_reflection.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/water_reflection.cpp
+            ${TEST_COMMON_SOURCES})
+
 # ── test_sphere_map ──────────────────────────────────────────
 # The sphere environment map coordinates m2.vert.glsl computes, run from the
 # shader's own include. The incident vector was negated, which put a surface
@@ -2329,19 +2435,6 @@ target_link_libraries(test_format_lookup PRIVATE catch2_main)
 add_test(NAME format_lookup COMMAND test_format_lookup)
 register_test_target(test_format_lookup)
 
-# ── test_wmo_material_class ──────────────────────────────────
-# Which WMO materials are glass. The oracle is the shipped WMO data: the
-# MOMT flags the artist set, not the texture's file name.
-add_executable(test_wmo_material_class
-    test_wmo_material_class.cpp
-    ${TEST_COMMON_SOURCES})
-target_include_directories(test_wmo_material_class PRIVATE ${TEST_INCLUDE_DIRS})
-target_include_directories(test_wmo_material_class SYSTEM PRIVATE
-    ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_wmo_material_class PRIVATE catch2_main)
-add_test(NAME wmo_material_class COMMAND test_wmo_material_class)
-register_test_target(test_wmo_material_class)
-
 # ── test_asset_token_name ────────────────────────────────────
 # Which part of an asset path a token check may read. A directory name
 # poisons every token under it: Item/TextureComponents/LegLowerTexture
@@ -2421,14 +2514,40 @@ register_test_target(test_light_bands)
 # pipeline library for the AssetManager and the DBC reader.
 add_executable(test_sky_model_gate
     test_sky_model_gate.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp)
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
 target_include_directories(test_sky_model_gate PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_sky_model_gate SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_base)
 wowee_test_link_glm(test_sky_model_gate)
 add_test(NAME sky_model_gate COMMAND test_sky_model_gate)
 register_test_target(test_sky_model_gate)
+
+# ── test_zone_light ──────────────────────────────────────────
+# A zone is lit by the Light.dbc volumes over it and nothing that knows its
+# id: LightingManager over a light volume made up in a data root, stood in
+# under Tirisfal's, Silverpine's and Duskwood's zone ids.
+add_executable(test_zone_light
+    test_zone_light.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+target_include_directories(test_zone_light PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_zone_light SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_zone_light PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_zone_light)
+add_test(NAME zone_light COMMAND test_zone_light)
+register_test_target(test_zone_light)
+
+# ── test_light_volume_blend ──────────────────────────────────
+# A point lit as WoW.exe lights it: its map's global light with the volumes
+# it stands in laid over it, farthest first, each by its linear falloff.
+add_executable(test_light_volume_blend
+    test_light_volume_blend.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+target_include_directories(test_light_volume_blend PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_light_volume_blend SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_light_volume_blend PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_light_volume_blend)
+add_test(NAME light_volume_blend COMMAND test_light_volume_blend)
+register_test_target(test_light_volume_blend)
 
 # ── test_light_headroom ──────────────────────────────────────
 # Keeping ambient + diffuse inside 1.0. 82% of the client's LightParams
@@ -2437,6 +2556,19 @@ register_test_target(test_sky_model_gate)
 wowee_add_test(test_light_headroom
     SOURCES test_light_headroom.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_sky_celestial ───────────────────────────────────────
+# The sun as WoW.exe shows it: the disc's own path under the horizon at
+# night, its size, the glare's hours, weather, and looking into it.
+wowee_add_test(test_sky_celestial
+    SOURCES test_sky_celestial.cpp)
+
+# ── test_sky_billboard ───────────────────────────────────────
+# The sun and moon quads face the eye, so their discs are round on screen.
+# They lay in the world's horizontal plane and the sun at 37 degrees came
+# out a flat oval.
+wowee_add_test(test_sky_billboard
+    SOURCES test_sky_billboard.cpp)
 
 # ── test_light_params_eval ───────────────────────────────────
 # Which LightParams row a volume names for the weather, what a row with
@@ -2459,6 +2591,7 @@ wowee_add_test(test_camera_water_depth
 wowee_add_test(test_interior_light
     SOURCES test_interior_light.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_m2_view_distance ────────────────────────────────────
@@ -2477,10 +2610,8 @@ add_test(NAME m2_view_distance COMMAND test_m2_view_distance)
 register_test_target(test_m2_view_distance)
 
 # ── test_light_volume_order ──────────────────────────────────
-# Which of two overlapping light volumes is blended first. Equal weights
-# are the ordinary case, not a coincidence, and an unstable sort decided
-# them differently every time the list changed - so the sky model flipped
-# frame to frame while walking.
+# The client's rule for laying light volumes over each other: each one's
+# weight, the order they go down in, and what each ends up contributing.
 add_executable(test_light_volume_order
     test_light_volume_order.cpp
     ${TEST_COMMON_SOURCES})
@@ -2488,6 +2619,7 @@ target_include_directories(test_light_volume_order PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_volume_order SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_light_volume_order PRIVATE catch2_main)
+wowee_test_link_glm(test_light_volume_order)
 add_test(NAME light_volume_order COMMAND test_light_volume_order)
 register_test_target(test_light_volume_order)
 
@@ -2702,6 +2834,24 @@ wowee_add_test(test_sun_direction
     SOURCES test_sun_direction.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_wmo_night_glow ──────────────────────────────────────
+# When F_SIDN windows and lamps glow, by the client's own table over the day.
+wowee_add_test(test_wmo_night_glow
+    SOURCES test_wmo_night_glow.cpp
+            ${TEST_COMMON_SOURCES})
+
+# ── test_wmo_lighting ────────────────────────────────────────
+# Which light each batch of a WMO group is drawn with: by its MOBA run, its
+# group, its material and the model's path, as WoW.exe picks it. Groups are
+# read through the loader; the real Dalaran, Duskwood and Orgrimmar cases run
+# when the WotLK data is extracted.
+wowee_add_test(test_wmo_lighting
+    SOURCES test_wmo_lighting.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp
+            ${TEST_COMMON_SOURCES})
+target_compile_definitions(test_wmo_lighting PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # ── test_placement_transform ─────────────────────────────────
 # The model matrix a doodad or a building placement becomes. Nothing on flat
 # ground can tell the six composition orders apart, so this checks four real
@@ -2792,7 +2942,8 @@ wowee_add_test(test_raid_mark_names
 wowee_add_test(test_adt_truncation
     SOURCES test_adt_truncation.cpp
             ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_blp_truncation ──────────────────────────────────────
 # What the BLP loader does with a texture that lies about its own sizes. The
@@ -2820,7 +2971,8 @@ wowee_add_test(test_adt_alpha
     SOURCES test_adt_alpha.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_terrain ─────────────────────────────────
 # Whether grass grows at a point, answered from the ADT's own ground-effect
@@ -2833,7 +2985,8 @@ wowee_add_test(test_grass_terrain
             ${CMAKE_SOURCE_DIR}/src/pipeline/grass_profile.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
-            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp)
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
 # ── test_grass_population ──────────────────────────────
 # Blades generated from terrain suitability. Most of these cases are one
@@ -3025,7 +3178,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet realm_time)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

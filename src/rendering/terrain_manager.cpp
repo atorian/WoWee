@@ -6,7 +6,7 @@
 #include "pipeline/grass_profile.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/water_renderer.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -148,6 +148,7 @@ void TerrainManager::setWMORenderer(WMORenderer* renderer) {
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer) {
     assetManager = assets;
     terrainRenderer = renderer;
+    if (renderer) terrainNormalMapFormat_ = renderer->normalMapFormat();
 
     if (!assetManager) {
         LOG_ERROR("Asset manager is null");
@@ -158,12 +159,6 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
         LOG_ERROR("Terrain renderer is null");
         return false;
     }
-
-    // Set dynamic tile cache budget.
-    // Keep this lower so decompressed MPQ file cache can stay very aggressive.
-    auto& memMonitor = core::MemoryMonitor::getInstance();
-    tileCacheBudgetBytes_ = memMonitor.getRecommendedCacheBudget() / 4;
-    LOG_INFO("Terrain tile cache budget: ", tileCacheBudgetBytes_ / (1024 * 1024), " MB (dynamic)");
 
     // Start background worker pool (dynamic: scales with available cores)
     // Keep defaults moderate; env override can increase if streaming is bottlenecked.
@@ -317,11 +312,6 @@ bool TerrainManager::enqueueTile(int x, int y) {
 
 std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     TileCoord coord = {.x = x, .y = y};
-    if (auto cached = getCachedTile(coord)) {
-        LOG_DEBUG("Using cached tile [", x, ",", y, "]");
-        return cached;
-    }
-
     LOG_DEBUG("Preparing tile [", x, ",", y, "] (CPU work)");
 
     // Early-exit check - worker should bail fast during shutdown
@@ -415,14 +405,14 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     // Fall back to ADT format
     if (!loadedFromWot) {
         std::string adtPath = getADTPath(coord);
-        auto adtData = assetManager->readFile(adtPath);
+        const auto adtData = assetManager->readFileShared(adtPath);
 
-        if (adtData.empty()) {
+        if (!adtData) {
             logMissingAdtOnce(adtPath);
             return nullptr;
         }
 
-        *terrainPtr = pipeline::ADTLoader::load(adtData);
+        *terrainPtr = pipeline::ADTLoader::load(*adtData);
         if (!terrainPtr->isLoaded()) {
             LOG_ERROR("Failed to parse ADT terrain: ", adtPath);
             return nullptr;
@@ -436,9 +426,9 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     if (!loadedFromWot) {
     std::string objPath = "World\\Maps\\" + mapName + "\\" + mapName + "_" +
                           std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_obj0.adt";
-    auto objData = assetManager->readFile(objPath);
-    if (!objData.empty()) {
-        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(objData));
+    const auto objData = assetManager->readFileShared(objPath);
+    if (objData) {
+        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(*objData));
         if (objTerrain->isLoaded()) {
             const uint32_t doodadNameBase = static_cast<uint32_t>(terrainPtr->doodadNames.size());
             const uint32_t wmoNameBase = static_cast<uint32_t>(terrainPtr->wmoNames.size());
@@ -569,21 +559,21 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             }
         }
 
-        std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-        if (m2Data.empty()) {
+        const auto m2Data = assetManager->readFileShared(m2Path);
+        if (!m2Data) {
             skippedFileNotFound++;
             return false;
         }
 
-        pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+        pipeline::M2Model m2Model = pipeline::M2Loader::load(*m2Data);
         // The asset path carries foliage semantics; embedded names frequently
         // do not. Always classify ADT doodads using the path.
         m2Model.name = m2Path;
         std::string skinPath = pipeline::skinPathForM2(m2Path);
-        std::vector<uint8_t> skinData = assetManager->readFileOptional(skinPath);
-        if (!skinData.empty() && m2Model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, m2Model);
-        } else if (skinData.empty() && m2Model.version >= 264) {
+        const auto skinData = assetManager->readFileShared(skinPath);
+        if (skinData && m2Model.version >= 264) {
+            pipeline::M2Loader::loadSkin(*skinData, m2Model);
+        } else if (!skinData && m2Model.version >= 264) {
             skippedSkinNotFound++;
         }
 
@@ -697,18 +687,17 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             }
 
             if (!wobLoaded) {
-                std::vector<uint8_t> wmoData = assetManager->readFile(wmoPath);
-                if (wmoData.empty()) continue;
+                const auto wmoData = assetManager->readFileShared(wmoPath);
+                if (!wmoData) continue;
 
-                wmoModel = pipeline::WMOLoader::load(wmoData);
+                wmoModel = pipeline::WMOLoader::load(*wmoData);
                 if (wmoModel.nGroups > 0) {
                     for (uint32_t gi = 0; gi < wmoModel.nGroups; gi++) {
                         for (const std::string& groupPath :
                              pipeline::wmoGroupCandidates(wmoPath, gi)) {
-                            std::vector<uint8_t> groupData =
-                                assetManager->readFile(groupPath);
-                            if (groupData.empty()) continue;
-                            pipeline::WMOLoader::loadGroup(groupData, wmoModel, gi);
+                            const auto groupData = assetManager->readFileShared(groupPath);
+                            if (!groupData) continue;
+                            pipeline::WMOLoader::loadGroup(*groupData, wmoModel, gi);
                             break;
                         }
                     }
@@ -783,15 +772,15 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
                         pipeline::M2Model m2Model;
                         if (!modelAlreadyUploaded && !modelAlreadyPreparedInWmo) {
-                            std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-                            if (m2Data.empty()) continue;
+                            const auto m2Data = assetManager->readFileShared(m2Path);
+                            if (!m2Data) continue;
 
-                            m2Model = pipeline::M2Loader::load(m2Data);
+                            m2Model = pipeline::M2Loader::load(*m2Data);
                             m2Model.name = m2Path;
                             std::string skinPath = pipeline::skinPathForM2(m2Path);
-                            std::vector<uint8_t> skinData = assetManager->readFile(skinPath);
-                            if (!skinData.empty() && m2Model.version >= 264) {
-                                pipeline::M2Loader::loadSkin(skinData, m2Model);
+                            const auto skinData = assetManager->readFileShared(skinPath);
+                            if (skinData && m2Model.version >= 264) {
+                                pipeline::M2Loader::loadSkin(*skinData, m2Model);
                             }
                             if (!m2Model.isValid()) continue;
                             wmoPreparedModelIds.insert(doodadModelId);
@@ -928,12 +917,21 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
     // Pre-load terrain texture BLP data on background thread so finalizeTile
     // doesn't block the main thread with file I/O.
+    // Their relief is derived here too, from a decoded copy, unless a tile
+    // loaded earlier already left it in the cache.
+    TextureCache* textureCache = terrainRenderer && terrainRenderer->getVkContext()
+        ? &terrainRenderer->getVkContext()->textures() : nullptr;
     for (const auto& texPath : pending->terrain.textures) {
         if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
         // Terrain tilesets and M2 skins stay in their blocks - both are only
         // sampled, and M2's transparency now comes from the blocks too. The
         // normal-map source below still decodes: it reads the pixels.
-        pending->preloadedTextures[texPath] = assetManager->loadTexture(texPath, true);
+        pipeline::BLPImage blp = assetManager->loadTexture(texPath, true);
+        if (blp.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
+            EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
+            if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
+        }
+        pending->preloadedTextures[texPath] = std::move(blp);
     }
 
     LOG_DEBUG("Prepared tile [", x, ",", y, "]: ",
@@ -992,6 +990,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 one.clear();
                 one.emplace(it->first, std::move(it->second));
                 terrainRenderer->uploadPreloadedTextures(one);
+                if (auto normals = pending->preloadedTerrainNormalMaps.find(it->first);
+                    normals != pending->preloadedTerrainNormalMaps.end()) {
+                    terrainRenderer->uploadPreloadedNormalMap(normals->first, normals->second);
+                    pending->preloadedTerrainNormalMaps.erase(normals);
+                }
                 if (std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
             }
@@ -1029,18 +1032,15 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         }
 
         // Load water after all terrain chunks are uploaded
-        if (!ft.terrainWaterDone && waterRenderer) {
+        if (!ft.terrainWaterDone) {
             ft.terrainWaterDone = true;
-            size_t beforeSurfaces = waterRenderer->getSurfaceCount();
-            waterRenderer->loadFromTerrain(pending->terrain, true, x, y);
-            size_t afterSurfaces = waterRenderer->getSurfaceCount();
-            if (afterSurfaces > beforeSurfaces) {
-                LOG_INFO("Water: tile [", x, ",", y, "] added ", afterSurfaces - beforeSurfaces,
-                         " surfaces (total: ", afterSurfaces, ")");
+            if (liquidScene) {
+                liquidScene->addTerrainTile(pending->terrain, x, y);
+            } else {
+                LOG_WARNING("Water: no liquid scene for tile [", x, ",", y,
+                            "] - its water is neither drawn nor swum in");
             }
             return false;
-        } else if (!waterRenderer) {
-            LOG_WARNING("Water: waterRenderer is null during tile [", x, ",", y, "] finalization!");
         }
 
         // Ensure M2 renderer has asset manager
@@ -1193,19 +1193,20 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             size_t liquidGroupsLoaded = 0;
             while (ft.wmoInstanceIndex < pending->wmoModels.size() && created < kWmoInstancesPerStep) {
                 auto& wmoReady = pending->wmoModels[ft.wmoInstanceIndex];
-                // Skip duplicates and unloaded models
-                if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
-                    continue;
-                }
-                if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
-                    ft.wmoInstanceIndex++;
-                    ft.wmoLiquidGroupIndex = 0;
-                    continue;
-                }
-                // Create the instance on first visit (liquidGroupIndex == 0)
-                if (ft.wmoLiquidGroupIndex == 0) {
+                // A placement is looked at once: skipped as a duplicate or for
+                // its model, or given its instance. A placement already open
+                // is this one resumed for the rest of its liquid - it is in
+                // placedWmoIds because it was placed, not because another tile
+                // placed it.
+                if (!ft.wmoInstanceOpen) {
+                    if (wmoReady.uniqueId != 0 && placedWmoIds.count(wmoReady.uniqueId)) {
+                        ft.wmoInstanceIndex++;
+                        continue;
+                    }
+                    if (!wmoRenderer->isModelLoaded(wmoReady.modelId)) {
+                        ft.wmoInstanceIndex++;
+                        continue;
+                    }
                     uint32_t wmoInstId = wmoRenderer->createInstance(
                         wmoReady.modelId, wmoReady.position, wmoReady.rotation, wmoReady.scale);
                     if (!wmoInstId) {
@@ -1217,9 +1218,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         placedWmoIds.insert(wmoReady.uniqueId);
                         ft.tileWmoUniqueIds.push_back(wmoReady.uniqueId);
                     }
+                    ft.wmoInstanceOpen = true;
+                    ft.wmoLiquidGroupIndex = 0;
                 }
                 // Load WMO liquids incrementally (canals, pools, etc.)
-                if (waterRenderer) {
+                if (liquidScene) {
                     uint32_t wmoInstId = ft.wmoInstanceIds.back();
                     glm::mat4 modelMatrix = glm::mat4(1.0f);
                     modelMatrix = glm::translate(modelMatrix, wmoReady.position);
@@ -1231,12 +1234,17 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         const auto& group = groups[ft.wmoLiquidGroupIndex];
                         ft.wmoLiquidGroupIndex++;
                         if (!group.liquid.hasLiquid()) continue;
-                        if (group.flags & 0x2000) {
-                            uint16_t lt = group.liquid.materialId;
-                            uint8_t basicType = (lt == 0) ? 0 : ((lt - 1) % 4);
-                            if (basicType < 2) continue;
-                        }
-                        waterRenderer->loadFromWMO(group.liquid, modelMatrix, wmoInstId);
+                        // Every group's liquid, indoor ones included. Water in an
+                        // interior group used to be dropped here without a word -
+                        // Orgrimmar's valleys are interior groups of its WMO, and
+                        // their ponds were only drawn while their MOMT index read
+                        // as slime. The client draws them as "WMO Water -
+                        // Interior", which wmoGroupLiquidType already names.
+                        // Indoors, the wind does not reach it.
+                        liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId,
+                                                  (group.flags & pipeline::kWMOGroupIndoor) != 0
+                                                      ? LiquidShelter::Indoors
+                                                      : LiquidShelter::Open);
                         liquidGroupsLoaded++;
                     }
                     // More liquid groups remain on this WMO - yield
@@ -1246,6 +1254,7 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 }
                 ft.wmoInstanceIndex++;
                 ft.wmoLiquidGroupIndex = 0;
+                ft.wmoInstanceOpen = false;
                 created++;
             }
             if (ft.wmoInstanceIndex < pending->wmoModels.size()) {
@@ -1411,8 +1420,9 @@ void TerrainManager::workerLoop() {
             // little memory free by design - sat at under 15% with every
             // worker asleep and no terrain at all.
             const auto& memMon = core::MemoryMonitor::getInstance();
-            const bool severe = memMon.isSevereMemoryPressure();
-            const bool pressure = severe || memMon.isMemoryPressure();
+            const core::MemoryPressure level = memMon.pressure();
+            const bool severe = level == core::MemoryPressure::Severe;
+            const bool pressure = level != core::MemoryPressure::None;
             const bool inFlight = preparingTiles_ > 0 || !readyQueue.empty();
             if (pressure && inFlight) {
                 if (!memoryWaitReported_) {
@@ -1643,24 +1653,6 @@ void TerrainManager::processOneReadyTile() {
     }
 }
 
-core::CacheStats TerrainManager::tileCacheStats() const {
-    std::lock_guard<std::mutex> lock(tileCacheMutex_);
-    core::CacheStats stats;
-    stats.entries = tileCache_.size();
-    for (const auto& [coord, cached] : tileCache_) stats.bytes += cached.bytes;
-    stats.budgetBytes = tileCacheBudgetBytes_;
-    return stats;
-}
-
-std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coord) {
-    std::lock_guard<std::mutex> lock(tileCacheMutex_);
-    auto it = tileCache_.find(coord);
-    if (it == tileCache_.end()) return nullptr;
-    tileCacheLru_.erase(it->second.lruIt);
-    tileCacheLru_.push_front(coord);
-    it->second.lruIt = tileCacheLru_.begin();
-    return it->second.tile;
-}
 void TerrainManager::unloadTile(int x, int y) {
     TileCoord coord = {.x = x, .y = y};
 
@@ -1679,8 +1671,8 @@ void TerrainManager::unloadTile(int x, int y) {
                 terrainRenderer->removeTile(x, y);
             }
             // If past TERRAIN phase, water was already loaded - remove it
-            if (fit->phase != FinalizationPhase::TERRAIN && waterRenderer) {
-                waterRenderer->removeTile(x, y);
+            if (fit->phase != FinalizationPhase::TERRAIN && liquidScene) {
+                liquidScene->removeTile(x, y);
             }
             // Clean up any M2/WMO instances that were already created
             if (m2Renderer && !fit->m2InstanceIds.empty()) {
@@ -1688,7 +1680,7 @@ void TerrainManager::unloadTile(int x, int y) {
             }
             if (wmoRenderer && !fit->wmoInstanceIds.empty()) {
                 for (uint32_t id : fit->wmoInstanceIds) {
-                    if (waterRenderer) waterRenderer->removeWMO(id);
+                    if (liquidScene) liquidScene->removeWmo(id);
                 }
                 wmoRenderer->removeInstances(fit->wmoInstanceIds);
             }
@@ -1732,8 +1724,8 @@ void TerrainManager::unloadTile(int x, int y) {
     if (wmoRenderer) {
         for (uint32_t id : tile->wmoInstanceIds) {
             // Remove WMO liquids associated with this instance
-            if (waterRenderer) {
-                waterRenderer->removeWMO(id);
+            if (liquidScene) {
+                liquidScene->removeWmo(id);
             }
         }
         wmoRenderer->removeInstances(tile->wmoInstanceIds);
@@ -1746,8 +1738,8 @@ void TerrainManager::unloadTile(int x, int y) {
     }
 
     // Remove water surfaces for this tile
-    if (waterRenderer) {
-        waterRenderer->removeTile(x, y);
+    if (liquidScene) {
+        liquidScene->removeTile(x, y);
     }
 
     loadedTiles.erase(it);
@@ -1880,18 +1872,18 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
     auto ensureModelPrepared = [&](const std::string& m2Path, uint32_t modelId) -> bool {
         if (preparedModelIds.count(modelId)) return true;
 
-        std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-        if (m2Data.empty()) {
+        const auto m2Data = assetManager->readFileShared(m2Path);
+        if (!m2Data) {
             modelMissing++;
             return false;
         }
 
-        pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+        pipeline::M2Model m2Model = pipeline::M2Loader::load(*m2Data);
         m2Model.name = m2Path;
         std::string skinPath = pipeline::skinPathForM2(m2Path);
-        std::vector<uint8_t> skinData = assetManager->readFileOptional(skinPath);
-        if (!skinData.empty() && m2Model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, m2Model);
+        const auto skinData = assetManager->readFileShared(skinPath);
+        if (skinData && m2Model.version >= 264) {
+            pipeline::M2Loader::loadSkin(*skinData, m2Model);
         }
         if (!m2Model.isValid()) {
             modelInvalid++;

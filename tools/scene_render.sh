@@ -4,8 +4,9 @@
 #   tools/scene_render.sh <scene.json> <out.png>
 #
 # The scene file is described at the top of tools/scene_render/main.cpp; there
-# are examples in tools/scene_render/scenes. Shader edits only need their .spv
-# rebuilt (ninja -C build-dev wowee_shaders), renderer edits only the renderer:
+# are examples in tools/scene_render/scenes. Build it before a run, after a
+# renderer or a shader edit alike - it compiles the changed shaders and copies
+# them and the rest of assets/ into build-dev/bin, where it loads them from:
 #
 #   ninja -C build-dev scene_render
 #
@@ -15,7 +16,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 

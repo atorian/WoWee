@@ -31,7 +31,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace rendering { class TerrainRenderer; class Camera; class WaterRenderer; class M2Renderer; class WMORenderer; }
+namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; }
 
 namespace rendering {
 
@@ -131,6 +131,9 @@ struct PendingTile {
     // Pre-loaded terrain texture BLP data (loaded on background thread to avoid
     // blocking file I/O on the main thread during finalizeTile)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedTextures;
+    // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
+    // a texture whose relief was already in the cache.
+    std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
 
     // Pre-decoded M2 model textures (decoded on background thread)
     std::unordered_map<std::string, pipeline::BLPImage> preloadedM2Textures;
@@ -172,6 +175,11 @@ struct FinalizingTile {
     size_t wmoInstanceIndex = 0;   // Next WMO placement to instantiate
     size_t wmoDoodadIndex   = 0;   // Next WMO doodad to upload
     size_t wmoLiquidGroupIndex = 0; // Next liquid group within current WMO instance
+    // The current placement's instance exists and its liquid is being laid
+    // down over several steps. Without it a resumed placement looked like a
+    // duplicate of itself - it had been marked placed on the first step - and
+    // every liquid group after the first few was skipped.
+    bool wmoInstanceOpen = false;
 
     // Incremental terrain upload state (splits TERRAIN phase across frames)
     bool terrainPreloaded = false;  // True after preloaded textures uploaded
@@ -275,7 +283,8 @@ public:
      */
     void getGroundEffectDoodads(uint32_t effectId, std::vector<std::string>& outModels,
                                 std::vector<uint32_t>& outWeights) const;
-    void setWaterRenderer(WaterRenderer* renderer) { waterRenderer = renderer; }
+    /// Where the tiles' and buildings' liquid goes as they stream in and out.
+    void setLiquidScene(LiquidScene* scene) { liquidScene = scene; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     /// Also fixes how the workers encode the normal maps they prepare for it.
     void setWMORenderer(WMORenderer* renderer);
@@ -367,9 +376,6 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
-    /// The prepared tiles kept in memory to be finalized again without
-    /// reading them from disk, against the budget they are kept under.
-    [[nodiscard]] core::CacheStats tileCacheStats() const;
     [[nodiscard]] int getPendingTileCount() const {
         std::lock_guard<std::mutex> lock(queueMutex);
         return static_cast<int>(pendingTiles.size());
@@ -438,12 +444,14 @@ private:
 
     pipeline::AssetManager* assetManager = nullptr;
     TerrainRenderer* terrainRenderer = nullptr;
-    WaterRenderer* waterRenderer = nullptr;
+    LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
     /// How the workers encode WMO normal maps: the device's, read once when
     /// the renderer is set rather than from the workers.
     NormalMapFormat wmoNormalMapFormat_ = NormalMapFormat::Rgba8;
+    /// The same for the ground's relief, read when the terrain renderer is set.
+    NormalMapFormat terrainNormalMapFormat_ = NormalMapFormat::Rgba8;
     AmbientEmitterSink ambientEmitterSink_;
 
     std::string mapName = "Azeroth";
@@ -513,19 +521,11 @@ private:
     // finalize (GPU-upload + free) before more tiles are prepared.
     static constexpr size_t maxReadyQueueSize_ = 3;
 
-    // In-RAM tile cache (LRU) to avoid re-reading from disk
-    struct CachedTile {
-        std::shared_ptr<PendingTile> tile;
-        size_t bytes = 0;
-        std::list<TileCoord>::iterator lruIt;
-    };
-    // THREAD-SAFE: protected by tileCacheMutex_.
-    std::unordered_map<TileCoord, CachedTile, TileCoord::Hash> tileCache_;
-    std::list<TileCoord> tileCacheLru_;
-    size_t tileCacheBudgetBytes_ = 8ull * 1024 * 1024 * 1024; // Dynamic, set at init based on RAM
-    mutable std::mutex tileCacheMutex_;
-
-    std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
+    // A revisited tile is prepared again. Its files - the ADT, its models and
+    // buildings - come from the asset manager's file cache when they are
+    // still there; a whole prepared tile is not kept, since finalizing hands
+    // its contents to the GPU and the decoded textures it holds would be a
+    // second copy of hundreds of megabytes.
     void logMissingAdtOnce(const std::string& adtPath);
     std::atomic<bool> workerRunning{false};
     core::JobGroup standaloneJobs_;

@@ -15,6 +15,7 @@
 #include "core/env_flag.hpp"
 #include "core/character_paths.hpp"
 #include "ui/settings_schema.hpp"
+#include "ui/weather_panel.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/enchant_visual.hpp"
 #include "core/coordinates.hpp"
@@ -65,11 +66,9 @@
 #include "core/resource_monitor.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/weather.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/character_emitters.hpp"
@@ -109,6 +108,7 @@
 #include "game/game_handler.hpp"
 #include "game/chat_handler.hpp"
 #include "game/realm_time_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
 #include "core/map_scope.hpp"
@@ -343,7 +343,7 @@ bool Application::initialize() {
         // installed data first, because that is the directory a player can
         // reach without a terminal, then beside the binary for a checkout.
         for (const std::filesystem::path& where :
-             {core::userDataRoot() / "gamecontrollerdb.txt",
+             {core::defaultDataRoot() / "gamecontrollerdb.txt",
               std::filesystem::path("assets/gamecontrollerdb.txt")}) {
             std::error_code ec;
             if (!std::filesystem::exists(where, ec)) continue;
@@ -392,6 +392,7 @@ bool Application::initialize() {
     screenRecording_ = std::make_unique<ScreenRecording>(*renderer);
     performanceHUD_ = std::make_unique<rendering::PerformanceHUD>();
     performanceHUD_->setPosition(rendering::PerformanceHUD::Position::TOP_LEFT);
+    weatherPanel_ = std::make_unique<ui::WeatherPanel>();
 
     // The renderer knows terrain and the sounds it places; which zone that
     // terrain is and what plays there are the client's, joined here.
@@ -904,7 +905,7 @@ bool Application::initialize() {
         };
         luaSvc.setWeatherDensity = [this](float scale) {
             if (!renderer) return;
-            if (auto* weather = renderer->getWeather()) weather->setDensityScale(scale);
+            renderer->setWeatherDetail(scale);
         };
         luaSvc.setClientSetting = [uim = uiManager.get()](const std::string& key,
                                                           const std::string& value) {
@@ -2008,6 +2009,10 @@ void Application::clientShortcut(ClientShortcut shortcut) {
         case ClientShortcut::TogglePerformanceHud:
             performanceHUD_->toggle();
             LOG_INFO("Performance HUD: ", performanceHUD_->isEnabled() ? "ON" : "OFF");
+            break;
+        case ClientShortcut::ToggleWeatherPanel:
+            weatherPanel_->toggle();
+            LOG_INFO("Weather panel: ", weatherPanel_->isOpen() ? "open" : "closed");
             break;
         case ClientShortcut::None:
             break;
@@ -3741,9 +3746,10 @@ void Application::presentWorldToRenderer(float deltaTime) {
         if (const auto realm = gameHandler->realmTime().realmSeconds()) {
             environment.realmSeconds = *realm;
         }
-        environment.raining = gameHandler->isRaining();
-        environment.weatherType = gameHandler->getWeatherType();
-        environment.weatherIntensity = gameHandler->getWeatherIntensity();
+        const game::WeatherReport& weather = gameHandler->weather().current();
+        environment.weatherKind = weather.kind;
+        environment.weatherIntensity = weather.intensity;
+        environment.weatherAbrupt = weather.abrupt;
         environment.ghost = gameHandler->isPlayerGhost();
     }
     renderer->setWorldEnvironment(environment);
@@ -3787,15 +3793,11 @@ void Application::followRendererUpdate(float deltaTime) {
     zctx.isSwimming = getCameraController()->isSwimming();
     zctx.insideWmo = indoors;
     zctx.insideWmoId = renderer->getInsideWmoId();
-    if (const auto* weather = renderer->getWeather()) {
-        const auto wt = weather->getWeatherType();
-        if (wt == rendering::Weather::Type::RAIN)       zctx.weatherType = 1;
-        else if (wt == rendering::Weather::Type::SNOW)  zctx.weatherType = 2;
-        else if (wt == rendering::Weather::Type::STORM) zctx.weatherType = 3;
-        zctx.weatherIntensity = weather->getIntensity();
-    }
+    // What is heard falling is what is drawn falling.
+    zctx.rainAmount = renderer->weatherMix().rain;
+    zctx.snowAmount = renderer->weatherMix().snow;
     if (auto* lighting = renderer->getLightingManager()) {
-        zctx.gameTimeHours = lighting->getVisualTimeOfDayHours();
+        zctx.gameTimeHours = lighting->getTimeOfDayHours();
     }
     if (const auto* terrain = renderer->getTerrainManager()) {
         const auto tile = terrain->getCurrentTile();
@@ -4215,6 +4217,7 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
         runInterfaceStage("renderHUD", [&] {
             if (renderer->getCamera()) performanceHUD_->render(renderer.get(), renderer->getCamera());
         });
+        if (view == FrameView::World) weatherPanel_->draw(*renderer, gameHandler.get());
     }
 
     // Addon-built frames, drawn under the client's own interface while the two
@@ -5958,8 +5961,8 @@ void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patch
 
     // Once, for archives already downloaded to the old place, so they are not
     // fetched again.
-    const fs::path oldDirectory = userDataRoot() / "realm_patches" / dirName;
-    if (!userDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
+    const fs::path oldDirectory = perUserDataRoot() / "realm_patches" / dirName;
+    if (!perUserDataRoot().empty() && fs::is_directory(oldDirectory, ec) && !fs::exists(directory, ec)) {
         fs::create_directories(directory.parent_path(), ec);
         // A rename only, which is instant on one drive. Across drives it fails,
         // and copying gigabytes here would hold up the login for minutes, so

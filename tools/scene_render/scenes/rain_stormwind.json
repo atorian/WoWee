@@ -1,0 +1,15 @@
+// Heavy rain over Stormwind's trade district, late afternoon: streaks lit by
+// the low sun, splashes on the street and the roofs, none under the arcades.
+// The wind drives it at the camera, which looks a little up into it, and
+// drops gather on the lens.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1519,
+  "hour": 16.5,
+  "weather": "rain", "weatherIntensity": 1.0,
+  "wind": { "direction": 225.0, "speed": 4.0 },
+  "server": [-8833.0, 628.0, 94.0],
+  "terrain": true,
+  "camera": { "offset": [-14, -14, 3], "lookAt": [0, 0, 6] },
+  "size": [1280, 720],
+  "frames": 150
+}

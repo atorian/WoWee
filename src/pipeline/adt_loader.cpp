@@ -1,4 +1,5 @@
 #include "pipeline/adt_loader.hpp"
+#include "pipeline/liquid_types.hpp"
 
 #include <span>
 #include "core/logger.hpp"
@@ -520,10 +521,15 @@ void ADTLoader::parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
 
     // Determine liquid type from MCNK flags
     // 0x04 = has liquid (river/lake), 0x08 = ocean, 0x10 = magma, 0x20 = slime
-    uint16_t liquidType = 0;  // water
-    if (mcnkFlags & 0x08) liquidType = 1;       // ocean
-    else if (mcnkFlags & 0x10) liquidType = 2;  // magma
-    else if (mcnkFlags & 0x20) liquidType = 3;  // slime
+    //
+    // As the LiquidType.dbc row, the way MH2O names it. This was the basic
+    // kind itself (0-3), so the same field meant two different things by
+    // where the chunk came from, and an MCLQ ocean read back as a lake.
+    LiquidBasic basic = LiquidBasic::Water;
+    if (mcnkFlags & 0x08) basic = LiquidBasic::Ocean;
+    else if (mcnkFlags & 0x10) basic = LiquidBasic::Magma;
+    else if (mcnkFlags & 0x20) basic = LiquidBasic::Slime;
+    const uint16_t liquidType = basicLiquidTypeId(basic);
 
     // Read 9x9 height values (skip depth/flow bytes, just read the float height)
     const std::span<const uint8_t> vertData = data.subspan(8);

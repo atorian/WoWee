@@ -35,10 +35,12 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayCorner[4];   // rays one yard deep through uv (0,0), (1,0), (0,1), (1,1)
     mat4 prevViewProj;
     vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
-    vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter
+    vec4 lighting;       // x = light scatter (sun and models' lights)
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
+    vec4 sunHalo;        // rgb = the zone's glow around the sun (LightIntBand 10)
+    vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -114,11 +116,7 @@ float sunVisibility(vec3 p) {
     return mix(lit, 1.0, smoothstep(0.8, 1.0, max(edge.x, edge.y)));
 }
 
-// Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
-float phaseHG(float cosTheta, float g) {
-    float g2 = g * g;
-    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5);
-}
+#include "sunlit_air.glsli"
 
 void main() {
     ivec3 cell = ivec3(gl_GlobalInvocationID);
@@ -132,14 +130,16 @@ void main() {
     float density = airDensity(p, depth);
 
     // The light reaching this air. Where only the sky lights it, it takes the
-    // zone's fog colour, at half: shade under trees is darker than the open
-    // haze, and a shaft reads against the shade beside it. Sunlight comes on
-    // top, and mostly forward, as it does off mist and dust: looking at the
-    // sun the air takes nineteen times the light it would scattering evenly,
-    // ten degrees off it twelve, thirty degrees off two and a half, and from
-    // forty five degrees on about one or less. That is where shafts are seen
-    // outdoors - toward a sun low enough to look at, through whatever stands
-    // in front of it.
+    // zone's fog colour, whole: that is the colour the zone's distance fog
+    // fades everything to, so deep air comes out as the same haze, and what
+    // stands far off in the mist turns to it - lighter than a dark forest, as
+    // mist is. At half, the air took out more light than it gave and the mist
+    // only darkened what was behind it, the more of it the darker.
+    //
+    // Sunlight comes on top, and mostly forward, as it does off mist and
+    // dust, the forward part in the colour of the zone's halo
+    // (sunlit_air.glsli). That is where shafts are seen outdoors - toward a
+    // sun low enough to look at, through whatever stands in front of it.
     //
     // Only while the sun is up. At night the light's direction points up
     // from under the ground; the shadow map flips it to build its projection,
@@ -148,16 +148,17 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    float phase = mix(1.0, phaseHG(dot(travel, toCamera), 0.75), 0.65);
-    vec3 light = fogColor.rgb * vol.lighting.z;
+    vec3 light = fogColor.rgb;
     if (sunUp > 0.0) {
-        light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);
+        light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb * vol.sunGlare.w, dot(-vol.sunGlare.xyz, toCamera)) *
+                 (sunVisibility(p) * sunUp * vol.lighting.x);
     }
 
     // The models' own lights: the same lights and falloff the surfaces are
-    // lit by, so the halo is where the pool of light is. Air has no normal,
-    // so no N.L. Past forty yards a light gives under a fiftieth and is
-    // skipped.
+    // lit by, so the halo is where the pool of light is, and scattered by the
+    // air as the sunlight is - a quarter of what a white surface returns, as
+    // brightly as the light is and no more. Air has no normal, so no N.L.
+    // Past forty yards a light gives under a fiftieth and is skipped.
     vec3 local = vec3(0.0);
     for (uint i = 0u; i < uint(localLightMeta.x); ++i) {
         vec3 toLight = localLightPosition(i) - p;
@@ -166,7 +167,7 @@ void main() {
         float dist = max(sqrt(distSq), 1e-3);
         local += localLightColor(i) / (0.7 * dist + 0.03 * dist * dist);
     }
-    light += min(local, vec3(1.0)) * vol.lighting.y;
+    light += min(local, vec3(1.0)) * vol.lighting.x;
 
     vec4 result = vec4(light * density, density);
 

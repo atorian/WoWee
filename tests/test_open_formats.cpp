@@ -5,6 +5,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "pipeline/adt_loader.hpp"
+#include "pipeline/liquid_types.hpp"
 #include <filesystem>
 #include <fstream>
 #include <cstring>
@@ -381,7 +382,9 @@ TEST_CASE("WOT metadata round-trip with placements", "[wot]") {
 
     // Water
     REQUIRE(terrain.waterData[0].hasWater());
-    REQUIRE(terrain.waterData[0].layers[0].liquidType == 3); // 3=slime, in valid 0..3 range
+    // The format's "type": 3 is slime; it is held as LiquidType.dbc's slime row.
+    REQUIRE(terrain.waterData[0].layers[0].liquidType ==
+            wowee::pipeline::basicLiquidTypeId(wowee::pipeline::LiquidBasic::Slime));
     REQUIRE(terrain.waterData[0].layers[0].maxHeight == Catch::Approx(50.0f));
 
     // Doodad names and placements
@@ -550,8 +553,9 @@ TEST_CASE("WOT clamps out-of-range water liquid type", "[wot][hardening]") {
     for (int i = 0; i < 256; i++) terrain.chunks[i].heightMap.loaded = true;
     REQUIRE(WoweeTerrainLoader::loadMetadata(wotPath, terrain));
     REQUIRE(terrain.waterData[0].hasWater());
-    // type=99 is unknown; loader maps to 0 (plain water).
-    REQUIRE(terrain.waterData[0].layers[0].liquidType == 0);
+    // type=99 is no kind; the loader says so and takes it for plain water.
+    REQUIRE(terrain.waterData[0].layers[0].liquidType ==
+            wowee::pipeline::basicLiquidTypeId(wowee::pipeline::LiquidBasic::Water));
     std::filesystem::remove(wotPath);
 }
 

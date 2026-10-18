@@ -144,10 +144,13 @@ public:
     void setInstanceAnimationSpeed(uint32_t instanceId, float speed);
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
     /// Look up again, for each instance that has moved since it was last
-    /// looked up, the light of the WMO interior group it stands in.
-    /// `interiorLightAt` answers for a world position; no value is outdoors.
+    /// looked up or whose buildings have changed since, the light of the WMO
+    /// interior group it stands in. `interiorLightAt` answers for a world
+    /// position, no value being outdoors; `worldRevision` changes whenever the
+    /// buildings it answers from do (WMORenderer::contentRevision).
     void updateInteriorLight(
-        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt);
+        const std::function<std::optional<InteriorLight>(const glm::vec3&)>& interiorLightAt,
+        uint64_t worldRevision);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
     /// How far the camera's closeness fades the instance - the player, with
@@ -253,6 +256,21 @@ public:
         bool posed = false;
     };
     void forEachEmitterSource(const std::function<void(const EmitterSource&)>& visit) const;
+
+    /// Where each body stands and how far it reaches, for what must know
+    /// where bodies are (the water's wake): its place, the way it faces
+    /// (radians about z), and its bind-pose bounds about its place, scaled -
+    /// the model's visual ones, which on many creatures are far larger than
+    /// the collision box. Not the models parented to another's bones, which
+    /// are part of that body.
+    struct BodyPlace {
+        uint32_t instanceId = 0;
+        glm::vec3 position{0.0f};
+        float yaw = 0.0f;
+        glm::vec3 boundMin{0.0f};
+        glm::vec3 boundMax{0.0f};
+    };
+    void forEachBody(const std::function<void(const BodyPlace&)>& visit) const;
 
     // Model id an instance renders with (0 if the instance doesn't exist).
     [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const {
@@ -414,6 +432,13 @@ private:
         // Instances drawn in this one's aura look (addLookCompanion). Ids are
         // never reused, so one removed since is simply not found.
         std::vector<uint32_t> lookCompanions;
+        // The body an attachment - a weapon, a helm, an enchant's effect -
+        // is part of; 0 for a body of its own. An attachment keeps no
+        // visibility, opacity or look of its own: it is shown, hidden,
+        // faded and tinted as its body is (drawnAs). Copied when it was
+        // attached, equipment that arrived after a druid's body was put away
+        // for a form floated over the bear.
+        uint32_t bodyId = 0;
 
         // Override model matrix (used for weapon instances positioned by parent bone)
         bool hasOverrideModelMatrix = false;
@@ -421,8 +446,8 @@ private:
 
         /// The light of the WMO interior group the instance stands in, if any.
         InteriorLightGPU interiorLight;
-        /// Where interiorLight was looked up, once it has been.
-        std::optional<glm::vec3> interiorLightOrigin;
+        /// Where interiorLight was looked up, and against which buildings.
+        InteriorLightProbe interiorLightProbe;
 
         // A scene rather than a character: the glue-screen backdrops. Two things
         // follow. Their origin can sit hundreds of units from their geometry, so
@@ -458,6 +483,11 @@ private:
     glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
                                int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
+    /// Whose opacity and aura look `instance` is drawn with: its body's for
+    /// an attachment, its own otherwise.
+    [[nodiscard]] const CharacterInstance& drawnAs(const CharacterInstance& instance) const;
+    /// Drawn at all: neither it nor, for an attachment, its body is hidden.
+    [[nodiscard]] bool isShown(const CharacterInstance& instance) const;
     void destroyModelGPU(M2ModelGPU& gpuModel, bool defer = false);
     void destroyInstanceBones(CharacterInstance& inst, bool defer = false);
 

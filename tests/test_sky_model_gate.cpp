@@ -41,17 +41,20 @@ constexpr uint32_t AURORA = 26;          // flags 2, as Aurora.mdx's row has
 constexpr uint32_t FIRE_SKY = 39;        // DeathKnightFireSkyBox, flags 0
 constexpr uint32_t FIRE_SKY_OVER = 40;   // DeathKnightFireSkyBox again, flags 2
 
-/// One light volume: a map, where it is in the file's own units, and the
-/// LightParams row it names in clear weather.
+constexpr float INNER_YARDS = 100.0f;
+constexpr float OUTER_YARDS = 200.0f;
+constexpr float DBC_UNITS_PER_YARD = wowee::rendering::LIGHT_COORD_UNITS_PER_YARD;
+
+/// One light volume: a map, where it is in the file's own units, the
+/// LightParams row it names in clear weather, and its radii.
 struct Volume {
     uint32_t lightId;
     uint32_t mapId;
     float dbcX, dbcY;
     uint32_t lightParamsId;
+    float innerYards = INNER_YARDS;
+    float outerYards = OUTER_YARDS;
 };
-
-constexpr float INNER_YARDS = 100.0f;
-constexpr float OUTER_YARDS = 200.0f;
 
 std::vector<uint8_t> lightDbc(const std::vector<Volume>& volumes) {
     std::vector<std::vector<uint32_t>> rows;
@@ -62,8 +65,8 @@ std::vector<uint8_t> lightDbc(const std::vector<Volume>& volumes) {
         row[2] = std::bit_cast<uint32_t>(v.dbcX);
         row[3] = std::bit_cast<uint32_t>(0.0f);
         row[4] = std::bit_cast<uint32_t>(v.dbcY);
-        row[5] = std::bit_cast<uint32_t>(INNER_YARDS * wowee::rendering::LIGHT_COORD_UNITS_PER_YARD);
-        row[6] = std::bit_cast<uint32_t>(OUTER_YARDS * wowee::rendering::LIGHT_COORD_UNITS_PER_YARD);
+        row[5] = std::bit_cast<uint32_t>(v.innerYards * DBC_UNITS_PER_YARD);
+        row[6] = std::bit_cast<uint32_t>(v.outerYards * DBC_UNITS_PER_YARD);
         row[7] = v.lightParamsId;
         rows.push_back(row);
     }
@@ -179,14 +182,27 @@ TEST_CASE("A sky model with LightSkybox flag 2 is drawn over the client's own sk
     CHECK_FALSE(place.proceduralSkyHidden());
 }
 
+namespace {
+
+/// A border between two zones, each sky its own volume: the point stands
+/// wholly inside the first zone's large volume, whose centre is 300 yards off,
+/// and halfway across the edge of the second's, 150 yards off. The nearer is
+/// laid over the farther at half its weight, so each sky is half of what is
+/// overhead.
+std::vector<Volume> border(uint32_t firstSky, uint32_t secondSky) {
+    return {
+        {1, 0, 1000.0f - 300.0f * DBC_UNITS_PER_YARD, 1000.0f, firstSky, 400.0f, 500.0f},
+        {2, 0, 1000.0f + 150.0f * DBC_UNITS_PER_YARD, 1000.0f, secondSky},
+    };
+}
+
+}  // namespace
+
 TEST_CASE("Two skies crossfading at a border are both drawn over the client's own sky",
           "[sky]") {
-    // Two volumes over one spot, each naming a different opaque sky: each is
-    // half of what is overhead, and neither covers the sky alone.
-    Place place("wowee_sky_gate_border", {
-        {1, 0, 1000.0f, 1000.0f, OPAQUE_SKY},
-        {2, 0, 1000.0f, 1000.0f, OTHER_OPAQUE_SKY},
-    });
+    // Each opaque sky is half of what is overhead, and neither covers the
+    // client's sky alone.
+    Place place("wowee_sky_gate_border", border(OPAQUE_SKY, OTHER_OPAQUE_SKY));
     place.stand(0, 1000.0f, 1000.0f);
 
     REQUIRE(place.weightOf(OPAQUE_SKY) > 0.4f);
@@ -195,12 +211,9 @@ TEST_CASE("Two skies crossfading at a border are both drawn over the client's ow
 }
 
 TEST_CASE("Lights naming the same LightSkybox row add up to one sky", "[sky]") {
-    // Two volumes, two LightParams rows, one sky: it is the whole of what is
-    // overhead, and stands in for the client's.
-    Place place("wowee_sky_gate_same_row", {
-        {1, 0, 1000.0f, 1000.0f, OPAQUE_SKY},
-        {2, 0, 1000.0f, 1000.0f, OPAQUE_SKY},
-    });
+    // Two volumes across a border, both naming one sky: their halves add up to
+    // the whole of what is overhead, and it stands in for the client's.
+    Place place("wowee_sky_gate_same_row", border(OPAQUE_SKY, OPAQUE_SKY));
     place.stand(0, 1000.0f, 1000.0f);
 
     CHECK(place.lighting.getSkyboxLayers().size() == 1);
@@ -209,12 +222,10 @@ TEST_CASE("Lights naming the same LightSkybox row add up to one sky", "[sky]") {
 }
 
 TEST_CASE("Two LightSkybox rows naming one model are two skies", "[sky]") {
-    // DeathKnightFireSkyBox is row 39 without flag 2 and row 40 with it. Each
-    // is half of what is overhead, and neither covers the client's sky alone.
-    Place place("wowee_sky_gate_shared_model", {
-        {1, 0, 1000.0f, 1000.0f, FIRE_SKY},
-        {2, 0, 1000.0f, 1000.0f, FIRE_SKY_OVER},
-    });
+    // DeathKnightFireSkyBox is row 39 without flag 2 and row 40 with it. At a
+    // border between them each is half of what is overhead, and neither
+    // covers the client's sky alone.
+    Place place("wowee_sky_gate_shared_model", border(FIRE_SKY, FIRE_SKY_OVER));
     place.stand(0, 1000.0f, 1000.0f);
 
     CHECK(place.lighting.getSkyboxLayers().size() == 2);

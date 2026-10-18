@@ -7,6 +7,7 @@
 #include "game/craft_recipe.hpp"
 #include "game/game_interfaces.hpp"
 #include "game/action_bar_handler.hpp"
+#include "game/chat_handler.hpp"
 #include "game/inventory_handler.hpp"
 #include "game/pet_handler.hpp"
 #include "game/frame_xml_events.hpp"
@@ -22,6 +23,8 @@
 #include "game/combat_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "game/quest_handler.hpp"
+#include "game/reputation_handler.hpp"
+#include "game/social_handler.hpp"
 #include "game/movement_handler.hpp"
 #include "game/entity_controller.hpp"
 #include "game/game_services.hpp"
@@ -61,6 +64,7 @@ namespace wowee::game {
     class WardenHandler;
     class AccountDataHandler;
     class RealmTimeHandler;
+    class WeatherHandler;
 }
 
 namespace wowee {
@@ -74,29 +78,6 @@ struct EzWowPatch;
 /**
  * Quest giver status values (WoW 3.3.5a)
  */
-/**
- * A single contact list entry (friend, ignore, or mute).
- */
-struct ContactEntry {
-    uint64_t    guid     = 0;
-    std::string name;
-    std::string note;
-    uint32_t    flags    = 0;   // 0x1=friend, 0x2=ignore, 0x4=mute
-    /// AzerothCore's FriendStatus, and a bitmask rather than a number:
-    /// 0x01 online, 0x02 away, 0x04 do-not-disturb, 0x08 recruit-a-friend.
-    /// An away friend is 0x03 - online *and* away - which is why this cannot
-    /// be compared for equality. It used to be documented as 0/1/2/3 and read
-    /// that way, so an away friend was shown as busy.
-    uint8_t     status   = 0;
-    uint32_t    areaId   = 0;
-    uint32_t    level    = 0;
-    uint32_t    classId  = 0;
-
-    [[nodiscard]] bool isFriend() const { return (flags & 0x1) != 0; }
-    [[nodiscard]] bool isIgnored() const { return (flags & 0x2) != 0; }
-    [[nodiscard]] bool isOnline()  const { return (status & 0x01) != 0; }
-};
-
 /**
  * World connection state
  */
@@ -169,7 +150,11 @@ class GameHandler : public IConnectionState,
                      public ActionBarQueries,
                      public InventoryQueries,
                      public PetQueries,
-                     public SpellQueries {
+                     public SpellQueries,
+                     public ChatQueries,
+                     public QuestQueries,
+                     public ReputationQueries,
+                     public SocialQueries {
 public:
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
@@ -350,6 +335,63 @@ public:
     SpellDataInfo spellData(uint32_t spellId) const override { return getSpellData(spellId); }
     std::string iconPath(uint32_t iconId) const override { return getIconPath(iconId); }
 
+    // ChatQueries (characterGuid, playerName, requestPlayerName,
+    // packetParsers, playerMovement and achievementName are above).
+    const Character* activeCharacter() const override { return getActiveCharacter(); }
+    uint32_t currentMapId() const override { return currentMapId_; }
+    uint8_t playerClassOf(uint64_t guid) const override { return lookupPlayerClass(guid); }
+    uint8_t playerRaceOf(uint64_t guid) const override { return lookupPlayerRace(guid); }
+    uint8_t playerGenderOf(uint64_t guid) const override { return lookupPlayerGender(guid); }
+    const GroupListData& party() const override { return getPartyData(); }
+    const GuildRosterData& guildRoster() const override { return getGuildRoster(); }
+    std::optional<uint32_t> guildRankRights() const override;
+    std::string languageName(uint32_t languageId) const override { return getLanguageName(languageId); }
+
+    // QuestQueries (the shared ones are above; closeVendor is declared with
+    // the vendor's facade).
+    bool inGroup() const override { return isInGroup(); }
+    void setResting(bool resting) override;
+    std::string creatureName(uint32_t entry) const override { return getCachedCreatureName(entry); }
+    void requestCreatureInfo(uint32_t entry) override { queryCreatureInfo(entry, 0); }
+    void requestGameObjectInfo(uint32_t entry) override { queryGameObjectInfo(entry, 0); }
+    void vendorCanRepair() override { setVendorCanRepair(true); }
+    void openedStableMaster(uint64_t npcGuid) override { petHandler_->setStableMaster(npcGuid); }
+
+    // SocialQueries (the ones shared with the other handlers are above).
+    bool battlegroundMap(uint32_t mapId) override { return isBattlegroundMap(mapId); }
+    std::string mapName(uint32_t mapId) const override { return getMapName(mapId); }
+    std::string areaName(uint32_t areaId) const override { return getAreaName(areaId); }
+    std::string lfgDungeonName(uint32_t dungeonId) const override { return getLfgDungeonName(dungeonId); }
+    uint8_t spellDispelType(uint32_t spellId) const override { return getSpellDispelType(spellId); }
+    const std::unordered_map<uint32_t, TalentTabEntry>& talentTabs() override {
+        spellHandler_->loadTalentDbc();
+        return spellHandler_->getAllTalentTabs();
+    }
+    const std::unordered_map<uint32_t, TalentEntry>& talents() override {
+        spellHandler_->loadTalentDbc();
+        return spellHandler_->getAllTalents();
+    }
+    void mirrorAurasByGuid(uint64_t guid, const std::vector<AuraSlot>& auras) override {
+        spellHandler_->mirrorAurasByGuid(guid, auras);
+    }
+    const std::array<uint32_t, 19>* inspectedItemEntries(uint64_t guid) const override {
+        return inventoryHandler_->inspectedItemEntries(guid);
+    }
+    bool showingHelm() const override { return helmVisible_; }
+    bool showingCloak() const override { return cloakVisible_; }
+    void setShowingHelm(bool shown) override { helmVisible_ = shown; }
+    void setShowingCloak(bool shown) override { cloakVisible_ = shown; }
+
+    // ReputationQueries (factionBaseReputation and refreshUnitHostility are
+    // declared with the rest of the faction table below).
+    uint32_t factionIdByRepListId(uint32_t repListId) const override {
+        return getFactionIdByRepListId(repListId);
+    }
+    std::string factionName(uint32_t factionId) const override {
+        loadFactionNameCache();
+        return getFactionName(factionId);
+    }
+
     /**
      * Get current connection state
      */
@@ -511,10 +553,6 @@ public:
     ChatAutoJoin chatAutoJoin;
     void autoJoinDefaultChannels();
 
-    // Chat bubble callback: (senderGuid, message, isYell)
-    using ChatBubbleCallback = std::function<void(uint64_t, const std::string&, bool)>;
-    void setChatBubbleCallback(ChatBubbleCallback cb) { chatBubbleCallback_ = std::move(cb); }
-
     // Addon chat event callback: fires when any chat message is received (for Lua event dispatch)
 
     // Generic addon event callback: fires named events with string args
@@ -585,13 +623,6 @@ public:
         return randomStatResolver_ ? randomStatResolver_(id, suffixFactor)
                                    : std::vector<RandomStatBonus>{};
     }
-
-    // Emote animation callback: (entityGuid, animationId)
-    // guid, animId, isState. isState marks persistent STATE_ emotes (from
-    // UNIT_NPC_EMOTESTATE or state-type SMSG_EMOTE) that loop until cleared;
-    // one-shots play once and return to the prior state.
-    using EmoteAnimCallback = std::function<void(uint64_t, uint32_t, bool)>;
-    void setEmoteAnimCallback(EmoteAnimCallback cb) { emoteAnimCallback_ = std::move(cb); }
 
     /**
      * Get chat history (recent messages)
@@ -772,7 +803,9 @@ public:
     void setFriendNote(const std::string& playerName, const std::string& note);
     void addIgnore(const std::string& playerName) override;
     void removeIgnore(const std::string& playerName) override;
-    const std::unordered_map<std::string, uint64_t>& getIgnoreCache() const override { return ignoreCache; }
+    const std::unordered_map<std::string, uint64_t>& getIgnoreCache() const override {
+        return socialHandler_->ignoreCache();
+    }
 
     // Random roll
     void randomRoll(uint32_t minRoll = 1, uint32_t maxRoll = 100);
@@ -879,7 +912,7 @@ public:
     void requestGuildEventLog();
     const std::vector<GuildEventLogEntry>& getGuildEventLog() const;
 
-    uint32_t getBfMgrBattleId() const { return bfMgrBattleId_; }
+    uint32_t getBfMgrBattleId() const { return socialHandler_->bfMgrBattleId(); }
     void acceptBfMgrInvite();
     void declineBfMgrInvite();
     void respondBfMgrQueueInvite(uint32_t battleId, bool accept);
@@ -1148,13 +1181,8 @@ public:
     void clearCombatLog();
 
     // Area trigger messages (SMSG_AREA_TRIGGER_MESSAGE) - drained by UI each frame
-    bool hasAreaTriggerMsg() const { return !areaTriggerMsgs_.empty(); }
-    std::string popAreaTriggerMsg() {
-        if (areaTriggerMsgs_.empty()) return {};
-        std::string msg = areaTriggerMsgs_.front();
-        areaTriggerMsgs_.pop_front();
-        return msg;
-    }
+    bool hasAreaTriggerMsg() const { return chatHandler_->hasAreaTriggerMessage(); }
+    std::string popAreaTriggerMsg() { return chatHandler_->takeAreaTriggerMessage(); }
 
     // Threat
     using ThreatEntry = CombatHandler::ThreatEntry;
@@ -1226,22 +1254,9 @@ public:
     bool canUseArmorSubclass(uint32_t subClass)  const { return (armorProficiency_  >> subClass) & 1u; }
 
     // Minimap pings from party members
-    struct MinimapPing {
-        uint64_t senderGuid = 0;
-        float    wowX       = 0.0f;  // canonical WoW X (north)
-        float    wowY       = 0.0f;  // canonical WoW Y (west)
-        float    age        = 0.0f;  // seconds since received
-        static constexpr float LIFETIME = 5.0f;
-        [[nodiscard]] bool isExpired() const { return age >= LIFETIME; }
-    };
-    const std::vector<MinimapPing>& getMinimapPings() const { return minimapPings_; }
-    void tickMinimapPings(float dt) {
-        for (auto& p : minimapPings_) p.age += dt;
-        minimapPings_.erase(
-            std::remove_if(minimapPings_.begin(), minimapPings_.end(),
-                           [](const MinimapPing& p){ return p.isExpired(); }),
-            minimapPings_.end());
-    }
+    using MinimapPing = game::MinimapPing;
+    const std::vector<MinimapPing>& getMinimapPings() const { return socialHandler_->minimapPings(); }
+    void tickMinimapPings(float dt) { socialHandler_->ageMinimapPings(dt); }
 
     bool isCasting() const { return spellHandler_->isCasting(); }
     bool isChanneling() const { return spellHandler_->isChanneling(); }
@@ -1362,8 +1377,10 @@ public:
     }
 
     // Completed quests (populated from SMSG_QUERY_QUESTS_COMPLETED_RESPONSE)
-    bool isQuestCompleted(uint32_t questId) const { return completedQuests_.count(questId) > 0; }
-    const std::unordered_set<uint32_t>& getCompletedQuests() const { return completedQuests_; }
+    bool isQuestCompleted(uint32_t questId) const { return questHandler_->isQuestCompleted(questId); }
+    const std::unordered_set<uint32_t>& getCompletedQuests() const {
+        return questHandler_->completedQuests();
+    }
 
     // NPC death callback (for animations)
     using NpcDeathCallback = std::function<void(uint64_t guid)>;
@@ -1440,12 +1457,6 @@ public:
     using PlayerHealthCallback = std::function<void(uint32_t health, uint32_t maxHealth)>;
     void setPlayerHealthCallback(PlayerHealthCallback cb) { playerHealthCallback_ = std::move(cb); }
 
-    // NPC greeting callback (plays voice line when NPC is clicked)
-    using NpcGreetingCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcGreetingCallback(NpcGreetingCallback cb) { npcGreetingCallback_ = std::move(cb); }
-
-    using NpcFarewellCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
-    void setNpcFarewellCallback(NpcFarewellCallback cb) { npcFarewellCallback_ = std::move(cb); }
 
     // XP tracking
     uint32_t getPlayerXp() const { return playerXp_; }
@@ -1474,12 +1485,6 @@ public:
     float getGCDRemaining() const;
     float getGCDTotal() const;
     bool isGCDActive() const { return getGCDRemaining() > 0.0f; }
-
-    // Weather state (updated by SMSG_WEATHER)
-    // weatherType: 0=clear, 1=rain, 2=snow, 3=storm/fog
-    uint32_t getWeatherType() const { return weatherType_; }
-    float getWeatherIntensity() const { return weatherIntensity_; }
-    bool isRaining() const { return weatherType_ == 1 && weatherIntensity_ > 0.05f; }
 
     // Player skills
     const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const {
@@ -1595,7 +1600,7 @@ public:
     }
     /// Re-judge every unit's hostility, after the at-war state it came from
     /// has changed. A unit's is worked out when it appears and kept.
-    void refreshUnitHostility();
+    void refreshUnitHostility() override;
     /// How a unit regards the player, numbered as UnitReaction numbers it:
     /// 1 hated to 8 exalted. For a faction the player has a standing with,
     /// that standing - no better than neutral while at war - and otherwise 2
@@ -1821,7 +1826,7 @@ public:
     void sendSetLootMethod(uint32_t method, uint32_t threshold, uint64_t masterLooterGuid);
     bool isInGroup() const;
     const GroupListData& getPartyData() const;
-    const std::vector<ContactEntry>& getContacts() const override { return contacts_; }
+    const std::vector<ContactEntry>& getContacts() const override { return socialHandler_->contacts(); }
     bool hasPendingGroupInvite() const;
     const std::string& getPendingInviterName() const;
 
@@ -1839,8 +1844,8 @@ public:
     void acceptSharedQuest();
     void declineSharedQuest();
 
-    const std::string& getSummonerName() const { return summonerName_; }
-    float getSummonTimeoutSec() const { return summonTimeoutSec_; }
+    const std::string& getSummonerName() const { return socialHandler_->summonerName(); }
+    float getSummonTimeoutSec() const { return socialHandler_->summonTimeoutSec(); }
     void acceptSummon();
     void declineSummon();
 
@@ -2106,19 +2111,8 @@ public:
     void abandonQuest(uint32_t questId);
     void shareQuestWithParty(uint32_t questId);  // CMSG_PUSHQUESTTOPARTY
     bool requestQuestQuery(uint32_t questId, bool force = false);
-    bool isQuestTracked(uint32_t questId) const { return trackedQuestIds_.count(questId) > 0; }
-    void setQuestTracked(uint32_t questId, bool tracked) {
-        const bool changed = tracked ? trackedQuestIds_.insert(questId).second
-                                     : trackedQuestIds_.erase(questId) > 0;
-        if (changed) {
-            saveCharacterConfig();
-            // WatchFrame is purely event-driven and never polls native state,
-            // so a change here is invisible to it until something else happens
-            // to fire QUEST_LOG_UPDATE (e.g. the quest log's own track/untrack
-            // button, which calls WatchFrame_Update() directly).
-            fireAddonEvent("QUEST_LOG_UPDATE", {});
-        }
-    }
+    bool isQuestTracked(uint32_t questId) const { return questHandler_->isQuestTracked(questId); }
+    void setQuestTracked(uint32_t questId, bool tracked) { questHandler_->setQuestTracked(questId, tracked); }
     const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
     /// The quests whose objective areas the world map shades.
     ///
@@ -2259,17 +2253,14 @@ public:
         return static_cast<int32_t>(v < 0 ? 0 : v);
     }
 
-    struct FactionStandingInit {
-        uint8_t flags = 0;
-        int32_t standing = 0;
-    };
+    using FactionStandingInit = game::FactionStanding;
     // Faction flag bitmask constants (from Faction.dbc ReputationFlags / SMSG_INITIALIZE_FACTIONS)
-    static constexpr uint8_t FACTION_FLAG_VISIBLE    = 0x01; // shown in reputation list
-    static constexpr uint8_t FACTION_FLAG_AT_WAR     = 0x02; // player is at war
-    static constexpr uint8_t FACTION_FLAG_HIDDEN      = 0x04; // never shown
-    static constexpr uint8_t FACTION_FLAG_INVISIBLE_FORCED = 0x08;
-    static constexpr uint8_t FACTION_FLAG_PEACE_FORCED     = 0x10;
-    static constexpr uint8_t FACTION_FLAG_INACTIVE         = 0x20; // moved to the inactive list
+    static constexpr uint8_t FACTION_FLAG_VISIBLE          = kFactionFlagVisible;
+    static constexpr uint8_t FACTION_FLAG_AT_WAR           = kFactionFlagAtWar;
+    static constexpr uint8_t FACTION_FLAG_HIDDEN           = kFactionFlagHidden;
+    static constexpr uint8_t FACTION_FLAG_INVISIBLE_FORCED = kFactionFlagInvisibleForced;
+    static constexpr uint8_t FACTION_FLAG_PEACE_FORCED     = kFactionFlagPeaceForced;
+    static constexpr uint8_t FACTION_FLAG_INACTIVE         = kFactionFlagInactive;
 
     /// A faction the player has a standing with, as the reputation panel lists
     /// it.
@@ -2322,17 +2313,17 @@ public:
     /// The faction this one is grouped under, or 0 for a top-level one.
     uint32_t getFactionParentId(uint32_t factionId) const;
 
-    const std::unordered_map<uint32_t, int32_t>& getFactionStandings() const { return factionStandings_; }
+    const std::unordered_map<uint32_t, int32_t>& getFactionStandings() const {
+        return reputationHandler_->standings();
+    }
 
     // Returns true if the player has "at war" toggled for the faction at repListId
     bool isFactionAtWar(uint32_t repListId) const {
-        if (repListId >= initialFactions_.size()) return false;
-        return (initialFactions_[repListId].flags & FACTION_FLAG_AT_WAR) != 0;
+        return reputationHandler_->hasFlag(repListId, kFactionFlagAtWar);
     }
     // Returns true if war cannot be declared on this faction (peace forced by the server)
     bool isFactionPeaceForced(uint32_t repListId) const {
-        if (repListId >= initialFactions_.size()) return false;
-        return (initialFactions_[repListId].flags & FACTION_FLAG_PEACE_FORCED) != 0;
+        return reputationHandler_->hasFlag(repListId, kFactionFlagPeaceForced);
     }
     // Returns the faction ID for a given repListId (0 if unknown)
     uint32_t getFactionIdByRepListId(uint32_t repListId) const;
@@ -2346,7 +2337,7 @@ public:
     /// character starts at -1200 with the Kurenai, so 900 earned showed as
     /// Neutral while the server held them at Unfriendly and Telaar would not
     /// speak to them.
-    int32_t factionBaseReputation(uint32_t factionId) const;
+    int32_t factionBaseReputation(uint32_t factionId) const override;
     // Returns the repListId for a given faction ID (0xFFFFFFFF if not found)
     uint32_t getRepListIdByFactionId(uint32_t factionId) const;
     // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air), kept by the
@@ -2359,7 +2350,7 @@ public:
     const TotemSlot& getTotemSlot(int slot) const { return spellHandler_->totemSlot(slot); }
 
     const std::string& getFactionNamePublic(uint32_t factionId) const;
-    uint32_t getWatchedFactionId() const { return watchedFactionId_; }
+    uint32_t getWatchedFactionId() const { return reputationHandler_->watchedFaction(); }
     void setWatchedFactionId(uint32_t factionId);
     // Declare war / make peace with a faction (CMSG_SET_FACTION_ATWAR). No-op on
     // peace-forced factions. Updates the local flag optimistically.
@@ -2433,12 +2424,6 @@ public:
     using AreaDiscoveryCallback = std::function<void(const std::string& areaName, uint32_t xpGained)>;
     void setAreaDiscoveryCallback(AreaDiscoveryCallback cb) { areaDiscoveryCallback_ = std::move(cb); }
 
-    // Quest objective progress callback - fires on SMSG_QUESTUPDATE_ADD_KILL / ADD_ITEM
-    // questTitle: name of the quest; objectiveName: creature/item name; current/required counts
-    using QuestProgressCallback = std::function<void(const std::string& questTitle,
-                                                     const std::string& objectiveName,
-                                                     uint32_t current, uint32_t required)>;
-    void setQuestProgressCallback(QuestProgressCallback cb) { questProgressCallback_ = std::move(cb); }
     const std::unordered_map<uint32_t, uint64_t>& getCriteriaProgress() const { return criteriaProgress_; }
     /// Returns the WoW PackedTime earn date for an achievement, or 0 if unknown.
     uint32_t getAchievementDate(uint32_t id) const {
@@ -2727,9 +2712,6 @@ public:
     /// Interface phase only. Notifications produced by handlers wait for the next drain.
     void dispatchAddonEvents();
 
-    // Reputation change toast: factionName, delta, new standing
-    using RepChangeCallback = std::function<void(const std::string& factionName, int32_t delta, int32_t standing)>;
-    void setRepChangeCallback(RepChangeCallback cb) { repChangeCallback_ = std::move(cb); }
 
     // PvP honor credit callback (honorable kill or BG reward)
     using PvpHonorCallback = std::function<void(uint32_t honorAmount, uint64_t victimGuid, uint32_t victimRank)>;
@@ -2771,9 +2753,6 @@ public:
     using TaxiFlightStartCallback = std::function<void()>;
     void setTaxiFlightStartCallback(TaxiFlightStartCallback cb) { taxiFlightStartCallback_ = std::move(cb); }
 
-    // Callback fired when server sends SMSG_OPEN_LFG_DUNGEON_FINDER (open dungeon finder UI)
-    using OpenLfgCallback = std::function<void()>;
-    void setOpenLfgCallback(OpenLfgCallback cb) { openLfgCallback_ = std::move(cb); }
 
     bool isMounted() const { return currentMountDisplayId_ != 0; }
     bool isHostileAttacker(uint64_t guid) const;
@@ -2841,7 +2820,7 @@ public:
 
     // Vendor
     void openVendor(uint64_t npcGuid);
-    void closeVendor();
+    void closeVendor() override;
     void buyItem(uint64_t vendorGuid, uint32_t itemId, uint32_t slot, uint32_t count);
     void sellItem(uint64_t vendorGuid, uint64_t itemGuid, uint32_t count);
     void sellItemBySlot(int backpackIndex);
@@ -3230,6 +3209,15 @@ public:
     /// windows that move it: loot, vendors, mail, the bank, the auction house.
     InventoryHandler& inventory() { return *inventoryHandler_; }
     const InventoryHandler& inventory() const { return *inventoryHandler_; }
+    /// The character's standing with each faction.
+    ReputationHandler& reputation() { return *reputationHandler_; }
+    const ReputationHandler& reputation() const { return *reputationHandler_; }
+    /// The character's quests, the quest givers' windows and their marks.
+    QuestHandler& quests() { return *questHandler_; }
+    const QuestHandler& quests() const { return *questHandler_; }
+    /// The character's conversation: the chat log, channels, whispers, AFK.
+    ChatHandler& chat() { return *chatHandler_; }
+    const ChatHandler& chat() const { return *chatHandler_; }
     /// The player's pet and the stable.
     PetHandler& pet() { return *petHandler_; }
     const PetHandler& pet() const { return *petHandler_; }
@@ -3246,6 +3234,9 @@ public:
     /// What time it is on the realm: the world's hour and the calendar moment.
     RealmTimeHandler& realmTime() { return *realmTimeHandler_; }
     const RealmTimeHandler& realmTime() const { return *realmTimeHandler_; }
+    /// The weather where the character stands, as the realm says it.
+    WeatherHandler& weather() { return *weatherHandler_; }
+    const WeatherHandler& weather() const { return *weatherHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3314,7 +3305,6 @@ public:
     // ── Combat & Player Stats ────────────────────────────────────────
     auto& comboPointsRef() { return comboPoints_; }
     auto& comboTargetRef() { return comboTarget_; }
-    auto& isRestingRef() { return isResting_; }
     auto& playerArenaPointsRef() { return playerArenaPoints_; }
     auto& playerArmorRatingRef() { return playerArmorRating_; }
     auto& playerBlockPctRef() { return playerBlockPct_; }
@@ -3338,6 +3328,7 @@ public:
     auto* playerSpellDmgBonusArr() { return playerSpellDmgBonus_; }
     auto& playerStatsArr() { return playerStats_; }
     auto& playerXpRef() { return playerXp_; }
+    auto& isRestingRef() { return isResting_; }
 
     // ── Skills ───────────────────────────────────────────────────────
     const std::string& getSkillDescription(uint32_t skillId) const {
@@ -3345,33 +3336,19 @@ public:
     }
 
     // ── Quests & Achievements ────────────────────────────────────────
-    auto& completedQuestsRef() { return completedQuests_; }
     auto& achievementNameCacheRef() { return achievementNameCache_; }
-
-    // ── Social, Chat & Contacts ──────────────────────────────────────
-    auto& contactsRef() { return contacts_; }
-    auto& friendGuidsRef() { return friendGuids_; }
-    auto& friendsCacheRef() { return friendsCache; }
-    auto& ignoreCacheRef() { return ignoreCache; }
-    auto& ignoreListGuidsRef() { return ignoreListGuids_; }
-    auto& lastContactListCountRef() { return lastContactListCount_; }
-    auto& lastContactListMaskRef() { return lastContactListMask_; }
 
     // ── World, Map & Zones ───────────────────────────────────────────
     auto& currentMapIdRef() { return currentMapId_; }
     auto& worldStateMapIdRef() { return worldStateMapId_; }
     auto& worldStatesRef() { return worldStates_; }
     auto& worldStateZoneIdRef() { return worldStateZoneId_; }
-    auto& minimapPingsRef() { return minimapPings_; }
     /// Drops the points of interest the quest handler is holding.
     ///
     /// This handed out a reference to a list of its own. getGossipPois
     /// forwards to QuestHandler, so clearing through the reference left
     /// the markers the map draws exactly where they were.
     void clearGossipPois();
-    auto& factionStandingsRef() { return factionStandings_; }
-    auto& initialFactionsRef() { return initialFactions_; }
-    auto& watchedFactionIdRef() { return watchedFactionId_; }
 
     // ── Corpse & Home Bind ───────────────────────────────────────────
     auto& corpseGuidRef() { return corpseGuid_; }
@@ -3386,7 +3363,6 @@ public:
     auto& activeAreaTriggersRef() { return activeAreaTriggers_; }
     auto& areaTriggerCheckTimerRef() { return areaTriggerCheckTimer_; }
     auto& areaTriggerDbcLoadedRef() { return areaTriggerDbcLoaded_; }
-    auto& areaTriggerMsgsRef() { return areaTriggerMsgs_; }
     auto& areaTriggersRef() { return areaTriggers_; }
     auto& areaTriggerSuppressFirstRef() { return areaTriggerSuppressFirst_; }
     auto& areaTriggerCooldownRef() { return areaTriggerCooldown_; }
@@ -3403,16 +3379,8 @@ public:
     auto& resurrectRequestPendingRef() { return resurrectRequestPending_; }
     auto& selfResAvailableRef() { return selfResAvailable_; }
 
-    // ── Summon & Battlefield ─────────────────────────────────────────
-    auto& pendingSummonRequestRef() { return pendingSummonRequest_; }
-    auto& summonerGuidRef() { return summonerGuid_; }
-    auto& summonerNameRef() { return summonerName_; }
-    auto& summonTimeoutSecRef() { return summonTimeoutSec_; }
-    auto& bfMgrInvitePendingRef() { return bfMgrInvitePending_; }
 
     // ── Trainer, GM & Misc ───────────────────────────────────────────
-    auto& gmTicketActiveRef() { return gmTicketActive_; }
-    auto& gmTicketTextRef() { return gmTicketText_; }
 
     // ── Tab Cycling ──────────────────────────────────────────────────
     auto& tabCycleIndexRef() { return tabCycleIndex; }
@@ -3424,11 +3392,9 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& chatBubbleCallbackRef() { return chatBubbleCallback_; }
     auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
     auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
     auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
-    auto& emoteAnimCallbackRef() { return emoteAnimCallback_; }
     auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
@@ -3444,18 +3410,13 @@ public:
     auto& mountCallbackRef() { return mountCallback_; }
     auto& npcAggroCallbackRef() { return npcAggroCallback_; }
     auto& npcDeathCallbackRef() { return npcDeathCallback_; }
-    auto& npcFarewellCallbackRef() { return npcFarewellCallback_; }
-    auto& npcGreetingCallbackRef() { return npcGreetingCallback_; }
     auto& npcRespawnCallbackRef() { return npcRespawnCallback_; }
     auto& npcSwingCallbackRef() { return npcSwingCallback_; }
-    auto& openLfgCallbackRef() { return openLfgCallback_; }
     auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
     auto& playerSpawnCallbackRef() { return playerSpawnCallback_; }
     auto& pvpHonorCallbackRef() { return pvpHonorCallback_; }
-    auto& questProgressCallbackRef() { return questProgressCallback_; }
-    auto& repChangeCallbackRef() { return repChangeCallback_; }
     auto& stealthStateCallbackRef() { return stealthStateCallback_; }
     auto& stunStateCallbackRef() { return stunStateCallback_; }
     auto& taxiFlightStartCallbackRef() { return taxiFlightStartCallback_; }
@@ -3502,7 +3463,7 @@ public:
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
     void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries,
-                                       const std::array<uint16_t, 19>& enchantIds);
+                                       const std::array<uint16_t, 19>& enchantIds) override;
     void detectInventorySlotBases(const FlatFieldMap& fields);
     bool applyInventoryFields(const FlatFieldMap& fields);
     void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
@@ -3600,7 +3561,8 @@ public:
     /// built from the starting standings, answer until then.
     int factionAtWarLive(uint32_t factionTemplateId) const {
         auto it = factionTemplateRepList_.find(factionTemplateId);
-        if (it == factionTemplateRepList_.end() || it->second >= initialFactions_.size()) return -1;
+        if (it == factionTemplateRepList_.end() ||
+            it->second >= reputationHandler_->factions().size()) return -1;
         return isFactionAtWar(it->second) ? 1 : 0;
     }
 
@@ -3717,7 +3679,6 @@ private:
     void checkAreaTriggers();
 
     // ---- Instance lockout handler ----
-    void handleSummonRequest(network::Packet& packet);
     void resetTradeState();
     void handleDuelRequested(network::Packet& packet);
     void handleDuelComplete(network::Packet& packet);
@@ -3759,7 +3720,9 @@ private:
     std::unique_ptr<AccountDataHandler> accountDataHandler_;
     std::unique_ptr<ActionBarHandler> actionBarHandler_;
     std::unique_ptr<PetHandler> petHandler_;
+    std::unique_ptr<ReputationHandler> reputationHandler_;
     std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
+    std::unique_ptr<WeatherHandler> weatherHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -3815,7 +3778,6 @@ private:
     std::unique_ptr<EntityController> entityController_;
 
     // Chat (state lives in ChatHandler; callbacks remain here for cross-domain access)
-    ChatBubbleCallback chatBubbleCallback_;
     AddonEventCallback addonEventCallback_;
     AddonEventQueue pendingAddonEvents_;
     InterfaceCommand   interfaceCommand_;
@@ -3825,7 +3787,6 @@ private:
     SpellDataResolver spellDataResolver_;
     RandomPropertyNameResolver randomPropertyNameResolver_;
     RandomStatResolver randomStatResolver_;
-    EmoteAnimCallback emoteAnimCallback_;
 
     // Targeting
     uint64_t targetGuid = 0;
@@ -3853,13 +3814,6 @@ private:
     uint32_t homeBindZoneId_ = 0;
     glm::vec3 homeBindPos_{0.0f};
 
-    // ---- Friend/contact list cache ----
-    std::unordered_map<std::string, uint64_t> friendsCache;  // name -> guid
-    std::unordered_set<uint64_t> friendGuids_;               // all known friend GUIDs (for name backfill)
-    uint32_t lastContactListMask_ = 0;
-    uint32_t lastContactListCount_ = 0;
-    std::vector<ContactEntry> contacts_;                     // structured contact list (friends + ignores)
-
     // ---- World state and faction initialization snapshots ----
     uint32_t worldStateMapId_ = 0;
     uint32_t worldStateZoneId_ = 0;
@@ -3870,11 +3824,6 @@ private:
     uint64_t activeCritterGuid_ = 0;
     uint32_t activeCritterSpellId_ = 0;
     std::unordered_map<uint32_t, uint32_t> worldStates_;
-    std::vector<FactionStandingInit> initialFactions_;
-
-    // ---- Ignore list cache ----
-    std::unordered_map<std::string, uint64_t> ignoreCache;  // name -> guid (UI display)
-    std::unordered_set<uint64_t> ignoreListGuids_;            // authoritative GUID set from server
 
     // ---- Display state ----
     bool helmVisible_ = true;
@@ -3893,8 +3842,6 @@ private:
     /// names it and the answer has to go back to the same one.
     uint64_t binderGuid_ = 0;
 
-    // ---- Combat ----
-    std::deque<std::string>    areaTriggerMsgs_;
 
     KnockBackCallback knockBackCallback_;
     CameraShakeCallback cameraShakeCallback_;
@@ -3937,7 +3884,6 @@ private:
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
-    std::vector<MinimapPing> minimapPings_;
     uint64_t pendingGameObjectInteractGuid_ = 0;
     // Owned fishing bobber whose bite animation has fired. Keeping this explicit
     // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
@@ -3969,7 +3915,6 @@ private:
 
 
     // Faction standings (factionId → absolute standing value)
-    std::unordered_map<uint32_t, int32_t> factionStandings_;
     // Faction name cache (factionId → name), populated lazily from Faction.dbc
     mutable std::unordered_map<uint32_t, std::string> factionNameCache_;
     // repListId → factionId mapping (populated with factionNameCache)
@@ -3981,11 +3926,6 @@ private:
     mutable std::unordered_map<uint32_t, std::array<int32_t, 12>> factionRepBase_;
     mutable bool factionNameCacheLoaded_ = false;
 
-    // Summon state
-    bool        pendingSummonRequest_ = false;
-    uint64_t    summonerGuid_         = 0;
-    std::string summonerName_;
-    float       summonTimeoutSec_     = 0.0f;
 
     // ---- Guild state ----
 
@@ -4040,7 +3980,6 @@ private:
     // the GameHandler selection copy this comment used to describe was dead -
     // written by setSelectedQuestLogIndex, read by nobody, while the getter went
     // to the QuestHandler - and has been removed.
-    std::unordered_set<uint32_t> trackedQuestIds_;
     std::unordered_set<uint32_t> blobQuestIds_;
     bool pendingLoginQuestResync_ = false;
     float pendingLoginQuestResyncTimeout_ = 0.0f;
@@ -4248,10 +4187,6 @@ private:
     bool isResting_ = false;
     uint32_t serverPlayerLevel_ = 1;
 
-    // ---- Weather state (SMSG_WEATHER) ----
-    uint32_t weatherType_ = 0;       // 0=clear, 1=rain, 2=snow, 3=storm
-    float weatherIntensity_ = 0.0f;  // 0.0 to 1.0
-
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 
     // ---- Player skills (the skills themselves are the spell book's) ----
@@ -4278,8 +4213,6 @@ private:
     StunStateCallback stunStateCallback_;
     StealthStateCallback stealthStateCallback_;
     PlayerHealthCallback playerHealthCallback_;
-    NpcGreetingCallback npcGreetingCallback_;
-    NpcFarewellCallback npcFarewellCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     /// PageTextMaterial.dbc is seven rows and is read once on the first ask,
     /// like the other DBC-backed caches here.
@@ -4290,13 +4223,11 @@ private:
     mutable bool languageNamesLoaded_ = false;
     OtherPlayerMountCallback otherPlayerMountCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
-    QuestProgressCallback questProgressCallback_;
     MountCallback mountCallback_;
     TaxiPrecacheCallback taxiPrecacheCallback_;
     TaxiOrientationCallback taxiOrientationCallback_;
     PlayerPositionCorrectionCallback playerPositionCorrectionCallback_;
     TaxiFlightStartCallback taxiFlightStartCallback_;
-    OpenLfgCallback openLfgCallback_;
     uint32_t currentMountDisplayId_ = 0;
     uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
     bool playerDead_ = false;
@@ -4345,9 +4276,6 @@ private:
     bool repopPending_ = false;
     uint64_t lastRepopRequestMs_ = 0;
 
-    // ---- Completed quest IDs (SMSG_QUERY_QUESTS_COMPLETED_RESPONSE) ----
-    std::unordered_set<uint32_t> completedQuests_;
-
     // ---- Equipment sets (SMSG_EQUIPMENT_SET_LIST) ----
     struct EquipmentSet {
         uint64_t setGuid = 0;
@@ -4366,8 +4294,6 @@ private:
     // ---- UI error frame callback ----
 
     // ---- Reputation change callback ----
-    RepChangeCallback repChangeCallback_;
-    uint32_t watchedFactionId_ = 0; // auto-set to most recently changed faction
 
     // ---- PvP honor credit callback ----
     PvpHonorCallback pvpHonorCallback_;
@@ -4378,18 +4304,10 @@ private:
     // ---- Quest completion callback ----
 
     // ---- GM Ticket state (SMSG_GMTICKET_GETTICKET / SMSG_GMTICKET_SYSTEMSTATUS) ----
-    bool        gmTicketActive_    = false;  ///< True when an open ticket exists on the server
     std::string gmTicketText_;               ///< Text of the open ticket (from SMSG_GMTICKET_GETTICKET)
     float       gmTicketWaitHours_ = 0.0f;  ///< Server-estimated wait time in hours
     bool        gmSupportAvailable_ = true; ///< GM support system online (SMSG_GMTICKET_SYSTEMSTATUS)
 
-    // ---- Battlefield Manager state (WotLK Wintergrasp / outdoor battlefields) ----
-    bool        bfMgrInvitePending_ = false; ///< True when an entry/queue invite is pending acceptance
-    uint32_t    bfMgrZoneId_        = 0;     ///< Zone ID of the pending/active battlefield
-    /// The battle the invite is for, which is not the zone it is in. Every
-    /// handler in the battlefield group opens `local battleID = ...` and passes
-    /// it back when the player answers, so the two must not be confused.
-    uint32_t    bfMgrBattleId_      = 0;
     /// What the resurrect offer said about itself: whether accepting brings
     /// resurrection sickness, and whether a reclaim delay applies. Both decide
     /// which of the three dialogs the interface raises.

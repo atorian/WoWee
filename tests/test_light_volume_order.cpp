@@ -1,21 +1,12 @@
-// The order two light volumes are blended in, when they weigh the same.
+// The client's rule for laying Light.dbc volumes over each other
+// (light_volume_order.hpp, WoW.exe 0x7f1360): what one weighs at a point, in
+// what order they go down, and what each is left contributing once the ones
+// laid over it have taken their part.
 //
-// Light.dbc's volumes overlap and the branch for "inside the inner radius"
-// assigns the constant 1.0, so equal weights are the ordinary case rather than
-// a coincidence: 166 points on the shipped maps sit inside two such volumes
-// and 23 inside three, while only the top two are blended.
-//
-// Weight alone therefore leaves the order undecided, and std::sort is unstable
-// and decides it differently for different sequences. Walking kept changing
-// the sequence - distant volumes crossing their outer radius enter and leave
-// the list - so the chosen pair flipped from frame to frame. The blended
-// colours are smoothed over time and survived it; the skybox is whichever
-// volume comes first and names one, and that is swapped outright. The sky
-// flickered while moving and stood still when the player did.
-//
-// What is asserted here is that the order is total: any two volumes that are
-// not the same volume compare one way round and stay that way, whatever else
-// is in the list.
+// The order is what decides which light a point mostly sees, so it has to be
+// total: two volumes that are not the same volume always go down the same way
+// round, whatever else is in the list. An unstable order once flipped the sky
+// model from frame to frame while the player walked.
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
@@ -25,83 +16,96 @@
 
 #include "rendering/light_volume_order.hpp"
 
-using wowee::rendering::lightVolumeOrderedBefore;
+using wowee::rendering::LightVolumePlace;
+using wowee::rendering::lightVolumeLaidBefore;
+using wowee::rendering::lightVolumeShares;
+using wowee::rendering::lightVolumeWeight;
 
-namespace {
-
-struct Volume {
-    float weight;
-    float outerRadius;
-    uint32_t id;
-};
-
-bool before(const Volume& a, const Volume& b) {
-    return lightVolumeOrderedBefore(a.weight, a.outerRadius, a.id,
-                                    b.weight, b.outerRadius, b.id);
-}
-
-}  // namespace
-
-TEST_CASE("a heavier volume comes first", "[lighting]") {
-    const Volume heavy{1.0f, 500.0f, 7};
-    const Volume light{0.25f, 100.0f, 3};
-    CHECK(before(heavy, light));
-    CHECK_FALSE(before(light, heavy));
-}
-
-TEST_CASE("equal weights are decided by the tighter volume", "[lighting]") {
-    // Both contain the player fully. The smaller one describes somewhere more
-    // specific - a city inside a continent - so it is the one that wins.
-    const Volume city{1.0f, 300.0f, 90};
-    const Volume continent{1.0f, 20000.0f, 2};
-    CHECK(before(city, continent));
-    CHECK_FALSE(before(continent, city));
-}
-
-TEST_CASE("two volumes of the same extent still cannot swap", "[lighting]") {
-    const Volume lower{1.0f, 300.0f, 11};
-    const Volume higher{1.0f, 300.0f, 12};
-    CHECK(before(lower, higher));
-    CHECK_FALSE(before(higher, lower));
-}
-
-TEST_CASE("a volume never comes before itself", "[lighting]") {
-    const Volume one{1.0f, 300.0f, 11};
-    CHECK_FALSE(before(one, one));
-}
-
-TEST_CASE("the chosen pair does not depend on what else is in the list",
+TEST_CASE("a volume weighs whole inside its inner radius and nothing past its outer one",
           "[lighting]") {
-    // The bug, as the player experienced it. Three volumes tie at 1.0 and only
-    // two are kept; around them, volumes far enough away to weigh almost
-    // nothing come and go as the player walks. Under an order that decides
-    // ties, the two kept are the same two every time.
-    const std::vector<Volume> tied = {
-        {1.0f, 20000.0f, 2},   // the continent
-        {1.0f, 900.0f, 47},    // a zone
-        {1.0f, 240.0f, 618},   // a courtyard
-    };
+    CHECK(lightVolumeWeight(0.0f, 100.0f, 200.0f) == 1.0f);
+    CHECK(lightVolumeWeight(100.0f, 100.0f, 200.0f) == 1.0f);
+    CHECK(lightVolumeWeight(200.0f, 100.0f, 200.0f) == 0.0f);
+    CHECK(lightVolumeWeight(350.0f, 100.0f, 200.0f) == 0.0f);
+}
 
-    std::vector<Volume> expected = tied;
-    std::sort(expected.begin(), expected.end(), before);
-    expected.resize(2);
+TEST_CASE("between its radii a volume's weight falls in a straight line", "[lighting]") {
+    CHECK(lightVolumeWeight(125.0f, 100.0f, 200.0f) == Catch::Approx(0.75f));
+    CHECK(lightVolumeWeight(150.0f, 100.0f, 200.0f) == Catch::Approx(0.5f));
+    CHECK(lightVolumeWeight(175.0f, 100.0f, 200.0f) == Catch::Approx(0.25f));
+}
 
-    std::mt19937 rng(20260813);
-    for (int round = 0; round < 200; ++round) {
-        std::vector<Volume> list = tied;
-        // Whatever else happens to be in range this frame, in whatever order
-        // the volume table happens to hold it.
-        const int extras = static_cast<int>(rng() % 6);
-        for (int i = 0; i < extras; ++i) {
-            list.push_back({static_cast<float>(rng() % 100) / 1000.0f,
-                            static_cast<float>(500 + rng() % 4000),
-                            1000 + static_cast<uint32_t>(rng() % 500)});
-        }
-        std::shuffle(list.begin(), list.end(), rng);
+TEST_CASE("the volume whose centre is farther goes down first, under the nearer",
+          "[lighting]") {
+    const LightVolumePlace far{.centre = {100.0f, 0.0f, 0.0f}, .distanceSq = 900.0f,
+                               .innerRadius = 10.0f, .id = 2};
+    const LightVolumePlace near{.centre = {0.0f, 0.0f, 0.0f}, .distanceSq = 100.0f,
+                                .innerRadius = 500.0f, .id = 1};
+    CHECK(lightVolumeLaidBefore(far, near));
+    CHECK_FALSE(lightVolumeLaidBefore(near, far));
+}
 
-        std::partial_sort(list.begin(), list.begin() + 2, list.end(), before);
-        INFO("round " << round << " with " << extras << " extra volumes");
-        CHECK(list[0].id == expected[0].id);
-        CHECK(list[1].id == expected[1].id);
+TEST_CASE("volumes on one centre go down larger first, so the tighter one lies on top",
+          "[lighting]") {
+    const LightVolumePlace large{.centre = {0.0f, 0.0f, 0.0f}, .distanceSq = 400.0f,
+                                 .innerRadius = 300.0f, .id = 1};
+    // A tenth of a yard away is the same centre; its distance is not what
+    // decides.
+    const LightVolumePlace small{.centre = {0.1f, 0.0f, 0.0f}, .distanceSq = 404.0f,
+                                 .innerRadius = 50.0f, .id = 2};
+    CHECK(lightVolumeLaidBefore(large, small));
+    CHECK_FALSE(lightVolumeLaidBefore(small, large));
+}
+
+TEST_CASE("volumes that tie on everything still go down one way round", "[lighting]") {
+    const LightVolumePlace a{.centre = {0.0f, 0.0f, 0.0f}, .distanceSq = 25.0f,
+                             .innerRadius = 50.0f, .id = 7};
+    const LightVolumePlace b{.centre = {0.0f, 0.0f, 0.0f}, .distanceSq = 25.0f,
+                             .innerRadius = 50.0f, .id = 9};
+    CHECK(lightVolumeLaidBefore(a, b));
+    CHECK_FALSE(lightVolumeLaidBefore(b, a));
+    CHECK_FALSE(lightVolumeLaidBefore(a, a));
+}
+
+TEST_CASE("the order of a set of volumes does not depend on the order they came in",
+          "[lighting]") {
+    std::vector<LightVolumePlace> places;
+    for (uint32_t id = 1; id <= 12; ++id) {
+        // Pairs on shared centres, and distances that repeat.
+        const float x = static_cast<float>((id / 2) * 40);
+        places.push_back({.centre = {x, 0.0f, 0.0f},
+                          .distanceSq = static_cast<float>((id % 4) * 100),
+                          .innerRadius = static_cast<float>(id * 10),
+                          .id = id});
     }
+    auto sorted = places;
+    std::sort(sorted.begin(), sorted.end(), lightVolumeLaidBefore);
+
+    std::mt19937 rng(12340);
+    for (int round = 0; round < 50; ++round) {
+        std::shuffle(places.begin(), places.end(), rng);
+        auto again = places;
+        std::sort(again.begin(), again.end(), lightVolumeLaidBefore);
+        for (size_t i = 0; i < sorted.size(); ++i) CHECK(again[i].id == sorted[i].id);
+    }
+}
+
+TEST_CASE("a volume laid over another takes its part from everything under it",
+          "[lighting]") {
+    // A zone's edge at half weight, and a hamlet inside it, also at half.
+    const float weights[] = {0.5f, 0.5f};
+    const auto shares = lightVolumeShares(weights);
+    REQUIRE(shares.volumes.size() == 2);
+    CHECK(shares.volumes[0] == Catch::Approx(0.25f));  // the zone, half of it covered
+    CHECK(shares.volumes[1] == Catch::Approx(0.5f));   // the hamlet, on top
+    CHECK(shares.global == Catch::Approx(0.25f));      // the map's own light, under both
+}
+
+TEST_CASE("a volume holding the point whole leaves nothing of what lies under it",
+          "[lighting]") {
+    const float weights[] = {0.7f, 1.0f};
+    const auto shares = lightVolumeShares(weights);
+    CHECK(shares.volumes[0] == 0.0f);
+    CHECK(shares.volumes[1] == 1.0f);
+    CHECK(shares.global == 0.0f);
 }

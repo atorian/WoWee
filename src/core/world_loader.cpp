@@ -288,7 +288,6 @@ bool WorldLoader::initializeScene() {
             ok = renderer_->loadTestTerrain(assetManager_, "World\\Maps\\" + name + "\\" + name + "_" + std::to_string(x) + "_" + std::to_string(y) + ".adt");
         }
         if (!ok) { fail("Cannot initialize geometry for " + name); return false; }
-        if (auto* wmo = renderer_->getWMORenderer()) wmo->setWMOOnlyMap(isInstance());
         if (auto* terrain = renderer_->getTerrainManager()) {
             terrain->setStreamingEnabled(!isInstance());
             if (!isInstance()) {
@@ -614,13 +613,13 @@ void WorldLoader::startWorldPreload(uint32_t mapId, const std::string& mapName,
                 std::string adtPath = "World\\Maps\\" + mn + "\\" + mn + "_" +
                                       std::to_string(tx) + "_" + std::to_string(ty) + ".adt";
                 // Discarded on purpose: the read is for the cache it warms.
-                (void)am->readFile(adtPath);
+                (void)am->readFileShared(adtPath);
                 if (cancelFlag->load(std::memory_order_relaxed)) break;
 
                 // Read obj0 variant
                 std::string objPath = "World\\Maps\\" + mn + "\\" + mn + "_" +
                                       std::to_string(tx) + "_" + std::to_string(ty) + "_obj0.adt";
-                (void)am->readFile(objPath);
+                (void)am->readFileShared(objPath);
             }
             LOG_DEBUG("World preload worker finished");
         });

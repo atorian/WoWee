@@ -7,7 +7,8 @@
 # Dalaran's noon sky. The camera stands relative to the model's centre: yaw 0
 # looks along +X, 90 along +Y; without it the camera backs off along -X far
 # enough to see the whole model. Shader edits only need their .spv rebuilt
-# (ninja -C build-dev wowee_shaders) and copied into build-dev/bin/assets.
+# (ninja -C build-dev wowee_shaders), which also copies them into
+# build-dev/bin/assets.
 #
 # WOWEE_PROBE_CHARACTER=1 draws the model the way a creature or a mount is
 # drawn in game, through CharacterRenderer with its emitters in M2Renderer;
@@ -20,7 +21,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 

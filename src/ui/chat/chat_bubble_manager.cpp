@@ -1,6 +1,7 @@
 // ChatBubbleManager - 3D-projected chat bubbles above entities.
 // Moved from ChatPanel::renderBubbles / setupCallbacks (Phase 1.4).
 #include "ui/chat/chat_bubble_manager.hpp"
+#include "game/game_events.hpp"
 #include "game/game_handler.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
@@ -143,10 +144,10 @@ void ChatBubbleManager::setupCallback(game::GameHandler& gameHandler) {
         // and drawn every frame. The chat panel already does this for the same
         // text, which is why an NPC line read correctly in the log and showed
         // its raw $r/$c/$g markers in the bubble over their head.
-        gameHandler.setChatBubbleCallback(
-            [this, &gameHandler](uint64_t guid, const std::string& msg, bool isYell) {
-                addBubble(guid, chat_utils::replaceGenderPlaceholders(msg, gameHandler), isYell);
-            });
+        subscriptions_.push_back(gameHandler.eventBus().subscribe<game::events::UnitSaidAloud>(
+            [this, &gameHandler](const game::events::UnitSaidAloud& e) {
+                addBubble(e.guid, chat_utils::replaceGenderPlaceholders(e.text, gameHandler), e.yell);
+            }));
         callbackSet_ = true;
     }
 }

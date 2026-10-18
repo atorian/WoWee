@@ -16,6 +16,7 @@
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/realm_time_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -554,16 +555,6 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // This avoids relying on UI/Application ordering for appearance-dependent logic.
     activeCharacterGuid_ = characterGuid;
 
-    // The last character's guild is not this one's.
-    //
-    // The guild name is kept for the character being played and was cleared
-    // only when that character left the guild or it disbanded - so logging out
-    // of a guilded character and into a guildless one left the name behind,
-    // and everything that asks "am I in a guild" answered yes. The guild vault
-    // is where that showed: the click passed the check, the server refused it
-    // with error 9, and an empty vault window was already on screen.
-    socialHandler_->clearGuildMembership();
-
     LOG_INFO("========================================");
     LOG_INFO("   ENTERING WORLD");
     LOG_INFO("========================================");
@@ -607,17 +598,13 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
+    weatherHandler_->beginCharacter();
     playerXp_ = 0;
     playerNextLevelXp_ = 0;
     serverPlayerLevel_ = 1;
-    // The handler's, not this class's same-named members - every reader
-    // forwards there, so clearing the copies here cleared nothing anyone
-    // looks at and the previous character's quests stayed in the log.
-    questHandler_->clearQuestStateForCharacterSwitch();
+    // The quest log begins again with CharacterLoggingIn, below.
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
-    questHandler_->pendingQuestAcceptTimeoutsRef().clear();
-    questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
     combatHandler_->resetAllCombatState();
     // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
@@ -808,16 +795,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
             LOG_INFO("Auto-queried guild info (guildId=", activeChar->guildId, ")");
         }
 
-        questHandler_->pendingQuestAcceptTimeoutsRef().clear();
-        questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
-        // QuestHandler's set (this cleared a GameHandler copy nothing filled).
-        // selectCharacter has already cleared it with the rest of the quest
-        // state, so this is the world entry saying the same thing again, not
-        // the only place a stale query is forgotten.
-        questHandler_->clearPendingQuestQueries();
+        // The quest log, its pending queries and the completed quests began
+        // empty with the login (CharacterLoggingIn); the server fills them.
         pendingLoginQuestResync_ = true;
         pendingLoginQuestResyncTimeout_ = 10.0f;
-        completedQuests_.clear();
         LOG_INFO("Queued quest log resync for login (from server quest slots)");
 
         // Request completed quest IDs when the expansion supports it. Classic-like
@@ -1733,7 +1714,7 @@ const std::deque<MessageChatData>& GameHandler::getChatHistory() const {
 }
 
 void GameHandler::clearChatHistory() {
-    chatHandler_->getChatHistory().clear();
+    chatHandler_->clearChatHistory();
 }
 
 bool GameHandler::ownsChatChannel(const std::string& name) const {

@@ -10,9 +10,16 @@
  * spent eight minutes writing a complete extraction the client would never
  * look at, with nothing on screen saying where any of it had gone.
  *
- * So: one rule, in one place, that both read. Each platform's own per-user data
- * directory, which is where a user's data belongs on that platform and is
- * writable without asking for anything.
+ * So: one rule, in one place, that both read. Data/ beside the executable - the
+ * client is a folder, and its assets go in that folder, on whatever drive the
+ * player put it on. It used to be each platform's per-user data directory,
+ * which on Windows is the system drive: a full extraction there, and the
+ * realm's archives after it, filled a C: that had no room for them, from a
+ * client installed on D:.
+ *
+ * The one exception is a macOS application bundle, whose executable sits
+ * inside a signed bundle that is no place to write; it keeps its per-user
+ * directory.
  *
  * This is only the default. WOW_DATA_PATH still wins for the client and the
  * asset manager still lets the folder be chosen; neither of those goes through
@@ -27,12 +34,18 @@
 #include <string>
 #include <vector>
 
+#include "core/config_paths.hpp"
+
 namespace wowee {
 namespace core {
 
-/// The per-user data directory for this client, or empty if the platform will
-/// not say where one is.
-inline std::filesystem::path userDataRoot() {
+/// The per-user data directory earlier builds used as the default, or empty
+/// if the platform will not say where one is.
+///
+/// Not where anything is written any more, except by a macOS bundle. Kept so
+/// the client can say that an extraction left there is no longer read, and so
+/// what was downloaded there can be moved beside the client.
+inline std::filesystem::path perUserDataRoot() {
     namespace fs = std::filesystem;
 #ifdef _WIN32
     if (const char* local = std::getenv("LOCALAPPDATA"); local != nullptr && *local != '\0') {
@@ -56,6 +69,24 @@ inline std::filesystem::path userDataRoot() {
     return fs::path(home) / ".local" / "share" / "wowee" / "Data";
 #endif
 #endif
+}
+
+/// Where this client's assets live when nobody has said: Data/ beside the
+/// executable, or the per-user directory for a macOS application bundle.
+///
+/// Beside the executable rather than the working directory: Windows starts the
+/// client wherever its shortcut says, and the two are not the same folder. If
+/// the executable cannot be located, the working directory is all there is.
+inline std::filesystem::path defaultDataRoot() {
+    namespace fs = std::filesystem;
+    const std::string exeDir = getExecutableDir();
+#ifdef __APPLE__
+    if (exeDir.find(".app/Contents/MacOS") != std::string::npos) return perUserDataRoot();
+#endif
+    std::error_code ec;
+    const fs::path base = exeDir.empty() ? fs::current_path(ec) : fs::path(exeDir);
+    if (base.empty()) return {};
+    return base / "Data";
 }
 
 /// The expansions extracted under a data root, by directory name, sorted.
@@ -96,8 +127,8 @@ inline bool holdsExtraction(const std::filesystem::path& dataRoot) {
 
 /// The data folders something the extraction wrote may be under, most likely
 /// first: the one the client is reading - WOW_DATA_PATH, which startup points
-/// at the per-user folder when an extraction is there - and then Data/ beside
-/// the client. The same folder is not named twice.
+/// at defaultDataRoot() when an extraction is there - and then Data/ in the
+/// working directory. The same folder is not named twice.
 ///
 /// For the lookups that name a file under the data folder by hand rather than
 /// through the asset manager. Those looked in Data/ alone, which is not where
@@ -120,8 +151,8 @@ inline std::vector<std::string> extractionRoots() {
 /// not game data. They ship with the client, in Data/expansions/<id>/ beside
 /// it, and they describe how this build speaks to a server - but the client
 /// reads them from the same directory as the extraction. The extractor does
-/// not write them. So an extraction made anywhere but beside the client - the
-/// per-user data directory, which is where the asset builder puts one - held
+/// not write them. So an extraction made anywhere but beside the client - a
+/// folder chosen in the asset builder, or a macOS bundle's per-user one - held
 /// no expansion.json at all: the client found no expansion to run, opened no
 /// assets, and could log in and then go no further. And one that did have
 /// them, copied in by an older build, went on answering with that build's

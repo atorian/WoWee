@@ -1,5 +1,10 @@
 #pragma once
 
+#include "rendering/liquid_scene.hpp"
+#include "rendering/ocean_waves.hpp"
+#include "rendering/water_wake.hpp"
+
+#include <array>
 #include <vector>
 #include <memory>
 #include <optional>
@@ -10,60 +15,20 @@
 #include <glm/glm.hpp>
 
 namespace wowee {
-namespace pipeline {
-    struct ADTTerrain;
-    struct LiquidData;
-    struct WMOLiquid;
-}
-
 namespace rendering {
 
 class Camera;
+class SeaBedMap;
 class VkContext;
 
 /**
- * Water surface for a single map chunk
- */
-struct WaterSurface {
-    glm::vec3 position;
-    glm::vec3 origin;
-    glm::vec3 stepX;
-    glm::vec3 stepY;
-    float minHeight;
-    float maxHeight;
-    uint16_t liquidType;
-
-    int tileX = -1, tileY = -1;
-    uint32_t wmoId = 0;
-
-    uint8_t xOffset = 0;
-    uint8_t yOffset = 0;
-    uint8_t width = 8;
-    uint8_t height = 8;
-
-    std::vector<float> heights;
-    std::vector<uint8_t> mask;
-
-    // Vulkan render data
-    ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VmaAllocation vertexAlloc = VK_NULL_HANDLE;
-    ::VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VmaAllocation indexAlloc = VK_NULL_HANDLE;
-    int indexCount = 0;
-
-    // Per-surface material UBO
-    ::VkBuffer materialUBO = VK_NULL_HANDLE;
-    VmaAllocation materialAlloc = VK_NULL_HANDLE;
-
-    // Material descriptor set (set 1)
-    VkDescriptorSet materialSet = VK_NULL_HANDLE;
-
-    [[nodiscard]] bool hasHeightData() const { return !heights.empty(); }
-};
-
-/**
- * Water renderer (Vulkan) with planar reflections, Gerstner waves,
- * GGX specular, shoreline foam, and subsurface scattering.
+ * Water renderer (Vulkan) with planar reflections, the wind's sea
+ * (OceanWaves), GGX specular, shoreline foam, and subsurface scattering.
+ *
+ * Draws the liquid a LiquidScene holds and nothing else: it is told of each
+ * surface as it comes and goes (LiquidSceneListener) and keeps only the GPU
+ * copy. What the water is and where - for swimming, the camera, footsteps -
+ * is the scene's to answer.
  */
 // Matches set 2 binding 3 in water.frag.glsl. Keep kMaxWakePoints in step with
 // the MAX_WAKE_POINTS constant declared there.
@@ -73,23 +38,38 @@ struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
     glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
+    // The wind's sea (OceanWaves::cascades, seaState): per cascade xy = the
+    // origin its patch is measured from, z = 1 / patch, w = patch, in yards;
+    // and the sea as it stands - x = root mean square height, y = ride,
+    // z = mean square slope.
+    glm::vec4 oceanCascades[kOceanCascadeCount]{};
+    glm::vec4 oceanSea{0.0f};
+    // How much of each cascade's height and slope the water keeps at the
+    // table's depths and fetches (OceanSea::keptTable).
+    glm::vec4 oceanKept[OceanSea::kKeptEntries / 4]{};
+    // The sea bed under the water (SeaBedMap): world to the map's clip
+    // space, and x = the height of depth 0, y = yards to depth 1, z = 1 once
+    // it has been drawn.
+    glm::mat4 seaBedMatrix{1.0f};
+    glm::vec4 seaBed{0.0f};
+    // The wake round the camera (WaterWake::area): xy = the world position
+    // of its corner, z = 1 / its side in yards, w = 1 once it has run.
+    glm::vec4 wakeArea{0.0f};
 };
 
-class WaterRenderer {
+class WaterRenderer : public LiquidSceneListener {
 public:
     WaterRenderer();
-    ~WaterRenderer();
+    ~WaterRenderer() override;
 
-    bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
+    /// `seaBed` is the map of what lies under the water, which the renderer
+    /// draws and the water reads; it outlives this.
+    bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout, const SeaBedMap* seaBed);
     void shutdown();
 
-    void loadFromTerrain(const pipeline::ADTTerrain& terrain, bool append = false,
-                         int tileX = -1, int tileY = -1);
-
-    void loadFromWMO(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix, uint32_t wmoId);
-    void removeWMO(uint32_t wmoId);
-    void removeTile(int tileX, int tileY);
-    void clear();
+    // LiquidSceneListener: the GPU copy of each surface.
+    void liquidSurfaceAdded(const LiquidSurface& surface) override;
+    void liquidSurfaceRemoved(LiquidSurfaceId id) override;
 
     void recreatePipelines();
 
@@ -117,13 +97,7 @@ public:
     bool beginReflectionPass(VkCommandBuffer cmd);
     void endReflectionPass(VkCommandBuffer cmd);
 
-    // Get the dominant water height near a position (for reflection plane)
-    std::optional<float> getDominantWaterHeight(const glm::vec3& cameraPos) const;
-
-    // Compute reflected view matrix for a given water height
-    static glm::mat4 computeReflectedView(const Camera& camera, float waterHeight);
-    // Compute oblique clip projection to clip below-water geometry in reflection
-    static glm::mat4 computeObliqueProjection(const glm::mat4& proj, const glm::mat4& view, float waterHeight);
+    // The mirrored camera's matrices: water_reflection.hpp.
 
     // Update the reflection UBO with reflected viewProj matrix
     void updateReflectionUBO(const glm::mat4& reflViewProj);
@@ -138,7 +112,7 @@ public:
     VkRenderPass getReflectionRenderPass() const { return reflectionRenderPass; }
     VkExtent2D getReflectionExtent() const { return {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}; }
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
-    bool hasSurfaces() const { return !surfaces.empty(); }
+    bool hasSurfaces() const { return !drawn_.empty(); }
 
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
     bool isEnabled() const { return renderingEnabled; }
@@ -152,29 +126,101 @@ public:
     // which is deliberately smaller than the frame.
     void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
 
-    /// Where a point sits on a surface, if that surface has water there:
-    /// the projection and the render mask, which every query asks first.
-    std::optional<glm::vec2> wateredGridPosition(const WaterSurface& surface,
-                                                 float glX, float glY) const;
+    /// Move the wind's waves on by `deltaSeconds` under a wind of
+    /// `windSpeed` yards a second (gust in) blowing toward `windDirection`,
+    /// measured near `nearby` (the player). Call once per frame.
+    void advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection, glm::vec2 nearby);
+    /// Move the wake round the camera on by `deltaSeconds`, centred near
+    /// `nearby`, with `movers` the bodies in the water now. Once per frame.
+    void advanceWake(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers) {
+        wake_.advance(deltaSeconds, nearby, movers);
+    }
+    /// A frame with none of the water in view: the wake waits (WaterWake::rest).
+    void restWake(double deltaSeconds) { wake_.rest(deltaSeconds); }
 
-    std::optional<float> getWaterHeightAt(float glX, float glY) const;
-    /// Like getWaterHeightAt but only returns water surfaces whose height is
-    /// close to the query Z (within maxAbove units above). Avoids false
-    /// underwater detection from elevated WMO water far above the camera.
-    std::optional<float> getNearestWaterHeightAt(float glX, float glY, float queryZ, float maxAbove = 15.0f) const;
-    std::optional<uint16_t> getWaterTypeAt(float glX, float glY) const;
-    bool isWmoWaterAt(float glX, float glY) const;
+    /// Whether any of the water is in `camera`'s view now, its crests in.
+    /// Only then is there a sea to build (recordWaves), a wake to step, a
+    /// sea bed to draw it over and a mirror to draw for it; render draws
+    /// nothing otherwise. Once a frame, before any of them.
+    bool updateInView(const Camera& camera);
+    [[nodiscard]] bool inView() const { return inView_; }
+    /// Build this frame's sea surface (OceanWaves::record) and step the
+    /// wake (WaterWake::record): outside any render pass, before the water
+    /// is drawn.
+    void recordWaves(VkCommandBuffer cmd) {
+        ocean_.record(cmd);
+        wake_.record(cmd);
+    }
 
-    int getSurfaceCount() const { return static_cast<int>(surfaces.size()); }
+    /// Surfaces with geometry on the GPU.
+    int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
+
+    /// The highest water open to the wind within `halfExtent` yards of
+    /// `centre` (a square), which the sea bed's map is drawn under; none
+    /// when there is no such water there.
+    [[nodiscard]] std::optional<float> highestOpenWaterNear(glm::vec2 centre, float halfExtent) const;
 
 private:
-    void createWaterMesh(WaterSurface& surface);
-    void destroyWaterMesh(WaterSurface& surface);
+    /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
+    struct DrawnSurface {
+        LiquidSurfaceId id = 0;
+        glm::vec3 origin{0.0f};
+        glm::vec3 stepX{0.0f};
+        glm::vec3 stepY{0.0f};
+        float minHeight = 0.0f;
+        float maxHeight = 0.0f;
+        uint16_t liquidType = 0;
+        uint32_t wmoId = 0;
+        uint8_t width = 0;
+        uint8_t height = 0;
+        /// 0 water, 1 ocean, 2 magma, 3 slime - LiquidType.dbc's word for it.
+        uint8_t basicType = 0;
+        LiquidShelter shelter = LiquidShelter::Open;
 
-    glm::vec4 getLiquidColor(uint16_t liquidType) const;
-    float getLiquidAlpha(uint16_t liquidType) const;
+        ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VmaAllocation vertexAlloc = VK_NULL_HANDLE;
+        ::VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VmaAllocation indexAlloc = VK_NULL_HANDLE;
+        int indexCount = 0;
 
-    void updateMaterialUBO(WaterSurface& surface);
+        // Per-surface material UBO
+        ::VkBuffer materialUBO = VK_NULL_HANDLE;
+        VmaAllocation materialAlloc = VK_NULL_HANDLE;
+
+        // Material descriptor set (set 1)
+        VkDescriptorSet materialSet = VK_NULL_HANDLE;
+    };
+
+    /// The box `surface` may be drawn in, as far as its waves carry it, for
+    /// culling it against the camera's view.
+    struct Bounds {
+        glm::vec3 min;
+        glm::vec3 max;
+    };
+    [[nodiscard]] Bounds boundsOf(const DrawnSurface& surface) const;
+
+    void createWaterMesh(DrawnSurface& drawn, const LiquidSurface& surface);
+    void destroyWaterMesh(DrawnSurface& drawn);
+    void destroyAllDrawn();
+
+    /// The water's pipeline for `renderPass` at `samples`: tessellated near
+    /// the camera where the device can, its own mesh otherwise.
+    VkPipeline buildWaterPipeline(VkRenderPass renderPass, VkSampleCountFlagBits samples);
+    /// The stages the push constants reach: the tessellation ones as well
+    /// where the pipeline has them.
+    VkShaderStageFlags pushStages_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    glm::vec4 getLiquidColor(uint8_t basicType) const;
+    float getLiquidAlpha(uint8_t basicType) const;
+
+    /// The wind's sea, as the surface every water surface samples.
+    OceanWaves ocean_;
+    /// What lies under the water; the renderer's.
+    const SeaBedMap* seaBed_ = nullptr;
+    /// What moves through the water leaves in it.
+    WaterWake wake_;
+
+    void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();
     VkExtent2D refractionCaptureExtent() const;
     void createSceneHistoryResources(VkExtent2D extent, VkFormat colorFormat, VkFormat depthFormat);
@@ -257,9 +303,14 @@ private:
     VkPipeline water1xPipeline = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> water1xFramebuffers;
 
-    std::vector<WaterSurface> surfaces;
+    std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
-    bool refractionEnabled = false;
+    bool inView_ = false;
+    // On from the start. The renderer keeps it always on, but did so only when
+    // the interface applied its saved settings, so until then - and in a
+    // renderer with no interface, scene_render - the water had no capture of
+    // what is under it: no depth, no shoreline, no sea bed.
+    bool refractionEnabled = true;
     VkExtent2D renderExtent_{.width = 0, .height = 0};
 };
 

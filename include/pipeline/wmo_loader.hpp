@@ -6,15 +6,10 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "pipeline/wmo_flags.hpp"
+
 namespace wowee {
 namespace pipeline {
-
-/// MOGP flag 0x2000: the group is indoors. It is what separates a building's
-/// inside from the porch and the roof, which are groups of the same model.
-inline constexpr uint32_t kWMOGroupIndoor = 0x2000;
-
-/// MOGP flag 0x4: the group has vertex colours (MOCV).
-inline constexpr uint32_t kWMOGroupHasVertexColors = 0x4;
 
 /**
  * WMO (World Model Object) Format
@@ -33,7 +28,7 @@ struct WMOMaterial {
     uint32_t shader;
     uint32_t blendMode;
     uint32_t texture1;          // Diffuse texture index
-    uint32_t color1;
+    uint32_t sidnColor;         // F_SIDN glow colour, BGRA
     uint32_t texture2;          // Environment/detail texture
     uint32_t color2;
     uint32_t texture3;
@@ -122,7 +117,10 @@ struct WMOLiquid {
     uint32_t xTiles = 0;        // Tiles in X (= xVerts - 1)
     uint32_t yTiles = 0;        // Tiles in Y (= yVerts - 1)
     glm::vec3 basePosition;     // Corner position in model space
-    uint16_t materialId = 0;    // Liquid material/type
+    uint16_t materialId = 0;    // MLIQ's material: an index into the root's MOMT
+    /// The LiquidType.dbc row the group's liquid is, by the client's rule
+    /// over the group header and the root flags (see wmoGroupLiquidType).
+    uint16_t liquidType = 0;
     std::vector<float> heights; // Height per vertex (xVerts * yVerts)
     std::vector<uint8_t> flags; // Flags per tile (xTiles * yTiles)
 
@@ -154,8 +152,11 @@ struct WMOGroup {
     glm::vec3 boundingBoxMax;
     uint16_t portalStart;
     uint16_t portalCount;
-    uint16_t batchCountA;
-    uint16_t batchCountB;
+    /// MOGP transBatchCount, intBatchCount and extBatchCount: how many of
+    /// `batches`, in that order, are of each kind.
+    uint16_t transBatchCount = 0;
+    uint16_t intBatchCount = 0;
+    uint16_t extBatchCount = 0;
     uint32_t fogIndices[4];     // Fog references
     uint32_t liquidType;
     uint32_t groupId;
@@ -181,6 +182,16 @@ struct WMOGroup {
 
     std::string name;
     std::string description;
+
+    /// The run batch `index` is in. The client counts it off the transition
+    /// and interior runs and takes whatever follows as exterior, so it does
+    /// here too: a group with no counts - or the one batch the loader makes
+    /// for a group without MOBA - is all exterior.
+    [[nodiscard]] WMOBatchKind batchKind(size_t index) const {
+        if (index < transBatchCount) return WMOBatchKind::Transition;
+        if (index < static_cast<size_t>(transBatchCount) + intBatchCount) return WMOBatchKind::Interior;
+        return WMOBatchKind::Exterior;
+    }
 };
 
 // Complete WMO Model
@@ -202,6 +213,10 @@ struct WMOModel {
     glm::vec3 ambientColor;     // MOHD ambient color (used for interior group lighting)
     glm::vec3 boundingBoxMin;
     glm::vec3 boundingBoxMax;
+    /// MOHD flags. 0x2: the client's unified path (kWMOModelUnifiedRenderPath).
+    /// 0x4: group liquid is named by its LiquidType.dbc id.
+    uint16_t flags = 0;
+    static constexpr uint16_t kFlagLiquidTypeIsDbcId = 0x4;
 
     // Materials and textures
     std::vector<WMOMaterial> materials;

@@ -21,11 +21,15 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/viewer_motion.hpp"
 #include "rendering/world_environment.hpp"
+#include "rendering/weather_controls.hpp"
+#include "rendering/weather_mix.hpp"
+#include "rendering/lens_drops.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
 #include "pipeline/wind_zones.hpp"
 #include "rendering/wind_field.hpp"
+#include "rendering/liquid_scene.hpp"
 #include "pipeline/grass_clearing.hpp"
 #include "pipeline/grass_population.hpp"
 #include "pipeline/grass_profile.hpp"
@@ -42,15 +46,19 @@ class RenderSurface;
 class TerrainRenderer;
 class TerrainManager;
 class WaterRenderer;
+class SeaBedMap;
 class Skybox;
 class SkyBackground;
-class Celestial;
+class SkyBodies;
 class StarField;
 class Clouds;
 class LensFlare;
-class Weather;
+class ShelterMap;
+class Precipitation;
+class LensWeather;
 class Lightning;
 class LightingManager;
+struct LightingParams;
 class SwimEffects;
 class MountDust;
 class LevelUpEffect;
@@ -174,13 +182,37 @@ public:
     std::unique_ptr<TerrainManager> takeTerrainSession();
     void releaseTerrainSession(TerrainManager* session);
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
+    /// The map's liquid: where it is, how high, what kind, which body.
+    LiquidScene& liquidScene() { return liquidScene_; }
+    const LiquidScene& liquidScene() const { return liquidScene_; }
     Skybox* getSkybox() const { return skySystem ? skySystem->getSkybox() : nullptr; }
-    Celestial* getCelestial() const { return skySystem ? skySystem->getCelestial() : nullptr; }
+    SkyBodies* getSkyBodies() const { return skySystem ? skySystem->getBodies() : nullptr; }
     StarField* getStarField() const { return skySystem ? skySystem->getStarField() : nullptr; }
     Clouds* getClouds() const { return skySystem ? skySystem->getClouds() : nullptr; }
     LensFlare* getLensFlare() const { return skySystem ? skySystem->getLensFlare() : nullptr; }
-    Weather* getWeather() const { return weather.get(); }
     Lightning* getLightning() const { return lightning.get(); }
+
+    // ---- Weather ----
+    /// The weather as it is drawn this frame: the realm's (WorldEnvironment)
+    /// or the dev panel's, coming over.
+    const WeatherMix& weatherMix() const { return weather_.mix(); }
+    const WeatherTarget& weatherTarget() const { return weather_.target(); }
+    /// The dev panel's say over the weather.
+    WeatherControls& weatherControls() { return weatherControls_; }
+    const WeatherControls& weatherControls() const { return weatherControls_; }
+    /// The Weather Detail setting: how much of what falls is drawn, 0-1.
+    void setWeatherDetail(float scale);
+    /// How open to the sky the camera is, 0-1 (ShelterMap::exposure).
+    float skyExposure() const;
+    /// How much of the sky the camera's surroundings leave it, 0-1
+    /// (ShelterMap::skyView).
+    float skyView() const;
+    /// What the weather has left on the camera's lens.
+    const LensDrops& lensDrops() const { return lensDrops_; }
+    /// Drops, flakes, grains and splashes drawn this frame.
+    uint32_t precipitationCount() const;
+    /// The wind as everything that moves in it reads it.
+    const WindState& windState() const { return wind_.state(); }
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
@@ -261,6 +293,24 @@ private:
     // the scene pass itself (see renderWorld).
     bool waterDrawsInContinuePass() const;
 
+    /// The single-sampled water pass over an off-screen, multisampled scene:
+    /// a framebuffer of the water's 1x pass on the post-process target's
+    /// resolved colour and depth. Built in beginFrame, once the frame's target
+    /// is settled and before the passes are chosen, and again whenever that
+    /// target or the water pass is rebuilt.
+    void updateOffscreenWater1xFramebuffer();
+    /// Built, and over the target and pass that exist now.
+    [[nodiscard]] bool offscreenWater1xReady() const;
+    void destroyOffscreenWater1xFramebuffer();
+    VkFramebuffer offscreenWater1xFb_ = VK_NULL_HANDLE;
+    uint64_t offscreenWater1xGeneration_ = 0;
+    /// The target generation a failure was last reported for, so it is said
+    /// once rather than every frame.
+    uint64_t offscreenWater1xFailedGeneration_ = ~uint64_t{0};
+    VkRenderPass offscreenWater1xPass_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xColor_ = VK_NULL_HANDLE;
+    VkImageView offscreenWater1xDepth_ = VK_NULL_HANDLE;
+
     /// Ghost tint, brightness and the minimap, in that order, at the end of
     /// the scene pass. The threaded and single-threaded paths both finish this
     /// way and differ only in which command buffer they are recording into.
@@ -301,28 +351,93 @@ private:
     RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
-    /// How much of the line from the eye to the sun is blocked, smoothed.
-    ///
-    /// Sampled once a frame in update() and eased, because the raw answer is a
-    /// yes or a no and a hill edge crossing it would snap the flare on and off.
-    float sunOcclusion_ = 0.0f;
+    /// The sun's glare, eased as WoW.exe eases it (sky_celestial::easeGlare):
+    /// its hours, the cloud in front of the sun, a sky model over it, and how
+    /// much of the disc the world leaves in view (SkyBodies::measuredVisibility,
+    /// the GPU's occlusion count). Whether the glare, the lens flare and
+    /// the dimming of the scene show. updateGlares() each frame.
+    float sunGlare_ = 0.0f;
+    /// The same without the line of sight - how much the sky around the sun
+    /// shines, for the air and the rays, which a tree in front does not stop.
+    float sunGlareSky_ = 0.0f;
+    /// The moon's glare, by its own hours, cloud rule and easing. It does not
+    /// dim the scene; the client never reads it for that.
+    float moonGlare_ = 0.0f;
+    void updateGlares(float deltaTime);
+    /// The glare sprites over the finished world (SkyBodies::renderGlare): the
+    /// sun's as large and bright as the view is turned onto it, the moon's
+    /// twice the moon; each by its visibility and what the weather leaves.
+    void drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    /// That line, asked of the terrain, the buildings and where the camera is.
-    [[nodiscard]] float sampleSunOcclusion() const;
+    /// The sun as the camera's sky drew it: whether the disc was drawn and,
+    /// if not, why; where it stands and whether it is in view; what it was
+    /// drawn with; and what might hide it. INFO, on a change, at most twice a
+    /// second - for the report of a sun that is not there.
+    void logSunDiagnostic(const SkyParams& params);
+    struct SunDiagState {
+        bool drawn = false;
+        const char* skipped = nullptr;
+        bool inView = false;
+        int angleStep = -1;      ///< from the view direction, 5-degree steps
+        int occlusionStep = -1;  ///< quarters
+        int hourStep = -1;       ///< quarter hours
+        bool weather = false;
+        bool moonDrawn = false;
+        bool operator==(const SunDiagState&) const = default;
+    };
+    SunDiagState sunDiagLast_;
+    double sunDiagLoggedAt_ = -1.0;
 
+    /// LiquidType.dbc, read in initializeRenderers; the scene and the water
+    /// hold pointers to it, so it is declared before both.
+    pipeline::LiquidTypeTable liquidTypes_ = pipeline::LiquidTypeTable::basicOnly();
+    bool liquidTypesLoaded_ = false;
+    /// The map's liquid, which the water renderer draws and everything else
+    /// asks about. It exists whether or not the water can be drawn, and is
+    /// declared before the terrain session that fills it so it outlives it.
+    LiquidScene liquidScene_;
     // A standalone scene owns its default session. The client transfers that
     // session into MapScope as soon as the renderers have been initialized.
     std::unique_ptr<TerrainManager> standaloneTerrain_;
     TerrainManager* terrainManager = nullptr;
     core::JobGroup::Token mapJobToken_;
     std::unique_ptr<WaterRenderer> waterRenderer;
+    /// The water renderer's subscription to liquidScene_; declared after
+    /// both, so it ends before either goes.
+    LiquidScene::Subscription waterSubscription_;
     std::unique_ptr<Skybox> skybox;
-    std::unique_ptr<Celestial> celestial;
     std::unique_ptr<StarField> starField;
     std::unique_ptr<Clouds> clouds;
     std::unique_ptr<LensFlare> lensFlare;
-    std::unique_ptr<Weather> weather;
     std::unique_ptr<Lightning> lightning;
+    // The weather: what is drawn of it this frame, coming toward the realm's
+    // or the dev panel's; where rain cannot reach; what falls; what is on the
+    // lens. The shelter map is drawn in the frame graph's "shelter" pass, the
+    // precipitation with the scene's blended effects (after the water when it
+    // has its own pass, as the spray is), the lens over the finished frame.
+    WeatherBlend weather_;
+    WeatherControls weatherControls_;
+    std::unique_ptr<ShelterMap> shelter_;
+    std::unique_ptr<Precipitation> precipitation_;
+    std::unique_ptr<LensWeather> lensWeather_;
+    LensDrops lensDrops_;
+    /// Whether the precipitation's pipeline was built for the water's pass.
+    bool precipitationDrawsWithWater_ = false;
+    float weatherDetail_ = 1.0f;
+    /// Where the wind carries grit across the screen this frame, screen
+    /// heights a second.
+    glm::vec2 lensWindOnScreen_{0.0f};
+    /// How heavy the weather is as the sky and the light take it.
+    float weatherStrength() const { return weather_.mix().strength(); }
+    /// The light the zone gives this frame with what the weather brings in
+    /// close of its own over it - blowing sand, the fog weather's mist - in
+    /// the sky and the fog alike. What the sky and the fog are drawn from.
+    std::unique_ptr<LightingParams> weatherLight_;
+    void hazeLightForWeather();
+    const LightingParams* weatherLight() const;
+    void updateWeather(float deltaTime);
+    void renderShelterPass();
+    void recordLensWeather();
     std::unique_ptr<LightingManager> lightingManager;
     std::unique_ptr<SkySystem> skySystem;  // Coordinator for sky rendering
     std::unique_ptr<SwimEffects> swimEffects;
@@ -585,6 +700,9 @@ private:
     // what the frame did without it. See pass_ablation.hpp for why the GPU's
     // own timestamps cannot answer that on this platform.
     std::unique_ptr<PassAblation> passAblation_;
+    /// The ablation run has the water, or only its reflection, switched off.
+    [[nodiscard]] bool waterAblated() const;
+    [[nodiscard]] bool waterReflectionAblated() const;
     bool passAblationReported_ = false;
     bool worldDrawnLastFrame_ = false;
     std::chrono::steady_clock::time_point lastFrameStart_{};
@@ -635,6 +753,20 @@ private:
     float fogExtinction_ = -1.0f;
     void renderVolumetricFog();
     void writeFogVolumeBindings(uint32_t slot);
+
+    // What lies under the water near the camera, drawn by the shadow pass's
+    // casters from straight above and read by the water for its depth.
+    // Outlives the water renderer.
+    std::unique_ptr<SeaBedMap> seaBed_;
+    void renderSeaBedPass();
+    /// The bodies in the water near the camera, to the wake.
+    void updateWaterWake(float deltaTime);
+    /// Whether a depth-only pass this frame has reset the buildings' and the
+    /// doodads' caster texture sets, which a later one in the frame then
+    /// reuses: the sun's pass resets both, the sea bed's the buildings', the
+    /// shelter map's whichever is still to be reset.
+    bool wmoCasterSetsReset_ = false;
+    bool m2CasterSetsReset_ = false;
     float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.

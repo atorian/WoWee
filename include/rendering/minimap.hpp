@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <deque>
+#include <list>
 #include <algorithm>
 
 namespace wowee {
@@ -119,11 +120,18 @@ private:
     std::unordered_map<std::string, std::string> trsLookup;
     bool trsParsed = false;
 
-    // Tile texture cache: hash → VkTexture
-    // Evicted (FIFO) when the count of successfully-loaded tiles exceeds MAX_TILE_CACHE.
+    // Tile texture cache: hash → VkTexture, the least recently drawn let go
+    // when more than MAX_TILE_CACHE tiles are loaded. The nine around the
+    // player are drawn every frame, so they are never the ones let go; one
+    // that is goes after the frames in flight that sample it.
+    // A null texture marks a tile that failed to load.
     static constexpr size_t MAX_TILE_CACHE = 128;
-    std::unordered_map<std::string, std::unique_ptr<VkTexture>> tileTextureCache;
-    std::deque<std::string> tileInsertionOrder;  // hashes of successfully loaded tiles, oldest first
+    struct CachedTile {
+        std::unique_ptr<VkTexture> texture;
+        std::list<std::string>::iterator lru;  // tileLru_.end() for a failed tile
+    };
+    std::unordered_map<std::string, CachedTile> tileTextureCache;
+    std::list<std::string> tileLru_;  // hashes of loaded tiles, most recently drawn first
     std::unique_ptr<VkTexture> noDataTexture;
 
     // Composite render target (3x3 tiles = 768x768)

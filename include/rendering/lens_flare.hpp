@@ -51,18 +51,16 @@ public:
      * @param cmd Command buffer to record into
      * @param camera The camera to render from
      * @param sunPosition World-space sun position
-     * @param timeOfDay Current time (0-24 hours)
-     * @param fogDensity Fog density 0-1 (attenuates flare)
-     * @param cloudDensity Cloud density 0-1 (attenuates flare)
-     * @param weatherIntensity Weather intensity 0-1 (rain/snow attenuates flare)
-     * @param sunOcclusion How much of the line to the sun is blocked, 0-1.
-     *        A flare is light scattering inside the lens, so it needs light to
-     *        arrive: with a hillside or a roof in the way there is none, and
-     *        this used to draw one anyway.
+     * @param sunColor The sun's colour (LightParams' sunColor), the light the
+     *        lens scatters; each element's own colour is the coating's tint
+     * @param glareVisibility How much of the sun's glare the camera sees, 0-1
+     *        (SkyParams::sunGlareVisibility): its hours, cloud, weather and
+     *        whatever stands in front of it. The flare had its own guesses at
+     *        each - a 05:00-19:00 window, a height curve, fog, cloud and
+     *        weather factors - and showed where the client's glare does not.
      */
     void render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
-                float timeOfDay, float fogDensity = 0.0f, float cloudDensity = 0.0f,
-                float weatherIntensity = 0.0f, float sunOcclusion = 0.0f);
+                const glm::vec3& sunColor, float glareVisibility);
 
     /**
      * @brief Enable or disable lens flare rendering

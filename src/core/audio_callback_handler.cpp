@@ -288,10 +288,11 @@ void AudioCallbackHandler::setupCallbacks() {
         }
     }));
 
-    // Open dungeon finder callback - server sends SMSG_OPEN_LFG_DUNGEON_FINDER
-    gameHandler_.setOpenLfgCallback([this]() {
-        if (uiManager_) uiManager_->getGameScreen().openDungeonFinder(gameHandler_);
-    });
+    // The server asks the dungeon finder be opened (SMSG_OPEN_LFG_DUNGEON_FINDER).
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::DungeonFinderOpened>(
+        [this](const game::events::DungeonFinderOpened&) {
+            if (uiManager_) uiManager_->getGameScreen().openDungeonFinder(gameHandler_);
+        }));
 }
 
 }} // namespace wowee::core

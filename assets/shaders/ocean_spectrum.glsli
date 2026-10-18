@@ -1,0 +1,294 @@
+// The wind's sea as a spectrum: how much of the water's height and slope
+// each wave vector k carries, under a wind of a given speed and way.
+// Tessendorf's ocean - the surface is a sum of a spectrum's waves, turned
+// into heights and slopes by an inverse FFT each frame (ocean_evolve.comp,
+// ocean_fft.comp) - with the sea's own physics for the spectrum:
+//  - as steep in all as Cox and Munk's sea in that wind: a mean square
+//    slope of 0.00512 U for U m/s, the wind's part of their 0.003 + 0.00512 U;
+//  - the slope shared equally between equal ratios of wavelength, as the
+//    saturated part of a wind sea has it (its height spectrum falls as k^-3),
+//    and falling away below the Phillips peak, k = g / U^2, for waves longer
+//    than the wind can raise;
+//  - spread round the wind by Donelan and Banner's sech^2(beta theta):
+//    narrow near the peak, wide for the short chop, but always downwind;
+//  - each wave running at the speed water carries one that long, gravity
+//    and surface tension both.
+//
+// Plain functions of their arguments, so the tests include this file as
+// C++ (with vec2 and the functions it uses brought into scope).
+
+const float kOceanPi = 3.14159265;
+const float kOceanGravity = 10.7246;      // yards / s^2: 9.80665 m/s^2
+const float kOceanTension = 9.5137e-5;    // yards^3 / s^2: water's surface tension over its density
+const float kOceanYardsToMetres = 0.9144;
+
+/// The grid: kOceanSize by kOceanSize wave vectors to each cascade.
+const int kOceanSize = 256;
+const int kOceanCascades = 3;
+
+/// The three cascades' patches, in yards: each repeats over its own patch,
+/// and the sizes go by ratios that are not whole numbers, so the repeats
+/// never line up into one. Each holds one band of the spectrum - its waves
+/// from kOceanBandEdge below to the next above - wide enough that its
+/// shortest are well inside its grid and its longest have enough ways round.
+const float kOceanPatch0 = 251.0;
+const float kOceanPatch1 = 31.7;
+const float kOceanPatch2 = 4.3;
+const float kOceanEdge1 = 1.2;     // radians a yard: a wavelength of 5.2 yards
+const float kOceanEdge2 = 9.0;     // radians a yard: 0.7 yards
+const float kOceanShortest = 0.3;  // yards: below this no pixel ever shows one
+
+float oceanPatch(int cascade) {
+    return cascade == 0 ? kOceanPatch0 : (cascade == 1 ? kOceanPatch1 : kOceanPatch2);
+}
+float oceanBandLow(int cascade) {
+    return cascade == 0 ? 2.0 * kOceanPi / kOceanPatch0 : (cascade == 1 ? kOceanEdge1 : kOceanEdge2);
+}
+float oceanBandHigh(int cascade) {
+    return cascade == 0 ? kOceanEdge1 : (cascade == 1 ? kOceanEdge2 : 2.0 * kOceanPi / kOceanShortest);
+}
+
+/// Radians a second of a wave of `k` radians a yard: w^2 = g k + (T/rho) k^3.
+float oceanAngularSpeed(float k) {
+    return sqrt(kOceanGravity * k + kOceanTension * k * k * k);
+}
+
+/// The same, made the nearest whole multiple of 2 pi / `repeatSeconds`, so
+/// the sea repeats itself after that long and its clock can be kept below
+/// it - a float holds the phase of a quick wave hours into the session no
+/// better than to a tenth of a turn.
+const float kOceanRepeatSeconds = 256.0;
+float oceanRepeatingAngularSpeed(float k, float repeatSeconds) {
+    float step = 2.0 * kOceanPi / repeatSeconds;
+    return floor(oceanAngularSpeed(k) / step + 0.5) * step;
+}
+
+/// Cox and Munk's mean square slope, the wind's part, for a wind of
+/// `speedYards` yards a second.
+float oceanMeanSquareSlope(float speedYards) {
+    return 0.00512 * max(speedYards, 0.0) * kOceanYardsToMetres;
+}
+
+/// Donelan and Banner's beta, for waves of angular speed `omega` in a sea
+/// that peaks at `peakOmega`.
+float oceanSpreadBeta(float omega, float peakOmega) {
+    float r = max(omega / peakOmega, 0.56);
+    if (r < 0.95) return 2.61 * pow(r, 1.3);
+    if (r < 1.6) return 2.28 * pow(r, -1.3);
+    return pow(10.0, -0.4 + 0.8393 * exp(-0.567 * log(r * r)));
+}
+
+/// Share of a wavelength's waves running `angle` radians off the wind,
+/// a density over the circle (it integrates to one).
+float oceanSpread(float angle, float beta) {
+    float s = 1.0 / cosh(beta * angle);
+    return beta / (2.0 * tanh(beta * kOceanPi)) * s * s;
+}
+
+/// The spectrum's shape: mean square slope per unit area of the plane of
+/// wave vectors, before it is scaled to the sea's whole (oceanSlopeScale):
+/// the Phillips fall below the peak, the spread round the wind, and 1 / k^2
+/// for an equal share to equal ratios of wavelength. `toward` is unit.
+float oceanSlopeShape(vec2 k, vec2 toward, float speedYards) {
+    float kl = length(k);
+    if (kl <= 0.0 || speedYards <= 0.0) return 0.0;
+    float peakK = kOceanGravity / (speedYards * speedYards);
+    float below = peakK / kl;
+    float beta = oceanSpreadBeta(oceanAngularSpeed(kl), oceanAngularSpeed(peakK));
+    float angle = acos(clamp(dot(k / kl, toward), -1.0, 1.0));
+    return exp(-below * below) * oceanSpread(angle, beta) / (kl * kl);
+}
+
+/// The variance of the height one wave vector of `cascade`'s grid carries:
+/// the slope its cell of the plane holds, over k^2. Zero outside the
+/// cascade's band, so no wave is counted twice. `slopeScale` makes the whole
+/// spectrum as steep as Cox and Munk's sea (computed by the renderer as the
+/// mean square slope over the integral of the shape).
+float oceanModeHeightVariance(vec2 k, int cascade, vec2 toward, float speedYards, float slopeScale) {
+    float kl = length(k);
+    if (kl < oceanBandLow(cascade) || kl >= oceanBandHigh(cascade)) return 0.0;
+    float cell = 2.0 * kOceanPi / oceanPatch(cascade);
+    return slopeScale * oceanSlopeShape(k, toward, speedYards) * cell * cell / (kl * kl);
+}
+
+/// The integral of oceanSlopeShape over the wave vectors the cascades hold,
+/// from the longest wave the first patch repeats over to kOceanShortest. The
+/// spread integrates to one round the circle, which leaves the Phillips fall
+/// over k dk - a sum over equal steps of ln k.
+float oceanSlopeShapeIntegral(float speedYards) {
+    if (speedYards <= 0.0) return 0.0;
+    float peakK = kOceanGravity / (speedYards * speedYards);
+    float lo = log(oceanBandLow(0));
+    float hi = log(oceanBandHigh(kOceanCascades - 1));
+    const int kSteps = 256;
+    float sum = 0.0;
+    for (int i = 0; i < kSteps; ++i) {
+        float below = peakK / exp(lo + (hi - lo) * (float(i) + 0.5) / float(kSteps));
+        sum += exp(-below * below);
+    }
+    return sum * (hi - lo) / float(kSteps);
+}
+
+/// What oceanModeHeightVariance's shape is scaled by, so the whole sea is
+/// as steep as Cox and Munk's in a wind of `speedYards`.
+float oceanSlopeScale(float speedYards) {
+    float integral = oceanSlopeShapeIntegral(speedYards);
+    return integral > 0.0 ? oceanMeanSquareSlope(speedYards) / integral : 0.0;
+}
+
+/// A sea does not follow its wind at once: each wave grows toward what the
+/// wind asks of it, or dies away, over kOceanResponsePeriods of its own
+/// periods - the short chop in seconds, thirty-yard waves over a minute and
+/// more - so a gust ruffles the water and leaves the long waves as they
+/// were. A wave of `k` holding `current` of its height variance, `dt`
+/// seconds on, toward `target`.
+const float kOceanResponsePeriods = 20.0;
+float oceanRelaxedVariance(float current, float target, float k, float dt) {
+    float period = 2.0 * kOceanPi / max(oceanAngularSpeed(k), 1e-6);
+    float settle = 1.0 - exp(-dt / (kOceanResponsePeriods * period));
+    return current + (target - current) * settle;
+}
+
+/// How much of the sea a wave of `omega` radians a second keeps in water
+/// `depth` yards deep: Kitaigorodskii's depth function, as the TMA spectrum
+/// takes it (Bouws et al. 1985) - the share of the deep-water spectrum's
+/// energy a depth-limited sea holds at that frequency. A wave feels the bed
+/// once the water is shallower than about half its length: the long waves
+/// lie down first as the shore comes up, the short chop last, and where
+/// there is no water under the surface - a wall, a pier, the beach - there
+/// is no wave.
+float oceanDepthFactor(float omega, float depth) {
+    if (depth <= 0.0) return 0.0;
+    float scaled = omega * sqrt(depth / kOceanGravity);
+    if (scaled < 1.0) return 0.5 * scaled * scaled;
+    if (scaled < 2.0) return 1.0 - 0.5 * (2.0 - scaled) * (2.0 - scaled);
+    return 1.0;
+}
+
+/// The depths each cascade's share of the sea is tabulated at for the
+/// water's shaders (OceanSea::shoalingTable): kOceanShoalingSteps of them,
+/// from a quarter of a yard, each 2^0.6 deeper than the last, to 128 yards -
+/// below which even the longest wave the cascades hold barely feels the bed.
+const int kOceanShoalingSteps = 16;
+const float kOceanShoalingShallowest = 0.25;
+const float kOceanShoalingStepLog2 = 0.6;
+
+float oceanShoalingDepth(int step) {
+    return kOceanShoalingShallowest * exp2(kOceanShoalingStepLog2 * float(step));
+}
+
+/// Where `depth` falls in the table: x the step below it, y how far toward
+/// the next. Above the shallowest step x is -1, and the value there runs
+/// from nothing at no depth to the shallowest step's; past the deepest it
+/// stays at the deepest.
+vec2 oceanShoalingSlot(float depth) {
+    if (depth <= kOceanShoalingShallowest) return vec2(-1.0, max(depth, 0.0) / kOceanShoalingShallowest);
+    float at = log2(depth / kOceanShoalingShallowest) / kOceanShoalingStepLog2;
+    float last = float(kOceanShoalingSteps - 1);
+    if (at >= last) return vec2(last - 1.0, 1.0);
+    float below = floor(at);
+    return vec2(below, at - below);
+}
+
+/// How much of the sea a wave of `k` keeps `fetch` yards downwind of the
+/// shore, in a wind of `speedYards`. A wind raises waves only over the
+/// water it has blown across: JONSWAP (Hasselmann et al. 1973) found the sea
+/// peaking at w U / g = 22 X^-0.33 for a fetch made X = g fetch / U^2 - a
+/// pond's waves a hand's breadth long in a wind that raises thirty-yard
+/// waves at sea. The spectrum here peaks at w U / g = 1, the open sea's;
+/// a shorter fetch moves its Phillips fall up to the fetch's peak, and the
+/// short waves above it, which saturate within yards, are as they were.
+const float kOceanJonswapPeak = 22.0;
+const float kOceanJonswapPower = -0.33;
+/// The wavenumber the sea `fetch` yards downwind of the shore peaks at in a
+/// wind of `speedYards` (not still): the open sea's, g / U^2, or above it.
+float oceanFetchPeak(float speedYards, float fetch) {
+    float openPeak = kOceanGravity / (speedYards * speedYards);
+    float scaledFetch = kOceanGravity * fetch / (speedYards * speedYards);
+    float peak = max(1.0, kOceanJonswapPeak * pow(scaledFetch, kOceanJonswapPower));
+    return openPeak * peak * peak;
+}
+/// What a wave of `k` keeps of the open sea's, where the sea peaks at
+/// `fetchPeak` and the open sea at `openPeak`: exp(-(fetchPeak / k)^2)
+/// over the open sea's exp(-(openPeak / k)^2).
+float oceanFetchKept(float k, float openPeak, float fetchPeak) {
+    return exp(-(fetchPeak * fetchPeak - openPeak * openPeak) / (k * k));
+}
+float oceanFetchFactor(float k, float speedYards, float fetch) {
+    if (speedYards <= 0.0) return 1.0;
+    if (fetch <= 0.0) return 0.0;
+    return oceanFetchKept(k, kOceanGravity / (speedYards * speedYards), oceanFetchPeak(speedYards, fetch));
+}
+
+/// The fetches each cascade's share of the sea is tabulated at
+/// (OceanSea::keptTable): kOceanFetchSteps of them, from two yards, each
+/// 2^0.6 longer than the last, to a thousand yards; past those, a row more
+/// for the open sea, which no shore limits.
+const int kOceanFetchSteps = 16;
+const int kOceanFetchRows = kOceanFetchSteps + 1;
+const float kOceanFetchShortest = 2.0;
+const float kOceanFetchStepLog2 = 0.6;
+/// Farther than any shore the sea bed's map can find: the open sea.
+const float kOceanOpenFetch = 1e6;
+
+float oceanFetchDistance(int row) {
+    return row >= kOceanFetchSteps ? kOceanOpenFetch
+                                   : kOceanFetchShortest * exp2(kOceanFetchStepLog2 * float(row));
+}
+
+/// Where `fetch` falls among the rows: x the row below, y how far toward
+/// the next. Above the shortest x is -1, from nothing at the shore to the
+/// shortest's; past the longest tabulated it runs over one step more to the
+/// open sea's row, and stays there.
+vec2 oceanFetchSlot(float fetch) {
+    if (fetch <= kOceanFetchShortest) return vec2(-1.0, max(fetch, 0.0) / kOceanFetchShortest);
+    float at = log2(fetch / kOceanFetchShortest) / kOceanFetchStepLog2;
+    float last = float(kOceanFetchSteps);
+    if (at >= last) return vec2(last - 1.0, 1.0);
+    float below = floor(at);
+    return vec2(below, at - below);
+}
+
+/// How far a point of the water rides toward the crests, 0 to 1. Under a
+/// passing wave a point goes round a circle as wide as the wave is high,
+/// which carries it toward each crest: crests sharp, troughs wide. Riding
+/// all the way stretches the surface by 1 + the divergence of the ride, and
+/// that divergence varies over the sea as much as its slope does - its mean
+/// square is the mean square slope. Where it falls below -1 the surface
+/// folds over itself, so the ride is cut until that takes three standard
+/// deviations, and kOceanFoldMargin to spare. For a sea of
+/// `meanSquareSlope` as it stands, which a falling wind leaves steeper than
+/// the wind now asks for.
+const float kOceanFoldMargin = 0.9;
+float oceanRide(float meanSquareSlope) {
+    float sigma = sqrt(max(meanSquareSlope, 0.0));
+    return sigma * 3.0 <= kOceanFoldMargin ? 1.0 : kOceanFoldMargin / (3.0 * sigma);
+}
+
+/// The wave vector of grid cell (x, y) of `cascade`: centred, so cell
+/// (kOceanSize / 2, kOceanSize / 2) is the still water at k = 0.
+vec2 oceanWaveVector(int x, int y, int cascade) {
+    float cell = 2.0 * kOceanPi / oceanPatch(cascade);
+    return vec2(float(x - kOceanSize / 2), float(y - kOceanSize / 2)) * cell;
+}
+
+/// A fixed pair of independent standard normal numbers for grid cell
+/// (x, y) of `cascade`: the sea's own random draw, the same every frame and
+/// every run, so its waves keep their places as the wind changes their size.
+uint oceanHash(uint v) {
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    v ^= v >> 16u;
+    return v;
+}
+vec2 oceanGaussianPair(int x, int y, int cascade) {
+    uint seed = uint(x) + uint(y) * 4099u + uint(cascade) * 16777619u;
+    uint a = oceanHash(seed * 2u + 1u);
+    uint b = oceanHash(seed * 2u + 2u);
+    float u1 = (float(a >> 8u) + 1.0) / 16777217.0;   // (0, 1]
+    float u2 = float(b >> 8u) / 16777216.0;           // [0, 1)
+    float r = sqrt(-2.0 * log(u1));
+    return vec2(r * cos(2.0 * kOceanPi * u2), r * sin(2.0 * kOceanPi * u2));
+}

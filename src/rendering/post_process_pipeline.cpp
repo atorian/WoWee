@@ -163,6 +163,26 @@ VkImage PostProcessPipeline::getSceneDepthImage() const {
     return VK_NULL_HANDLE;
 }
 
+VkImageView PostProcessPipeline::getSceneResolvedColorView() const {
+    if (getSceneFramebuffer() == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return fsr2_.sceneColor.imageView;
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer) return fxaa_.sceneColor.imageView;
+    if (fsr_.enabled && fsr_.sceneFramebuffer) return fsr_.sceneColor.imageView;
+    return VK_NULL_HANDLE;
+}
+
+VkImageView PostProcessPipeline::getSceneResolvedDepthView() const {
+    if (getSceneFramebuffer() == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const bool msaa = vkCtx_ && vkCtx_->getMsaaSamples() != VK_SAMPLE_COUNT_1_BIT;
+    auto pick = [msaa](const auto& resolve, const auto& depth) {
+        return msaa ? resolve.imageView : depth.imageView;
+    };
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return pick(fsr2_.sceneDepthResolve, fsr2_.sceneDepth);
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer) return pick(fxaa_.sceneDepthResolve, fxaa_.sceneDepth);
+    if (fsr_.enabled && fsr_.sceneFramebuffer) return pick(fsr_.sceneDepthResolve, fsr_.sceneDepth);
+    return VK_NULL_HANDLE;
+}
+
 bool PostProcessPipeline::isFsr2BlockingMsaa() const {
     return fsr2_.enabled && vkCtx_ && !vkCtx_->isDepthResolveSupported();
 }
@@ -542,6 +562,7 @@ const char* PostProcessPipeline::getAmdFsr3FramegenRuntimePath() const {
 
 bool PostProcessPipeline::initFSRResources() {
     if (!vkCtx_) return false;
+    ++sceneTargetGeneration_;
 
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator alloc = vkCtx_->getAllocator();
@@ -754,6 +775,7 @@ bool PostProcessPipeline::initFSRResources() {
 
 void PostProcessPipeline::destroyFSRResources() {
     if (!vkCtx_) return;
+    ++sceneTargetGeneration_;
 
     DeferredResources retired(*vkCtx_);
 
@@ -818,6 +840,7 @@ float PostProcessPipeline::halton(uint32_t index, uint32_t base) {
 
 bool PostProcessPipeline::initFSR2Resources() {
     if (!vkCtx_) return false;
+    ++sceneTargetGeneration_;
 
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator alloc = vkCtx_->getAllocator();
@@ -1065,7 +1088,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.motionVecPipelineLayout;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.motionVecPipeline) != VK_SUCCESS) {
+        if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr, &fsr2_.motionVecPipeline) != VK_SUCCESS) {
             LOG_ERROR("FSR2: failed to create motion vector pipeline");
             compMod.destroy();
             destroyFSR2Resources();
@@ -1159,7 +1182,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.accumulatePipelineLayout;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.accumulatePipeline) != VK_SUCCESS) {
+        if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr, &fsr2_.accumulatePipeline) != VK_SUCCESS) {
             LOG_ERROR("FSR2: failed to create accumulation pipeline");
             compMod.destroy();
             destroyFSR2Resources();
@@ -1299,6 +1322,7 @@ bool PostProcessPipeline::initFSR2Resources() {
 
 void PostProcessPipeline::destroyFSR2Resources() {
     if (!vkCtx_) return;
+    ++sceneTargetGeneration_;
 
     DeferredResources retired(*vkCtx_);
 
@@ -1631,6 +1655,7 @@ void PostProcessPipeline::renderFSR2Sharpen() {
 
 bool PostProcessPipeline::initFXAAResources() {
     if (!vkCtx_) return false;
+    ++sceneTargetGeneration_;
 
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator alloc = vkCtx_->getAllocator();
@@ -1850,6 +1875,7 @@ bool PostProcessPipeline::initFXAAResources() {
 
 void PostProcessPipeline::destroyFXAAResources() {
     if (!vkCtx_) return;
+    ++sceneTargetGeneration_;
     DeferredResources retired(*vkCtx_);
 
     retired.destroy(fxaa_.pipeline);

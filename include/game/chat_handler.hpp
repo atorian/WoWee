@@ -2,6 +2,7 @@
 
 #include <deque>
 
+#include "core/event_bus.hpp"
 #include "game/chat_filters.hpp"
 #include "game/chat_log.hpp"
 
@@ -12,6 +13,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,10 +21,53 @@
 #include <vector>
 
 namespace wowee {
+namespace core { class CVarStore; }
 namespace game {
 
-class GameHandler;
+class PacketSender;
+class FrameXmlEvents;
+class PacketParsers;
+class EmoteTable;
+struct Character;
+struct GroupListData;
+struct GuildRosterData;
 struct TextSubject;
+
+/// What chat asks of the rest of the game: who the player is and where, who
+/// another player is, and the tables a line is dressed from. Grouped by the
+/// owner of each answer.
+class ChatQueries {
+public:
+    virtual ~ChatQueries() = default;
+
+    // ---- The character ----
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    /// The character logged in, or null between characters.
+    [[nodiscard]] virtual const Character* activeCharacter() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    [[nodiscard]] virtual const MovementInfo& playerMovement() const = 0;
+
+    // ---- Other players ----
+    /// The name the game knows a guid by, or empty.
+    [[nodiscard]] virtual std::string playerName(uint64_t guid) const = 0;
+    virtual void requestPlayerName(uint64_t guid) = 0;
+    /// Class, race and gender as a name query answered them; 0 (gender 2)
+    /// while unknown.
+    [[nodiscard]] virtual uint8_t playerClassOf(uint64_t guid) const = 0;
+    [[nodiscard]] virtual uint8_t playerRaceOf(uint64_t guid) const = 0;
+    [[nodiscard]] virtual uint8_t playerGenderOf(uint64_t guid) const = 0;
+    [[nodiscard]] virtual const GroupListData& party() const = 0;
+    [[nodiscard]] virtual const GuildRosterData& guildRoster() const = 0;
+    /// The player's guild rank's rights, or nothing while the rank is not
+    /// known.
+    [[nodiscard]] virtual std::optional<uint32_t> guildRankRights() const = 0;
+
+    // ---- What the client's data says ----
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    /// Languages.dbc's name for a language ("Common"), "Universal" for 0.
+    [[nodiscard]] virtual std::string languageName(uint32_t languageId) const = 0;
+    [[nodiscard]] virtual std::string achievementName(uint32_t achievementId) = 0;
+};
 
 /// The chat log is this handler's, and the domains that write a line to it
 /// are handed it as a ChatLog.
@@ -31,7 +76,8 @@ public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit ChatHandler(GameHandler& owner);
+    ChatHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                ChatQueries& queries, const core::CVarStore& cvars, const EmoteTable& emotes);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -46,17 +92,19 @@ public:
     void requestChannelList(const std::string& channelName);
     [[nodiscard]] std::string getChannelByIndex(int index) const;
     [[nodiscard]] int getChannelIndex(const std::string& channelName) const;
-    [[nodiscard]] const std::vector<std::string>& getJoinedChannels() const { return joinedChannels_; }
+    [[nodiscard]] const std::vector<std::string>& getJoinedChannels() const {
+        return conversation_.joinedChannels;
+    }
     /// Whether the player owns this channel - the one who created it, or who
     /// it passed to. SMSG_CHANNEL_NOTIFY says so with OWNER_CHANGED, which
     /// carries the new owner's guid: AzerothCore's Channel::MakeOwnerChanged
     /// writes _ownerGUID into it.
     [[nodiscard]] bool ownsChannel(const std::string& name) const {
-        return ownedChannels_.count(name) != 0;
+        return conversation_.ownedChannels.count(name) != 0;
     }
     /// Who sent the line with this id, or zero if it is not remembered.
     [[nodiscard]] uint64_t chatLineSender(uint32_t lineId) const {
-        for (const auto& [id, guid] : chatLineSenders_)
+        for (const auto& [id, guid] : conversation_.lineSenders)
             if (id == lineId) return guid;
         return 0;
     }
@@ -66,8 +114,8 @@ public:
     /// no members to show and reported every channel as having none.
     [[nodiscard]] const std::vector<ChannelMember>& getChannelRoster(const std::string& channel) const {
         static const std::vector<ChannelMember> empty;
-        auto it = channelRosters_.find(channel);
-        return (it != channelRosters_.end()) ? it->second : empty;
+        auto it = conversation_.channelRosters.find(channel);
+        return (it != conversation_.channelRosters.end()) ? it->second : empty;
     }
     void autoJoinDefaultChannels();
     void addLocalChatMessage(const MessageChatData& msg);
@@ -89,8 +137,8 @@ public:
     void toggleAfk(const std::string& message);
     void toggleDnd(const std::string& message);
     void replyToLastWhisper(const std::string& message);
-    [[nodiscard]] bool isAfk() const { return afk_; }
-    [[nodiscard]] bool isDnd() const { return dnd_; }
+    [[nodiscard]] bool isAfk() const { return conversation_.afk; }
+    [[nodiscard]] bool isDnd() const { return conversation_.dnd; }
     /// Who /r answers: the last player to whisper, by the name the whisper
     /// came with or, when it came with none, the one the name cache has for
     /// that guid since.
@@ -101,18 +149,22 @@ public:
     /// Replace the text of the ticket already open.
     void updateGmTicket(const std::string& text);
 
-    /// Release the lines held for `guid`, now that its name is known.
-    void flushChatAwaitingName(uint64_t guid);
     /// Release anything whose wait has run out, named or not. A line nobody
     /// answers for is still a line the player should see.
     void expireChatAwaitingName();
     void handleMotd(network::Packet& packet);
 
     // --- State accessors ---
-    std::deque<MessageChatData>& getChatHistory() { return chatHistory_; }
-    [[nodiscard]] const std::deque<MessageChatData>& getChatHistory() const { return chatHistory_; }
+    [[nodiscard]] const std::deque<MessageChatData>& getChatHistory() const { return conversation_.history; }
+    /// /clear: the player emptying their own log.
+    void clearChatHistory() { conversation_.history.clear(); }
     [[nodiscard]] size_t getMaxChatHistory() const { return maxChatHistory_; }
     void setMaxChatHistory(size_t n) { maxChatHistory_ = n; }
+
+    /// SMSG_AREA_TRIGGER_MESSAGE texts not yet shown as a notice, oldest
+    /// first; the notice takes them.
+    [[nodiscard]] bool hasAreaTriggerMessage() const { return !conversation_.areaTriggerMessages.empty(); }
+    std::string takeAreaTriggerMessage();
 
     // Chat auto-join settings (aliased from handler_types.hpp)
     using ChatAutoJoin = game::ChatAutoJoin;
@@ -131,7 +183,6 @@ private:
         uint64_t guid = 0;
         double deadline = 0.0;
     };
-    std::deque<ChatAwaitingName> chatAwaitingName_;
     /// Long enough for a name query to come back on a working connection,
     /// short enough that a line does not feel withheld.
     static constexpr double kNameWaitSeconds = 1.0;
@@ -157,50 +208,68 @@ private:
                              uint8_t memberFlags, bool removing);
     void initializeChatLog();
     void logChatMessage(const MessageChatData& msg, const char* source);
+    void raiseUiError(const std::string& message);
+    /// Release the lines held for `guid`, now that its name is known.
+    void flushChatAwaitingName(uint64_t guid);
+    /// The logged-in character as the $-tokens of an NPC's line read them.
+    [[nodiscard]] TextSubject readerSubject() const;
 
-    GameHandler& owner_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    ChatQueries& queries_;
+    const core::CVarStore& cvars_;
+    const EmoteTable& emotes_;
 
-    // --- State ---
-    std::deque<MessageChatData> chatHistory_;
-    /// What has just been said, for the spam filter. Short on purpose: this
-    /// is looking for a line pasted again a moment later, not keeping a record
-    /// of the conversation. See repeatsRecentLine in chat_filters.hpp.
-    std::deque<RecentChatLine> recentChatLines_;
+    /// The character's conversation: what was said to them, where they are
+    /// listening, whether they are away and who /r answers. Assigned whole
+    /// when a character logs in (events::CharacterLoggingIn), so none of it
+    /// reaches the next character - the server joins a character to its own
+    /// channels and nobody has whispered them yet.
+    struct Conversation {
+        std::deque<MessageChatData> history;
+        /// What has just been said, for the spam filter. Short on purpose:
+        /// this is looking for a line pasted again a moment later, not keeping
+        /// a record of the conversation. See repeatsRecentLine.
+        std::deque<RecentChatLine> recentLines;
+        /// Who sent the message a chat line id names, newest last.
+        ///
+        /// Every chat event carries a line id as its eleventh argument, and
+        /// FrameXML builds it into the player link on the name - so a
+        /// right-click on that name hands the id back and expects the client
+        /// to know which message it was. Bounded: only recent lines can be
+        /// reported anyway.
+        std::deque<std::pair<uint32_t, uint64_t>> lineSenders;
+        uint32_t nextLineId = 1;
+        std::deque<ChatAwaitingName> awaitingName;
+        std::vector<std::string> joinedChannels;
+        std::set<std::string> ownedChannels;
+        std::unordered_map<std::string, std::vector<ChannelMember>> channelRosters;
+        // Away and do-not-disturb, with what the auto-reply says for each.
+        bool afk = false;
+        bool dnd = false;
+        std::string afkMessage;
+        std::string dndMessage;
+        /// Whisperers already answered while away, so two clients both away
+        /// do not answer each other forever. Cleared when AFK/DND ends.
+        std::unordered_set<std::string> autoRepliedSenders;
+        /// The last player to whisper, for /r. The guid as well as the name:
+        /// a whisper can arrive before its sender's name does.
+        std::string lastWhisperSender;
+        uint64_t lastWhisperSenderGuid = 0;
+        std::deque<std::string> areaTriggerMessages;
+    };
+    Conversation conversation_;
+
     size_t maxChatHistory_ = 100;
-    uint64_t chatUidCounter_ = 0;  // monotonic uid for MessageChatData::uid
-    std::vector<std::string> joinedChannels_;
-    std::set<std::string> ownedChannels_;
-    /// Who sent the message a chat line id names, newest last.
-    ///
-    /// Every chat event carries a line id as its eleventh argument, and
-    /// FrameXML builds it into the player link on the name - so a right-click
-    /// on that name hands the id back and expects the client to know which
-    /// message it was. This client sent zero for all of them, which is one id
-    /// shared by every line ever printed and therefore no id at all.
-    ///
-    /// Bounded, because a session's chat is unbounded and only recent lines can
-    /// be reported anyway.
-    std::deque<std::pair<uint32_t, uint64_t>> chatLineSenders_;
-    uint32_t nextChatLineId_ = 1;
-    std::unordered_map<std::string, std::vector<ChannelMember>> channelRosters_;
+    /// Monotonic across characters: the interface tells new lines by it.
+    uint64_t chatUidCounter_ = 0;
     bool chatLogEnabled_ = false;
     bool chatLogInitialized_ = false;
     std::string chatLogPath_;
     std::ofstream chatLogStream_;
 
-    // Away and do-not-disturb, with what the auto-reply says for each.
-    bool afk_ = false;
-    bool dnd_ = false;
-    std::string afkMessage_;
-    std::string dndMessage_;
-    // Track senders we've already auto-replied to (AFK/DND) this session
-    // to prevent infinite reply loops. Cleared when AFK/DND is toggled off.
-    std::unordered_set<std::string> afkAutoRepliedSenders_;
-
-    // The last player to whisper, for /r. The guid as well as the name: a
-    // whisper can arrive before its sender's name does.
-    std::string lastWhisperSender_;
-    uint64_t lastWhisperSenderGuid_ = 0;
+    std::vector<core::EventBus::Subscription> subscriptions_;
 };
 
 } // namespace game

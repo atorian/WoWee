@@ -8,15 +8,19 @@ namespace game {
 // The half that needs a client. Kept out of text_tokens.cpp so the substitution
 // itself links against nothing and can be exercised on its own.
 
-TextSubject textSubjectFor(GameHandler& gameHandler) {
+TextSubject textSubjectFor(const Character* character) {
     TextSubject subject;
-    if (const auto* character = gameHandler.getActiveCharacter()) {
+    if (character) {
         subject.gender = character->gender;
         if (!character->name.empty()) subject.name = character->name;
         subject.className = getClassName(character->characterClass);
         subject.raceName = getRaceName(character->race);
     }
     return subject;
+}
+
+TextSubject textSubjectFor(GameHandler& gameHandler) {
+    return textSubjectFor(gameHandler.getActiveCharacter());
 }
 
 std::string resolveTextTokens(const std::string& text, GameHandler& gameHandler) {

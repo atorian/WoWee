@@ -14,8 +14,9 @@
 /// transparent, and the two gate banners of Stormwind, one texture, swung
 /// about the first banner's pivot.
 ///
-/// Material flags are here only through what they change. F_UNLIT is
-/// `unlit`; F_SIDN and F_WINDOW reach the draw through `isWindow`. F_UNFOGGED
+/// Material flags are here only through what they change. F_UNLIT and
+/// F_WINDOW are in `lighting`, with the batch's run and its group's flags
+/// (wmo_lighting.hpp); F_SIDN is `sidnColor`, the glow it brings. F_UNFOGGED
 /// and F_UNCULLED change nothing yet - every WMO pipeline draws both faces and
 /// fogs every batch - so keying on them would only split batches that draw the
 /// same.
@@ -24,14 +25,19 @@
 #include <cstdint>
 #include <vector>
 
+#include "rendering/wmo_lighting.hpp"
+
 namespace wowee::rendering {
 
 /// Everything a merged batch takes from the material of the batches in it.
 struct WmoBatchState {
     const void* texture = nullptr;  ///< the texture bound, fallback included
     uint32_t blendMode = 0;         ///< MOMT blend mode: 1 alpha-tests, 2+ blends
-    bool unlit = false;
-    bool isWindow = false;
+    /// The light the batch is drawn with. A group's transition and interior
+    /// batches on one texture are lit apart, so they draw apart.
+    WmoBatchLighting lighting;
+    /// MOMT sidnColor (BGRA) of an F_SIDN material, 0 for any other.
+    uint32_t sidnColor = 0;
     bool isLava = false;
     uint8_t emissiveLevel = 0;
     /// Where cloth hangs: the top edge, how far it drops, and its middle.
@@ -45,7 +51,6 @@ struct WmoBatchState {
     /// merged batch of its own, which a retry can then give its texture alone.
     /// UINT32_MAX when the texture loaded.
     uint32_t pendingTexture = UINT32_MAX;
-    bool exteriorLighting = false;  ///< lit as exterior despite a portal-interior group
 
     bool operator==(const WmoBatchState&) const = default;
 };

@@ -7,6 +7,7 @@
 #include "pipeline/asset_manifest.hpp"
 #include "pipeline/loose_file_reader.hpp"
 #include <atomic>
+#include <list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -152,12 +153,20 @@ public:
      */
     [[nodiscard]] bool fileExists(const std::string& path) const;
 
+    /// A file's bytes as the file cache holds them, shared rather than copied.
+    using FileBytes = std::shared_ptr<const std::vector<uint8_t>>;
+
     /**
-     * Read raw file data
+     * Read raw file data, as a copy the caller owns.
      * @param path Virtual file path
      * @return File contents (empty if not found)
      */
     [[nodiscard]] std::vector<uint8_t> readFile(const std::string& path) const;
+
+    /// Read a file to parse it: the bytes the file cache keeps, handed out
+    /// without a copy, and kept alive by the pointer after the cache lets them
+    /// go. Null when the file is not there or cannot be read. Any thread.
+    [[nodiscard]] FileBytes readFileShared(const std::string& path) const;
 
     /**
      * Read optional file data without warning spam.
@@ -178,6 +187,10 @@ public:
     [[nodiscard]] size_t dbcCacheEntries() const;
     [[nodiscard]] size_t getFileCacheHits() const { return fileCacheHits; }
     [[nodiscard]] size_t getFileCacheMisses() const { return fileCacheMisses; }
+    /// The bytes the file cache may hold before it lets the least recently
+    /// read files go; a file over half of it is read and not kept. Replaces
+    /// the default (1 GB, or WOWEE_FILE_CACHE_MB) and evicts down to it now.
+    void setFileCacheBudget(size_t bytes);
 
     /**
      * Clear all cached resources
@@ -265,36 +278,54 @@ private:
     // THREAD-SAFE: protected by cacheMutex.
     uint64_t cacheGeneration_ = 0;
 
-    // Guards fileCache, dbcCache, fileCacheTotalBytes, fileCacheAccessCounter, and
-    // fileCacheBudget.  Shared lock for read-only cache lookups (readFile cache hit,
-    // loadDBC cache hit); exclusive lock for inserts and eviction.
+    // Guards dbcCache and cacheGeneration_. Shared lock for a cache hit,
+    // exclusive for inserts and clears.
     mutable std::shared_mutex cacheMutex;
     // THREAD-SAFE: protected by cacheMutex (exclusive lock for writes).
     std::unordered_map<std::string, std::shared_ptr<DBCFile>> dbcCache;
 
-    // File cache (LRU, dynamic budget based on system RAM)
+    // The file cache: least recently read at the back of the list, the map
+    // pointing into it, so a hit moves its file to the front and an eviction
+    // takes the back, both in constant time. A hit reorders the list, so even
+    // a lookup takes the lock exclusively - for a hash lookup and a splice;
+    // the bytes are shared out, never copied under it.
     struct CachedFile {
-        std::vector<uint8_t> data;
-        uint64_t lastAccessTime;
+        std::string path;
+        FileBytes data;
     };
-    // THREAD-SAFE: protected by cacheMutex (shared_mutex - shared_lock for reads,
-    // exclusive lock_guard for writes/eviction).
-    mutable std::unordered_map<std::string, CachedFile> fileCache;
+    using FileLru = std::list<CachedFile>;
+    // THREAD-SAFE: everything from here to fileCacheGeneration_ is protected
+    // by fileCacheMutex_.
+    mutable std::mutex fileCacheMutex_;
+    mutable FileLru fileCacheLru_;
+    mutable std::unordered_map<std::string, FileLru::iterator> fileCache;
     mutable size_t fileCacheTotalBytes = 0;
-    mutable uint64_t fileCacheAccessCounter = 0;
-    // THREAD-SAFE: atomic - incremented from any thread after releasing cacheMutex.
+    /// 1 GB, or WOWEE_FILE_CACHE_MB, or setFileCacheBudget.
+    size_t fileCacheBudget = 1024 * 1024 * 1024;
+    /// Bumped by every clear, so a read that straddles one is not cached.
+    uint64_t fileCacheGeneration_ = 0;
+    // THREAD-SAFE: atomic - incremented from any thread after releasing the lock.
     mutable std::atomic<size_t> fileCacheHits{0};
     mutable std::atomic<size_t> fileCacheMisses{0};
-    /// 1 GB, or WOWEE_FILE_CACHE_MB; set once by setupFileCacheBudget.
-    mutable size_t fileCacheBudget = 1024 * 1024 * 1024;
 
     void setupFileCacheBudget();
+    /// Let the least recently read files go until `incoming` more bytes fit.
+    /// fileCacheMutex_ held.
+    void evictFilesFor(size_t incoming) const;
 
-    /// Whether a file read is kept in the file cache for the next read of it.
-    /// Not when what the bytes become is held elsewhere - a texture on the
-    /// GPU, a parsed DBC - and the bytes would only be a second copy.
-    enum class KeepBytes { Yes, No };
-    [[nodiscard]] std::vector<uint8_t> readFileBytes(const std::string& normalizedPath, KeepBytes keep) const;
+    /// The cached bytes of a file, moved to the front of the list; null on a
+    /// miss. `generation` is the cache's, to hand to keepFile after the read.
+    [[nodiscard]] FileBytes cachedFile(const std::string& normalizedPath, uint64_t& generation) const;
+    /// The file from where it lives - the override dir, the archive layer,
+    /// what was extracted - bypassing the cache. Empty when it is not there.
+    [[nodiscard]] std::vector<uint8_t> readFromSource(const std::string& normalizedPath) const;
+    /// The bytes just read, kept for the next read when they fit the budget.
+    FileBytes keepFile(const std::string& normalizedPath, std::vector<uint8_t>&& data,
+                       uint64_t generation) const;
+    /// A file whose bytes are not kept, because what they become is held
+    /// elsewhere - a texture on the GPU, a parsed DBC - and they would only be
+    /// a second copy. Served from the cache if something else kept it.
+    [[nodiscard]] std::vector<uint8_t> readFileNotKept(const std::string& normalizedPath) const;
 
     /**
      * Try to load a PNG override for a BLP path.

@@ -199,3 +199,32 @@ TEST_CASE("what the bags hold is what a quest's collect objective counts",
     CHECK(counts.at(kWolfMeat) == 3);
     CHECK_FALSE(h.addonEvents("QUEST_WATCH_UPDATE").empty());
 }
+
+TEST_CASE("the next character is offered none of the last one's quests", "[quest][harness]") {
+    wowee::test::PlayerSpec alice;
+    alice.guid = 0x61;
+    alice.name = "Alice";
+    wowee::test::PlayerSpec bob;
+    bob.guid = 0x62;
+    bob.name = "Bob";
+
+    GameHarness h;
+    h.enterWorld(alice);
+    // A party member shares a quest (SMSG_QUEST_CONFIRM_ACCEPT: the quest,
+    // its title, the sharer), a quest giver's page is open, and Alice tracks
+    // a quest.
+    h.receive(Opcode::SMSG_QUEST_CONFIRM_ACCEPT, Body().u32(11).cstr("Riverpaw Gnoll Bounty").u64(0x99));
+    h.receive(Opcode::SMSG_QUESTGIVER_QUEST_DETAILS, offer(kMarshal, 12, "The Fargodeep Mine"));
+    h.pump();
+    h.game().setQuestTracked(11, true);
+    REQUIRE(h.game().hasPendingSharedQuest());
+    REQUIRE(h.game().isQuestDetailsOpen());
+
+    h.relogAs(bob);
+
+    // Bob was asked to accept a quest shared with Alice, saw the page her
+    // quest giver had open, and tracked her quest.
+    CHECK_FALSE(h.game().hasPendingSharedQuest());
+    CHECK_FALSE(h.game().isQuestDetailsOpen());
+    CHECK_FALSE(h.game().isQuestTracked(11));
+}

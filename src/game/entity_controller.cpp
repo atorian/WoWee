@@ -1292,12 +1292,12 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             uint32_t oldEmote = unit->getNpcEmoteState();
             unit->setNpcEmoteState(val);
             // Fire emote animation callback so entity_spawner can update the NPC's idle anim
-            if (val != oldEmote && owner_.emoteAnimCallbackRef()) {
+            if (val != oldEmote) {
                 uint32_t animId = val != 0 ? owner_.emotes().animByEmotesId(val) : 0;
                 if (val == 0 || animId != 0) {
                     // UNIT_NPC_EMOTESTATE is persistent by definition - a zero
                     // here genuinely clears the state loop.
-                    owner_.emoteAnimCallbackRef()(block.guid, animId, /*isState=*/true);
+                    owner_.eventBus().publish(events::UnitEmotePlayed{block.guid, animId, true});
                 } else {
                     LOG_DEBUG("UNIT_NPC_EMOTESTATE emoteId=", val, " had no Emotes.dbc animation mapping");
                 }
@@ -2755,7 +2755,7 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // QuestHandler's map, which is the one every reader forwards to.
     // GameHandler's same-named member is dead, so erasing there left a
     // despawned quest giver's mark behind on whatever took its place.
-    if (auto* qh = owner_.getQuestHandler()) qh->npcQuestStatusRef().erase(data.guid);
+    owner_.quests().forgetQuestGiver(data.guid);
 
     // Remove combat text entries referencing the destroyed entity so floating
     // damage numbers don't linger after the source/target despawns.
@@ -2846,27 +2846,15 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             playerClassRaceCache_[data.guid] = {.classId = data.classId, .raceId = data.race,
                                                 .gender = data.gender};
         }
-        // Chat lines held back for this name can go out now, with it on them.
-        // After the cache above, which a held NPC line reads for its $-tokens.
-        if (owner_.getChatHandler()) owner_.getChatHandler()->flushChatAwaitingName(data.guid);
+        // After the cache above: chat releases the lines it held back for this
+        // name, and a held NPC line reads the cache for its $-tokens.
+        owner_.eventBus().publish(events::PlayerNameKnown{data.guid, data.name});
         // Update entity name
         auto entity = entityManager.getEntity(data.guid);
         if (entity && entity->getType() == ObjectType::PLAYER) {
             auto player = std::static_pointer_cast<Player>(entity);
             player->setName(data.name);
         }
-
-        // Backfill chat history entries that arrived before we knew the name.
-        if (owner_.getChatHandler()) {
-            for (auto& msg : owner_.getChatHandler()->getChatHistory()) {
-                if (msg.senderGuid == data.guid && msg.senderName.empty()) {
-                    msg.senderName = data.name;
-                }
-            }
-        }
-
-        // The whisper reply target needs no backfill: ChatHandler keeps the
-        // whisperer's guid and finds the name in the cache this just filled.
 
         // Backfill mail inbox sender names
         for (auto& mail : owner_.inventory().mailInboxRef()) {
@@ -2875,17 +2863,7 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
             }
         }
 
-        // Backfill friend list: if this GUID came from a friend list packet,
-        // register the name in owner_.friendsCacheRef() now that we know it.
-        if (owner_.friendGuidsRef().count(data.guid)) {
-            owner_.friendsCacheRef()[data.name] = data.guid;
-        }
-
-        // Backfill ignore list: SMSG_IGNORE_LIST only contains GUIDs, so
-        // ignoreCache (name→guid for UI) is populated here once names resolve.
-        if (owner_.ignoreListGuidsRef().count(data.guid)) {
-            owner_.ignoreCacheRef()[data.name] = data.guid;
-        }
+        // The friend and ignore lists file the name themselves (PlayerNameKnown).
 
         // Fire UNIT_NAME_UPDATE so nameplate/unit frame addons know the name is available
         if (owner_.hasAddonEventListener()) {

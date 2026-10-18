@@ -20,6 +20,11 @@ enum class AblationPass {
     Shadows,
     VolumetricFog,
     SunShafts,
+    /// All of the water: its surface, the refraction copy taken for it and
+    /// the planar reflection pass.
+    Water,
+    /// The planar reflection pass alone - the scene drawn again, mirrored.
+    WaterReflection,
 };
 
 const char* ablationPassName(AblationPass pass);

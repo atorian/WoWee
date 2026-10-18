@@ -6,11 +6,10 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
-#include "rendering/celestial.hpp"
+#include "rendering/sky_bodies.hpp"
 #include "rendering/starfield.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
-#include "rendering/weather.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -323,10 +322,13 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
         // Water info
         auto* waterRenderer = renderer->getWaterRenderer();
         if (waterRenderer) {
+            const auto& liquid = renderer->liquidScene();
             ImGui::TextColored(ImVec4(0.2f, 0.5f, 1.0f, 1.0f), "WATER");
             ImGui::Separator();
 
-            ImGui::Text("Surfaces: %d", waterRenderer->getSurfaceCount());
+            ImGui::Text("Surfaces: %d (%d drawn)", static_cast<int>(liquid.surfaceCount()),
+                        waterRenderer->getDrawnSurfaceCount());
+            ImGui::Text("Bodies: %d", static_cast<int>(liquid.bodies().size()));
             ImGui::Text("Enabled: %s", waterRenderer->isEnabled() ? "YES" : "NO");
 
             ImGui::Spacing();
@@ -347,25 +349,14 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Text("Time: %02d:%02d", hours, minutes);
             ImGui::Text("Auto: %s", skybox->isTimeProgressionEnabled() ? "YES" : "NO");
 
-            // Celestial info
-            auto* celestial = renderer->getCelestial();
-            if (celestial) {
-                ImGui::Text("Sun/Moon: %s", celestial->isEnabled() ? "YES" : "NO");
-
-                // Moon phase info
-                float phase = celestial->getMoonPhase();
-                const char* phaseName = "Unknown";
-                if (phase < 0.0625f || phase >= 0.9375f) phaseName = "New";
-                else if (phase < 0.1875f) phaseName = "Wax Cresc";
-                else if (phase < 0.3125f) phaseName = "1st Qtr";
-                else if (phase < 0.4375f) phaseName = "Wax Gibb";
-                else if (phase < 0.5625f) phaseName = "Full";
-                else if (phase < 0.6875f) phaseName = "Wan Gibb";
-                else if (phase < 0.8125f) phaseName = "Last Qtr";
-                else phaseName = "Wan Cresc";
-
-                ImGui::Text("Moon: %s (%.0f%%)", phaseName, phase * 100.0f);
-                ImGui::Text("Cycling: %s", celestial->isMoonPhaseCycling() ? "YES" : "NO");
+            // The sun's and the moon's discs: drawn, or why not.
+            if (auto* bodies = renderer->getSkyBodies()) {
+                const auto line = [&](const char* name, SkyBodies::Body body) {
+                    const auto& draw = bodies->lastDiscDraw(body);
+                    ImGui::Text("%s: %s", name, draw.drawn ? "drawn" : draw.skipped);
+                };
+                line("Sun", SkyBodies::Body::Sun);
+                line("Moon", SkyBodies::Body::Moon);
             }
 
             // Star field info
@@ -397,21 +388,17 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
 
     // Weather info
     if (showRenderer) {
-        auto* weather = renderer->getWeather();
-        if (weather) {
+        {
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "WEATHER");
             ImGui::Separator();
 
-            const char* typeName = "None";
-            using WeatherType = rendering::Weather::Type;
-            auto type = weather->getWeatherType();
-            if (type == WeatherType::RAIN) typeName = "Rain";
-            else if (type == WeatherType::SNOW) typeName = "Snow";
-
-            ImGui::Text("Type: %s", typeName);
-            if (weather->isEnabled()) {
-                ImGui::Text("Particles: %d", weather->getParticleCount());
-                ImGui::Text("Intensity: %.0f%%", weather->getIntensity() * 100.0f);
+            const auto& target = renderer->weatherTarget();
+            const std::string kind(pipeline::weatherKindName(target.kind));
+            ImGui::Text("Type: %s", kind.c_str());
+            if (renderer->weatherMix().any()) {
+                ImGui::Text("Particles: %u", renderer->precipitationCount());
+                ImGui::Text("Intensity: %.0f%%", renderer->weatherMix().strength() * 100.0f);
+                ImGui::Text("Open to sky: %.0f%%", renderer->skyExposure() * 100.0f);
             }
 
             auto* lightning = renderer->getLightning();

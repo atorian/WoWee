@@ -1,0 +1,26 @@
+// The light sunlit air sends toward the eye, before the sun scatter and the
+// shadow scale it. Shared by the fog volume's inject pass and its tests.
+//
+// Some of it goes every way alike, and that part is lit by the light the sun
+// casts - LightParams' direct light, the one the ground takes. The rest goes
+// forward, mostly toward an eye looking at the sun: looking at it the air
+// takes nineteen times the light it would scattering evenly, ten degrees off
+// twelve, thirty degrees off two and a half, and from forty five on about one
+// or less. That forward light is the glow around the sun, and the zone's light
+// tables say what colour and how bright that glow is - the sun's halo,
+// LightIntBand channel 10: green and dim over Tirisfal, orange over Durotar,
+// violet over Teldrassil. Lit by the direct light alone, the air toward the sun
+// was a bright cool white in every zone, over a sun the tables draw green.
+
+// Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
+float phaseHG(float cosTheta, float g) {
+    float g2 = g * g;
+    return (1.0f - g2) / pow(max(1.0f + g2 - 2.0f * g * cosTheta, 1e-4f), 1.5f);
+}
+
+// `cosToSun` is the cosine between the way the sunlight travels and the way
+// from the air to the eye: 1 when the eye looks straight at the sun through it.
+vec3 sunlitAirLight(vec3 sunLight, vec3 sunHalo, float cosToSun) {
+    const float kForward = 0.65f;
+    return sunLight * (1.0f - kForward) + sunHalo * (kForward * phaseHG(cosToSun, 0.75f));
+}

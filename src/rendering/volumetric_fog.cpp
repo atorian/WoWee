@@ -23,10 +23,12 @@ struct VolumeParamsGPU {
     glm::vec4 rayCorner[4];   // world rays at one yard of view depth: uv (0,0), (1,0), (0,1), (1,1)
     glm::mat4 prevViewProj;   // last frame's, for reprojecting the history
     glm::vec4 medium;         // x = density, y = layer base z, z = 1 / layer height, w = floor
-    glm::vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter, w = unused
+    glm::vec4 lighting;       // x = light scatter (sun and models' lights), yzw = unused
     glm::vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
+    glm::vec4 sunHalo;        // rgb = the zone's glow around the sun, w = unused
+    glm::vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -423,13 +425,15 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
 
     p.medium = glm::vec4(in.density, in.layerBase, 1.0f / std::max(in.layerHeight, 1.0f),
                          glm::clamp(in.layerFloor, 0.0f, 1.0f));
-    p.lighting = glm::vec4(in.sunScatter, in.localLightScatter, in.ambientScatter, 0.0f);
+    p.lighting = glm::vec4(in.lightScatter, 0.0f, 0.0f, 0.0f);
     // A slow breeze, a yard a second, so the mist drifts rather than sits.
     const float t = in.time;
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
     p.dims = glm::ivec4(size_, 0);
+    p.sunHalo = glm::vec4(in.sunHaloColor, 0.0f);
+    p.sunGlare = glm::vec4(in.sunGlareDirection, in.sunGlareAmount);
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
     // Everything that last touched these volumes: last frame's inject and

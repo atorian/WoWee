@@ -9,7 +9,6 @@
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_batch_merge.hpp"
-#include "rendering/wmo_material_class.hpp"
 #include "rendering/wmo_lighting.hpp"
 #include "rendering/wmo_group_containment.hpp"
 #include <cstdlib>
@@ -103,10 +102,10 @@ WMORenderer::~WMORenderer() {
     shutdown();
 }
 
-/// Builds the four main-pass pipelines from an already-loaded shader pair.
+/// Builds the three main-pass pipelines from an already-loaded shader pair.
 ///
-/// initialize() and recreatePipelines() both need exactly these four, in
-/// exactly these states, and each described all four for itself. They only
+/// initialize() and recreatePipelines() both need exactly these three, in
+/// exactly these states, and each described all three for itself. They only
 /// differ in what happens when one fails to build: the first cannot continue,
 /// the second is a rebuild after a settings change and leaves the renderer
 /// with whatever it managed.
@@ -162,23 +161,6 @@ bool WMORenderer::buildMainPassPipelines(VkDevice device,
     if (!transparentPipeline_) {
         core::Logger::getInstance().warning("WMORenderer: transparent pipeline not available");
     }
-
-    // --- Build glass pipeline (derivative - alpha blend WITH depth write for windows) ---
-    glassPipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({ vertexBinding }, vertexAttribs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kWmoFrontFace)
-        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(pipelineLayout_)
-        .setRenderPass(mainPass)
-        .setDynamicStates(viewportAndScissorDynamic())
-        .setFlags(VK_PIPELINE_CREATE_DERIVATIVE_BIT)
-        .setBasePipeline(opaquePipeline_)
-        .build(device, vkCtx_->getPipelineCache());
 
     // --- Build wireframe pipeline (derivative of opaque) ---
     wireframePipeline_ = PipelineBuilder()
@@ -388,7 +370,6 @@ void WMORenderer::shutdown() {
     // Destroy pipelines
     destroy(device, opaquePipeline_);
     destroy(device, transparentPipeline_);
-    destroy(device, glassPipeline_);
     destroy(device, wireframePipeline_);
     destroy(device, pipelineLayout_);
     destroy(device, materialDescPool_);
@@ -584,7 +565,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         modelData.materialTextureIndices.push_back(texIndex);
         modelData.materialBlendModes.push_back(mat.blendMode);
         modelData.materialFlags.push_back(mat.flags);
-
+        modelData.materialSidnColors.push_back(mat.sidnColor);
     }
 
 
@@ -730,18 +711,16 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 blendMode = modelData.materialBlendModes[batch.materialId];
             }
 
-            bool unlit = false;
             uint32_t matFlags = 0;
             if (batch.materialId < modelData.materialFlags.size()) {
                 matFlags = modelData.materialFlags[batch.materialId];
-                unlit = (matFlags & 0x01) != 0;
+            }
+            // F_SIDN: the material glows in its sidnColor - windows and lamps.
+            uint32_t sidnColor = 0;
+            if ((matFlags & 0x10) != 0 && batch.materialId < modelData.materialSidnColors.size()) {
+                sidnColor = modelData.materialSidnColors[batch.materialId];
             }
 
-            // Glass comes from the flags the artist set on the material, not
-            // from the texture's file name: most textures named for a window
-            // are walls with window openings painted into them. See
-            // rendering/wmo_material_class.hpp.
-            bool isWindow = false;
             bool isLava = false;
             bool isCloth = false;
             uint8_t emissiveLevel = 0;
@@ -759,8 +738,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                         // face: backlit by a flickering fire in the tower.
                         emissiveLevel = 2;
                     }
-                    isWindow = emissiveLevel == 0 &&
-                               wmoMaterialIsGlass(matFlags, texName);
                     isLava = (texNameLower.find("lava") != std::string::npos ||
                               texNameLower.find("molten") != std::string::npos ||
                               texNameLower.find("magma") != std::string::npos);
@@ -805,13 +782,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
                 }
             }
 
-            batchStates.push_back({ .texture = tex, .blendMode = blendMode, .unlit = unlit,
-                                    .isWindow = isWindow, .isLava = isLava,
+            batchStates.push_back({ .texture = tex, .blendMode = blendMode,
+                                    .lighting = wmoBatchLighting(model.flags, groupRes.groupFlags,
+                                                                 batch.kind, matFlags),
+                                    .sidnColor = sidnColor, .isLava = isLava,
                                     .emissiveLevel = emissiveLevel,
                                     .clothTop = clothTop, .clothDrop = clothDrop,
                                     .clothCentreX = clothCx, .clothCentreY = clothCy,
-                                    .pendingTexture = pendingTexture,
-                                    .exteriorLighting = wmoUsesExteriorLighting(groupRes.groupFlags, matFlags) });
+                                    .pendingTexture = pendingTexture });
             batchTextures.push_back(tex);
             batchTextureIndices.push_back(usedTexture);
         }
@@ -826,16 +804,15 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             mb.pendingTextureIndex = state.pendingTexture;
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
-            mb.unlit = state.unlit;
             mb.isTransparent = state.blendMode >= 2;
-            mb.isWindow = state.isWindow;
+            mb.sidnColor = state.sidnColor;
             mb.isLava = state.isLava;
             mb.emissiveLevel = state.emissiveLevel;
             mb.clothTop = state.clothTop;
             mb.clothDrop = state.clothDrop;
             mb.clothCentreX = state.clothCentreX;
             mb.clothCentreY = state.clothCentreY;
-            mb.exteriorLighting = state.exteriorLighting;
+            mb.lighting = state.lighting;
             if (mb.hasTexture) {
                 attachNormalHeightMap(modelData, texIndex, mb);
             }
@@ -975,6 +952,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
     loadedModels[id] = std::move(modelData);
     scene_->loadingModels_.erase(id);
+    // Instances placed while it loaded had no groups to answer from.
+    markContentChanged();
     retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
     return ModelLoadResult::Complete;
@@ -1007,6 +986,7 @@ void WMORenderer::unloadModel(uint32_t id) {
     }
 
     loadedModels.erase(it);
+    markContentChanged();
     core::Logger::getInstance().info("WMO model ", id, " unloaded");
 }
 
@@ -1071,6 +1051,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     size_t idx = scene_->instances.size() - 1;
     scene_->instanceIndexById[instance.id] = idx;
     insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    markContentChanged();
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
     return instance.id;
 }
@@ -1248,6 +1229,7 @@ void WMORenderer::removeInstance(uint32_t instanceId) {
         }
         scene_->instances.erase(it);
         rebuildSpatialIndex();
+        markContentChanged();
         core::Logger::getInstance().debug("Removed WMO instance ", instanceId);
     }
 }
@@ -1283,6 +1265,7 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 
     if (scene_->instances.size() != oldSize) {
         rebuildSpatialIndex();
+        markContentChanged();
         core::Logger::getInstance().debug("Removed ", (oldSize - scene_->instances.size()),
                                           " WMO instances (batched)");
     }
@@ -1303,6 +1286,7 @@ void WMORenderer::clearInstances() {
         for (auto& group : model.groups) destroyGroupGPU(group, true);
     }
     *scene_ = InstanceState{};
+    markContentChanged();
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
 
@@ -1326,6 +1310,7 @@ void WMORenderer::clearAll() {
     // The models' textures go back to the shared cache with them, to be found
     // again by the next map or evicted when room is wanted.
     loadedModels.clear();
+    markContentChanged();
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
     textureLookupSerial_ = 0;
@@ -1791,9 +1776,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
 
                 // Determine which pipeline this batch needs
                 int neededPipeline = 0; // opaque
-                if (mb.isWindow && glassPipeline_) {
-                    neededPipeline = 2; // glass (alpha blend + depth write)
-                } else if (mb.isTransparent && transparentPipeline_) {
+                if (mb.isTransparent && transparentPipeline_) {
                     neededPipeline = 1; // transparent (alpha blend, no depth write)
                 }
 
@@ -1802,7 +1785,6 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 if (neededPipeline != currentPipelineKind) {
                     VkPipeline targetPipeline = activePipeline;
                     if (neededPipeline == 1) targetPipeline = transparentPipeline_;
-                    else if (neededPipeline == 2) targetPipeline = glassPipeline_;
                     if (targetPipeline == VK_NULL_HANDLE) continue;
 
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
@@ -1917,16 +1899,19 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                               const glm::vec3& shadowCenter, float shadowRadius) {
+                               const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (scene_->instances.empty() || loadedModels.empty()) return;
 
-    // Once a frame: the WMO pass casts into the sun's map only.
+    // Once a frame, by the frame's first depth-only pass: the sets a later
+    // one reuses are still in this frame's command buffer.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+    if (resetDescriptors) {
+        if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
+            vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+        }
+        shadowTexSetCache_.clear();
     }
-    shadowTexSetCache_.clear();
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
@@ -2239,11 +2224,13 @@ bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupRes
 
     // Create batches
     if (!group.batches.empty()) {
-        for (const auto& batch : group.batches) {
+        for (size_t i = 0; i < group.batches.size(); ++i) {
+            const auto& batch = group.batches[i];
             GroupResources::Batch resBatch;
             resBatch.startIndex = batch.startIndex;
             resBatch.indexCount = batch.indexCount;
             resBatch.materialId = batch.materialId;
+            resBatch.kind = group.batchKind(i);
             resources.batches.push_back(resBatch);
         }
     } else {
@@ -2323,11 +2310,14 @@ void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texInde
 
 void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                             GroupResources::MergedBatch& mb) {
-    // A portal-interior group can still be lit as exterior by its material;
-    // the baseline probe reproduces the lighting from before that was honoured.
+    // The baseline probe reproduces the lighting from before a portal-interior
+    // group could be sunlit at all: every batch of one baked, and unshadowed.
     const bool portalInterior = (group.groupFlags & 0x2000) != 0;
     const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
                                std::getenv("WOWEE_ORGRIMMAR_SHADOW_BASELINE");
+    const WmoBatchLighting lighting = baselineProbe && portalInterior
+        ? WmoBatchLighting{ .light = WmoLight::VertexColour }
+        : mb.lighting;
 
     // Create material UBO
     VmaAllocator allocator = vkCtx_->getAllocator();
@@ -2341,13 +2331,16 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     WMOMaterialUBO matData{};
     matData.hasTexture = mb.hasTexture ? 1 : 0;
     matData.alphaTest = mb.alphaTest ? 1 : 0;
-    matData.unlit = mb.unlit ? 1 : 0;
-    matData.isInterior = (portalInterior && (baselineProbe || !mb.exteriorLighting)) ? 1 : 0;
+    matData.light = static_cast<int32_t>(lighting.light);
+    matData.transitionLight = lighting.transition ? static_cast<int32_t>(lighting.under) : -1;
     matData.receivesExteriorShadows = !baselineProbe &&
-        wmoReceivesExteriorShadows(group.groupFlags, mb.exteriorLighting) ? 1 : 0;
+        wmoReceivesExteriorShadows(group.groupFlags) ? 1 : 0;
     matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
-    matData.isWindow = mb.isWindow ? (wmoOnlyMap_ ? 2 : 1) : 0;
+    // MOMT colours are BGRA bytes.
+    matData.sidnR = static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f;
+    matData.sidnG = static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f;
+    matData.sidnB = static_cast<float>(mb.sidnColor & 0xffu) / 255.0f;
     matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
     matData.enablePOM = pomEnabled_ ? 1 : 0;
     matData.pomScale = 0.012f;
@@ -4183,14 +4176,14 @@ bool WMORenderer::withinWorldBounds(const WMOInstance& instance,
 /// model matrix and multiplying is the expensive part, and a building whose
 /// own bounds contain the point usually has no *group* that does.
 std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
-        float glX, float glY, float glZ, bool interiorOnly) const {
+        float glX, float glY, float glZ, bool interiorOnly, QueryReach reach) const {
     const glm::vec3 queryMin(glX - 0.5f, glY - 0.5f, glZ - 0.5f);
     const glm::vec3 queryMax(glX + 0.5f, glY + 0.5f, glZ + 0.5f);
     gatherCandidates(queryMin, queryMax, tl_candidateScratch);
 
     for (size_t idx : tl_candidateScratch) {
         const auto& instance = scene_->instances[idx];
-        if (outsideCollisionFocus(instance)) continue;
+        if (reach == QueryReach::CollisionFocus && outsideCollisionFocus(instance)) continue;
         if (!withinWorldBounds(instance, glX, glY, glZ)) continue;
 
         auto it = loadedModels.find(instance.modelId);
@@ -4223,7 +4216,7 @@ std::optional<WMORenderer::GroupHolding> WMORenderer::findGroupHolding(
 
 bool WMORenderer::isInsideWMOGroups(float glX, float glY, float glZ,
                                     bool interiorOnly, uint32_t* outModelId) const {
-    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly);
+    const auto holding = findGroupHolding(glX, glY, glZ, interiorOnly, QueryReach::CollisionFocus);
     if (holding && outModelId) *outModelId = holding->instance->modelId;
     return holding.has_value();
 }
@@ -4264,7 +4257,8 @@ static std::optional<glm::vec3> floorColorBelow(const Group& group, const glm::v
 
 std::optional<InteriorLight> WMORenderer::interiorLightAt(float glX, float glY, float glZ) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
-    const auto holding = findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true);
+    const auto holding =
+        findGroupHolding(glX, glY, glZ, /*interiorOnly=*/true, QueryReach::Everywhere);
     if (!holding) return std::nullopt;
     const glm::vec3 localDown =
         glm::normalize(glm::vec3(holding->instance->invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
@@ -4412,7 +4406,6 @@ void WMORenderer::recreatePipelines() {
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layout)
     destroy(device, opaquePipeline_);
     destroy(device, transparentPipeline_);
-    destroy(device, glassPipeline_);
     destroy(device, wireframePipeline_);
 
     // --- Load shaders ---
@@ -4484,14 +4477,10 @@ void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model) {
             const uint32_t mat = batch.materialId;
             const uint32_t blend = mat < model.materialBlendModes.size() ? model.materialBlendModes[mat] : 0;
             if (blend >= 2) continue;  // blended: glass, light cards, water sheets
-            const uint32_t flags = mat < model.materialFlags.size() ? model.materialFlags[mat] : 0;
             glm::vec3 albedo(0.5f);
             float opacity = 1.0f;
             if (mat < model.materialTextureIndices.size()) {
                 const uint32_t ti = model.materialTextureIndices[mat];
-                if (ti < model.textureNames.size() && wmoMaterialIsGlass(flags, model.textureNames[ti])) {
-                    continue;
-                }
                 if (ti < model.textures.size() && model.textures[ti]) {
                     albedo = model.textures[ti]->averageColor();
                     if (blend == 1) opacity = model.textures[ti]->alphaCoverage();

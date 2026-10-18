@@ -37,6 +37,8 @@ std::string resolveTextTokens(const std::string& text, const TextSubject& subjec
 
 /// The logged-in character, as the substitution sees them.
 TextSubject textSubjectFor(GameHandler& gameHandler);
+/// A character as the substitution sees them; the neutral reader for null.
+TextSubject textSubjectFor(const Character* character);
 
 /// Fill in the $-tokens in a piece of server text for the logged-in character.
 ///

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/refusal.hpp"
+#include "pipeline/weather_kind.hpp"
 
 #include <array>
 #include <cstdint>
@@ -233,6 +234,45 @@ struct ItemBought {
 /// Unread mail arrived, where there was none.
 struct MailArrived {};
 
+/// A quest objective moved: a kill, an item, counted against what is needed.
+struct QuestObjectiveProgressed {
+    std::string questTitle;
+    std::string objective;
+    uint32_t count = 0;
+    uint32_t required = 0;
+};
+
+/// The quests the watch frame shows changed; the character config keeps them.
+struct QuestTrackingChanged {};
+
+/// A gossip window opened on an NPC in view, which greets the player.
+/// Canonical coordinates.
+struct GossipOpenedOnNpc {
+    uint64_t npcGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// The gossip window on a creature in view closed: it bids the player
+/// farewell. Canonical coordinates.
+struct GossipClosedOnNpc {
+    uint64_t npcGuid = 0;
+    float x = 0, y = 0, z = 0;
+};
+
+/// The server asks the dungeon finder be opened (SMSG_OPEN_LFG_DUNGEON_FINDER).
+struct DungeonFinderOpened {};
+
+/// The character's standing with a faction moved.
+struct ReputationChanged {
+    std::string factionName;
+    int32_t delta = 0;
+    int32_t standing = 0;
+};
+
+/// Which factions the character has, or which are visible, changed: the
+/// reputation list is built again.
+struct FactionListChanged {};
+
 /// The player accepted a quest into the log.
 struct QuestAccepted {
     uint32_t questId = 0;
@@ -318,6 +358,31 @@ struct SpellSuperseded {
     uint32_t newSpellId = 0;
 };
 
+/// A player's name is known now (SMSG_NAME_QUERY_RESPONSE): what waited for
+/// it - a chat line, a mail's sender - can be finished.
+struct PlayerNameKnown {
+    uint64_t guid = 0;
+    std::string name;
+};
+
+/// A unit said or yelled a line that floats over its head as a bubble - a
+/// say, a yell, a monster's line, and party chat when the player wants that
+/// too.
+struct UnitSaidAloud {
+    uint64_t guid = 0;
+    std::string text;
+    bool yell = false;
+};
+
+/// A unit plays an emote's animation (SMSG_EMOTE, the emote state field, a
+/// drowning hit...). `looping` for a STATE_ emote that holds until another
+/// replaces it; animation 0 cancels a one-shot.
+struct UnitEmotePlayed {
+    uint64_t guid = 0;
+    uint32_t animationId = 0;
+    bool looping = false;
+};
+
 /// A macro was deleted from the account data. The action bar empties the
 /// buttons that held it.
 struct MacroDeleted {
@@ -363,6 +428,17 @@ struct PlayerEquipmentResolved {
 /// reply to CMSG_QUERY_TIME. The realm clock keeps time from it.
 struct ServerTimeReceived {
     uint32_t unixSeconds = 0;
+};
+
+/// The realm said what the weather is where the character stands
+/// (SMSG_WEATHER): a new kind, or the same one harder or softer.
+struct WeatherChanged {
+    pipeline::WeatherKind kind = pipeline::WeatherKind::Clear;
+    float intensity = 0.0f;  ///< 0-1
+    /// It arrives at once rather than coming over.
+    bool abrupt = false;
+    /// The kind it was before.
+    pipeline::WeatherKind previous = pipeline::WeatherKind::Clear;
 };
 
 } // namespace wowee::game::events

@@ -1,0 +1,14 @@
+// Heavy snow over Kharanos at midday: flakes tumbling in a light wind, more
+// of them close by, the lens taking flakes that melt and frost creeping in
+// from its edges.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1,
+  "hour": 12.0,
+  "weather": "snow", "weatherIntensity": 1.0,
+  "wind": { "direction": 200.0, "speed": 2.0 },
+  "server": [-5603.0, -482.0, 397.0],
+  "terrain": true,
+  "camera": { "offset": [-12, -6, 3], "lookAt": [0, 0, 5] },
+  "size": [1280, 720],
+  "frames": 240
+}

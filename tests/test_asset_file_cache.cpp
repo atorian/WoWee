@@ -57,3 +57,49 @@ TEST_CASE("a texture read for the GPU leaves no copy of its file in the file cac
     CHECK(assets.fileCacheStats().entries == 1);
     CHECK(assets.fileCacheStats().bytes == 64);
 }
+
+TEST_CASE("the file cache lets go of the file read longest ago, not the one kept longest", "[assets]") {
+    const auto root = wowee::test::makeDataRoot("wowee_asset_file_cache_lru", {
+        {"world\\a.m2", std::vector<uint8_t>(100, 1)},
+        {"world\\b.m2", std::vector<uint8_t>(100, 2)},
+        {"world\\c.m2", std::vector<uint8_t>(100, 3)},
+    });
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    assets.setFileCacheBudget(250);
+
+    REQUIRE(assets.readFile("World\\a.m2").size() == 100);
+    REQUIRE(assets.readFile("World\\b.m2").size() == 100);
+    // A read again: now it is B that was read longest ago.
+    REQUIRE(assets.readFile("World\\a.m2").size() == 100);
+    // C does not fit beside both, so one of them goes.
+    REQUIRE(assets.readFile("World\\c.m2").size() == 100);
+    CHECK(assets.fileCacheStats().entries == 2);
+
+    const size_t hitsBefore = assets.getFileCacheHits();
+    CHECK(assets.readFile("World\\a.m2")[0] == 1);
+    CHECK(assets.getFileCacheHits() == hitsBefore + 1);  // still kept
+    CHECK(assets.readFile("World\\b.m2")[0] == 2);
+    CHECK(assets.getFileCacheHits() == hitsBefore + 1);  // let go, read anew
+}
+
+TEST_CASE("a file kept in the cache is shared out, not copied for every reader", "[assets]") {
+    const auto root = wowee::test::makeDataRoot("wowee_asset_file_cache_shared", {
+        {"world\\crate.m2", std::vector<uint8_t>(64, 7)},
+    });
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+
+    const auto first = assets.readFileShared("World\\Crate.m2");
+    const auto second = assets.readFileShared("world/crate.m2");
+    REQUIRE(first);
+    CHECK(first->size() == 64);
+    CHECK(first.get() == second.get());
+
+    // Still the reader's after the cache forgets it.
+    assets.clearCache();
+    CHECK(first->size() == 64);
+    CHECK((*first)[0] == 7);
+
+    CHECK_FALSE(assets.readFileShared("World\\Missing.m2"));
+}

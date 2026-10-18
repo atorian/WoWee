@@ -1,4 +1,5 @@
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/liquid_types.hpp"
 #include "core/logger.hpp"
 #include <cstring>
 #include <glm/gtc/quaternion.hpp>
@@ -69,6 +70,20 @@ std::string readString(const std::vector<uint8_t>& data, uint32_t offset) {
     return result;
 }
 
+/// Which group a log line is about. The root file does not say its own path,
+/// and loadGroup runs before a caller sets sourcePath, so the group's MOGN
+/// name stands in for it when there is no path yet.
+std::string groupLabel(const WMOModel& model, uint32_t groupIndex) {
+    std::string label = model.sourcePath.empty() ? std::string("WMO") : "WMO " + model.sourcePath;
+    label += " group " + std::to_string(groupIndex);
+    if (groupIndex < model.groupInfo.size() && model.groupInfo[groupIndex].nameOffset >= 0) {
+        std::string name = readString(model.groupNameRaw,
+                                      static_cast<uint32_t>(model.groupInfo[groupIndex].nameOffset));
+        if (!name.empty()) label += " '" + name + "'";
+    }
+    return label;
+}
+
 } // anonymous namespace
 
 WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
@@ -131,8 +146,8 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                 model.boundingBoxMax.y = read<float>(wmoData, offset);
                 model.boundingBoxMax.z = read<float>(wmoData, offset);
 
-                // flags and numLod (uint16 each) - skip for now
-                offset += 4;
+                model.flags = read<uint16_t>(wmoData, offset);
+                offset += 2;  // numLod
 
                 core::Logger::getInstance().debug("WMO header: nTextures=", model.nTextures, " nGroups=", model.nGroups);
                 break;
@@ -190,7 +205,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                     mat.shader = fields[1];
                     mat.blendMode = fields[2];
                     mat.texture1 = fields[3];
-                    mat.color1 = fields[4];
+                    mat.sidnColor = fields[4];
                     mat.texture2 = fields[6];  // Skip frameSidnColor at [5]
                     mat.color2 = fields[7];
                     mat.texture3 = fields[9];  // Skip ground_type at [8]
@@ -491,7 +506,10 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             group.boundingBoxMax.z = read<float>(groupData, mogpOffset);
             group.portalStart = read<uint16_t>(groupData, mogpOffset);
             group.portalCount = read<uint16_t>(groupData, mogpOffset);
-            mogpOffset += 8; // transBatchCount, intBatchCount, extBatchCount, padding
+            group.transBatchCount = read<uint16_t>(groupData, mogpOffset);
+            group.intBatchCount = read<uint16_t>(groupData, mogpOffset);
+            group.extBatchCount = read<uint16_t>(groupData, mogpOffset);
+            mogpOffset += 2; // padding
             // fogIndices: 4 × uint8 (4 bytes total, NOT 4 × uint32)
             group.fogIndices[0] = read<uint8_t>(groupData, mogpOffset);
             group.fogIndices[1] = read<uint8_t>(groupData, mogpOffset);
@@ -694,9 +712,19 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                             group.liquid.flags.resize(tileCount, 0);
                         }
 
-                        if (group.liquid.materialId == 0) {
-                            group.liquid.materialId = static_cast<uint16_t>(group.liquidType);
+                        // What liquid it is comes from the group header, not
+                        // from MLIQ, whose material id indexes MOMT. It used to
+                        // be taken for the liquid type - and the group's own
+                        // liquid written over it when it was zero - so a
+                        // building's water was whatever its material index
+                        // happened to read as.
+                        uint8_t tileLiquid = 0;
+                        for (uint8_t f : group.liquid.flags) {
+                            if ((f & 0x0F) != 0x0F) { tileLiquid = f & 0x0F; break; }
                         }
+                        group.liquid.liquidType = wmoGroupLiquidType(
+                            group.liquidType, group.flags,
+                            (model.flags & WMOModel::kFlagLiquidTypeIsDbcId) != 0, tileLiquid);
                     }
                 }
 
@@ -709,11 +737,23 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
 
     // Create a default batch if none were loaded
     if (group.batches.empty() && !group.indices.empty()) {
+        core::Logger::getInstance().warning(groupLabel(model, groupIndex),
+                                            " has triangles but no MOBA batches - drawn as one"
+                                            " exterior batch of material 0");
         WMOBatch batch;
         batch.startIndex = 0;
         batch.indexCount = static_cast<uint16_t>(group.indices.size());
         batch.materialId = 0;
         group.batches.push_back(batch);
+        group.transBatchCount = group.intBatchCount = group.extBatchCount = 0;
+    } else if (static_cast<size_t>(group.transBatchCount) + group.intBatchCount +
+                   group.extBatchCount != group.batches.size()) {
+        // batchKind() counts off the first two runs as the client does, so
+        // the batches past them are lit as exterior whatever the third says.
+        core::Logger::getInstance().warning(
+            groupLabel(model, groupIndex), " MOGP says ", group.transBatchCount, " transition + ",
+            group.intBatchCount, " interior + ", group.extBatchCount, " exterior batches but MOBA has ",
+            group.batches.size(), " - the batches past the first two runs are lit as exterior");
     }
 
     core::Logger::getInstance().debug("WMO group ", groupIndex, " loaded: ",

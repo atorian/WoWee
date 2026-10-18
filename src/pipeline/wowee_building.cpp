@@ -409,7 +409,7 @@ bool WoweeBuildingLoader::toWMOModel(const WoweeBuilding& building, WMOModel& ou
             wm.shader = mat.shader;
             wm.blendMode = mat.blendMode;
             wm.texture1 = textureIndex(mat.texturePath);
-            wm.color1 = 0;
+            wm.sidnColor = 0;
             wm.texture2 = 0;
             wm.color2 = 0;
             wm.texture3 = 0;

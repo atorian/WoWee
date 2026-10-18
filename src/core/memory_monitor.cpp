@@ -129,25 +129,17 @@ size_t MemoryMonitor::getAvailableRAM() const {
 #endif
 }
 
-size_t MemoryMonitor::getRecommendedCacheBudget() const {
-    size_t available = getAvailableRAM();
-    // Use 50% of available RAM for caches, hard-capped at 16 GB.
-    static constexpr size_t kHardCapBytes = 16ull * 1024 * 1024 * 1024;  // 16 GB
-    size_t budget = available * 50 / 100;
-    return budget < kHardCapBytes ? budget : kHardCapBytes;
+MemoryPressure MemoryMonitor::classify(size_t availableBytes, size_t totalBytes) {
+    // Severe was the looser of the two (under 15% free, against under 10% for
+    // plain pressure), so it was the only one that ever fired: every machine
+    // short of memory took the long wait, and the short one never ran.
+    if (availableBytes < totalBytes / 100 * 10) return MemoryPressure::Severe;
+    if (availableBytes < totalBytes / 100 * 15) return MemoryPressure::Low;
+    return MemoryPressure::None;
 }
 
-bool MemoryMonitor::isMemoryPressure() const {
-    size_t available = getAvailableRAM();
-    // Memory pressure if < 10% RAM available
-    return available < (totalRAM_ * 10 / 100);
-}
-
-bool MemoryMonitor::isSevereMemoryPressure() const {
-    size_t available = getAvailableRAM();
-    // Severe pressure if < 15% RAM available - background workers should
-    // pause entirely to avoid OOM-killing other applications.
-    return available < (totalRAM_ * 15 / 100);
+MemoryPressure MemoryMonitor::pressure() const {
+    return classify(getAvailableRAM(), totalRAM_);
 }
 
 } // namespace core

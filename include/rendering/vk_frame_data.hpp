@@ -15,12 +15,12 @@ struct GPUPerFrameData {
     glm::mat4 view;
     glm::mat4 projection;
     glm::mat4 lightSpaceMatrix;
-    glm::vec4 lightDir;       // xyz = direction, w = unused
+    glm::vec4 lightDir;       // xyz = direction, w = how strongly F_SIDN materials glow (wmo_night_glow.hpp)
     glm::vec4 lightColor;     // xyz = color, w = unused
     glm::vec4 ambientColor;   // xyz = color, w = unused
     glm::vec4 viewPos;        // xyz = camera pos, w = unused
     glm::vec4 fogColor;       // xyz = color, w = unused
-    glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = water ripple strength
+    glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = unused
     glm::vec4 shadowParams;   // x = enabled(0/1), y = unused, z = one shadow-map texel, w = one texel in yards
     // The player, for effects that react to where they are standing: water
     // ripples and the foliage the player brushes past. playerWake trails the

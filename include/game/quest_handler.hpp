@@ -16,17 +16,58 @@
 #include <vector>
 
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace game {
 
-class GameHandler;
+class PacketSender;
+class FrameXmlEvents;
+class ChatLog;
+class EntityManager;
+class PacketParsers;
 enum class QuestGiverStatus : uint8_t;
+
+/// What the quest log asks of the rest of the game, and the few things a
+/// quest giver's window has another part of it do. Grouped by owner.
+class QuestQueries {
+public:
+    virtual ~QuestQueries() = default;
+
+    // ---- The character and the world in view ----
+    [[nodiscard]] virtual uint64_t characterGuid() const = 0;
+    [[nodiscard]] virtual const EntityManager& entities() const = 0;
+    /// The character's own update fields, as last received: the quest slots
+    /// and their kill counts are read from them.
+    [[nodiscard]] virtual const FlatFieldMap& playerFields() const = 0;
+    [[nodiscard]] virtual uint32_t currentMapId() const = 0;
+    [[nodiscard]] virtual bool inGroup() const = 0;
+    /// SMSG_SET_REST_START, which shares an opcode with a quest one.
+    virtual void setResting(bool resting) = 0;
+
+    // ---- Names and templates ----
+    [[nodiscard]] virtual PacketParsers& packetParsers() = 0;
+    [[nodiscard]] virtual std::string playerName(uint64_t guid) const = 0;
+    [[nodiscard]] virtual std::string creatureName(uint32_t entry) const = 0;
+    virtual void requestCreatureInfo(uint32_t entry) = 0;
+    virtual void requestGameObjectInfo(uint32_t entry) = 0;
+    [[nodiscard]] virtual const ItemQueryResponseData* itemInfo(uint32_t itemId) const = 0;
+    virtual void requestItemInfo(uint32_t itemId) = 0;
+
+    // ---- What a gossip option opens ----
+    /// A gossip or quest list opened over the vendor window, which closes.
+    virtual void closeVendor() = 0;
+    /// The armorer's option: the vendor that follows can repair.
+    virtual void vendorCanRepair() = 0;
+    /// The stable master's option: the stable that follows is theirs.
+    virtual void openedStableMaster(uint64_t npcGuid) = 0;
+};
 
 class QuestHandler {
 public:
     using PacketHandler = std::function<void(network::Packet&)>;
     using DispatchTable = std::unordered_map<LogicalOpcode, PacketHandler>;
 
-    explicit QuestHandler(GameHandler& owner);
+    QuestHandler(PacketSender& sender, FrameXmlEvents& frameXml, core::EventBus& events,
+                 ChatLog& chat, QuestQueries& queries, pipeline::AssetManager* assets);
 
     void registerOpcodes(DispatchTable& table);
 
@@ -48,13 +89,13 @@ public:
     void closeGossip();
     void offerQuestFromItem(uint64_t itemGuid, uint32_t questId);
 
-    [[nodiscard]] bool isGossipWindowOpen() const { return gossipWindowOpen_; }
-    [[nodiscard]] const GossipMessageData& getCurrentGossip() const { return currentGossip_; }
+    [[nodiscard]] bool isGossipWindowOpen() const { return journal_.gossipWindowOpen; }
+    [[nodiscard]] const GossipMessageData& getCurrentGossip() const { return journal_.currentGossip; }
     [[nodiscard]] const std::string& getNpcText(uint32_t textId) const;
     /// What a quest giver says over its list of quests, from
     /// SMSG_QUESTGIVER_QUEST_LIST. Empty when the window came from gossip
     /// instead, which carries its text as an npc-text id rather than inline.
-    [[nodiscard]] const std::string& getQuestGreeting() const { return questGreeting_; }
+    [[nodiscard]] const std::string& getQuestGreeting() const { return journal_.questGreeting; }
 
     // Quest details
     /// Whether a quest giver's detail page is up. True from the moment the
@@ -76,31 +117,31 @@ public:
     /// gave it. The reward list appeared in the middle of the screen, outside
     /// the quest frame, and closing the frame did not take it away because it
     /// was never inside it.
-    [[nodiscard]] bool isQuestDetailsOpen() const { return questDetailsOpen_; }
+    [[nodiscard]] bool isQuestDetailsOpen() const { return journal_.questDetailsOpen; }
 
     /// Whether the item queries sent when the details arrived have had time to
     /// answer. Only this client's own quest window asks: it draws the reward
     /// icons itself and they are blank until the names land. The interface
     /// does not, because FrameXML redraws when the item info event arrives.
     [[nodiscard]] bool questDetailsItemInfoReady() const {
-        return questDetailsOpenTime_ == std::chrono::steady_clock::time_point{} ||
-               std::chrono::steady_clock::now() >= questDetailsOpenTime_;
+        return journal_.questDetailsOpenTime == std::chrono::steady_clock::time_point{} ||
+               std::chrono::steady_clock::now() >= journal_.questDetailsOpenTime;
     }
-    [[nodiscard]] const QuestDetailsData& getQuestDetails() const { return currentQuestDetails_; }
+    [[nodiscard]] const QuestDetailsData& getQuestDetails() const { return journal_.currentQuestDetails; }
 
     // Gossip / quest map POI markers (aliased from handler_types.hpp)
     using GossipPoi = game::GossipPoi;
-    [[nodiscard]] const std::vector<GossipPoi>& getGossipPois() const { return gossipPois_; }
-    void clearGossipPois() { gossipPois_.clear(); }
+    [[nodiscard]] const std::vector<GossipPoi>& getGossipPois() const { return journal_.gossipPois; }
+    void clearGossipPois() { journal_.gossipPois.clear(); }
 
     // Quest turn-in
-    [[nodiscard]] bool isQuestRequestItemsOpen() const { return questRequestItemsOpen_; }
-    [[nodiscard]] const QuestRequestItemsData& getQuestRequestItems() const { return currentQuestRequestItems_; }
+    [[nodiscard]] bool isQuestRequestItemsOpen() const { return journal_.questRequestItemsOpen; }
+    [[nodiscard]] const QuestRequestItemsData& getQuestRequestItems() const { return journal_.currentQuestRequestItems; }
     void completeQuest();
     void closeQuestRequestItems(bool announce = true);
 
-    [[nodiscard]] bool isQuestOfferRewardOpen() const { return questOfferRewardOpen_; }
-    [[nodiscard]] const QuestOfferRewardData& getQuestOfferReward() const { return currentQuestOfferReward_; }
+    [[nodiscard]] bool isQuestOfferRewardOpen() const { return journal_.questOfferRewardOpen; }
+    [[nodiscard]] const QuestOfferRewardData& getQuestOfferReward() const { return journal_.currentQuestOfferReward; }
     void chooseQuestReward(uint32_t rewardIndex);
     void closeQuestOfferReward(bool announce = true);
 
@@ -151,19 +192,19 @@ public:
         std::array<QuestRewardItem, 4> rewardItems{};
         std::array<QuestRewardItem, 6> rewardChoiceItems{};
     };
-    [[nodiscard]] const std::vector<QuestLogEntry>& getQuestLog() const { return questLog_; }
+    [[nodiscard]] const std::vector<QuestLogEntry>& getQuestLog() const { return journal_.questLog; }
     /// Mutable access for the headless harness to seed a quest with text the
     /// server would otherwise supply, so the quest-log flow can be driven and
     /// drawn without a running realm. Not used on the live path.
-    std::vector<QuestLogEntry>& questLogRef() { return questLog_; }
+    std::vector<QuestLogEntry>& questLogRef() { return journal_.questLog; }
 
     /// Where a quest sits in the log, counting from one, or zero if it is not
     /// in it. This is what the interface means by a quest index - every quest
     /// log API takes it, and QUEST_WATCH_UPDATE carries it - and it is not the
     /// quest id, which is what was being sent in its place.
     [[nodiscard]] int questLogIndexOf(uint32_t questId) const {
-        for (size_t i = 0; i < questLog_.size(); ++i) {
-            if (questLog_[i].questId == questId) return static_cast<int>(i) + 1;
+        for (size_t i = 0; i < journal_.questLog.size(); ++i) {
+            if (journal_.questLog[i].questId == questId) return static_cast<int>(i) + 1;
         }
         return 0;
     }
@@ -188,30 +229,45 @@ public:
     /// value index (row 1 for a gain, row 2 for a loss), the same as
     /// AzerothCore's Player::RewardReputation display value.
     int32_t getQuestRewardReputation(int32_t valueId, int32_t override);
-    [[nodiscard]] int getSelectedQuestLogIndex() const { return selectedQuestLogIndex_; }
-    void setSelectedQuestLogIndex(int idx) { selectedQuestLogIndex_ = idx; }
+    [[nodiscard]] int getSelectedQuestLogIndex() const { return journal_.selectedQuestLogIndex; }
+    void setSelectedQuestLogIndex(int idx) { journal_.selectedQuestLogIndex = idx; }
     void abandonQuest(uint32_t questId);
     void shareQuestWithParty(uint32_t questId);
     bool requestQuestQuery(uint32_t questId, bool force = false);
-    // Tracker membership deliberately lives on GameHandler, not here: it is
-    // what the HUD, the Lua watch bindings and the saved character config all
-    // read, and this handler's own quest code reaches it via
-    // owner_.setQuestTracked(). A second copy here would answer only to
-    // whoever wrote it.
-    [[nodiscard]] bool isQuestQueryPending(uint32_t questId) const {
-        return pendingQuestQueryIds_.count(questId) > 0;
+    // The quests the watch frame shows. The character config keeps them
+    // between sessions: a change is announced (events::QuestTrackingChanged)
+    // for it to be saved, and the saved set comes back through
+    // restoreTrackedQuests when the character's settings are read.
+    [[nodiscard]] bool isQuestTracked(uint32_t questId) const {
+        return journal_.trackedQuests.count(questId) > 0;
     }
-    void clearQuestQueryPending(uint32_t questId) { pendingQuestQueryIds_.erase(questId); }
+    void setQuestTracked(uint32_t questId, bool tracked);
+    [[nodiscard]] const std::unordered_set<uint32_t>& trackedQuests() const {
+        return journal_.trackedQuests;
+    }
+    void restoreTrackedQuests(std::unordered_set<uint32_t> questIds) {
+        journal_.trackedQuests = std::move(questIds);
+    }
+    [[nodiscard]] bool isQuestCompleted(uint32_t questId) const {
+        return journal_.completedQuests.count(questId) > 0;
+    }
+    [[nodiscard]] const std::unordered_set<uint32_t>& completedQuests() const {
+        return journal_.completedQuests;
+    }
+    [[nodiscard]] bool isQuestQueryPending(uint32_t questId) const {
+        return journal_.pendingQuestQueryIds.count(questId) > 0;
+    }
+    void clearQuestQueryPending(uint32_t questId) { journal_.pendingQuestQueryIds.erase(questId); }
 
     // Quest giver status (! and ? markers)
     [[nodiscard]] QuestGiverStatus getQuestGiverStatus(uint64_t guid) const;
-    [[nodiscard]] const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const { return npcQuestStatus_; }
+    [[nodiscard]] const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const { return journal_.npcQuestStatus; }
 
     // Shared quest
-    [[nodiscard]] bool hasPendingSharedQuest() const { return pendingSharedQuest_; }
-    [[nodiscard]] uint32_t getSharedQuestId() const { return sharedQuestId_; }
-    [[nodiscard]] const std::string& getSharedQuestTitle() const { return sharedQuestTitle_; }
-    [[nodiscard]] const std::string& getSharedQuestSharerName() const { return sharedQuestSharerName_; }
+    [[nodiscard]] bool hasPendingSharedQuest() const { return journal_.pendingSharedQuest; }
+    [[nodiscard]] uint32_t getSharedQuestId() const { return journal_.sharedQuestId; }
+    [[nodiscard]] const std::string& getSharedQuestTitle() const { return journal_.sharedQuestTitle; }
+    [[nodiscard]] const std::string& getSharedQuestSharerName() const { return journal_.sharedQuestSharerName; }
     void acceptSharedQuest();
     void declineSharedQuest();
 
@@ -233,38 +289,16 @@ public:
     void clearPendingQuestAccept(uint32_t questId);
     void triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, const char* reason);
 
-    // Pending quest accept timeout state (used by GameHandler::update)
-    std::unordered_map<uint32_t, float>& pendingQuestAcceptTimeoutsRef() { return pendingQuestAcceptTimeouts_; }
-    std::unordered_map<uint32_t, uint64_t>& pendingQuestAcceptNpcGuidsRef() { return pendingQuestAcceptNpcGuids_; }
-    // (login quest resync state lives in GameHandler, which drives its timing)
+    /// A quest giver left view: its mark goes with it.
+    void forgetQuestGiver(uint64_t guid) { journal_.npcQuestStatus.erase(guid); }
 
-    // Direct state access for vendor/gossip interaction in GameHandler
-    bool& gossipWindowOpenRef() { return gossipWindowOpen_; }
-    GossipMessageData& currentGossipRef() { return currentGossip_; }
-    std::unordered_map<uint64_t, QuestGiverStatus>& npcQuestStatusRef() { return npcQuestStatus_; }
-
-    /// Everything this handler holds about the character that is leaving.
-    ///
-    /// The reset path used to clear GameHandler's same-named members, which
-    /// are dead: every reader forwards here. So a character switch left the
-    /// previous character's quest log and quest-giver marks in place until the
-    /// server happened to overwrite them.
     /// Tell the interface a quest moved - see the definition for why the
     /// three events go together.
     void announceQuestLogChanged(uint32_t questId);
 
-    /// Forget which quest queries are in flight, so a login asks again.
-    void clearPendingQuestQueries() { pendingQuestQueryIds_.clear(); }
-
-    void clearQuestStateForCharacterSwitch() {
-        questLog_.clear();
-        pendingQuestQueryIds_.clear();
-        npcQuestStatus_.clear();
-    }
-
-    // Drives the quest-giver status requery cooldown; called once per frame by
-    // GameHandler::update alongside the other quest bookkeeping.
-    void tickQuestGiverStatusRequery(float deltaTime);
+    /// The frame's quest bookkeeping: the quest-giver status requery
+    /// cooldown, and accepts the server has not confirmed in time.
+    void update(float deltaTime);
 
 private:
     // Request fresh quest-giver status for nearby NPCs so the !/? markers update
@@ -297,26 +331,68 @@ private:
     void handleQuestOfferReward(network::Packet& packet);
     void handleQuestConfirmAccept(network::Packet& packet);
 
-    GameHandler& owner_;
+    void raiseUiError(const std::string& message);
 
-    // --- State ---
-    // Gossip
-    bool gossipWindowOpen_ = false;
-    GossipMessageData currentGossip_;
-    std::string questGreeting_;
-    std::vector<GossipPoi> gossipPois_;
+    PacketSender& sender_;
+    FrameXmlEvents& frameXml_;
+    core::EventBus& events_;
+    ChatLog& chat_;
+    QuestQueries& queries_;
+    /// The client's data, for the quest DBC tables. Null in a test that has
+    /// none.
+    pipeline::AssetManager* const assets_;
 
-    // Quest details
-    bool questDetailsOpen_ = false;
-    std::chrono::steady_clock::time_point questDetailsOpenTime_{};
-    QuestDetailsData currentQuestDetails_;
+    /// The character's quests and the quest windows open on them. Assigned
+    /// whole when a character logs in (events::CharacterLoggingIn): the
+    /// server sends the next character's log, and nothing of the last one's -
+    /// a share offered to them, a giver's page, the quests they tracked -
+    /// is the next one's.
+    struct Journal {
+        // Gossip
+        bool gossipWindowOpen = false;
+        GossipMessageData currentGossip;
+        std::string questGreeting;
+        std::vector<GossipPoi> gossipPois;
 
-    // Quest turn-in
-    bool questRequestItemsOpen_ = false;
-    QuestRequestItemsData currentQuestRequestItems_;
-    uint32_t pendingTurnInQuestId_ = 0;
-    uint64_t pendingTurnInNpcGuid_ = 0;
-    bool pendingTurnInRewardRequest_ = false;
+        // Quest details
+        bool questDetailsOpen = false;
+        std::chrono::steady_clock::time_point questDetailsOpenTime{};
+        QuestDetailsData currentQuestDetails;
+
+        // Quest turn-in
+        bool questRequestItemsOpen = false;
+        QuestRequestItemsData currentQuestRequestItems;
+        uint32_t pendingTurnInQuestId = 0;
+        uint64_t pendingTurnInNpcGuid = 0;
+        bool pendingTurnInRewardRequest = false;
+        bool questOfferRewardOpen = false;
+        QuestOfferRewardData currentQuestOfferReward;
+
+        std::unordered_map<uint32_t, float> pendingQuestAcceptTimeouts;
+        std::unordered_map<uint32_t, uint64_t> pendingQuestAcceptNpcGuids;
+
+        // Quest log
+        std::vector<QuestLogEntry> questLog;
+        int selectedQuestLogIndex = 0;
+        std::unordered_set<uint32_t> pendingQuestQueryIds;
+        /// The quests the watch frame shows, which the character config keeps.
+        std::unordered_set<uint32_t> trackedQuests;
+        /// Every quest the character has turned in
+        /// (SMSG_QUERY_QUESTS_COMPLETE_RESPONSE).
+        std::unordered_set<uint32_t> completedQuests;
+
+        // Quest giver status per NPC
+        std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus;
+
+        // Shared quest
+        bool        pendingSharedQuest    = false;
+        uint32_t    sharedQuestId         = 0;
+        std::string sharedQuestTitle;
+        std::string sharedQuestSharerName;
+        uint64_t    sharedQuestSharerGuid = 0;
+    };
+    Journal journal_;
+
     // QuestSort.dbc names, loaded lazily
     std::unordered_map<uint32_t, std::string> questSortNames_;
     bool questSortDbcLoaded_ = false;
@@ -328,28 +404,8 @@ private:
     std::unordered_map<int32_t, std::array<int32_t, 10>> questFactionRew_;
     bool questFactionRewDbcLoaded_ = false;
 
-    std::unordered_map<uint32_t, float> pendingQuestAcceptTimeouts_;
-    std::unordered_map<uint32_t, uint64_t> pendingQuestAcceptNpcGuids_;
-    bool questOfferRewardOpen_ = false;
-    QuestOfferRewardData currentQuestOfferReward_;
-
-    // Quest log
-    std::vector<QuestLogEntry> questLog_;
-    int selectedQuestLogIndex_ = 0;
-    std::unordered_set<uint32_t> pendingQuestQueryIds_;
-
-    // Quest giver status per NPC
-    std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;
-
     // NPC gossip text cache (textId → body text)
     std::unordered_map<uint32_t, std::string> npcTextCache_;
-
-    // Shared quest state
-    bool        pendingSharedQuest_       = false;
-    uint32_t    sharedQuestId_            = 0;
-    std::string sharedQuestTitle_;
-    std::string sharedQuestSharerName_;
-    uint64_t    sharedQuestSharerGuid_    = 0;
 
     /// Last, so it goes first: its handler writes the quest log.
     std::vector<core::EventBus::Subscription> subscriptions_;

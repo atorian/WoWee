@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pipeline/weather_kind.hpp"
+
 #include <glm/glm.hpp>
 
 #include <cstddef>
@@ -45,7 +47,7 @@ struct BaseWind {
 /// fronts - each a hash of the slot it falls in, so it stays O(1) and the same
 /// on every client.
 [[nodiscard]] BaseWind baseWindAt(double clockSeconds, const pipeline::WindZoneRow& row,
-                                  const pipeline::WindZoneTable& table, uint32_t weatherType,
+                                  const pipeline::WindZoneTable& table, pipeline::WeatherKind weatherKind,
                                   float weatherIntensity);
 
 /// A fixed wind, for a scene that wants to draw a particular one.
@@ -60,9 +62,8 @@ struct WindInputs {
     /// is no realm. Only differences and slots of it are used, so a local
     /// clock gives a wind that is right but not shared.
     double clockSeconds = 0.0;
-    /// The realm's weather, WorldEnvironment's numbering: 0 none, 1 rain,
-    /// 2 snow, 3 storm.
-    uint32_t weatherType = 0;
+    /// The weather being drawn.
+    pipeline::WeatherKind weatherKind = pipeline::WeatherKind::Clear;
     float weatherIntensity = 0.0f;
     /// Where the player stands, render xy. The grass's travelling fronts turn
     /// about it when the wind turns: a front measured from the world's origin

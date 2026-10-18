@@ -1,0 +1,32 @@
+// Where a point of the still water is drawn: carried by the wind's sea as
+// far as geometry this fine can carry it, and raised or let down by the
+// wake of what moves through it.
+// Shared by the vertex stage, which moves the water's own mesh, and the
+// tessellation evaluation stage, which moves the finer mesh near the
+// camera - both go by `step`, the yards between the vertices doing it.
+//
+// Needs, declared before it: the water push block (push.*), WaterFrameData,
+// the sea's surface (ocean_surface.glsli) and the wake's
+// (water_wake_surface.glsli).
+
+vec3 displacedWaterPoint(vec3 rest, float step, float time) {
+    vec3 displacement = vec3(0.0);
+    if (push.liquidBasicType >= 1.5) {
+        // Magma and slime: a slow undulation, far longer than any step.
+        float amp = push.waveAmp, freq = push.waveFreq, spd = push.waveSpeed;
+        float wave = sin(rest.x * freq * 0.5 + time * spd * 0.3) * 0.4
+                   + sin(rest.y * freq * 0.3 + time * spd * 0.5) * 0.3;
+        displacement.z = wave * amp * 0.5;
+    } else if (push.exposed > 0.5) {
+        // The wind's sea, where the wind reaches the water: under a passing
+        // wave a point of the water goes round a circle, up and down and
+        // toward each crest as it comes, which draws crests sharp and
+        // troughs wide (ocean_fft.glsli) - and less of it as the bed comes
+        // up under it.
+        displacement = oceanDisplacementAt(rest, step);
+    }
+    vec3 p = rest + displacement;
+    // The wake: what swims or wades through the water, every body of it.
+    if (push.liquidBasicType < 1.5) p.z += waterWakeAt(rest.xy).x;
+    return p;
+}

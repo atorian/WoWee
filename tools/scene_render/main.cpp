@@ -12,8 +12,12 @@
 //   {
 //     "map": "Northrend", "mapId": 571, "zoneId": 4395,
 //     "hour": 12.0,                       // the realm clock; the sky and the light
-//     "weather": "none",                  // none | rain | snow | storm
-//     "weatherIntensity": 0.0,
+//     "weather": "clear",                 // clear | fog | rain | snow | sandstorm |
+//                                         //   thunderstorm | blackrain | blacksnow
+//     "weatherIntensity": 0.0,            //   0-1; there from the first frame
+//     "lens": true,                       // what the weather leaves on the camera's
+//                                         //   lens - it gathers over the frames
+//     "splashes": true,                   // rain splashing where it lands
 //     "realmTime": 0.0,                   // the realm's calendar clock, seconds since
 //                                         //   1970, that the wind is drawn from; it
 //                                         //   runs on with the frames
@@ -39,12 +43,29 @@
 //                                          //   on the other map,
 //         "shownAtFrame": 10 }             //   and back in it from this frame
 //     ],
+//     "characters": [                     // drawn as the client draws units,
+//       { "path": "Creature\\Seal\\Seal.m2", //   and what follows units follows
+//         "offset": [0, 0, 0],             //   them - the water's wake - as
+//         "rotation": [0, 0, 0],           //   they move at `velocity` (render
+//         "scale": 1.0,                    //   yards a second) every frame
+//         "velocity": [3, 0, 0] }
+//     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
-//                 "lookAt": [0, 0, 2] },  // from the origin; or "yaw"/"pitch"
+//                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
+//                 "velocity": [0, 6, 0],  // optional: after the frames above, it
+//                 "motionFrames": 10 },   //   moves this fast (render yards/s) for
+//                                         //   this many more before the kept one
 //     "fov": 60.0,
 //     "size": [1280, 720],
 //     "frames": 30,                       // drawn before the one that is kept
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
+//     "msaa": 1,                          // samples: 1, 2, 4 or 8
+//     "fxaa": false,                      // FXAA, drawn through its own target
+//     "fogStrength": 0.4,                 // the settings panel's atmosphere:
+//     "fogSkyBlend": 0.7,                 //   distance fog, its pull to the sky,
+//     "volumetricFog": 2,                 //   volumetric quality 0-3 and density,
+//     "volumetricDensity": 1.0,           //   and the sun's rays
+//     "sunShafts": true,
 //     "minimap": false                    // the minimap disc in the corner
 //   }
 //
@@ -59,12 +80,15 @@
 #include "rendering/minimap.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/post_process_pipeline.hpp"
 #include "rendering/render_surface.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -138,6 +162,17 @@ bool openAssets(pipeline::AssetManager& assets) {
     }
     if (!assets.initialize(assetPath)) return false;
     if (assetPath != dataPath) assets.setBaseFallbackPath(dataPath, expansion);
+
+    // The expansion's DBC column layouts, as the client sets them: the
+    // renderer reads tables through them (LiquidType.dbc among them).
+    static pipeline::DBCLayout layouts;
+    const std::string layoutsPath = expansionPath + "/dbc_layouts.json";
+    if (layouts.loadFromJson(layoutsPath)) {
+        pipeline::setActiveDBCLayout(&layouts);
+    } else {
+        std::fprintf(stderr, "scene_render: no DBC layouts at %s - tables are read without "
+                             "them\n", layoutsPath.c_str());
+    }
     return true;
 }
 
@@ -266,11 +301,43 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
     return true;
 }
 
-uint32_t weatherType(const std::string& name) {
-    if (name == "rain") return 1;
-    if (name == "snow") return 2;
-    if (name == "storm") return 3;
-    return 0;
+/// A unit's model through the client's loaders, placed as the client places
+/// units, to be moved each frame at `velocity`.
+struct MovingCharacter {
+    uint32_t instance = 0;
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+};
+
+bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetManager& assets,
+                    rendering::Renderer& renderer, uint32_t modelId, MovingCharacter& placed) {
+    const std::string path = entry.value("path", "");
+    auto* characters = renderer.getCharacterRenderer();
+    if (!characters) {
+        LOG_ERROR("scene_render: no character renderer to place ", path, " with");
+        return false;
+    }
+    auto model = pipeline::M2Loader::load(assets.readFile(path));
+    model.name = path;
+    if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(path)), model)) {
+        LOG_ERROR("scene_render: cannot load the skin of ", path);
+        return false;
+    }
+    if (!characters->loadModel(model, modelId)) {
+        LOG_ERROR("scene_render: the character renderer would not take ", path);
+        return false;
+    }
+    placed.position = origin + vec3(entry.value("offset", json()));
+    placed.velocity = vec3(entry.value("velocity", json()));
+    placed.instance = characters->createInstance(modelId, placed.position,
+                                                 glm::radians(vec3(entry.value("rotation", json()))),
+                                                 entry.value("scale", 1.0f));
+    if (placed.instance == 0) {
+        LOG_ERROR("scene_render: cannot place ", path);
+        return false;
+    }
+    LOG_INFO("scene_render: placed character ", path);
+    return true;
 }
 
 /// What the scene left in video memory, by use, and what each texture cache
@@ -342,6 +409,12 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             return 1;
         }
     }
+    std::vector<MovingCharacter> movingCharacters;
+    for (const auto& entry : scene.value("characters", json::array())) {
+        MovingCharacter placed;
+        if (!placeCharacter(entry, origin, assets, renderer, modelId++, placed)) return 1;
+        movingCharacters.push_back(placed);
+    }
 
     // The camera: placed, aimed, or backed off to see the first model.
     auto* camera = renderer.getCamera();
@@ -374,9 +447,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     environment.mapId = scene.value("mapId", 571u);
     environment.zoneId = scene.value("zoneId", 0u);
     environment.gameTime = scene.value("hour", 12.0f);
-    environment.weatherType = weatherType(scene.value("weather", std::string("none")));
+    const std::string weatherName = scene.value("weather", std::string("clear"));
+    const auto weatherKind = pipeline::weatherKindFromName(weatherName == "none" ? "clear" : weatherName);
+    if (!weatherKind) {
+        std::fprintf(stderr, "scene_render: \"weather\" is one of clear, fog, rain, snow, sandstorm, "
+                             "thunderstorm, blackrain, blacksnow - not \"%s\"\n", weatherName.c_str());
+        return 1;
+    }
+    environment.weatherKind = *weatherKind;
     environment.weatherIntensity = scene.value("weatherIntensity", 0.0f);
-    environment.raining = environment.weatherType == 1 || environment.weatherType == 3;
+    // What of it is drawn, as the weather dev panel switches it.
+    renderer.weatherControls().lens = scene.value("lens", true);
+    renderer.weatherControls().splashes = scene.value("splashes", true);
     // A realm clock of the scene's own, so the wind - drawn from it - is the
     // same on every run rather than whatever this machine's clock says.
     const double realmTime = scene.value("realmTime", 0.0);
@@ -395,16 +477,43 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     renderer.setWorldEnvironment(environment);
     renderer.setWorldInView(true);
 
+    // The atmosphere settings, as the settings panel sets them. Unset, each
+    // keeps the renderer's own default, not the panel's.
+    if (auto* lighting = renderer.getLightingManager()) {
+        if (scene.contains("fogStrength")) lighting->setFogStrength(scene["fogStrength"].get<float>());
+        if (scene.contains("fogSkyBlend")) lighting->setFogSkyBlend(scene["fogSkyBlend"].get<float>());
+    }
+    if (scene.contains("volumetricFog")) renderer.setVolumetricFogQuality(scene["volumetricFog"].get<int>());
+    if (scene.contains("volumetricDensity")) {
+        renderer.setVolumetricFogDensity(scene["volumetricDensity"].get<float>());
+    }
+    if (scene.contains("sunShafts")) renderer.setSunShaftsEnabled(scene["sunShafts"].get<bool>());
+
+    // Anti-aliasing as the settings panel sets it: the sample count, and
+    // FXAA, which puts the scene in an off-screen target of its own.
+    const int msaa = scene.value("msaa", 1);
+    if (msaa != 1 && msaa != 2 && msaa != 4 && msaa != 8) {
+        std::fprintf(stderr, "scene_render: \"msaa\" is 1, 2, 4 or 8 samples\n");
+        return 1;
+    }
+    if (msaa > 1) renderer.setMsaaSamples(static_cast<VkSampleCountFlagBits>(msaa));
+    if (scene.value("fxaa", false)) {
+        if (auto* post = renderer.getPostProcessPipeline()) {
+            post->setFXAAEnabled(true);
+        } else {
+            std::fprintf(stderr, "scene_render: \"fxaa\" asked for but there is no post-processing\n");
+            return 1;
+        }
+    }
+
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
     // on its own threads: with it on, the frames wait for it as well.
     const int frames = std::max(1, scene.value("frames", 30));
     constexpr float kStep = 1.0f / 30.0f;
     const auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
-    for (int frame = 0, extra = 0; frame < frames || (waitTerrain && extra < 600 &&
-                                                       terrain->getRemainingTileCount() > 0);
-         ++frame) {
-        if (frame >= frames) ++extra;
+    int frame = 0;
+    auto drawFrame = [&]() {
         for (const auto& placement : placements) {
             if (placement.shownAtFrame != frame) continue;
             if (placement.wmo) {
@@ -415,10 +524,40 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
+        for (MovingCharacter& c : movingCharacters) {
+            if (frame > 0) c.position += c.velocity * kStep;
+            renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
+        }
         renderer.update(kStep);
         renderer.beginFrame();
         renderer.renderWorld();
         renderer.endFrame();
+        ++frame;
+    };
+    for (int extra = 0; frame < frames || (waitTerrain && extra < 600 &&
+                                           terrain->getRemainingTileCount() > 0);) {
+        if (frame >= frames) ++extra;
+        drawFrame();
+    }
+
+    // Then, if asked, the camera on the move for the last few frames. What a
+    // pass keeps of an earlier frame - the water's refraction once kept the
+    // whole finished picture - only shows while the view is changing.
+    if (cam.contains("velocity")) {
+        const glm::vec3 velocity = vec3(cam["velocity"]);
+        const int motionFrames = std::max(1, cam.value("motionFrames", 10));
+        for (int i = 1; i <= motionFrames; ++i) {
+            camera->setPosition(eye + velocity * (kStep * static_cast<float>(i)));
+            drawFrame();
+        }
+    }
+    if (renderer.weatherMix().any()) {
+        const auto& mix = renderer.weatherMix();
+        LOG_WARNING("scene_render: weather rain ", mix.rain, " snow ", mix.snow, " sand ", mix.sand,
+                    "; ", renderer.precipitationCount(), " drops drawn; camera open to the sky ",
+                    renderer.skyExposure(), ", sky in view ", renderer.skyView(), "; ",
+                    renderer.lensDrops().drops().size(), " on the lens, frost ",
+                    renderer.lensDrops().frost(), ", dust ", renderer.lensDrops().dust());
     }
     std::printf("scene_render: world M2 draw calls: %u in the kept frame\n",
                 renderer.getM2Renderer()->getDrawCallCount());

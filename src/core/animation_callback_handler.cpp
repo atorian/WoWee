@@ -148,6 +148,16 @@ void AnimationCallbackHandler::setupCallbacks() {
         cr->setInstanceVisible(instId, !entered);
     });
 
+    // A thunderstorm rolling in: a low rumble through the camera, as hard as
+    // the storm.
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::WeatherChanged>(
+        [this](const game::events::WeatherChanged& e) {
+            if (e.kind != pipeline::WeatherKind::Thunderstorm || e.previous == e.kind || e.intensity <= 0.3f) return;
+            if (auto* camera = playerView_.getCameraController()) {
+                camera->triggerShake(0.03f + e.intensity * 0.04f, 6.0f, 0.6f);
+            }
+        }));
+
     // Charge callback - warrior rushes toward target
     subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::ChargeStarted>(
         [this](const game::events::ChargeStarted& e) {
@@ -352,7 +362,11 @@ void AnimationCallbackHandler::setupCallbacks() {
     // isState marks persistent STATE_ emotes (UNIT_NPC_EMOTESTATE or state-type
     // SMSG_EMOTE): they loop until cleared and are retained across model
     // reloads. One-shots play once and resume the retained state loop.
-    gameHandler_.setEmoteAnimCallback([this](uint64_t guid, uint32_t emoteAnim, bool isState) {
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::UnitEmotePlayed>(
+        [this](const game::events::UnitEmotePlayed& e) {
+        const uint64_t guid = e.guid;
+        const uint32_t emoteAnim = e.animationId;
+        const bool isState = e.looping;
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr || !entitySpawner_.hasMap()) return;
         auto entity = gameHandler_.getEntityManager().getEntity(guid);
@@ -409,7 +423,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 cr->playAnimation(emoteInstanceId, emoteAnim, false);
             }
         }
-    });
+    }));
 
     // Spell cast animation callback - play cast animation on caster (player or NPC/other player)
     // WoW-accurate 3-phase spell animation sequence:
