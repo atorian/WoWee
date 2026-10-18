@@ -81,7 +81,14 @@ void ResourceMonitor::sampleVideoMemory(const rendering::Renderer& renderer, dou
             }
             const double ms =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-            LOG_DEBUG("Video memory broken down over ", byUse->allocations, " allocations in ", ms, " ms");
+            // On the main thread, inside a frame: long enough to be seen as a
+            // stall, it is said as one.
+            if (ms > 20.0) {
+                LOG_WARNING("Video memory broken down over ", byUse->allocations,
+                            " allocations in ", ms, " ms, inside one frame");
+            } else {
+                LOG_DEBUG("Video memory broken down over ", byUse->allocations, " allocations in ", ms, " ms");
+            }
         }
         if (!gpuMemoryDumpPath_.empty()) (void)vk->writeGpuMemoryMap(gpuMemoryDumpPath_);
     }

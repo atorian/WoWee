@@ -1790,7 +1790,19 @@ void Application::frameFinished() {
             benchmarkFrameEnded(*frameSeconds);
         }
     }
-    reportStageTimes();
+    {
+        // The report is a hundred and more lines once every ten seconds, and
+        // it lands in some frame's time. Said when it is long enough to be
+        // mistaken for a stall of the game's own.
+        const auto reportStart = std::chrono::steady_clock::now();
+        reportStageTimes();
+        const float reportMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - reportStart).count();
+        if (reportMs > 20.0f) {
+            LOG_WARNING("Frame profile report took ", reportMs,
+                        " ms of the frame it was written in");
+        }
+    }
     std::optional<uint32_t> latencyMs;
     if (gameHandler && gameHandler->isInWorld()) latencyMs = gameHandler->getLatencyMs();
     resourceMonitor_->frameFinished(frameSeconds, renderer.get(), assetManager.get(), latencyMs);
