@@ -40,7 +40,16 @@ struct TerrainChunkGPU {
     VmaAllocation vertexAlloc = VK_NULL_HANDLE;
     ::VkBuffer indexBuffer = VK_NULL_HANDLE;
     VmaAllocation indexAlloc = VK_NULL_HANDLE;
+    /// Level 0, the full mesh, at the start of the index buffer: what the
+    /// shadow pass and anything else that wants the true ground draws.
     uint32_t indexCount = 0;
+    /// Each level of detail's range of the index buffer, level 0 first; a
+    /// level with no indices is not offered and the next finer one is drawn.
+    struct LodRange {
+        uint32_t first = 0;
+        uint32_t count = 0;
+    };
+    std::array<LodRange, pipeline::kTerrainLodLevels> lods{};
 
     // Material descriptor set (set 1: 7 samplers, params UBO, 4 normal maps)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
@@ -197,7 +206,18 @@ public:
     /// compares it against the doodads. See Renderer::logViewDistanceDiag.
     [[nodiscard]] float getFurthestDrawnDistance() const { return std::sqrt(furthestDrawnSq_); }
     [[nodiscard]] int getCulledChunkCount() const { return culledChunks; }
+    /// The triangles the last render() drew, at the levels it chose.
+    [[nodiscard]] uint64_t getRenderedTriangleCount() const { return renderedTriangles_; }
     [[nodiscard]] int getTriangleCount() const;
+
+    /// The height in pixels of the image the terrain is drawn into, which the
+    /// level of detail is chosen against: a chunk drops a level where the
+    /// finer one's triangles would be smaller than kLodMinTrianglePixels.
+    void setLodViewportHeight(uint32_t pixels) { lodViewportHeight_ = pixels; }
+    /// The level of detail a chunk this far from a camera with this vertical
+    /// focal length (in pixels) is drawn at, before falling back over levels
+    /// the chunk does not offer. Level 0 throughout when LOD is off.
+    [[nodiscard]] int lodLevelAt(float distance, float focalPixels) const;
     [[nodiscard]] VkContext* getVkContext() const { return vkCtx; }
 
     /// Where chunks register their geometry for the ray traced lighting.
@@ -286,6 +306,10 @@ private:
     bool frustumCullingEnabled = true;
     bool fogEnabled = true;
     float maxViewDistance_ = 1200.0f;
+    /// WOWEE_TERRAIN_LOD=0 draws every chunk at level 0, to compare against.
+    bool lodEnabled_ = true;
+    uint32_t lodViewportHeight_ = 0;
+    uint64_t renderedTriangles_ = 0;
     int renderedChunks = 0;
     float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;
@@ -302,7 +326,10 @@ private:
     uint32_t megaVBUsed_ = 0;  // vertices used
     uint32_t megaIBUsed_ = 0;  // indices used
     static constexpr uint32_t MEGA_VB_MAX_VERTS   = 1536 * 1024; // ~1.5M verts × 44B ≈ 64MB
-    static constexpr uint32_t MEGA_IB_MAX_INDICES  = 6 * 1024 * 1024; // 6M indices × 4B = 24MB
+    // Every level of detail of a chunk shares its vertices and adds indices:
+    // 1608 a chunk against level 0's 768, so as many chunks fit as the
+    // vertex buffer holds (~8600 at 181 vertices each).
+    static constexpr uint32_t MEGA_IB_MAX_INDICES  = 14 * 1024 * 1024; // 14M indices × 4B = 56MB
 
     VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
     VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;

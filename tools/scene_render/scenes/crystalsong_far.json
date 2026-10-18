@@ -1,0 +1,14 @@
+// From Dalaran's rim across Crystalsong Forest to the hills beyond, at noon:
+// terrain from a few hundred yards out to the edge of the streamed tiles, so
+// every level of the terrain's detail is in one picture. Render it with
+// WOWEE_TERRAIN_LOD=0 as well to compare the far ground at full detail.
+{
+  "map": "Northrend", "mapId": 571, "zoneId": 2817,
+  "hour": 12.0,
+  "server": [5804.0, 624.0, 647.0],
+  "terrain": true,
+  "terrainRadius": 3,
+  "camera": { "offset": [-500, -500, 0], "lookAt": [-1300, -1300, -380] },
+  "size": [1280, 720],
+  "frames": 60
+}

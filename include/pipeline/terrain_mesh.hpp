@@ -4,6 +4,7 @@
 #include "pipeline/adt_loader.hpp"
 
 #include <glm/glm.hpp>
+#include <array>
 #include <vector>
 #include <cstdint>
 
@@ -33,12 +34,38 @@ struct TerrainVertex {
  */
 using TerrainIndex = uint32_t;
 
+/// The levels of detail a chunk can be drawn at. Level 0 is the full mesh;
+/// each level after it spans twice the cells of the one before (level 1
+/// drops the quads' centre vertices).
+inline constexpr int kTerrainLodLevels = 4;
+
 /**
  * Renderable terrain mesh for a single map chunk
  */
 struct ChunkMesh {
     std::vector<TerrainVertex> vertices;
+    /// Level 0: four triangles fanned from each quad's centre vertex, the
+    /// ground as the data describes it. Collision, shadows and ray tracing
+    /// read this one.
     std::vector<TerrainIndex> indices;
+
+    /// The coarser levels, 1 to kTerrainLodLevels-1, for ground far enough
+    /// away that level 0's triangles would be a pixel or two across: each a
+    /// range of `lodIndices` holding its surface and then its skirts. A level
+    /// whose count is 0 is not offered - its quads would have to cover only
+    /// part of a hole.
+    struct IndexRange {
+        uint32_t first = 0;
+        uint32_t count = 0;
+    };
+    std::vector<TerrainIndex> lodIndices;
+    std::array<IndexRange, kTerrainLodLevels - 1> lods{};
+    /// Where the skirt vertices start in `vertices`: each edge's nine outer
+    /// vertices again, lowered by the skirt depth, edge after edge (north,
+    /// south, west, east in grid terms: row 0, row 8, column 0, column 8).
+    /// The skirts hang from a coarse level's edges so that where it meets a
+    /// finer neighbour the sky does not show through the seam.
+    uint32_t skirtFirstVertex = 0;
 
     // Chunk position in world space
     float worldX;
@@ -145,6 +172,12 @@ private:
      * Skips quads that are marked as holes in the chunk
      */
     static std::vector<TerrainIndex> generateIndices(const MapChunk& chunk);
+
+    /**
+     * The coarser levels of detail and their skirts: appends the skirt
+     * vertices to `mesh.vertices` and fills `mesh.lodIndices` and `mesh.lods`.
+     */
+    static void generateLods(const MapChunk& chunk, ChunkMesh& mesh);
 
 
     /**

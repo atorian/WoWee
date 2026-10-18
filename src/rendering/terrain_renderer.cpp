@@ -14,6 +14,7 @@
 #include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -145,6 +146,11 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
 
     LOG_INFO("Initializing terrain renderer (Vulkan)");
     VkDevice device = vkCtx->getDevice();
+
+    lodEnabled_ = core::envFlagEnabled("WOWEE_TERRAIN_LOD", true);
+    if (!lodEnabled_) {
+        LOG_WARNING("WOWEE_TERRAIN_LOD=0: every terrain chunk is drawn at full detail, however far");
+    }
 
     // --- Create material descriptor set layout (set 1) ---
     // bindings 0-6: combined image samplers (base + 3 layer + 3 alpha)
@@ -575,21 +581,33 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
     gpuChunk.indexCount = static_cast<uint32_t>(chunk.indices.size());
     gpuChunk.vertexCount = static_cast<uint32_t>(chunk.vertices.size());
 
+    // One index buffer for every level: the full mesh first, where the shadow
+    // pass reads it, then the coarser levels after it.
+    std::vector<pipeline::TerrainIndex> indices;
+    indices.reserve(chunk.indices.size() + chunk.lodIndices.size());
+    indices.insert(indices.end(), chunk.indices.begin(), chunk.indices.end());
+    indices.insert(indices.end(), chunk.lodIndices.begin(), chunk.lodIndices.end());
+    gpuChunk.lods[0] = {0, gpuChunk.indexCount};
+    for (size_t level = 1; level < gpuChunk.lods.size(); ++level) {
+        const auto& range = chunk.lods[level - 1];
+        gpuChunk.lods[level] = {gpuChunk.indexCount + range.first, range.count};
+    }
+
     VkDeviceSize vbSize = chunk.vertices.size() * sizeof(pipeline::TerrainVertex);
     AllocatedBuffer vb = uploadBuffer(*vkCtx, chunk.vertices.data(), vbSize,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     gpuChunk.vertexBuffer = vb.buffer;
     gpuChunk.vertexAlloc = vb.allocation;
 
-    VkDeviceSize ibSize = chunk.indices.size() * sizeof(pipeline::TerrainIndex);
-    AllocatedBuffer ib = uploadBuffer(*vkCtx, chunk.indices.data(), ibSize,
+    VkDeviceSize ibSize = indices.size() * sizeof(pipeline::TerrainIndex);
+    AllocatedBuffer ib = uploadBuffer(*vkCtx, indices.data(), ibSize,
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     gpuChunk.indexBuffer = ib.buffer;
     gpuChunk.indexAlloc = ib.allocation;
 
     // Also copy into mega buffers for indirect drawing
     uint32_t vertCount = static_cast<uint32_t>(chunk.vertices.size());
-    uint32_t idxCount = static_cast<uint32_t>(chunk.indices.size());
+    uint32_t idxCount = static_cast<uint32_t>(indices.size());
     if (megaVBMapped_ && megaIBMapped_ &&
         megaVBUsed_ + vertCount <= MEGA_VB_MAX_VERTS &&
         megaIBUsed_ + idxCount <= MEGA_IB_MAX_INDICES) {
@@ -598,7 +616,7 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
         std::memcpy(vbDst, chunk.vertices.data(), vertCount * sizeof(pipeline::TerrainVertex));
         // Copy indices
         auto* ibDst = static_cast<uint32_t*>(megaIBMapped_) + megaIBUsed_;
-        std::memcpy(ibDst, chunk.indices.data(), idxCount * sizeof(uint32_t));
+        std::memcpy(ibDst, indices.data(), idxCount * sizeof(uint32_t));
 
         gpuChunk.megaBaseVertex = static_cast<int32_t>(megaVBUsed_);
         gpuChunk.megaFirstIndex = megaIBUsed_;
@@ -800,6 +818,38 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     return true;
 }
 
+namespace {
+
+/// How big a level's triangles are across the ground, in yards. Level 0 fans
+/// four triangles from each 4.17-yard quad's centre, 2.95 yards to a side;
+/// level 1 splits the quad in two; levels 2 and 3 double the quad each.
+constexpr float kLodTriangleYards[pipeline::kTerrainLodLevels] = {2.95f, 4.17f, 8.33f, 16.67f};
+/// A chunk drops to the next level where the finer level's triangles would
+/// come out smaller than this on screen. Below it a triangle is mostly the
+/// edges of partly covered pixels - shaded again for every one under MSAA -
+/// and adds no shape a viewer can see.
+constexpr float kLodMinTrianglePixels = 8.0f;
+/// Each level spans at least this much distance. Two neighbouring chunks'
+/// distances differ by at most a chunk's diagonal (47 yards), so with every
+/// band wider than twice that, neighbours are never more than one level
+/// apart - and level 0, which has no skirts, never meets level 2.
+constexpr float kLodMinBandYards = 100.0f;
+
+}  // namespace
+
+int TerrainRenderer::lodLevelAt(float distance, float focalPixels) const {
+    if (!lodEnabled_ || !(focalPixels > 0.0f)) return 0;
+    int level = 0;
+    float switchAt = 0.0f;
+    for (int next = 1; next < pipeline::kTerrainLodLevels; ++next) {
+        switchAt = std::max(kLodTriangleYards[next - 1] * focalPixels / kLodMinTrianglePixels,
+                            switchAt + kLodMinBandYards);
+        if (distance < switchAt) break;
+        level = next;
+    }
+    return level;
+}
+
 void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
     if (chunks.empty() || !pipeline) {
         static int emptyLog = 0;
@@ -862,6 +912,13 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     renderedChunks = 0;
     culledChunks = 0;
     furthestDrawnSq_ = 0.0f;
+    renderedTriangles_ = 0;
+
+    // Pixels per yard at unit distance: what a triangle's size on screen is
+    // judged against when a chunk's level is chosen.
+    const uint32_t viewportHeight = lodViewportHeight_ ? lodViewportHeight_ : vkCtx->getSwapchainExtent().height;
+    const float focalPixels =
+        std::abs(camera.getProjectionMatrix()[1][1]) * static_cast<float>(viewportHeight) * 0.5f;
 
     // Use mega VB + IB when available.
     // Bind mega buffers once, then use direct draws with base vertex/index offsets.
@@ -907,6 +964,12 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                                offsetof(GPUPushConstants, localLights), sizeof(LocalLightSet), &pushedLights);
         }
 
+        // The coarsest level whose triangles still come out big enough on
+        // screen, or the next finer one the chunk offers.
+        int level = lodLevelAt(std::sqrt(distSq), focalPixels);
+        while (level > 0 && chunk.lods[static_cast<size_t>(level)].count == 0) --level;
+        const auto& lod = chunk.lods[static_cast<size_t>(level)];
+
         if (useMegaBuffers && chunk.megaBaseVertex >= 0) {
             // Rebound if a fallback chunk bound its own buffers since. The mega
             // buffers are bound once before the loop, and a chunk without a
@@ -920,16 +983,17 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                 vkCmdBindIndexBuffer(cmd, megaIB_, 0, VK_INDEX_TYPE_UINT32);
                 megaBuffersBound = true;
             }
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1,
-                             chunk.megaFirstIndex, chunk.megaBaseVertex, 0);
+            vkCmdDrawIndexed(cmd, lod.count, 1,
+                             chunk.megaFirstIndex + lod.first, chunk.megaBaseVertex, 0);
         } else {
             // Fallback: per-chunk VB/IB bind + direct draw
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmd, lod.count, 1, lod.first, 0, 0);
             megaBuffersBound = false;
         }
+        renderedTriangles_ += lod.count / 3;
         renderedChunks++;
         if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
     }

@@ -77,6 +77,8 @@ ChunkMesh TerrainMeshGenerator::generateChunkMesh(const MapChunk& chunk, int chu
 
     // Generate triangle indices (checks for holes)
     mesh.indices = generateIndices(chunk);
+    // The far levels and their skirts, after the full mesh.
+    generateLods(chunk, mesh);
 
     // Debug: verify mesh integrity (one-time)
     static bool debugLogged = false;
@@ -275,6 +277,130 @@ std::vector<TerrainIndex> TerrainMeshGenerator::generateIndices(const MapChunk& 
 
     return indices;
 }
+
+namespace {
+
+/// Outer vertex (row r, column c, both 0-8) of the interleaved 9x17 layout.
+constexpr int outerVertex(int r, int c) { return r * 17 + c; }
+
+/// The i-th outer vertex (0-8) along one of the chunk's edges: row 0, row 8,
+/// column 0, column 8.
+constexpr int edgeVertex(int edge, int i) {
+    switch (edge) {
+        case 0: return outerVertex(0, i);
+        case 1: return outerVertex(8, i);
+        case 2: return outerVertex(i, 0);
+        default: return outerVertex(i, 8);
+    }
+}
+
+/// Whether the quad beside cell i (0-7) of an edge is a hole.
+bool edgeCellIsHole(const MapChunk& chunk, int edge, int i) {
+    switch (edge) {
+        case 0: return chunk.isHole(0, i);
+        case 1: return chunk.isHole(7, i);
+        case 2: return chunk.isHole(i, 0);
+        default: return chunk.isHole(i, 7);
+    }
+}
+
+/// How far below a coarse level's edge its skirt reaches past the furthest
+/// any level's edge strays from another's, in yards.
+constexpr float kSkirtMargin = 1.0f;
+
+}  // namespace
+
+void TerrainMeshGenerator::generateLods(const MapChunk& chunk, ChunkMesh& mesh) {
+    const auto height = [&](int vertex) { return mesh.vertices[static_cast<size_t>(vertex)].position[2]; };
+
+    // Two chunks at neighbouring levels meet along an edge one draws through
+    // all nine outer vertices and the other through every second or fourth:
+    // between the shared vertices the two edges are different lines, and the
+    // sky shows through the gap. Each coarse level hangs a skirt from its
+    // edges, deep enough to pass below the furthest any level's edge can
+    // stray from another's, so whichever side is higher, the lower one's
+    // skirt fills the gap below it.
+    float deviation = 0.0f;
+    for (int edge = 0; edge < 4; ++edge) {
+        for (int level = 2; level < kTerrainLodLevels; ++level) {
+            const int stride = 1 << (level - 1);
+            for (int i = 0; i <= 8; ++i) {
+                const int from = std::min(i / stride * stride, 8 - stride);
+                const float t = static_cast<float>(i - from) / static_cast<float>(stride);
+                const float line = height(edgeVertex(edge, from)) * (1.0f - t) +
+                                   height(edgeVertex(edge, from + stride)) * t;
+                deviation = std::max(deviation, std::abs(height(edgeVertex(edge, i)) - line));
+            }
+        }
+    }
+    const float depth = deviation + kSkirtMargin;
+
+    mesh.skirtFirstVertex = static_cast<uint32_t>(mesh.vertices.size());
+    for (int edge = 0; edge < 4; ++edge) {
+        for (int i = 0; i <= 8; ++i) {
+            TerrainVertex lowered = mesh.vertices[static_cast<size_t>(edgeVertex(edge, i))];
+            lowered.position[2] -= depth;
+            mesh.vertices.push_back(lowered);
+        }
+    }
+    const auto skirtVertex = [&](int edge, int i) {
+        return static_cast<TerrainIndex>(mesh.skirtFirstVertex + static_cast<uint32_t>(edge * 9 + i));
+    };
+
+    std::vector<TerrainIndex> level;
+    for (int lod = 1; lod < kTerrainLodLevels; ++lod) {
+        const int stride = 1 << (lod - 1);
+        const int cells = 8 / stride;
+        level.clear();
+
+        // The surface: two triangles a cell, split along the diagonal whose
+        // ends are closer in height, which strays least from the full mesh.
+        // A cell that is all hole is left open; one that is part hole cannot
+        // be drawn at this level, and neither can any coarser one.
+        bool offered = true;
+        for (int cy = 0; cy < cells && offered; ++cy) {
+            for (int cx = 0; cx < cells; ++cx) {
+                int holes = 0;
+                for (int y = cy * stride; y < (cy + 1) * stride; ++y)
+                    for (int x = cx * stride; x < (cx + 1) * stride; ++x) holes += chunk.isHole(y, x) ? 1 : 0;
+                if (holes == stride * stride) continue;
+                if (holes > 0) { offered = false; break; }
+
+                const auto a = static_cast<TerrainIndex>(outerVertex(cy * stride, cx * stride));
+                const auto b = static_cast<TerrainIndex>(outerVertex(cy * stride, (cx + 1) * stride));
+                const auto c = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, cx * stride));
+                const auto d = static_cast<TerrainIndex>(outerVertex((cy + 1) * stride, (cx + 1) * stride));
+                if (std::abs(height(a) - height(d)) <= std::abs(height(b) - height(c))) {
+                    level.insert(level.end(), {a, b, d, a, d, c});
+                } else {
+                    level.insert(level.end(), {a, b, c, b, d, c});
+                }
+            }
+        }
+        if (!offered) break;
+
+        // The skirts, one strip a segment of this level's edge, left off
+        // where the ground beside it is a hole.
+        for (int edge = 0; edge < 4; ++edge) {
+            for (int i = 0; i + stride <= 8; i += stride) {
+                bool open = true;
+                for (int cell = i; cell < i + stride; ++cell) open = open && edgeCellIsHole(chunk, edge, cell);
+                if (open) continue;
+                const auto top0 = static_cast<TerrainIndex>(edgeVertex(edge, i));
+                const auto top1 = static_cast<TerrainIndex>(edgeVertex(edge, i + stride));
+                const TerrainIndex low0 = skirtVertex(edge, i);
+                const TerrainIndex low1 = skirtVertex(edge, i + stride);
+                level.insert(level.end(), {top0, top1, low1, top0, low1, low0});
+            }
+        }
+
+        auto& range = mesh.lods[static_cast<size_t>(lod - 1)];
+        range.first = static_cast<uint32_t>(mesh.lodIndices.size());
+        range.count = static_cast<uint32_t>(level.size());
+        mesh.lodIndices.insert(mesh.lodIndices.end(), level.begin(), level.end());
+    }
+}
+
 void TerrainMeshGenerator::decompressNormal(const int8_t* compressedNormal, float* normal) {
     // WoW stores normals as signed bytes (-127 to 127)
     // Convert to float and normalize

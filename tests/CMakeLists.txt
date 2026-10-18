@@ -949,6 +949,17 @@ wowee_add_test(test_tile_size_agreement
             ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
 
+# ── test_terrain_lod ─────────────────────────────────────────
+# The far levels of a terrain chunk: the same ground with fewer triangles,
+# holes kept open, and skirts that close the seam between two levels.
+wowee_add_test(test_terrain_lod
+    SOURCES test_terrain_lod.cpp
+            ${TEST_COMMON_SOURCES}
+            ${CMAKE_SOURCE_DIR}/src/pipeline/terrain_mesh.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_alpha.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+            ${CMAKE_SOURCE_DIR}/src/pipeline/liquid_types.cpp)
+
 # ── test_chunk_surface ───────────────────────────────────────
 # Where a point inside a terrain chunk sits in the world. The clutter and
 # doodad scatterers each had their own copy, including the crossed axes.

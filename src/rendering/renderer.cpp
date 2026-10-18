@@ -3119,6 +3119,9 @@ void Renderer::renderWorld() {
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
     const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
     const bool skipGrass = ablated(AblationPass::Grass);
+    // The terrain chooses its chunks' detail by their triangles' size in the
+    // image it is drawn into, which an upscaler makes smaller than the window.
+    if (terrainRenderer) terrainRenderer->setLodViewportHeight(sceneRenderExtent().height);
     if (m2Renderer) {
         m2Renderer->setSkipGroundDetail(ablated(AblationPass::Clutter));
         // 250 yards: past the shadow distance and well past where a tree with

@@ -298,6 +298,40 @@ The 1x-at-2400 run came in 3 fps under the earlier one of the same setting
 (37.4 against 40.4), with no other client running: the spread between runs
 is larger at 1x, where the CPU sets the frame.
 
+### Terrain level of detail
+
+Every chunk now carries four levels (`TerrainMeshGenerator::generateLods`):
+the full mesh (256 triangles, what shadows, collision and ray tracing keep
+reading), the outer grid without the centre vertices (128), every second
+outer vertex (32) and every fourth (8). A chunk drops a level where the finer
+level's triangles would be under 8 pixels in the scene image, and every level
+spans at least 100 yards, so neighbours are never more than one level apart.
+Coarse levels hang skirts from their edges, deep enough to pass below every
+level's edge, so no seam opens between neighbours; hole quads stay open, and
+a level whose cells would cover part of a hole is not offered.
+`WOWEE_TERRAIN_LOD=0` draws every chunk at full detail to compare against;
+`tools/scene_render/scenes/crystalsong_far.json` is the picture to compare
+(no seams, the far slopes a little smoother).
+
+Dalaran, saved 2400-yard view distance, one session:
+
+| | fps | p50 | p95 | > 33.3 ms | terrain triangles | terrain GPU | GPU avg |
+|---|---|---|---|---|---|---|---|
+| 8x, LOD off | 34.3 | 28.2 | 34.3 | 7.7% | 1 253 000 | 10.84 | 28.1 |
+| 8x, LOD on | 36.8 | 26.2 | 31.5 | 1.2% | 162 500 | 8.94 | 26.1 |
+| 1x, LOD on | 38.5 | 24.1 | 32.5 | 2.3% | 162 500 | 6.29 | 22.6 |
+| 8x, terrain cut to 800 yards (above) | 41.2 | 22.0 | 30.3 | 1.6% | - | 1.99 | 19.8 |
+
+- The LOD draws 7.7 times fewer terrain triangles and takes 1.9 ms off the
+  terrain at 8x, and with it most of the slow frames.
+- **It is not where the far ground's cost is.** Cutting the far chunks away
+  saves 8.9 ms; drawing them with an eighth of the triangles saves 1.9, and at
+  1x nothing. What the far chunks cost is their pixels and their draws: the
+  same ~4 900 draw calls, each binding its material, and every far pixel
+  blending four texture layers and their normal maps. The next step for the
+  far ground is a cheaper far shader (fewer layers, no relief, or a baked
+  texture) and fewer draws (merged far chunks), not fewer triangles.
+
 scene_render's static Dalaran scene (`dalaran.json`, 1280x720, hidden window)
 is held by its swapchain's FIFO present at 60 fps: `acquire image` takes 8 ms
 of each frame and the GPU about 2. It is for timing a renderer change on one

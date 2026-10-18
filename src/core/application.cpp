@@ -1900,6 +1900,7 @@ void Application::benchmarkFrameEnded(float frameSeconds) {
         if (const auto* terrainDraw = renderer->getTerrainRenderer()) {
             benchmark_->noteSceneCount("terrain chunks drawn",
                                        static_cast<uint64_t>(terrainDraw->getRenderedChunkCount()));
+            benchmark_->noteSceneCount("terrain triangles drawn", terrainDraw->getRenderedTriangleCount());
         }
         if (const auto* m2 = renderer->getM2Renderer()) {
             benchmark_->noteSceneCount("M2 instances", m2->getInstanceCount());
