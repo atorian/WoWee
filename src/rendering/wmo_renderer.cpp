@@ -1873,9 +1873,6 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         return false;
     }
 
-    // The shadow shader is shared with the skinned renderers, so it declares
-    // bone inputs this geometry has none of; kWmoShadowVertexAttributes says
-    // where they point and why.
     const VkVertexInputBindingDescription vertBind = perVertexBinding(sizeof(WMOVertex));
     const std::vector<VkVertexInputAttributeDescription> vertAttrs =
         toVkAttributes(kWmoShadowVertexAttributes);

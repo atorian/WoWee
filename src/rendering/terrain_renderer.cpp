@@ -1171,9 +1171,6 @@ bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         return false;
     }
 
-    // The shadow shader is shared with the skinned renderers, so it declares
-    // bone inputs terrain has none of; kTerrainShadowVertexAttributes says
-    // where they point and why.
     const VkVertexInputBindingDescription vertBind =
         perVertexBinding(sizeof(pipeline::TerrainVertex));
     const std::vector<VkVertexInputAttributeDescription> vertAttrs =

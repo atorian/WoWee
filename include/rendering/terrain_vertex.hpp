@@ -26,17 +26,11 @@ inline constexpr std::array<VertexAttribute, 4> kTerrainVertexAttributes = {{
     {.location = 3, .componentCount = 2, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, layerUV))},
 }};
 
-/// The same geometry through the shared shadow shader, which declares bone
-/// inputs terrain has none of.
-///
-/// They point at the position, which is the earliest field and so always in
-/// bounds. useBones is 0 in the shadow pass, so nothing reads them; a declared
-/// input with no description would make the pipeline invalid.
-inline constexpr std::array<VertexAttribute, 4> kTerrainShadowVertexAttributes = {{
+/// The same geometry through the shadow shader (shadow.vert.glsl): the
+/// position, and the texture coordinate it passes on.
+inline constexpr std::array<VertexAttribute, 2> kTerrainShadowVertexAttributes = {{
     {.location = 0, .componentCount = 3, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, position))},
     {.location = 1, .componentCount = 2, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, texCoord))},
-    {.location = 2, .componentCount = 4, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, position))},
-    {.location = 3, .componentCount = 4, .offset = static_cast<uint32_t>(offsetof(pipeline::TerrainVertex, position))},
 }};
 
 }  // namespace rendering

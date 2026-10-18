@@ -120,8 +120,8 @@ TEST_CASE("the shadow attributes match what shadow.vert.glsl declares",
         return;
     }
 
-    // Every declared input needs a description even though this geometry has
-    // no bones: an input with none makes the pipeline invalid.
+    // Every declared input needs a description: an input with none makes the
+    // pipeline invalid.
     REQUIRE(inputs.size() == kWmoShadowVertexAttributes.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
         INFO("shadow input " << inputs[i].name);
@@ -133,8 +133,6 @@ TEST_CASE("the shadow attributes match what shadow.vert.glsl declares",
 
 TEST_CASE("the shadow pass reads position and texcoord from the real places",
           "[wmovertex]") {
-    // The two that are actually read. The bone attributes are aliased onto the
-    // colour on purpose and are checked only for being in bounds above.
     CHECK(kWmoShadowVertexAttributes[0].offset == offsetof(WMOVertex, position));
     CHECK(kWmoShadowVertexAttributes[1].offset == offsetof(WMOVertex, texCoord));
 }
