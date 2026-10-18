@@ -3,6 +3,7 @@
 #include "rendering/frame_sink.hpp"
 #include "rendering/sun_direction.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include "core/env_flag.hpp"
@@ -4909,6 +4910,17 @@ float Renderer::volumetricFogExtinction() const {
 void Renderer::renderSeaBedPass() {
     ZoneScopedN("Renderer::renderSeaBedPass");
     if (!seaBed_ || !waterRenderer || !camera || currentCmd == VK_NULL_HANDLE) return;
+    // What the last drawing cost, once its timestamps are back. The frame
+    // profile's own report is of one frame every ten seconds, and the map is
+    // drawn in one frame of a few hundred.
+    static const bool frameProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    if (frameProfile && vkCtx) {
+        for (const auto& [label, ms] : vkCtx->gpuTimings()) {
+            if (label && std::strcmp(label, "sea bed") == 0) {
+                LOG_WARNING("Sea bed map drawn in ", ms, "ms of GPU time");
+            }
+        }
+    }
     // WOWEE_NO_SEA_BED=1: the water as if it were deep everywhere, waves to
     // the beach and through the piers, to compare against.
     static const bool noSeaBed = core::envFlagEnabled("WOWEE_NO_SEA_BED", false);
