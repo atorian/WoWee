@@ -467,7 +467,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         const auto start = std::chrono::steady_clock::now();
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
-        timer.call("update", [&] { renderer.update(kStep); });
+        timer.call("rendererUpdate", [&] { renderer.update(kStep); });
         timer.call("beginFrame", [&] { renderer.beginFrame(); });
         timer.call("renderWorld", [&] { renderer.renderWorld(); });
         timer.call("endFrame", [&] { renderer.endFrame(); });

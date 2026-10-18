@@ -1823,6 +1823,18 @@ void Application::startBenchmarkFromEnvironment() {
     timing.flySeconds = seconds("WOWEE_BENCHMARK_SECONDS", timing.flySeconds);
     timing.settleSeconds = seconds("WOWEE_BENCHMARK_SETTLE", timing.settleSeconds);
     timing.maxSettleSeconds = std::max(timing.maxSettleSeconds, timing.settleSeconds);
+    // A sample count for this run only, over the saved setting and without
+    // changing it: to tell what the scene costs in pixels from what it costs
+    // in geometry.
+    if (const char* msaa = std::getenv("WOWEE_BENCHMARK_MSAA"); msaa && *msaa) {
+        const int samples = std::atoi(msaa);
+        if (samples == 1 || samples == 2 || samples == 4 || samples == 8) {
+            benchmarkMsaa_ = samples;
+        } else {
+            LOG_WARNING("WOWEE_BENCHMARK_MSAA=", msaa, " is not 1, 2, 4 or 8; the run keeps the "
+                        "saved anti-aliasing");
+        }
+    }
     benchmark_ = std::make_unique<BenchmarkRun>(*route, timing);
     LOG_WARNING("Benchmark '", route->name, "': offline world entry, at least ", timing.settleSeconds,
                 " s for the world to settle, then one lap of the route in ", timing.flySeconds,
@@ -1860,13 +1872,27 @@ void Application::benchmarkFrameEnded(float frameSeconds) {
         (stage == WorldLoader::Stage::Finished || stage == WorldLoader::Stage::Idle);
     const bool streaming = terrain && terrain->getRemainingTileCount() > 0;
 
+    // Held until the flight: the saved setting is applied as the world comes
+    // up, and the change rebuilds the targets and pipelines, which the
+    // settle absorbs.
+    if (benchmarkMsaa_ && renderer && !benchmark_->recording() &&
+        benchmark_->phase() != BenchmarkRun::Phase::Finished) {
+        renderer->setMsaaSamples(static_cast<VkSampleCountFlagBits>(*benchmarkMsaa_));
+    }
+
     if (benchmark_->recording() && renderer) {
+        if (const auto* terrainDraw = renderer->getTerrainRenderer()) {
+            benchmark_->noteSceneCount("terrain chunks drawn",
+                                       static_cast<uint64_t>(terrainDraw->getRenderedChunkCount()));
+        }
         if (const auto* m2 = renderer->getM2Renderer()) {
             benchmark_->noteSceneCount("M2 instances", m2->getInstanceCount());
             benchmark_->noteSceneCount("M2 models", m2->getModelCount());
+            benchmark_->noteSceneCount("M2 draw calls", m2->getDrawCallCount());
         }
         if (const auto* wmo = renderer->getWMORenderer()) {
             benchmark_->noteSceneCount("WMO instances", wmo->getInstanceCount());
+            benchmark_->noteSceneCount("WMO draw calls", wmo->getDrawCallCount());
         }
         if (const auto* chars = renderer->getCharacterRenderer()) {
             benchmark_->noteSceneCount("characters", chars->getInstanceCount());
@@ -4283,9 +4309,17 @@ void Application::present(float deltaTime, const FramePlan& plan) {
     if (renderer && (plan.world || plan.loading)) {
         auto rendererUpdateStart = std::chrono::steady_clock::now();
         try {
-            presentWorldToRenderer(deltaTime);
-            renderer->update(deltaTime);
-            followRendererUpdate(deltaTime);
+            // The Present phase, by part: the renderer's update is broken down
+            // further under "rendererUpdate".
+            auto timed = [this](const char* stage, auto&& fn) {
+                const auto start = std::chrono::steady_clock::now();
+                fn();
+                noteStage(stage, std::chrono::duration<float, std::milli>(
+                                     std::chrono::steady_clock::now() - start).count());
+            };
+            timed("presentWorldToRenderer", [&] { presentWorldToRenderer(deltaTime); });
+            timed("rendererUpdate", [&] { renderer->update(deltaTime); });
+            timed("followRendererUpdate", [&] { followRendererUpdate(deltaTime); });
             if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
                 glm::vec3 feet = renderer->getCharacterPosition();
                 static std::optional<float> floor;

@@ -793,6 +793,9 @@ private:
 
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;
+    /// update() cleared the CPU stage times for this frame, so beginFrame
+    /// keeps what it recorded.
+    bool stagesOpenedByUpdate_ = false;
     double lastRenderMs = 0.0;
     double lastTerrainRenderMs = 0.0;
     double lastWMORenderMs = 0.0;

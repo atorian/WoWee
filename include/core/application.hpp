@@ -323,6 +323,8 @@ private:
     /// the report; null without it.
     std::unique_ptr<BenchmarkRun> benchmark_;
     bool benchmarkEntered_ = false;
+    /// WOWEE_BENCHMARK_MSAA: the run's sample count, over the saved one.
+    std::optional<int> benchmarkMsaa_;
     /// Starts the run WOWEE_BENCHMARK asks for; the client closes when it
     /// cannot (an unknown route), with the reason in the log.
     void startBenchmarkFromEnvironment();

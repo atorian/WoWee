@@ -1395,9 +1395,11 @@ void Renderer::beginFrame() {
     ZoneScopedN("Renderer::beginFrame");
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
-    // The renderer's frame starts here; its parts are read after endFrame.
+    // The renderer's frame starts here unless update() already began it;
+    // its parts are read after endFrame.
     CpuStageTimes& stages = vkCtx->cpuStages();
-    stages.clear();
+    if (!stagesOpenedByUpdate_) stages.clear();
+    stagesOpenedByUpdate_ = false;
 
     // The ablation's clock. Top of one frame to the top of the next is the
     // frame's whole wall time, which is the number a pass has to move to be
@@ -2202,26 +2204,33 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
 
 void Renderer::update(float deltaTime) {
     ZoneScopedN("Renderer::update");
+    // The renderer's frame starts here when it is updated before it draws;
+    // its parts, these included, are read after endFrame.
+    if (vkCtx) {
+        vkCtx->cpuStages().clear();
+        stagesOpenedByUpdate_ = true;
+    }
+    auto updateStart = std::chrono::steady_clock::now();
     globalTime += deltaTime;
     runDeferredWorldInitStep(deltaTime);
 
     updateGlares(deltaTime);
 
-    auto updateStart = std::chrono::steady_clock::now();
     lastDeltaTime_ = deltaTime;
 
-    // Where a slow update went. The stage timer around this call says only
-    // that it took 50-70 ms a frame for seconds at a time in Dalaran; camera
-    // and terrain, the only parts that said anything, said nothing then.
+    // Where the update goes, every frame into the frame budget under
+    // "rendererUpdate", and the whole breakdown in the log when one is slow.
+    // The stage timer around this call said only that it took 50-70 ms a
+    // frame for seconds at a time in Dalaran.
     struct UpdatePhase { const char* name; float ms; };
     std::array<UpdatePhase, 12> phases{};
     size_t phaseCount = 0;
     auto phaseStart = updateStart;
     auto endPhase = [&](const char* name) {
         const auto now = std::chrono::steady_clock::now();
-        if (phaseCount < phases.size()) {
-            phases[phaseCount++] = {name, std::chrono::duration<float, std::milli>(now - phaseStart).count()};
-        }
+        const float ms = std::chrono::duration<float, std::milli>(now - phaseStart).count();
+        if (phaseCount < phases.size()) phases[phaseCount++] = {name, ms};
+        if (vkCtx) vkCtx->cpuStages().add("rendererUpdate", name, ms);
         phaseStart = now;
     };
 
@@ -2298,7 +2307,7 @@ void Renderer::update(float deltaTime) {
 
     updateWind(deltaTime);
 
-    endPhase("weather/character anim");
+    endPhase("weather and wind");
     // Update terrain streaming
     if (terrainManager && camera) {
         auto terrStart = std::chrono::steady_clock::now();
@@ -2446,7 +2455,7 @@ void Renderer::update(float deltaTime) {
         modelCleanupTimer = 0.0f;
     }
 
-    endPhase("sounds/hud/cleanup");
+    endPhase("footprints and cleanup");
     auto updateEnd = std::chrono::steady_clock::now();
     lastUpdateMs = std::chrono::duration<double, std::milli>(updateEnd - updateStart).count();
     if (lastUpdateMs > 40.0) {
