@@ -133,15 +133,26 @@ TEST_CASE("an older building lights a room's batches by the run MOBA puts them i
     CHECK(l[3] == kWindowLight);
 }
 
-TEST_CASE("the sun's shadow falls on a room's window and not on its walls", "[wmo-light]") {
+TEST_CASE("no batch of a room takes the sun's shadow, though its window is sunlit",
+          "[wmo-light]") {
+    // The trees outside cast no shadow into a room: the client binds an
+    // interior group only the units' shadow map, on every batch of it.
     const WMOModel model = modelWith(0, kRoomMaterials, kRoom);
     const auto l = lights(model);
+    // Its window is sunlit and its doorway half so...
+    REQUIRE(l[3] == kWindowLight);
+    REQUIRE(l[0].light == WmoLight::Sun);
+    // ...and still the sun's map falls on none of the room.
     const uint32_t flags = model.groups[0].flags;
-    CHECK(wmoReceivesExteriorShadows(flags, l[3]));
-    CHECK(wmoReceivesExteriorShadows(flags, l[0]));
-    CHECK_FALSE(wmoReceivesExteriorShadows(flags, l[1]));
-    // A room that shows the sky outside takes it on its walls too.
-    CHECK(wmoReceivesExteriorShadows(flags | 0x100, l[1]));
+    CHECK_FALSE(wmoReceivesExteriorShadows(flags));
+    // Showing the sky outside (MOGP 0x100) does not make it outdoors.
+    CHECK_FALSE(wmoReceivesExteriorShadows(flags | 0x100));
+}
+
+TEST_CASE("every batch of an outdoor group takes the sun's shadow", "[wmo-light]") {
+    for (const uint32_t outdoors : {0x8u, 0x40u}) {
+        CHECK(wmoReceivesExteriorShadows((0x2805u & ~0x2000u) | outdoors));
+    }
 }
 
 TEST_CASE("a unified building lights a room by its group, not by the run", "[wmo-light]") {

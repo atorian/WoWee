@@ -2320,7 +2320,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.light = static_cast<int32_t>(lighting.light);
     matData.transitionLight = lighting.transition ? static_cast<int32_t>(lighting.under) : -1;
     matData.receivesExteriorShadows = !baselineProbe &&
-        wmoReceivesExteriorShadows(group.groupFlags, lighting) ? 1 : 0;
+        wmoReceivesExteriorShadows(group.groupFlags) ? 1 : 0;
     matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
     // MOMT colours are BGRA bytes.

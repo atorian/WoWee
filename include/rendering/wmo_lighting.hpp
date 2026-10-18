@@ -96,15 +96,19 @@ inline WmoBatchLighting wmoBatchLighting(uint16_t modelFlags, uint32_t groupFlag
     return {.light = sunOrWindow};
 }
 
-/// Whether the sun's shadow map falls on a batch: on every batch of an
-/// exterior group, which is the map the client binds for one (MOGP & 0x48),
-/// lit or not; wherever the sun lights a batch, so a window's sunlight stops
-/// where the sun's does; and on a group that shows the sky outside (MOGP
-/// 0x100), whose baked light is then shaded by what stands between it and
-/// the sky.
-inline bool wmoReceivesExteriorShadows(uint32_t groupFlags, const WmoBatchLighting& lighting) {
-    return (groupFlags & (0x8u | 0x40u | 0x100u)) != 0 || lighting.light == WmoLight::Sun ||
-           lighting.light == WmoLight::Window;
+/// Whether the sun's shadow map falls on a group's batches: on every batch of
+/// an exterior group (MOGP & 0x48), lit or not, and on nothing indoors.
+///
+/// WoW.exe 12340 marks each group of a building interior or exterior by those
+/// two flags alone (0x7bdfb5) and binds an interior group only the units'
+/// shadow map, on every batch of it: its window and doorway batches too,
+/// which wmoBatchLighting lights by the sun or the window light without the
+/// sun's map shading them. So the trees outside cast no shadow into a room.
+/// This took the sun's map onto a room's sunlit and window batches and onto
+/// every batch of a group showing the sky outside (MOGP 0x100), and a tree's
+/// shadow lay across the floor of rooms the client keeps clear.
+inline bool wmoReceivesExteriorShadows(uint32_t groupFlags) {
+    return (groupFlags & (0x8u | 0x40u)) != 0;
 }
 
 }  // namespace wowee::rendering
