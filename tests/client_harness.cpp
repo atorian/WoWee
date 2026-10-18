@@ -438,6 +438,17 @@ bool ClientHarness::interfaceAnswers(const std::string& expression) {
     return addons->interfaceCommandBoolean(expression);
 }
 
+void ClientHarness::layOutInterface() {
+    auto* addons = loop_->characterAddons();
+    if (!addons) fail("no interface to lay out");
+    core::ScopedPhase interfacePhase(phase_, core::Phase::Interface);
+    auto* engine = addons->getLuaEngine();
+    // The order Application keeps: layout, then visibility, then sizes.
+    engine->widgets().layout(1920.0f, 1080.0f);
+    engine->updateVisibility();
+    engine->updateSizeChanges();
+}
+
 bool ClientHarness::presentsCreature(uint64_t guid) const {
     return spawner_->isCreaturePending(guid) || spawner_->isCreatureSpawned(guid);
 }

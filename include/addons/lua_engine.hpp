@@ -5,6 +5,7 @@
 #include <map>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -326,6 +327,12 @@ public:
     void writeLuaErrorReport() const;
 
 private:
+    /// WOWEE_WIDGET_REPORT_CHECK: a change the two passes above were not
+    /// listed. See the definition.
+    void checkChangeReports();
+    /// The widgets it has already warned about, so each is said once.
+    std::unordered_set<uint32_t> unreportedChangesWarned_;
+
     lua_State* L_ = nullptr;
     InterfaceState& interfaceState_;
     ui::WidgetTree widgets_;

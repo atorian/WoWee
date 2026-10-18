@@ -3274,6 +3274,14 @@ if(_ipo_supported AND WOWEE_ENABLE_LTO)
     set_property(TARGET test_client_transitions PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
+# What the interface's frames are told after layout - OnShow, OnHide,
+# OnSizeChanged - through the character's own interface.
+wowee_add_test(test_interface_frame_scripts SOURCES test_interface_frame_scripts.cpp)
+target_link_libraries(test_interface_frame_scripts PRIVATE wowee_client_harness)
+if(_ipo_supported AND WOWEE_ENABLE_LTO)
+    set_property(TARGET test_interface_frame_scripts PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
 # ── wowee_loading_test_client ────────────────────────────────
 # The native loading fixture: the client's own objects with a main of its own
 # that watches the frames (loading_frame_probe.cpp). Built with the client in

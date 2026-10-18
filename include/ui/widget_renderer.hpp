@@ -11,6 +11,7 @@
 // is shipped; it is the player's own install being drawn.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -80,25 +81,29 @@ private:
     /// Already-uploaded texture for a path, without triggering an upload.
     [[nodiscard]] VkDescriptorSet resident(const std::string& path, bool add = false) const;
 
-    /// scale is pixels per interface unit. The rect arrives in pixels, but a
-    /// backdrop's insets and edge size are authored in units like everything
-    /// else, so they have to make the same trip or a border comes out the
-    /// wrong thickness on any display that is not 768 pixels tall.
-    /// Sizes every tooltip to the lines it holds, before layout runs. A
-    /// tooltip has no size until it has something to say.
-    /// Give every unsized label the size of the text in it.
+    /// A label or a texture, as the tree places it (WidgetTree::setContentSizer).
     ///
     /// A FontString with no <Size> takes the size of its string, as it does in
     /// WoW. Leaving it at zero lays it out to nothing and draws nothing, so the
     /// text is set, correct, and invisible - the player frame's level number
-    /// read text="14" in a rect of 0x0.
-    /// Gives a texture the dimensions of its own image on any axis nothing else
-    /// decides. WoW's rule, and FrameXML depends on it - the friends list's
-    /// status icon declares one anchor and no size whatsoever.
-    /// Labels and textures, in one pass. See sizeArtAndText.
-    void sizeArtAndText(WidgetTree& tree);
+    /// read text="14" in a rect of 0x0. A texture takes the dimensions of its
+    /// own image on any axis nothing else decides; FrameXML depends on that -
+    /// the friends list's status icon declares one anchor and no size.
+    ///
+    /// Measured as each is placed rather than in a pass over the whole tree
+    /// before layout, which touched all 28,000 widgets to size the few hundred
+    /// on screen.
+    void sizeContent(Widget& w);
+    /// The face a label falls back to, found once a layout rather than per
+    /// label; null until the first layout.
+    ImFont* sizingFont_ = nullptr;
+    /// Held by the sizer the tree calls, so a tree that outlives this
+    /// renderer finds it gone rather than calling into freed memory.
+    std::shared_ptr<char> alive_ = std::make_shared<char>(0);
     void sizeTextureWidget(Widget* w);
     void sizeFontStringWidget(Widget* w, ImFont* font);
+    /// Sizes a tooltip to the lines it holds. A tooltip has no size until it
+    /// has something to say.
     void sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree);
     /// How big the picture is, without uploading it. No Vulkan context needed:
     /// asking a file its dimensions does not require a GPU, and requiring one
@@ -133,6 +138,10 @@ private:
     /// can be filed in the coordinates the click will arrive in.
     float linkScreenH_ = 0.0f;
     float linkScale_ = 1.0f;
+    /// scale is pixels per interface unit. The rect arrives in pixels, but a
+    /// backdrop's insets and edge size are authored in units like everything
+    /// else, so they have to make the same trip or a border comes out the
+    /// wrong thickness on any display that is not 768 pixels tall.
     void drawBackdrop(ImDrawList* dl, const Widget& w, float scale,
                       float x0, float y0, float x1, float y1);
     void drawStatusBar(ImDrawList* dl, const Widget& w,

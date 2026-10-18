@@ -215,7 +215,7 @@ bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
 /// Only the axis that has nothing. A texture given a width by two anchors and
 /// left open vertically keeps the width and takes only the height, which is how
 /// a stretched border piece is meant to work.
-/// One texture, sized from its own image. See sizeArtAndText.
+/// One texture, sized from its own image. See sizeContent.
 void WidgetRenderer::sizeTextureWidget(Widget* w) {
     if (!assets_) return;
     if (w->texturePath.empty()) return;
@@ -252,7 +252,7 @@ void WidgetRenderer::sizeTextureWidget(Widget* w) {
     if (needsH) w->height = ih;
 }
 
-/// One label, sized from its own text. See sizeArtAndText.
+/// One label, sized from its own text. See sizeContent.
 void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     if (w->text.empty()) return;
     // Anchors that span an axis give the size on that axis, and the string
@@ -377,7 +377,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
 ///
 /// This one writes to widgets other than its own: it anchors and sizes
 /// each TextLeft font string the tooltip owns. That is why tooltips are
-/// still a pass of their own rather than folded into sizeArtAndText -
+/// still a pass of their own rather than sized as they are placed -
 /// every tooltip has to have placed its lines before any font string is
 /// measured, or a line whose id fell below its tooltip's would be
 /// measured against the size it had last frame.
@@ -588,26 +588,24 @@ void WidgetRenderer::sizeTooltipWidget(Widget* w, ImFont* font, WidgetTree& tree
     }
 }
 
-/// Every label and every texture that decides its own size, in one pass.
+/// A label or a texture that decides its own size, sized as the tree places
+/// it.
 ///
-/// These were two passes, each walking all 28018 widgets to act on the few
-/// thousand of its own kind. The work per widget is small and the walk is
-/// not: a Widget is a large struct, so two scans of the array is twice the
-/// memory traffic for the same answers. The two are independent - a label is
-/// measured from its own text and a texture from its own image, the kinds are
-/// disjoint, and neither writes to any widget but its own - so one scan
-/// dispatching on kind gives the same result.
+/// This was a pass of its own over all 28,000 widgets every frame, before
+/// the anchor solve - 1.5ms in Dalaran, nearly all of it touching widgets
+/// nobody would place: a Widget is a large struct, and about 900 of them are
+/// on screen. The tree now calls this from layoutWidgetSelf, for what the full
+/// pass places and for whatever a script resolves on demand, so every rect
+/// is still solved from a fresh size. A label is measured from its own text
+/// and a texture from its own image, and neither writes to any widget but its
+/// own, so the order they are sized in changes nothing.
 ///
 /// Tooltips are deliberately not in here; see sizeTooltipWidget.
-void WidgetRenderer::sizeArtAndText(WidgetTree& tree) {
-    ImFont* font = interfaceFace("frizqt__");
-    if (!font) font = ImGui::GetFont();
-
-    for (size_t id = 1; id < tree.size(); ++id) {
-        Widget* w = tree.get(static_cast<uint32_t>(id));
-        if (!w) continue;
-        if (font && w->kind == WidgetKind::FontString) sizeFontStringWidget(w, font);
-        else if (w->kind == WidgetKind::Texture) sizeTextureWidget(w);
+void WidgetRenderer::sizeContent(Widget& w) {
+    if (w.kind == WidgetKind::FontString) {
+        if (sizingFont_) sizeFontStringWidget(&w, sizingFont_);
+    } else if (w.kind == WidgetKind::Texture) {
+        sizeTextureWidget(&w);
     }
 }
 
@@ -1262,7 +1260,7 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     // all. So it is measured rather than reasoned about.
     static const bool profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
     struct PassTimes {
-        double sizing = 0.0, solve = 0.0;
+        double solve = 0.0;
         int frames = 0;
         double reportedAt = 0.0;
     };
@@ -1275,7 +1273,13 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
             std::chrono::steady_clock::now() - t0).count();
     };
 
-    // Labels and textures, in a single scan; see sizeArtAndText.
+    // Labels and textures are sized as the solve places them; see
+    // sizeContent. The fallback face is found once here rather than per label.
+    sizingFont_ = interfaceFace("frizqt__");
+    if (!sizingFont_ && ImGui::GetCurrentContext()) sizingFont_ = ImGui::GetFont();
+    tree.setContentSizer([this, alive = std::weak_ptr<char>(alive_)](Widget& w) {
+        if (!alive.expired()) sizeContent(w);
+    });
     //
     // Tooltips are not sized here any more. This pass runs before FrameXML's
     // OnUpdate handlers, and the micro button's tooltip is rebuilt by one of
@@ -1283,8 +1287,6 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     // frame and the draw then measured the lines it has now - two answers per
     // frame, and the tooltip flicked between the two widths they gave it.
     // WidgetRenderer::draw sizes them once, after FrameXML has finished.
-    mark(times.sizing, [&] { sizeArtAndText(tree); });
-
     mark(times.solve, [&] { tree.layout(screenW, screenH); });
 
     if (profile) {
@@ -1293,8 +1295,7 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
         if (now - times.reportedAt > 10.0 && times.frames > 0) {
             const double n = times.frames;
             LOG_WARNING("  WidgetRenderer::layout over ", times.frames,
-                        " frames: sizing ", times.sizing / n,
-                        "ms, anchor solve ", times.solve / n,
+                        " frames: anchor solve, sizing what it places, ", times.solve / n,
                         "ms/frame, over ", tree.size(), " widgets");
             LOG_WARNING("    of that solve: anchor walk ", tree.lastWalkMs(),
                         "ms, draw order ", tree.lastDrawOrderMs(),

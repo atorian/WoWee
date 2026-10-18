@@ -104,6 +104,8 @@ void WidgetTree::reset() {
     ownedTooltips_.clear();
     portraitsByUnit_.clear();
     portraitUnitOf_.clear();
+    sizeChanges_.clear();
+    visibilityChanges_.clear();
     // Every one of these names a widget by id, and the ids are about to mean
     // something else. A drag or a focus held across the reset would be held on
     // whatever frame the new load happens to give that number to.
@@ -155,7 +157,46 @@ uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string&
         w.effLevel = widgets_[parent].effLevel + 1;
         w.effStrata = widgets_[parent].effStrata;
     }
+    noteSizeChange(w);
     return id;
+}
+
+void WidgetTree::noteSizeChange(Widget& w) {
+    if (w.sizeChangeQueued) return;
+    w.sizeChangeQueued = true;
+    sizeChanges_.push_back(w.id);
+}
+
+void WidgetTree::noteVisibilityChange(Widget& w) {
+    if (w.visibilityChangeQueued) return;
+    w.visibilityChangeQueued = true;
+    visibilityChanges_.push_back(w.id);
+}
+
+void WidgetTree::noteShownToggle(uint32_t id) {
+    if (Widget* w = get(id)) noteVisibilityChange(*w);
+}
+
+std::vector<uint32_t> WidgetTree::takeSizeChanges() {
+    std::vector<uint32_t> out;
+    out.swap(sizeChanges_);
+    for (uint32_t id : out) {
+        if (Widget* w = get(id)) w->sizeChangeQueued = false;
+    }
+    // In id order, the order the whole-tree pass this replaced told them in:
+    // a parent is made before its children, so its OnSizeChanged comes first.
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<uint32_t> WidgetTree::takeVisibilityChanges() {
+    std::vector<uint32_t> out;
+    out.swap(visibilityChanges_);
+    for (uint32_t id : out) {
+        if (Widget* w = get(id)) w->visibilityChangeQueued = false;
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
@@ -191,6 +232,7 @@ void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
     // layout walk does not look again beneath a frame it has already marked.
     if (!parent->visibleChain) {
         w->visibleChain = false;
+        if (w->visible) noteVisibilityChange(*w);
         w->visible = false;
         markSubtreeHidden(id, /*all=*/true);
     }
@@ -228,6 +270,7 @@ void WidgetTree::hideOrphanedTooltips() {
         // own right after LootFrame hides above it.
         if (owner && owner->visibleChain) continue;
         tip->shown = false;
+        if (tip->visible) noteVisibilityChange(*tip);
         tip->visible = false;
         tip->visibleChain = false;
     }
@@ -338,6 +381,7 @@ void WidgetTree::setWidth(uint32_t id, float width) {
     // Provisional, so a read before the next layout sees what was just set.
     // The layout overwrites it from the anchors, which is the final answer
     // where anchors decide the size.
+    if (w->rectW != width) noteSizeChange(*w);
     w->rectW = width;
 }
 
@@ -365,6 +409,7 @@ void WidgetTree::setHeight(uint32_t id, float height) {
         w->measuredText.clear();
     }
     w->height = height;
+    if (w->rectH != height) noteSizeChange(*w);
     w->rectH = height;
 }
 
@@ -756,13 +801,20 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     const auto solveStart = std::chrono::steady_clock::now();
     visibleThisPass_ = 0;
 
+    // The screen and UIParent are sized here rather than by the solve, so
+    // their changes are noted here too.
+    auto fillScreen = [&](Widget& w, bool visible) {
+        if (w.rectW != screenW || w.rectH != screenH) noteSizeChange(w);
+        if (w.visible != visible) noteVisibilityChange(w);
+        w.left = 0.0f;
+        w.bottom = 0.0f;
+        w.rectW = screenW;
+        w.rectH = screenH;
+        w.visibleChain = visible;
+        w.visible = visible;
+    };
     Widget& rootW = widgets_[rootId_];
-    rootW.left = 0.0f;
-    rootW.bottom = 0.0f;
-    rootW.rectW = screenW;
-    rootW.rectH = screenH;
-    rootW.visibleChain = rootW.shown;
-    rootW.visible = rootW.shown;
+    fillScreen(rootW, rootW.shown);
     rootW.effStrata = rootW.strata;
     rootW.effLevel = 0;
     rootW.effScale = 1.0f;
@@ -772,12 +824,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     // no anchors is not displayed. Its own shown flag still decides whether
     // anything under it is, which is the whole point of it being a frame.
     if (Widget* ui = get(uiParentId_); ui && ui != &rootW) {
-        ui->left = 0.0f;
-        ui->bottom = 0.0f;
-        ui->rectW = screenW;
-        ui->rectH = screenH;
-        ui->visibleChain = rootW.visible && ui->shown;
-        ui->visible = ui->visibleChain;
+        fillScreen(*ui, rootW.visible && ui->shown);
         ui->effStrata = ui->strata;
         ui->effLevel = 0;
         ui->effScale = 1.0f;
@@ -845,6 +892,7 @@ void WidgetTree::markSubtreeHidden(uint32_t id, bool all) {
             // answer, because resolveWidget re-derives whatever the last full
             // pass did not claim.
             c->visibleChain = false;
+            if (c->visible) noteVisibilityChange(*c);
             c->visible = false;
         }
         markSubtreeHidden(child, all);
@@ -886,7 +934,13 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
 void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     Widget* w = get(id);
     if (!w) return;
+    // Its size from what it holds, now that it is being placed.
+    if (contentSizer_) contentSizer_(*w);
     w->resolvedGen = layoutGeneration_;
+    // What the interface may be owed word of, compared at the end.
+    const bool wasVisible = w->visible;
+    const float wasW = w->rectW;
+    const float wasH = w->rectH;
     const Widget* parent = get(w->parent);
 
     // A frame with no anchor points is not displayed. That is WoW's rule, and
@@ -1176,6 +1230,8 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         }
     }
 
+    if (w->rectW != wasW || w->rectH != wasH) noteSizeChange(*w);
+    if (w->visible != wasVisible) noteVisibilityChange(*w);
 }
 
 uint32_t WidgetTree::hitTest(float x, float y) const {

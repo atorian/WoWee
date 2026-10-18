@@ -29,6 +29,7 @@
 #include <fstream>
 #include "core/app_clock.hpp"
 #include "core/config_paths.hpp"
+#include "core/env_flag.hpp"
 #include <filesystem>
 
 extern "C" {
@@ -3443,7 +3444,10 @@ int lua_Region_Show(lua_State* L) {
         // flag where it started, and the pass that fires OnShow works by
         // comparing against the last state it reported - so the rebuild the
         // interface asked for is invisible to it. See Widget::shownToggles.
-        if (!w->shown && w->shownToggles < 200) ++w->shownToggles;
+        if (!w->shown && w->shownToggles < 200) {
+            ++w->shownToggles;
+            if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteShownToggle(w->id);
+        }
         becameShown = !w->shown;
         w->shown = true;
     }
@@ -3504,6 +3508,7 @@ int lua_Region_Hide(lua_State* L) {
         // the startTime its OnShow was going to set. Reported in #132.
         if (w->shown && frameScriptSet(L, 1, "OnHide") && w->shownToggles < 200) {
             ++w->shownToggles;
+            if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteShownToggle(w->id);
         }
         // A hidden tooltip belongs to nobody.
         //
@@ -10235,10 +10240,14 @@ void LuaEngine::reportEventListenersOnce() {
 /// fired from SetWidth, because a frame is far more often resized by its
 /// anchors than by anyone calling a setter - a scroll child stretched by its
 /// parent never goes near SetWidth.
+///
+/// Over the widgets the tree says it resized, not over the tree: comparing all
+/// 28,000 against their last report every frame cost more than everything
+/// those few dozen handlers then did.
 void LuaEngine::updateSizeChanges() {
     if (!L_) return;
-    for (size_t id = 1; id < widgets_.size(); ++id) {
-        const ui::Widget* wp = widgets_.get(static_cast<uint32_t>(id));
+    for (uint32_t id : widgets_.takeSizeChanges()) {
+        const ui::Widget* wp = widgets_.get(id);
         if (!wp) continue;
         const ui::Widget& w = *wp;
         if (w.id == 0 || w.kind != ui::WidgetKind::Frame) continue;
@@ -10256,33 +10265,53 @@ void LuaEngine::updateSizeChanges() {
         // nothing and runs 3000 handlers to say it.
         if (!known) continue;
         if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
-        lua_getglobal(L_, "__WoweeFramesByWid");
-        if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return; }
-        lua_pushinteger(L_, static_cast<lua_Integer>(w.id));
-        lua_rawget(L_, -2);
-        if (lua_istable(L_, -1)) {
-            lua_getfield(L_, -1, "OnSizeChanged");
-            if (lua_isfunction(L_, -1)) {
-                lua_pushvalue(L_, -2);
-                lua_pushnumber(L_, w.rectW);
-                lua_pushnumber(L_, w.rectH);
-                if (pcallScript(L_, "OnSizeChanged", 3, 0) != 0) {
-                    LOG_WARNING("OnSizeChanged error: ",
-                                luaL_optstring(L_, -1, "?"));
-                    lua_pop(L_, 1);
-                }
-            } else {
-                lua_pop(L_, 1);
-            }
-        }
-        lua_pop(L_, 2);
+        // From the frame's scripts, where SetScript and the XML's
+        // <OnSizeChanged> put it. This looked for a field on the frame itself,
+        // which nothing sets, so no OnSizeChanged in the interface had ever
+        // run - the quest tracker's among them.
+        const float width = w.rectW;
+        const float height = w.rectH;
+        const int handlerIdx = beginFrameScript(id, "OnSizeChanged");
+        if (handlerIdx == 0) continue;
+        lua_pushnumber(L_, width);
+        lua_pushnumber(L_, height);
+        finishFrameScript(id, "OnSizeChanged", handlerIdx, 3);
+    }
+    checkChangeReports();
+}
+
+void LuaEngine::checkChangeReports() {
+    // Under WOWEE_WIDGET_REPORT_CHECK, the whole-tree comparison the two passes
+    // above used to make, as a check on the lists they now read instead: a
+    // widget whose size or visibility differs from what the interface was told
+    // without being listed is a change some write in the tree did not note,
+    // and its handler never ran. Slow; for verifying, not for playing.
+    static const bool check = core::envFlagEnabled("WOWEE_WIDGET_REPORT_CHECK", false);
+    if (!check) return;
+    for (uint32_t id = 1; id < widgets_.size(); ++id) {
+        const ui::Widget* w = widgets_.get(id);
+        if (!w || w->id == 0) continue;
+        const bool sizeMissed = w->kind == ui::WidgetKind::Frame &&
+            !w->sizeChangeQueued && w->lastReportedW >= 0.0f &&
+            (w->lastReportedW != w->rectW || w->lastReportedH != w->rectH);
+        const bool visibilityMissed = !w->visibilityChangeQueued &&
+            (w->visible != w->reportedVisible || w->shownToggles != 0);
+        if (!sizeMissed && !visibilityMissed) continue;
+        if (!unreportedChangesWarned_.insert(id).second) continue;
+        LOG_WARNING("Widget report check: '", w->name, "' (", id, ") ",
+                    sizeMissed ? "was resized" : "changed visibility",
+                    " without the tree noting it - its ",
+                    sizeMissed ? "OnSizeChanged" : "OnShow/OnHide",
+                    " did not run");
     }
 }
 
 void LuaEngine::updateVisibility() {
     if (!L_) return;
-    // By index and re-fetched each time: a handler is free to create frames,
-    // and OnShow very often does.
+    // Over the widgets the tree says may have appeared, gone or been toggled
+    // (WidgetTree::takeVisibilityChanges), not over all of them. Re-fetched by
+    // id each time: a handler is free to create frames, and OnShow very often
+    // does.
     // `visible` here and `visibleChain` in the OnUpdate pump, which is a
     // deliberate difference rather than an oversight.
     //
@@ -10302,7 +10331,7 @@ void LuaEngine::updateVisibility() {
     // handlers is worth the risk of waking the rest.
     //
     // (UIParent looks like a seventh and is not: it carries setAllPoints.)
-    for (uint32_t id = 1; id < widgets_.size(); ++id) {
+    for (uint32_t id : widgets_.takeVisibilityChanges()) {
         auto* w = widgets_.get(id);
         if (!w || w->id == 0) continue;
         const uint8_t toggles = w->shownToggles;

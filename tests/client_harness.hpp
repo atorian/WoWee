@@ -124,6 +124,11 @@ public:
     void runInInterface(const std::string& code);
     /// The same for an expression, answered as a boolean.
     bool interfaceAnswers(const std::string& expression);
+    /// What the client does with the interface's frames each frame after its
+    /// scripts ran, short of drawing them: lay them out on a 1920x1080 screen,
+    /// then tell the interface what appeared, went away and changed size
+    /// (OnShow, OnHide, OnSizeChanged).
+    void layOutInterface();
 
     // ---- Reading it ---------------------------------------------------------
 

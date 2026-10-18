@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <string>
 #include <string_view>
@@ -161,10 +162,14 @@ struct Widget {
     float animOffsetX = 0.0f, animOffsetY = 0.0f;
 
     /// The rect this frame last reported through OnSizeChanged. Kept on the
-    /// widget rather than in a map beside it: the pass runs every frame over
-    /// every widget, and a hash lookup each was paying for a comparison that
-    /// two floats here answer directly.
+    /// widget rather than in a map beside it: a hash lookup each was paying
+    /// for a comparison that two floats here answer directly.
     float lastReportedW = -1.0f, lastReportedH = -1.0f;
+    /// Whether this widget is already waiting in the tree's list of size or
+    /// visibility changes, so a widget moved several times in a frame is
+    /// reported on once. See WidgetTree::takeSizeChanges.
+    bool sizeChangeQueued = false;
+    bool visibilityChangeQueued = false;
 
     /// The layout generation this widget's rect was last resolved in. Zero
     /// means never, which is older than any generation.
@@ -833,6 +838,32 @@ public:
     /// resolved in, and a repeat asks nothing.
     void resolveWidget(uint32_t id);
 
+    /// Gives a label or a texture the size of its own content, called just
+    /// before its rect is solved - in the full pass for what is on screen, and
+    /// on demand for whatever a script asks about - so nothing is measured
+    /// that nobody places (WidgetRenderer). A tree with none keeps the sizes
+    /// it was given, which is what the headless tests want.
+    using ContentSizer = std::function<void(Widget&)>;
+    void setContentSizer(ContentSizer sizer) { contentSizer_ = std::move(sizer); }
+
+    /// The widgets whose rect or whose `visible` may have changed since the
+    /// last time these were taken, in id order, each once.
+    ///
+    /// OnSizeChanged, OnShow and OnHide are owed for a change, and the tree is
+    /// what makes every change, so it keeps the list as it makes them rather
+    /// than the interface comparing all 28,000 widgets against what it last
+    /// said, every frame, to find the few dozen that moved. A widget is on the
+    /// list from its creation, too, so its first size is recorded as it was
+    /// when it appeared.
+    ///
+    /// "May have": a frame hidden and shown back in one frame is listed, and
+    /// the caller still compares against what it last reported.
+    [[nodiscard]] std::vector<uint32_t> takeSizeChanges();
+    [[nodiscard]] std::vector<uint32_t> takeVisibilityChanges();
+    /// Lua flipped `shown`, which is owed OnHide and OnShow even when the
+    /// frame ends where it started (Widget::shownToggles).
+    void noteShownToggle(uint32_t id);
+
     /// How far a scroll child's contents actually reach, in interface units.
     ///
     /// A scroll child is very often smaller than what is inside it, because
@@ -1020,6 +1051,13 @@ private:
     /// Bumped whenever anything moves. A widget resolved in this generation
     /// needs no further work; one from an older generation is stale.
     uint64_t layoutGeneration_ = 1;
+    ContentSizer contentSizer_;
+    /// See takeSizeChanges. Filed through these two, which skip a widget
+    /// already listed.
+    std::vector<uint32_t> sizeChanges_;
+    std::vector<uint32_t> visibilityChanges_;
+    void noteSizeChange(Widget& w);
+    void noteVisibilityChange(Widget& w);
     // What the last full pass cost and whether it needed to run. Read by the
     // frame profile; see WidgetTree::layout.
     double lastWalkMs_ = 0.0;
