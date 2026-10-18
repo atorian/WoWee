@@ -5,7 +5,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/glsl_as_cpp.hpp"
-#include "rendering/sea_bed_frame.hpp"
+#include "rendering/overhead_frame.hpp"
 
 #include <vector>
 
@@ -15,8 +15,8 @@ namespace {
 }
 }  // namespace wowee::rendering::glsl
 
-using wowee::rendering::SeaBedFrame;
-using wowee::rendering::seaBedFrameFor;
+using wowee::rendering::OverheadFrame;
+using wowee::rendering::overheadFrameFor;
 using wowee::rendering::glsl::seaBedDepth;
 
 namespace {
@@ -44,7 +44,7 @@ float kept(const glm::mat4& m, glm::vec2 xy, std::initializer_list<float> height
 }  // namespace
 
 TEST_CASE("the sea bed's map looks straight down and gives each height back", "[water][sea_bed]") {
-    const SeaBedFrame frame = seaBedFrameFor({-8574.7f, 1340.8f}, 0.0f, kHalf, kRange, kTexels);
+    const OverheadFrame frame = overheadFrameFor({-8574.7f, 1340.8f}, 0.0f, kHalf, kRange, kTexels);
     const glm::mat4 above = frame.viewProjection();
     for (glm::vec3 p : {glm::vec3(-8574.0f, 1341.0f, -3.0f), glm::vec3(-8300.0f, 1600.0f, -150.0f),
                         glm::vec3(-8900.0f, 1000.0f, -0.5f)}) {
@@ -66,7 +66,7 @@ TEST_CASE("the sea bed's map looks straight down and gives each height back", "[
 }
 
 TEST_CASE("seen from below, the map keeps the lowest surface in a column", "[water][sea_bed]") {
-    const SeaBedFrame frame = seaBedFrameFor({100.0f, 200.0f}, 10.0f, kHalf, kRange, kTexels);
+    const OverheadFrame frame = overheadFrameFor({100.0f, 200.0f}, 10.0f, kHalf, kRange, kTexels);
     const glm::vec2 xy(120.0f, 180.0f);
     // A hull: its deck at the water, its keel four yards down.
     const float fromAbove = kept(frame.viewProjection(), xy, {10.0f, 6.0f});
@@ -84,14 +84,14 @@ TEST_CASE("the map's texels stay put in the world as the camera moves", "[water]
     // Drawn again round a camera that has moved, every point of the shore
     // falls at the same place in its texel as before; the waves along it
     // would shimmer with every step otherwise.
-    const auto withinTexel = [](const SeaBedFrame& f, glm::vec2 p) {
+    const auto withinTexel = [](const OverheadFrame& f, glm::vec2 p) {
         const glm::vec3 c = clipOf(f.viewProjection(), glm::vec3(p, -1.0f));
         const glm::vec2 at = (glm::vec2(c) * 0.5f + 0.5f) * static_cast<float>(kTexels);
         return at - glm::floor(at);
     };
-    const SeaBedFrame a = seaBedFrameFor({1000.1f, -50.2f}, 0.0f, kHalf, kRange, kTexels);
+    const OverheadFrame a = overheadFrameFor({1000.1f, -50.2f}, 0.0f, kHalf, kRange, kTexels);
     for (glm::vec2 moved : {glm::vec2(0.2f, -0.1f), glm::vec2(13.37f, 7.9f), glm::vec2(-95.0f, 60.4f)}) {
-        const SeaBedFrame b = seaBedFrameFor(glm::vec2(1000.1f, -50.2f) + moved, 0.0f, kHalf, kRange, kTexels);
+        const OverheadFrame b = overheadFrameFor(glm::vec2(1000.1f, -50.2f) + moved, 0.0f, kHalf, kRange, kTexels);
         for (glm::vec2 shore : {glm::vec2(1010.3f, -40.7f), glm::vec2(1100.9f, -130.2f)}) {
             const glm::vec2 fa = withinTexel(a, shore), fb = withinTexel(b, shore);
             CHECK(fa.x == Catch::Approx(fb.x).margin(2e-3));

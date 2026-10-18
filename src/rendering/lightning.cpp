@@ -339,10 +339,11 @@ void Lightning::spawnRandomStrike(const glm::vec3& cameraPos) {
     float angle = randomRange(0.0f, core::coords::TWO_PI);
     float distance = randomRange(50.0f, STRIKE_DISTANCE);
 
+    // Out on the ground plane (render z is up), from high over it.
     glm::vec3 strikePos;
     strikePos.x = cameraPos.x + std::cos(angle) * distance;
-    strikePos.z = cameraPos.z + std::sin(angle) * distance;
-    strikePos.y = cameraPos.y + randomRange(80.0f, 150.0f);  // High in sky
+    strikePos.y = cameraPos.y + std::sin(angle) * distance;
+    strikePos.z = cameraPos.z + randomRange(80.0f, 150.0f);
 
     triggerStrike(strikePos);
 }
@@ -367,7 +368,7 @@ void Lightning::triggerStrike(const glm::vec3& position) {
     bolt->brightness = 1.0f;
     bolt->startPos = position;
     bolt->endPos = position;
-    bolt->endPos.y = position.y - randomRange(100.0f, 200.0f);  // Strike downward
+    bolt->endPos.z = position.z - randomRange(90.0f, 160.0f);  // down to the ground
 
     // Generate segments
     bolt->segments.clear();
@@ -404,7 +405,9 @@ void Lightning::generateBoltSegments(const glm::vec3& start, const glm::vec3& en
 
         // Add random offset perpendicular to direction
         float offsetAmount = (1.0f - t) * 8.0f;  // More offset at start
-        glm::vec3 perpendicular1 = glm::normalize(glm::cross(direction, glm::vec3(0.0f, 1.0f, 0.0f)));
+        // Against a level axis: the bolt runs nearly straight down, and its
+        // cross with the up axis is nothing.
+        glm::vec3 perpendicular1 = glm::normalize(glm::cross(direction, glm::vec3(1.0f, 0.0f, 0.0f)));
         glm::vec3 perpendicular2 = glm::normalize(glm::cross(direction, perpendicular1));
 
         glm::vec3 offset = perpendicular1 * randomRange(-offsetAmount, offsetAmount) +
@@ -417,8 +420,8 @@ void Lightning::generateBoltSegments(const glm::vec3& start, const glm::vec3& en
         if (dist(gen) < BRANCH_PROBABILITY && depth < 3) {
             glm::vec3 branchEnd = current;
             branchEnd += glm::vec3(randomRange(-20.0f, 20.0f),
-                                   randomRange(-30.0f, -10.0f),
-                                   randomRange(-20.0f, 20.0f));
+                                   randomRange(-20.0f, 20.0f),
+                                   randomRange(-30.0f, -10.0f));
             generateBoltSegments(current, branchEnd, segments, depth + 1);
         }
     }
@@ -445,28 +448,24 @@ void Lightning::renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &boltDynamicVB, &offset);
 
+    // Each bolt in its own stretch of the buffer: the draws read it when they
+    // execute, so one stretch rewritten per bolt drew the last bolt every time.
+    const uint32_t capacity = static_cast<uint32_t>(boltDynamicVBSize / sizeof(glm::vec3));
+    uint32_t used = 0;
     for (const auto& bolt : bolts) {
-        if (!bolt.active || bolt.segments.empty()) {
+        if (!bolt.active || bolt.segments.empty() || !boltDynamicVBAllocInfo.pMappedData) {
             continue;
         }
+        const uint32_t count = std::min(static_cast<uint32_t>(bolt.segments.size()), capacity - used);
+        if (count < 2) break;
+        std::memcpy(static_cast<glm::vec3*>(boltDynamicVBAllocInfo.pMappedData) + used, bolt.segments.data(),
+                    count * sizeof(glm::vec3));
 
-        // Upload bolt segments to mapped buffer
-        VkDeviceSize uploadSize = bolt.segments.size() * sizeof(glm::vec3);
-        if (uploadSize > boltDynamicVBSize) {
-            // Clamp to buffer size
-            uploadSize = boltDynamicVBSize;
-        }
-        if (boltDynamicVBAllocInfo.pMappedData) {
-            std::memcpy(boltDynamicVBAllocInfo.pMappedData, bolt.segments.data(), uploadSize);
-        }
-
-        // Push brightness
         vkCmdPushConstants(cmd, boltPipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(float), &bolt.brightness);
-
-        uint32_t vertexCount = static_cast<uint32_t>(uploadSize / sizeof(glm::vec3));
-        vkCmdDraw(cmd, vertexCount, 1, 0, 0);
+        vkCmdDraw(cmd, count, 1, used, 0);
+        used += count;
     }
 }
 

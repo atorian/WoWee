@@ -14,6 +14,7 @@
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/realm_time_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -1382,45 +1383,7 @@ void GameHandler::registerRemainingOpcodes() {
                       " override=", overrideLightId, " transition=", transitionMs, "ms");
         }
     };
-    // Classic 1.12: uint32 weatherType + float intensity (8 bytes, no isAbrupt)
-    // TBC 2.4.3 / WotLK 3.3.5a: uint32 weatherType + float intensity + uint8 isAbrupt (9 bytes)
-    dispatchTable_[Opcode::SMSG_WEATHER] = [this](network::Packet& packet) {
-        // Classic 1.12: uint32 weatherType + float intensity (8 bytes, no isAbrupt)
-        // TBC 2.4.3 / WotLK 3.3.5a: uint32 weatherType + float intensity + uint8 isAbrupt (9 bytes)
-        if (packet.hasRemaining(8)) {
-            uint32_t wType = packet.readUInt32();
-            float wIntensity = packet.readFloat();
-            if (packet.hasRemaining(1))
-                /*uint8_t isAbrupt =*/ packet.readUInt8();
-            uint32_t prevWeatherType = weatherType_;
-            weatherType_ = wType;
-            weatherIntensity_ = wIntensity;
-            const char* typeName = (wType == 1) ? "Rain" : (wType == 2) ? "Snow" : (wType == 3) ? "Storm" : "Clear";
-            LOG_INFO("Weather changed: type=", wType, " (", typeName, "), intensity=", wIntensity);
-            // Announce weather changes (including initial zone weather)
-            if (wType != prevWeatherType) {
-                const char* weatherMsg = nullptr;
-                if (wIntensity < 0.05f || wType == 0) {
-                    if (prevWeatherType != 0)
-                        weatherMsg = "The weather clears.";
-                } else if (wType == 1) {
-                    weatherMsg = "It begins to rain.";
-                } else if (wType == 2) {
-                    weatherMsg = "It begins to snow.";
-                } else if (wType == 3) {
-                    weatherMsg = "A storm rolls in.";
-                }
-                if (weatherMsg) addSystemChatMessage(weatherMsg);
-            }
-            // Notify addons of weather change
-                            fireAddonEvent("WEATHER_CHANGED", {std::to_string(wType), std::to_string(wIntensity)});
-            // Storm transition: trigger a low-frequency thunder rumble shake
-            if (wType == 3 && wIntensity > 0.3f && cameraShakeCallback_) {
-                float mag = 0.03f + wIntensity * 0.04f; // 0.03–0.07 units
-                cameraShakeCallback_(mag, 6.0f, 0.6f);
-            }
-        }
-    };
+    // SMSG_WEATHER is WeatherHandler's.
     // Server-script text message - display in system chat
     dispatchTable_[Opcode::SMSG_SCRIPT_MESSAGE] = [this](network::Packet& packet) {
         // Server-script text message - display in system chat
@@ -2898,6 +2861,7 @@ void GameHandler::registerDomainOpcodes() {
     petHandler_->registerOpcodes(dispatchTable_);
     reputationHandler_->registerOpcodes(dispatchTable_);
     realmTimeHandler_->registerOpcodes(dispatchTable_);
+    weatherHandler_->registerOpcodes(dispatchTable_);
 }
 
 void GameHandler::registerOpcodeHandlers() {
@@ -2949,31 +2913,9 @@ void GameHandler::handlePacket(network::Packet& packet) {
             }
         }
 
-        // Expected weather payload: uint32 weatherType, float intensity, uint8 abrupt
-        if (packet.hasRemaining(9)) {
-            uint32_t wType = packet.readUInt32();
-            float wIntensity = packet.readFloat();
-            uint8_t abrupt = packet.readUInt8();
-            bool plausibleWeather =
-                (wType <= 3) &&
-                std::isfinite(wIntensity) &&
-                (wIntensity >= 0.0f && wIntensity <= 1.5f) &&
-                (abrupt <= 1);
-            if (plausibleWeather) {
-                weatherType_ = wType;
-                weatherIntensity_ = wIntensity;
-                const char* typeName =
-                    (wType == 1) ? "Rain" :
-                    (wType == 2) ? "Snow" :
-                    (wType == 3) ? "Storm" : "Clear";
-                LOG_INFO("Weather changed (0x006B alias): type=", wType,
-                         " (", typeName, "), intensity=", wIntensity,
-                         ", abrupt=", static_cast<int>(abrupt));
-                return;
-            }
-            // Not weather-shaped: rewind and fall through to normal opcode table handling.
-            packet.setReadPos(0);
-        }
+        // Then weather; anything shaped like neither falls through to the
+        // opcode table, unread.
+        if (weatherHandler_->takeAliasedWeather(packet)) return;
     } else if (allowVanillaAliases && opcode == 0x0103) {
         // Expected play-music payload: uint32 sound/music id
         if (packet.getRemainingSize() == 4) {

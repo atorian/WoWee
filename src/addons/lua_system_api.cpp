@@ -32,6 +32,7 @@
 #include "game/calendar_data.hpp"
 #include "game/pet_action.hpp"
 #include "game/account_data_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -8022,8 +8023,9 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetWeatherInfo", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
-            lua_pushnumber(L, gh->getWeatherType());
-            lua_pushnumber(L, gh->getWeatherIntensity());
+            // The realm's own number for it, and how hard.
+            lua_pushnumber(L, gh->weather().current().realmState);
+            lua_pushnumber(L, gh->weather().current().intensity);
             return 2;
         }},
                 {"GetMaxPlayerLevel", [](lua_State* L) -> int {

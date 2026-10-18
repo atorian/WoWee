@@ -770,6 +770,7 @@ set(WOWEE_SOURCES
     src/game/pet_handler.cpp
     src/game/realm_clock.cpp
     src/game/realm_time_handler.cpp
+    src/game/weather_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp
@@ -1033,13 +1034,18 @@ set(WOWEE_SOURCES
     src/rendering/ocean_sea.cpp
     src/rendering/ocean_waves.cpp
     src/rendering/sea_bed.cpp
+    src/rendering/water_wake.cpp
     src/rendering/water_reflection.cpp
     src/rendering/skybox.cpp
     src/rendering/sky_bodies.cpp
     src/rendering/starfield.cpp
     src/rendering/clouds.cpp
     src/rendering/lens_flare.cpp
-    src/rendering/weather.cpp
+    src/rendering/weather_mix.cpp
+    src/rendering/shelter_map.cpp
+    src/rendering/precipitation.cpp
+    src/rendering/lens_drops.cpp
+    src/rendering/lens_weather.cpp
     src/rendering/lightning.cpp
     src/rendering/lighting_manager.cpp
     src/rendering/sky_system.cpp
@@ -1174,6 +1180,7 @@ set(WOWEE_SOURCES
     src/ui/toast_manager.cpp
     src/ui/dialog_manager.cpp
     src/ui/settings_panel.cpp
+    src/ui/weather_panel.cpp
     src/ui/gamepad_bindings.cpp
     src/ui/gamepad_controls.cpp
     src/ui/touch_controls.cpp
@@ -1375,7 +1382,12 @@ set(WOWEE_HEADERS
     include/rendering/starfield.hpp
     include/rendering/clouds.hpp
     include/rendering/lens_flare.hpp
-    include/rendering/weather.hpp
+    include/rendering/weather_mix.hpp
+    include/rendering/weather_controls.hpp
+    include/rendering/shelter_map.hpp
+    include/rendering/precipitation.hpp
+    include/rendering/lens_drops.hpp
+    include/rendering/lens_weather.hpp
     include/rendering/lightning.hpp
     include/rendering/swim_effects.hpp
     include/rendering/world_map.hpp

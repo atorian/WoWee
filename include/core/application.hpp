@@ -51,7 +51,7 @@ class SpellVisualSystem;
 namespace world_map { class WorldMapFacade; }
 using WorldMap = world_map::WorldMapFacade;
 }
-namespace ui { class UIManager; class MapWindow; }
+namespace ui { class UIManager; class MapWindow; class WeatherPanel; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
 namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
@@ -457,6 +457,8 @@ private:
     std::unique_ptr<PlayerView> playerView_;
     std::unique_ptr<ScreenRecording> screenRecording_;
     std::unique_ptr<rendering::PerformanceHUD> performanceHUD_;
+    /// The weather dev panel (ClientShortcut::ToggleWeatherPanel).
+    std::unique_ptr<ui::WeatherPanel> weatherPanel_;
     /// The process's memory, threads and caches over time: the HUD's graphs
     /// and the resource log line. Built when the loop starts.
     std::unique_ptr<ResourceMonitor> resourceMonitor_;

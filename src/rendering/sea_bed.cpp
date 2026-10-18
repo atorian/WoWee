@@ -464,7 +464,7 @@ bool SeaBedMap::wantsDrawing(glm::vec2 nearby, float waterHeight, double now) co
 }
 
 void SeaBedMap::begin(glm::vec2 nearby, float waterHeight) {
-    drawing_ = seaBedFrameFor(nearby, waterHeight, kHalfExtent, kRange, kTexels);
+    drawing_ = overheadFrameFor(nearby, waterHeight, kHalfExtent, kRange, kTexels);
 }
 
 glm::mat4 SeaBedMap::viewMatrix(SeaBedView view) const {

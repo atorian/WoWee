@@ -8,9 +8,10 @@
 namespace wowee {
 namespace rendering {
 
-/// Where one drawing of the sea bed's map lies and what its depth means
-/// (SeaBedMap).
-struct SeaBedFrame {
+/// Where one drawing of a map of the world seen from straight above lies and
+/// what its depth means: the sea bed's (SeaBedMap) and the shelter the rain
+/// and snow find (ShelterMap).
+struct OverheadFrame {
     glm::vec2 centre{0.0f};   ///< world xy under the map's middle
     float halfExtent = 0.0f;  ///< yards from the middle to an edge
     float ceiling = 0.0f;     ///< world height of depth 0; nothing above it is drawn
@@ -39,12 +40,12 @@ private:
 
 /// The frame to draw for a camera at `nearby`, under a ceiling at `ceiling`:
 /// centred on the texel corner nearest it, so that a camera moving less than
-/// a texel draws the same texels and the waves do not shimmer along the
-/// shore as it does.
-[[nodiscard]] inline SeaBedFrame seaBedFrameFor(glm::vec2 nearby, float ceiling, float halfExtent,
-                                                float range, int texels) {
+/// a texel draws the same texels and what is read from them does not shimmer
+/// as it moves.
+[[nodiscard]] inline OverheadFrame overheadFrameFor(glm::vec2 nearby, float ceiling, float halfExtent,
+                                                    float range, int texels) {
     const float texel = 2.0f * halfExtent / static_cast<float>(texels);
-    SeaBedFrame frame;
+    OverheadFrame frame;
     frame.centre = glm::vec2(std::round(nearby.x / texel), std::round(nearby.y / texel)) * texel;
     frame.halfExtent = halfExtent;
     frame.ceiling = ceiling;

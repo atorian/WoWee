@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rendering/sea_bed_frame.hpp"
+#include "rendering/overhead_frame.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include <vulkan/vulkan.h>
@@ -69,7 +69,7 @@ public:
     /// and endView with that view's matrix, and finish. Outside any render
     /// pass.
     void begin(glm::vec2 nearby, float waterHeight);
-    [[nodiscard]] const SeaBedFrame& drawing() const { return drawing_; }
+    [[nodiscard]] const OverheadFrame& drawing() const { return drawing_; }
     /// World to the view's clip space.
     [[nodiscard]] glm::mat4 viewMatrix(SeaBedView view) const;
     void beginView(VkCommandBuffer cmd, SeaBedView view);
@@ -91,7 +91,7 @@ public:
     [[nodiscard]] VkImageView view() const { return bed_.imageView; }
     [[nodiscard]] VkImageView fetchView() const { return effective_.imageView; }
     [[nodiscard]] VkSampler sampler() const { return sampler_; }
-    [[nodiscard]] const SeaBedFrame& frame() const { return frame_; }
+    [[nodiscard]] const OverheadFrame& frame() const { return frame_; }
     [[nodiscard]] bool isDrawn() const { return drawn_; }
 
 private:
@@ -127,8 +127,8 @@ private:
     std::array<VkDescriptorSet, 2> fetchSets_{};
     glm::vec2 fetchWind_{0.0f};
 
-    SeaBedFrame frame_{};
-    SeaBedFrame drawing_{};
+    OverheadFrame frame_{};
+    OverheadFrame drawing_{};
     double drawnAt_ = -1e9;
     bool drawn_ = false;
 };

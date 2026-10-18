@@ -2,6 +2,7 @@
 
 #include "rendering/liquid_scene.hpp"
 #include "rendering/ocean_waves.hpp"
+#include "rendering/water_wake.hpp"
 
 #include <array>
 #include <vector>
@@ -51,6 +52,9 @@ struct WaterFrameUBOData {
     // it has been drawn.
     glm::mat4 seaBedMatrix{1.0f};
     glm::vec4 seaBed{0.0f};
+    // The wake round the camera (WaterWake::area): xy = the world position
+    // of its corner, z = 1 / its side in yards, w = 1 once it has run.
+    glm::vec4 wakeArea{0.0f};
 };
 
 class WaterRenderer : public LiquidSceneListener {
@@ -126,9 +130,18 @@ public:
     /// `windSpeed` yards a second (gust in) blowing toward `windDirection`,
     /// measured near `nearby` (the player). Call once per frame.
     void advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection, glm::vec2 nearby);
-    /// Build this frame's sea surface (OceanWaves::record): outside any
-    /// render pass, before the water is drawn.
-    void recordWaves(VkCommandBuffer cmd) { ocean_.record(cmd); }
+    /// Move the wake round the camera on by `deltaSeconds`, centred near
+    /// `nearby`, with `movers` the bodies in the water now. Once per frame.
+    void advanceWake(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers) {
+        wake_.advance(deltaSeconds, nearby, movers);
+    }
+    /// Build this frame's sea surface (OceanWaves::record) and step the
+    /// wake (WaterWake::record): outside any render pass, before the water
+    /// is drawn.
+    void recordWaves(VkCommandBuffer cmd) {
+        ocean_.record(cmd);
+        wake_.record(cmd);
+    }
 
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
@@ -187,6 +200,8 @@ private:
     OceanWaves ocean_;
     /// What lies under the water; the renderer's.
     const SeaBedMap* seaBed_ = nullptr;
+    /// What moves through the water leaves in it.
+    WaterWake wake_;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();

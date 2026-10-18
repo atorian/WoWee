@@ -16,6 +16,7 @@
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/realm_time_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -597,6 +598,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     eventBus().publish(events::PlayerIntoxicationChanged{0.0f});
     actionBarHandler_->clear();
     petHandler_->beginCharacter();
+    weatherHandler_->beginCharacter();
     playerXp_ = 0;
     playerNextLevelXp_ = 0;
     serverPlayerLevel_ = 1;

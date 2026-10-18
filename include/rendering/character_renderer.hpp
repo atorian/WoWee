@@ -257,6 +257,21 @@ public:
     };
     void forEachEmitterSource(const std::function<void(const EmitterSource&)>& visit) const;
 
+    /// Where each body stands and how far it reaches, for what must know
+    /// where bodies are (the water's wake): its place, the way it faces
+    /// (radians about z), and its bind-pose bounds about its place, scaled -
+    /// the model's visual ones, which on many creatures are far larger than
+    /// the collision box. Not the models parented to another's bones, which
+    /// are part of that body.
+    struct BodyPlace {
+        uint32_t instanceId = 0;
+        glm::vec3 position{0.0f};
+        float yaw = 0.0f;
+        glm::vec3 boundMin{0.0f};
+        glm::vec3 boundMax{0.0f};
+    };
+    void forEachBody(const std::function<void(const BodyPlace&)>& visit) const;
+
     // Model id an instance renders with (0 if the instance doesn't exist).
     [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const {
         auto it = scene_->instances.find(instanceId);

@@ -21,6 +21,9 @@
 #include "rendering/sky_system.hpp"
 #include "rendering/viewer_motion.hpp"
 #include "rendering/world_environment.hpp"
+#include "rendering/weather_controls.hpp"
+#include "rendering/weather_mix.hpp"
+#include "rendering/lens_drops.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
 #include "pipeline/grass_biomes.hpp"
@@ -50,9 +53,12 @@ class SkyBodies;
 class StarField;
 class Clouds;
 class LensFlare;
-class Weather;
+class ShelterMap;
+class Precipitation;
+class LensWeather;
 class Lightning;
 class LightingManager;
+struct LightingParams;
 class SwimEffects;
 class MountDust;
 class LevelUpEffect;
@@ -184,8 +190,29 @@ public:
     StarField* getStarField() const { return skySystem ? skySystem->getStarField() : nullptr; }
     Clouds* getClouds() const { return skySystem ? skySystem->getClouds() : nullptr; }
     LensFlare* getLensFlare() const { return skySystem ? skySystem->getLensFlare() : nullptr; }
-    Weather* getWeather() const { return weather.get(); }
     Lightning* getLightning() const { return lightning.get(); }
+
+    // ---- Weather ----
+    /// The weather as it is drawn this frame: the realm's (WorldEnvironment)
+    /// or the dev panel's, coming over.
+    const WeatherMix& weatherMix() const { return weather_.mix(); }
+    const WeatherTarget& weatherTarget() const { return weather_.target(); }
+    /// The dev panel's say over the weather.
+    WeatherControls& weatherControls() { return weatherControls_; }
+    const WeatherControls& weatherControls() const { return weatherControls_; }
+    /// The Weather Detail setting: how much of what falls is drawn, 0-1.
+    void setWeatherDetail(float scale);
+    /// How open to the sky the camera is, 0-1 (ShelterMap::exposure).
+    float skyExposure() const;
+    /// How much of the sky the camera's surroundings leave it, 0-1
+    /// (ShelterMap::skyView).
+    float skyView() const;
+    /// What the weather has left on the camera's lens.
+    const LensDrops& lensDrops() const { return lensDrops_; }
+    /// Drops, flakes, grains and splashes drawn this frame.
+    uint32_t precipitationCount() const;
+    /// The wind as everything that moves in it reads it.
+    const WindState& windState() const { return wind_.state(); }
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
@@ -382,8 +409,35 @@ private:
     std::unique_ptr<StarField> starField;
     std::unique_ptr<Clouds> clouds;
     std::unique_ptr<LensFlare> lensFlare;
-    std::unique_ptr<Weather> weather;
     std::unique_ptr<Lightning> lightning;
+    // The weather: what is drawn of it this frame, coming toward the realm's
+    // or the dev panel's; where rain cannot reach; what falls; what is on the
+    // lens. The shelter map is drawn in the frame graph's "shelter" pass, the
+    // precipitation with the scene's blended effects (after the water when it
+    // has its own pass, as the spray is), the lens over the finished frame.
+    WeatherBlend weather_;
+    WeatherControls weatherControls_;
+    std::unique_ptr<ShelterMap> shelter_;
+    std::unique_ptr<Precipitation> precipitation_;
+    std::unique_ptr<LensWeather> lensWeather_;
+    LensDrops lensDrops_;
+    /// Whether the precipitation's pipeline was built for the water's pass.
+    bool precipitationDrawsWithWater_ = false;
+    float weatherDetail_ = 1.0f;
+    /// Where the wind carries grit across the screen this frame, screen
+    /// heights a second.
+    glm::vec2 lensWindOnScreen_{0.0f};
+    /// How heavy the weather is as the sky and the light take it.
+    float weatherStrength() const { return weather_.mix().strength(); }
+    /// The light the zone gives this frame with what the weather brings in
+    /// close of its own over it - blowing sand, the fog weather's mist - in
+    /// the sky and the fog alike. What the sky and the fog are drawn from.
+    std::unique_ptr<LightingParams> weatherLight_;
+    void hazeLightForWeather();
+    const LightingParams* weatherLight() const;
+    void updateWeather(float deltaTime);
+    void renderShelterPass();
+    void recordLensWeather();
     std::unique_ptr<LightingManager> lightingManager;
     std::unique_ptr<SkySystem> skySystem;  // Coordinator for sky rendering
     std::unique_ptr<SwimEffects> swimEffects;
@@ -705,9 +759,14 @@ private:
     // Outlives the water renderer.
     std::unique_ptr<SeaBedMap> seaBed_;
     void renderSeaBedPass();
-    /// Whether this frame's sun shadow pass has reset the casters' texture
-    /// sets, which a later depth-only pass in the frame then reuses.
-    bool shadowDescriptorsReset_ = false;
+    /// The bodies in the water near the camera, to the wake.
+    void updateWaterWake(float deltaTime);
+    /// Whether a depth-only pass this frame has reset the buildings' and the
+    /// doodads' caster texture sets, which a later one in the frame then
+    /// reuses: the sun's pass resets both, the sea bed's the buildings', the
+    /// shelter map's whichever is still to be reset.
+    bool wmoCasterSetsReset_ = false;
+    bool m2CasterSetsReset_ = false;
     float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.

@@ -1,0 +1,60 @@
+// What the wake's compute passes share (WaterWake): the images they work in,
+// the bodies in the water, and the push constants that say which pass this
+// is (water_wake.comp's modes, water_wake_fft.comp's direction).
+//
+//   state     rgba32f: the field's height now, a step ago, and the water's
+//             downward acceleration in the last step (for its breaking)
+//   spectrum  rgba32f: the height and pressure head through the FFT and
+//             back, as complex numbers, the first lane of two; working
+//             room for a shift of the field after that
+//   surface   rgba16f: what the water samples - height, its slopes along
+//             x and y, and the foam the wake's breaking leaves (wakeFoam),
+//             which is kept here from frame to frame
+//   bed       r32f: the sea bed's map (SeaBedMap), for where the shore is
+
+#include "ocean_spectrum.glsli"
+#include "ocean_fft.glsli"
+#include "water_wake.glsli"
+#include "sea_bed.glsli"
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D wakeState;
+layout(set = 0, binding = 1, rgba32f) uniform image2D wakeSpectrum;
+layout(set = 0, binding = 2, rgba16f) uniform image2D wakeSurface;
+layout(set = 0, binding = 3, r32f) uniform readonly image2D wakeBed;
+
+/// kWakeMovers bodies at most; each its middle now and a frame ago (xy, zw),
+/// the way it heads and its half length and width, and its pressure head.
+const int kWakeMovers = 32;
+layout(set = 0, binding = 4) uniform WakeMovers {
+    vec4 moverPlace[kWakeMovers];  // xy = where it is, zw = where it was a frame ago (field yards)
+    vec4 moverShape[kWakeMovers];  // xy = the way it heads (unit), z = half length, w = half width
+    vec4 moverHead[kWakeMovers];   // x = pressure head, yards; y = speed, yards a second
+    ivec4 moverCount;              // x = how many
+};
+
+const int kWakeLoad = 0;      // the height and the pressure head into the spectrum's first lane
+const int kWakeDerive = 1;    // the spectrum times the vertical derivative
+const int kWakeStepMode = 2;  // each texel one step on, held still at the shore, soaked at the edge
+const int kWakeSurface = 3;   // what the water samples, out of the state
+const int kWakeShiftOut = 4;  // the state moved by `shift` texels into the spectrum's room
+const int kWakeShiftIn = 5;   // and back
+
+layout(push_constant) uniform WakePush {
+    vec4 bedArea;     // the field's texel (0, 0) corner in the bed map's uv, and the uv a texel spans (z); w = 1 when the bed map is drawn
+    vec2 shoreRange;  // x = yards from the water to the bed map's foot
+    float along;      // how far between a frame ago (0) and now (1) this step falls
+    float stepSeconds;
+    ivec2 shift;      // texels the field moves by
+    int mode;
+    int vertical;     // water_wake_fft.comp: 0 transforms rows, 1 columns
+} wake;
+
+/// Whether texel `texel` of the field is shore, by the sea bed's map.
+bool wakeIsShore(ivec2 texel) {
+    if (wake.bedArea.w < 0.5) return false;
+    vec2 uv = wake.bedArea.xy + (vec2(texel) + vec2(0.5)) * wake.bedArea.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return false;
+    ivec2 size = imageSize(wakeBed);
+    float depth = imageLoad(wakeBed, ivec2(uv * vec2(size))).r;
+    return seaBedIsShore(depth, wake.shoreRange.x);
+}

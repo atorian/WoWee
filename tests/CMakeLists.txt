@@ -2146,6 +2146,29 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_weather_mix ─────────────────────────────────────────
+# The weather as it is drawn: a shower coming over in the time it is given,
+# rain turning to snow through both, a storm the realm asks for at once
+# arriving at once.
+wowee_add_test(test_weather_mix
+    SOURCES test_weather_mix.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/weather_mix.cpp)
+
+# ── test_shelter_probe ───────────────────────────────────────
+# What the shelter map says of the camera's place, as its probe works it out
+# on the GPU: under a roof or not, and how much of the sky a street's walls
+# leave it.
+wowee_add_test(test_shelter_probe
+    SOURCES test_shelter_probe.cpp)
+
+# ── test_lens_drops ──────────────────────────────────────────
+# What the weather leaves on the camera's lens: rain gathering while the
+# camera looks into it and drying under a roof, big drops running down,
+# snow melting to water and frosting the edges, grit driven by the wind.
+wowee_add_test(test_lens_drops
+    SOURCES test_lens_drops.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/lens_drops.cpp)
+
 # ── test_liquid_scene ────────────────────────────────────────
 # The map's liquid: where the water stands and how high, which body each
 # stretch of it belongs to as tiles stream in and out, and what the water
@@ -2175,6 +2198,11 @@ wowee_add_test(test_liquid_types
 wowee_add_test(test_ocean_spectrum
     SOURCES test_ocean_spectrum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
+
+# ── test_water_wake ──────────────────────────────────────────
+# The water's answer to what moves through it: water's speeds, Kelvin's wedge.
+wowee_add_test(test_water_wake
+    SOURCES test_water_wake.cpp)
 
 # ── test_sea_bed ─────────────────────────────────────────────
 # What lies under the water: the map's views, and which buildings are its bed.
@@ -3150,7 +3178,7 @@ target_compile_definitions(wowee_game_harness PRIVATE WOWEE_SOURCE_DIR="${CMAKE_
 target_link_libraries(wowee_game_harness PUBLIC wowee_game catch2_main)
 wowee_test_link_glm(wowee_game_harness)
 
-foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time)
+foreach(_domain chat spell inventory quest social session account_data action_bar pet reputation realm_time weather)
     wowee_add_test(test_${_domain}_domain SOURCES test_${_domain}_domain.cpp)
     target_link_libraries(test_${_domain}_domain PRIVATE wowee_game_harness)
 endforeach()

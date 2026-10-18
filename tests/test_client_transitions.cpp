@@ -641,3 +641,35 @@ TEST_CASE("control and the grave key show the performance HUD and reach nothing 
         "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
         "end\n");
 }
+
+TEST_CASE("control and F10 open the weather panel and reach nothing in the interface; F10 is the "
+          "interface's", "[client][harness][input]") {
+    using wowee::core::ClientShortcut;
+    ClientHarness h;
+    h.enterWorld();
+    h.runInInterface(
+        "__WoweeBindingScripts = __WoweeBindingScripts or {}\n"
+        "HarnessKeysHeard = {}\n"
+        "HarnessBindingsBefore = {}\n"
+        "for _, key in ipairs({'F10', 'CTRL-F10'}) do\n"
+        "  local command = 'HARNESSKEY_' .. key\n"
+        "  HarnessBindingsBefore[key] = GetBindingAction(key) or ''\n"
+        "  __WoweeBindingScripts[command] = function(keystate)\n"
+        "    if keystate == 'down' then table.insert(HarnessKeysHeard, key) end\n"
+        "  end\n"
+        "  SetBinding(key, command)\n"
+        "end\n");
+
+    h.pressKey(SDLK_F10, SDL_KMOD_LCTRL);
+    h.releaseKey(SDLK_F10, SDL_KMOD_LCTRL);
+    h.pressKey(SDLK_F10);
+    h.releaseKey(SDLK_F10);
+    h.frame();
+    CHECK(h.clientShortcuts() == std::vector<ClientShortcut>{ClientShortcut::ToggleWeatherPanel});
+    CHECK(h.interfaceAnswers("#HarnessKeysHeard == 1 and HarnessKeysHeard[1] == 'F10'"));
+
+    h.runInInterface(
+        "for key, command in pairs(HarnessBindingsBefore) do\n"
+        "  if command ~= '' then SetBinding(key, command) else SetBinding(key) end\n"
+        "end\n");
+}

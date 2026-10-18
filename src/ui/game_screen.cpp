@@ -722,7 +722,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // setting in it the moment the menu was handed over.
     settingsPanel_.renderSettingsWindow(chatPanel_, [this]() { saveSettings(); });
     toastManager_.renderLateToasts(gameHandler);
-    renderWeatherOverlay(gameHandler);
 
     // Always, because this is the only thing that feeds the map its data and
     // the only thing that draws it. Skipping it when FrameXML owns the map
