@@ -367,7 +367,7 @@ std::size_t LiquidScene::addTerrainTile(const pipeline::ADTTerrain& terrain, int
 }
 
 bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix,
-                               uint32_t wmoId) {
+                               uint32_t wmoId, LiquidShelter shelter) {
     if (!liquid.hasLiquid()) return false;
 
     // A liquid the data describes and this cannot lay down is the building's
@@ -393,6 +393,7 @@ bool LiquidScene::addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat
     surface.tileX = -1;
     surface.tileY = -1;
     surface.wmoId = wmoId;
+    surface.shelter = shelter;
     surface.liquidType = liquid.liquidType;
     surface.xOffset = 0;
     surface.yOffset = 0;

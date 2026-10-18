@@ -2152,6 +2152,11 @@ wowee_add_test(test_ocean_spectrum
     SOURCES test_ocean_spectrum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
 
+# ── test_sea_bed ─────────────────────────────────────────────
+# What lies under the water: the map's views, and which buildings are its bed.
+wowee_add_test(test_sea_bed
+    SOURCES test_sea_bed.cpp)
+
 # ── test_ocean_fft ───────────────────────────────────────────
 # The sea's surface out of its spectrum, by the compute shaders' own FFT.
 wowee_add_test(test_ocean_fft

@@ -149,6 +149,47 @@ float oceanRelaxedVariance(float current, float target, float k, float dt) {
     return current + (target - current) * settle;
 }
 
+/// How much of the sea a wave of `omega` radians a second keeps in water
+/// `depth` yards deep: Kitaigorodskii's depth function, as the TMA spectrum
+/// takes it (Bouws et al. 1985) - the share of the deep-water spectrum's
+/// energy a depth-limited sea holds at that frequency. A wave feels the bed
+/// once the water is shallower than about half its length: the long waves
+/// lie down first as the shore comes up, the short chop last, and where
+/// there is no water under the surface - a wall, a pier, the beach - there
+/// is no wave.
+float oceanDepthFactor(float omega, float depth) {
+    if (depth <= 0.0) return 0.0;
+    float scaled = omega * sqrt(depth / kOceanGravity);
+    if (scaled < 1.0) return 0.5 * scaled * scaled;
+    if (scaled < 2.0) return 1.0 - 0.5 * (2.0 - scaled) * (2.0 - scaled);
+    return 1.0;
+}
+
+/// The depths each cascade's share of the sea is tabulated at for the
+/// water's shaders (OceanSea::shoalingTable): kOceanShoalingSteps of them,
+/// from a quarter of a yard, each 2^0.6 deeper than the last, to 128 yards -
+/// below which even the longest wave the cascades hold barely feels the bed.
+const int kOceanShoalingSteps = 16;
+const float kOceanShoalingShallowest = 0.25;
+const float kOceanShoalingStepLog2 = 0.6;
+
+float oceanShoalingDepth(int step) {
+    return kOceanShoalingShallowest * exp2(kOceanShoalingStepLog2 * float(step));
+}
+
+/// Where `depth` falls in the table: x the step below it, y how far toward
+/// the next. Above the shallowest step x is -1, and the value there runs
+/// from nothing at no depth to the shallowest step's; past the deepest it
+/// stays at the deepest.
+vec2 oceanShoalingSlot(float depth) {
+    if (depth <= kOceanShoalingShallowest) return vec2(-1.0, max(depth, 0.0) / kOceanShoalingShallowest);
+    float at = log2(depth / kOceanShoalingShallowest) / kOceanShoalingStepLog2;
+    float last = float(kOceanShoalingSteps - 1);
+    if (at >= last) return vec2(last - 1.0, 1.0);
+    float below = floor(at);
+    return vec2(below, at - below);
+}
+
 /// How far a point of the water rides toward the crests, 0 to 1. Under a
 /// passing wave a point goes round a circle as wide as the wave is high,
 /// which carries it toward each crest: crests sharp, troughs wide. Riding

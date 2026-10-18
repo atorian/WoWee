@@ -30,6 +30,9 @@ using LiquidSurfaceId = uint32_t;
 /// as long as that patch is loaded, however the rest of it streams in and out.
 using LiquidBodyId = uint64_t;
 
+/// Whether a liquid is open to the sky's wind or indoors, out of it.
+enum class LiquidShelter : uint8_t { Open, Indoors };
+
 struct LiquidSurface {
     LiquidSurfaceId id = 0;
 
@@ -48,6 +51,9 @@ struct LiquidSurface {
     int tileY = -1;
     /// The WMO instance it belongs to; 0 for terrain liquid.
     uint32_t wmoId = 0;
+    /// Whether the wind reaches it: not in a WMO's indoor group - a sewer,
+    /// a cellar's cistern, a hall's pool - where the water lies still.
+    LiquidShelter shelter = LiquidShelter::Open;
 
     uint8_t xOffset = 0;
     uint8_t yOffset = 0;
@@ -145,10 +151,11 @@ public:
 
     /// A terrain tile's liquid. Returns how many surfaces it added.
     std::size_t addTerrainTile(const pipeline::ADTTerrain& terrain, int tileX, int tileY);
-    /// A WMO group's liquid, placed by the instance's model matrix. False when
-    /// it has none or cannot be placed; the latter is logged once per instance.
+    /// A WMO group's liquid, placed by the instance's model matrix, in a group
+    /// that is indoors (MOGP 0x2000) or not. False when it has none or cannot
+    /// be placed; the latter is logged once per instance.
     bool addWmoLiquid(const pipeline::WMOLiquid& liquid, const glm::mat4& modelMatrix,
-                      uint32_t wmoId);
+                      uint32_t wmoId, LiquidShelter shelter);
     void removeTile(int tileX, int tileY);
     void removeWmo(uint32_t wmoId);
     void clear();

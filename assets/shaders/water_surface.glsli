@@ -16,12 +16,13 @@ vec3 displacedWaterPoint(vec3 rest, float step, float time) {
         float wave = sin(rest.x * freq * 0.5 + time * spd * 0.3) * 0.4
                    + sin(rest.y * freq * 0.3 + time * spd * 0.5) * 0.3;
         displacement.z = wave * amp * 0.5;
-    } else if (push.displaced > 0.5) {
-        // The wind's sea, where this surface moves at all: under a passing
+    } else if (push.exposed > 0.5) {
+        // The wind's sea, where the wind reaches the water: under a passing
         // wave a point of the water goes round a circle, up and down and
         // toward each crest as it comes, which draws crests sharp and
-        // troughs wide (ocean_fft.glsli).
-        displacement = oceanDisplacementAt(rest.xy, step);
+        // troughs wide (ocean_fft.glsli) - and less of it as the bed comes
+        // up under it.
+        displacement = oceanDisplacementAt(rest, step);
     }
     vec3 p = rest + displacement;
 

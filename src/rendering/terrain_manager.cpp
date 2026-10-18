@@ -1252,7 +1252,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                         // their ponds were only drawn while their MOMT index read
                         // as slime. The client draws them as "WMO Water -
                         // Interior", which wmoGroupLiquidType already names.
-                        liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId);
+                        // Indoors, the wind does not reach it.
+                        liquidScene->addWmoLiquid(group.liquid, modelMatrix, wmoInstId,
+                                                  (group.flags & pipeline::kWMOGroupIndoor) != 0
+                                                      ? LiquidShelter::Indoors
+                                                      : LiquidShelter::Open);
                         liquidGroupsLoaded++;
                     }
                     // More liquid groups remain on this WMO - yield

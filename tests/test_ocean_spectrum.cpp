@@ -190,6 +190,48 @@ TEST_CASE("a sea left by a gale rides its crests less than the breeze after it w
     CHECK(afterGale.ride() >= inGale);
 }
 
+TEST_CASE("a wave keeps itself in water half its length deep, and lies down in shallower", "[water][ocean]") {
+    // Deep water, for a wave, is water deeper than half its length; a
+    // twentieth of it holds little of the wave.
+    for (float wavelength : {1.0f, 10.0f, 100.0f}) {
+        const float omega = oceanAngularSpeed(2.0f * kOceanPi / wavelength);
+        CHECK(oceanDepthFactor(omega, wavelength) == 1.0f);
+        CHECK(oceanDepthFactor(omega, 0.5f * wavelength) > 0.95f);
+        CHECK(oceanDepthFactor(omega, 0.05f * wavelength) < 0.3f);
+        CHECK(oceanDepthFactor(omega, 0.0f) == 0.0f);
+        CHECK(oceanDepthFactor(omega, -1.0f) == 0.0f);
+    }
+}
+
+TEST_CASE("the sea lies down toward the shore, its long waves first", "[water][ocean]") {
+    wowee::rendering::OceanSea sea;
+    sea.advance(0.0, 8.0f, vec2(1.0f, 0.0f));
+    using wowee::rendering::OceanSea;
+    for (int kind : {OceanSea::kShoalingHeight, OceanSea::kShoalingSlope}) {
+        for (int c = 0; c < kOceanCascades; ++c) {
+            // None of it where there is no water under the surface, all of it
+            // in the open sea, and never more as the water gets shallower.
+            CHECK(sea.shoaling(kind, c, 0.0f) == 0.0f);
+            CHECK(sea.shoaling(kind, c, -2.0f) == 0.0f);
+            CHECK(sea.shoaling(kind, c, 500.0f) > 0.99f);
+            float last = 0.0f;
+            for (float depth = 0.0f; depth < 200.0f; depth += 0.1f + depth * 0.05f) {
+                const float kept = sea.shoaling(kind, c, depth);
+                CHECK(kept >= last - 1e-6f);
+                last = kept;
+            }
+        }
+        // Two yards of water: the patch-long swell mostly gone, the chop of
+        // under a yard all there.
+        const float swell = sea.shoaling(kind, 0, 2.0f);
+        const float waves = sea.shoaling(kind, 1, 2.0f);
+        const float chop = sea.shoaling(kind, 2, 2.0f);
+        CHECK(swell < waves);
+        CHECK(waves < chop);
+        CHECK(chop > 0.99f);
+    }
+}
+
 TEST_CASE("each wave runs as fast as water carries one that long, and comes round again", "[water][ocean]") {
     // A metre-long wave runs at sqrt(g lambda / 2 pi) = 1.25 m/s.
     const float metre = 2.0f * kOceanPi / kYardsPerMetre;

@@ -34,20 +34,25 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float meshStep;   // yards between the mesh's vertices
-    float displaced;  // 1 where the surface moves with the waves, 0 where it is held flat
+    float exposed;    // 1 where the wind reaches the surface, 0 indoors where it lies still
     float pad2;
 } push;
 
 const int MAX_WAKE_POINTS = 32;
 const int OCEAN_CASCADES = 3;  // kOceanCascadeCount in ocean_waves.hpp
+const int OCEAN_SHOALING_VEC4S = 24;  // OceanSea::kShoalingEntries / 4
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;
     vec4 wakePoints[MAX_WAKE_POINTS];
     vec4 oceanCascades[OCEAN_CASCADES];  // xy = origin, z = 1 / patch, w = patch (yards)
     vec4 oceanSea;                       // x = rms height, y = ride, z = mean square slope
+    vec4 oceanShoaling[OCEAN_SHOALING_VEC4S];
+    mat4 seaBedMatrix;
+    vec4 seaBed;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
+layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
 
 #include "ocean_surface.glsli"
 #include "water_surface.glsli"
@@ -56,7 +61,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aTexCoord;
 
 layout(location = 0) out vec3 FragPos;
-layout(location = 1) out vec2 RestPos;   // where this point lies on the still surface
+layout(location = 1) out vec3 RestPos;   // where this point lies on the still surface
 layout(location = 2) out vec2 TexCoord;
 layout(location = 4) out vec2 ScreenUV;
 
@@ -65,7 +70,7 @@ void main() {
     vec3 p = displacedWaterPoint(rest, push.meshStep, fogParams.z);
 
     FragPos = p;
-    RestPos = rest.xy;
+    RestPos = rest;
     TexCoord = aTexCoord;
     vec4 clipPos = projection * view * vec4(p, 1.0);
     gl_Position = clipPos;

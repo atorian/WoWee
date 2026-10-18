@@ -250,7 +250,7 @@ TEST_CASE("a building's pool is liquid in the building", "[liquid]") {
     pool.yTiles = 4;
     pool.basePosition = glm::vec3(100.0f, 200.0f, 50.0f);
     pool.liquidType = kWater;
-    REQUIRE(scene.addWmoLiquid(pool, glm::mat4(1.0f), 77));
+    REQUIRE(scene.addWmoLiquid(pool, glm::mat4(1.0f), 77, wowee::rendering::LiquidShelter::Open));
 
     const float x = 100.0f + 2.0f * 4.1666625f;
     const float y = 200.0f + 2.0f * 4.1666625f;
@@ -275,7 +275,7 @@ TEST_CASE("liquid whose grid does not add up is not placed", "[liquid]") {
     broken.xTiles = 7;  // five vertices make four tiles
     broken.yTiles = 4;
     broken.basePosition = glm::vec3(0.0f);
-    CHECK_FALSE(scene.addWmoLiquid(broken, glm::mat4(1.0f), 9));
+    CHECK_FALSE(scene.addWmoLiquid(broken, glm::mat4(1.0f), 9, wowee::rendering::LiquidShelter::Open));
     CHECK(scene.empty());
 }
 

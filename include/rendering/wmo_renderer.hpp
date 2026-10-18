@@ -247,10 +247,14 @@ public:
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
 
     /**
-     * Render depth-only for shadow casting
+     * Render depth-only for shadow casting. The first depth-only pass of a
+     * frame resets the frame slot's texture sets; a later one in the same
+     * frame (the sea bed's map) passes `resetDescriptors` false and reuses
+     * them, as M2Renderer::renderShadow does.
      */
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f);
+                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
+                      bool resetDescriptors = true);
 
     /**
      * Get number of loaded models

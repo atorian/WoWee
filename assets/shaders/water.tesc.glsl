@@ -34,7 +34,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float meshStep;
-    float displaced;
+    float exposed;
     float pad2;
 } push;
 
@@ -48,7 +48,7 @@ layout(location = 1) out vec2 tTexCoord[];
 
 float edgeLevel(vec3 a, vec3 b) {
     // A surface held still has nothing to divide for.
-    if (push.displaced < 0.5) return 1.0;
+    if (push.exposed < 0.5) return 1.0;
     float pieces = length(a - b) * pixelsPerYardAt(0.5 * (a + b)) / kSegmentPixels;
     return clamp(pieces, 1.0, kMaxTessLevel);
 }

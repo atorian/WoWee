@@ -209,7 +209,7 @@ TEST_CASE("the sea a building's group says is the sea in the scene", "[liquid]")
     pool.basePosition = glm::vec3(0.0f, 0.0f, 0.0f);
     pool.materialId = 7;  // MOMT index: nothing to do with the liquid
     pool.liquidType = wmoGroupLiquidType(1, 0x80000, true, 0);
-    REQUIRE(scene.addWmoLiquid(pool, glm::mat4(1.0f), 5));
+    REQUIRE(scene.addWmoLiquid(pool, glm::mat4(1.0f), 5, wowee::rendering::LiquidShelter::Open));
     CHECK(scene.basicTypeAt(4.0f, 4.0f) == LiquidBasic::Ocean);
 }
 

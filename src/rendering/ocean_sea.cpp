@@ -58,6 +58,44 @@ void OceanSea::advance(double deltaSeconds, float speedYardsPerSecond, glm::vec2
     }
     started_ = true;
     time_ = std::fmod(time_ + std::max(deltaSeconds, 0.0), static_cast<double>(ocean::kOceanRepeatSeconds));
+    tabulateShoaling();
+}
+
+static_assert(OceanSea::kShoalingEntries == 2 * ocean::kOceanCascades * ocean::kOceanShoalingSteps,
+              "the table holds a height and a slope share for every cascade at every step");
+
+void OceanSea::tabulateShoaling() {
+    for (int kind = 0; kind < 2; ++kind) {
+        for (int c = 0; c < ocean::kOceanCascades; ++c) {
+            for (int step = 0; step < ocean::kOceanShoalingSteps; ++step) {
+                const float depth = ocean::oceanShoalingDepth(step);
+                // Each ring of the cascade's band, weighted by what it holds:
+                // its slope, or its height (slope over k squared).
+                double kept = 0.0, whole = 0.0;
+                for (int i = 0; i < kRings; ++i) {
+                    const Ring r = ringAt(i);
+                    if (r.k < ocean::oceanBandLow(c) || r.k >= ocean::oceanBandHigh(c)) continue;
+                    const double weight = kind == kShoalingSlope ? slopeSq_[i] : slopeSq_[i] / (r.k * r.k);
+                    whole += weight;
+                    kept += weight * ocean::oceanDepthFactor(ocean::oceanAngularSpeed(r.k), depth);
+                }
+                // Energy kept, as a share of amplitude: its root. A cascade
+                // that holds nothing in this wind keeps all of its nothing.
+                const float share = whole > 0.0 ? static_cast<float>(std::sqrt(kept / whole)) : 1.0f;
+                const int entry = (kind * ocean::kOceanCascades + c) * ocean::kOceanShoalingSteps + step;
+                shoaling_[entry / 4][entry % 4] = share;
+            }
+        }
+    }
+}
+
+float OceanSea::shoaling(int kind, int cascade, float depth) const {
+    const glm::vec2 slot = ocean::oceanShoalingSlot(depth);
+    const int base = (kind * ocean::kOceanCascades + cascade) * ocean::kOceanShoalingSteps;
+    const auto at = [&](int step) { return shoaling_[(base + step) / 4][(base + step) % 4]; };
+    const int below = static_cast<int>(slot.x);
+    if (below < 0) return slot.y * at(0);
+    return at(below) + (at(below + 1) - at(below)) * slot.y;
 }
 
 float OceanSea::meanSquareSlope() const {

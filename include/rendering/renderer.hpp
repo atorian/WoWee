@@ -43,6 +43,7 @@ class RenderSurface;
 class TerrainRenderer;
 class TerrainManager;
 class WaterRenderer;
+class SeaBedMap;
 class Skybox;
 class SkyBackground;
 class SkyBodies;
@@ -698,6 +699,15 @@ private:
     float fogExtinction_ = -1.0f;
     void renderVolumetricFog();
     void writeFogVolumeBindings(uint32_t slot);
+
+    // What lies under the water near the camera, drawn by the shadow pass's
+    // casters from straight above and read by the water for its depth.
+    // Outlives the water renderer.
+    std::unique_ptr<SeaBedMap> seaBed_;
+    void renderSeaBedPass();
+    /// Whether this frame's sun shadow pass has reset the casters' texture
+    /// sets, which a later depth-only pass in the frame then reuses.
+    bool shadowDescriptorsReset_ = false;
     float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.

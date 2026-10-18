@@ -1,0 +1,33 @@
+// What the water stands on, out of the three views of what is under it
+// (SeaBedMap): the ground from above, the buildings from above, and the
+// buildings from below. Each view's depth runs over the map's range under
+// the water: the two from above 0 at the water and 1 at the range's foot,
+// the one from below 0 at the foot and 1 at the water.
+//
+// A building is the bed where it stands on the ground: its lowest surface
+// there comes down to the ground, or below it - a quay wall, a bridge's
+// pier, a lighthouse's footing. Where its lowest surface hangs over deeper
+// ground it floats - a ship's hull, a moored barge - and the water under and
+// beside it is as deep as the ground below makes it.
+//
+// A plain function of its arguments, so the tests include this file as C++.
+
+/// How close to the ground a building's lowest surface has to come, in
+/// yards, to stand on it: a quay's foundation and the ground it is set in
+/// are modelled apart, and never meet exactly.
+const float kSeaBedGroundedYards = 1.0;
+
+/// The bed's depth under the water, in the views' terms (0 at the water,
+/// 1 at the range's foot), from the depths the three views read there.
+float seaBedDepth(float groundFromAbove, float buildingFromAbove, float buildingFromBelow, float range) {
+    // Nothing in a view reads as its cleared depth: 1 from above, 1 from
+    // below - which from below is the water itself, so a building there has
+    // its lowest surface no higher than the water.
+    bool building = buildingFromAbove < 1.0;
+    // Yards under the water of the ground and of the building's lowest
+    // surface (from below, depth 0 is the range's foot).
+    float ground = groundFromAbove * range;
+    float lowest = (1.0 - buildingFromBelow) * range;
+    bool standsOnGround = building && lowest >= ground - kSeaBedGroundedYards;
+    return standsOnGround ? min(groundFromAbove, buildingFromAbove) : groundFromAbove;
+}

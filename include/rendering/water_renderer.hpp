@@ -17,6 +17,7 @@ namespace wowee {
 namespace rendering {
 
 class Camera;
+class SeaBedMap;
 class VkContext;
 
 /**
@@ -42,6 +43,14 @@ struct WaterFrameUBOData {
     // z = mean square slope.
     glm::vec4 oceanCascades[kOceanCascadeCount]{};
     glm::vec4 oceanSea{0.0f};
+    // How much of each cascade's height and slope the water keeps at the
+    // shoaling table's depths (OceanSea::shoalingTable).
+    glm::vec4 oceanShoaling[OceanSea::kShoalingEntries / 4]{};
+    // The sea bed under the water (SeaBedMap): world to the map's clip
+    // space, and x = the height of depth 0, y = yards to depth 1, z = 1 once
+    // it has been drawn, w = its texels a side.
+    glm::mat4 seaBedMatrix{1.0f};
+    glm::vec4 seaBed{0.0f};
 };
 
 class WaterRenderer : public LiquidSceneListener {
@@ -49,7 +58,9 @@ public:
     WaterRenderer();
     ~WaterRenderer() override;
 
-    bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
+    /// `seaBed` is the map of what lies under the water, which the renderer
+    /// draws and the water reads; it outlives this.
+    bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout, const SeaBedMap* seaBed);
     void shutdown();
 
     // LiquidSceneListener: the GPU copy of each surface.
@@ -122,6 +133,11 @@ public:
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
 
+    /// The highest water open to the wind within `halfExtent` yards of
+    /// `centre` (a square), which the sea bed's map is drawn under; none
+    /// when there is no such water there.
+    [[nodiscard]] std::optional<float> highestOpenWaterNear(glm::vec2 centre, float halfExtent) const;
+
 private:
     /// The GPU copy of one LiquidSurface, with the little of it a draw needs.
     struct DrawnSurface {
@@ -137,6 +153,7 @@ private:
         uint8_t height = 0;
         /// 0 water, 1 ocean, 2 magma, 3 slime - LiquidType.dbc's word for it.
         uint8_t basicType = 0;
+        LiquidShelter shelter = LiquidShelter::Open;
 
         ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -168,6 +185,8 @@ private:
 
     /// The wind's sea, as the surface every water surface samples.
     OceanWaves ocean_;
+    /// What lies under the water; the renderer's.
+    const SeaBedMap* seaBed_ = nullptr;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();

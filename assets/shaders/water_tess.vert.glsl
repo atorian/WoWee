@@ -13,7 +13,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;
     float sceneValid;
     float meshStep;
-    float displaced;
+    float exposed;
     float pad2;
 } push;
 

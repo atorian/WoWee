@@ -74,7 +74,7 @@ layout(push_constant) uniform Push {
     vec2 depthRange;  // the camera's own near and far, for linearising SceneDepth
     float sceneValid; // 1 once the refraction capture holds a frame, 0 before it
     float meshStep;   // yards between the mesh's vertices (the vertex stage's)
-    float displaced;  // 1 where the surface moves with the waves, 0 where it is held flat
+    float exposed;    // 1 where the wind reaches the surface, 0 indoors where it lies still
     float pad2;
 } push;
 
@@ -95,6 +95,8 @@ layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
 const int MAX_WAKE_POINTS = 32;
 // kOceanCascadeCount in ocean_waves.hpp.
 const int OCEAN_CASCADES = 3;
+// OceanSea::kShoalingEntries / 4.
+const int OCEAN_SHOALING_VEC4S = 24;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
@@ -106,13 +108,22 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     // toward the crests, z = its mean square slope.
     vec4 oceanCascades[OCEAN_CASCADES];
     vec4 oceanSea;
+    // How much of each cascade's height and slope the water keeps at the
+    // shoaling table's depths (OceanSea::shoalingTable).
+    vec4 oceanShoaling[OCEAN_SHOALING_VEC4S];
+    // The sea bed under the water (SeaBedMap): world to its clip space, and
+    // x = the height of depth 0, y = yards to depth 1, z = 1 once drawn,
+    // w = texels a side.
+    mat4 seaBedMatrix;
+    vec4 seaBed;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
+layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
 
 #include "ocean_surface.glsli"
 
 layout(location = 0) in vec3 FragPos;
-layout(location = 1) in vec2 RestPos;   // where this point lies on the still surface
+layout(location = 1) in vec3 RestPos;   // where this point lies on the still surface
 layout(location = 2) in vec2 TexCoord;
 layout(location = 4) in vec2 ScreenUV;
 
@@ -412,14 +423,14 @@ void main() {
     // surface lies down into a smooth sheet as they shrink on screen, which
     // is what a fade by distance stood in for - and the slope of the rest
     // goes into the highlight's width below.
-    OceanLight sea = oceanLightAt(RestPos, push.displaced);
+    OceanLight sea = oceanLightAt(RestPos, push.exposed);
     vec3 norm = normalize(vec3(-sea.slope, 1.0));
     // The height as a share of the sea's own: one where a crest stands two
     // of its standard deviations up.
     float waveHeight = sea.height / max(2.0 * oceanSea.x, 1e-3);
     // Where riding toward the crests has bunched the surface to under half,
     // the crest is too steep to hold and is breaking.
-    float breaking = smoothstep(0.55, 0.25, sea.jacobian) * push.displaced;
+    float breaking = smoothstep(0.55, 0.25, sea.jacobian) * push.exposed;
 
     // Player interaction ripple normal perturbation
     vec2 rippleOrigin = playerPos.xy;

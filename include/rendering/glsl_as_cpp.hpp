@@ -34,6 +34,8 @@ inline float floor(float x) { return std::floor(x); }
 inline float sqrt(float x) { return std::sqrt(x); }
 inline float exp(float x) { return std::exp(x); }
 inline float log(float x) { return std::log(x); }
+inline float exp2(float x) { return std::exp2(x); }
+inline float log2(float x) { return std::log2(x); }
 inline float pow(float x, float y) { return std::pow(x, y); }
 inline float sin(float x) { return std::sin(x); }
 inline float cos(float x) { return std::cos(x); }

@@ -76,6 +76,8 @@ public:
     /// y = how far its water rides toward the crests, z = its mean square
     /// slope.
     [[nodiscard]] glm::vec4 seaState() const;
+    /// The sea's totals as the CPU keeps them.
+    [[nodiscard]] const OceanSea& sea() const { return sea_; }
 
 private:
     struct Image {

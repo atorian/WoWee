@@ -14,6 +14,7 @@
 #include "rendering/camera_water_depth.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/sea_bed.hpp"
 #include "rendering/water_reflection.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/starfield.hpp"
@@ -1093,6 +1094,7 @@ bool Renderer::initialize(RenderSurface* surface) {
     renderGraph_->registerResource("shadow_depth");
     renderGraph_->registerResource("volumetric_fog");
     renderGraph_->registerResource("ocean_surface");
+    renderGraph_->registerResource("sea_bed");
     renderGraph_->registerResource("reflection_texture");
     renderGraph_->registerResource("scene_color");
     renderGraph_->registerResource("scene_depth");
@@ -1127,6 +1129,10 @@ void Renderer::shutdown() {
     if (waterRenderer) {
         waterRenderer->shutdown();
         waterRenderer.reset();
+    }
+    if (seaBed_) {
+        seaBed_->shutdown();
+        seaBed_.reset();
     }
 
     LOG_DEBUG("Renderer::shutdown - minimap...");
@@ -3965,10 +3971,20 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         liquidScene_.setLiquidTypes(&liquidTypes_);
     }
 
+    // What lies under the water, drawn by the shadow pass's casters: before
+    // the water, whose sets bind it.
+    if (!seaBed_) {
+        seaBed_ = std::make_unique<SeaBedMap>();
+        if (!seaBed_->initialize(vkCtx, shadowRenderPass)) {
+            LOG_ERROR("Failed to create the sea bed map - liquid is not drawn, "
+                      "though it can still be swum in");
+        }
+    }
+
     // Create water renderer if not already created
     if (!waterRenderer) {
         waterRenderer = std::make_unique<WaterRenderer>();
-        if (!waterRenderer->initialize(vkCtx, perFrameSetLayout)) {
+        if (!waterRenderer->initialize(vkCtx, perFrameSetLayout, seaBed_.get())) {
             LOG_ERROR("Failed to initialize water renderer - liquid is not drawn, "
                       "though it can still be swum in");
             waterRenderer.reset();
@@ -4722,6 +4738,7 @@ void Renderer::renderShadowMap(bool contact) {
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
+    if (!contact) shadowDescriptorsReset_ = true;
     if (terrainRenderer && !contact) {
         terrainRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
@@ -4889,6 +4906,55 @@ float Renderer::volumetricFogExtinction() const {
     return extinction;
 }
 
+void Renderer::renderSeaBedPass() {
+    ZoneScopedN("Renderer::renderSeaBedPass");
+    if (!seaBed_ || !waterRenderer || !camera || currentCmd == VK_NULL_HANDLE) return;
+    // WOWEE_NO_SEA_BED=1: the water as if it were deep everywhere, waves to
+    // the beach and through the piers, to compare against.
+    static const bool noSeaBed = core::envFlagEnabled("WOWEE_NO_SEA_BED", false);
+    if (noSeaBed) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOG_WARNING("Sea bed map off (WOWEE_NO_SEA_BED) - the waves keep their height to every shore");
+        }
+        return;
+    }
+    // Round the camera, which is where the waves are seen.
+    const glm::vec2 nearby(camera->getPosition());
+    const std::optional<float> water =
+        waterRenderer->highestOpenWaterNear(nearby, SeaBedMap::kHalfExtent);
+    if (!water) return;
+    if (!seaBed_->wantsDrawing(nearby, *water, globalTime)) return;
+
+    seaBed_->begin(nearby, *water);
+    const SeaBedFrame& frame = seaBed_->drawing();
+    // The casters cull by the matrix's footprint and by distance; the map's
+    // corners are its half extent and a half again from its middle.
+    const glm::vec3 centre(frame.centre, frame.ceiling);
+    const float reach = SeaBedMap::kHalfExtent * 1.415f;
+    // The ground, and the buildings from above and from below: what the
+    // water stands on and against. Not the doodads (SeaBedMap).
+    const auto drawView = [&](SeaBedView view) {
+        const glm::mat4 matrix = seaBed_->viewMatrix(view);
+        seaBed_->beginView(currentCmd, view);
+        if (view == SeaBedView::GroundFromAbove) {
+            if (terrainRenderer) terrainRenderer->renderShadow(currentCmd, matrix, centre, frame.range);
+        } else if (wmoRenderer) {
+            // The sun's pass reset the casters' texture sets this frame if
+            // it drew them; if it did not, this is the first, and resets.
+            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !shadowDescriptorsReset_);
+            shadowDescriptorsReset_ = true;
+        }
+        seaBed_->endView(currentCmd, view);
+    };
+    drawView(SeaBedView::GroundFromAbove);
+    drawView(SeaBedView::BuildingsFromAbove);
+    drawView(SeaBedView::BuildingsFromBelow);
+    seaBed_->finish(currentCmd, globalTime);
+    if (vkCtx) vkCtx->gpuMark(currentCmd, "sea bed");
+}
+
 void Renderer::renderVolumetricFog() {
     ZoneScopedN("Renderer::renderVolumetricFog");
     if (!volumetricThisFrame_ || !volumetricFog_ || !camera || currentCmd == VK_NULL_HANDLE) return;
@@ -5003,6 +5069,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
+    shadowDescriptorsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");
@@ -5054,6 +5121,16 @@ void Renderer::buildFrameGraph() {
             renderVolumetricFog();
         });
     renderGraph_->setPassEnabled("volumetric_fog", volumetricThisFrame_);
+
+    // What lies under the water → read by the water for its depth. After
+    // the shadow pass, whose casters' texture sets it reuses.
+    auto seaBedRes = renderGraph_->findResource("sea_bed");
+    renderGraph_->addPass("sea_bed", {shadowDepth}, {seaBedRes},
+        [this](VkCommandBuffer) {
+            renderSeaBedPass();
+        });
+    renderGraph_->setPassEnabled("sea_bed", seaBed_ && waterRenderer && waterRenderer->hasSurfaces() &&
+                                                !waterAblated());
 
     // The sea → outputs the surface every water surface is carried by and
     // lit from. Only while there is water to draw; the sea's clock and its

@@ -1,4 +1,5 @@
 #include "rendering/water_renderer.hpp"
+#include "rendering/sea_bed.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -39,7 +40,7 @@ struct WaterPushConstants {
     glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
     float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
     float meshStep = 0.0f;   // yards between the surface's vertices: the waves the mesh can carry
-    float displaced = 0.0f;  // 1 where the surface moves with the waves, 0 where it is held flat
+    float exposed = 0.0f;    // 1 where the wind reaches the surface, 0 indoors where it lies still
     float pad2 = 0.0f;
 };
 static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
@@ -52,9 +53,14 @@ WaterRenderer::~WaterRenderer() {
     shutdown();
 }
 
-bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
+bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout, const SeaBedMap* seaBed) {
     vkCtx = ctx;
     if (!vkCtx) return false;
+    seaBed_ = seaBed;
+    if (!seaBed_ || seaBed_->view() == VK_NULL_HANDLE) {
+        LOG_ERROR("WaterRenderer: no sea bed map to read the water's depth from - no water drawn");
+        return false;
+    }
 
     LOG_INFO("Initializing water renderer (Vulkan)");
     VkDevice device = vkCtx->getDevice();
@@ -126,8 +132,12 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     oceanBinding.descriptorCount = 1;
     oceanBinding.stageFlags = reflUBOBinding.stageFlags;
 
+    // What lies under the water (SeaBedMap): the waves lie down as it comes up.
+    VkDescriptorSetLayoutBinding seaBedBinding = oceanBinding;
+    seaBedBinding.binding = 5;
+
     sceneSetLayout = createDescriptorSetLayout(device,
-        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding});
+        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding, seaBedBinding});
     if (!sceneSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create scene set layout");
         return false;
@@ -138,10 +148,10 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
 
-    // Pool needs 4 combined image samplers + 1 uniform buffer per frame
+    // Pool needs 5 combined image samplers + 1 uniform buffer per frame
     std::array<VkDescriptorPoolSize, 2> scenePoolSizes{};
     scenePoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    scenePoolSizes[0].descriptorCount = 4 * SCENE_HISTORY_FRAMES;
+    scenePoolSizes[0].descriptorCount = 5 * SCENE_HISTORY_FRAMES;
     scenePoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     scenePoolSizes[1].descriptorCount = SCENE_HISTORY_FRAMES;
     VkDescriptorPoolCreateInfo scenePoolInfo{};
@@ -255,6 +265,25 @@ void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::
     ocean_.advance(deltaSeconds, windSpeed, windDirection, nearby);
     for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
     frameUBO_.oceanSea = ocean_.seaState();
+    const auto& shoaling = ocean_.sea().shoalingTable();
+    std::copy(shoaling.begin(), shoaling.end(), frameUBO_.oceanShoaling);
+}
+
+std::optional<float> WaterRenderer::highestOpenWaterNear(glm::vec2 centre, float halfExtent) const {
+    std::optional<float> highest;
+    for (const DrawnSurface& s : drawn_) {
+        if (s.shelter != LiquidShelter::Open || s.basicType > 1) continue;
+        const glm::vec3 corner = s.origin + s.stepX * static_cast<float>(s.width) +
+                                 s.stepY * static_cast<float>(s.height);
+        const glm::vec2 lo = glm::min(glm::vec2(s.origin), glm::vec2(corner));
+        const glm::vec2 hi = glm::max(glm::vec2(s.origin), glm::vec2(corner));
+        if (hi.x < centre.x - halfExtent || lo.x > centre.x + halfExtent ||
+            hi.y < centre.y - halfExtent || lo.y > centre.y + halfExtent) {
+            continue;
+        }
+        if (!highest || s.maxHeight > *highest) highest = s.maxHeight;
+    }
+    return highest;
 }
 
 void WaterRenderer::recreatePipelines() {
@@ -565,6 +594,15 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
         w4.pImageInfo = &oceanInfo;
         writes.push_back(w4);
 
+        VkDescriptorImageInfo seaBedInfo{};
+        seaBedInfo.sampler = seaBed_->sampler();
+        seaBedInfo.imageView = seaBed_->view();
+        seaBedInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w5 = w4;
+        w5.dstBinding = 5;
+        w5.pImageInfo = &seaBedInfo;
+        writes.push_back(w5);
+
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
@@ -688,6 +726,7 @@ void WaterRenderer::liquidSurfaceAdded(const LiquidSurface& surface) {
     drawn.liquidType = surface.liquidType;
     drawn.basicType = surface.basicType();
     drawn.wmoId = surface.wmoId;
+    drawn.shelter = surface.shelter;
     drawn.width = surface.width;
     drawn.height = surface.height;
 
@@ -719,6 +758,11 @@ void WaterRenderer::destroyAllDrawn() {
 
 void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const Camera& camera, float /*time*/, bool use1x, uint32_t frameIndex) {
+    // The sea bed as it was last drawn - this frame, if it was drawn in it.
+    const SeaBedFrame& bed = seaBed_->frame();
+    frameUBO_.seaBedMatrix = bed.viewProjection();
+    frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f,
+                                 static_cast<float>(SeaBedMap::kTexels));
     // The wake as it stands, into this frame's slot - safe now, the frame has
     // waited for the GPU to finish with it.
     uploadFrameUBO();
@@ -800,10 +844,10 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
         push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
-        // Held flat for the same reason as its swell: a building's water
-        // meets its floors, bridges and docks, and waves rising through
-        // them read as the water leaking.
-        push.displaced = isWmoWater ? 0.0f : 1.0f;
+        // A building's water outdoors takes the wind as the sea does; where
+        // it meets its quays, piers and walls the sea bed's map has no depth
+        // under it and its waves lie down there. Indoors it lies still.
+        push.exposed = surface.shelter == LiquidShelter::Open ? 1.0f : 0.0f;
 
         vkCmdPushConstants(cmd, pipelineLayout, pushStages_,
                             0, sizeof(WaterPushConstants), &push);

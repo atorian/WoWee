@@ -1885,16 +1885,19 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                               const glm::vec3& shadowCenter, float shadowRadius) {
+                               const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (scene_->instances.empty() || loadedModels.empty()) return;
 
-    // Once a frame: the WMO pass casts into the sun's map only.
+    // Once a frame, by the frame's first depth-only pass: the sets a later
+    // one reuses are still in this frame's command buffer.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+    if (resetDescriptors) {
+        if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
+            vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+        }
+        shadowTexSetCache_.clear();
     }
-    shadowTexSetCache_.clear();
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
