@@ -596,11 +596,32 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
 
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
-    // on its own threads: with it on, the frames wait for it as well.
+    // on its own threads, as long as it takes; with it on, it streams first,
+    // with the scene's clock held, and the frames run from the clock's start
+    // once it is in. They used to run while it streamed, and then on until it
+    // was in - so how many steps the wind, the animations and the weather had
+    // taken by the kept frame depended on how fast the disk was, and the same
+    // scene twice drew two different frames.
     const int frames = std::max(1, scene.value("frames", 30));
     constexpr float kStep = 1.0f / 30.0f;
     const auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
+    if (waitTerrain) {
+        environment.realmSeconds = realmTime;
+        renderer.setWorldEnvironment(environment);
+        int waited = 0;
+        for (; waited < 600 && (waited == 0 || terrain->getRemainingTileCount() > 0); ++waited) {
+            renderer.update(0.0f);
+            renderer.beginFrame();
+            renderer.renderWorld();
+            renderer.endFrame();
+        }
+        if (terrain->getRemainingTileCount() > 0) {
+            std::fprintf(stderr, "scene_render: %d terrain tiles still streaming after %d frames; "
+                                 "drawing without them\n",
+                         static_cast<int>(terrain->getRemainingTileCount()), waited);
+        }
+    }
     int frame = 0;
     FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
@@ -628,11 +649,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                         *renderer.getVkContext());
         ++frame;
     };
-    for (int extra = 0; frame < frames || (waitTerrain && extra < 600 &&
-                                           terrain->getRemainingTileCount() > 0);) {
-        if (frame >= frames) ++extra;
-        drawFrame();
-    }
+    while (frame < frames) drawFrame();
 
     // Then, if asked, the camera on the move for the last few frames. What a
     // pass keeps of an earlier frame - the water's refraction once kept the
