@@ -4919,18 +4919,27 @@ void Renderer::renderShadowMap(bool contact) {
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
+    // Each caster kind's recording timed apart, under the pass that runs it:
+    // the pass's whole is the largest part of beginFrame in a city, and which
+    // of these it is decides where to cut.
+    constexpr std::string_view kStageGroup = "beginFrame/graph/shadow_pass";
     if (!contact) wmoCasterSetsReset_ = m2CasterSetsReset_ = true;
     if (terrainRenderer && !contact) {
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: terrain");
         terrainRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
     if (wmoRenderer && !contact) {
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: wmo");
         wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius);
     }
     if (m2Renderer) {
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup, contact ? "units: m2" : "sun: m2");
         m2Renderer->renderShadow(currentCmd, passMatrix, wind_.gpu(), passCenter, shadowCullRadius,
                                  !contact);
     }
     if (characterRenderer) {
+        CpuStage stage(vkCtx->cpuStages(), kStageGroup,
+                       contact ? "units: characters" : "sun: characters");
         characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !contact);
     }
     }  // drawCasters
