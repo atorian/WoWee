@@ -1,4 +1,5 @@
 #include "rendering/render_graph.hpp"
+#include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
@@ -113,7 +114,7 @@ void RenderGraph::topologicalSort() {
     }
 }
 
-void RenderGraph::execute(VkCommandBuffer cmd) {
+void RenderGraph::execute(VkCommandBuffer cmd, VkContext& context, std::string_view stageGroup) {
     if (!compiled_) {
         LOG_WARNING("RenderGraph::execute called without compile()");
         compile();
@@ -180,8 +181,19 @@ void RenderGraph::execute(VkCommandBuffer cmd) {
             cmdPipelineBarrier2(cmd, dep);
         }
 
-        // Execute the pass
-        pass.execute(cmd);
+        // Execute the pass: its recording timed on the CPU, its commands
+        // grouped under its name for a capture and for Tracy.
+        const uint32_t marksBefore = context.gpuMarksRecorded();
+        {
+            CpuStage stage(context.cpuStages(), stageGroup, pass.name);
+            GpuScope scope(context, cmd, pass.name.c_str());
+            pass.execute(cmd);
+        }
+        // Every pass ends on a timestamp. One that marks its own work keeps
+        // its own names; one that does not would otherwise have its cost
+        // read as part of whichever pass marks next - the minimap's had been
+        // counted as the shadows'.
+        if (context.gpuMarksRecorded() == marksBefore) context.gpuMark(cmd, context.gpuLabel(pass.name));
     }
 }
 

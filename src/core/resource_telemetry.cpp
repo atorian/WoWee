@@ -1,5 +1,7 @@
 #include "core/resource_telemetry.hpp"
 
+#include "core/frame_budget.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -67,21 +69,15 @@ std::vector<float> SampleRing::measured() const {
 FrameSummary ResourceTelemetry::FrameWindow::summary() const {
     FrameSummary out;
     if (seconds.empty()) return out;
-    double total = 0.0;
-    float slowest = 0.0f;
-    for (const float s : seconds) {
-        total += s;
-        slowest = std::max(slowest, s);
-    }
-    std::vector<float> sorted = seconds;
-    // The frame at the 99th percentile, counting up from the fastest.
-    const size_t rank = std::min(sorted.size() - 1,
-                                 static_cast<size_t>(std::ceil(0.99 * sorted.size())) - 1);
-    std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(rank), sorted.end());
-    out.frames = static_cast<uint32_t>(seconds.size());
-    out.averageFps = total > 0.0 ? static_cast<float>(seconds.size() / total) : 0.0f;
-    out.minimumFps = slowest > 0.0f ? 1.0f / slowest : 0.0f;
-    out.p99FrameMs = sorted[rank] * 1000.0f;
+    std::vector<float> frameMs;
+    frameMs.reserve(seconds.size());
+    for (const float s : seconds) frameMs.push_back(s * 1000.0f);
+    // The same percentiles the frame budget reports.
+    const TimeDistribution frames = distributionOf(frameMs);
+    out.frames = frames.count;
+    out.averageFps = frames.totalMs > 0.0 ? static_cast<float>(frames.count * 1000.0 / frames.totalMs) : 0.0f;
+    out.minimumFps = frames.maxMs > 0.0f ? 1000.0f / frames.maxMs : 0.0f;
+    out.p99FrameMs = frames.p99Ms;
     return out;
 }
 

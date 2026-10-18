@@ -43,12 +43,12 @@ ResourceMonitor::ResourceMonitor(bool frameProfile)
     }
 }
 
-void ResourceMonitor::frameFinished(const rendering::Renderer* renderer,
+void ResourceMonitor::frameFinished(std::optional<float> frameSeconds,
+                                    const rendering::Renderer* renderer,
                                     const pipeline::AssetManager* assets,
                                     std::optional<uint32_t> latencyMs) {
     const auto now = std::chrono::steady_clock::now();
-    if (lastFrame_) telemetry_.noteFrame(std::chrono::duration<float>(now - *lastFrame_).count());
-    lastFrame_ = now;
+    if (frameSeconds) telemetry_.noteFrame(*frameSeconds);
 
     const double seconds = std::chrono::duration<double>(now - started_).count();
     if (seconds - lastSampleAt_ < kSampleIntervalSeconds) return;

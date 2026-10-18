@@ -149,7 +149,22 @@ wowee_add_test(test_event_bus
 # should end with, once per crossing. No logger: the owner logs what it says.
 wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
+            ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+
+# The frame budget the profile, the benchmark and scene_render report: the
+# frame time's spread and hitches, each stage's tail, and stages nested under
+# the one they are part of. No logger: the owner logs the lines.
+wowee_add_test(test_frame_budget
+    SOURCES test_frame_budget.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+
+# WOWEE_BENCHMARK's run: when the flight starts and ends, where the camera
+# goes, and what the report covers. No client.
+wowee_add_test(test_benchmark_run
+    SOURCES test_benchmark_run.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/benchmark_run.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
 
 # What the video memory is used for, from the allocator's detailed map: each
 # allocation by its usage flags, in VRAM or system memory. No device.

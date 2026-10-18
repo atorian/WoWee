@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rendering/cpu_stage_times.hpp"
 #include "rendering/frames_in_flight.hpp"
 #include "rendering/frame_targets.hpp"
 #include "rendering/gpu_memory.hpp"
@@ -17,6 +18,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <set>
 #include <unordered_map>
 #include <mutex>
 
@@ -210,6 +213,43 @@ public:
     /// previous mark). Empty until a frame has come round and been read back.
     [[nodiscard]] const std::vector<std::pair<const char*, double>>&
         gpuTimings() const { return gpuTimings_; }
+    /// What a reader of gpuTimings() has to know to believe them, or empty.
+    ///
+    /// MoltenVK resolves a timestamp against the Metal encoder - the render
+    /// pass - that contains it rather than the draw: every mark inside one
+    /// pass reads the same clock, so the first mark absorbs the whole pass
+    /// and the rest read a couple of microseconds. That is how a profile came
+    /// to say terrain cost 14ms and the characters, the buildings, the water
+    /// and every doodad in the city twenty microseconds between them.
+    [[nodiscard]] const char* gpuTimingCaveat() const;
+    /// Counts the frames read back into gpuTimings(): a reader that wants
+    /// every frame's timings once - to average them - takes them when this
+    /// moves.
+    [[nodiscard]] uint64_t gpuTimingsSerial() const { return gpuTimingsSerial_; }
+    /// The marks recorded so far into the frame being recorded.
+    [[nodiscard]] uint32_t gpuMarksRecorded() const { return gpuMarkCount_[currentFrame]; }
+    /// A mark label named at run time - a frame graph pass's - kept for the
+    /// life of the context, since a mark's label is read back frames after
+    /// it is recorded. The same text gives the same pointer. Main thread.
+    [[nodiscard]] const char* gpuLabel(std::string_view text);
+
+    /// A named stretch of the frame's commands for the tools that read a
+    /// frame: a debug-utils label that RenderDoc and Nsight group a capture
+    /// by, whenever VK_EXT_debug_utils is there (not only under validation),
+    /// and a Tracy GPU zone in a Tracy build. Nothing without either. Scopes
+    /// nest, end in the order they began, and are recorded on the main
+    /// thread into the frame's primary command buffer. The name must outlive
+    /// the frame's recording.
+    void beginGpuScope(VkCommandBuffer cmd, const char* name);
+    void endGpuScope(VkCommandBuffer cmd);
+    /// Whether debug labels reach anything: VK_EXT_debug_utils is enabled.
+    [[nodiscard]] bool gpuLabelsEnabled() const { return cmdBeginLabel_ != nullptr; }
+
+    /// What the parts of the renderer's frame cost the CPU, this frame. The
+    /// renderer clears it as its frame begins; VkContext's own beginFrame and
+    /// endFrame put their waits in it.
+    [[nodiscard]] CpuStageTimes& cpuStages() { return cpuStages_; }
+    [[nodiscard]] const CpuStageTimes& cpuStages() const { return cpuStages_; }
     [[nodiscard]] bool hasDedicatedTransferQueue() const { return hasDedicatedTransfer_; }
     [[nodiscard]] VmaAllocator getAllocator() const { return allocator; }
 
@@ -423,7 +463,7 @@ private:
     /// One pool per frame slot, read back when that slot comes round again -
     /// by then its fence has been waited on, so the results are ready and the
     /// read never blocks.
-    static constexpr uint32_t kMaxGpuMarks = 32;
+    static constexpr uint32_t kMaxGpuMarks = 48;
     VkQueryPool gpuQueryPools_[MAX_FRAMES_IN_FLIGHT]{};
     const char* gpuMarkLabels_[MAX_FRAMES_IN_FLIGHT][kMaxGpuMarks]{};
     uint32_t gpuMarkCount_[MAX_FRAMES_IN_FLIGHT]{};
@@ -431,10 +471,26 @@ private:
     /// slot that has never run is not read back as garbage.
     bool gpuMarksPending_[MAX_FRAMES_IN_FLIGHT]{};
     std::vector<std::pair<const char*, double>> gpuTimings_;
+    uint64_t gpuTimingsSerial_ = 0;
+    /// The driver resolves timestamps per render pass (MoltenVK).
+    bool timestampsPerRenderPass_ = false;
+    std::set<std::string, std::less<>> gpuLabels_;
     float timestampPeriodNs_ = 0.0f;
     bool gpuTimingSupported_ = false;
     void createGpuQueryPools();
     void readGpuTimings(uint32_t slot);
+
+    /// VK_EXT_debug_utils was enabled on the instance.
+    bool debugUtilsEnabled_ = false;
+    /// vkCmdBegin/EndDebugUtilsLabelEXT, or null without VK_EXT_debug_utils.
+    PFN_vkCmdBeginDebugUtilsLabelEXT cmdBeginLabel_ = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT cmdEndLabel_ = nullptr;
+    /// Tracy's GPU context and its open zones; null outside a Tracy build.
+    struct TracyGpu;
+    TracyGpu* tracyGpu_ = nullptr;
+    void createTracyGpuContext();
+    void destroyTracyGpuContext();
+    CpuStageTimes cpuStages_;
     uint32_t presentQueueFamily = 0;
 
     // Dedicated transfer queue (second queue from same graphics family)
@@ -679,6 +735,44 @@ private:
 #endif
     // Whether the layers actually came up this run, including via the env var.
     bool validationActive_ = false;
+};
+
+/// A GPU scope for as long as it lives (VkContext::beginGpuScope).
+class GpuScope {
+public:
+    GpuScope(VkContext& context, VkCommandBuffer cmd, const char* name)
+        : context_(context), cmd_(cmd) {
+        context_.beginGpuScope(cmd_, name);
+    }
+    ~GpuScope() { context_.endGpuScope(cmd_); }
+    GpuScope(const GpuScope&) = delete;
+    GpuScope& operator=(const GpuScope&) = delete;
+
+private:
+    VkContext& context_;
+    VkCommandBuffer cmd_;
+};
+
+/// One pass of the frame, under one name for every tool that reads it: a
+/// GPU scope while it records, and a timestamp mark of the same name when it
+/// ends, which the frame profile reads the pass's cost from.
+class GpuPass {
+public:
+    GpuPass(VkContext& context, VkCommandBuffer cmd, const char* name)
+        : context_(context), cmd_(cmd), name_(name) {
+        context_.beginGpuScope(cmd_, name_);
+    }
+    ~GpuPass() {
+        context_.endGpuScope(cmd_);
+        context_.gpuMark(cmd_, name_);
+    }
+    GpuPass(const GpuPass&) = delete;
+    GpuPass& operator=(const GpuPass&) = delete;
+
+private:
+    VkContext& context_;
+    VkCommandBuffer cmd_;
+    const char* name_;
 };
 
 } // namespace rendering

@@ -691,6 +691,7 @@ set(WOWEE_SOURCES
     src/core/process_stats.cpp
     src/core/resource_telemetry.cpp
     src/core/resource_monitor.cpp
+    src/core/benchmark_run.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
@@ -719,6 +720,7 @@ set(WOWEE_SOURCES
     src/core/logger.cpp
     src/core/memory_monitor.cpp
     src/core/app_clock.cpp
+    src/core/frame_budget.cpp
     src/core/config_paths.cpp
     src/core/frame_pacer.cpp
     src/core/https_get.cpp
@@ -1230,6 +1232,7 @@ set(WOWEE_BASE_SOURCES
     src/core/logger.cpp
     src/core/memory_monitor.cpp
     src/core/app_clock.cpp
+    src/core/frame_budget.cpp
     src/core/config_paths.cpp
     src/core/cvar_store.cpp
     src/math/spline.cpp
@@ -1730,10 +1733,26 @@ endif()
 # definition: a tool linking instrumented pipeline objects needs TracyClient
 # as much as the client does.
 if(WOWEE_ENABLE_TRACY)
+    if(NOT EXISTS ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
+        message(FATAL_ERROR "WOWEE_ENABLE_TRACY is on but extern/tracy is missing - run tools/fetch_tracy.sh")
+    endif()
     target_sources(wowee_base PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
+    # Tracy's own source, not ours: under the project's -Werror its Windows
+    # GetProcAddress casts and unused parameters stop the build.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp
+            PROPERTIES COMPILE_OPTIONS "-w")
+    elseif(MSVC)
+        set_source_files_properties(${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp
+            PROPERTIES COMPILE_OPTIONS "/w")
+    endif()
     target_compile_definitions(wowee_base PUBLIC TRACY_ENABLE)
     target_include_directories(wowee_base SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
     target_link_libraries(wowee_base PUBLIC ${CMAKE_DL_LIBS})
+    # Its socket to the profiler and its symbol resolution for callstacks.
+    if(WIN32)
+        target_link_libraries(wowee_base PUBLIC ws2_32 dbghelp)
+    endif()
 endif()
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})

@@ -26,10 +26,11 @@ class ResourceMonitor {
 public:
     explicit ResourceMonitor(bool frameProfile);
 
-    /// End of a frame. The caches are read from their owners when a sample is
-    /// due; either may be null before the world's renderers exist.
-    void frameFinished(const rendering::Renderer* renderer, const pipeline::AssetManager* assets,
-                       std::optional<uint32_t> latencyMs);
+    /// End of a frame `frameSeconds` long - none for the first, which has no
+    /// frame before it. The caches are read from their owners when a sample
+    /// is due; either may be null before the world's renderers exist.
+    void frameFinished(std::optional<float> frameSeconds, const rendering::Renderer* renderer,
+                       const pipeline::AssetManager* assets, std::optional<uint32_t> latencyMs);
 
     [[nodiscard]] const ResourceTelemetry& telemetry() const { return telemetry_; }
 
@@ -51,7 +52,6 @@ private:
     ResourceTelemetry telemetry_;
     ProcessStatsSampler sampler_;
     std::chrono::steady_clock::time_point started_;
-    std::optional<std::chrono::steady_clock::time_point> lastFrame_;
     double lastSampleAt_ = 0.0;
 };
 

@@ -53,8 +53,15 @@
 //
 // Without a camera it backs off along -X far enough to see the first model.
 // Render axes: z is up, yaw 0 looks along +x and 90 along +y.
+//
+// With --timing after the paths (tools/scene_render.sh passes it when
+// SCENE_RENDER_TIMING=1), every frame prints a "timing:" line: its wall time, the
+// renderer's calls and their largest parts, and the GPU's time for the last
+// frame read back. A frame budget of the frames after the warm-up follows -
+// the same report, percentiles and parts, as the client's frame profile.
 
 #include "core/coordinates.hpp"
+#include "core/frame_budget.hpp"
 #include "rendering/minimap.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -250,8 +257,90 @@ void reportVideoMemory(const rendering::Renderer& renderer) {
     }
 }
 
+/// Per-frame timing (--timing): a line for each frame, and the frame budget
+/// of those after the warm-up, whose first frames build pipelines.
+class FrameTimer {
+public:
+    FrameTimer(bool enabled, int warmupFrames) : enabled_(enabled), warmup_(warmupFrames) {}
+
+    /// Time one renderer call of the frame.
+    template <typename Fn>
+    void call(const char* name, Fn&& fn) {
+        if (!enabled_) {
+            fn();
+            return;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        fn();
+        const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+        calls_.emplace_back(name, ms);
+    }
+
+    void frameDone(int frame, float frameMs, rendering::VkContext& vk) {
+        if (!enabled_) return;
+        const bool counted = frame >= warmup_;
+        std::string line = "frame " + std::to_string(frame) + ": " + fixed(frameMs) + " ms";
+        for (const auto& [name, ms] : calls_) {
+            line += std::string(", ") + name + " " + fixed(ms);
+            if (counted) budget_.noteStage(name, ms);
+        }
+        // The renderer's own parts, largest three on the line, all of them
+        // in the budget.
+        auto parts = std::vector<rendering::CpuStageTimes::Entry>(vk.cpuStages().entries().begin(),
+                                                                 vk.cpuStages().entries().end());
+        for (const auto& part : parts) {
+            if (counted) budget_.noteStage(std::string(part.group) + "/" + std::string(part.name), part.milliseconds);
+        }
+        std::sort(parts.begin(), parts.end(),
+                  [](const auto& a, const auto& b) { return a.milliseconds > b.milliseconds; });
+        line += " [";
+        for (size_t i = 0; i < parts.size() && i < 3; ++i) {
+            line += (i ? ", " : "") + std::string(parts[i].group) + "/" + std::string(parts[i].name) + " " +
+                    fixed(parts[i].milliseconds);
+        }
+        line += "]";
+        vk.cpuStages().clear();
+        if (vk.gpuTimingsSerial() != gpuSeen_) {
+            gpuSeen_ = vk.gpuTimingsSerial();
+            double gpu = 0.0;
+            for (const auto& [label, ms] : vk.gpuTimings()) gpu += ms;
+            line += ", GPU " + fixed(static_cast<float>(gpu)) + " ms (a frame in flight earlier)";
+            if (counted) budget_.noteGpuFrame(vk.gpuTimings());
+        }
+        if (counted) {
+            budget_.frameFinished(frameMs);
+            windowMs_ += frameMs;
+        }
+        std::printf("timing: %s\n", line.c_str());
+        calls_.clear();
+    }
+
+    void report(const rendering::VkContext& vk) const {
+        if (!enabled_) return;
+        for (const auto& line : budget_.report("scene_render, frames after the first " +
+                                                   std::to_string(warmup_), windowMs_)) {
+            std::printf("timing: %s\n", line.c_str());
+        }
+        if (*vk.gpuTimingCaveat() != '\0') std::printf("timing:     %s\n", vk.gpuTimingCaveat());
+    }
+
+private:
+    static std::string fixed(float ms) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.2f", ms);
+        return text;
+    }
+
+    bool enabled_;
+    int warmup_;
+    std::vector<std::pair<const char*, float>> calls_;
+    core::FrameBudget budget_;
+    uint64_t gpuSeen_ = 0;
+    double windowMs_ = 0.0;
+};
+
 int render(const json& scene, const std::string& outPath, pipeline::AssetManager& assets,
-           rendering::Renderer& renderer) {
+           rendering::Renderer& renderer, bool timing) {
     const std::string map = scene.value("map", "Northrend");
     if (!renderer.initializeRenderers(&assets, map)) return 1;
     // The minimap is interface; a scene shows only the world unless asked.
@@ -373,13 +462,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     const auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
     int frame = 0;
+    FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
+        const auto start = std::chrono::steady_clock::now();
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
-        renderer.update(kStep);
-        renderer.beginFrame();
-        renderer.renderWorld();
-        renderer.endFrame();
+        timer.call("update", [&] { renderer.update(kStep); });
+        timer.call("beginFrame", [&] { renderer.beginFrame(); });
+        timer.call("renderWorld", [&] { renderer.renderWorld(); });
+        timer.call("endFrame", [&] { renderer.endFrame(); });
+        timer.frameDone(frame, std::chrono::duration<float, std::milli>(
+                                   std::chrono::steady_clock::now() - start).count(),
+                        *renderer.getVkContext());
         ++frame;
     };
     for (int extra = 0; frame < frames || (waitTerrain && extra < 600 &&
@@ -399,6 +493,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             drawFrame();
         }
     }
+    timer.report(*renderer.getVkContext());
     if (!renderer.captureScreenshot(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;
@@ -407,7 +502,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     return 0;
 }
 
-int run(const json& scene, const std::string& outPath) {
+int run(const json& scene, const std::string& outPath, bool timing) {
     const auto start = std::chrono::steady_clock::now();
     const json size = scene.value("size", json::array({1280, 720}));
     const int width = size[0].get<int>();
@@ -438,7 +533,7 @@ int run(const json& scene, const std::string& outPath) {
             renderer.setShadowQualityLevel(scene.value("shadowQuality", 2));
             if (renderer.initialize(&surface) &&
                 renderer.getLightingManager()->initialize(&assets)) {
-                status = render(scene, outPath, assets, renderer);
+                status = render(scene, outPath, assets, renderer, timing);
             } else {
                 std::fprintf(stderr, "scene_render: the renderer did not start\n");
             }
@@ -455,8 +550,9 @@ int run(const json& scene, const std::string& outPath) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: scene_render <scene.json> <out.png>\n");
+    const bool timing = argc == 4 && std::string(argv[3]) == "--timing";
+    if (argc != 3 && !timing) {
+        std::fprintf(stderr, "usage: scene_render <scene.json> <out.png> [--timing]\n");
         return 2;
     }
     std::ifstream in(argv[1]);
@@ -471,5 +567,5 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "scene_render: %s: %s\n", argv[1], e.what());
         return 2;
     }
-    return run(scene, argv[2]);
+    return run(scene, argv[2], timing);
 }

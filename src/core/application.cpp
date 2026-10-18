@@ -63,6 +63,7 @@
 #include "rendering/terrain_manager.hpp"
 #include "rendering/performance_hud.hpp"
 #include "core/resource_monitor.hpp"
+#include "core/benchmark_run.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/starfield.hpp"
@@ -1637,6 +1638,7 @@ void Application::run() {
     }
     resourceMonitor_ = std::make_unique<ResourceMonitor>(frameProfileEnabled_);
     performanceHUD_->setResourceTelemetry(&resourceMonitor_->telemetry());
+    startBenchmarkFromEnvironment();
 
     // Integer nanoseconds off a monotonic clock, and the finest sleep the
     // platform will give for as long as the loop runs. See frame_pacer.hpp
@@ -1761,11 +1763,164 @@ void Application::pace() {
 }
 
 void Application::frameFinished() {
-    stageStatFrames_ += 1;
+    // One clock for the frame, end to end, which every report reads.
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<float> frameSeconds;
+    if (lastFrameEnd_) frameSeconds = std::chrono::duration<float>(now - *lastFrameEnd_).count();
+    lastFrameEnd_ = now;
+
+    // The GPU's breakdown of each frame read back, once.
+    if (renderer && renderer->getVkContext()) {
+        const auto* vk = renderer->getVkContext();
+        if (vk->gpuTimingsSerial() != gpuTimingsSeen_) {
+            gpuTimingsSeen_ = vk->gpuTimingsSerial();
+            frameBudget_.noteGpuFrame(vk->gpuTimings());
+            if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteGpuFrame(vk->gpuTimings());
+        }
+    }
+    if (frameSeconds) {
+        frameBudget_.frameFinished(*frameSeconds * 1000.0f);
+        if (benchmark_) {
+            if (benchmark_->recording()) benchmark_->budget().frameFinished(*frameSeconds * 1000.0f);
+            benchmarkFrameEnded(*frameSeconds);
+        }
+    }
     reportStageTimes();
     std::optional<uint32_t> latencyMs;
     if (gameHandler && gameHandler->isInWorld()) latencyMs = gameHandler->getLatencyMs();
-    resourceMonitor_->frameFinished(renderer.get(), assetManager.get(), latencyMs);
+    resourceMonitor_->frameFinished(frameSeconds, renderer.get(), assetManager.get(), latencyMs);
+}
+
+void Application::startBenchmarkFromEnvironment() {
+    const char* name = std::getenv("WOWEE_BENCHMARK");
+    if (name == nullptr || *name == '\0') return;
+    const BenchmarkRoute* route = findBenchmarkRoute(name);
+    if (route == nullptr) {
+        std::string known;
+        for (const auto& r : benchmarkRoutes()) known += (known.empty() ? "" : ", ") + r.name;
+        LOG_ERROR("WOWEE_BENCHMARK=", name, ": there is no such route (the routes are ", known,
+                  "); closing without a run");
+        window->setShouldClose(true);
+        return;
+    }
+    if (!worldLoader_ || !gameHandler || !renderer || !loop_) {
+        LOG_ERROR("WOWEE_BENCHMARK=", name, ": the client has no world to enter (the game data did "
+                  "not load); closing without a run");
+        window->setShouldClose(true);
+        return;
+    }
+    BenchmarkRun::Timing timing;
+    const auto seconds = [](const char* variable, float fallback) {
+        const char* text = std::getenv(variable);
+        if (text == nullptr || *text == '\0') return fallback;
+        const float value = std::strtof(text, nullptr);
+        if (!std::isfinite(value) || value <= 0.0f) {
+            LOG_WARNING(variable, "=", text, " is not a number of seconds above zero; using ", fallback);
+            return fallback;
+        }
+        return value;
+    };
+    timing.flySeconds = seconds("WOWEE_BENCHMARK_SECONDS", timing.flySeconds);
+    timing.settleSeconds = seconds("WOWEE_BENCHMARK_SETTLE", timing.settleSeconds);
+    timing.maxSettleSeconds = std::max(timing.maxSettleSeconds, timing.settleSeconds);
+    benchmark_ = std::make_unique<BenchmarkRun>(*route, timing);
+    LOG_WARNING("Benchmark '", route->name, "': offline world entry, at least ", timing.settleSeconds,
+                " s for the world to settle, then one lap of the route in ", timing.flySeconds,
+                " s; the report is written to logs/ and the client closes");
+}
+
+void Application::beginOfflineWorldEntry(const game::Character& character) {
+    gameHandler->currentMapIdRef() = character.mapId;
+    gameHandler->charactersRef().push_back(character);
+    gameHandler->setActiveCharacterGuid(character.guid);
+    gameHandler->setPlayerGuid(character.guid);
+    auto& movement = gameHandler->movementInfoRef();
+    movement.x = character.x; movement.y = character.y; movement.z = character.z;
+    // Addon login events require live UNIT update fields. An offline entry
+    // exercises world assets and appearance queues without those packets:
+    // its character's interface hears events and OnUpdate from the start
+    // and loads nothing.
+    loop_->setSessionInterface(CharacterSession::Interface::EventsOnly);
+    worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
+}
+
+void Application::placeBenchmarkCamera() {
+    if (!benchmark_ || !renderer || !renderer->getCamera()) return;
+    const auto camera = benchmark_->camera();
+    if (!camera) return;
+    renderer->getCamera()->setPosition(camera->position);
+    renderer->getCamera()->setRotation(camera->yawDegrees, camera->pitchDegrees);
+}
+
+void Application::benchmarkFrameEnded(float frameSeconds) {
+    using Phase = BenchmarkRun::Phase;
+    const auto* terrain = renderer ? renderer->getTerrainManager() : nullptr;
+    const auto stage = worldLoader_ ? worldLoader_->stage() : WorldLoader::Stage::Idle;
+    const bool worldInView = getState() == AppState::IN_GAME &&
+        (stage == WorldLoader::Stage::Finished || stage == WorldLoader::Stage::Idle);
+    const bool streaming = terrain && terrain->getRemainingTileCount() > 0;
+
+    if (benchmark_->recording() && renderer) {
+        if (const auto* m2 = renderer->getM2Renderer()) {
+            benchmark_->noteSceneCount("M2 instances", m2->getInstanceCount());
+            benchmark_->noteSceneCount("M2 models", m2->getModelCount());
+        }
+        if (const auto* wmo = renderer->getWMORenderer()) {
+            benchmark_->noteSceneCount("WMO instances", wmo->getInstanceCount());
+        }
+        if (const auto* chars = renderer->getCharacterRenderer()) {
+            benchmark_->noteSceneCount("characters", chars->getInstanceCount());
+        }
+        if (terrain) benchmark_->noteSceneCount("terrain tiles", terrain->getLoadedTileCount());
+    }
+
+    const Phase before = benchmark_->phase();
+    benchmark_->frameEnded(frameSeconds, worldInView, streaming);
+    const Phase after = benchmark_->phase();
+    if (after == before) return;
+    if (after == Phase::Settling) {
+        LOG_WARNING("Benchmark: the world is in view; settling");
+    } else if (after == Phase::WaitingForWorld) {
+        LOG_WARNING("Benchmark: the world left the view while settling; waiting for it again");
+    } else if (after == Phase::Flying) {
+        if (streaming) {
+            LOG_WARNING("Benchmark: flying with terrain still streaming in (", terrain->getRemainingTileCount(),
+                        " tiles) - the settle reached its limit; the report says so");
+        } else {
+            LOG_WARNING("Benchmark: settled; flying the route");
+        }
+    } else if (after == Phase::Finished) {
+        std::vector<std::string> setup;
+        if (const auto* vk = renderer ? renderer->getVkContext() : nullptr) {
+            const VkExtent2D extent = vk->getSwapchainExtent();
+            setup.push_back(std::string("device: ") + vk->getGpuName());
+            setup.push_back("swapchain: " + std::to_string(extent.width) + "x" + std::to_string(extent.height) +
+                            ", vsync " + (window->isVsyncEnabled() ? "on" : "off") + ", frame cap " +
+                            (window->frameCap() > 0 ? std::to_string(window->frameCap()) : std::string("none")) +
+                            ", MSAA " + std::to_string(static_cast<int>(vk->getMsaaSamples())) + "x");
+            setup.push_back(std::string("GPU timestamps ") + (vk->gpuTimingSupported() ? "on" : "unavailable") +
+                            ", pass labels " + (vk->gpuLabelsEnabled() ? "on" : "off") +
+#ifdef TRACY_ENABLE
+                            ", Tracy built in");
+#else
+                            ", no Tracy");
+#endif
+            if (*vk->gpuTimingCaveat() != '\0') setup.push_back(vk->gpuTimingCaveat());
+        }
+        if (renderer) setup.push_back("shadow distance: " + std::to_string(static_cast<int>(renderer->getShadowDistance())));
+        const auto lines = benchmark_->report(setup);
+        const char* dirText = std::getenv("WOWEE_BENCHMARK_DIR");
+        const std::filesystem::path dir = dirText && *dirText ? dirText : "logs";
+        if (const auto written = writeBenchmarkReport(dir, benchmark_->route().name, lines)) {
+            LOG_WARNING("Benchmark finished: ", benchmark_->summary());
+            LOG_WARNING("Benchmark report written to ", written->string());
+        } else {
+            LOG_ERROR("Benchmark finished but its report could not be written under ", dir.string(),
+                      "; it follows here instead");
+            for (const auto& line : lines) LOG_ERROR("  ", line);
+        }
+        running = false;
+    }
 }
 
 void Application::afterTransitions() {
@@ -3881,20 +4036,31 @@ void Application::prepareFrame() {
                 if (std::isfinite(h) && h >= 0.0f && h < 24.0f)
                     renderer->getLightingManager()->setTimeOfDay(h / 24.0f);
             }
-            gameHandler->charactersRef().push_back(character);
-            gameHandler->setActiveCharacterGuid(character.guid);
-            gameHandler->setPlayerGuid(character.guid);
-            auto& movement = gameHandler->movementInfoRef();
-            movement.x = character.x; movement.y = character.y; movement.z = character.z;
-            // Addon login events require live UNIT update fields. This fixture
-            // exercises world assets and appearance queues without those
-            // packets: its character's interface hears events and OnUpdate from
-            // the start and loads nothing.
-            loop_->setSessionInterface(CharacterSession::Interface::EventsOnly);
             LOG_INFO("Mulgore probe: starting world entry");
-            worldLoader_->setPendingEntry(character.mapId, character.x, character.y, character.z);
+            beginOfflineWorldEntry(character);
             LOG_INFO("Mulgore probe: world entry queued for the transition phase");
         }
+    }
+    // WOWEE_BENCHMARK: the same entry, at the route's place and hour.
+    if (benchmark_ && !benchmarkEntered_ && worldLoader_) {
+        benchmarkEntered_ = true;
+        const BenchmarkRoute& route = benchmark_->route();
+        game::Character character{};
+        character.guid = 0x1236000000000000ULL;
+        character.name = "Benchmark";
+        character.race = game::Race::HUMAN;
+        character.characterClass = game::Class::WARRIOR;
+        character.gender = game::Gender::FEMALE;
+        character.level = 1;
+        character.mapId = route.mapId;
+        character.zoneId = route.zoneId;
+        character.x = route.spawn.x;
+        character.y = route.spawn.y;
+        character.z = route.spawn.z;
+        renderer->getLightingManager()->setTimeOfDay(route.hour / 24.0f);
+        beginOfflineWorldEntry(character);
+        LOG_WARNING("Benchmark '", route.name, "': world entry queued, map ", route.mapId, " at ",
+                    route.spawn.x, ", ", route.spawn.y, ", ", route.spawn.z);
     }
     // Offline regression fixture: exercises the real appearance/equipment
     // queues and GPU uploads without authenticating or changing realm state.
@@ -4152,6 +4318,7 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                     if (!logged) { LOG_INFO("Orgrimmar shadow probe: caster on WMO floor z=", floorZ); logged = true; }
                 }
             }
+            placeBenchmarkCamera();
         } catch (const std::bad_alloc& e) {
             LOG_ERROR("OOM during Application::update stage 'renderer->update': ", e.what());
             throw;
@@ -5096,6 +5263,8 @@ void Application::renderFrame(const FramePlan& plan) {
     }
 
     runRenderStage("endFrame", [&] { renderer->endFrame(); });
+    // What beginFrame, renderWorld and endFrame were made of.
+    noteRendererStages();
 
     // A picture of the client, written once and then done with.
     //
@@ -5144,10 +5313,25 @@ void Application::renderFrame(const FramePlan& plan) {
 }
 
 void Application::noteStageTime(const char* stage, float milliseconds) {
-    auto& stat = stageStats_[stage];
-    stat.totalMs += milliseconds;
-    stat.frames += 1;
-    if (milliseconds > stat.worstMs) stat.worstMs = milliseconds;
+    noteStage(stage, milliseconds);
+}
+
+void Application::noteStage(std::string_view stage, float milliseconds) {
+    frameBudget_.noteStage(stage, milliseconds);
+    if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteStage(stage, milliseconds);
+}
+
+void Application::noteRendererStages() {
+    if (!renderer || !renderer->getVkContext()) return;
+    auto& parts = renderer->getVkContext()->cpuStages();
+    for (const auto& part : parts.entries()) {
+        stageKey_.assign(part.group);
+        stageKey_ += '/';
+        stageKey_ += part.name;
+        noteStage(stageKey_, part.milliseconds);
+    }
+    // Taken: a frame the renderer skips does not count these again.
+    parts.clear();
 }
 
 void Application::reportStageTimes() {
@@ -5157,42 +5341,25 @@ void Application::reportStageTimes() {
         stageStatsSince_ = now;
         return;
     }
-    const float windowMs = duration<float, std::milli>(now - stageStatsSince_).count();
-    if (windowMs < 10000.0f) return;
+    const double windowMs = duration<double, std::milli>(now - stageStatsSince_).count();
+    if (windowMs < 10000.0) return;
 
-    if (stageStatFrames_ > 0) {
-        const float fps = stageStatFrames_ * 1000.0f / windowMs;
-        const bool loud = frameProfileEnabled_;
-        std::ostringstream head;
-        head << "frame budget over " << static_cast<int>(windowMs / 1000.0f)
-             << "s: " << stageStatFrames_ << " frames, " << fps << " fps, "
-             << windowMs / static_cast<float>(stageStatFrames_) << "ms each";
-        if (loud) LOG_WARNING(head.str()); else LOG_INFO(head.str());
-        // Worst first: the stage to look at is the one taking the time, and a
-        // long tail matters more than an average on a device that stutters.
-        std::vector<std::pair<double, std::string>> byCost;
-        byCost.reserve(stageStats_.size());
-        for (const auto& [name, stat] : stageStats_) {
-            byCost.emplace_back(stat.totalMs, name);
-        }
-        std::sort(byCost.rbegin(), byCost.rend());
-        for (const auto& [total, name] : byCost) {
-            const auto& stat = stageStats_[name];
-            if (stat.frames == 0) continue;
-            std::ostringstream line;
-            line << "  " << name << ": "
-                 << static_cast<float>(total / stageStatFrames_) << "ms/frame avg, "
-                 << stat.worstMs << "ms worst, "
-                 << static_cast<int>(100.0 * total / windowMs) << "% of the window";
-            if (loud) LOG_WARNING(line.str()); else LOG_INFO(line.str());
-        }
+    // The frame time's spread and the frames that missed 120, 60 and 30 fps;
+    // each stage, costliest first, with its parts under it; and the GPU's
+    // passes averaged over every frame read back in the window. The CPU
+    // stages say where the frame waits, the GPU's where the GPU spent it.
+    const auto lines = frameBudget_.report(
+        "frame budget over " + std::to_string(static_cast<int>(windowMs / 1000.0)) + "s", windowMs);
+    for (const auto& line : lines) {
+        if (frameProfileEnabled_) LOG_WARNING(line); else LOG_INFO(line);
+    }
+    // ...and whether the GPU's part of that is worth believing.
+    if (const auto* vk = renderer ? renderer->getVkContext() : nullptr;
+        vk && frameBudget_.gpuFrames() > 0 && *vk->gpuTimingCaveat() != '\0') {
+        if (frameProfileEnabled_) LOG_WARNING("    ", vk->gpuTimingCaveat());
+        else LOG_INFO("    ", vk->gpuTimingCaveat());
     }
 
-    // The GPU's own breakdown, from the last completed frame rather than an
-    // average: the CPU stages above are where the frame *waits*, and once
-    // beginFrame and endFrame dominate they say nothing about which pass the
-    // GPU spent it in. One frame is enough to rank the passes, and reading a
-    // window of them would mean keeping the marks alive across slots.
     // How much world there is to draw. The same city cost twice as much on
     // one visit as another, and without these the report could not say
     // whether the scene was larger or the work per object had grown.
@@ -5210,50 +5377,7 @@ void Application::reportStageTimes() {
         if (frameProfileEnabled_) LOG_WARNING(scene.str()); else LOG_INFO(scene.str());
     }
 
-    if (renderer && renderer->getVkContext()) {
-        const auto& gpu = renderer->getVkContext()->gpuTimings();
-        if (!gpu.empty()) {
-            double total = 0.0;
-            for (const auto& [name, ms] : gpu) total += ms;
-            std::ostringstream head;
-            head << "  GPU, last frame: " << total << "ms across " << gpu.size()
-                 << " passes";
-            if (frameProfileEnabled_) LOG_WARNING(head.str()); else LOG_INFO(head.str());
-            for (const auto& [name, ms] : gpu) {
-                std::ostringstream line;
-                line << "    " << name << ": " << ms << "ms";
-                if (frameProfileEnabled_) LOG_WARNING(line.str()); else LOG_INFO(line.str());
-            }
-            // ...and whether any of that is worth believing.
-            //
-            // A mark is a timestamp, and this driver resolves a timestamp
-            // against the render pass that contains it rather than the draw:
-            // every mark inside one pass reads the same clock, so the first
-            // mark absorbs the whole pass and the rest report a couple of
-            // microseconds. That is how a profile came to say terrain cost
-            // 14ms and that the characters, the buildings, the water and
-            // every doodad in the city came to twenty microseconds between
-            // them. Passes that read sensibly are the ones with a render pass
-            // to themselves. Rather than let the breakdown be taken at face
-            // value, count the collapsed marks and name the way round it.
-            int collapsed = 0;
-            for (const auto& [name, ms] : gpu) {
-                (void)name;
-                if (ms < 0.02) ++collapsed;
-            }
-            if (collapsed >= 2 && total > 1.0) {
-                std::ostringstream note;
-                note << "    (" << collapsed << " of those read under 20us: this driver "
-                        "resolves a timestamp to its render pass, so the first mark in a "
-                        "pass holds the whole pass and the rest are empty. Run with "
-                        "WOWEE_PASS_ABLATION=1 to attribute the scene pass.)";
-                if (frameProfileEnabled_) LOG_WARNING(note.str()); else LOG_INFO(note.str());
-            }
-        }
-    }
-
-    stageStats_.clear();
-    stageStatFrames_ = 0;
+    frameBudget_.reset();
     stageStatsSince_ = now;
 }
 

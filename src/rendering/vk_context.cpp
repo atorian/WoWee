@@ -6,6 +6,7 @@
 
 #include <fstream>
 #include "rendering/vk_utils.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <VkBootstrap.h>
@@ -16,11 +17,25 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#ifdef TRACY_ENABLE
+#include <tracy/TracyVulkan.hpp>
+#endif
 
 namespace wowee {
 namespace rendering {
 
 VkContext* VkContext::sInstance_ = nullptr;
+
+#ifdef TRACY_ENABLE
+/// Tracy's GPU context on the graphics queue, and the zones open in the
+/// frame being recorded, innermost last.
+struct VkContext::TracyGpu {
+    TracyVkCtx context = nullptr;
+    std::vector<std::unique_ptr<tracy::VkCtxScope>> open;
+};
+#else
+struct VkContext::TracyGpu {};
+#endif
 
 /// What the texture cache needs of the device: retirement after every frame
 /// slot has fenced, and the driver's budget for the heap textures live in.
@@ -124,6 +139,7 @@ bool VkContext::initialize(SDL_Window* window) {
     if (!createCommandPools()) return false;
     if (!createSyncObjects()) return false;
     createGpuQueryPools();
+    createTracyGpuContext();
     if (!createImGuiResources()) return false;
 
     sInstance_ = this;
@@ -166,6 +182,7 @@ void VkContext::shutdown() {
     for (auto& pool : gpuQueryPools_) {
         if (pool) { vkDestroyQueryPool(device, pool, nullptr); pool = VK_NULL_HANDLE; }
     }
+    destroyTracyGpuContext();
     for (auto sem : imageAcquiredSemaphores_) { if (sem) vkDestroySemaphore(device, sem, nullptr); }
     imageAcquiredSemaphores_.clear();
     for (auto sem : renderFinishedSemaphores_) { if (sem) vkDestroySemaphore(device, sem, nullptr); }
@@ -453,6 +470,24 @@ bool VkContext::createInstance([[maybe_unused]] SDL_Window* window) {
         }
     }
     validationActive_ = enableValidationEffective;
+
+    // Debug labels and object names, for RenderDoc and Nsight: with the
+    // extension a capture groups its commands by pass and names its images.
+    // It came only with validation, so the captures worth taking - of the
+    // ordinary build, at its ordinary speed - were one flat list of
+    // thousands of draws. Enabled whenever the loader offers it; the labels
+    // are a few calls a pass. WOWEE_VK_DEBUG_LABELS=0 leaves it off.
+    const bool labelsWanted = core::envFlagEnabled("WOWEE_VK_DEBUG_LABELS", true);
+    if (const auto system = vkb::SystemInfo::get_system_info(); !system) {
+        LOG_WARNING("Could not list the Vulkan instance extensions (", system.error().message(),
+                    "); captures will have no pass labels");
+    } else if (!system.value().is_extension_available(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+        LOG_INFO("VK_EXT_debug_utils is not offered; captures will have no pass labels");
+    } else if (labelsWanted || enableValidationEffective) {
+        // Validation's messenger asks for it itself.
+        if (!enableValidationEffective) builder.enable_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        debugUtilsEnabled_ = true;
+    }
 
     auto instRet = builder.build();
     if (!instRet) {
@@ -1014,10 +1049,24 @@ bool VkContext::createLogicalDevice() {
     }
     setPipelineBarrier2Fn(cmdPipelineBarrier2_);
 
-    // Only present with VK_EXT_debug_utils, which comes with validation. When
-    // it is absent naming is a no-op, which is what a release build wants.
+    // Only present with VK_EXT_debug_utils (createInstance). When it is
+    // absent naming and labels are no-ops.
     setObjectNameFn(reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
         vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT")));
+    if (debugUtilsEnabled_) {
+        cmdBeginLabel_ = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+            vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT"));
+        cmdEndLabel_ = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+            vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT"));
+        if (cmdBeginLabel_ == nullptr || cmdEndLabel_ == nullptr) {
+            LOG_WARNING("VK_EXT_debug_utils is enabled but its label commands did not resolve; "
+                        "captures will have no pass labels");
+            cmdBeginLabel_ = nullptr;
+            cmdEndLabel_ = nullptr;
+        } else {
+            LOG_INFO("GPU pass labels enabled (VK_EXT_debug_utils)");
+        }
+    }
 
     if (hostImageCopySupported_) {
         copyMemoryToImage_ = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
@@ -1497,6 +1546,13 @@ void VkContext::createGpuQueryPools() {
     const uint32_t validBits = (graphicsQueueFamily < familyCount)
         ? families[graphicsQueueFamily].timestampValidBits : 0;
     gpuTimingSupported_ = (timestampPeriodNs_ > 0.0f) && (validBits > 0);
+    VkPhysicalDeviceDriverProperties driver{};
+    driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &driver;
+    vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+    timestampsPerRenderPass_ = driver.driverID == VK_DRIVER_ID_MOLTENVK;
     if (!gpuTimingSupported_) {
         LOG_WARNING("GPU timing unavailable: timestampPeriod=", timestampPeriodNs_,
                     ", the graphics queue reports ", validBits,
@@ -1684,6 +1740,95 @@ void VkContext::readGpuTimings(uint32_t slot) {
         if (ms > 1000.0) continue;
         gpuTimings_.emplace_back(gpuMarkLabels_[slot][i], ms);
     }
+    ++gpuTimingsSerial_;
+}
+
+const char* VkContext::gpuTimingCaveat() const {
+    if (!timestampsPerRenderPass_) return "";
+    return "(MoltenVK resolves a timestamp to its render pass: the first mark in a pass holds the "
+           "whole pass and the rest read empty. Run with WOWEE_PASS_ABLATION=1 to attribute the "
+           "scene pass.)";
+}
+
+const char* VkContext::gpuLabel(std::string_view text) {
+    auto it = gpuLabels_.find(text);
+    if (it == gpuLabels_.end()) it = gpuLabels_.emplace(text).first;
+    return it->c_str();
+}
+
+void VkContext::beginGpuScope(VkCommandBuffer cmd, const char* name) {
+    if (cmd == VK_NULL_HANDLE) return;
+    if (cmdBeginLabel_ != nullptr) {
+        VkDebugUtilsLabelEXT label{};
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pLabelName = name;
+        cmdBeginLabel_(cmd, &label);
+    }
+#ifdef TRACY_ENABLE
+    if (tracyGpu_ != nullptr) {
+        tracyGpu_->open.push_back(std::make_unique<tracy::VkCtxScope>(
+            tracyGpu_->context, static_cast<uint32_t>(__LINE__), __FILE__, std::strlen(__FILE__),
+            "GpuScope", std::strlen("GpuScope"), name, std::strlen(name), cmd, true));
+    }
+#endif
+}
+
+void VkContext::endGpuScope(VkCommandBuffer cmd) {
+    if (cmd == VK_NULL_HANDLE) return;
+#ifdef TRACY_ENABLE
+    if (tracyGpu_ != nullptr && !tracyGpu_->open.empty()) tracyGpu_->open.pop_back();
+#endif
+    if (cmdEndLabel_ != nullptr) cmdEndLabel_(cmd);
+}
+
+void VkContext::createTracyGpuContext() {
+#ifdef TRACY_ENABLE
+    // Tracy calibrates its clock against the GPU's with a few submits of its
+    // own, waited on, so it gets a command buffer it may begin repeatedly.
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = graphicsQueueFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+        LOG_WARNING("Tracy: could not create a command pool for its GPU context; "
+                    "the capture will have no GPU zones");
+        return;
+    }
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = pool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(device, &allocInfo, &cmd) != VK_SUCCESS) {
+        LOG_WARNING("Tracy: could not allocate a command buffer for its GPU context; "
+                    "the capture will have no GPU zones");
+        vkDestroyCommandPool(device, pool, nullptr);
+        return;
+    }
+    auto* gpu = new TracyGpu;
+    gpu->context = TracyVkContext(physicalDevice, device, graphicsQueue, cmd);
+    vkDestroyCommandPool(device, pool, nullptr);
+    if (gpu->context == nullptr) {
+        LOG_WARNING("Tracy: the GPU context was not created; the capture will have no GPU zones");
+        delete gpu;
+        return;
+    }
+    TracyVkContextName(gpu->context, "graphics queue", std::strlen("graphics queue"));
+    tracyGpu_ = gpu;
+    LOG_INFO("Tracy: GPU zones enabled on the graphics queue");
+#endif
+}
+
+void VkContext::destroyTracyGpuContext() {
+#ifdef TRACY_ENABLE
+    if (tracyGpu_ == nullptr) return;
+    tracyGpu_->open.clear();
+    TracyVkDestroy(tracyGpu_->context);
+    delete tracyGpu_;
+    tracyGpu_ = nullptr;
+#endif
 }
 
 bool VkContext::createSyncObjects() {
@@ -3028,6 +3173,9 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     static int beginFrameCounter = 0;
     beginFrameCounter++;
     VkResult fenceResult;
+    // The CPU idle while the GPU finishes the frame this slot last held: in
+    // a GPU-bound frame this is where the time goes, and it is not work.
+    std::optional<CpuStage> waitStage(std::in_place, cpuStages_, "beginFrame", "wait for GPU");
     if (frameTimeline_ != VK_NULL_HANDLE) {
         VkSemaphoreWaitInfo waitInfo{};
         waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -3038,6 +3186,7 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     } else {
         fenceResult = vkWaitForFences(device, 1, &frame.inFlightFence, VK_TRUE, 5000000000ULL); // 5 second timeout
     }
+    waitStage.reset();
     if (fenceResult == VK_TIMEOUT) {
         LOG_ERROR("beginFrame[", beginFrameCounter, "] FENCE TIMEOUT (5s) on frame slot ", currentFrame,
                   " (waiting for timeline ", frame.timelineValue, ") - GPU hang detected!");
@@ -3051,18 +3200,27 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
 
     frame.submitted = false;
 
-    // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
-    runDeferredCleanup(currentFrame);
+    {
+        CpuStage stage(cpuStages_, "beginFrame", "retire slot");
+        // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
+        runDeferredCleanup(currentFrame);
 
-    // The wait above is what makes this slot's timestamps readable: the submit
-    // that wrote them has completed. Read before the pool is reset below.
-    readGpuTimings(currentFrame);
+        // The wait above is what makes this slot's timestamps readable: the submit
+        // that wrote them has completed. Read before the pool is reset below.
+        readGpuTimings(currentFrame);
+    }
 
     // Acquire next swapchain image using the free semaphore.
     // After acquiring we swap it into the per-image slot so the old per-image
     // semaphore (now released by the presentation engine) becomes the free one.
-    VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
-        nextAcquireSemaphore_, VK_NULL_HANDLE, &imageIndex);
+    VkResult result;
+    {
+        // Blocks when the presentation engine has no image free: the display,
+        // not the GPU, holding the frame back.
+        CpuStage stage(cpuStages_, "beginFrame", "acquire image");
+        result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+            nextAcquireSemaphore_, VK_NULL_HANDLE, &imageIndex);
+    }
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         swapchainDirty = true;
@@ -3103,6 +3261,11 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
         gpuMarksPending_[currentFrame] = true;
         gpuMark(frame.commandBuffer, "frame start");
     }
+#ifdef TRACY_ENABLE
+    // Tracy's zones of the frames that have completed, and its queries reset,
+    // outside any render pass.
+    if (tracyGpu_ != nullptr) TracyVkCollect(tracyGpu_->context, frame.commandBuffer);
+#endif
 
     // Upload batches still in flight are ordered against this frame by the
     // queue, not by the CPU.
@@ -3128,7 +3291,10 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
             const char* v = std::getenv("WOWEE_VK_WAIT_UPLOADS");
             return v && *v && *v != '0';
         }();
-        if (anyOnTransferQueue || waitUploads) waitAllUploads();
+        if (anyOnTransferQueue || waitUploads) {
+            CpuStage stage(cpuStages_, "beginFrame", "wait for uploads");
+            waitAllUploads();
+        }
 
         // Every stage that reads what uploads write: vertex and index
         // buffers, shaders of any stage, and copies. The wait used to stand
@@ -3207,9 +3373,13 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
     submitInfo.pSignalSemaphores = signalSemaphores.data();
 
-    VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo,
-                                          frameTimeline_ != VK_NULL_HANDLE ? VK_NULL_HANDLE
-                                                                           : frame.inFlightFence);
+    VkResult submitResult;
+    {
+        CpuStage stage(cpuStages_, "endFrame", "submit");
+        submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo,
+                                     frameTimeline_ != VK_NULL_HANDLE ? VK_NULL_HANDLE
+                                                                      : frame.inFlightFence);
+    }
     frame.submitted = (submitResult == VK_SUCCESS);
     if (submitResult == VK_SUCCESS && frameTimeline_ != VK_NULL_HANDLE) {
         // Only once the submit is in: on failure the timeline is never
@@ -3267,7 +3437,13 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     presentInfo.pSwapchains = &swapchain;
     presentInfo.pImageIndices = &imageIndex;
 
-    VkResult result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    VkResult result;
+    {
+        // A present can block when the swapchain's queue of images is full -
+        // the display's pace, under FIFO, rather than the client's work.
+        CpuStage stage(cpuStages_, "endFrame", "present");
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
     // Presenting unrotated onto a rotated surface is suboptimal by definition,
     // and says so on every frame for as long as the swapchain lives. Rebuilding
     // on that answer rebuilds every frame, which is what stopped the client

@@ -13,12 +13,17 @@
 # Runs build-dev/bin/scene_render.exe (SCENE_RENDER_BIN overrides) with its
 # working directory in that folder, where Data and the shaders are, and keeps
 # temporaries under build-dev so nothing lands on the system drive.
+#
+# SCENE_RENDER_TIMING=1 prints each frame's CPU and GPU time, and the frame
+# budget of the frames after the warm-up, before the PNG's line.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
+timing=()
+if [[ "${SCENE_RENDER_TIMING:-0}" != "0" ]]; then timing=(--timing); fi
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="${SCENE_RENDER_BIN:-$root/build-dev/bin/scene_render.exe}"
@@ -31,9 +36,12 @@ to_native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else print
 export TMP="$(to_native "$root/build-dev/tmp")" TEMP="$(to_native "$root/build-dev/tmp")"
 
 cd "$(dirname "$bin")"
-if ! "./$(basename "$bin")" "$(to_native "$scene")" "$(to_native "$out")" \
+if ! "./$(basename "$bin")" "$(to_native "$scene")" "$(to_native "$out")" "${timing[@]}" \
         > "$root/build-dev/scratch/scene_render.log" 2>&1; then
     tail -20 "$root/build-dev/scratch/scene_render.log" >&2
     exit 1
+fi
+if [[ ${#timing[@]} -gt 0 ]]; then
+    grep '^timing: ' "$root/build-dev/scratch/scene_render.log" | sed 's/^timing: //' || true
 fi
 tail -1 "$root/build-dev/scratch/scene_render.log"

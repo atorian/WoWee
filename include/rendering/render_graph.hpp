@@ -2,12 +2,15 @@
 
 #include <vulkan/vulkan.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <functional>
 #include <cstdint>
 
 namespace wowee {
 namespace rendering {
+
+class VkContext;
 
 // Lightweight Render Graph / Frame Graph
 // Converts hardcoded pass sequence (shadow → reflection → compute cull →
@@ -87,7 +90,9 @@ public:
     void compile();
 
     // Execute all enabled passes in compiled order on the given command buffer.
-    void execute(VkCommandBuffer cmd);
+    // Each pass's recording is timed into the context's CPU stages under
+    // `stageGroup`, and its commands are a GPU scope of the pass's name.
+    void execute(VkCommandBuffer cmd, VkContext& context, std::string_view stageGroup);
 
     // Query: get the compiled execution order (pass names, for debug HUD).
     [[nodiscard]] const std::vector<uint32_t>& getExecutionOrder() const { return executionOrder_; }

@@ -16,6 +16,7 @@
 #include "game/character.hpp"
 #include "core/event_bus.hpp"
 #include "core/frame_plan.hpp"
+#include "core/frame_budget.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/cvar_store.hpp"
 #include "core/config_paths.hpp"
@@ -69,6 +70,7 @@ class SpellPresentation;
 class RendererTransportScene;
 class ScreenRecording;
 class ResourceMonitor;
+class BenchmarkRun;
 class AudioCallbackHandler;
 class EntitySpawnCallbackHandler;
 class AnimationCallbackHandler;
@@ -232,7 +234,9 @@ private:
     [[nodiscard]] bool scenePending() const override;
     void render(const FramePlan& plan) override;
     void afterTransitions() override;
-    [[nodiscard]] bool profilingStages() const override { return frameProfileEnabled_; }
+    [[nodiscard]] bool profilingStages() const override {
+        return frameProfileEnabled_ || benchmark_ != nullptr;
+    }
     void frameFinished() override;
     void mapEntryBegun(const WorldLoader::Entry& entry) override;
     void mapRenderersReady(const WorldLoader::Entry& entry, const std::string& mapName) override;
@@ -291,30 +295,49 @@ private:
     /// The per-stage timings only ever spoke up above 50ms, which says which
     /// stage stalled and nothing about where a frame's time normally goes. On
     /// a phone the whole budget is 33ms, so every stage was silent and the
-    /// client was slow for reasons nothing reported. This keeps a running
-    /// average and worst case per stage and prints the breakdown periodically.
+    /// client was slow for reasons nothing reported. This keeps every stage's
+    /// samples for the window and prints the breakdown periodically.
     void noteStageTime(const char* stage, float milliseconds) override;
+    void noteStage(std::string_view stage, float milliseconds);
+    /// The renderer's own parts of the frame (CpuStageTimes), under the
+    /// renderer call each belongs to.
+    void noteRendererStages();
     void reportStageTimes();
 
-    struct StageStat {
-        double totalMs = 0.0;
-        float worstMs = 0.0f;
-        int frames = 0;
-    };
     /// WOWEE_FRAME_PROFILE. The breakdown below is reported at info, which the
     /// log a bug report arrives with does not carry - so the one measurement
     /// that answers "where does the frame go" was never in the logs it was
     /// built for. With the flag set it is reported at warning instead.
     bool frameProfileEnabled_ = false;
-    std::map<std::string, StageStat> stageStats_;
+    /// The window the periodic report covers.
+    FrameBudget frameBudget_;
     std::chrono::steady_clock::time_point stageStatsSince_{};
+    /// The end of the last frame: the frame time is measured end to end.
+    std::optional<std::chrono::steady_clock::time_point> lastFrameEnd_;
+    /// The GPU timings read so far, so each frame's are taken once.
+    uint64_t gpuTimingsSeen_ = 0;
+    /// Reused for "group/name" so a renderer part costs no allocation.
+    std::string stageKey_;
+
+    /// WOWEE_BENCHMARK=<route>: the run, from the offline world entry to
+    /// the report; null without it.
+    std::unique_ptr<BenchmarkRun> benchmark_;
+    bool benchmarkEntered_ = false;
+    /// Starts the run WOWEE_BENCHMARK asks for; the client closes when it
+    /// cannot (an unknown route), with the reason in the log.
+    void startBenchmarkFromEnvironment();
+    /// A benchmark run's end of frame: its phase, the scene it flies over,
+    /// and the report once the flight is done.
+    void benchmarkFrameEnded(float frameSeconds);
+    /// The run's camera, over whatever the camera controller made of it.
+    void placeBenchmarkCamera();
+    /// The offline entry the fixtures and the benchmark share: the character
+    /// put in the game's list and the world entry queued for Transitions.
+    void beginOfflineWorldEntry(const game::Character& character);
     /// What assets were found at startup, so the login screen can say so
     /// rather than every screen finding out separately.
     pipeline::AssetInventory assetInventory_;
     UpdateCheck updateCheck_;
-
-
-    int stageStatFrames_ = 0;
 
     /// WOWEE_SCREENSHOT: frames drawn before the picture is taken, so the
     /// interface has settled into what it will actually look like.

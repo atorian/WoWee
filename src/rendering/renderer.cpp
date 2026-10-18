@@ -887,10 +887,13 @@ void Renderer::updatePerFrameUBO() {
     // this frame, as the client lights a scene (local_lights.hpp). Each draw
     // then picks its nearest few from this list by index; the list itself has
     // no cap, and its buffer grows with it.
+    std::optional<CpuStage> lightsStage(std::in_place, vkCtx->cpuStages(), "beginFrame/per-frame UBO",
+                                        "local lights");
     frameLocalLights_.clear();
     if (m2Renderer) m2Renderer->gatherLocalLights(camera->getPosition(), frameLocalLights_);
     if (characterRenderer) characterRenderer->gatherLocalLights(*camera, frameLocalLights_);
     uploadLocalLights(vkCtx->getCurrentFrame());
+    lightsStage.reset();
     const uint32_t localLightCount = static_cast<uint32_t>(currentFrameData.localLightMeta.x);
     if (m2Renderer) m2Renderer->setFrameLocalLights(&frameLocalLights_);
     if (characterRenderer) characterRenderer->setFrameLocalLights(&frameLocalLights_);
@@ -1076,7 +1079,7 @@ bool Renderer::initialize(RenderSurface* surface) {
         if (rtRecordedThisFrame_ || !postProcessPipeline_) return;
         recordRtLighting(postProcessPipeline_->getSceneDepthImage(),
                          postProcessPipeline_->getSceneRenderExtent(),
-                         postProcessPipeline_->sceneDepthIsMsaa());
+                         postProcessPipeline_->sceneDepthIsMsaa(), "endFrame/post-process");
     });
 
     // Not fatal: without them the picture is only missing its rays.
@@ -1392,6 +1395,9 @@ void Renderer::beginFrame() {
     ZoneScopedN("Renderer::beginFrame");
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
+    // The renderer's frame starts here; its parts are read after endFrame.
+    CpuStageTimes& stages = vkCtx->cpuStages();
+    stages.clear();
 
     // The ablation's clock. Top of one frame to the top of the next is the
     // frame's whole wall time, which is the number a pass has to move to be
@@ -1429,6 +1435,10 @@ void Renderer::beginFrame() {
     }
 
     worldDrawnThisFrame_ = false;
+
+    // Settings applied between frames, the targets they size, and the upload
+    // batches the GPU has finished with.
+    std::optional<CpuStage> targetsStage(std::in_place, stages, "beginFrame", "targets and uploads");
 
     // Apply deferred MSAA change between frames (before any rendering state is used)
     if (msaaChangePending_) {
@@ -1500,39 +1510,48 @@ void Renderer::beginFrame() {
 
     // Retire replaced images; each consumer set is rewritten after its fence.
     if (rtLighting_) rtLighting_->prepare(sceneRenderExtent());
+    targetsStage.reset();
 
     rtRecordedThisFrame_ = false;
 
-    // Acquire swapchain image and begin command buffer
+    // Acquire swapchain image and begin command buffer. Its waits are timed
+    // inside: for the GPU, for the image, for uploads.
     currentCmd = vkCtx->beginFrame(currentImageIndex);
     if (currentCmd == VK_NULL_HANDLE) {
         // Swapchain out of date, will retry next frame
         return;
     }
 
-    // This slot's fence has just been waited on, so a frame it copied for the
-    // recording two frames ago is complete.
-    collectRecordedFrame();
-    // The sun's and moon's occlusion answers from this slot's last frame, read
-    // now its fence is passed, and its queries reset before any pass begins.
-    if (skySystem && skySystem->getBodies()) {
-        skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
+    {
+        CpuStage stage(stages, "beginFrame", "frame bindings");
+        // This slot's fence has just been waited on, so a frame it copied for the
+        // recording two frames ago is complete.
+        collectRecordedFrame();
+        // The sun's and moon's occlusion answers from this slot's last frame, read
+        // now its fence is passed, and its queries reset before any pass begins.
+        if (skySystem && skySystem->getBodies()) {
+            skySystem->getBodies()->beginFrameQueries(currentCmd, vkCtx->getCurrentFrame());
+        }
+        writeRtLightingBindings(vkCtx->getCurrentFrame());
+        writeFogVolumeBindings(vkCtx->getCurrentFrame());
+
+        // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
+        if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
     }
-    writeRtLightingBindings(vkCtx->getCurrentFrame());
-    writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
-    // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
-    if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
+    {
+        CpuStage stage(stages, "beginFrame", "per-frame UBO");
+        // Compute fresh shadow matrix BEFORE UBO update so shaders get current-frame data.
+        lightSpaceMatrix = computeLightSpaceMatrix();
 
-    // Compute fresh shadow matrix BEFORE UBO update so shaders get current-frame data.
-    lightSpaceMatrix = computeLightSpaceMatrix();
-
-    // Update per-frame UBO with current camera/lighting state
-    updatePerFrameUBO();
+        // Update per-frame UBO with current camera/lighting state
+        updatePerFrameUBO();
+    }
 
     // Prepare and update sets before any pre-pass binds them (volumetric fog
     // uses the world set too). Updating an already recorded set invalidates it.
     const uint32_t skySlot = vkCtx->getCurrentFrame();
+    std::optional<CpuStage> skySetStage(std::in_place, stages, "beginFrame", "sky set");
     if (skyBackground_ && skyBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent())) {
         const uint32_t slot = skySlot;
         // The sky uses the same light, shadows and fog volume, but a separate set
@@ -1557,6 +1576,7 @@ void Renderer::beginFrame() {
         write.pImageInfo = &image;
         vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 5, copies);
     }
+    skySetStage.reset();
 
     // ── Early compute: M2 frustum culling ──
     // beginFrame() has already waited for this frame slot's previous fence, so
@@ -1566,6 +1586,8 @@ void Renderer::beginFrame() {
     // separate command buffer and synchronously waited on a fence every frame,
     // serializing CPU and GPU work solely to obtain same-frame cull results.
     if (m2Renderer && camera && vkCtx) {
+        CpuStage stage(stages, "beginFrame", "M2 cull");
+        GpuPass pass(*vkCtx, currentCmd, "M2 cull");
         uint32_t frame = vkCtx->getCurrentFrame();
         m2Renderer->invalidateCullOutput(frame);
         m2Renderer->dispatchCullCompute(currentCmd, frame, *camera);
@@ -1575,6 +1597,8 @@ void Renderer::beginFrame() {
     // outside a render pass. Unlike the M2 path nothing reads the result back -
     // the count it produces is consumed by the indirect draw on the GPU.
     if (grassRenderer_ && camera && vkCtx) {
+        CpuStage stage(stages, "beginFrame", "grass");
+        GpuPass pass(*vkCtx, currentCmd, "grass cull");
         updateGrassPopulation();
         grassRenderer_->reportCullResult();
         grassRenderer_->dispatchCull(currentCmd, vkCtx->getCurrentFrame(), *camera,
@@ -1584,9 +1608,14 @@ void Renderer::beginFrame() {
     // --- Off-screen pre-passes ---
     // Build frame graph: registers pre-passes as graph nodes with dependencies.
     // compile() topologically sorts; execute() runs them with auto barriers.
-    buildFrameGraph();
+    {
+        CpuStage stage(stages, "beginFrame", "graph build");
+        buildFrameGraph();
+    }
     if (renderGraph_) {
-        renderGraph_->execute(currentCmd);
+        // Each pass under "graph", by its name.
+        CpuStage stage(stages, "beginFrame", "graph");
+        renderGraph_->execute(currentCmd, *vkCtx, "beginFrame/graph");
     }
 
     // The real atmosphere is ready after the fog pre-pass. Capture it before
@@ -1596,6 +1625,8 @@ void Renderer::beginFrame() {
         std::getenv("WOWEE_SKIP_ALL_RENDER") ||
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
     if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
+        CpuStage stage(stages, "beginFrame", "sky capture");
+        GpuPass pass(*vkCtx, currentCmd, "sky capture");
         if (skyProbe && updateSkyboxLayers()) {
             skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
             skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
@@ -1682,10 +1713,12 @@ void Renderer::endFrame() {
     // it swapped the scene pass for an INLINE one no longer matters to the
     // caller: the UI is drawn in the overlay pass, which this function opens
     // itself once whichever pass is current has been closed.
+    CpuStageTimes& stages = vkCtx->cpuStages();
     if (postProcessPipeline_) {
+        CpuStage stage(stages, "endFrame", "post-process");
+        GpuPass pass(*vkCtx, currentCmd, "post-process");
         postProcessPipeline_->executePostProcessing(
             currentCmd, currentImageIndex, camera.get(), lastDeltaTime_);
-        if (vkCtx) vkCtx->gpuMark(currentCmd, "post-process");
     }
 
     // The scene is complete: close its pass so the water refraction copy can run
@@ -1717,6 +1750,8 @@ void Renderer::endFrame() {
 
     const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
     if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
+        CpuStage stage(stages, "endFrame", "interface");
+        GpuPass pass(*vkCtx, currentCmd, "interface");
         VkRenderPassBeginInfo overlayRp{};
         overlayRp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         overlayRp.renderPass = vkCtx->getOverlayRenderPass();
@@ -1741,7 +1776,6 @@ void Renderer::endFrame() {
         // always records inline here rather than into a scene-pass secondary.
         if (interface_) interface_(currentCmd);
         vkCmdEndRenderPass(currentCmd);
-        if (vkCtx) vkCtx->gpuMark(currentCmd, "interface");
     } else {
         LOG_ERROR("Overlay render pass missing - UI not drawn this frame");
     }
@@ -3106,6 +3140,13 @@ void Renderer::renderWorld() {
         const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
         const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
         const double prepCharMs = std::chrono::duration<double, std::milli>(prepEnd - prepM2End).count();
+        CpuStageTimes& stages = vkCtx->cpuStages();
+        stages.add("renderWorld", "prepare WMO", static_cast<float>(prepWmoMs));
+        stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
+        stages.add("renderWorld", "prepare characters", static_cast<float>(prepCharMs));
+        // From here to the wait the main thread hands work out and records its
+        // own share; then it waits for the slowest worker.
+        std::optional<CpuStage> dispatchStage(std::in_place, stages, "renderWorld", "dispatch");
 
         // --- Dispatch worker threads (terrain + WMO + M2) ---
         std::future<double> terrainFuture, wmoFuture, charFuture, m2Future, postFuture;
@@ -3286,6 +3327,8 @@ void Renderer::renderWorld() {
         // Guard with try-catch: future::get() re-throws any exception from the
         // async task. Without this, a single bad_alloc in a render worker would
         // propagate as an unhandled exception and terminate the process.
+        dispatchStage.reset();
+        std::optional<CpuStage> waitStage(std::in_place, stages, "renderWorld", "wait for workers");
         try { if (terrainFuture.valid()) lastTerrainRenderMs = terrainFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Terrain render worker: ", e.what()); }
         try { if (wmoFuture.valid()) lastWMORenderMs = wmoFuture.get(); }
@@ -3296,6 +3339,7 @@ void Renderer::renderWorld() {
         catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what()); }
         try { if (postFuture.valid()) (void)postFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
+        waitStage.reset();
 
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
@@ -3384,8 +3428,8 @@ void Renderer::renderWorld() {
         // written from the primary buffer, so the threads that recorded the
         // secondaries never touch the shared mark counter.
         for (uint32_t i = 0; i < numCmds; ++i) {
+            GpuPass pass(*vkCtx, currentCmd, validLabels[i]);
             vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, validLabels[i]);
         }
         // The world, as one mark.
         //
@@ -3403,8 +3447,10 @@ void Renderer::renderWorld() {
 
         if (terrainRenderer && camera && terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
-            terrainRenderer->render(currentCmd, perFrameSet, *camera);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "terrain");
+            {
+                GpuPass pass(*vkCtx, currentCmd, "terrain");
+                terrainRenderer->render(currentCmd, perFrameSet, *camera);
+            }
             lastTerrainRenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - terrainStart).count();
         }
@@ -3412,12 +3458,13 @@ void Renderer::renderWorld() {
         // After terrain, before the world's models: grass sits on the ground and
         // is occluded by everything standing on it.
         if (grassRenderer_ && vkCtx && !skipGrass) {
+            GpuPass pass(*vkCtx, currentCmd, "grass");
             grassRenderer_->render(currentCmd, vkCtx->getCurrentFrame(), perFrameSet);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "grass");
         }
 
         // Sky after the ground, for the reason given on the parallel path.
         if (skySystem && camera && !skipSky) {
+            GpuPass pass(*vkCtx, currentCmd, "sky");
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
                 environment_.gameTime, environment_.weatherIntensity,
@@ -3431,14 +3478,15 @@ void Renderer::renderWorld() {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
                 skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);
             }
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "sky");
         }
 
         if (wmoRenderer && camera && !skipWMO) {
             wmoRenderer->prepareRender();
             auto wmoStart = std::chrono::steady_clock::now();
-            wmoRenderer->render(currentCmd, perFrameSet, *camera, &characterPosition);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "wmo");
+            {
+                GpuPass pass(*vkCtx, currentCmd, "wmo");
+                wmoRenderer->render(currentCmd, perFrameSet, *camera, &characterPosition);
+            }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wmoStart).count();
         }
@@ -3452,19 +3500,21 @@ void Renderer::renderWorld() {
 
         if (characterRenderer && camera && !skipChars) {
             characterRenderer->prepareRender(frameIdx);
+            GpuPass pass(*vkCtx, currentCmd, "characters");
             characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "characters");
         }
 
         if (m2Renderer && camera && !skipM2) {
             m2Renderer->prepareRender(frameIdx, *camera);
             auto m2Start = std::chrono::steady_clock::now();
-            m2Renderer->render(currentCmd, perFrameSet, *camera);
-            if (!m2Renderer->drawsBlendedAfterWater()) {
-                m2Renderer->renderM2Particles(currentCmd, perFrameSet);
-                m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
+            {
+                GpuPass pass(*vkCtx, currentCmd, "m2");
+                m2Renderer->render(currentCmd, perFrameSet, *camera);
+                if (!m2Renderer->drawsBlendedAfterWater()) {
+                    m2Renderer->renderM2Particles(currentCmd, perFrameSet);
+                    m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
+                }
             }
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "m2");
             lastM2RenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - m2Start).count();
         }
@@ -3472,14 +3522,14 @@ void Renderer::renderWorld() {
         // Faded characters over the blended world, unless they go after the
         // water with it.
         if (characterRenderer && camera && !skipChars && !fadedCharactersAfterWater()) {
+            GpuPass pass(*vkCtx, currentCmd, "faded characters");
             characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "faded characters");
         }
 
         if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
+            GpuPass pass(*vkCtx, currentCmd, "water");
             waterRenderer->setRenderExtent(activeRenderExtent_);
             waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
-            if (vkCtx) vkCtx->gpuMark(currentCmd, "water");
         }
         if (weather && camera) weather->render(currentCmd, perFrameSet);
         if (lightning && camera && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
@@ -3527,7 +3577,7 @@ void Renderer::renderWorld() {
 
         // The opaque scene is finished and out of its pass: the ray traced
         // lighting reads its depth here, for the surfaces of the next frame.
-        recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
+        recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa, "renderWorld");
 
         if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
@@ -4619,8 +4669,16 @@ void Renderer::renderReflectionPass() {
 }
 
 void Renderer::renderShadowPass() {
-    renderShadowMap(false);
-    renderShadowMap(true);
+    // Each map ends on its own mark; these group its commands under the
+    // same name in a capture.
+    {
+        GpuScope scope(*vkCtx, currentCmd, "shadows");
+        renderShadowMap(false);
+    }
+    {
+        GpuScope scope(*vkCtx, currentCmd, "contact shadows");
+        renderShadowMap(true);
+    }
 }
 
 void Renderer::renderShadowMap(bool contact) {
@@ -4823,7 +4881,8 @@ VkExtent2D Renderer::sceneRenderExtent() const {
     return vkCtx->getSwapchainExtent();
 }
 
-void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa) {
+void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
+                                std::string_view stageGroup) {
     if (!rtLighting_ || !rtLighting_->active() || !camera) return;
     rtRecordedThisFrame_ = true;
     RtLighting::FrameInputs in{};
@@ -4834,10 +4893,15 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     in.sunColor = glm::vec3(currentFrameData.lightColor);
     in.skyColor = glm::vec3(currentFrameData.ambientColor);
     in.sunUp = in.sunDir.z > -0.05f;
-    if (wmoRenderer) wmoRenderer->syncRtScene();
-    if (m2Renderer) m2Renderer->syncRtScene();
+    GpuPass pass(*vkCtx, currentCmd, "rt_lighting");
+    {
+        // The ray traced scene brought up to date with the world's instances.
+        CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt scene sync");
+        if (wmoRenderer) wmoRenderer->syncRtScene();
+        if (m2Renderer) m2Renderer->syncRtScene();
+    }
+    CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt lighting");
     rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in);
-    vkCtx->gpuMark(currentCmd, "rt_lighting");
 }
 
 VkImageView Renderer::getNeutralFogVolumeView() const {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <cstdint>
 #include <vector>
 #include <future>
@@ -685,7 +686,10 @@ private:
     std::unique_ptr<RtLighting> rtLighting_;
     void writeRtLightingBindings(uint32_t slot);
     VkExtent2D sceneRenderExtent() const;
-    void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa);
+    /// `stageGroup` is the renderer call it is recorded from, which its CPU
+    /// parts are timed under (CpuStageTimes).
+    void recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
+                          std::string_view stageGroup);
     bool rtRecordedThisFrame_ = false;
     float volumetricFogDensity_ = 1.0f;
     /// Whether this frame builds the volume, decided where the per-frame block
