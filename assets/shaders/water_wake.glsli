@@ -1,0 +1,116 @@
+// The water's answer to what moves through it: a field of heights round
+// the camera, run as Tessendorf's iWave ("Interactive Water Surfaces",
+// 2004): h_tt + a h_t = -g G (h + P), each step
+//
+//     h' = (2 h - h_prev (1 - a dt / 2) - g dt^2 G (h + P)) / (1 + a dt / 2)
+//
+// - the damping by the central difference, so it slows what moves and
+// leaves what is still alone (the paper's own form shrank still water too).
+//
+// where G is the surface's vertical derivative - the operator that is k on a
+// wave of wavenumber k, with surface tension's (T/rho) k^3 / g beside it -
+// so that every wave runs at water's own speed, w^2 = g k + (T/rho) k^3: the
+// long waves outrun the short ones, and a body moving through the water
+// leaves Kelvin's wedge behind it, 19.5 degrees either side of its track,
+// its waves longer the faster it goes. G is applied in the field's spectrum
+// (WaterWake runs it through the FFT), not by a small kernel, which could
+// not reach as far as a wake's long waves. P is the pressure each body in
+// the water puts on it, as a head of water (yards): a patch the shape of
+// what of the body is under the water, drawn out along its way. It goes
+// under G with the height, as the surface's Bernoulli condition has it, so
+// a body at rest sits in a hollow as deep as its head and raises no waves.
+// `a` lets a wake die away over some seconds, and the field's edge soaks up
+// what reaches it rather than throwing it back. Where there is shore the
+// water is held still, and waves are thrown back from it.
+//
+// Plain functions of their arguments, so the tests include this file as
+// C++ (glsl_as_cpp.hpp) after ocean_spectrum.glsli.
+
+/// The field: kWakeSize texels a side, kWakeTexelYards apart.
+const int kWakeSize = 256;
+const float kWakeTexelYards = 0.5;
+/// One step of the field is this long; a frame takes as many as it spans.
+const float kWakeStepSeconds = 1.0 / 60.0;
+/// How fast a wake dies away: to 1/e in a few seconds.
+const float kWakeDamping = 0.35;
+/// The outer share of the field that soaks up what reaches its edge.
+const float kWakeEdge = 0.12;
+
+/// The vertical derivative's factor on a wave of `k` radians a yard.
+float wakeVerticalDerivative(float k) {
+    return k + (kOceanTension / kOceanGravity) * k * k * k;
+}
+
+/// Spectrum cell `cell` of a field `size` texels a side, `texelYards`
+/// apart, in the plain FFT order: 0 up to size / 2, then the negative ones.
+vec2 wakeWaveVector(ivec2 cell, int size, float texelYards) {
+    ivec2 m = ivec2(cell.x < size / 2 ? cell.x : cell.x - size, cell.y < size / 2 ? cell.y : cell.y - size);
+    float cellK = 2.0 * kOceanPi / (float(size) * texelYards);
+    return vec2(m) * cellK;
+}
+
+/// One step of a texel: its height now and a step ago, and the vertical
+/// derivative there of the height and the pressure head together.
+float wakeStep(float height, float previous, float vertical, float dt) {
+    float a = 0.5 * kWakeDamping * dt;
+    return (2.0 * height - previous * (1.0 - a) - kOceanGravity * dt * dt * vertical) / (1.0 + a);
+}
+
+/// How much of a texel's height its place in the field keeps each step:
+/// all of it inside, less and less over the outer kWakeEdge, so a wave that
+/// runs out of the field fades there instead of coming back off its edge.
+float wakeEdgeKeep(ivec2 texel, int size) {
+    vec2 p = (vec2(texel) + vec2(0.5)) / float(size);
+    float fromEdge = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y));
+    float inward = clamp(fromEdge / kWakeEdge, 0.0, 1.0);
+    // A gentle ramp, so the absorbing layer is itself no wall to reflect off.
+    return 1.0 - 0.08 * (1.0 - inward) * (1.0 - inward);
+}
+
+/// White water on the wake, from two things, and dying away over a few
+/// seconds where it was made:
+///  - the churn a body makes moving through the water - arms, legs, the
+///    water torn off behind it - in the strip it has just crossed, the more
+///    the faster it goes (`churn`, 0 to 1 of a swimmer at full stroke);
+///  - the wake's crests breaking where they are too steep to hold: a crest
+///    falls once the water at it is pulled down faster than about half of
+///    gravity (Longuet-Higgins), `downward` its downward acceleration.
+/// `foam` is what there was (0 to 1), `dt` the seconds since.
+const float kWakeFoamSeconds = 2.5;   // to 1/e
+const float kWakeChurnRise = 5.0;     // foam a second where a body churns at full stroke
+const float kWakeBreakRise = 6.0;     // and where a crest breaks wholly
+float wakeFoam(float foam, float churn, float downward, float dt) {
+    float breaking = smoothstep(0.4 * kOceanGravity, 0.6 * kOceanGravity, downward);
+    float rise = kWakeChurnRise * clamp(churn, 0.0, 1.0) + kWakeBreakRise * breaking;
+    return clamp(foam * exp(-dt / kWakeFoamSeconds) + rise * dt, 0.0, 1.0);
+}
+
+/// How hard a body moving at `speed` yards a second churns the water, 0 to
+/// 1: a swimmer's full stroke, about two yards a second, churns wholly; a
+/// body drifting barely at all.
+float wakeChurn(float speed) {
+    return smoothstep(0.3, 2.0, speed);
+}
+
+/// The pressure head a body puts on the water at `p`: a patch round its
+/// middle `centre`, `halfLength` along `way` (unit, or zero for a body at
+/// rest) and `halfWidth` across, as deep as `head` at the middle and falling
+/// away smoothly, so it raises no waves shorter than itself.
+float wakePressure(vec2 p, vec2 centre, vec2 way, float halfLength, float halfWidth, float head) {
+    vec2 d = p - centre;
+    vec2 along = length(way) > 0.0 ? way : vec2(1.0, 0.0);
+    vec2 across = vec2(-along.y, along.x);
+    float u = dot(d, along) / max(halfLength, 1e-3);
+    float v = dot(d, across) / max(halfWidth, 1e-3);
+    float r2 = u * u + v * v;
+    if (r2 >= 4.0) return 0.0;
+    return head * exp(-2.0 * r2);
+}
+
+/// How hard a body churns the water at `p`, over the strip its footprint
+/// (as wakePressure's, of a unit head) swept this frame, from `from` to `to`.
+float wakeChurnAt(vec2 p, vec2 from, vec2 to, vec2 way, float halfLength, float halfWidth, float speed) {
+    vec2 crossed = to - from;
+    float along = dot(crossed, crossed) > 1e-6 ? clamp(dot(p - from, crossed) / dot(crossed, crossed), 0.0, 1.0) : 1.0;
+    return wakePressure(p, from + crossed * along, way, halfLength, halfWidth, 1.0) * wakeChurn(speed);
+}

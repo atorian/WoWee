@@ -2152,6 +2152,11 @@ wowee_add_test(test_ocean_spectrum
     SOURCES test_ocean_spectrum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/ocean_sea.cpp)
 
+# ── test_water_wake ──────────────────────────────────────────
+# The water's answer to what moves through it: water's speeds, Kelvin's wedge.
+wowee_add_test(test_water_wake
+    SOURCES test_water_wake.cpp)
+
 # ── test_sea_bed ─────────────────────────────────────────────
 # What lies under the water: the map's views, and which buildings are its bed.
 wowee_add_test(test_sea_bed

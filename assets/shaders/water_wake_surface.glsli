@@ -1,0 +1,13 @@
+// What moves through the water leaves in it, as the water reads it: the
+// wake round the camera (WaterWake), its height, its slopes along x and y
+// and the foam its breaking has left (0 to 1).
+//
+// Needs, declared before it: WaterFrameData (wakeArea) and the wake's
+// surface, `wakeSurface`, a sampler2D.
+
+vec4 waterWakeAt(vec2 rest) {
+    if (wakeArea.w < 0.5) return vec4(0.0);
+    vec2 uv = (rest - wakeArea.xy) * wakeArea.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+    return textureLod(wakeSurface, uv, 0.0);
+}

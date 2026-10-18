@@ -1031,6 +1031,7 @@ set(WOWEE_SOURCES
     src/rendering/ocean_sea.cpp
     src/rendering/ocean_waves.cpp
     src/rendering/sea_bed.cpp
+    src/rendering/water_wake.cpp
     src/rendering/water_reflection.cpp
     src/rendering/skybox.cpp
     src/rendering/sky_bodies.cpp

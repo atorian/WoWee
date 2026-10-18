@@ -115,12 +115,17 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     // x = the height of depth 0, y = yards to depth 1, z = 1 once drawn.
     mat4 seaBedMatrix;
     vec4 seaBed;
+    // The wake round the camera (WaterWake): xy = its corner, z = 1 / its
+    // side in yards, w = 1 once it has run.
+    vec4 wakeArea;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
 layout(set = 2, binding = 6) uniform sampler2D seaFetchMap;
+layout(set = 2, binding = 7) uniform sampler2D wakeSurface;
 
 #include "ocean_surface.glsli"
+#include "water_wake_surface.glsli"
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 RestPos;   // where this point lies on the still surface
@@ -424,24 +429,15 @@ void main() {
     // is what a fade by distance stood in for - and the slope of the rest
     // goes into the highlight's width below.
     OceanLight sea = oceanLightAt(RestPos, push.exposed);
-    vec3 norm = normalize(vec3(-sea.slope, 1.0));
-    // The height as a share of the sea's own: one where a crest stands two
+    // And on it the wake of what moves through it: its slopes add, as waves'
+    // do (WaterWake).
+    vec4 wake = waterWakeAt(RestPos.xy);
+    vec3 norm = normalize(vec3(-(sea.slope + wake.yz), 1.0));    // The height as a share of the sea's own: one where a crest stands two
     // of its standard deviations up.
     float waveHeight = sea.height / max(2.0 * oceanSea.x, 1e-3);
     // Where riding toward the crests has bunched the surface to under half,
     // the crest is too steep to hold and is breaking.
     float breaking = smoothstep(0.55, 0.25, sea.jacobian) * push.exposed;
-
-    // Player interaction ripple normal perturbation
-    vec2 rippleOrigin = playerPos.xy;
-    float rippleStrength = fogParams.w;
-    float d = length(FragPos.xy - rippleOrigin);
-    float rippleEnv = rippleStrength * exp(-d * 0.12);
-    if (rippleEnv > 0.001) {
-        vec2 radialDir = (FragPos.xy - rippleOrigin) / max(d, 0.01);
-        float dHdr = rippleEnv * 0.12 * (-0.12 * sin(d * 2.5 - time * 6.0) + 2.5 * cos(d * 2.5 - time * 6.0));
-        norm = normalize(norm + vec3(-radialDir * dHdr, 0.0));
-    }
 
     vec3 viewDir = normalize(viewPos.xyz - FragPos);
     vec3 ldir = normalize(-lightDir.xyz);
@@ -840,7 +836,13 @@ void main() {
                 wakeFoam += disc * disc * wp.w * (1.0 - wp.z);
             }
             wakeFoam = clamp(wakeFoam, 0.0, 1.0);
-
+        }
+    }
+    // And the white water the wake's breaking leaves: at a body's bow, and
+    // trailing back along the arms of its wedge.
+    wakeFoam = max(wakeFoam, 0.85 * wake.w);
+    {
+        {
             if (wakeFoam > 0.002) {
                 vec2 churnWarp = vec2(
                     noiseValue(FragPos.xy * 3.4 + time * 0.5) - 0.5,

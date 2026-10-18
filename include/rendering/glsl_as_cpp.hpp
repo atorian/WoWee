@@ -29,6 +29,10 @@ using glm::normalize;
 inline float max(float a, float b) { return a > b ? a : b; }
 inline float min(float a, float b) { return a < b ? a : b; }
 inline float clamp(float x, float lo, float hi) { return min(max(x, lo), hi); }
+inline float smoothstep(float edge0, float edge1, float x) {
+    const float t = clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
 inline float abs(float x) { return std::fabs(x); }
 inline float floor(float x) { return std::floor(x); }
 inline float sqrt(float x) { return std::sqrt(x); }

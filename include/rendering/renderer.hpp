@@ -705,6 +705,8 @@ private:
     // Outlives the water renderer.
     std::unique_ptr<SeaBedMap> seaBed_;
     void renderSeaBedPass();
+    /// The bodies in the water near the camera, to the wake.
+    void updateWaterWake(float deltaTime);
     /// Whether this frame's sun shadow pass has reset the casters' texture
     /// sets, which a later depth-only pass in the frame then reuses.
     bool shadowDescriptorsReset_ = false;

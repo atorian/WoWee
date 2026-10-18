@@ -946,9 +946,6 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.playerPos = glm::vec4(characterPosition, playerSpeed_);
     currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
 
-    // Water ripple gate: swimming and actually moving.
-    currentFrameData.fogParams.w = (viewerMotion_.swimming && viewerMotion_.moving) ? 1.0f : 0.0f;
-
     // Copy to current frame's mapped UBO
     uint32_t frame = vkCtx->getCurrentFrame();
     std::memcpy(perFrameUBOMapped[frame], &currentFrameData, sizeof(GPUPerFrameData));
@@ -2304,6 +2301,9 @@ void Renderer::update(float deltaTime) {
         swimEffects->update(*camera, viewerMotion_, characterPosition, liquidScene_, deltaTime);
     }
 
+    // What every body in the water leaves in it: the wake round the camera.
+    updateWaterWake(deltaTime);
+
     // Surface disturbance the character leaves in the water. The droplet spray
     // is thrown by SwimEffects above; this is the froth on the surface itself,
     // which has to come from the water shader to move and light with the water.
@@ -2585,6 +2585,46 @@ void Renderer::updateWind(float deltaTime) {
         waterRenderer->advanceWindWaves(deltaTime, wind.speed * wind.gust, wind.direction,
                                         glm::vec2(characterPosition.x, characterPosition.y));
     }
+}
+
+void Renderer::updateWaterWake(float deltaTime) {
+    if (!waterRenderer || !camera) return;
+    const glm::vec3 eye = camera->getPosition();
+    // The bodies whose middle is within the wake's reach of the camera, and
+    // in water: the player, every NPC and creature the renderer draws.
+    struct InReach {
+        float distance;
+        WaterMover mover;
+    };
+    std::vector<InReach> inReach;
+    if (characterRenderer) {
+        constexpr float kReach = 60.0f;  // the wake's field is 128 yards a side
+        characterRenderer->forEachBody([&](const CharacterRenderer::BodyPlace& body) {
+            const float distance = glm::length(glm::vec2(body.position) - glm::vec2(eye));
+            if (distance > kReach) return;
+            const auto surface = liquidScene_.nearestHeightAt(body.position.x, body.position.y, body.position.z);
+            if (!surface) return;
+            const float bottom = body.position.z + body.boundMin.z;
+            const float top = body.position.z + body.boundMax.z;
+            WaterMover m;
+            m.id = body.instanceId;
+            m.position = glm::vec2(body.position);
+            m.facing = glm::vec2(std::cos(body.yaw), std::sin(body.yaw));
+            const glm::vec2 extent = glm::vec2(body.boundMax - body.boundMin);
+            m.halfLength = 0.5f * std::max(extent.x, extent.y);
+            m.halfWidth = 0.5f * std::min(extent.x, extent.y);
+            m.head = wakeHeadFor(bottom, top, *surface);
+            if (m.head <= 0.0f) return;
+            inReach.push_back({distance, m});
+        });
+    }
+    // Nearest first: if there are more than the wake takes, the furthest go.
+    std::sort(inReach.begin(), inReach.end(),
+              [](const InReach& a, const InReach& b) { return a.distance < b.distance; });
+    std::vector<WaterMover> movers;
+    movers.reserve(inReach.size());
+    for (const InReach& r : inReach) movers.push_back(r.mover);
+    waterRenderer->advanceWake(deltaTime, glm::vec2(eye), movers);
 }
 
 uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {

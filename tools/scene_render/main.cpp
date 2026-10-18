@@ -32,6 +32,13 @@
 //         "rotation": [0, 0, 0],           // degrees about x, y, z
 //         "scale": 1.0 }
 //     ],
+//     "characters": [                     // drawn as the client draws units,
+//       { "path": "Creature\\Seal\\Seal.m2", //   and what follows units follows
+//         "offset": [0, 0, 0],             //   them - the water's wake - as
+//         "rotation": [0, 0, 0],           //   they move at `velocity` (render
+//         "scale": 1.0,                    //   yards a second) every frame
+//         "velocity": [3, 0, 0] }
+//     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
 //                 "velocity": [0, 6, 0],  // optional: after the frames above, it
@@ -63,6 +70,7 @@
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -212,6 +220,45 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
     return true;
 }
 
+/// A unit's model through the client's loaders, placed as the client places
+/// units, to be moved each frame at `velocity`.
+struct MovingCharacter {
+    uint32_t instance = 0;
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+};
+
+bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetManager& assets,
+                    rendering::Renderer& renderer, uint32_t modelId, MovingCharacter& placed) {
+    const std::string path = entry.value("path", "");
+    auto* characters = renderer.getCharacterRenderer();
+    if (!characters) {
+        LOG_ERROR("scene_render: no character renderer to place ", path, " with");
+        return false;
+    }
+    auto model = pipeline::M2Loader::load(assets.readFile(path));
+    model.name = path;
+    if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(path)), model)) {
+        LOG_ERROR("scene_render: cannot load the skin of ", path);
+        return false;
+    }
+    if (!characters->loadModel(model, modelId)) {
+        LOG_ERROR("scene_render: the character renderer would not take ", path);
+        return false;
+    }
+    placed.position = origin + vec3(entry.value("offset", json()));
+    placed.velocity = vec3(entry.value("velocity", json()));
+    placed.instance = characters->createInstance(modelId, placed.position,
+                                                 glm::radians(vec3(entry.value("rotation", json()))),
+                                                 entry.value("scale", 1.0f));
+    if (placed.instance == 0) {
+        LOG_ERROR("scene_render: cannot place ", path);
+        return false;
+    }
+    LOG_INFO("scene_render: placed character ", path);
+    return true;
+}
+
 uint32_t weatherType(const std::string& name) {
     if (name == "rain") return 1;
     if (name == "snow") return 2;
@@ -283,6 +330,12 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     uint32_t modelId = 0xFFFF0400;
     for (const auto& entry : scene.value("models", json::array())) {
         if (!placeModel(entry, origin, assets, renderer, modelId++, bounds)) return 1;
+    }
+    std::vector<MovingCharacter> movingCharacters;
+    for (const auto& entry : scene.value("characters", json::array())) {
+        MovingCharacter placed;
+        if (!placeCharacter(entry, origin, assets, renderer, modelId++, placed)) return 1;
+        movingCharacters.push_back(placed);
     }
 
     // The camera: placed, aimed, or backed off to see the first model.
@@ -376,6 +429,10 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     auto drawFrame = [&]() {
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
+        for (MovingCharacter& c : movingCharacters) {
+            if (frame > 0) c.position += c.velocity * kStep;
+            renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
+        }
         renderer.update(kStep);
         renderer.beginFrame();
         renderer.renderWorld();
