@@ -86,6 +86,13 @@ PipelineBuilder& PipelineBuilder::setColorBlendAttachment(
     return *this;
 }
 
+PipelineBuilder& PipelineBuilder::setColorBlendAttachments(
+    std::vector<VkPipelineColorBlendAttachmentState> blendStates)
+{
+    colorBlendAttachments_ = std::move(blendStates);
+    return *this;
+}
+
 PipelineBuilder& PipelineBuilder::setNoColorAttachment() {
     colorBlendAttachments_.clear();
     return *this;

@@ -1,0 +1,87 @@
+// A terrain chunk's layers - its base texture and up to three more over it by
+// their alpha maps - and their relief, blended. The one copy of how they mix:
+// terrain.frag.glsl draws the ground from it, and terrain_bake.frag.glsl
+// bakes the far ground's atlas from it (TerrainBake), so a chunk seen through
+// its bake is the same ground.
+//
+// The includer defines TERRAIN_MATERIAL_SET, the set the chunk's material is
+// bound at.
+
+layout(set = TERRAIN_MATERIAL_SET, binding = 0) uniform sampler2D uBaseTexture;
+layout(set = TERRAIN_MATERIAL_SET, binding = 1) uniform sampler2D uLayer1Texture;
+layout(set = TERRAIN_MATERIAL_SET, binding = 2) uniform sampler2D uLayer2Texture;
+layout(set = TERRAIN_MATERIAL_SET, binding = 3) uniform sampler2D uLayer3Texture;
+layout(set = TERRAIN_MATERIAL_SET, binding = 4) uniform sampler2D uLayer1Alpha;
+layout(set = TERRAIN_MATERIAL_SET, binding = 5) uniform sampler2D uLayer2Alpha;
+layout(set = TERRAIN_MATERIAL_SET, binding = 6) uniform sampler2D uLayer3Alpha;
+
+layout(set = TERRAIN_MATERIAL_SET, binding = 7) uniform TerrainParams {
+    int layerCount;
+    int hasLayer1;
+    int hasLayer2;
+    int hasLayer3;
+};
+
+// Each texture's relief, derived from its colours when the tile loaded
+// (TerrainRenderer::deriveNormalMap): the normal in rgb, along the texture's
+// u and v and out of it.
+layout(set = TERRAIN_MATERIAL_SET, binding = 8) uniform sampler2D uBaseNormal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 9) uniform sampler2D uLayer1Normal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 10) uniform sampler2D uLayer2Normal;
+layout(set = TERRAIN_MATERIAL_SET, binding = 11) uniform sampler2D uLayer3Normal;
+
+// Every read below takes its gradients from the caller - the coordinate's
+// dFdx and dFdy, taken in uniform control flow - so a pixel may skip the
+// layers while its neighbour reads them, and the mips are still the ones the
+// whole quad would have chosen.
+
+// How much of each layer covers a point: the three layers' alpha, and what is
+// left of the base under them. Maps uploaded by the mesh generator contain
+// absolute coverage. Big alpha must not be blended as successive opacities:
+// that exposes the base layer and changes the blend when adjacent chunks
+// reorder textures.
+struct TerrainCoverage {
+    vec3 layers;
+    float base;
+};
+
+TerrainCoverage terrainCoverage(vec2 layerUV, vec2 dx, vec2 dy) {
+    TerrainCoverage c;
+    c.layers = vec3(0.0);
+    if (hasLayer1 != 0) c.layers.x = textureGrad(uLayer1Alpha, layerUV, dx, dy).r;
+    if (hasLayer2 != 0) c.layers.y = textureGrad(uLayer2Alpha, layerUV, dx, dy).r;
+    if (hasLayer3 != 0) c.layers.z = textureGrad(uLayer3Alpha, layerUV, dx, dy).r;
+    float total = c.layers.x + c.layers.y + c.layers.z;
+    c.layers /= max(total, 1.0);
+    c.base = max(1.0 - total, 0.0);
+    return c;
+}
+
+vec4 terrainColor(TerrainCoverage c, vec2 uv, vec2 dx, vec2 dy) {
+    vec4 color = textureGrad(uBaseTexture, uv, dx, dy) * c.base;
+    if (hasLayer1 != 0) color += textureGrad(uLayer1Texture, uv, dx, dy) * c.layers.x;
+    if (hasLayer2 != 0) color += textureGrad(uLayer2Texture, uv, dx, dy) * c.layers.y;
+    if (hasLayer3 != 0) color += textureGrad(uLayer3Texture, uv, dx, dy) * c.layers.z;
+    return color;
+}
+
+// The relief of each layer, blended as its colour is, as stored (rgb, the
+// normal * 0.5 + 0.5). It is read from maps made of the textures, not from
+// how the shaded colour changes from one pixel to the next on screen: that
+// answer belonged to the pixel grid, so it changed with every sub-pixel move
+// of the camera and crawled over the ground in 2x2 blocks. The maps' mips
+// flatten it with distance as the colour's mips soften the colour.
+vec3 terrainRelief(TerrainCoverage c, vec2 uv, vec2 dx, vec2 dy) {
+    vec3 relief = textureGrad(uBaseNormal, uv, dx, dy).rgb * c.base;
+    if (hasLayer1 != 0) relief += textureGrad(uLayer1Normal, uv, dx, dy).rgb * c.layers.x;
+    if (hasLayer2 != 0) relief += textureGrad(uLayer2Normal, uv, dx, dy).rgb * c.layers.y;
+    if (hasLayer3 != 0) relief += textureGrad(uLayer3Normal, uv, dx, dy).rgb * c.layers.z;
+    return relief;
+}
+
+// Where a point of the chunk is across it, 0 to 1 each way, from its alpha-map
+// coordinate: LayerUV runs over the alpha maps' texel centres,
+// (offset * 63/8 + 0.5) / 64 for a grid offset of 0 to 8.
+vec2 terrainChunkLocal(vec2 layerUV) {
+    return (layerUV * 64.0 - 0.5) * (8.0 / 63.0) / 8.0;
+}

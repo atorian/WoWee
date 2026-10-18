@@ -5463,6 +5463,13 @@ void Renderer::buildFrameGraph() {
             for (auto* composite : offscreenComposites_) composite->compositeOffscreen(cmd, frame);
         });
 
+    // The far ground's bake: new tiles' atlases readied and their chunks
+    // drawn into them, before anything draws the ground this frame.
+    renderGraph_->addPass("terrain_bake", {}, {},
+        [this](VkCommandBuffer cmd) {
+            if (terrainRenderer) terrainRenderer->recordBake(cmd);
+        });
+
     // Shadow pre-pass → outputs shadow_depth
     renderGraph_->addPass("shadow_pass", {}, {shadowDepth},
         [this](VkCommandBuffer) {

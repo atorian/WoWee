@@ -30,28 +30,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "contact_shadows.glsli"
 #include "sky_atmosphere.glsli"
 
-layout(set = 1, binding = 0) uniform sampler2D uBaseTexture;
-layout(set = 1, binding = 1) uniform sampler2D uLayer1Texture;
-layout(set = 1, binding = 2) uniform sampler2D uLayer2Texture;
-layout(set = 1, binding = 3) uniform sampler2D uLayer3Texture;
-layout(set = 1, binding = 4) uniform sampler2D uLayer1Alpha;
-layout(set = 1, binding = 5) uniform sampler2D uLayer2Alpha;
-layout(set = 1, binding = 6) uniform sampler2D uLayer3Alpha;
-
-layout(set = 1, binding = 7) uniform TerrainParams {
-    int layerCount;
-    int hasLayer1;
-    int hasLayer2;
-    int hasLayer3;
-};
-
-// Each texture's relief, derived from its colours when the tile loaded
-// (TerrainRenderer::deriveNormalMap): the normal in rgb, along the texture's
-// u and v and out of it.
-layout(set = 1, binding = 8) uniform sampler2D uBaseNormal;
-layout(set = 1, binding = 9) uniform sampler2D uLayer1Normal;
-layout(set = 1, binding = 10) uniform sampler2D uLayer2Normal;
-layout(set = 1, binding = 11) uniform sampler2D uLayer3Normal;
+#define TERRAIN_MATERIAL_SET 1
+#include "terrain_layers.glsli"
 
 // The chunk's own normals, every vertex's, as a 17x17 image (ChunkMesh::
 // normalGrid): outer vertices on even texels, inner on odd. The ground is lit
@@ -67,10 +47,26 @@ vec3 chunkNormal(vec2 layerUV) {
     return normalize(texture(uChunkNormal, (offset * 2.0 + 0.5) / 17.0).xyz * 2.0 - 1.0);
 }
 
+// The far ground: the chunk's tile's colour and relief, its layers blended
+// once into 32x32 texels a chunk (TerrainBake), the chunk at its cell.
+layout(set = 1, binding = 13) uniform sampler2D uBakedColor;
+layout(set = 1, binding = 14) uniform sampler2D uBakedRelief;
+
 // After the vertex stage's model matrix and lights (GPUPushConstants).
 layout(push_constant) uniform Surface {
     layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
+    // x: 0 the layers, 1 the layers giving way to the bake between y and z
+    // yards from the camera, 2 the bake alone. w: the chunk's cell in its
+    // tile's atlas, x + 16 y.
+    vec4 baked;
 } surface;
+
+// Where the point is in its tile's bake atlas.
+vec2 bakedAtlasUv(vec2 layerUV) {
+    float cell = surface.baked.w;
+    vec2 origin = vec2(mod(cell, 16.0), floor(cell / 16.0));
+    return (origin + terrainChunkLocal(layerUV)) / 16.0;
+}
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
@@ -170,45 +166,49 @@ vec3 reliefNormal(vec3 n, vec3 mapNormal, float strength) {
 
 void main() {
     const vec3 receiverFace = receiverFaceNormal(FragPos);
+    // The gradients every texture read below takes, here where the whole quad
+    // is still there: past the discard, and inside the per-pixel branches
+    // further down, implicit ones would be undefined.
+    const vec2 texDx = dFdx(TexCoord), texDy = dFdy(TexCoord);
+    const vec2 layerDx = dFdx(LayerUV), layerDy = dFdy(LayerUV);
+    const vec2 atlasUv = bakedAtlasUv(LayerUV);
+    const vec2 atlasDx = dFdx(atlasUv), atlasDy = dFdy(atlasUv);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     float fragDist = length(viewPos.xyz - FragPos);
-    // Maps uploaded by the mesh generator contain absolute coverage. Big
-    // alpha must not be blended as successive opacities: that exposes the
-    // base layer and changes the blend when adjacent chunks reorder textures.
-    vec3 weights = vec3(0.0);
-    if (hasLayer1 != 0) weights.x = texture(uLayer1Alpha, LayerUV).r;
-    if (hasLayer2 != 0) weights.y = texture(uLayer2Alpha, LayerUV).r;
-    if (hasLayer3 != 0) weights.z = texture(uLayer3Alpha, LayerUV).r;
-    float total = weights.x + weights.y + weights.z;
-    weights /= max(total, 1.0);
-    float baseWeight = max(1.0 - total, 0.0);
-    vec4 finalColor = texture(uBaseTexture, TexCoord) * baseWeight;
-    // These branches depend only on the chunk's uniform layer count, so UV
-    // derivatives remain valid for mip selection across alpha-map boundaries.
-    if (hasLayer1 != 0) finalColor += texture(uLayer1Texture, TexCoord) * weights.x;
-    if (hasLayer2 != 0) finalColor += texture(uLayer2Texture, TexCoord) * weights.y;
-    if (hasLayer3 != 0) finalColor += texture(uLayer3Texture, TexCoord) * weights.z;
 
     // The surface normal from the chunk's normal image, the same whichever
     // level of detail drew this pixel. `Normal`, the drawn vertices' own, is
     // what the image was made of.
     vec3 vertexNormal = chunkNormal(LayerUV);
-    vec3 norm = vertexNormal;
 
-    // The relief of each layer, blended as its colour is. It is read from
-    // maps made of the textures, not from how the shaded colour changes from
-    // one pixel to the next on screen: that answer belonged to the pixel grid,
-    // so it changed with every sub-pixel move of the camera and crawled over
-    // the ground in 2x2 blocks. The maps' mips flatten it with distance as the
-    // colour's mips soften the colour.
-    if (surface.relief.x > 0.0) {
-        vec3 blended = texture(uBaseNormal, TexCoord).rgb * baseWeight;
-        if (hasLayer1 != 0) blended += texture(uLayer1Normal, TexCoord).rgb * weights.x;
-        if (hasLayer2 != 0) blended += texture(uLayer2Normal, TexCoord).rgb * weights.y;
-        if (hasLayer3 != 0) blended += texture(uLayer3Normal, TexCoord).rgb * weights.z;
-        norm = reliefNormal(vertexNormal, blended * 2.0 - 1.0, surface.relief.x);
+    // The ground's colour and relief: from its layers near, from its bake
+    // far, and both across the band between - pixel by pixel, so a pixel past
+    // the band reads only the bake and one short of it only its layers. The
+    // layers are laid from above, so a slope reads them as finely as flat
+    // ground nearer by its normal's up-component, and takes the bake as much
+    // later (terrainSurfaceSourceFor). The renderer's choice for the chunk
+    // settles the chunks wholly on one side without the test.
+    const bool relief = surface.relief.x > 0.0;
+    const float share = surface.baked.x > 1.5 ? 1.0
+        : surface.baked.x > 0.5 ? smoothstep(surface.baked.y, surface.baked.z, fragDist * abs(vertexNormal.z))
+        : 0.0;
+    vec4 finalColor = vec4(0.0);
+    vec3 reliefMap = vec3(0.5, 0.5, 1.0);
+    if (share < 1.0) {
+        TerrainCoverage coverage = terrainCoverage(LayerUV, layerDx, layerDy);
+        finalColor = terrainColor(coverage, TexCoord, texDx, texDy);
+        if (relief) reliefMap = terrainRelief(coverage, TexCoord, texDx, texDy);
     }
+    if (share > 0.0) {
+        finalColor = mix(finalColor, textureGrad(uBakedColor, atlasUv, atlasDx, atlasDy), share);
+        if (relief) {
+            reliefMap = mix(reliefMap, textureGrad(uBakedRelief, atlasUv, atlasDx, atlasDy).rgb, share);
+        }
+    }
+
+    vec3 norm = relief ? reliefNormal(vertexNormal, reliefMap * 2.0 - 1.0, surface.relief.x)
+                       : vertexNormal;
 
     vec3 lightDir2 = normalize(-lightDir.xyz);
     vec3 ambient = ambientColor.rgb * finalColor.rgb;

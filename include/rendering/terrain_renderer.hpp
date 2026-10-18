@@ -8,6 +8,7 @@
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
 #include "rendering/range_allocator.hpp"
+#include "rendering/terrain_bake.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
@@ -111,6 +112,14 @@ struct TerrainChunkGPU {
     uint32_t rtMesh = ~0u;
     uint32_t rtInstance = ~0u;
 
+    /// Its cell of its tile's bake atlas holds it (TerrainBake): from now on
+    /// it may be drawn far from the bake. Until then, from its layers.
+    bool baked = false;
+    /// The up-component of its steepest normal, 1 flat: how much nearer than
+    /// flat ground its steepest slope reads its layers finely
+    /// (terrainSurfaceSourceFor).
+    float steepestUpZ = 1.0f;
+
     [[nodiscard]] bool isValid() const {
         return geometryPage >= 0 || (vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE);
     }
@@ -207,6 +216,15 @@ public:
      * @param camera Camera for frustum culling
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+
+    /// Outside any rendering scope, before the frame's terrain is drawn: the
+    /// atlases made since the last frame readied, and the chunks waiting for
+    /// their bake drawn into them, a budget a frame (TerrainBake).
+    void recordBake(VkCommandBuffer cmd);
+    /// Chunks the last render() drew from their bake alone, and across the
+    /// band from both it and their layers.
+    [[nodiscard]] int getBakedDrawnChunkCount() const { return bakedDrawnChunks_; }
+    [[nodiscard]] int getCrossfadeDrawnChunkCount() const { return crossfadeDrawnChunks_; }
 
     /**
      * Initialize terrain shadow pipeline (must be called after initialize()).
@@ -356,6 +374,17 @@ private:
     float maxViewDistance_ = 1200.0f;
     /// WOWEE_TERRAIN_LOD=0 draws every chunk at level 0, to compare against.
     bool lodEnabled_ = true;
+    /// The far ground's atlases. WOWEE_TERRAIN_BAKE=0 draws every chunk from
+    /// its layers, to compare against.
+    TerrainBake bake_;
+    bool bakeEnabled_ = false;
+    /// Chunks waiting for their bake, by their place on the map (chunkAt_).
+    std::vector<uint64_t> bakeQueue_;
+    int bakedDrawnChunks_ = 0;
+    int crossfadeDrawnChunks_ = 0;
+    /// Enqueue a chunk just added for its bake.
+    void queueBake(const TerrainChunkGPU& chunk);
+    void refreshChunkAt();
     /// Where each chunk is in `chunks`, by its place on the map, so a chunk
     /// can ask its neighbours' levels; rebuilt after the list changes.
     std::unordered_map<uint64_t, uint32_t> chunkAt_;

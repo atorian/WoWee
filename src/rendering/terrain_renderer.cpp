@@ -40,16 +40,29 @@ struct TerrainParamsUBO {
 struct TerrainSurfacePush {
     /// x: how steep the textures' relief is drawn, 0 for flat ground.
     glm::vec4 relief{0.0f};
+    /// x: where the colour and relief come from (TerrainSurfaceSource);
+    /// y, z: the band the bake takes over across, in yards from the camera;
+    /// w: the chunk's cell in its tile's atlas, x + 16 y.
+    glm::vec4 baked{0.0f};
 };
 constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
+static_assert(kSurfacePushOffset + sizeof(TerrainSurfacePush) <= 128,
+              "the terrain's push constants fit the space Vulkan guarantees");
 
 // The material set's bindings past the seven samplers and the params block:
 // the base texture's relief, then each layer's.
 constexpr uint32_t kFirstNormalMapBinding = 8;
 // Then the chunk's own normals, which the ground is lit from.
 constexpr uint32_t kNormalGridBinding = kFirstNormalMapBinding + 4;
-constexpr uint32_t kMaterialBindingCount = kNormalGridBinding + 1;
-constexpr uint32_t kMaterialSamplerCount = 7 + 4 + 1;
+// Then its tile's bake atlas, colour and relief.
+constexpr uint32_t kBakedColorBinding = kNormalGridBinding + 1;
+constexpr uint32_t kBakedReliefBinding = kBakedColorBinding + 1;
+constexpr uint32_t kMaterialBindingCount = kBakedReliefBinding + 1;
+constexpr uint32_t kMaterialSamplerCount = 7 + 4 + 1 + 2;
+
+/// Chunks drawn into their atlases a frame. A tile is 256; one arriving bakes
+/// in the frame after it, and the world's first hundred tiles in seventy.
+constexpr size_t kBakeChunksPerFrame = 512;
 
 /// The Sobel strength the ground's relief is derived with, half a wall's. The
 /// ground is seen at a grazing angle across a whole road at once, where the
@@ -159,6 +172,7 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     // binding 7: uniform buffer (TerrainParams)
     // bindings 8-11: combined image samplers (base + 3 layer normal maps)
     // binding 12: combined image sampler (the chunk's normals)
+    // bindings 13-14: combined image samplers (the tile's bake, colour and relief)
     std::vector<VkDescriptorSetLayoutBinding> materialBindings(kMaterialBindingCount);
     for (uint32_t i = 0; i < kMaterialBindingCount; i++) {
         materialBindings[i] = {};
@@ -173,6 +187,13 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     if (!materialSetLayout) {
         LOG_ERROR("TerrainRenderer: failed to create material set layout");
         return false;
+    }
+
+    // The far ground's bake, which says itself why when it cannot be had.
+    if (!core::envFlagEnabled("WOWEE_TERRAIN_BAKE", true)) {
+        LOG_WARNING("WOWEE_TERRAIN_BAKE=0: every terrain chunk is drawn from its layers, however far");
+    } else {
+        bakeEnabled_ = bake_.initialize(*vkCtx, materialSetLayout);
     }
 
     // --- Create descriptor pool ---
@@ -290,6 +311,10 @@ void TerrainRenderer::shutdown() {
     // sets from are still alive. Without this every resident chunk's vertex and
     // index buffers outlived the device: twenty thousand of each.
     vkCtx->flushDeferredCleanup();
+    // After the flush, which destroyed the atlases clear() let go; before the
+    // material layout its pipeline layout names.
+    bake_.shutdown();
+    bakeEnabled_ = false;
 
     loggedTextureLoadFails_.clear();
     loggedNormalMapFails_.clear();
@@ -367,6 +392,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
             registerRtChunk(gpuChunk, chunk);
             chunks.push_back(std::move(gpuChunk));
             chunkAtStale_ = true;
+            queueBake(chunks.back());
         }
     }
 
@@ -440,6 +466,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         registerRtChunk(gpuChunk, chunk);
         chunks.push_back(std::move(gpuChunk));
         chunkAtStale_ = true;
+        queueBake(chunks.back());
         uploaded++;
     }
 
@@ -554,6 +581,10 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
     gpuChunk.lodErrors = chunk.lodError;
     gpuChunk.offeredLods = chunk.offeredLods();
     gpuChunk.normalGrid = createNormalGridTexture(chunk.normalGrid);
+    // Over the 145 grid vertices; the skirts after them hang straight down.
+    for (size_t v = 0; v < std::min<size_t>(chunk.vertices.size(), 145); ++v) {
+        gpuChunk.steepestUpZ = std::min(gpuChunk.steepestUpZ, std::abs(chunk.vertices[v].normal[2]));
+    }
 
     if (placeInGeometryPage(gpuChunk, chunk.vertices, indices)) return gpuChunk;
 
@@ -905,6 +936,17 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
         imageInfos[4 + i] = pick(chunk.alphaTextures[i].get(), opaque)->descriptorInfo();
         imageInfos[kFirstNormalMapBinding + 1 + i] = pick(chunk.layerNormalMaps[i].get(), flat)->descriptorInfo();
     }
+    // The tile's bake atlas, or the fallbacks where there is none; a chunk
+    // with no atlas is never baked, and so never drawn from it.
+    if (const TerrainBake::Atlas* atlas = bakeEnabled_ ? bake_.atlas(chunk.tileX, chunk.tileY) : nullptr) {
+        imageInfos[kBakedColorBinding] = {bake_.sampler(), atlas->color.imageView,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        imageInfos[kBakedReliefBinding] = {bake_.sampler(), atlas->relief.imageView,
+                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    } else {
+        imageInfos[kBakedColorBinding] = white->descriptorInfo();
+        imageInfos[kBakedReliefBinding] = flat->descriptorInfo();
+    }
 
     VkDescriptorBufferInfo bufInfo{};
     bufInfo.buffer = chunk.paramsUBO;
@@ -1023,15 +1065,14 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     int32_t boundPage = kNothingBound;
 
     // Where each chunk is, by its place on the map, for its neighbours.
-    if (chunkAtStale_) {
-        chunkAt_.clear();
-        chunkAt_.reserve(chunks.size());
-        for (uint32_t i = 0; i < chunks.size(); ++i) {
-            chunkAt_[chunkMapKey(chunks[i].tileX * 16 + chunks[i].chunkX,
-                                 chunks[i].tileY * 16 + chunks[i].chunkY)] = i;
-        }
-        chunkAtStale_ = false;
-    }
+    refreshChunkAt();
+
+    // Where the bake takes over from the layers, for this view.
+    const TerrainBakeBand bakeBand = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
+    bakedDrawnChunks_ = 0;
+    crossfadeDrawnChunks_ = 0;
+    // Layers until a chunk says otherwise; pushed again only when that changes.
+    float pushedSource = 0.0f;
 
     // First every chunk's level, so each can see its neighbours'.
     frameLevels_.assign(chunks.size(), -1);
@@ -1075,6 +1116,25 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                  1, 1, &chunk.materialSet, 0, nullptr);
+
+        // From its layers, its bake, or both across the band: by where its
+        // points lie, nearest to farthest, once it has been baked.
+        const float centreDistance = glm::length(chunk.boundingSphereCenter - camPos);
+        const TerrainSurfaceSource source =
+            bakeEnabled_ && chunk.baked
+                ? terrainSurfaceSourceFor(bakeBand, centreDistance - chunk.boundingSphereRadius,
+                                          centreDistance + chunk.boundingSphereRadius,
+                                          chunk.steepestUpZ)
+                : TerrainSurfaceSource::Layers;
+        if (source != TerrainSurfaceSource::Layers || pushedSource != 0.0f) {
+            surface.baked = glm::vec4(static_cast<float>(source), bakeBand.start, bakeBand.end,
+                                      static_cast<float>(chunk.chunkX + 16 * chunk.chunkY));
+            pushedSource = surface.baked.x;
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                               kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
+        }
+        if (source == TerrainSurfaceSource::Baked) ++bakedDrawnChunks_;
+        if (source == TerrainSurfaceSource::Crossfade) ++crossfadeDrawnChunks_;
 
         // The lights nearest the chunk (local_lights.hpp).
         const LocalLightSet chunkLights = frameLights_ && !frameLights_->empty()
@@ -1133,6 +1193,86 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         renderedChunks++;
     }
 
+}
+
+void TerrainRenderer::refreshChunkAt() {
+    if (!chunkAtStale_) return;
+    chunkAt_.clear();
+    chunkAt_.reserve(chunks.size());
+    for (uint32_t i = 0; i < chunks.size(); ++i) {
+        chunkAt_[chunkMapKey(chunks[i].tileX * 16 + chunks[i].chunkX,
+                             chunks[i].tileY * 16 + chunks[i].chunkY)] = i;
+    }
+    chunkAtStale_ = false;
+}
+
+void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
+    if (!bakeEnabled_) return;
+    bakeQueue_.push_back(chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY));
+}
+
+void TerrainRenderer::recordBake(VkCommandBuffer cmd) {
+    if (!bakeEnabled_ || cmd == VK_NULL_HANDLE) return;
+    // Every atlas a chunk already names, ready before this frame draws it.
+    bake_.prepareNewAtlases(cmd);
+    if (bakeQueue_.empty()) return;
+    refreshChunkAt();
+
+    // This frame's share, grouped by tile: one rendering scope and one set of
+    // mips an atlas.
+    const size_t take = std::min(bakeQueue_.size(), kBakeChunksPerFrame);
+    std::vector<uint32_t> due;
+    due.reserve(take);
+    for (size_t i = 0; i < take; ++i) {
+        const auto found = chunkAt_.find(bakeQueue_[i]);
+        if (found == chunkAt_.end()) continue;  // its tile went before its turn
+        if (!chunks[found->second].baked) due.push_back(found->second);
+    }
+    bakeQueue_.erase(bakeQueue_.begin(), bakeQueue_.begin() + static_cast<std::ptrdiff_t>(take));
+    std::sort(due.begin(), due.end(), [this](uint32_t a, uint32_t b) {
+        return std::pair(chunks[a].tileX, chunks[a].tileY) < std::pair(chunks[b].tileX, chunks[b].tileY);
+    });
+
+    constexpr int32_t kNothingBound = -2;
+    for (size_t g = 0; g < due.size();) {
+        const int tileX = chunks[due[g]].tileX;
+        const int tileY = chunks[due[g]].tileY;
+        size_t end = g;
+        while (end < due.size() && chunks[due[end]].tileX == tileX && chunks[due[end]].tileY == tileY) ++end;
+
+        TerrainBake::Atlas* atlas = bake_.atlas(tileX, tileY);
+        if (!atlas) {  // said by atlas(); the tile's chunks stay drawn from their layers
+            g = end;
+            continue;
+        }
+        bake_.beginTile(cmd, *atlas);
+        int32_t boundPage = kNothingBound;
+        for (size_t k = g; k < end; ++k) {
+            TerrainChunkGPU& chunk = chunks[due[k]];
+            bake_.cell(cmd, chunk.chunkX, chunk.chunkY);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bake_.pipelineLayout(), 0, 1,
+                                    &chunk.materialSet, 0, nullptr);
+            // The whole chunk, level 0: what the bake holds is the ground's
+            // colour wherever it is, not the shape of any level.
+            const auto& full = chunk.lods[0];
+            if (chunk.geometryPage >= 0) {
+                if (boundPage != chunk.geometryPage) {
+                    bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
+                    boundPage = chunk.geometryPage;
+                }
+                vkCmdDrawIndexed(cmd, full.count, 1, chunk.firstIndex + full.first, chunk.baseVertex, 0);
+            } else {
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
+                vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, full.count, 1, full.first, 0, 0);
+                boundPage = kNothingBound;
+            }
+            chunk.baked = true;
+        }
+        bake_.endTile(cmd, *atlas);
+        g = end;
+    }
 }
 
 bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
@@ -1289,6 +1429,8 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         chunkAtStale_ = true;
         LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
+    // Its chunks still queued find nothing at their place and are dropped.
+    bake_.releaseTile(tileX, tileY);
 }
 
 void TerrainRenderer::clear() {
@@ -1299,6 +1441,8 @@ void TerrainRenderer::clear() {
     }
     chunks.clear();
     chunkAtStale_ = true;
+    bakeQueue_.clear();
+    bake_.releaseAll();
     renderedChunks = 0;
     // A page refused before may fit now that every chunk is going.
     geometryPagesExhausted_ = false;

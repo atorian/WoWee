@@ -65,6 +65,9 @@ public:
     // Color blend attachment
     PipelineBuilder& setColorBlendAttachment(
         VkPipelineColorBlendAttachmentState blendState);
+    /// One blend state per colour attachment, for a pass that writes several.
+    PipelineBuilder& setColorBlendAttachments(
+        std::vector<VkPipelineColorBlendAttachmentState> blendStates);
 
     // No color attachment (depth-only pass)
     PipelineBuilder& setNoColorAttachment();

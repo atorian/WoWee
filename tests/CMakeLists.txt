@@ -2172,6 +2172,13 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_terrain_bake ────────────────────────────────────────
+# Where the far ground is drawn from its bake: its layers near, the bake far,
+# both across the band, and a slope keeping its layers as long as its
+# steepness says.
+wowee_add_test(test_terrain_bake
+    SOURCES test_terrain_bake.cpp)
+
 # ── test_shadow_plane ────────────────────────────────────────
 # The plane a shadow receiver is compared in, from its surface and the map
 # alone: along the surface it predicts the sun's and the units' map depth,
