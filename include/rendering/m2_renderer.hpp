@@ -653,9 +653,14 @@ public:
      * the same numbers the main pass reads from GPUPerFrameData, so a tree's
      * shadow bends with the tree.
      */
+    ///
+    /// `reuseCull`: the map this is drawn into moves little from one frame to
+    /// the next - the sun's - so its casters may be found from the last
+    /// frame's candidates while they still hold (shadow_cull_reuse.hpp). The
+    /// casters are the same either way.
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
-                      bool resetDescriptors = true);
+                      bool resetDescriptors = true, bool reuseCull = false);
 
     /**
      * Render M2 particle emitters (point sprites)
@@ -1310,6 +1315,25 @@ private:
     std::vector<uint32_t> viewCandidates_;    // reused by render()
     std::vector<uint32_t> cullCandidates_;    // reused by dispatchCullCompute()
     std::vector<uint32_t> shadowCandidates_;  // reused by renderShadow()
+    /// The sun map's candidates: the instances that can cast at all (valid,
+    /// not a trap), within kShadowCullSlack of the map shadowCullMatrix_
+    /// was, by index, in draw order (model, then index); and the largest
+    /// caster margin in the world
+    /// when they were culled (and since). Reused while
+    /// lightSpaceCullStillCovers says they hold and no instance has changed
+    /// place in the list, with the instances refiled since added to them.
+    std::vector<uint32_t> shadowCullIndices_;
+    glm::mat4 shadowCullMatrix_{0.0f};
+    float shadowCullRadius_ = 0.0f;
+    float shadowCullMaxMargin_ = 0.0f;
+    const void* shadowCullScene_ = nullptr;
+    uint64_t shadowCullLayoutRevision_ = 0;
+    bool shadowCullValid_ = false;
+    /// Moved on whenever an instance may have changed its index - a removal
+    /// moves the last one into the gap - or the list was emptied.
+    uint64_t instanceLayoutRevision_ = 0;
+    /// shadowCandidates_ for the sun's map, from shadowCullIds_ or a new cull.
+    void gatherReusedShadowCandidates(const glm::mat4& lightSpace, float shadowRadius);
     uint32_t cullVerdictSerial_ = 0;
     // Instance to copy bone matrices from when spawning another of the same
     // model. Finding one by scanning every instance is O(n) per spawn, which
@@ -1525,6 +1549,11 @@ private:
         SpatialGrid spatialGrid;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
         M2CullGrid cullGrid_;
+        /// Instances filed or refiled in cullGrid_ - added, moved, shown -
+        /// since the sun's shadow cull last took them, by id; past
+        /// kMaxShadowRefiled it gives up listing and the cull starts over.
+        std::vector<uint32_t> shadowRefiledIds;
+        bool shadowRefiledOverflow = false;
         std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         std::vector<uint32_t> cullSubmittedIds_[2];
         std::vector<uint32_t> cullReadableIds_[2];

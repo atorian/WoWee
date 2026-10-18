@@ -389,6 +389,15 @@ private:
     /// can ask its neighbours' levels; rebuilt after the list changes.
     std::unordered_map<uint64_t, uint32_t> chunkAt_;
     bool chunkAtStale_ = true;
+    /// The chunks of each tile and a sphere round all of theirs, rebuilt with
+    /// chunkAt_: the shadow pass tests a tile before its chunks, and a tile
+    /// outside the map has no chunk inside it.
+    struct ShadowTile {
+        glm::vec3 centre{0.0f};
+        float radius = 0.0f;
+        std::vector<uint32_t> chunks;
+    };
+    std::vector<ShadowTile> shadowTiles_;
     /// This frame's level for each chunk in `chunks`, -1 where it is not drawn.
     std::vector<int8_t> frameLevels_;
     /// The visible chunks of this frame, in `chunks` order, with their levels.

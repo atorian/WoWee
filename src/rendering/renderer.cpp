@@ -4935,7 +4935,7 @@ void Renderer::renderShadowMap(bool contact) {
     if (m2Renderer) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, contact ? "units: m2" : "sun: m2");
         m2Renderer->renderShadow(currentCmd, passMatrix, wind_.gpu(), passCenter, shadowCullRadius,
-                                 !contact);
+                                 !contact, /*reuseCull=*/!contact);
     }
     if (characterRenderer) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup,

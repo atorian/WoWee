@@ -12,6 +12,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
+#include "rendering/shadow_cull_reuse.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -49,6 +50,15 @@ void M2Renderer::fileInCullGrid(const M2Instance& instance) {
         .cullCenter = instance.cachedCullCenter,
         .cullRadius = instance.cachedPaddedRadius,
         .shadowRadius = boundRadius * instance.scale * 1.5f});
+    // The sun's shadow cull reuses its candidates across frames; this one
+    // arrived or moved since, and is added to them (gatherReusedShadowCandidates).
+    // Past this many it is cheaper to cull again than to fold them in.
+    constexpr size_t kMaxShadowRefiled = 8192;
+    if (scene_->shadowRefiledIds.size() < kMaxShadowRefiled) {
+        scene_->shadowRefiledIds.push_back(instance.id);
+    } else {
+        scene_->shadowRefiledOverflow = true;
+    }
 }
 
 void M2Renderer::gatherViewCandidates(const glm::vec3& camPos, const Frustum& frustum,
@@ -87,6 +97,97 @@ void M2Renderer::gatherShadowCandidates(const glm::mat4& lightSpace, float shado
             }
         }
     }
+}
+
+void M2Renderer::gatherReusedShadowCandidates(const glm::mat4& lightSpace, float shadowRadius) {
+    // How much further than its own margin a candidate may lie, in the map's
+    // clip units: a twentieth of the map, 25 yards at the default 500. The
+    // texel snap and the sun's turn take it up a little a frame.
+    constexpr float kShadowCullSlack = 0.05f;
+    const float invRadius = shadowRadius > 0.0f ? 1.0f / shadowRadius : 0.0f;
+    const auto marginOf = [&](const M2Instance& instance) {
+        const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
+                                                       : instance.cachedBoundRadius;
+        return boundRadius * instance.scale * 1.5f * invRadius;
+    };
+    // Against the map the candidates were culled for: a refiled instance
+    // joins them by the same test the others passed.
+    const auto withinSlackOf = [&](const glm::mat4& map, const M2Instance& instance) {
+        const glm::vec4 clip = map * glm::vec4(instance.position, 1.0f);
+        const float m = marginOf(instance) + kShadowCullSlack;
+        return std::abs(clip.x) <= 1.0f + m && std::abs(clip.y) <= 1.0f + m &&
+               clip.z >= -m && clip.z <= 1.0f + m;
+    };
+
+    // What can cast at all, and stays so for the instance's life: a valid
+    // model that is not a trap. Whether it is hidden or on its way out the
+    // caller's exact test asks every frame.
+    const auto canCast = [](const M2Instance& instance) {
+        return instance.cachedIsValid && !instance.cachedIsInvisibleTrap && instance.cachedModel;
+    };
+    // Kept in the order the pass draws them in - by model, then index - so
+    // the casters it picks out come out grouped without sorting them anew.
+    const auto drawOrder = [this](uint32_t a, uint32_t b) {
+        const uint32_t modelA = scene_->instances[a].modelId;
+        const uint32_t modelB = scene_->instances[b].modelId;
+        return modelA != modelB ? modelA < modelB : a < b;
+    };
+
+    bool reuse = shadowCullValid_ && shadowCullScene_ == scene_ && shadowCullRadius_ == shadowRadius &&
+                 shadowCullLayoutRevision_ == instanceLayoutRevision_ && !scene_->shadowRefiledOverflow;
+    if (reuse) {
+        // What arrived or moved since may carry a larger margin than anything
+        // the last cull saw; the region the check tests grows with it.
+        for (const uint32_t id : scene_->shadowRefiledIds) {
+            const auto it = scene_->instanceIndexById.find(id);
+            if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
+            shadowCullMaxMargin_ = std::max(shadowCullMaxMargin_, marginOf(scene_->instances[it->second]));
+        }
+        reuse = lightSpaceCullStillCovers(shadowCullMatrix_, lightSpace, glm::vec3(-1.0f, -1.0f, 0.0f),
+                                          glm::vec3(1.0f), shadowCullMaxMargin_, kShadowCullSlack);
+    }
+    if (reuse) {
+        // The refiled ones join, once each, where the draw order puts them;
+        // one that has left fails the caller's exact test.
+        for (const uint32_t id : scene_->shadowRefiledIds) {
+            const auto it = scene_->instanceIndexById.find(id);
+            if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
+            const M2Instance& instance = scene_->instances[it->second];
+            if (!canCast(instance) || !withinSlackOf(shadowCullMatrix_, instance)) continue;
+            const auto index = static_cast<uint32_t>(it->second);
+            const auto at = std::lower_bound(shadowCullIndices_.begin(), shadowCullIndices_.end(), index,
+                                             drawOrder);
+            if (at == shadowCullIndices_.end() || *at != index) shadowCullIndices_.insert(at, index);
+        }
+    } else {
+        // Every column, for the largest margin anywhere; the ones that may
+        // cast with the slack, for their instances.
+        shadowCullIndices_.clear();
+        shadowCullMaxMargin_ = 0.0f;
+        for (const auto& cell : scene_->cullGrid_.cells()) {
+            if (cell.ids.empty()) continue;
+            shadowCullMaxMargin_ = std::max(shadowCullMaxMargin_, cell.maxShadowRadius * invRadius);
+            if (!cellMayCastShadow(lightSpace, cell.posMin, cell.posMax,
+                                   cell.maxShadowRadius * invRadius + kShadowCullSlack)) continue;
+            for (const uint32_t id : cell.ids) {
+                const auto it = scene_->instanceIndexById.find(id);
+                if (it == scene_->instanceIndexById.end() || it->second >= scene_->instances.size()) continue;
+                const M2Instance& instance = scene_->instances[it->second];
+                if (canCast(instance) && withinSlackOf(lightSpace, instance)) {
+                    shadowCullIndices_.push_back(static_cast<uint32_t>(it->second));
+                }
+            }
+        }
+        std::sort(shadowCullIndices_.begin(), shadowCullIndices_.end(), drawOrder);
+        shadowCullMatrix_ = lightSpace;
+        shadowCullRadius_ = shadowRadius;
+        shadowCullScene_ = scene_;
+        shadowCullLayoutRevision_ = instanceLayoutRevision_;
+        shadowCullValid_ = true;
+    }
+    scene_->shadowRefiledIds.clear();
+    scene_->shadowRefiledOverflow = false;
+    shadowCandidates_ = shadowCullIndices_;
 }
 
 void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
@@ -405,6 +506,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     if (idxIt == scene_->instanceIndexById.end()) return;
     size_t idx = idxIt->second;
     if (idx >= scene_->instances.size()) return;
+    ++instanceLayoutRevision_;  // the last instance moves into its place
 
     auto& inst = scene_->instances[idx];
 
@@ -527,6 +629,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     if (instanceIds.empty() || scene_->instances.empty()) {
         return;
     }
+    ++instanceLayoutRevision_;
 
     // A tile's doodads leave together, and this used to compact the array and
     // then rebuild the whole spatial index - every grid cell, the id map and
@@ -594,6 +697,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 }
 
 void M2Renderer::clear() {
+    ++instanceLayoutRevision_;
     if (vkCtx_) {
         // Their owners see them gone (hasPosedEmitters) and ask again.
         destroyPosedEmitterModels();
@@ -631,6 +735,7 @@ void M2Renderer::clear() {
 }
 
 void M2Renderer::clearInstances() {
+    ++instanceLayoutRevision_;
     for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};
 }

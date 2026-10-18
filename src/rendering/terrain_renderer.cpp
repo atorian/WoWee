@@ -1199,9 +1199,29 @@ void TerrainRenderer::refreshChunkAt() {
     if (!chunkAtStale_) return;
     chunkAt_.clear();
     chunkAt_.reserve(chunks.size());
+    std::unordered_map<uint64_t, size_t> tileSlot;
+    shadowTiles_.clear();
     for (uint32_t i = 0; i < chunks.size(); ++i) {
         chunkAt_[chunkMapKey(chunks[i].tileX * 16 + chunks[i].chunkX,
                              chunks[i].tileY * 16 + chunks[i].chunkY)] = i;
+        const auto [slot, added] = tileSlot.try_emplace(chunkMapKey(chunks[i].tileX, chunks[i].tileY),
+                                                        shadowTiles_.size());
+        if (added) shadowTiles_.emplace_back();
+        shadowTiles_[slot->second].chunks.push_back(i);
+    }
+    // Each tile's sphere holds every one of its chunks' spheres.
+    for (ShadowTile& tile : shadowTiles_) {
+        glm::vec3 lo(std::numeric_limits<float>::max());
+        glm::vec3 hi(std::numeric_limits<float>::lowest());
+        for (const uint32_t i : tile.chunks) {
+            lo = glm::min(lo, chunks[i].boundingSphereCenter);
+            hi = glm::max(hi, chunks[i].boundingSphereCenter);
+        }
+        tile.centre = (lo + hi) * 0.5f;
+        for (const uint32_t i : tile.chunks) {
+            tile.radius = std::max(tile.radius, glm::length(chunks[i].boundingSphereCenter - tile.centre) +
+                                                    chunks[i].boundingSphereRadius);
+        }
     }
     chunkAtStale_ = false;
 }
@@ -1375,31 +1395,38 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
     const float scaleY = glm::length(glm::vec3(lightSpaceMatrix[0][1], lightSpaceMatrix[1][1],
                                                lightSpaceMatrix[2][1]));
 
-    uint32_t shadowChunksDrawn = 0;
-    for (const auto& chunk : chunks) {
-        if (!chunk.isValid()) continue;
-
-        const glm::vec4 ls = lightSpaceMatrix * glm::vec4(chunk.boundingSphereCenter, 1.0f);
-        if (std::abs(ls.x) > 1.0f + chunk.boundingSphereRadius * scaleX ||
-            std::abs(ls.y) > 1.0f + chunk.boundingSphereRadius * scaleY) {
-            continue;
-        }
+    // The same test for a sphere, a chunk's or a whole tile's: a tile's holds
+    // its chunks', so a tile that fails it has no chunk that passes.
+    const auto mayCast = [&](const glm::vec3& centre, float radius) {
+        const glm::vec4 ls = lightSpaceMatrix * glm::vec4(centre, 1.0f);
+        if (std::abs(ls.x) > 1.0f + radius * scaleX || std::abs(ls.y) > 1.0f + radius * scaleY) return false;
         // Depth grows away from the light in either depth convention.
-        if (ls.z > centreLs.z + (shadowRadius + chunk.boundingSphereRadius) * scaleZ) continue;
-        ++shadowChunksDrawn;
+        return ls.z <= centreLs.z + (shadowRadius + radius) * scaleZ;
+    };
 
-        if (chunk.geometryPage >= 0) {
-            if (boundPage != chunk.geometryPage) {
-                bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
-                boundPage = chunk.geometryPage;
+    refreshChunkAt();
+    uint32_t shadowChunksDrawn = 0;
+    for (const ShadowTile& tile : shadowTiles_) {
+        if (!mayCast(tile.centre, tile.radius)) continue;
+        for (const uint32_t index : tile.chunks) {
+            const auto& chunk = chunks[index];
+            if (!chunk.isValid()) continue;
+            if (!mayCast(chunk.boundingSphereCenter, chunk.boundingSphereRadius)) continue;
+            ++shadowChunksDrawn;
+
+            if (chunk.geometryPage >= 0) {
+                if (boundPage != chunk.geometryPage) {
+                    bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
+                    boundPage = chunk.geometryPage;
+                }
+                vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.firstIndex, chunk.baseVertex, 0);
+            } else {
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
+                vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
+                boundPage = kNothingBound;
             }
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.firstIndex, chunk.baseVertex, 0);
-        } else {
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
-            vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
-            boundPage = kNothingBound;
         }
     }
     // How many chunks cast, said when it moves by a quarter: the count is the

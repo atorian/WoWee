@@ -1063,6 +1063,7 @@ void M2Renderer::shutdown() {
     for (auto& inst : scene_->instances) {
         destroyInstanceBones(inst);
     }
+    ++instanceLayoutRevision_;
     scene_->instances.clear();
     scene_->spatialGrid.clear();
     scene_->instanceIndexById.clear();

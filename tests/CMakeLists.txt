@@ -2172,6 +2172,12 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_shadow_cull_reuse ───────────────────────────────────
+# A shadow map's cached cull holds while the map has moved by less than the
+# slack, and then drops no caster the new map keeps.
+wowee_add_test(test_shadow_cull_reuse
+    SOURCES test_shadow_cull_reuse.cpp)
+
 # ── test_terrain_bake ────────────────────────────────────────
 # Where the far ground is drawn from its bake: its layers near, the bake far,
 # both across the band, and a slope keeping its layers as long as its

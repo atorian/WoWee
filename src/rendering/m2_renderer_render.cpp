@@ -2416,7 +2416,8 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
-                              const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors) {
+                              const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
+                              bool reuseCull) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
     if (scene_->instances.empty() || models.empty()) return;
 
@@ -2535,8 +2536,14 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         };
         // The columns the light's box reaches, chosen by the light alone: a
         // caster outside the camera's view still throws its shadow into it.
-        // This walked every instance resident, ninety thousand in Dalaran.
-        gatherShadowCandidates(lightSpaceMatrix, shadowRadius, shadowCandidates_);
+        // This walked every instance resident, ninety thousand in Dalaran;
+        // the sun's map, which hardly moves, keeps its candidates while they
+        // hold.
+        if (reuseCull) {
+            gatherReusedShadowCandidates(lightSpaceMatrix, shadowRadius);
+        } else {
+            gatherShadowCandidates(lightSpaceMatrix, shadowRadius, shadowCandidates_);
+        }
         for (const uint32_t i : shadowCandidates_) {
             const auto& instance = scene_->instances[i];
             if (!castsHere(instance)) continue;
@@ -2561,8 +2568,10 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                             " whole-world", whole != kept ? "  <-- DIFFERS" : "");
             }
         }
+        // Grouped by model for the draws. The sun's candidates come in that
+        // order already, and a check is cheaper than a sort.
         for (auto& bucket : shadowCasters_) {
-            std::sort(bucket.begin(), bucket.end());
+            if (!std::is_sorted(bucket.begin(), bucket.end())) std::sort(bucket.begin(), bucket.end());
         }
         solarCastersFresh_ = resetDescriptors;
     }
