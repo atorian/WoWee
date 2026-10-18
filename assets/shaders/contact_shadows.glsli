@@ -9,6 +9,7 @@
 layout(set = 0, binding = 8) uniform sampler2D uContactShadow;
 
 #include "shadow_shading.glsli"
+#include "shadow_plane.glsli"
 
 // Indoors the units' shadows stay below the player's head: they fade out
 // between two and three yards above the player's feet, so a unit does not
@@ -18,23 +19,18 @@ float unitShadowAboveFade(vec3 worldPos) {
     return clamp(worldPos.z - (playerPos.z + 2.0), 0.0, 1.0);
 }
 
-// The units' map at worldPos: 1 lit, 0 in shadow.
-float localShadowAt(vec3 worldPos) {
+// The units' map at worldPos, on a surface facing `normal` (world space,
+// either side): 1 lit, 0 in shadow.
+float localShadowAt(vec3 worldPos, vec3 normal) {
     if (contactParams.x < 0.5 || shadowParams.x < 0.5) return 1.0;
     vec4 clip = contactSpaceMatrix * vec4(worldPos, 1.0);
     vec3 projected = clip.xyz / clip.w;
     vec2 uv = projected.xy * 0.5 + 0.5;
-    // The receiver's own depth slope across the map, taken before anything
-    // returns early. A doodad is drawn into this map as well as receiving it:
-    // compared at a flat depth, a dock's planks at a low sun shadowed
-    // themselves in stripes a texel wide.
-    vec3 receiver = vec3(uv, projected.z);
-    vec3 dx = dFdx(receiver);
-    vec3 dy = dFdy(receiver);
-    float det = dx.x * dy.y - dx.y * dy.x;
-    vec2 slope = abs(det) < 1e-14 ? vec2(0.0)
-        : clamp(vec2(dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z) / det,
-                vec2(-64.0), vec2(64.0));
+    // The receiver's own depth slope across the map, from its surface's plane.
+    // A doodad is drawn into this map as well as receiving it: compared at a
+    // flat depth, a dock's planks at a low sun shadowed themselves in stripes
+    // a texel wide.
+    vec2 slope = shadowPlaneSlope(contactSpaceMatrix, normal);
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) ||
         projected.z <= 0.0 || projected.z >= 1.0) return 1.0;
     // Half a texel of that slope: how far a receiver can sit from the centre

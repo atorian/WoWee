@@ -236,6 +236,7 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     return color;
 }
 void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     if (enablePOM == PREVIEW_SIMPLE_TEXTURE_MODE) {
@@ -378,7 +379,7 @@ void main() {
             vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
             vec3 proj = lsPos.xyz / lsPos.w;
             proj.xy = proj.xy * 0.5 + 0.5;
-            vec2 receiverSlope = shadowReceiverSlope(proj);
+            vec2 receiverSlope = shadowReceiverSlope(receiverFace);
             if (proj.x >= 0.0 && proj.x <= 1.0 &&
                 proj.y >= 0.0 && proj.y <= 1.0 &&
                 proj.z >= 0.0 && proj.z <= 1.0) {
@@ -391,7 +392,7 @@ void main() {
         // A unit takes the units' shadows too - its neighbours', a rider's on
         // the mount - as the client's models do. Indoors only those, kept
         // below the player's head.
-        float unitShadow = localShadowAt(FragPos);
+        float unitShadow = localShadowAt(FragPos, receiverFace);
         if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
         shadow = min(shadow, unitShadow);
 

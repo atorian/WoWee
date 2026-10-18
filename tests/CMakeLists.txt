@@ -2172,6 +2172,13 @@ wowee_add_test(test_wind_field
             ${CMAKE_SOURCE_DIR}/src/pipeline/wind_zones.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_shadow_plane ────────────────────────────────────────
+# The plane a shadow receiver is compared in, from its surface and the map
+# alone: along the surface it predicts the sun's and the units' map depth,
+# whichever way and however long the normal, and edge-on it stays bounded.
+wowee_add_test(test_shadow_plane
+    SOURCES test_shadow_plane.cpp)
+
 # ── test_weather_mix ─────────────────────────────────────────
 # The weather as it is drawn: a shower coming over in the time it is given,
 # rain turning to snow through both, a storm the realm asks for at once

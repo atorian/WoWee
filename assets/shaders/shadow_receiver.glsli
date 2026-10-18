@@ -2,10 +2,10 @@
 // cast it.
 //
 // A receiver is compared, at each PCF tap, against its own plane's depth at
-// that tap - its depth slope across the map from the screen derivatives - so
-// a flat floor needs no depth bias to keep from shadowing itself. What is
-// left is the half texel a receiver can sit from the centre the caster's
-// depth was stored at, and a hand's breadth in yards.
+// that tap - the plane of its surface normal, shadow_plane.glsli - so a flat
+// floor needs no depth bias to keep from shadowing itself. What is left is
+// the half texel a receiver can sit from the centre the caster's depth was
+// stored at, and a hand's breadth in yards.
 //
 // It replaces a bias of 0.0005 of the map's whole depth range. The range is
 // 6.5 times the shadow distance, so at the largest distance that was 1.6
@@ -14,17 +14,26 @@
 //
 // Needs lightSpaceMatrix and shadowTexel() declared before it is included.
 
-// How far the receiver's depth runs per unit of map uv, from its screen
-// derivatives. Call in uniform control flow, before any test on the result.
-vec2 shadowReceiverSlope(vec3 proj) {
-    vec3 dx = dFdx(proj);
-    vec3 dy = dFdy(proj);
-    float det = dx.x * dy.y - dx.y * dy.x;
-    if (abs(det) < 1e-14) return vec2(0.0);
-    vec2 slope = vec2(dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z) / det;
-    // Near grazing the plane runs away; past this it is not lit enough to
-    // matter, and an unbounded slope would push the taps off the map.
-    return clamp(slope, vec2(-64.0), vec2(64.0));
+#include "shadow_plane.glsli"
+
+// The plane of the triangle being drawn, as a normal of any length: how the
+// world position runs across the pixel quad. Every pixel of a quad, the
+// helpers included, is the same triangle's, so this is its own plane however
+// the camera looks at it - which is what the map stored its depth from. The
+// interpolated normal is not: a leaf card's is bent outward for soft light,
+// and a column's rounds its flat faces.
+//
+// Take it first thing in main(), before any discard: once a pixel of the quad
+// has been discarded, the quad's derivatives are undefined, and an alpha-
+// tested leaf's edge took its shadow from whatever they came out as.
+vec3 receiverFaceNormal(vec3 worldPos) {
+    return cross(dFdx(worldPos), dFdy(worldPos));
+}
+
+// How far the receiver's depth runs per unit of the sun map's uv, on the
+// plane of `normal` (world space, any length, either side).
+vec2 shadowReceiverSlope(vec3 normal) {
+    return shadowPlaneSlope(lightSpaceMatrix, normal);
 }
 
 // Map depth per yard along the light: the length of the light space

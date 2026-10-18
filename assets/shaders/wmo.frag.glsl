@@ -271,6 +271,7 @@ vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
 }
 
 void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     float lodFactor = computeLodFactor();
@@ -346,7 +347,7 @@ void main() {
         vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
         vec3 proj = lsPos.xyz / lsPos.w;
         proj.xy = proj.xy * 0.5 + 0.5;
-        vec2 receiverSlope = shadowReceiverSlope(proj);
+        vec2 receiverSlope = shadowReceiverSlope(receiverFace);
         if (proj.x >= 0.0 && proj.x <= 1.0 &&
             proj.y >= 0.0 && proj.y <= 1.0 &&
             proj.z >= 0.0 && proj.z <= 1.0) {
@@ -356,7 +357,7 @@ void main() {
     }
     RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
-    float unitShadow = localShadowAt(FragPos);
+    float unitShadow = localShadowAt(FragPos, receiverFace);
     if (baked) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
     shadow = min(shadow, unitShadow);
 

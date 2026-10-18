@@ -169,6 +169,7 @@ vec3 reliefNormal(vec3 n, vec3 mapNormal, float strength) {
 }
 
 void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     float fragDist = length(viewPos.xyz - FragPos);
@@ -230,7 +231,7 @@ void main() {
         vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
         vec3 proj = lsPos.xyz / lsPos.w;
         proj.xy = proj.xy * 0.5 + 0.5;
-        vec2 receiverSlope = shadowReceiverSlope(proj);
+        vec2 receiverSlope = shadowReceiverSlope(receiverFace);
         if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
             shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
             shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
@@ -244,7 +245,7 @@ void main() {
     // The units' map and the sun's, the darker of the two, as the client
     // takes the dynamic map and the ground's baked one. Ground has no
     // edge-on fade in the client; it darkens the whole lit colour.
-    shadow = min(shadow, localShadowAt(FragPos));
+    shadow = min(shadow, localShadowAt(FragPos, receiverFace));
     vec3 result = (ambient + diffuse) * shadowLightFactor(shadow);
     result += localLightContribution(FragPos, norm, finalColor.rgb, vLocalLights);
 

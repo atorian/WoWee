@@ -148,6 +148,7 @@ vec4 fogVolumeSky(vec2 uv) {
 #include "m2_combiner.glsli"
 
 void main() {
+    const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (cullBackFaces != 0 && !gl_FrontFacing) discard;
     // The stages as the client combines them: armour doubled by its
     // sphere-mapped shine, a flame shaped by its mask, a layer with light
@@ -319,7 +320,7 @@ void main() {
             vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
             vec3 proj = lsPos.xyz / lsPos.w;
             proj.xy = proj.xy * 0.5 + 0.5;
-            vec2 receiverSlope = shadowReceiverSlope(proj);
+            vec2 receiverSlope = shadowReceiverSlope(receiverFace);
             if (proj.x >= 0.0 && proj.x <= 1.0 &&
                 proj.y >= 0.0 && proj.y <= 1.0 &&
                 proj.z >= 0.0 && proj.z <= 1.0) {
@@ -350,7 +351,7 @@ void main() {
         // the buildings take them: a model is ground too - a dock, a bridge,
         // a rock. Indoors a model takes only these, kept below the player's
         // head as the room around it does.
-        float unitShadow = localShadowAt(FragPos);
+        float unitShadow = localShadowAt(FragPos, receiverFace);
         if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
         shadow = min(shadow, unitShadow);
         // The whole lit colour darkened alike, as the client does; the

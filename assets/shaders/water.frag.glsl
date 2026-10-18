@@ -44,7 +44,6 @@ float shadowTexel() {
 // How much of the sun reaches the water here, 1 lit to 0 in shadow: the
 // sun's map, the units' map and the traced sun, the way the ground beside it
 // takes them, so a tree's shadow runs from the bank onto the water unbroken.
-// Call in uniform control flow (the receiver slope is taken from derivatives).
 float sunOnWater(vec3 worldPos) {
     float shadow = 1.0;
     const vec3 up = vec3(0.0, 0.0, 1.0);
@@ -53,7 +52,7 @@ float sunOnWater(vec3 worldPos) {
     vec4 lsPos = lightSpaceMatrix * vec4(worldPos + up * normalOffset, 1.0);
     vec3 proj = lsPos.xyz / lsPos.w;
     proj.xy = proj.xy * 0.5 + 0.5;
-    vec2 receiverSlope = shadowReceiverSlope(proj);
+    vec2 receiverSlope = shadowReceiverSlope(up);
     if (shadowParams.x > 0.5 && proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 &&
         proj.z >= 0.0 && proj.z <= 1.0) {
         shadow = sampleShadowReceiverPlane(uShadowMap, proj, receiverSlope);
@@ -61,7 +60,7 @@ float sunOnWater(vec3 worldPos) {
     }
     RtLight rt = rtLightAt(worldPos, up);
     shadow = rtShadow(rt, shadow);
-    return min(shadow, localShadowAt(worldPos));
+    return min(shadow, localShadowAt(worldPos, up));
 }
 
 layout(push_constant) uniform Push {
