@@ -2484,6 +2484,19 @@ wowee_test_link_glm(test_zone_light)
 add_test(NAME zone_light COMMAND test_zone_light)
 register_test_target(test_zone_light)
 
+# ── test_light_volume_blend ──────────────────────────────────
+# A point lit as WoW.exe lights it: its map's global light with the volumes
+# it stands in laid over it, farthest first, each by its linear falloff.
+add_executable(test_light_volume_blend
+    test_light_volume_blend.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/lighting_manager.cpp)
+target_include_directories(test_light_volume_blend PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_light_volume_blend SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_light_volume_blend PRIVATE catch2_main wowee_pipeline wowee_base)
+wowee_test_link_glm(test_light_volume_blend)
+add_test(NAME light_volume_blend COMMAND test_light_volume_blend)
+register_test_target(test_light_volume_blend)
+
 # ── test_light_headroom ──────────────────────────────────────
 # Keeping ambient + diffuse inside 1.0. 82% of the client's LightParams
 # rows exceed it at noon, and per-channel clipping shifts hue: Mulgore's
@@ -2545,10 +2558,8 @@ add_test(NAME m2_view_distance COMMAND test_m2_view_distance)
 register_test_target(test_m2_view_distance)
 
 # ── test_light_volume_order ──────────────────────────────────
-# Which of two overlapping light volumes is blended first. Equal weights
-# are the ordinary case, not a coincidence, and an unstable sort decided
-# them differently every time the list changed - so the sky model flipped
-# frame to frame while walking.
+# The client's rule for laying light volumes over each other: each one's
+# weight, the order they go down in, and what each ends up contributing.
 add_executable(test_light_volume_order
     test_light_volume_order.cpp
     ${TEST_COMMON_SOURCES})
@@ -2556,6 +2567,7 @@ target_include_directories(test_light_volume_order PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_volume_order SYSTEM PRIVATE
     ${TEST_SYSTEM_INCLUDE_DIRS})
 target_link_libraries(test_light_volume_order PRIVATE catch2_main)
+wowee_test_link_glm(test_light_volume_order)
 add_test(NAME light_volume_order COMMAND test_light_volume_order)
 register_test_target(test_light_volume_order)
 

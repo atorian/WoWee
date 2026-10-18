@@ -344,7 +344,7 @@ private:
     bool loadLightBandDbcs(pipeline::AssetManager* assetManager);
 
     /**
-     * Weighted light volume for blending
+     * A light and its share of what a point is lit by.
      */
     struct WeightedVolume {
         const LightVolume* volume = nullptr;
@@ -352,7 +352,10 @@ private:
     };
 
     /**
-     * Find light volumes for blending (up to 4 with weight > 0)
+     * The lights that make a point's light, each with its share once all are
+     * laid down as the client lays them (light_volume_order.hpp): the map's
+     * global light first, then the volumes the point stands in, farthest
+     * first. The shares add up to one when the map has a global light.
      */
     [[nodiscard]] std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
 
@@ -364,6 +367,11 @@ private:
 
     // Light volumes by map
     std::map<uint32_t, std::vector<LightVolume>> lightVolumesByMap_;
+    /// Each map's global light: its Light.dbc row at the origin, which the
+    /// volumes are laid over and which lights it where none reaches.
+    std::map<uint32_t, LightVolume> globalLightByMap_;
+    /// Maps with no global light, reported once each.
+    mutable std::set<uint32_t> mapsWithoutGlobalLight_;
 
     // LightParams profiles by ID
     std::map<uint32_t, LightParamsProfile> lightParamsProfiles_;
