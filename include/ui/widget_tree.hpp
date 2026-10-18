@@ -1007,8 +1007,10 @@ private:
     std::vector<LinkRect> linkRects_;
     void layoutWidget(uint32_t id, float screenW, float screenH);
     /// Clear the drawing and running flags under a hidden frame without
-    /// placing any of it. See layoutWidget.
-    void markSubtreeHidden(uint32_t id);
+    /// placing any of it. See layoutWidget. Not below a widget already
+    /// hidden - everything under it was cleared when it was - unless `all`,
+    /// for a subtree just moved under a hidden frame.
+    void markSubtreeHidden(uint32_t id, bool all = false);
     /// The same, without descending into the children. What a single-widget
     /// resolve needs, and the body of the recursive one.
     void layoutWidgetSelf(uint32_t id, float screenW, float screenH);

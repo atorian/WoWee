@@ -1602,17 +1602,43 @@ TEST_CASE("a reparented frame inherits the new parent's visibility",
     tree.addPoint(child, ca);
     tree.setWidth(child, 10.0f);
     tree.setHeight(child, 10.0f);
+    // And what it carries: the move takes the whole branch with it.
+    const uint32_t grandchild = tree.create(WidgetKind::Frame, child, "Grandchild");
+    Anchor ga; ga.point = "BOTTOMLEFT"; ga.relativeTo = child; ga.relativePoint = "BOTTOMLEFT";
+    tree.addPoint(grandchild, ga);
+    tree.setWidth(grandchild, 5.0f);
+    tree.setHeight(grandchild, 5.0f);
 
     tree.layout(kScreenW, kScreenH);
     REQUIRE(tree.get(child)->visible);
+    REQUIRE(tree.get(grandchild)->visible);
 
     tree.setParent(child, hidden);
     tree.layout(kScreenW, kScreenH);
     CHECK_FALSE(tree.get(child)->visible);
+    CHECK_FALSE(tree.get(grandchild)->visible);
+
+    // Into a panel inside the hidden window, hidden with it on the pass
+    // before - which the layout does not walk into again.
+    const uint32_t panel = tree.create(WidgetKind::Frame, hidden, "Panel");
+    Anchor pa; pa.point = "BOTTOMLEFT"; pa.relativeTo = hidden; pa.relativePoint = "BOTTOMLEFT";
+    tree.addPoint(panel, pa);
+    tree.setWidth(panel, 50.0f);
+    tree.setHeight(panel, 50.0f);
+    tree.setParent(child, shown);
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.get(grandchild)->visible);
+    REQUIRE_FALSE(tree.get(panel)->visibleChain);
+    tree.setParent(child, panel);
+    tree.layout(kScreenW, kScreenH);
+    CHECK_FALSE(tree.get(child)->visible);
+    CHECK_FALSE(tree.get(grandchild)->visible);
+    CHECK_FALSE(tree.get(grandchild)->visibleChain);
 
     tree.setParent(child, shown);
     tree.layout(kScreenW, kScreenH);
     CHECK(tree.get(child)->visible);
+    CHECK(tree.get(grandchild)->visible);
 }
 
 TEST_CASE("a frame cannot be put inside itself", "[widget_tree]") {

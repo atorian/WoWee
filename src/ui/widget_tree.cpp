@@ -185,7 +185,15 @@ void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
         kids.erase(std::remove(kids.begin(), kids.end(), id), kids.end());
     }
     w->parent = newParent;
-    get(newParent)->children.push_back(id);
+    Widget* parent = get(newParent);
+    parent->children.push_back(id);
+    // Under a hidden frame it is hidden too, and everything under it: the
+    // layout walk does not look again beneath a frame it has already marked.
+    if (!parent->visibleChain) {
+        w->visibleChain = false;
+        w->visible = false;
+        markSubtreeHidden(id, /*all=*/true);
+    }
 }
 
 void WidgetTree::markScrollFrame(uint32_t id) {
@@ -815,7 +823,7 @@ bool WidgetTree::runs(uint32_t id) const {
     return w == nullptr;
 }
 
-void WidgetTree::markSubtreeHidden(uint32_t id) {
+void WidgetTree::markSubtreeHidden(uint32_t id, bool all) {
     const Widget* w = get(id);
     if (!w) return;
     const std::size_t count = w->children.size();
@@ -824,6 +832,12 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
         if (!w || i >= w->children.size()) return;
         const uint32_t child = w->children[i];
         if (Widget* c = get(child)) {
+            // Hidden on an earlier pass, and so is everything under it: only
+            // the walk itself puts a widget on screen, and it does not reach
+            // under a hidden one; a frame moved under a hidden one is marked
+            // as it moves (setParent). This used to walk all 27,000 hidden
+            // widgets again every frame to set what was already set.
+            if (!all && !c->visibleChain) continue;
             // Neither running nor drawn, so the draw-order pass skips it and
             // nothing measures against it. Its rect is deliberately left
             // alone, and its resolvedGen deliberately not stamped: a script
@@ -833,7 +847,7 @@ void WidgetTree::markSubtreeHidden(uint32_t id) {
             c->visibleChain = false;
             c->visible = false;
         }
-        markSubtreeHidden(child);
+        markSubtreeHidden(child, all);
     }
 }
 

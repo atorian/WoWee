@@ -302,14 +302,7 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
     // anchored to end exactly where the coin icon begins, so the overspill
     // lands on top of the coin.
     //
-    // Same face too - the widget's own, then the interface default -
-    // rather than whichever face this measure happened to be handed.
-    ImFont* runFont = interfaceFaceOrDefault(w->fontFace);
-    if (!runFont) runFont = font;
     const float size = interfaceFontSize(w->fontHeight);
-    const auto measureRun = [&](const std::string& piece) {
-        return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
-    };
 
     // Already the right size for this text, measured the way it would be
     // measured now. A label that has changed what it says is measured
@@ -332,6 +325,17 @@ void WidgetRenderer::sizeFontStringWidget(Widget* w, ImFont* font) {
         if (w->autoSized && sameMeasurement) return;
         if (!w->autoSized && w->width > 0.0f && w->height > 0.0f) return;
     }
+
+    // Same face too - the widget's own, then the interface default -
+    // rather than whichever face this measure happened to be handed. Looked
+    // up only for a label that is going to be measured: finding a face by
+    // name builds its key, and doing that for every label with text, every
+    // frame, was most of this pass for labels that had not changed.
+    ImFont* runFont = interfaceFaceOrDefault(w->fontFace);
+    if (!runFont) runFont = font;
+    const auto measureRun = [&](const std::string& piece) {
+        return runFont->CalcTextSizeA(size, FLT_MAX, 0.0f, piece.c_str()).x;
+    };
 
     if (paragraph) {
         // The width stays as declared and the height follows the wrap.
