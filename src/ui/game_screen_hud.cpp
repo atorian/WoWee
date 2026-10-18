@@ -1,6 +1,7 @@
 #include "ui/game_screen.hpp"
 #include "core/screen_recording.hpp"
 #include "ui/sight_cache.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/ui_texture_load.hpp"
 #include "ui/ui_upload_budget.hpp"
@@ -948,6 +949,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const float screenW = static_cast<float>(window->getWidth());
     const float screenH = static_cast<float>(window->getHeight());
 
+    rendering::CpuStageLaps laps(services_.interfaceStages, "uiManager->render/nameplates");
     const glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
     const glm::vec3 camPos   = camera->getPosition();
     const uint64_t  playerGuid = gameHandler.getPlayerGuid();
@@ -990,6 +992,19 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                   });
     }
 
+    laps.lap("gather");
+    static SightCache sight;
+    rendering::WMORenderer* wmo = services_.renderer ? services_.renderer->getWMORenderer() : nullptr;
+    // Timed on its own: the collision queries are the part of a plate that
+    // costs, and the part the cache exists to ration.
+    float sightMs = 0.0f;
+    const auto sightQuery = [wmo, &sightMs](const glm::vec3& from, const glm::vec3& to) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool blocked = wmo->segmentBlocked(from, to);
+        sightMs += std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        return blocked;
+    };
     for (const auto& entityPtr : nameplateEntities) {
         if (!entityPtr) continue;
         const uint64_t guid = entityPtr->getGuid();
@@ -1078,28 +1093,23 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         float cullDist = isTarget ? 60.0f : (isPlayer ? 40.0f : 20.0f);
         if (distSq > cullDist * cullDist) continue;
 
-        // Behind a building is out of sight, and a name that reads through a
-        // wall is worse than no name: it puts a player in a room they are not
-        // in. Distance and the frustum were the only tests here, so every
-        // nameplate drew over whatever stood in front of it.
-        //
-        // Cached per unit, because this is a collision query and there can be
-        // a dozen plates up. Recomputed when either end has moved far enough
-        // to change the answer, and every so often regardless, since the
-        // geometry between them streams in and out - the same treatment the
-        // selection circle gives its floor query.
-        static SightCache sight;
-        if (sight.blocked(services_.renderer ? services_.renderer->getWMORenderer() : nullptr,
-                          guid, camPos, renderPos)) {
-            continue;
-        }
-
         // Project to clip space
         glm::vec4 clipPos = viewProj * glm::vec4(renderPos, 1.0f);
         if (clipPos.w <= 0.01f) continue;  // Behind camera
 
         glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;
         if (ndc.x < -1.2f || ndc.x > 1.2f || ndc.y < -1.2f || ndc.y > 1.2f) continue;
+
+        // Behind a building is out of sight, and a name that reads through a
+        // wall is worse than no name: it puts a player in a room they are not
+        // in. Distance and the frustum were the only tests here, so every
+        // nameplate drew over whatever stood in front of it.
+        //
+        // After the frustum, so a unit off screen costs no collision query.
+        // Cached per unit and refreshed a few a frame (SightCache).
+        if (wmo && sight.blocked(guid, camPos, renderPos)) {
+            continue;
+        }
 
         // NDC → screen pixels.
         // The camera bakes the Vulkan Y-flip into the projection matrix, so
@@ -1637,6 +1647,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 }
             }
         }
+    }
+    // The stale answers this frame asked for, a few of them: after the loop,
+    // so every plate has had its say about which are stale.
+    if (wmo) sight.refresh(sightQuery);
+    laps.lap("plates");
+    if (services_.interfaceStages) {
+        services_.interfaceStages->add("uiManager->render/nameplates", "plates: sight queries", sightMs);
     }
 
     // My Name. Its own block rather than a case inside the loop above, because

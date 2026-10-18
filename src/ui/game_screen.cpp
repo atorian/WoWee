@@ -1,4 +1,5 @@
 #include "ui/graphics_choices.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "core/zone_tracker.hpp"
 #include "ui/game_screen.hpp"
 #include "ui/gamepad_controls.hpp"
@@ -328,6 +329,7 @@ void openBagsForTrading(game::GameHandler& gameHandler) {
 }  // namespace
 
 void GameScreen::render(game::GameHandler& gameHandler) {
+    rendering::CpuStageLaps laps(services_.interfaceStages, "uiManager->render");
     // Apply before any Begin() calls so a scale change cannot alter style
     // metrics halfway through an ImGui frame.
     settingsPanel_.applyWindowUiScale();
@@ -615,8 +617,10 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     gameHandler.chatAutoJoin.lfg = chatPanel_.chatAutoJoinLFG;
     gameHandler.chatAutoJoin.local = chatPanel_.chatAutoJoinLocal;
 
+    laps.lap("settings");
     // Process targeting input before UI windows
     processTargetInput(gameHandler);
+    laps.lap("target input");
 
 
     // Render windows
@@ -663,11 +667,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
     reportRecordingFailure();
+    laps.lap("windows and commands");
 
     // ---- New UI elements ----
     auto spellIconFn = [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); };
     combatUI_.renderCooldownTracker(gameHandler, settingsPanel_, spellIconFn);
+    laps.lap("cooldowns");
     renderNameplates(gameHandler);  // player names always shown; NPC plates gated by the enemyplates row
+    laps.lap("nameplates");
     combatUI_.playSoundsForNewChat(gameHandler);
     // Blizzard_CombatText draws its own once it is loaded, which happens the
     // moment the player touches the float-mode dropdown in the interface
@@ -683,6 +690,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         addons::storedCVarValue("enableCombatText", "1") != "0") {
         combatUI_.renderCombatText(gameHandler);
     }
+    laps.lap("combat text");
     // No target frame of ours to park under any more, so the meter takes its
     // own position. FrameXML's TargetFrame has one, and could be measured the
     // way the minimap measures MinimapCluster, but nothing reads it yet.
@@ -698,6 +706,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     windowManager_.renderSkillsWindow(gameHandler);
     windowManager_.renderEquipSetWindow(gameHandler);
     combatUI_.renderThreatWindow(gameHandler);
+    laps.lap("windows");
     // The blips, whoever draws the ring around them.
     //
     // This was gated on the element the way every other pass is, and the
@@ -714,14 +723,17 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     if (showMinimap_) {
         renderMinimapMarkers(gameHandler);
     }
+    laps.lap("minimap markers");
     dialogManager_.renderLateDialogs(gameHandler);
     chatPanel_.renderBubbles(gameHandler);
+    laps.lap("chat bubbles");
     // Not gated on GameMenu ownership. FrameXML's own options frames are shells
     // - its menu buttons are routed here through ShowUIPanel - and this window
     // draws nothing unless something opened it, so leaving it out cost every
     // setting in it the moment the menu was handed over.
     settingsPanel_.renderSettingsWindow(chatPanel_, [this]() { saveSettings(); });
     toastManager_.renderLateToasts(gameHandler);
+    laps.lap("settings window and toasts");
 
     // Always, because this is the only thing that feeds the map its data and
     // the only thing that draws it. Skipping it when FrameXML owns the map
@@ -731,6 +743,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // whether the map is wanted; under FrameXML that is FrameXML's frame being
     // on screen rather than this client's own flag.
     renderWorldMap(gameHandler);
+    laps.lap("world map");
 
     // Insert spell link into chat if player shift-clicked a spellbook entry
     {
@@ -840,6 +853,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
+    laps.lap("inventory and equipment");
     // Update renderer face-target position and selection circle
     auto* renderer = services_.renderer;
     if (renderer) {
@@ -1017,6 +1031,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Restore previous alpha
     ImGui::GetStyle().Alpha = prevAlpha;
+    laps.lap("target and screen effects");
 }
 
 /// Put the item dropped on a player into the trade it opened.

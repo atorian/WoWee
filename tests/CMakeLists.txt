@@ -1739,6 +1739,11 @@ wowee_add_test(test_npc_flags SOURCES test_npc_flags.cpp)
 # vendor cursor was asking the wrong one.
 wowee_add_test(test_scene_pick SOURCES test_scene_pick.cpp)
 
+# ── test_sight_cache ─────────────────────────────────────────
+# Line of sight for nameplates and chat bubbles: answered at once for a new
+# unit, refreshed a few a frame for a crowd.
+wowee_add_test(test_sight_cache SOURCES test_sight_cache.cpp)
+
 # ── test_plural_escape ───────────────────────────────────────
 # WoW's |4singular:plural; escape, which nothing resolved - so the logout
 # prompt read "5 |4Second:Seconds; until logout" and seventy-four other
@@ -2111,6 +2116,12 @@ register_test_target(test_realm_list)
 # what it reaches.
 wowee_add_test(test_auth_reconnect SOURCES test_auth_reconnect.cpp)
 target_link_libraries(test_auth_reconnect PRIVATE wowee_client)
+
+# ── test_widget_draw ─────────────────────────────────────────
+# WidgetRenderer::draw in a headless ImGui frame: what it settles in the tree
+# before it paints. The renderer is a member of the client's archive.
+wowee_add_test(test_widget_draw SOURCES test_widget_draw.cpp)
+target_link_libraries(test_widget_draw PRIVATE wowee_client)
 
 # ── test_quest_rewards ──────────────────────────────────────
 wowee_add_packet_test(test_quest_rewards)

@@ -170,6 +170,8 @@ struct Widget {
     /// reported on once. See WidgetTree::takeSizeChanges.
     bool sizeChangeQueued = false;
     bool visibilityChangeQueued = false;
+    /// In WidgetTree::placedTooltips.
+    bool tooltipListed = false;
 
     /// The layout generation this widget's rect was last resolved in. Zero
     /// means never, which is older than any generation.
@@ -1003,6 +1005,12 @@ public:
     /// same omission and new ones would arrive with the same bug.
     void hideOrphanedTooltips();
     [[nodiscard]] const std::vector<uint32_t>& scrollFrames() const { return scrollFrames_; }
+    /// Every tooltip the layout has put on screen at least once, in the order
+    /// it first did. What the draw sizes to its lines, without searching all
+    /// 28,000 widgets each frame for the dozen that are tooltips. A tooltip
+    /// not on screen has no lines worth sizing, so filing it as it appears
+    /// misses none.
+    [[nodiscard]] const std::vector<uint32_t>& placedTooltips() const { return placedTooltips_; }
     [[nodiscard]] const std::vector<uint32_t>& playerPortraits() const { return portraitsFor("player"); }
 
     /// The widget published under this name, or null. Names are unique in
@@ -1117,6 +1125,7 @@ private:
     float uiScale_ = 1.0f;
     float userScale_ = 1.0f;
     std::vector<uint32_t> scrollFrames_;
+    std::vector<uint32_t> placedTooltips_;
     /// Which unit each portrait texture is showing, and the reverse. Two maps
     /// rather than one because both questions are asked every frame: the draw
     /// loop wants every texture for a unit, and a claim wants the unit a

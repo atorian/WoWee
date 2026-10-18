@@ -5,6 +5,7 @@
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
 #include "ui/widget_renderer.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "core/input.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/appearance_composer.hpp"
@@ -404,6 +405,10 @@ private:
     /// Draws the widget tree addons build through CreateFrame/CreateTexture.
     /// Holds the texture cache for Interface\ art, so it lives as long as the app.
     ui::WidgetRenderer widgetRenderer_;
+    /// What the parts of the interface's two drawing stages cost this frame -
+    /// the client's panels and the widget draw - read into the frame profile
+    /// under their stage after drawInterface.
+    rendering::CpuStageTimes interfaceStages_;
     /// The live head-and-shoulders view the interface's portrait draws.
     ui::UnitPortrait unitPortrait_;
     /// Where the portrait's widget was found last time. Ids are stable, so

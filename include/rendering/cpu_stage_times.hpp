@@ -86,5 +86,27 @@ private:
     std::chrono::steady_clock::time_point started_;
 };
 
+/// Splits one long stretch of code into consecutive parts: each lap() records
+/// the time since the previous one (or since construction) under its name.
+/// For a function that is a list of steps, where wrapping each step in a scope
+/// would reindent the whole of it. Records nothing without somewhere to put it.
+class CpuStageLaps {
+public:
+    CpuStageLaps(CpuStageTimes* times, std::string_view group)
+        : times_(times), group_(group), last_(std::chrono::steady_clock::now()) {}
+
+    void lap(std::string_view name) {
+        if (!times_) return;
+        const auto now = std::chrono::steady_clock::now();
+        times_->add(group_, name, std::chrono::duration<float, std::milli>(now - last_).count());
+        last_ = now;
+    }
+
+private:
+    CpuStageTimes* times_;
+    std::string_view group_;
+    std::chrono::steady_clock::time_point last_;
+};
+
 } // namespace rendering
 } // namespace wowee

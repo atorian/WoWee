@@ -5,6 +5,7 @@
 #include "game/game_handler.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/wmo_renderer.hpp"
 #include "core/coordinates.hpp"
 #include "core/window.hpp"
 #include <imgui.h>
@@ -56,6 +57,12 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
 
     glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
 
+    static SightCache sight;
+    rendering::WMORenderer* wmo = renderer->getWMORenderer();
+    const auto sightQuery = [wmo](const glm::vec3& from, const glm::vec3& to) {
+        return wmo->segmentBlocked(from, to);
+    };
+
     // Update and render bubbles
     for (int i = static_cast<int>(bubbles_.size()) - 1; i >= 0; --i) {
         auto& bubble = bubbles_[i];
@@ -73,16 +80,6 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ() + 2.5f);
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
 
-        // Not through a wall. A bubble carries a name as well as a line, so
-        // one drawn over the building someone is standing behind says they are
-        // in front of it - the same fault the nameplates had, answered by the
-        // same query.
-        static SightCache sight;
-        if (sight.blocked(renderer->getWMORenderer(), bubble.senderGuid,
-                          camera->getPosition(), renderPos)) {
-            continue;
-        }
-
         // Project to screen
         glm::vec4 clipPos = viewProj * glm::vec4(renderPos, 1.0f);
         if (clipPos.w <= 0.0f) continue;  // Behind camera
@@ -96,6 +93,14 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         // Skip if off-screen
         if (screenX < -200.0f || screenX > screenW + 200.0f ||
             screenY < -100.0f || screenY > screenH + 100.0f) continue;
+
+        // Not through a wall. A bubble carries a name as well as a line, so
+        // one drawn over the building someone is standing behind says they are
+        // in front of it - the same fault the nameplates had, answered by the
+        // same query, and after the screen test for the same reason.
+        if (wmo && sight.blocked(bubble.senderGuid, camera->getPosition(), renderPos)) {
+            continue;
+        }
 
         // Fade alpha over last 2 seconds
         float alpha = 1.0f;
@@ -136,6 +141,7 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
                     ImGui::GetColorU32(textColor), bubble.message.c_str(), nullptr,
                     kWrapWidth);
     }
+    if (wmo) sight.refresh(sightQuery);
 }
 
 void ChatBubbleManager::setupCallback(game::GameHandler& gameHandler) {

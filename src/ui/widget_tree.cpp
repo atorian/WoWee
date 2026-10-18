@@ -106,6 +106,7 @@ void WidgetTree::reset() {
     portraitUnitOf_.clear();
     sizeChanges_.clear();
     visibilityChanges_.clear();
+    placedTooltips_.clear();
     // Every one of these names a widget by id, and the ids are about to mean
     // something else. A drag or a focus held across the reset would be held on
     // whatever frame the new load happens to give that number to.
@@ -1232,6 +1233,10 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
 
     if (w->rectW != wasW || w->rectH != wasH) noteSizeChange(*w);
     if (w->visible != wasVisible) noteVisibilityChange(*w);
+    if (w->isTooltip && w->visible && !w->tooltipListed) {
+        w->tooltipListed = true;
+        placedTooltips_.push_back(id);
+    }
 }
 
 uint32_t WidgetTree::hitTest(float x, float y) const {

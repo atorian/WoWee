@@ -14,6 +14,7 @@ namespace core {
     class ScreenRecording;
 }
 namespace rendering {
+class CpuStageTimes;
 class Renderer;
 class CameraController;
 class AnimationController;
@@ -66,6 +67,9 @@ struct UIServices {
     rendering::AnimationController* animationController = nullptr;
     /// The world map, which is built on entering the world: null before.
     std::function<rendering::world_map::WorldMapFacade*()> worldMap;
+    /// Where the interface's own parts record what they cost this frame, for
+    /// the frame profile (CpuStageLaps); null records nothing.
+    rendering::CpuStageTimes* interfaceStages = nullptr;
     
     // Extracted classes (also available individually for Phase A compatibility)
     core::EntitySpawner* entitySpawner = nullptr;

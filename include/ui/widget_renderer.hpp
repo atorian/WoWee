@@ -25,7 +25,7 @@ struct ImVec2;
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace rendering { class VkContext; }
+namespace rendering { class VkContext; class CpuStageTimes; }
 
 namespace ui {
 
@@ -35,6 +35,8 @@ struct Widget;
 class WidgetRenderer {
 public:
     void initialize(pipeline::AssetManager* assets, rendering::VkContext* vkCtx);
+    /// Where draw() records what its parts cost, for the frame profile.
+    void setStageTimes(rendering::CpuStageTimes* times) { stageTimes_ = times; }
 
     /// Lay the tree out for this screen and draw it. Safe to call with no
     /// device or assets - it simply does nothing, which is what the headless
@@ -163,6 +165,7 @@ private:
 
     pipeline::AssetManager* assets_ = nullptr;
     rendering::VkContext* vkCtx_ = nullptr;
+    rendering::CpuStageTimes* stageTimes_ = nullptr;
     std::unordered_map<std::string, VkDescriptorSet> textures_;
     /// The cached set for a path, or null when nothing is cached for it -
     /// which is different from a cached kMissing, and both callers care.

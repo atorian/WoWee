@@ -817,6 +817,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();  // May be nullptr here, re-wire later
+            uiServices.interfaceStages = &interfaceStages_;
             uiServices.requestInterfaceReload = [this] {
                 if (auto* character = session()) character->requestInterfaceReload();
             };
@@ -1171,6 +1172,7 @@ bool Application::initialize() {
         // device to upload it; both exist by now.
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
+        widgetRenderer_.setStageTimes(&interfaceStages_);
         // No Lua state is made here: each character in the world gets its
         // own, built by its CharacterSession.
         {
@@ -1569,6 +1571,7 @@ bool Application::initialize() {
             uiServices.expansionRegistry = expansionRegistry_.get();
             uiServices.addonManager = [this] { return characterAddons(); };
             uiServices.addonCatalog = addonCatalog_.get();
+            uiServices.interfaceStages = &interfaceStages_;
             uiServices.requestInterfaceReload = [this] {
                 if (auto* character = session()) character->requestInterfaceReload();
             };
@@ -5284,6 +5287,15 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {
 
         runInterfaceStage("mapWindow", [&] { updateMapWindow(plan); });
     }
+
+    // The parts of the two stages above, each under its own.
+    for (const auto& part : interfaceStages_.entries()) {
+        stageKey_.assign(part.group);
+        stageKey_ += '/';
+        stageKey_ += part.name;
+        noteStage(stageKey_, part.milliseconds);
+    }
+    interfaceStages_.clear();
 }
 
 void Application::beatWatchdog() {

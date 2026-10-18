@@ -1,5 +1,6 @@
 #include <cstring>
 #include "ui/widget_renderer.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "ui/text_markup.hpp"
 #include "ui/simple_html.hpp"
 #include "ui/link_hit.hpp"
@@ -20,6 +21,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cfloat>
 #include <cstdlib>
@@ -1310,15 +1312,14 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
     }
 
     // The two below are diagnostics, and each says a given name once and
-    // never again. Both walk every widget in the tree, and the first walks
-    // each font string's parent chain on top of that, so between them they
-    // were 4.98ms of a 21ms frame - a fifth of the frame spent, once the
-    // interface had settled, confirming there was nothing to report.
+    // never again. Each frame and over every widget in the tree they were
+    // 4.98ms of a 21ms frame - a fifth of the frame spent, once the interface
+    // had settled, confirming there was nothing to report.
     //
     // On a timer instead, the way the unresolved-suppression retry above is
-    // and for the same reason. Text changes while the game runs, so they
-    // cannot simply stop; a few times a second catches the same labels and
-    // costs nothing measurable.
+    // and for the same reason, and over what is drawn rather than the whole
+    // tree, since only a label on screen is a fault anyone sees. Text changes
+    // while the game runs, so they cannot simply stop.
     static double lastReportScan = 0.0;
     if (now - lastReportScan > 1.0) {
         lastReportScan = now;
@@ -1346,9 +1347,10 @@ void WidgetRenderer::layout(WidgetTree& tree, float screenW, float screenH) {
 /// in the backpack, and turning that branch off did not stop it, so whatever
 /// writes them is somewhere else. This says which label holds one, by name.
 void WidgetRenderer::reportLetteredAmounts(WidgetTree& tree) {
-    for (size_t id = 1; id < tree.size(); ++id) {
-        const Widget* w = tree.get(static_cast<uint32_t>(id));
-        if (!w || w->kind != WidgetKind::FontString || w->text.empty()) continue;
+    // Over what is drawn: the letter was reported because it was seen, and a
+    // walk of every widget in the tree to find it cost milliseconds a second.
+    for (const Widget* w : tree.drawOrder()) {
+        if (w->kind != WidgetKind::FontString || w->text.empty()) continue;
         // A run of digits with a single g, s or c after it and nothing else.
         const std::string& s = w->text;
         const char last = s.back();
@@ -1372,18 +1374,17 @@ void WidgetRenderer::reportLetteredAmounts(WidgetTree& tree) {
 }
 
 void WidgetRenderer::reportOverflowingText(WidgetTree& tree) {
-    for (size_t id = 1; id < tree.size(); ++id) {
-        const Widget* w = tree.get(static_cast<uint32_t>(id));
-        if (!w || w->kind != WidgetKind::FontString) continue;
+    // On screen only, so over what is drawn rather than every widget in the
+    // tree. A hidden label's rect is whatever it was last solved to, and the
+    // full pass does not solve hidden frames - so one measured on demand while
+    // its page was still being built keeps that answer. The retired voice chat
+    // page was reported at every login this way: its message was measured
+    // inside a one-unit frame during OnLoad, the frame was then sized to the
+    // text, and the page was never shown to lay out again.
+    for (const Widget* w : tree.drawOrder()) {
+        if (w->kind != WidgetKind::FontString) continue;
         if (!w->autoSized || w->text.empty() || w->rectW <= 0.0f) continue;
-        // On screen only. A hidden label's rect is whatever it was last solved
-        // to, and the full pass does not solve hidden frames - so one measured
-        // on demand while its page was still being built keeps that answer.
-        // The retired voice chat page was reported at every login this way:
-        // its message was measured inside a one-unit frame during OnLoad, the
-        // frame was then sized to the text, and the page was never shown to
-        // lay out again.
-        if (!w->visible) continue;
+        const uint32_t id = w->id;
 
         // Against the width this label was measured to need, not against a
         // fresh measurement: a label stretched between two anchors is given
@@ -1398,7 +1399,7 @@ void WidgetRenderer::reportOverflowingText(WidgetTree& tree) {
         // every boss frame is - would otherwise read as an overflow when it is
         // simply smaller.
         float chainScale = 1.0f;
-        for (uint32_t up = static_cast<uint32_t>(id), guard = 0;
+        for (uint32_t up = id, guard = 0;
              up != 0 && guard <= tree.size(); ++guard) {
             const Widget* node = tree.get(up);
             if (!node) break;
@@ -2034,6 +2035,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     // last frame - a frame behind, where a link that stopped being drawn stays
     // clickable for one more, which is the smaller of the two faults.
     tree.clearLinkRects();
+    rendering::CpuStageLaps laps(stageTimes_, "frameXml->draw");
 
     // Size the tooltips again, now that FrameXML has finished with them.
     //
@@ -2058,8 +2060,13 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         // six rounds of reasoning about the code had each been wrong.
         static const bool tipDiag = std::getenv("WOWEE_TOOLTIP_DIAG") != nullptr;
         int seenTooltip = 0, seenVisible = 0, seenWithLines = 0, sized = 0;
-        for (size_t id = 1; id < tree.size(); ++id) {
-            Widget* w = tree.get(static_cast<uint32_t>(id));
+        // By index over a count taken first: re-placing one below can file
+        // another tooltip, which grows the list.
+        const auto& tooltips = tree.placedTooltips();
+        const size_t tooltipCount = tooltips.size();
+        for (size_t i = 0; i < tooltipCount; ++i) {
+            const uint32_t id = tooltips[i];
+            Widget* w = tree.get(id);
             if (!w || !w->isTooltip) continue;
             ++seenTooltip;
             if (w->visible) ++seenVisible;
@@ -2125,6 +2132,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
             }
         }
     }
+    laps.lap("tooltips");
 
     // The item on the cursor, drawn over everything. FrameXML never draws this
     // - in WoW the client does - so without it picking something up looked
@@ -2241,6 +2249,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
         for (const auto& p : wanted) texture(*p.first, p.second);
         vkCtx_->endUploadBatchSync();
     }
+    laps.lap("uploads");
 
     // Interface units to pixels. The tree is laid out against a virtual screen
     // 768 units tall so a frame is the same apparent size on every display;
@@ -2249,6 +2258,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
 
     // Instrumentation, not drawing.
     reportWidgetDiagnostics(tree, order, s, screenW, screenH);
+    laps.lap("diagnostics");
 
     // Behind ImGui's own windows, so the existing interface stays on top while
     // the two coexist, but still over the 3D scene.
@@ -2266,7 +2276,29 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                      ImVec2(440.0f, 440.0f));
     }
 
+    // What each kind of widget cost to draw, summed over the order.
+    std::array<float, 3> kindMs{};
+    struct KindTimer {
+        float& into;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~KindTimer() {
+            into += std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+        }
+    };
+    struct KindLaps {
+        rendering::CpuStageTimes* times;
+        const std::array<float, 3>& ms;
+        ~KindLaps() {
+            if (!times) return;
+            times->add("frameXml->draw", "frames", ms[0]);
+            times->add("frameXml->draw", "textures", ms[1]);
+            times->add("frameXml->draw", "labels", ms[2]);
+        }
+    } kindLaps{stageTimes_, kindMs};
+
     for (const Widget* w : order) {
+        KindTimer kindTimer{kindMs[static_cast<size_t>(w->kind)]};
         // Anything inside a scroll frame is bounded by it. Without this a
         // scroll child taller than its window draws over everything above and
         // below, which is not a window onto it at all.
