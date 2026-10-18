@@ -772,6 +772,7 @@ set(WOWEE_SOURCES
     src/game/pet_handler.cpp
     src/game/realm_clock.cpp
     src/game/realm_time_handler.cpp
+    src/game/weather_handler.cpp
     src/game/ui_errors.cpp
     src/game/quest_handler.cpp
     src/game/reputation_handler.cpp
@@ -998,6 +999,7 @@ set(WOWEE_SOURCES
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
     src/rendering/vk_context.cpp
+    src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
@@ -1021,6 +1023,7 @@ set(WOWEE_SOURCES
     src/rendering/wall_sweep.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
@@ -1033,13 +1036,18 @@ set(WOWEE_SOURCES
     src/rendering/ocean_sea.cpp
     src/rendering/ocean_waves.cpp
     src/rendering/sea_bed.cpp
+    src/rendering/water_wake.cpp
     src/rendering/water_reflection.cpp
     src/rendering/skybox.cpp
     src/rendering/sky_bodies.cpp
     src/rendering/starfield.cpp
     src/rendering/clouds.cpp
     src/rendering/lens_flare.cpp
-    src/rendering/weather.cpp
+    src/rendering/weather_mix.cpp
+    src/rendering/shelter_map.cpp
+    src/rendering/precipitation.cpp
+    src/rendering/lens_drops.cpp
+    src/rendering/lens_weather.cpp
     src/rendering/lightning.cpp
     src/rendering/lighting_manager.cpp
     src/rendering/sky_system.cpp
@@ -1174,6 +1182,7 @@ set(WOWEE_SOURCES
     src/ui/toast_manager.cpp
     src/ui/dialog_manager.cpp
     src/ui/settings_panel.cpp
+    src/ui/weather_panel.cpp
     src/ui/gamepad_bindings.cpp
     src/ui/gamepad_controls.cpp
     src/ui/touch_controls.cpp
@@ -1376,7 +1385,12 @@ set(WOWEE_HEADERS
     include/rendering/starfield.hpp
     include/rendering/clouds.hpp
     include/rendering/lens_flare.hpp
-    include/rendering/weather.hpp
+    include/rendering/weather_mix.hpp
+    include/rendering/weather_controls.hpp
+    include/rendering/shelter_map.hpp
+    include/rendering/precipitation.hpp
+    include/rendering/lens_drops.hpp
+    include/rendering/lens_weather.hpp
     include/rendering/lightning.hpp
     include/rendering/swim_effects.hpp
     include/rendering/world_map.hpp
@@ -2154,6 +2168,29 @@ target_link_libraries(scene_render PRIVATE wowee_render)
 target_precompile_headers(scene_render REUSE_FROM wowee_render)
 wowee_apply_client_flags(scene_render)
 
+# Scenes drawn as tests: what the world's M2 renderer drew in the kept frame,
+# as scene_render reports it. They need a Vulkan device and the game data in
+# bin/Data, and are skipped without either.
+if(WOWEE_BUILD_TESTS)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/scratch)
+    function(wowee_add_scene_test name scene pass_regex)
+        add_test(NAME ${name}
+                 COMMAND scene_render ${CMAKE_SOURCE_DIR}/tools/scene_render/scenes/${scene}
+                         ${CMAKE_BINARY_DIR}/scratch/${name}.png
+                 WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+        set_tests_properties(${name} PROPERTIES
+            PASS_REGULAR_EXPRESSION "${pass_regex}"
+            SKIP_REGULAR_EXPRESSION "no Vulkan device;no assets under")
+    endfunction()
+    # A ship whose route is on the other map: its hull is hidden, and its sails
+    # and the rest of its doodads go with it rather than hanging over the sea.
+    wowee_add_scene_test(scene_hidden_transport transport_hidden.json
+                         "world M2 draw calls: 0 in")
+    # Brought back, it is drawn whole again.
+    wowee_add_scene_test(scene_transport_shown_again transport_shown_again.json
+                         "world M2 draw calls: [1-9][0-9]* in")
+endif()
+
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer
 # on this machine's Vulkan device, without a realm to stand in. Built from the
@@ -2772,6 +2809,7 @@ add_executable(wowee_editor
 
     # Rendering core
     src/rendering/vk_context.cpp
+    src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
@@ -2787,6 +2825,7 @@ add_executable(wowee_editor
     src/rendering/vk_pipeline.cpp
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_instance.cpp

@@ -117,7 +117,6 @@ ResourceSample ResourceMonitor::sample(const rendering::Renderer* renderer,
     if (!renderer) return out;
     sampleVideoMemory(*renderer, now, out);
     if (const auto* terrain = renderer->getTerrainManager()) {
-        out.caches.push_back({"terrain tile cache", terrain->tileCacheStats()});
         out.counts.push_back({"terrain tiles loaded",
                               static_cast<uint64_t>(terrain->getLoadedTileCount())});
         out.counts.push_back({"terrain tiles in flight",

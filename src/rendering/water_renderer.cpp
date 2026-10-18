@@ -139,10 +139,13 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     seaBedBinding.binding = 5;
     VkDescriptorSetLayoutBinding fetchBinding = oceanBinding;
     fetchBinding.binding = 6;
+    // What moves through the water leaves in it (WaterWake).
+    VkDescriptorSetLayoutBinding wakeBinding = oceanBinding;
+    wakeBinding.binding = 7;
 
     sceneSetLayout = createDescriptorSetLayout(device,
         {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding, seaBedBinding,
-         fetchBinding});
+         fetchBinding, wakeBinding});
     if (!sceneSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create scene set layout");
         return false;
@@ -152,11 +155,15 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         LOG_ERROR("WaterRenderer: the sea's surface could not be made - no water drawn");
         return false;
     }
+    if (!wake_.initialize(vkCtx, seaBed_)) {
+        LOG_ERROR("WaterRenderer: the wake could not be made - no water drawn");
+        return false;
+    }
 
-    // Pool needs 6 combined image samplers + 1 uniform buffer per frame
+    // Pool needs 7 combined image samplers + 1 uniform buffer per frame
     std::array<VkDescriptorPoolSize, 2> scenePoolSizes{};
     scenePoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    scenePoolSizes[0].descriptorCount = 6 * SCENE_HISTORY_FRAMES;
+    scenePoolSizes[0].descriptorCount = 7 * SCENE_HISTORY_FRAMES;
     scenePoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     scenePoolSizes[1].descriptorCount = SCENE_HISTORY_FRAMES;
     VkDescriptorPoolCreateInfo scenePoolInfo{};
@@ -268,10 +275,35 @@ VkPipeline WaterRenderer::buildWaterPipeline(VkRenderPass renderPass, VkSampleCo
 void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection,
                                      glm::vec2 nearby) {
     ocean_.advance(deltaSeconds, windSpeed, windDirection, nearby);
-    for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
-    frameUBO_.oceanSea = ocean_.seaState();
-    const auto& kept = ocean_.sea().keptTable();
-    std::copy(kept.begin(), kept.end(), frameUBO_.oceanKept);
+}
+
+WaterRenderer::Bounds WaterRenderer::boundsOf(const DrawnSurface& surface) const {
+    const glm::vec3 extentX = surface.stepX * static_cast<float>(surface.width);
+    const glm::vec3 extentY = surface.stepY * static_cast<float>(surface.height);
+    const glm::vec3 c0 = surface.origin;
+    const glm::vec3 c1 = surface.origin + extentX;
+    const glm::vec3 c2 = surface.origin + extentY;
+    const glm::vec3 c3 = surface.origin + extentX + extentY;
+    // As far as the waves carry a point of it, any way: four times the
+    // sea's rms height - a sea's heights are near enough Gaussian that its
+    // crests pass that one time in thirty thousand, and its choppy shift
+    // sideways is the heights' times the ride, which is below one. Magma and
+    // slime, and water indoors, lie still.
+    const bool waves = surface.basicType <= 1 && surface.shelter == LiquidShelter::Open;
+    const glm::vec3 reach(waves ? 4.0f * ocean_.seaState().x : 0.0f);
+    return {glm::vec3(std::min({c0.x, c1.x, c2.x, c3.x}), std::min({c0.y, c1.y, c2.y, c3.y}), surface.minHeight) - reach,
+            glm::vec3(std::max({c0.x, c1.x, c2.x, c3.x}), std::max({c0.y, c1.y, c2.y, c3.y}), surface.maxHeight) + reach};
+}
+
+bool WaterRenderer::updateInView(const Camera& camera) {
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    inView_ = renderingEnabled && std::any_of(drawn_.begin(), drawn_.end(), [&](const DrawnSurface& s) {
+        if (s.vertexBuffer == VK_NULL_HANDLE || s.indexCount == 0 || !s.materialSet) return false;
+        const Bounds b = boundsOf(s);
+        return frustum.intersectsAABB(b.min, b.max);
+    });
+    return inView_;
 }
 
 std::optional<float> WaterRenderer::highestOpenWaterNear(glm::vec2 centre, float halfExtent) const {
@@ -375,6 +407,7 @@ void WaterRenderer::shutdown() {
     destroyReflectionResources();
     destroySceneHistoryResources();
     ocean_.shutdown();
+    wake_.shutdown();
     destroy(device, waterPipeline);
     destroy(device, pipelineLayout);
     destroy(device, sceneDescPool);
@@ -615,6 +648,15 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
         w6.pImageInfo = &fetchInfo;
         writes.push_back(w6);
 
+        VkDescriptorImageInfo wakeInfo{};
+        wakeInfo.sampler = wake_.surfaceSampler();
+        wakeInfo.imageView = wake_.surfaceView();
+        wakeInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet w7 = w4;
+        w7.dstBinding = 7;
+        w7.pImageInfo = &wakeInfo;
+        writes.push_back(w7);
+
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
@@ -770,12 +812,6 @@ void WaterRenderer::destroyAllDrawn() {
 
 void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const Camera& camera, float /*time*/, bool use1x, uint32_t frameIndex) {
-    // The sea bed as it was last drawn - this frame, if it was drawn in it.
-    const SeaBedFrame& bed = seaBed_->frame();
-    frameUBO_.seaBedMatrix = bed.viewProjection();
-    frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f, 0.0f);    // The wake as it stands, into this frame's slot - safe now, the frame has
-    // waited for the GPU to finish with it.
-    uploadFrameUBO();
     VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
     if (!renderingEnabled || drawn_.empty() || !pipeline) {
         if (renderDiagCounter_++ % 300 == 0 && !drawn_.empty()) {
@@ -786,6 +822,22 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         }
         return;
     }
+    // None of it in view (updateInView): nothing to draw, and none of the
+    // sea's to work out for it.
+    if (!inView_) return;
+
+    // Into this frame's slot - safe now, the frame has waited for the GPU to
+    // finish with it: the sea as it stands, the sea bed as it was last drawn
+    // (this frame, if it was drawn in it), and the wake.
+    for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
+    frameUBO_.oceanSea = ocean_.seaState();
+    const auto& kept = ocean_.sea().keptTable();
+    std::copy(kept.begin(), kept.end(), frameUBO_.oceanKept);
+    const OverheadFrame& bed = seaBed_->frame();
+    frameUBO_.seaBedMatrix = bed.viewProjection();
+    frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f, 0.0f);
+    frameUBO_.wakeArea = wake_.area();
+    uploadFrameUBO();
     uint32_t fi = frameIndex % SCENE_HISTORY_FRAMES;
     VkDescriptorSet activeSceneSet = sceneHistory[fi].sceneSet;
     if (!activeSceneSet) {
@@ -810,26 +862,8 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (surface.vertexBuffer == VK_NULL_HANDLE || surface.indexCount == 0) continue;
         if (!surface.materialSet) continue;
 
-        // Frustum cull: compute AABB from surface origin + step vectors
-        {
-            const glm::vec3 extentX = surface.stepX * static_cast<float>(surface.width);
-            const glm::vec3 extentY = surface.stepY * static_cast<float>(surface.height);
-            const glm::vec3 c0 = surface.origin;
-            const glm::vec3 c1 = surface.origin + extentX;
-            const glm::vec3 c2 = surface.origin + extentY;
-            const glm::vec3 c3 = surface.origin + extentX + extentY;
-            const glm::vec3 aabbMin(
-                std::min({c0.x, c1.x, c2.x, c3.x}),
-                std::min({c0.y, c1.y, c2.y, c3.y}),
-                surface.minHeight
-            );
-            const glm::vec3 aabbMax(
-                std::max({c0.x, c1.x, c2.x, c3.x}),
-                std::max({c0.y, c1.y, c2.y, c3.y}),
-                surface.maxHeight
-            );
-            if (!frustum.intersectsAABB(aabbMin, aabbMax)) continue;
-        }
+        const Bounds bounds = boundsOf(surface);
+        if (!frustum.intersectsAABB(bounds.min, bounds.max)) continue;
 
         bool isWmoWater = (surface.wmoId != 0);
         bool canalProfile = isWmoWater || (surface.liquidType == 5);

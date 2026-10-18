@@ -1,0 +1,14 @@
+// A sandstorm over Gadgetzan in the afternoon: grains driven along the wind,
+// veils of dust drifting over the ground, and the camera facing into it, its
+// lens dusted and grit streaking across.
+{
+  "map": "Kalimdor", "mapId": 1, "zoneId": 440,
+  "hour": 15.0,
+  "weather": "sandstorm", "weatherIntensity": 1.0,
+  "wind": { "direction": 180.0, "speed": 12.0 },
+  "server": [-7177.0, -3785.0, 9.0],
+  "terrain": true,
+  "camera": { "offset": [-15, 0, 4], "lookAt": [0, 0, 4] },
+  "size": [1280, 720],
+  "frames": 180
+}

@@ -77,14 +77,14 @@ Rates ratesFor(double s) {
 }  // namespace
 
 BaseWind baseWindAt(double clockSeconds, const pipeline::WindZoneRow& row,
-                    const pipeline::WindZoneTable& table, uint32_t weatherType,
+                    const pipeline::WindZoneTable& table, pipeline::WeatherKind weatherKind,
                     float weatherIntensity) {
     const auto& regimes = table.regimes();
     BaseWind out;
     out.directionDegrees = row.directionDegrees;
 
     const pipeline::WindWeatherRule rule = weatherIntensity >= kWindWeatherThreshold
-                                               ? table.weatherRule(weatherType)
+                                               ? table.weatherRule(weatherKind)
                                                : pipeline::WindWeatherRule{};
     const size_t count = std::min(regimes.size(), row.weights.size());
     if (rule.force && *rule.force < regimes.size()) {
@@ -132,7 +132,7 @@ void WindField::update(float dt, const WindInputs& inputs, const pipeline::WindZ
         target_.directionDegrees = inputs.fixedWind->directionDegrees;
         target_.speed = std::max(inputs.fixedWind->speed, 0.0f);
     } else {
-        target_ = baseWindAt(inputs.clockSeconds, row, table, inputs.weatherType,
+        target_ = baseWindAt(inputs.clockSeconds, row, table, inputs.weatherKind,
                              inputs.weatherIntensity);
     }
     const double targetAngle = glm::radians(static_cast<double>(target_.directionDegrees));

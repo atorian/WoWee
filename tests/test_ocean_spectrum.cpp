@@ -284,6 +284,30 @@ TEST_CASE("a pond keeps its chop and none of the sea's long waves", "[water][oce
     }
 }
 
+TEST_CASE("what the water keeps follows the wind the sea was last moved on in", "[water][ocean]") {
+    // The shares are worked out when asked for; one asked for in a breeze
+    // is not what the same pond keeps once the wind has dropped, whether or
+    // not anyone asked in between.
+    using wowee::rendering::OceanSea;
+    const float deep = 500.0f;
+    const float pond = 50.0f;
+    OceanSea asked;
+    asked.advance(0.0, 8.0f, vec2(1.0f, 0.0f));
+    const float inBreeze = asked.kept(OceanSea::kKeptSlope, 2, deep, pond);
+    asked.advance(1.0, 2.0f, vec2(1.0f, 0.0f));
+    OceanSea unasked;
+    unasked.advance(0.0, 8.0f, vec2(1.0f, 0.0f));
+    unasked.advance(1.0, 2.0f, vec2(1.0f, 0.0f));
+    for (int kind : {OceanSea::kKeptHeight, OceanSea::kKeptSlope}) {
+        for (int c = 0; c < kOceanCascades; ++c) {
+            CHECK(asked.kept(kind, c, deep, pond) == unasked.kept(kind, c, deep, pond));
+        }
+    }
+    // Over fifty yards a gentler wind raises only shorter waves - its sea
+    // there peaks at a tenth of a yard - so the pond keeps less of the chop.
+    CHECK(asked.kept(OceanSea::kKeptSlope, 2, deep, pond) < 0.5f * inBreeze);
+}
+
 TEST_CASE("each wave runs as fast as water carries one that long, and comes round again", "[water][ocean]") {
     // A metre-long wave runs at sqrt(g lambda / 2 pi) = 1.25 m/s.
     const float metre = 2.0f * kOceanPi / kYardsPerMetre;

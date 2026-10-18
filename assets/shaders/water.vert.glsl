@@ -50,12 +50,15 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     vec4 oceanKept[OCEAN_KEPT_VEC4S];
     mat4 seaBedMatrix;
     vec4 seaBed;
+    vec4 wakeArea;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
 layout(set = 2, binding = 6) uniform sampler2D seaFetchMap;
+layout(set = 2, binding = 7) uniform sampler2D wakeSurface;
 
 #include "ocean_surface.glsli"
+#include "water_wake_surface.glsli"
 #include "water_surface.glsli"
 
 layout(location = 0) in vec3 aPos;

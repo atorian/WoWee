@@ -16,6 +16,7 @@ struct ShortcutKey {
 /// against the rest and against what the interface is left with.
 constexpr ShortcutKey kShortcuts[] = {
     {SDL_SCANCODE_GRAVE, SDL_KMOD_CTRL, ClientShortcut::TogglePerformanceHud, "Ctrl+`"},
+    {SDL_SCANCODE_F10, SDL_KMOD_CTRL, ClientShortcut::ToggleWeatherPanel, "Ctrl+F10"},
 };
 
 /// Whether the modifiers held are the ones a shortcut names: each of control,

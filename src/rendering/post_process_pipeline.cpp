@@ -1088,7 +1088,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.motionVecPipelineLayout;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.motionVecPipeline) != VK_SUCCESS) {
+        if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr, &fsr2_.motionVecPipeline) != VK_SUCCESS) {
             LOG_ERROR("FSR2: failed to create motion vector pipeline");
             compMod.destroy();
             destroyFSR2Resources();
@@ -1182,7 +1182,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.accumulatePipelineLayout;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.accumulatePipeline) != VK_SUCCESS) {
+        if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr, &fsr2_.accumulatePipeline) != VK_SUCCESS) {
             LOG_ERROR("FSR2: failed to create accumulation pipeline");
             compMod.destroy();
             destroyFSR2Resources();

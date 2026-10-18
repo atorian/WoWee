@@ -145,7 +145,7 @@ void AssetManager::shutdown() {
     if (fileCacheHits + fileCacheMisses > 0) {
         float hitRate = static_cast<float>(fileCacheHits) / (fileCacheHits + fileCacheMisses) * 100.0f;
         LOG_INFO("File cache stats: ", fileCacheHits, " hits, ", fileCacheMisses, " misses (",
-                 static_cast<int>(hitRate), "% hit rate), ", fileCacheTotalBytes / 1024 / 1024, " MB cached");
+                 static_cast<int>(hitRate), "% hit rate), ", fileCacheStats().bytes / 1024 / 1024, " MB cached");
     }
 
     clearCache();
@@ -355,7 +355,7 @@ BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed)
     // Not kept in the file cache: decoded and uploaded, the texture is the
     // GPU texture cache's from here on, and the file's bytes would only be a
     // second copy of it in system memory.
-    std::vector<uint8_t> blpData = readFileBytes(normalizedPath, KeepBytes::No);
+    std::vector<uint8_t> blpData = readFileNotKept(normalizedPath);
     if (blpData.empty()) {
         static std::mutex logMtx;
         static std::unordered_set<std::string> loggedMissingTextures;
@@ -519,7 +519,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
     std::string dbcPath = "DBFilesClient\\" + name;
     {
         // The parsed table is cached (dbcCache); its file's bytes are not.
-        dbcData = readFileBytes(normalizePath(dbcPath), KeepBytes::No);
+        dbcData = readFileNotKept(normalizePath(dbcPath));
     }
 
     // If asset_extract was run with --emit-json-dbc, the DBC's directory
@@ -730,7 +730,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     {
         std::string dbcPath = "DBFilesClient\\" + name;
         // The parsed table is cached (dbcCache); its file's bytes are not.
-        dbcData = readFileBytes(normalizePath(dbcPath), KeepBytes::No);
+        dbcData = readFileNotKept(normalizePath(dbcPath));
     }
 
     // Fall back to expansion-specific CSV
@@ -795,31 +795,80 @@ bool AssetManager::fileExists(const std::string& path) const {
 }
 
 std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
-    if (!initialized) {
-        return {};
-    }
-    return readFileBytes(normalizePath(path), KeepBytes::Yes);
+    // A copy for a caller that keeps or changes the bytes, taken outside the
+    // cache's lock.
+    if (FileBytes bytes = readFileShared(path)) return *bytes;
+    return {};
 }
 
-std::vector<uint8_t> AssetManager::readFileBytes(const std::string& normalized, KeepBytes keep) const {
+AssetManager::FileBytes AssetManager::readFileShared(const std::string& path) const {
+    if (!initialized) {
+        return nullptr;
+    }
+    const std::string normalized = normalizePath(path);
+    uint64_t generation = 0;
+    if (FileBytes hit = cachedFile(normalized, generation)) return hit;
+    // A miss of the files read to be kept; a texture's or DBC's read is not.
+    fileCacheMisses++;
+    std::vector<uint8_t> data = readFromSource(normalized);
+    if (data.empty()) return nullptr;
+    return keepFile(normalized, std::move(data), generation);
+}
+
+std::vector<uint8_t> AssetManager::readFileNotKept(const std::string& normalized) const {
     if (!initialized) {
         return {};
     }
-
-    // Check cache first (shared lock allows concurrent reads)
     uint64_t generation = 0;
-    {
-        std::shared_lock<std::shared_mutex> cacheLock(cacheMutex);
-        generation = cacheGeneration_;
-        auto it = fileCache.find(normalized);
-        if (it != fileCache.end()) {
-            auto data = it->second.data;
-            cacheLock.unlock();
-            fileCacheHits++;
-            return data;
-        }
-    }
+    if (FileBytes hit = cachedFile(normalized, generation)) return *hit;
+    return readFromSource(normalized);
+}
 
+AssetManager::FileBytes AssetManager::cachedFile(const std::string& normalized,
+                                                 uint64_t& generation) const {
+    std::unique_lock<std::mutex> lock(fileCacheMutex_);
+    generation = fileCacheGeneration_;
+    const auto it = fileCache.find(normalized);
+    if (it == fileCache.end()) return nullptr;
+    // Most recently read: to the front, out of the way of eviction.
+    fileCacheLru_.splice(fileCacheLru_.begin(), fileCacheLru_, it->second);
+    FileBytes data = it->second->data;
+    lock.unlock();
+    fileCacheHits++;
+    return data;
+}
+
+void AssetManager::evictFilesFor(size_t incoming) const {
+    while (!fileCacheLru_.empty() && fileCacheTotalBytes + incoming > fileCacheBudget) {
+        const CachedFile& oldest = fileCacheLru_.back();
+        fileCacheTotalBytes -= oldest.data->size();
+        fileCache.erase(oldest.path);
+        fileCacheLru_.pop_back();
+    }
+}
+
+AssetManager::FileBytes AssetManager::keepFile(const std::string& normalized,
+                                               std::vector<uint8_t>&& data,
+                                               uint64_t generation) const {
+    auto bytes = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+    const size_t fileSize = bytes->size();
+    std::lock_guard<std::mutex> lock(fileCacheMutex_);
+    // Too large to keep without pushing out half the cache, or read through
+    // a layer that has since been replaced: handed out, not kept.
+    if (fileSize >= fileCacheBudget / 2 || generation != fileCacheGeneration_) return bytes;
+    // Another thread read the same file meanwhile and kept it: share that copy.
+    if (const auto it = fileCache.find(normalized); it != fileCache.end()) {
+        fileCacheLru_.splice(fileCacheLru_.begin(), fileCacheLru_, it->second);
+        return it->second->data;
+    }
+    evictFilesFor(fileSize);
+    fileCacheLru_.push_front({normalized, bytes});
+    fileCache.emplace(normalized, fileCacheLru_.begin());
+    fileCacheTotalBytes += fileSize;
+    return bytes;
+}
+
+std::vector<uint8_t> AssetManager::readFromSource(const std::string& normalized) const {
     // The override dir, then the archive layer, then what was extracted.
     std::vector<uint8_t> data;
     std::string fsPath = resolveOverride(normalized);
@@ -842,33 +891,13 @@ std::vector<uint8_t> AssetManager::readFileBytes(const std::string& normalized, 
             return data;
         }
     }
-
-    // Add to cache if within budget
-    size_t fileSize = data.size();
-    if (keep == KeepBytes::Yes && fileSize > 0 && fileSize < fileCacheBudget / 2) {
-        std::lock_guard<std::shared_mutex> cacheLock(cacheMutex);
-        // Read through a layer that has since been replaced.
-        if (generation != cacheGeneration_) return data;
-        // Evict old entries if needed (LRU)
-        while (fileCacheTotalBytes + fileSize > fileCacheBudget && !fileCache.empty()) {
-            auto lru = fileCache.begin();
-            for (auto it = fileCache.begin(); it != fileCache.end(); ++it) {
-                if (it->second.lastAccessTime < lru->second.lastAccessTime) {
-                    lru = it;
-                }
-            }
-            fileCacheTotalBytes -= lru->second.data.size();
-            fileCache.erase(lru);
-        }
-
-        CachedFile cached;
-        cached.data = data;
-        cached.lastAccessTime = ++fileCacheAccessCounter;
-        fileCache[normalized] = std::move(cached);
-        fileCacheTotalBytes += fileSize;
-    }
-
     return data;
+}
+
+void AssetManager::setFileCacheBudget(size_t bytes) {
+    std::lock_guard<std::mutex> lock(fileCacheMutex_);
+    fileCacheBudget = bytes;
+    evictFilesFor(0);
 }
 
 std::vector<uint8_t> AssetManager::readFileOptional(const std::string& path) const {
@@ -882,7 +911,7 @@ std::vector<uint8_t> AssetManager::readFileOptional(const std::string& path) con
 }
 
 core::CacheStats AssetManager::fileCacheStats() const {
-    std::shared_lock<std::shared_mutex> lock(cacheMutex);
+    std::lock_guard<std::mutex> lock(fileCacheMutex_);
     return {fileCache.size(), fileCacheTotalBytes, fileCacheBudget};
 }
 
@@ -903,12 +932,16 @@ void AssetManager::clearCache() {
         std::lock_guard<std::shared_mutex> existsLock(existsMutex_);
         existsCache_.clear();
     }
+    {
+        std::lock_guard<std::mutex> fileLock(fileCacheMutex_);
+        ++fileCacheGeneration_;
+        fileCache.clear();
+        fileCacheLru_.clear();
+        fileCacheTotalBytes = 0;
+    }
     std::lock_guard<std::shared_mutex> lock(cacheMutex);
     ++cacheGeneration_;
     dbcCache.clear();
-    fileCache.clear();
-    fileCacheTotalBytes = 0;
-    fileCacheAccessCounter = 0;
     LOG_INFO("Cleared asset cache (DBC + file cache)");
 }
 std::string AssetManager::normalizePath(const std::string& path) const {

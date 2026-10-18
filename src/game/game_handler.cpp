@@ -17,6 +17,7 @@
 #include "game/social_handler.hpp"
 #include "game/account_data_handler.hpp"
 #include "game/realm_time_handler.hpp"
+#include "game/weather_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
 #include "game/warden_crypto.hpp"
@@ -142,6 +143,9 @@ GameHandler::GameHandler(GameServices& services)
             reputationRowsDirty_ = true;
         }));
     realmTimeHandler_ = std::make_unique<RealmTimeHandler>(*services_.events, services_.steadyNow);
+    weatherHandler_ = std::make_unique<WeatherHandler>(
+        *services_.events, *this, *chatHandler_,
+        [] { return isClassicLikeExpansion() ? WeatherNumbering::Classic : WeatherNumbering::WeatherState; });
 
     // The character's own settings, read once its spells have arrived - the
     // first thing the realm sends of a character entering the world.

@@ -259,11 +259,11 @@ void Minimap::shutdown() {
 
     destroy(alloc, quadVB, quadVBAlloc);
 
-    for (auto& [hash, tex] : tileTextureCache) {
-        if (tex) tex->destroy(device, alloc);
+    for (auto& [hash, cached] : tileTextureCache) {
+        if (cached.texture) cached.texture->destroy(device, alloc);
     }
     tileTextureCache.clear();
-    tileInsertionOrder.clear();
+    tileLru_.clear();
 
     if (noDataTexture) { noDataTexture->destroy(device, alloc); noDataTexture.reset(); }
     if (compositeTarget) { compositeTarget->destroy(device, alloc); compositeTarget.reset(); }
@@ -360,14 +360,19 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
     const std::string& hash = trsIt->second;
 
     auto cacheIt = tileTextureCache.find(hash);
-    if (cacheIt != tileTextureCache.end())
-        return cacheIt->second.get();
+    if (cacheIt != tileTextureCache.end()) {
+        CachedTile& cached = cacheIt->second;
+        if (!cached.texture) return noDataTexture.get();
+        tileLru_.splice(tileLru_.begin(), tileLru_, cached.lru);
+        return cached.texture.get();
+    }
 
     // Load from MPQ
     std::string blpPath = "Textures\\Minimap\\" + hash + ".blp";
     auto blpImage = assetManager->loadTexture(blpPath);
     if (!blpImage.isValid()) {
-        tileTextureCache[hash] = nullptr;  // Mark as failed
+        LOG_WARNING("Minimap: tile ", key, " (", blpPath, ") could not be loaded - drawn as no data");
+        tileTextureCache[hash] = CachedTile{nullptr, tileLru_.end()};  // Mark as failed
         return noDataTexture.get();
     }
 
@@ -378,14 +383,19 @@ VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
                        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
 
     VkTexture* ptr = tex.get();
-    tileTextureCache[hash] = std::move(tex);
-    tileInsertionOrder.push_back(hash);
+    tileLru_.push_front(hash);
+    tileTextureCache[hash] = CachedTile{std::move(tex), tileLru_.begin()};
 
-    // Evict oldest tiles when cache grows too large to bound GPU memory usage.
-    while (tileInsertionOrder.size() > MAX_TILE_CACHE) {
-        const std::string& oldest = tileInsertionOrder.front();
-        tileTextureCache.erase(oldest);
-        tileInsertionOrder.pop_front();
+    // Let the least recently drawn tiles go to bound GPU memory. The frames in
+    // flight may still sample one through a descriptor written before, so it
+    // is destroyed after their fences, not here.
+    while (tileLru_.size() > MAX_TILE_CACHE) {
+        auto evicted = tileTextureCache.find(tileLru_.back());
+        tileLru_.pop_back();
+        if (evicted == tileTextureCache.end()) continue;
+        std::shared_ptr<VkTexture> retiring = std::move(evicted->second.texture);
+        tileTextureCache.erase(evicted);
+        vkCtx->deferAfterAllFrameFences([retiring]() mutable { retiring.reset(); });
     }
 
     return ptr;

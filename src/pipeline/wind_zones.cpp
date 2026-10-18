@@ -189,13 +189,18 @@ std::optional<size_t> WindZoneTable::regimeIndex(std::string_view name) const {
     return std::nullopt;
 }
 
-WindWeatherRule WindZoneTable::weatherRule(uint32_t weatherType) const {
-    switch (weatherType) {
-        case 1: return rain_;
-        case 2: return snow_;
-        case 3: return storm_;
-        default: return {};
+WindWeatherRule WindZoneTable::weatherRule(WeatherKind kind) const {
+    switch (kind) {
+        case WeatherKind::Rain:
+        case WeatherKind::BlackRain: return rain_;
+        case WeatherKind::Snow:
+        case WeatherKind::BlackSnow: return snow_;
+        case WeatherKind::Thunderstorm:
+        case WeatherKind::Sandstorm: return storm_;
+        case WeatherKind::Clear:
+        case WeatherKind::Fog: return {};
     }
+    return {};
 }
 
 WindZoneTable parseWindZones(std::string_view jsonText, const std::string& origin) {

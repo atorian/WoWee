@@ -160,12 +160,6 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
         return false;
     }
 
-    // Set dynamic tile cache budget.
-    // Keep this lower so decompressed MPQ file cache can stay very aggressive.
-    auto& memMonitor = core::MemoryMonitor::getInstance();
-    tileCacheBudgetBytes_ = memMonitor.getRecommendedCacheBudget() / 4;
-    LOG_INFO("Terrain tile cache budget: ", tileCacheBudgetBytes_ / (1024 * 1024), " MB (dynamic)");
-
     // Start background worker pool (dynamic: scales with available cores)
     // Keep defaults moderate; env override can increase if streaming is bottlenecked.
     workerRunning.store(true);
@@ -318,11 +312,6 @@ bool TerrainManager::enqueueTile(int x, int y) {
 
 std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     TileCoord coord = {.x = x, .y = y};
-    if (auto cached = getCachedTile(coord)) {
-        LOG_DEBUG("Using cached tile [", x, ",", y, "]");
-        return cached;
-    }
-
     LOG_DEBUG("Preparing tile [", x, ",", y, "] (CPU work)");
 
     // Early-exit check - worker should bail fast during shutdown
@@ -416,14 +405,14 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     // Fall back to ADT format
     if (!loadedFromWot) {
         std::string adtPath = getADTPath(coord);
-        auto adtData = assetManager->readFile(adtPath);
+        const auto adtData = assetManager->readFileShared(adtPath);
 
-        if (adtData.empty()) {
+        if (!adtData) {
             logMissingAdtOnce(adtPath);
             return nullptr;
         }
 
-        *terrainPtr = pipeline::ADTLoader::load(adtData);
+        *terrainPtr = pipeline::ADTLoader::load(*adtData);
         if (!terrainPtr->isLoaded()) {
             LOG_ERROR("Failed to parse ADT terrain: ", adtPath);
             return nullptr;
@@ -437,9 +426,9 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     if (!loadedFromWot) {
     std::string objPath = "World\\Maps\\" + mapName + "\\" + mapName + "_" +
                           std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_obj0.adt";
-    auto objData = assetManager->readFile(objPath);
-    if (!objData.empty()) {
-        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(objData));
+    const auto objData = assetManager->readFileShared(objPath);
+    if (objData) {
+        auto objTerrain = std::make_unique<pipeline::ADTTerrain>(pipeline::ADTLoader::load(*objData));
         if (objTerrain->isLoaded()) {
             const uint32_t doodadNameBase = static_cast<uint32_t>(terrainPtr->doodadNames.size());
             const uint32_t wmoNameBase = static_cast<uint32_t>(terrainPtr->wmoNames.size());
@@ -570,21 +559,21 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             }
         }
 
-        std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-        if (m2Data.empty()) {
+        const auto m2Data = assetManager->readFileShared(m2Path);
+        if (!m2Data) {
             skippedFileNotFound++;
             return false;
         }
 
-        pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+        pipeline::M2Model m2Model = pipeline::M2Loader::load(*m2Data);
         // The asset path carries foliage semantics; embedded names frequently
         // do not. Always classify ADT doodads using the path.
         m2Model.name = m2Path;
         std::string skinPath = pipeline::skinPathForM2(m2Path);
-        std::vector<uint8_t> skinData = assetManager->readFileOptional(skinPath);
-        if (!skinData.empty() && m2Model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, m2Model);
-        } else if (skinData.empty() && m2Model.version >= 264) {
+        const auto skinData = assetManager->readFileShared(skinPath);
+        if (skinData && m2Model.version >= 264) {
+            pipeline::M2Loader::loadSkin(*skinData, m2Model);
+        } else if (!skinData && m2Model.version >= 264) {
             skippedSkinNotFound++;
         }
 
@@ -698,18 +687,17 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             }
 
             if (!wobLoaded) {
-                std::vector<uint8_t> wmoData = assetManager->readFile(wmoPath);
-                if (wmoData.empty()) continue;
+                const auto wmoData = assetManager->readFileShared(wmoPath);
+                if (!wmoData) continue;
 
-                wmoModel = pipeline::WMOLoader::load(wmoData);
+                wmoModel = pipeline::WMOLoader::load(*wmoData);
                 if (wmoModel.nGroups > 0) {
                     for (uint32_t gi = 0; gi < wmoModel.nGroups; gi++) {
                         for (const std::string& groupPath :
                              pipeline::wmoGroupCandidates(wmoPath, gi)) {
-                            std::vector<uint8_t> groupData =
-                                assetManager->readFile(groupPath);
-                            if (groupData.empty()) continue;
-                            pipeline::WMOLoader::loadGroup(groupData, wmoModel, gi);
+                            const auto groupData = assetManager->readFileShared(groupPath);
+                            if (!groupData) continue;
+                            pipeline::WMOLoader::loadGroup(*groupData, wmoModel, gi);
                             break;
                         }
                     }
@@ -784,15 +772,15 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
 
                         pipeline::M2Model m2Model;
                         if (!modelAlreadyUploaded && !modelAlreadyPreparedInWmo) {
-                            std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-                            if (m2Data.empty()) continue;
+                            const auto m2Data = assetManager->readFileShared(m2Path);
+                            if (!m2Data) continue;
 
-                            m2Model = pipeline::M2Loader::load(m2Data);
+                            m2Model = pipeline::M2Loader::load(*m2Data);
                             m2Model.name = m2Path;
                             std::string skinPath = pipeline::skinPathForM2(m2Path);
-                            std::vector<uint8_t> skinData = assetManager->readFile(skinPath);
-                            if (!skinData.empty() && m2Model.version >= 264) {
-                                pipeline::M2Loader::loadSkin(skinData, m2Model);
+                            const auto skinData = assetManager->readFileShared(skinPath);
+                            if (skinData && m2Model.version >= 264) {
+                                pipeline::M2Loader::loadSkin(*skinData, m2Model);
                             }
                             if (!m2Model.isValid()) continue;
                             wmoPreparedModelIds.insert(doodadModelId);
@@ -1432,8 +1420,9 @@ void TerrainManager::workerLoop() {
             // little memory free by design - sat at under 15% with every
             // worker asleep and no terrain at all.
             const auto& memMon = core::MemoryMonitor::getInstance();
-            const bool severe = memMon.isSevereMemoryPressure();
-            const bool pressure = severe || memMon.isMemoryPressure();
+            const core::MemoryPressure level = memMon.pressure();
+            const bool severe = level == core::MemoryPressure::Severe;
+            const bool pressure = level != core::MemoryPressure::None;
             const bool inFlight = preparingTiles_ > 0 || !readyQueue.empty();
             if (pressure && inFlight) {
                 if (!memoryWaitReported_) {
@@ -1664,24 +1653,6 @@ void TerrainManager::processOneReadyTile() {
     }
 }
 
-core::CacheStats TerrainManager::tileCacheStats() const {
-    std::lock_guard<std::mutex> lock(tileCacheMutex_);
-    core::CacheStats stats;
-    stats.entries = tileCache_.size();
-    for (const auto& [coord, cached] : tileCache_) stats.bytes += cached.bytes;
-    stats.budgetBytes = tileCacheBudgetBytes_;
-    return stats;
-}
-
-std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coord) {
-    std::lock_guard<std::mutex> lock(tileCacheMutex_);
-    auto it = tileCache_.find(coord);
-    if (it == tileCache_.end()) return nullptr;
-    tileCacheLru_.erase(it->second.lruIt);
-    tileCacheLru_.push_front(coord);
-    it->second.lruIt = tileCacheLru_.begin();
-    return it->second.tile;
-}
 void TerrainManager::unloadTile(int x, int y) {
     TileCoord coord = {.x = x, .y = y};
 
@@ -1901,18 +1872,18 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
     auto ensureModelPrepared = [&](const std::string& m2Path, uint32_t modelId) -> bool {
         if (preparedModelIds.count(modelId)) return true;
 
-        std::vector<uint8_t> m2Data = assetManager->readFile(m2Path);
-        if (m2Data.empty()) {
+        const auto m2Data = assetManager->readFileShared(m2Path);
+        if (!m2Data) {
             modelMissing++;
             return false;
         }
 
-        pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+        pipeline::M2Model m2Model = pipeline::M2Loader::load(*m2Data);
         m2Model.name = m2Path;
         std::string skinPath = pipeline::skinPathForM2(m2Path);
-        std::vector<uint8_t> skinData = assetManager->readFileOptional(skinPath);
-        if (!skinData.empty() && m2Model.version >= 264) {
-            pipeline::M2Loader::loadSkin(skinData, m2Model);
+        const auto skinData = assetManager->readFileShared(skinPath);
+        if (skinData && m2Model.version >= 264) {
+            pipeline::M2Loader::loadSkin(*skinData, m2Model);
         }
         if (!m2Model.isValid()) {
             modelInvalid++;

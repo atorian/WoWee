@@ -1,0 +1,33 @@
+// One line of FFT_SIZE points, two complex lanes to a vec4, through the
+// inverse radix-2 Stockham FFT in shared memory (ocean_fft.glsli's
+// butterflies), and back in place. A workgroup of FFT_SIZE / 2 invocations
+// takes one line; each takes one butterfly of every stage.
+//
+// Needs, defined before it: FFT_SIZE, and FFT_LOAD(i) / FFT_STORE(i, v),
+// which read and write point i of the workgroup's line - the ocean's modes
+// and the wake's spectrum lie in different images. And ocean_fft.glsli.
+
+shared vec4 fftLine[2][FFT_SIZE];
+
+void fftTransformLine() {
+    int j = int(gl_LocalInvocationID.x);
+    const int halfSize = FFT_SIZE / 2;
+    fftLine[0][j] = FFT_LOAD(j);
+    fftLine[0][j + halfSize] = FFT_LOAD(j + halfSize);
+    barrier();
+
+    int from = 0;
+    for (int stage = 0; (1 << stage) < FFT_SIZE; ++stage) {
+        OceanButterfly b = oceanStockhamButterfly(j, stage, FFT_SIZE);
+        vec4 s0 = fftLine[from][b.source0];
+        vec4 s1 = fftLine[from][b.source1];
+        vec4 w = vec4(oceanComplexMul(b.twiddle, s1.xy), oceanComplexMul(b.twiddle, s1.zw));
+        fftLine[1 - from][b.target0] = s0 + w;
+        fftLine[1 - from][b.target1] = s0 - w;
+        from = 1 - from;
+        barrier();
+    }
+
+    FFT_STORE(j, fftLine[from][j]);
+    FFT_STORE(j + halfSize, fftLine[from][j + halfSize]);
+}

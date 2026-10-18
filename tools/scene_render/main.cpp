@@ -12,8 +12,12 @@
 //   {
 //     "map": "Northrend", "mapId": 571, "zoneId": 4395,
 //     "hour": 12.0,                       // the realm clock; the sky and the light
-//     "weather": "none",                  // none | rain | snow | storm
-//     "weatherIntensity": 0.0,
+//     "weather": "clear",                 // clear | fog | rain | snow | sandstorm |
+//                                         //   thunderstorm | blackrain | blacksnow
+//     "weatherIntensity": 0.0,            //   0-1; there from the first frame
+//     "lens": true,                       // what the weather leaves on the camera's
+//                                         //   lens - it gathers over the frames
+//     "splashes": true,                   // rain splashing where it lands
 //     "realmTime": 0.0,                   // the realm's calendar clock, seconds since
 //                                         //   1970, that the wind is drawn from; it
 //                                         //   runs on with the frames
@@ -30,7 +34,21 @@
 //       { "path": "World\\Azeroth\\Elwynn\\PassiveDoodads\\LampPost\\LampPost.m2",
 //         "offset": [0, 0, 0],             // render axes, from the origin
 //         "rotation": [0, 0, 0],           // degrees about x, y, z
-//         "scale": 1.0 }
+//         "scale": 1.0,
+//         "doodads": false,                // a WMO's doodads, placed as its
+//                                          //   children the way the client fits
+//                                          //   out a transport hull
+//         "hidden": false,                 // placed out of the world, as a
+//                                          //   transport is while its route is
+//                                          //   on the other map,
+//         "shownAtFrame": 10 }             //   and back in it from this frame
+//     ],
+//     "characters": [                     // drawn as the client draws units,
+//       { "path": "Creature\\Seal\\Seal.m2", //   and what follows units follows
+//         "offset": [0, 0, 0],             //   them - the water's wake - as
+//         "rotation": [0, 0, 0],           //   they move at `velocity` (render
+//         "scale": 1.0,                    //   yards a second) every frame
+//         "velocity": [3, 0, 0] }
 //     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
@@ -59,6 +77,10 @@
 // renderer's calls and their largest parts, and the GPU's time for the last
 // frame read back. A frame budget of the frames after the warm-up follows -
 // the same report, percentiles and parts, as the client's frame profile.
+//
+// Besides the picture it prints how many draw calls the world's M2 renderer
+// recorded in the kept frame, which is what the scene tests registered beside
+// this tool read.
 
 #include "core/coordinates.hpp"
 #include "core/frame_budget.hpp"
@@ -70,6 +92,7 @@
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -91,6 +114,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace wowee;
@@ -165,17 +189,73 @@ struct Bounds {
     bool valid = false;
 };
 
+/// One placed model, and when the scene brings it back into the world.
+struct Placement {
+    bool wmo = false;
+    uint32_t instanceId = 0;
+    int shownAtFrame = -1;  ///< -1: left as placed
+};
+
+/// A WMO's own doodads, placed as children of one of its instances the way
+/// the client fits out a transport: each an M2 instance of its own, carried
+/// by the hull's transform.
+bool placeWmoDoodads(const std::string& wmoPath, uint32_t wmoModelId, uint32_t wmoInstanceId,
+                     pipeline::AssetManager& assets, rendering::Renderer& renderer,
+                     uint32_t& nextDoodadModelId) {
+    auto* wmoRenderer = renderer.getWMORenderer();
+    auto* m2Renderer = renderer.getM2Renderer();
+    const auto* templates = wmoRenderer->getDoodadTemplates(wmoModelId);
+    if (!templates || templates->empty()) {
+        LOG_ERROR("scene_render: ", wmoPath, " has no doodads to place");
+        return false;
+    }
+    std::unordered_map<std::string, uint32_t> modelIds;
+    for (const auto& doodad : *templates) {
+        auto [known, fresh] = modelIds.try_emplace(lowered(doodad.m2Path), nextDoodadModelId);
+        if (fresh) {
+            ++nextDoodadModelId;
+            auto model = pipeline::M2Loader::load(assets.readFile(doodad.m2Path));
+            model.name = doodad.m2Path;
+            if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(doodad.m2Path)),
+                                              model) ||
+                !m2Renderer->loadModel(model, known->second)) {
+                LOG_ERROR("scene_render: cannot load ", doodad.m2Path, ", a doodad of ", wmoPath);
+                return false;
+            }
+        }
+        // At a placeholder position the hull moves it from, so never one
+        // deduplicated against another doodad of the same model.
+        const uint32_t instanceId = m2Renderer->createInstance(
+            known->second, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f, /*allowPositionDedup=*/false);
+        if (instanceId == 0) {
+            LOG_ERROR("scene_render: no instance for ", doodad.m2Path, ", a doodad of ", wmoPath);
+            return false;
+        }
+        wmoRenderer->addDoodadToInstance(wmoInstanceId, instanceId, doodad.localTransform);
+    }
+    LOG_INFO("scene_render: placed ", templates->size(), " doodads of ", wmoPath);
+    return true;
+}
+
 /// Load one model through the client's loaders and place it. Its bounds,
 /// in world space, extend `bounds`.
 bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManager& assets,
-                rendering::Renderer& renderer, uint32_t modelId, Bounds& bounds) {
+                rendering::Renderer& renderer, uint32_t modelId, uint32_t& nextDoodadModelId,
+                Bounds& bounds, std::vector<Placement>& placements) {
     const std::string path = entry.value("path", "");
     const glm::vec3 position = origin + vec3(entry.value("offset", json()));
     const glm::vec3 rotation = glm::radians(vec3(entry.value("rotation", json())));
     const float scale = entry.value("scale", 1.0f);
+    const bool hidden = entry.value("hidden", false);
+    Placement placement{.shownAtFrame = entry.value("shownAtFrame", -1)};
     glm::vec3 lo(0.0f), hi(0.0f);
     const std::string lower = lowered(path);
-    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0) {
+    placement.wmo = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0;
+    if (!placement.wmo && entry.value("doodads", false)) {
+        LOG_ERROR("scene_render: \"doodads\" is for a WMO, not ", path);
+        return false;
+    }
+    if (placement.wmo) {
         auto wmo = pipeline::WMOLoader::load(assets.readFile(path));
         for (uint32_t group = 0; group < wmo.nGroups; ++group) {
             const auto candidates = pipeline::wmoGroupCandidates(path, group);
@@ -184,8 +264,14 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
                 return false;
             }
         }
-        if (!renderer.getWMORenderer()->loadModel(wmo, modelId)) return false;
-        renderer.getWMORenderer()->createInstance(modelId, position, rotation, scale);
+        auto* wmoRenderer = renderer.getWMORenderer();
+        if (!wmoRenderer->loadModel(wmo, modelId)) return false;
+        placement.instanceId = wmoRenderer->createInstance(modelId, position, rotation, scale);
+        if (entry.value("doodads", false) &&
+            !placeWmoDoodads(path, modelId, placement.instanceId, assets, renderer, nextDoodadModelId)) {
+            return false;
+        }
+        if (hidden) wmoRenderer->setInstanceHidden(placement.instanceId, true);
         lo = wmo.boundingBoxMin;
         hi = wmo.boundingBoxMax;
     } else {
@@ -195,8 +281,10 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
             LOG_ERROR("scene_render: cannot load the skin of ", path);
             return false;
         }
-        if (!renderer.getM2Renderer()->loadModel(model, modelId)) return false;
-        renderer.getM2Renderer()->createInstance(modelId, position, rotation, scale, false);
+        auto* m2Renderer = renderer.getM2Renderer();
+        if (!m2Renderer->loadModel(model, modelId)) return false;
+        placement.instanceId = m2Renderer->createInstance(modelId, position, rotation, scale, false);
+        if (hidden) m2Renderer->setInstanceHidden(placement.instanceId, true);
         // From the vertices: the header's box is not always filled in, and a
         // doodad is often modelled well away from its origin.
         if (!model.vertices.empty()) {
@@ -215,15 +303,48 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
         bounds.min = glm::min(bounds.min, lo);
         bounds.max = glm::max(bounds.max, hi);
     }
-    LOG_INFO("scene_render: placed ", path);
+    placements.push_back(placement);
+    LOG_INFO("scene_render: placed ", path, hidden ? " hidden" : "");
     return true;
 }
 
-uint32_t weatherType(const std::string& name) {
-    if (name == "rain") return 1;
-    if (name == "snow") return 2;
-    if (name == "storm") return 3;
-    return 0;
+/// A unit's model through the client's loaders, placed as the client places
+/// units, to be moved each frame at `velocity`.
+struct MovingCharacter {
+    uint32_t instance = 0;
+    glm::vec3 position{0.0f};
+    glm::vec3 velocity{0.0f};
+};
+
+bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetManager& assets,
+                    rendering::Renderer& renderer, uint32_t modelId, MovingCharacter& placed) {
+    const std::string path = entry.value("path", "");
+    auto* characters = renderer.getCharacterRenderer();
+    if (!characters) {
+        LOG_ERROR("scene_render: no character renderer to place ", path, " with");
+        return false;
+    }
+    auto model = pipeline::M2Loader::load(assets.readFile(path));
+    model.name = path;
+    if (!pipeline::M2Loader::loadSkin(assets.readFile(pipeline::skinPathForM2(path)), model)) {
+        LOG_ERROR("scene_render: cannot load the skin of ", path);
+        return false;
+    }
+    if (!characters->loadModel(model, modelId)) {
+        LOG_ERROR("scene_render: the character renderer would not take ", path);
+        return false;
+    }
+    placed.position = origin + vec3(entry.value("offset", json()));
+    placed.velocity = vec3(entry.value("velocity", json()));
+    placed.instance = characters->createInstance(modelId, placed.position,
+                                                 glm::radians(vec3(entry.value("rotation", json()))),
+                                                 entry.value("scale", 1.0f));
+    if (placed.instance == 0) {
+        LOG_ERROR("scene_render: cannot place ", path);
+        return false;
+    }
+    LOG_INFO("scene_render: placed character ", path);
+    return true;
 }
 
 /// What the scene left in video memory, by use, and what each texture cache
@@ -370,8 +491,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
 
     Bounds bounds;
     uint32_t modelId = 0xFFFF0400;
+    uint32_t doodadModelId = 0xFFFE0000;
+    std::vector<Placement> placements;
     for (const auto& entry : scene.value("models", json::array())) {
-        if (!placeModel(entry, origin, assets, renderer, modelId++, bounds)) return 1;
+        if (!placeModel(entry, origin, assets, renderer, modelId++, doodadModelId, bounds, placements)) {
+            return 1;
+        }
+    }
+    std::vector<MovingCharacter> movingCharacters;
+    for (const auto& entry : scene.value("characters", json::array())) {
+        MovingCharacter placed;
+        if (!placeCharacter(entry, origin, assets, renderer, modelId++, placed)) return 1;
+        movingCharacters.push_back(placed);
     }
 
     // The camera: placed, aimed, or backed off to see the first model.
@@ -405,9 +536,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     environment.mapId = scene.value("mapId", 571u);
     environment.zoneId = scene.value("zoneId", 0u);
     environment.gameTime = scene.value("hour", 12.0f);
-    environment.weatherType = weatherType(scene.value("weather", std::string("none")));
+    const std::string weatherName = scene.value("weather", std::string("clear"));
+    const auto weatherKind = pipeline::weatherKindFromName(weatherName == "none" ? "clear" : weatherName);
+    if (!weatherKind) {
+        std::fprintf(stderr, "scene_render: \"weather\" is one of clear, fog, rain, snow, sandstorm, "
+                             "thunderstorm, blackrain, blacksnow - not \"%s\"\n", weatherName.c_str());
+        return 1;
+    }
+    environment.weatherKind = *weatherKind;
     environment.weatherIntensity = scene.value("weatherIntensity", 0.0f);
-    environment.raining = environment.weatherType == 1 || environment.weatherType == 3;
+    // What of it is drawn, as the weather dev panel switches it.
+    renderer.weatherControls().lens = scene.value("lens", true);
+    renderer.weatherControls().splashes = scene.value("splashes", true);
     // A realm clock of the scene's own, so the wind - drawn from it - is the
     // same on every run rather than whatever this machine's clock says.
     const double realmTime = scene.value("realmTime", 0.0);
@@ -465,8 +605,20 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
+        for (const auto& placement : placements) {
+            if (placement.shownAtFrame != frame) continue;
+            if (placement.wmo) {
+                renderer.getWMORenderer()->setInstanceHidden(placement.instanceId, false);
+            } else {
+                renderer.getM2Renderer()->setInstanceHidden(placement.instanceId, false);
+            }
+        }
         environment.realmSeconds = realmTime + frame * static_cast<double>(kStep);
         renderer.setWorldEnvironment(environment);
+        for (MovingCharacter& c : movingCharacters) {
+            if (frame > 0) c.position += c.velocity * kStep;
+            renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
+        }
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
         timer.call("beginFrame", [&] { renderer.beginFrame(); });
         timer.call("renderWorld", [&] { renderer.renderWorld(); });
@@ -494,6 +646,16 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
     timer.report(*renderer.getVkContext());
+    if (renderer.weatherMix().any()) {
+        const auto& mix = renderer.weatherMix();
+        LOG_WARNING("scene_render: weather rain ", mix.rain, " snow ", mix.snow, " sand ", mix.sand,
+                    "; ", renderer.precipitationCount(), " drops drawn; camera open to the sky ",
+                    renderer.skyExposure(), ", sky in view ", renderer.skyView(), "; ",
+                    renderer.lensDrops().drops().size(), " on the lens, frost ",
+                    renderer.lensDrops().frost(), ", dust ", renderer.lensDrops().dust());
+    }
+    std::printf("scene_render: world M2 draw calls: %u in the kept frame\n",
+                renderer.getM2Renderer()->getDrawCallCount());
     if (!renderer.captureScreenshot(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;

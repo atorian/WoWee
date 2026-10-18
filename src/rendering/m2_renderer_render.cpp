@@ -372,6 +372,8 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     // then stood still, and one with emitters - wrapped at a fixed 3.3 s
     // below, whatever its sequence - stopped for the rest of each lap.
     for (auto& instance : scene_->instances) {
+        // A hidden instance's clock stops, so it resumes where it was shown.
+        if (instance.hidden) continue;
         instance.animTime += dtMs;
         instance.globalSequenceTime += dtMs;
         // A boat asks once whether it is on water - the canal may stream in
@@ -1242,8 +1244,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         for (uint32_t k = begin; k < end; ++k) {
             const uint32_t i = list[k];
             const auto& instance = scene_->instances[i];
-            // A finished effect shows only the particles it has left.
-            if (instance.finishing) continue;
+            // A finished effect shows only the particles it has left. A
+            // hidden one is in no column; this keeps it out of the walks
+            // over every instance (forceNoCull_, the cull check) as well.
+            if (instance.finishing || instance.hidden) continue;
             float distSq;
             float effectiveMaxDistSq;
 
@@ -2450,8 +2454,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         shadowCasters_[0].clear();
         shadowCasters_[1].clear();
         auto castsHere = [&](const M2Instance& instance) {
-            if (!instance.cachedIsValid ||
-                instance.cachedIsInvisibleTrap || instance.finishing) return false;
+            if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap ||
+                instance.finishing || instance.hidden) return false;
             if (!instance.cachedModel) return false;
             return insideFootprint(instance, *instance.cachedModel);
         };

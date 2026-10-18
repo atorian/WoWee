@@ -35,6 +35,11 @@ thread_local std::vector<uint32_t> tl_m2_collisionTriScratch;
 } // namespace m2_internal
 
 void M2Renderer::fileInCullGrid(const M2Instance& instance) {
+    // A hidden instance is in no column, however it moves meanwhile.
+    if (instance.hidden) {
+        scene_->cullGrid_.remove(instance.id);
+        return;
+    }
     // The margin the shadow pass inflates a position by, before its division
     // by the pass's radius: the model's bound radius at this scale, times 1.5.
     const float boundRadius = instance.cachedModel ? instance.cachedModel->boundRadius
@@ -108,15 +113,57 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     }
     fileInCullGrid(inst);
 
-    // Incrementally update spatial grid
-    refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
-                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    // Incrementally update spatial grid; a hidden instance is not in it and
+    // is filed where it then is once shown.
+    if (!inst.hidden) {
+        refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    }
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     scene_->instances[idxIt->second].fade = std::clamp(alpha, 0.0f, 1.0f);
+}
+
+void M2Renderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
+    setInstancesHidden({instanceId}, hidden);
+}
+
+void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bool hidden) {
+    // Out of the world is out of every index the passes walk: the cull grid
+    // the view, shadow and GPU cull passes gather from, the spatial grid the
+    // floor and wall queries gather from, and the animated, particle and light
+    // lists. The few walks over every instance check the flag itself.
+    bool changed = false;
+    for (const uint32_t id : instanceIds) {
+        auto idxIt = scene_->instanceIndexById.find(id);
+        if (idxIt == scene_->instanceIndexById.end()) continue;
+        auto& inst = scene_->instances[idxIt->second];
+        if (inst.hidden == hidden) continue;
+        changed = true;
+        inst.hidden = hidden;
+        if (hidden) {
+            scene_->cullGrid_.remove(id);
+            eraseBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, id);
+            // What it had emitted goes with it rather than hanging where it
+            // was, or reappearing there, stale, when it comes back.
+            inst.particles.clear();
+            inst.particleReach = 0.0f;
+            for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
+        } else {
+            fileInCullGrid(inst);
+            insertBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, id);
+            // Back as if newly placed: no cull verdict to trust, and its bone
+            // slots were handed to others while it was away, so the bones are
+            // uploaded again wherever it lands.
+            inst.lastCullVisible = 1;
+            inst.hizPrevCulledFrames = 2;
+            inst.megaBoneUploadedSlot[0] = inst.megaBoneUploadedSlot[1] = 0;
+        }
+    }
+    if (changed) rebuildInstanceIndexLists();
 }
 
 void M2Renderer::setInstanceHighlight(uint32_t instanceId, float amount) {
@@ -344,9 +391,12 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     }
     fileInCullGrid(inst);
 
-    // Incrementally update spatial grid (remove old cells, add new cells)
-    refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
-                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    // Incrementally update spatial grid (remove old cells, add new cells).
+    // A hidden instance is not in it; showing it files it where it then is.
+    if (!inst.hidden) {
+        refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
+                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    }
     // No spatialIndexDirty_ = true - handled incrementally
 }
 
@@ -396,6 +446,8 @@ void M2Renderer::rebuildInstanceIndexLists() {
     scene_->lightInstanceIndices_.clear();
     for (size_t i = 0; i < scene_->instances.size(); i++) {
         auto& ri = scene_->instances[i];
+        // Not animated, emitting or lighting anything while out of the world.
+        if (ri.hidden) continue;
         if (ri.cachedHasEmitters) scene_->particleInstanceIndices_.push_back(i);
         if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
             scene_->animatedInstanceIndices_.push_back(i);
@@ -620,6 +672,9 @@ void M2Renderer::rebuildSpatialIndex() {
             scene_->instanceDedupMap_[dk] = inst.id;
         }
 
+        // In none of the per-frame lists or the spatial grid while hidden
+        // (setInstancesHidden); fileInCullGrid below leaves it out as well.
+        if (inst.hidden) continue;
         if (inst.cachedHasEmitters) {
             scene_->particleInstanceIndices_.push_back(i);
         }
@@ -656,7 +711,8 @@ void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& qu
     if (outIndices.empty() && !scene_->instances.empty()) {
         outIndices.reserve(scene_->instances.size());
         for (size_t i = 0; i < scene_->instances.size(); i++) {
-            outIndices.push_back(i);
+            // Hidden is out of the world, and the grid above leaves it out.
+            if (!scene_->instances[i].hidden) outIndices.push_back(i);
         }
     }
 }
@@ -863,6 +919,8 @@ std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
         return std::nullopt;
     }
     const auto& instance = scene_->instances[idxIt->second];
+    // Out of the world, it is nobody's floor.
+    if (instance.hidden) return std::nullopt;
     if (!instance.cachedModel || instance.scale <= 0.001f) return std::nullopt;
     const M2ModelGPU& model = *instance.cachedModel;
     if (!model.collision.valid()) return std::nullopt;
@@ -1226,7 +1284,7 @@ void M2Renderer::collectGrassClearings(float minX, float minY, float maxX, float
     for (const auto& inst : scene_->instances) {
         // The ground detail IS the grass's kin - clutter clearing the ground
         // around clutter would eat the whole field.
-        if (inst.cachedIsGroundDetail) continue;
+        if (inst.cachedIsGroundDetail || inst.hidden) continue;
 
         // Footprint radius from the horizontal bounds, capped: a fence post
         // clears its foot, a wagon its wheelbase, and a tree its trunk - not

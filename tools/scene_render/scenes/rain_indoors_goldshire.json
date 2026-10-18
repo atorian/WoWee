@@ -1,0 +1,15 @@
+// Inside the Lion's Pride Inn in Goldshire while it pours outside: no rain
+// in the room, none on the lens - the camera is under the inn's roof (camera
+// open to the sky 0 in the log) - and the rain falls past the windows. The
+// frames give drops gathered while the inn streamed in time to dry.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 12,
+  "hour": 14.0,
+  "weather": "rain", "weatherIntensity": 1.0,
+  "wind": { "direction": 0.0, "speed": 3.0 },
+  "server": [-9462.0, 16.0, 57.5],
+  "terrain": true,
+  "camera": { "offset": [0, 0, 1.6], "yaw": 160, "pitch": 5 },
+  "size": [1280, 720],
+  "frames": 400
+}

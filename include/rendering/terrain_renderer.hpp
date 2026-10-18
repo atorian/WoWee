@@ -7,6 +7,8 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/local_lights.hpp"
+#include "rendering/range_allocator.hpp"
+#include "rendering/vk_utils.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -93,16 +95,49 @@ struct TerrainChunkGPU {
     float boundingSphereRadius = 0.0f;
     glm::vec3 boundingSphereCenter = glm::vec3(0.0f);
 
-    // Offsets into mega buffers for indirect drawing (-1 = not in mega buffer)
-    int32_t megaBaseVertex = -1;
-    uint32_t megaFirstIndex = 0;
+    // Where the chunk's geometry lives in a shared page (TerrainGeometryPage):
+    // the page's slot in TerrainRenderer::geometryPages_, or -1 when the chunk
+    // has buffers of its own (vertexBuffer, indexBuffer) because no page had
+    // room and none could be made.
+    int32_t geometryPage = -1;
+    int32_t baseVertex = 0;
+    uint32_t firstIndex = 0;
     uint32_t vertexCount = 0;
+    /// Every index the chunk holds - all levels and their skirts - which is
+    /// what its place in a page spans and gives back.
+    uint32_t allIndexCount = 0;
 
     // The chunk as the ray traced lighting sees it (RtScene ids, or ~0u).
     uint32_t rtMesh = ~0u;
     uint32_t rtInstance = ~0u;
 
-    [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool isValid() const {
+        return geometryPage >= 0 || (vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE);
+    }
+};
+
+/// One device-local vertex buffer and index buffer that many chunks' geometry
+/// is copied into, each chunk at ranges handed out by the allocators. A
+/// chunk's ranges come back after the frames that may still draw it are done
+/// (deferAfterAllFrameFences), which is why the page is shared with those
+/// deferred frees rather than owned outright: a free may land after the
+/// renderer let the page go, and then it is only bookkeeping.
+struct TerrainGeometryPage {
+    AllocatedBuffer vertices;
+    AllocatedBuffer indices;
+    RangeAllocator vertexRanges;
+    RangeAllocator indexRanges;
+};
+
+/// How the resident terrain's geometry is held, for the frame profile.
+struct TerrainGeometryStats {
+    uint32_t pages = 0;
+    uint64_t vertexCapacity = 0;
+    uint64_t verticesUsed = 0;
+    uint64_t indexCapacity = 0;
+    uint64_t indicesUsed = 0;
+    /// Chunks with buffers of their own because no page could take them.
+    uint32_t ownBufferChunks = 0;
 };
 
 /**
@@ -190,6 +225,8 @@ public:
                       const glm::vec3& shadowCenter, float shadowRadius);
 
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
+
+    [[nodiscard]] TerrainGeometryStats geometryStats() const;
 
     void clear();
 
@@ -333,26 +370,31 @@ private:
     float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;
 
-    // Mega vertex/index buffers for indirect drawing
-    // All terrain chunks share a single VB + IB, eliminating per-chunk rebinds.
-    // Indirect draw commands are built CPU-side each frame for visible chunks.
-    VkBuffer megaVB_ = VK_NULL_HANDLE;
-    VmaAllocation megaVBAlloc_ = VK_NULL_HANDLE;
-    void* megaVBMapped_ = nullptr;
-    VkBuffer megaIB_ = VK_NULL_HANDLE;
-    VmaAllocation megaIBAlloc_ = VK_NULL_HANDLE;
-    void* megaIBMapped_ = nullptr;
-    uint32_t megaVBUsed_ = 0;  // vertices used
-    uint32_t megaIBUsed_ = 0;  // indices used
-    static constexpr uint32_t MEGA_VB_MAX_VERTS   = 1536 * 1024; // ~1.5M verts × 44B ≈ 64MB
-    // Every level of detail of a chunk shares its vertices and adds indices:
-    // 1608 a chunk against level 0's 768, so as many chunks fit as the
-    // vertex buffer holds (~8600 at 181 vertices each).
-    static constexpr uint32_t MEGA_IB_MAX_INDICES  = 14 * 1024 * 1024; // 14M indices × 4B = 56MB
+    // The chunks' geometry, in pages each holding many tiles, so the draw
+    // loops bind a vertex and an index buffer per page rather than per chunk.
+    // Made when the resident tiles need room and let go when a page empties,
+    // keeping one spare; a slot let go is null, so a chunk's page index stays
+    // put. A tile is 256 chunks, each with every level of detail and its
+    // skirts (pipeline::kChunkMaxVertices, kChunkMaxIndices).
+    std::vector<std::shared_ptr<TerrainGeometryPage>> geometryPages_;
+    static constexpr uint32_t kTilesPerGeometryPage = 16;
+    static constexpr uint32_t kPageVertices = kTilesPerGeometryPage * 256 * pipeline::kChunkMaxVertices;
+    static constexpr uint32_t kPageIndices = kTilesPerGeometryPage * 256 * pipeline::kChunkMaxIndices;
+    /// Set, and said once, when a page could not be made: no other is tried
+    /// until a page is let go or the terrain cleared, so a full device is not
+    /// asked again for every chunk.
+    bool geometryPagesExhausted_ = false;
+    uint32_t ownBufferChunks_ = 0;
 
-    VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
-    VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;
-    static constexpr uint32_t MAX_INDIRECT_DRAWS = 8192;
+    /// Copy the chunk's geometry into a page with room, making one if none
+    /// has; false when no page could be made.
+    bool placeInGeometryPage(TerrainChunkGPU& gpuChunk, const std::vector<pipeline::TerrainVertex>& vertices,
+                             const std::vector<pipeline::TerrainIndex>& indices);
+    /// Let go of pages nothing is in any more, keeping one spare.
+    void releaseEmptyGeometryPages();
+    void destroyGeometryPages();
+    /// Binds the page's buffers.
+    static void bindGeometryPage(VkCommandBuffer cmd, const TerrainGeometryPage& page);
 };
 
 } // namespace rendering

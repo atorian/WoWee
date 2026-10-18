@@ -1103,7 +1103,18 @@ void WMORenderer::setInstanceIsTransport(uint32_t instanceId, bool isTransport) 
 void WMORenderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
-    scene_->instances[idxIt->second].hidden = hidden;
+    auto& inst = scene_->instances[idxIt->second];
+    if (inst.hidden == hidden) return;
+    inst.hidden = hidden;
+    // Its doodads leave and come back with it. Hiding the hull alone left a
+    // ship's sails, barrels and anchor hanging over the harbour while the
+    // ship itself was on the other continent.
+    if (m2Renderer_ && !inst.doodads.empty()) {
+        std::vector<uint32_t> doodadIds;
+        doodadIds.reserve(inst.doodads.size());
+        for (const auto& doodad : inst.doodads) doodadIds.push_back(doodad.m2InstanceId);
+        m2Renderer_->setInstancesHidden(doodadIds, hidden);
+    }
 }
 
 void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
@@ -1172,6 +1183,9 @@ void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId
     // indefinitely if the parent is static.
     if (m2Renderer_) {
         m2Renderer_->setInstanceTransform(m2InstanceId, it->modelMatrix * localTransform);
+        // A transport's doodads stream in over several frames, and the hull
+        // may already be away on the other map by then.
+        if (it->hidden) m2Renderer_->setInstanceHidden(m2InstanceId, true);
     }
 }
 

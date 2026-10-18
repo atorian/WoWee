@@ -783,7 +783,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             VkComputePipelineCreateInfo cpCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             cpCi.stage = cullComp.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
             cpCi.layout = cullPipelineLayout_;
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &cullPipeline_) != VK_SUCCESS) {
+            if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCi, nullptr, &cullPipeline_) != VK_SUCCESS) {
                 LOG_ERROR("M2Renderer: failed to create cull compute pipeline");
                 cullPipeline_ = VK_NULL_HANDLE;
             }
@@ -818,7 +818,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             VkComputePipelineCreateInfo hizCpCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             hizCpCi.stage = cullHiZComp.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
             hizCpCi.layout = cullHiZPipelineLayout_;
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &hizCpCi, nullptr, &cullHiZPipeline_) != VK_SUCCESS) {
+            if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &hizCpCi, nullptr, &cullHiZPipeline_) != VK_SUCCESS) {
                 LOG_WARNING("M2Renderer: failed to create HiZ cull compute pipeline - HiZ disabled");
                 cullHiZPipeline_ = VK_NULL_HANDLE;
                 vkDestroyPipelineLayout(device, cullHiZPipelineLayout_, nullptr);
@@ -2521,7 +2521,7 @@ void M2Renderer::syncRtScene() {
     for (auto& inst : scene_->instances) {
         auto it = models.find(inst.modelId);
         const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
-        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f;
+        const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && !inst.hidden;
         // Still ours, not claimed by another instance this pass (a copied
         // M2Instance carries its original's id), and placing the same mesh.
         const bool valid = inst.rtInstance != RtScene::kInvalid &&

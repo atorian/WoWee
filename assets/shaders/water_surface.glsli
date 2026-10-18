@@ -1,12 +1,13 @@
 // Where a point of the still water is drawn: carried by the wind's sea as
-// far as geometry this fine can carry it, and by the player's ripple.
+// far as geometry this fine can carry it, and raised or let down by the
+// wake of what moves through it.
 // Shared by the vertex stage, which moves the water's own mesh, and the
 // tessellation evaluation stage, which moves the finer mesh near the
 // camera - both go by `step`, the yards between the vertices doing it.
 //
-// Needs, declared before it: the PerFrame block (fogParams, playerPos), the
-// water push block (push.*), WaterFrameData and the sea's surface
-// (ocean_surface.glsli).
+// Needs, declared before it: the water push block (push.*), WaterFrameData,
+// the sea's surface (ocean_surface.glsli) and the wake's
+// (water_wake_surface.glsli).
 
 vec3 displacedWaterPoint(vec3 rest, float step, float time) {
     vec3 displacement = vec3(0.0);
@@ -25,9 +26,7 @@ vec3 displacedWaterPoint(vec3 rest, float step, float time) {
         displacement = oceanDisplacementAt(rest, step);
     }
     vec3 p = rest + displacement;
-
-    // The player's ripple: rings spreading from where they swim.
-    float d = length(p.xy - playerPos.xy);
-    p.z += fogParams.w * 0.12 * exp(-d * 0.12) * sin(d * 2.5 - time * 6.0);
+    // The wake: what swims or wades through the water, every body of it.
+    if (push.liquidBasicType < 1.5) p.z += waterWakeAt(rest.xy).x;
     return p;
 }

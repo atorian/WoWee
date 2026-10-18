@@ -3769,6 +3769,20 @@ void CharacterRenderer::forEachEmitterSource(
     }
 }
 
+void CharacterRenderer::forEachBody(const std::function<void(const BodyPlace&)>& visit) const {
+    for (const auto& [id, inst] : scene_->instances) {
+        const M2ModelGPU* model = inst.cachedModel;
+        if (!model || inst.hasOverrideModelMatrix) continue;
+        BodyPlace body;
+        body.instanceId = id;
+        body.position = inst.position;
+        body.yaw = inst.rotation.z;
+        body.boundMin = model->visualBoundMin * inst.scale;
+        body.boundMax = model->visualBoundMax * inst.scale;
+        visit(body);
+    }
+}
+
 void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) {
     auto it = scene_->instances.find(instanceId);
     if (it == scene_->instances.end()) return;

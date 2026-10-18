@@ -2,6 +2,7 @@
 
 #include "rendering/liquid_scene.hpp"
 #include "rendering/ocean_waves.hpp"
+#include "rendering/water_wake.hpp"
 
 #include <array>
 #include <vector>
@@ -51,6 +52,9 @@ struct WaterFrameUBOData {
     // it has been drawn.
     glm::mat4 seaBedMatrix{1.0f};
     glm::vec4 seaBed{0.0f};
+    // The wake round the camera (WaterWake::area): xy = the world position
+    // of its corner, z = 1 / its side in yards, w = 1 once it has run.
+    glm::vec4 wakeArea{0.0f};
 };
 
 class WaterRenderer : public LiquidSceneListener {
@@ -126,9 +130,27 @@ public:
     /// `windSpeed` yards a second (gust in) blowing toward `windDirection`,
     /// measured near `nearby` (the player). Call once per frame.
     void advanceWindWaves(double deltaSeconds, float windSpeed, glm::vec2 windDirection, glm::vec2 nearby);
-    /// Build this frame's sea surface (OceanWaves::record): outside any
-    /// render pass, before the water is drawn.
-    void recordWaves(VkCommandBuffer cmd) { ocean_.record(cmd); }
+    /// Move the wake round the camera on by `deltaSeconds`, centred near
+    /// `nearby`, with `movers` the bodies in the water now. Once per frame.
+    void advanceWake(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers) {
+        wake_.advance(deltaSeconds, nearby, movers);
+    }
+    /// A frame with none of the water in view: the wake waits (WaterWake::rest).
+    void restWake(double deltaSeconds) { wake_.rest(deltaSeconds); }
+
+    /// Whether any of the water is in `camera`'s view now, its crests in.
+    /// Only then is there a sea to build (recordWaves), a wake to step, a
+    /// sea bed to draw it over and a mirror to draw for it; render draws
+    /// nothing otherwise. Once a frame, before any of them.
+    bool updateInView(const Camera& camera);
+    [[nodiscard]] bool inView() const { return inView_; }
+    /// Build this frame's sea surface (OceanWaves::record) and step the
+    /// wake (WaterWake::record): outside any render pass, before the water
+    /// is drawn.
+    void recordWaves(VkCommandBuffer cmd) {
+        ocean_.record(cmd);
+        wake_.record(cmd);
+    }
 
     /// Surfaces with geometry on the GPU.
     int getDrawnSurfaceCount() const { return static_cast<int>(drawn_.size()); }
@@ -169,6 +191,14 @@ private:
         VkDescriptorSet materialSet = VK_NULL_HANDLE;
     };
 
+    /// The box `surface` may be drawn in, as far as its waves carry it, for
+    /// culling it against the camera's view.
+    struct Bounds {
+        glm::vec3 min;
+        glm::vec3 max;
+    };
+    [[nodiscard]] Bounds boundsOf(const DrawnSurface& surface) const;
+
     void createWaterMesh(DrawnSurface& drawn, const LiquidSurface& surface);
     void destroyWaterMesh(DrawnSurface& drawn);
     void destroyAllDrawn();
@@ -187,6 +217,8 @@ private:
     OceanWaves ocean_;
     /// What lies under the water; the renderer's.
     const SeaBedMap* seaBed_ = nullptr;
+    /// What moves through the water leaves in it.
+    WaterWake wake_;
 
     void updateMaterialUBO(DrawnSurface& drawn);
     VkDescriptorSet allocateMaterialSet();
@@ -273,6 +305,7 @@ private:
 
     std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
+    bool inView_ = false;
     // On from the start. The renderer keeps it always on, but did so only when
     // the interface applied its saved settings, so until then - and in a
     // renderer with no interface, scene_render - the water had no capture of

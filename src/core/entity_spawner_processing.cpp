@@ -530,11 +530,12 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                     result.orientation = s.orientation;
                     result.scale = s.scale;
 
-                    auto m2Data = am->readFile(m2Path);
-                    if (m2Data.empty()) {
+                    const auto m2Bytes = am->readFileShared(m2Path);
+                    if (!m2Bytes) {
                         result.permanent_failure = true;
                         return result;
                     }
+                    const std::vector<uint8_t>& m2Data = *m2Bytes;
 
                     auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
                     if (model->name.empty()) model->name = m2Path;
@@ -568,9 +569,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                     // Load skin file
                     if (model->version >= 264) {
                         std::string skinPath = pipeline::skinPathForM2(m2Path);
-                        auto skinData = am->readFile(skinPath);
-                        if (!skinData.empty()) {
-                            pipeline::M2Loader::loadSkin(skinData, *model);
+                        if (const auto skinData = am->readFileShared(skinPath)) {
+                            pipeline::M2Loader::loadSkin(*skinData, *model);
                         }
                     }
 
@@ -1211,23 +1211,23 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     result.modelPath = capturePath;
                     result.isWmo = true;
 
-                    auto wmoData = am->readFile(capturePath);
-                    if (wmoData.empty()) {
+                    const auto wmoData = am->readFileShared(capturePath);
+                    if (!wmoData) {
                         result.error = "file missing or empty";
                         return result;
                     }
 
                     auto wmo = std::make_shared<pipeline::WMOModel>(
-                        pipeline::WMOLoader::load(wmoData));
+                        pipeline::WMOLoader::load(*wmoData));
 
                     // Load groups
                     if (wmo->nGroups > 0) {
                         for (uint32_t gi = 0; gi < wmo->nGroups; gi++) {
                             for (const std::string& groupPath :
                                  pipeline::wmoGroupCandidates(capturePath, gi)) {
-                                auto groupData = am->readFile(groupPath);
-                                if (groupData.empty()) continue;
-                                pipeline::WMOLoader::loadGroup(groupData, *wmo, gi);
+                                const auto groupData = am->readFileShared(groupPath);
+                                if (!groupData) continue;
+                                pipeline::WMOLoader::loadGroup(*groupData, *wmo, gi);
                                 break;
                             }
                         }
@@ -1305,11 +1305,12 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     result.modelPath = capturePath;
                     result.isWmo = false;
 
-                    auto m2Data = am->readFile(capturePath);
-                    if (m2Data.empty()) {
+                    const auto m2Bytes = am->readFileShared(capturePath);
+                    if (!m2Bytes) {
                         result.error = "file missing or empty";
                         return result;
                     }
+                    const std::vector<uint8_t>& m2Data = *m2Bytes;
                     auto model = std::make_shared<pipeline::M2Model>(
                         pipeline::M2Loader::load(m2Data));
                     // Collision classification needs the asset path. Embedded M2
@@ -1323,10 +1324,10 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                     }
 
                     const std::string skinPath = pipeline::skinPathForM2(capturePath);
-                    auto skinData = am->readFile(skinPath);
-                    if (!skinData.empty() && model->version >= 264) {
-                        pipeline::M2Loader::loadSkin(skinData, *model);
-                    } else if (skinData.empty() && model->version >= 264) {
+                    const auto skinData = am->readFileShared(skinPath);
+                    if (skinData && model->version >= 264) {
+                        pipeline::M2Loader::loadSkin(*skinData, *model);
+                    } else if (!skinData && model->version >= 264) {
                         LOG_WARNING("GO skin file MISSING for WotLK M2 (no indices/batches): ", skinPath);
                     }
 
@@ -2388,19 +2389,20 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
             parsed = std::make_shared<pipeline::M2Model>();
             // Each failure is reported here, where its cause is known; the
             // empty result is cached, so this runs once per model.
-            auto bytes = assets->readFile(key);
-            if (bytes.empty()) {
+            const auto shared = assets->readFileShared(key);
+            if (!shared) {
                 LOG_WARNING("Model not found in any archive: ", key);
                 parsed.reset();
             } else {
+                const std::vector<uint8_t>& bytes = *shared;
                 *parsed = pipeline::M2Loader::load(bytes);
                 if (parsed->name.empty()) parsed->name = key;
                 if (parsed->version >= 264) {
                     const std::string skinPath = pipeline::skinPathForM2(key);
-                    auto skin = assets->readFile(skinPath);
-                    if (skin.empty()) {
+                    const auto skin = assets->readFileShared(skinPath);
+                    if (!skin) {
                         LOG_WARNING("Model ", key, ": skin file ", skinPath, " not found");
-                    } else if (!pipeline::M2Loader::loadSkin(skin, *parsed)) {
+                    } else if (!pipeline::M2Loader::loadSkin(*skin, *parsed)) {
                         LOG_WARNING("Model ", key, ": skin file ", skinPath, " did not parse");
                     }
                 }

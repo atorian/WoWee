@@ -39,6 +39,24 @@ using TerrainIndex = uint32_t;
 /// drops the quads' centre vertices).
 inline constexpr int kTerrainLodLevels = 4;
 
+/// The most vertices a chunk's mesh has: its 145 grid vertices and the nine
+/// outer vertices of each edge again, lowered, for its skirts.
+inline constexpr uint32_t kChunkMaxVertices = 145 + 4 * 9;
+
+/// The most indices a chunk's mesh holds: level 0's four triangles a quad,
+/// each coarser level's two a cell, and every level's skirts - a strip of two
+/// triangles per segment of each of the four edges.
+constexpr uint32_t terrainChunkMaxIndices() {
+    uint32_t total = 8 * 8 * 4 * 3;
+    for (int level = 0; level < kTerrainLodLevels; ++level) {
+        const uint32_t cells = level == 0 ? 8u : 8u >> (level - 1);
+        if (level > 0) total += cells * cells * 2 * 3;
+        total += 4 * cells * 2 * 3;
+    }
+    return total;
+}
+inline constexpr uint32_t kChunkMaxIndices = terrainChunkMaxIndices();
+
 /**
  * Renderable terrain mesh for a single map chunk
  */

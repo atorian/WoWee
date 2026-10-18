@@ -1,0 +1,18 @@
+// The Stormwind ship while its route is on the other map: the hull hidden, as
+// the transport manager hides it. Nothing of it may be drawn - its sails,
+// barrels and anchor used to hang over the harbour with no ship under them.
+//
+// Out at sea west of the coast, where the map has no tiles: the renderer
+// streams the terrain around the camera whether or not the scene asks for it,
+// and a harbour's own doodads would be counted with the ship's.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 1519,
+  "hour": 12.0,
+  "server": [-8650.0, 9000.0, 0.0],
+  "models": [
+    { "path": "World\\wmo\\transports\\transport_ship\\transportship.wmo",
+      "doodads": true, "hidden": true }
+  ],
+  "size": [640, 360],
+  "frames": 30
+}

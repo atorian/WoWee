@@ -64,6 +64,7 @@ namespace wowee::game {
     class WardenHandler;
     class AccountDataHandler;
     class RealmTimeHandler;
+    class WeatherHandler;
 }
 
 namespace wowee {
@@ -1484,12 +1485,6 @@ public:
     float getGCDRemaining() const;
     float getGCDTotal() const;
     bool isGCDActive() const { return getGCDRemaining() > 0.0f; }
-
-    // Weather state (updated by SMSG_WEATHER)
-    // weatherType: 0=clear, 1=rain, 2=snow, 3=storm/fog
-    uint32_t getWeatherType() const { return weatherType_; }
-    float getWeatherIntensity() const { return weatherIntensity_; }
-    bool isRaining() const { return weatherType_ == 1 && weatherIntensity_ > 0.05f; }
 
     // Player skills
     const std::unordered_map<uint32_t, PlayerSkill>& getPlayerSkills() const {
@@ -3239,6 +3234,9 @@ public:
     /// What time it is on the realm: the world's hour and the calendar moment.
     RealmTimeHandler& realmTime() { return *realmTimeHandler_; }
     const RealmTimeHandler& realmTime() const { return *realmTimeHandler_; }
+    /// The weather where the character stands, as the realm says it.
+    WeatherHandler& weather() { return *weatherHandler_; }
+    const WeatherHandler& weather() const { return *weatherHandler_; }
 
     // ── Mutable Accessors for Members with Existing Const Getters ────
     void setTargetGuidRaw(uint64_t g) { targetGuid = g; }
@@ -3724,6 +3722,7 @@ private:
     std::unique_ptr<PetHandler> petHandler_;
     std::unique_ptr<ReputationHandler> reputationHandler_;
     std::unique_ptr<RealmTimeHandler> realmTimeHandler_;
+    std::unique_ptr<WeatherHandler> weatherHandler_;
 
     // Opcode dispatch table - built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;
@@ -4187,10 +4186,6 @@ private:
     uint32_t playerRestedXp_ = 0;
     bool isResting_ = false;
     uint32_t serverPlayerLevel_ = 1;
-
-    // ---- Weather state (SMSG_WEATHER) ----
-    uint32_t weatherType_ = 0;       // 0=clear, 1=rain, 2=snow, 3=storm
-    float weatherIntensity_ = 0.0f;  // 0.0 to 1.0
 
     // ---- Light override (SMSG_OVERRIDE_LIGHT) ----
 

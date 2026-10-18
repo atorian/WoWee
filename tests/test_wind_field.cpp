@@ -168,7 +168,7 @@ TEST_CASE("A storm raises the wind smoothly and it arrives in the time promised"
     REQUIRE(calmSpeed == Approx(2.0f));  // light, the middle of 1-3
 
     WindInputs storm = at(clock);
-    storm.weatherType = 3;
+    storm.weatherKind = wowee::pipeline::WeatherKind::Thunderstorm;
     storm.weatherIntensity = 1.0f;
     const float stormSpeed = 11.0f;  // storm, the middle of 8-14
 
@@ -329,8 +329,8 @@ TEST_CASE("Rain makes strong wind as likely as all the rest together", "[wind][j
     const int slots = 2000;
     for (int i = 0; i < slots; ++i) {
         const double clock = kRealmNow + (i + 0.5) * slot;
-        const auto dry = wowee::rendering::baseWindAt(clock, row, table, 0, 0.0f);
-        const auto wet = wowee::rendering::baseWindAt(clock, row, table, 1, 0.8f);
+        const auto dry = wowee::rendering::baseWindAt(clock, row, table, wowee::pipeline::WeatherKind::Clear, 0.0f);
+        const auto wet = wowee::rendering::baseWindAt(clock, row, table, wowee::pipeline::WeatherKind::Rain, 0.8f);
         strongDry += dry.speed > 4.0f ? 1 : 0;
         strongWet += wet.speed > 4.0f ? 1 : 0;
     }

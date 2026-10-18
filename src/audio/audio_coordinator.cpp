@@ -210,16 +210,17 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
         }
         ambientSoundManager_->setGameTime(ctx.gameTimeHours);
 
-        // Map visual weather type to ambient sound weather type
+        // The heavier of the two that fall, graded by how hard it falls.
         AmbientSoundManager::WeatherType audioWeatherType = AmbientSoundManager::WeatherType::NONE;
-        if (ctx.weatherType == 1) { // RAIN
-            if (ctx.weatherIntensity < 0.33f)      audioWeatherType = AmbientSoundManager::WeatherType::RAIN_LIGHT;
-            else if (ctx.weatherIntensity < 0.66f)  audioWeatherType = AmbientSoundManager::WeatherType::RAIN_MEDIUM;
-            else                                     audioWeatherType = AmbientSoundManager::WeatherType::RAIN_HEAVY;
-        } else if (ctx.weatherType == 2) { // SNOW
-            if (ctx.weatherIntensity < 0.33f)      audioWeatherType = AmbientSoundManager::WeatherType::SNOW_LIGHT;
-            else if (ctx.weatherIntensity < 0.66f)  audioWeatherType = AmbientSoundManager::WeatherType::SNOW_MEDIUM;
-            else                                     audioWeatherType = AmbientSoundManager::WeatherType::SNOW_HEAVY;
+        constexpr float kAudible = 0.05f;
+        if (ctx.rainAmount >= ctx.snowAmount && ctx.rainAmount > kAudible) {
+            if (ctx.rainAmount < 0.33f)      audioWeatherType = AmbientSoundManager::WeatherType::RAIN_LIGHT;
+            else if (ctx.rainAmount < 0.66f) audioWeatherType = AmbientSoundManager::WeatherType::RAIN_MEDIUM;
+            else                             audioWeatherType = AmbientSoundManager::WeatherType::RAIN_HEAVY;
+        } else if (ctx.snowAmount > kAudible) {
+            if (ctx.snowAmount < 0.33f)      audioWeatherType = AmbientSoundManager::WeatherType::SNOW_LIGHT;
+            else if (ctx.snowAmount < 0.66f) audioWeatherType = AmbientSoundManager::WeatherType::SNOW_MEDIUM;
+            else                             audioWeatherType = AmbientSoundManager::WeatherType::SNOW_HEAVY;
         }
         ambientSoundManager_->setWeather(audioWeatherType);
         ambientSoundManager_->update(deltaTime, ctx.cameraPosition, ctx.insideWmo, ctx.isSwimming, isBlacksmith);

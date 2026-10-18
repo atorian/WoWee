@@ -30,9 +30,10 @@ struct ZoneAudioContext {
     bool isSwimming = false;
     bool insideWmo = false;
     uint32_t insideWmoId = 0;
-    // Visual weather state for ambient audio sync
-    int weatherType = 0;      // 0=none, 1=rain, 2=snow, 3=storm
-    float weatherIntensity = 0.0f;
+    // How hard rain and snow fall as they are drawn, 0-1 each: both while
+    // one weather turns into the other.
+    float rainAmount = 0.0f;
+    float snowAmount = 0.0f;
     // Visible sky clock after zone ambience overrides (hours in [0, 24)).
     float gameTimeHours = 12.0f;
     // Terrain tile for offline zone lookup

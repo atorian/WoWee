@@ -42,7 +42,13 @@ SOURCES = [ROOT / "include", ROOT / "src", ROOT / "tools"]
 
 # A trailing-underscore member declaration: `Type name_;` or `Type name_ = init;`
 DECL = re.compile(
-    r"^\s{2,}(?:mutable\s+|static\s+|const\s+)*"
+    # Not a statement whose first word is a keyword: `return name_;` alone on a
+    # line has the shape of `Type name_;`, and taking it for a declaration
+    # skipped the one line that read the member and left its real declaration
+    # looking written and never read (VkContext's occlusionQueryPreciseSupported_,
+    # read only by the accessor that returns it).
+    r"^\s{2,}(?!(?:return|throw|delete|co_return|co_yield|goto|case|else|using|typedef)\b)"
+    r"(?:mutable\s+|static\s+|const\s+)*"
     r"[A-Za-z_][\w:<>,\s\*&]*?[\s\*&]"
     # [ \t]* rather than \s*: under re.M a \s* here runs past the newline and
     # swallows the next blank line and comment into the match, after which the

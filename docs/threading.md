@@ -73,12 +73,9 @@ follow.
 
 | Variable                | Guard            | Notes |
 |-------------------------|------------------|-------|
-| `fileCache`             | `cacheMutex` (shared_mutex) | `shared_lock` for reads, `lock_guard` for writes/eviction |
+| `fileCache`, `fileCacheLru_`, `fileCacheTotalBytes`, `fileCacheBudget`, `fileCacheGeneration_` | `fileCacheMutex_` (std::mutex) | A hit moves its file to the front of the LRU list, so lookups lock exclusively too - for a hash lookup and a splice; the bytes are shared out as `shared_ptr<const vector>`, never copied under the lock |
 | `dbcCache`              | `cacheMutex`     | `shared_lock` for the lookup, `lock_guard` for the insert; the load between them is unlocked, and the first table inserted for a name is the one every caller gets |
-| `fileCacheTotalBytes`   | `cacheMutex`     | Written under exclusive lock only |
-| `fileCacheAccessCounter`| `cacheMutex`     | Written under exclusive lock only |
-| `fileCacheHits`         | `std::atomic`    | Incremented after releasing cacheMutex |
-| `fileCacheMisses`       | `std::atomic`    | Never incremented (see Known Limitations) |
+| `fileCacheHits`, `fileCacheMisses` | `std::atomic` | Incremented after releasing `fileCacheMutex_`; a miss is counted for reads that are kept (`readFile`, `readFileShared`) |
 
 ### Audio Engine (`src/audio/audio_engine.cpp`)
 
@@ -101,7 +98,6 @@ follow.
 | Variable              | Guard                    | Notes |
 |-----------------------|--------------------------|-------|
 | `loadQueue`, `readyQueue`, `pendingTiles` | `queueMutex` + `queueCV` | Workers wait; main signals on enqueue/finalize |
-| `tileCache_`, `tileCacheLru_` | `tileCacheMutex_` | Read/write by both main and workers |
 | `uploadedM2Ids_`      | `uploadedM2IdsMutex_`    | Workers check, main inserts on finalize |
 | `preparedWmoUniqueIds_`| `preparedWmoUniqueIdsMutex_` | Workers insert, main erases in `unloadTile()` |
 | `missingAdtWarnings_` | `missingAdtWarningsMutex_` | Workers only |
@@ -189,9 +185,4 @@ follow.
   never modified afterwards.  This is safe in practice but not formally
   synchronized - do not change the callback after `connect()`.
 
-* `fileCacheMisses` is declared as `std::atomic<size_t>` for consistency but is
-  currently never incremented.  `fileCacheAccessCounter` is not a total either:
-  it is bumped only when a missed file is inserted into the cache (hits do not
-  touch it) and reset by `clearCache()`, so it approximates cached misses since
-  the last clear.
 
