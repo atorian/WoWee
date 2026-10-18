@@ -4937,7 +4937,16 @@ void Renderer::renderSeaBedPass() {
     const std::optional<float> water =
         waterRenderer->highestOpenWaterNear(nearby, SeaBedMap::kHalfExtent);
     if (!water) return;
-    if (!seaBed_->wantsDrawing(nearby, *water, globalTime)) return;
+    // The wind the fetch is found for: the way it blows, not its gusts.
+    const glm::vec2 windToward = wind_.state().direction;
+    if (!seaBed_->wantsDrawing(nearby, *water, globalTime)) {
+        // The same bed, a wind that has turned: the shore upwind is another.
+        if (seaBed_->wantsFetch(windToward)) {
+            seaBed_->refetch(currentCmd, windToward);
+            if (vkCtx) vkCtx->gpuMark(currentCmd, "sea fetch");
+        }
+        return;
+    }
 
     seaBed_->begin(nearby, *water);
     const SeaBedFrame& frame = seaBed_->drawing();
@@ -4963,7 +4972,7 @@ void Renderer::renderSeaBedPass() {
     drawView(SeaBedView::GroundFromAbove);
     drawView(SeaBedView::BuildingsFromAbove);
     drawView(SeaBedView::BuildingsFromBelow);
-    seaBed_->finish(currentCmd, globalTime);
+    seaBed_->finish(currentCmd, globalTime, windToward);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "sea bed");
 }
 

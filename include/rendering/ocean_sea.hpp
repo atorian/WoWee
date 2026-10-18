@@ -47,26 +47,30 @@ public:
     /// after which every wave is where it started.
     [[nodiscard]] float time() const { return static_cast<float>(time_); }
 
-    /// How much of cascade `cascade`'s sea water `depth` yards deep keeps,
-    /// 0 to 1: of its height (`kind` kShoalingHeight) or of its slope
-    /// (kShoalingSlope). Each of its waves keeps the share of its energy the
-    /// TMA spectrum leaves it at that depth (oceanDepthFactor), weighted by
-    /// how much of the cascade's height or slope that wave carries now - a
-    /// cascade's long waves lie down before its short ones.
-    static constexpr int kShoalingHeight = 0;
-    static constexpr int kShoalingSlope = 1;
-    [[nodiscard]] float shoaling(int kind, int cascade, float depth) const;
-    /// The same at the table's depths (oceanShoalingDepth), packed as the
-    /// water's shaders read it: entry (kind * cascades + cascade) * steps +
-    /// step, four to a vec4.
-    static constexpr int kShoalingEntries = 2 * 3 * 16;
-    [[nodiscard]] const std::array<glm::vec4, kShoalingEntries / 4>& shoalingTable() const { return shoaling_; }
+    /// How much of cascade `cascade`'s sea water `depth` yards deep and
+    /// `fetch` yards downwind of the shore keeps, 0 to 1: of its height
+    /// (`kind` kKeptHeight) or of its slope (kKeptSlope). Each of its waves
+    /// keeps the share of its energy the TMA spectrum leaves it at that
+    /// depth (oceanDepthFactor) and the fetch lets the wind raise
+    /// (oceanFetchFactor), weighted by how much of the cascade's height or
+    /// slope that wave carries now - a cascade's long waves lie down before
+    /// its short ones, near the shore and in a pond. kOceanOpenFetch is the
+    /// open sea.
+    static constexpr int kKeptHeight = 0;
+    static constexpr int kKeptSlope = 1;
+    [[nodiscard]] float kept(int kind, int cascade, float depth, float fetch) const;
+    /// The same at the table's depths (oceanShoalingDepth) and fetches
+    /// (oceanFetchDistance), packed as the water's shaders read it: entry
+    /// ((kind * cascades + cascade) * fetch rows + row) * depth steps + step,
+    /// four to a vec4.
+    static constexpr int kKeptEntries = 2 * 3 * 17 * 16;
+    [[nodiscard]] const std::array<glm::vec4, kKeptEntries / 4>& keptTable() const { return kept_; }
 
 private:
-    void tabulateShoaling();
+    void tabulateKept();
 
     std::array<float, kRings> slopeSq_{};
-    std::array<glm::vec4, kShoalingEntries / 4> shoaling_{};
+    std::array<glm::vec4, kKeptEntries / 4> kept_{};
     double time_ = 0.0;
     float speed_ = 0.0f;
     glm::vec2 toward_{1.0f, 0.0f};

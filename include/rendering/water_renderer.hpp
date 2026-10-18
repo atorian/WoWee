@@ -44,11 +44,11 @@ struct WaterFrameUBOData {
     glm::vec4 oceanCascades[kOceanCascadeCount]{};
     glm::vec4 oceanSea{0.0f};
     // How much of each cascade's height and slope the water keeps at the
-    // shoaling table's depths (OceanSea::shoalingTable).
-    glm::vec4 oceanShoaling[OceanSea::kShoalingEntries / 4]{};
+    // table's depths and fetches (OceanSea::keptTable).
+    glm::vec4 oceanKept[OceanSea::kKeptEntries / 4]{};
     // The sea bed under the water (SeaBedMap): world to the map's clip
     // space, and x = the height of depth 0, y = yards to depth 1, z = 1 once
-    // it has been drawn, w = its texels a side.
+    // it has been drawn.
     glm::mat4 seaBedMatrix{1.0f};
     glm::vec4 seaBed{0.0f};
 };

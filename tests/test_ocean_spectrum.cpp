@@ -207,28 +207,80 @@ TEST_CASE("the sea lies down toward the shore, its long waves first", "[water][o
     wowee::rendering::OceanSea sea;
     sea.advance(0.0, 8.0f, vec2(1.0f, 0.0f));
     using wowee::rendering::OceanSea;
-    for (int kind : {OceanSea::kShoalingHeight, OceanSea::kShoalingSlope}) {
+    const float open = kOceanOpenFetch;
+    for (int kind : {OceanSea::kKeptHeight, OceanSea::kKeptSlope}) {
         for (int c = 0; c < kOceanCascades; ++c) {
             // None of it where there is no water under the surface, all of it
             // in the open sea, and never more as the water gets shallower.
-            CHECK(sea.shoaling(kind, c, 0.0f) == 0.0f);
-            CHECK(sea.shoaling(kind, c, -2.0f) == 0.0f);
-            CHECK(sea.shoaling(kind, c, 500.0f) > 0.99f);
+            CHECK(sea.kept(kind, c, 0.0f, open) == 0.0f);
+            CHECK(sea.kept(kind, c, -2.0f, open) == 0.0f);
+            CHECK(sea.kept(kind, c, 500.0f, open) > 0.99f);
             float last = 0.0f;
             for (float depth = 0.0f; depth < 200.0f; depth += 0.1f + depth * 0.05f) {
-                const float kept = sea.shoaling(kind, c, depth);
+                const float kept = sea.kept(kind, c, depth, open);
                 CHECK(kept >= last - 1e-6f);
                 last = kept;
             }
         }
         // Two yards of water: the patch-long swell mostly gone, the chop of
         // under a yard all there.
-        const float swell = sea.shoaling(kind, 0, 2.0f);
-        const float waves = sea.shoaling(kind, 1, 2.0f);
-        const float chop = sea.shoaling(kind, 2, 2.0f);
+        const float swell = sea.kept(kind, 0, 2.0f, open);
+        const float waves = sea.kept(kind, 1, 2.0f, open);
+        const float chop = sea.kept(kind, 2, 2.0f, open);
         CHECK(swell < waves);
         CHECK(waves < chop);
         CHECK(chop > 0.99f);
+    }
+}
+
+TEST_CASE("a longer fetch lets the wind raise longer waves", "[water][ocean]") {
+    // The longest wave a fetch holds half of, for a breeze of 8 yards a
+    // second: it grows with the fetch, and at the fetch the open sea
+    // needs - tens of miles - every wave is there.
+    const float speed = 8.0f;
+    auto halfKept = [&](float fetch) {
+        float wavelength = 0.05f;
+        while (wavelength < 400.0f &&
+               oceanFetchFactor(2.0f * kOceanPi / wavelength, speed, fetch) >= 0.5f) {
+            wavelength *= 1.05f;
+        }
+        return wavelength;
+    };
+    float last = 0.0f;
+    for (float fetch : {5.0f, 20.0f, 80.0f, 320.0f, 1280.0f}) {
+        const float longest = halfKept(fetch);
+        CHECK(longest > last);
+        last = longest;
+    }
+    const float seaFetch = 1.2e4f * speed * speed / kOceanGravity;
+    for (float wavelength : {0.3f, 3.0f, 30.0f, 200.0f}) {
+        CHECK(oceanFetchFactor(2.0f * kOceanPi / wavelength, speed, seaFetch) == Catch::Approx(1.0f));
+    }
+    CHECK(oceanFetchFactor(2.0f, speed, 0.0f) == 0.0f);
+}
+
+TEST_CASE("a pond keeps its chop and none of the sea's long waves", "[water][ocean]") {
+    wowee::rendering::OceanSea sea;
+    sea.advance(0.0, 8.0f, vec2(1.0f, 0.0f));
+    using wowee::rendering::OceanSea;
+    const float deep = 500.0f;
+    for (int kind : {OceanSea::kKeptHeight, OceanSea::kKeptSlope}) {
+        // Fifty yards from the upwind bank the sea peaks at a third of a
+        // yard: the waves of tens of yards cannot have grown there, the
+        // short chop has, much of it.
+        CHECK(sea.kept(kind, 0, deep, 50.0f) < 0.05f);
+        CHECK(sea.kept(kind, 2, deep, 50.0f) > 0.25f);
+        CHECK(sea.kept(kind, 2, deep, 50.0f) > 5.0f * sea.kept(kind, 1, deep, 50.0f));
+        for (int c = 0; c < kOceanCascades; ++c) {
+            CHECK(sea.kept(kind, c, deep, 0.0f) == 0.0f);
+            float last = 0.0f;
+            for (float fetch = 0.0f; fetch < 5000.0f; fetch += 0.5f + fetch * 0.1f) {
+                const float kept = sea.kept(kind, c, deep, fetch);
+                CHECK(kept >= last - 1e-6f);
+                last = kept;
+            }
+            CHECK(sea.kept(kind, c, deep, kOceanOpenFetch) > 0.99f);
+        }
     }
 }
 

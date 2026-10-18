@@ -1,4 +1,5 @@
 #include "rendering/sea_bed.hpp"
+#include "rendering/glsl_as_cpp.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -6,10 +7,44 @@
 
 #include <cmath>
 
+namespace wowee::rendering::glsl {
+namespace {
+// The shaders' whole includes, of which this takes the open sea's fetch and
+// the radials of the effective fetch.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "../../assets/shaders/ocean_spectrum.glsli"
+#include "../../assets/shaders/sea_bed.glsli"
+#pragma GCC diagnostic pop
+}
+}  // namespace wowee::rendering::glsl
+
 namespace wowee {
 namespace rendering {
 
 namespace {
+
+/// Must match Push in sea_bed_fetch.comp.glsl.
+struct FetchPushGPU {
+    glm::vec2 upwind;
+    float step;
+    float texelYards;
+    float range;
+    float openFetch;
+    float share;
+    float leastUnmet;
+    int32_t mode;
+    int32_t first;
+};
+constexpr VkFormat kEffectiveFetchFormat = VK_FORMAT_R32G32_SFLOAT;
+constexpr int32_t kFetchReadShore = 0;
+constexpr int32_t kFetchDouble = 1;
+constexpr int32_t kFetchAdd = 2;
+/// A radial's passes after the one reading the shore in: 1, 2, 4 ... 128
+/// texels, every offset to 255 between them - the grid's whole width.
+constexpr int kFetchPasses = 8;
+/// How far the wind may turn before the fetch is found again.
+constexpr float kFetchTurnCos = 0.996f;  // five degrees
 
 constexpr VkImageSubresourceRange kDepthRange{.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0,
                                               .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
@@ -90,6 +125,18 @@ bool SeaBedMap::initialize(VkContext* ctx, VkRenderPass shadowRenderPass) {
                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!bed_.image) return fail("could not create the map");
     setObjectName(device, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(bed_.image), "sea bed map");
+    for (int i = 0; i < 2; ++i) {
+        fetch_[i] = createImage(device, ctx_->getAllocator(), kFetchTexels, kFetchTexels, kBedFormat,
+                                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!fetch_[i].image) return fail("could not create the fetch's images");
+        setObjectName(device, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(fetch_[i].image),
+                      "sea bed fetch radial");
+    }
+    effective_ = createImage(device, ctx_->getAllocator(), kFetchTexels, kFetchTexels, kEffectiveFetchFormat,
+                             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                             VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (!effective_.image) return fail("could not create the fetch's map");
+    setObjectName(device, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(effective_.image), "sea bed fetch");
 
     // Read texel by texel: the water and the combining pass blend themselves.
     VkSamplerCreateInfo sampCI{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -101,7 +148,7 @@ bool SeaBedMap::initialize(VkContext* ctx, VkRenderPass shadowRenderPass) {
     sampCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_ = ctx_->getOrCreateSampler(sampCI);
     if (sampler_ == VK_NULL_HANDLE) return fail("could not create its sampler");
-    if (!createCombine()) return false;
+    if (!createCombine() || !createFetch()) return false;
 
     // The views readable for the combining pass; the map deep everywhere
     // until it is first drawn, in GENERAL for good: the water's sets bind it
@@ -122,6 +169,20 @@ bool SeaBedMap::initialize(VkContext* ctx, VkRenderPass shadowRenderPass) {
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+        // And the open sea's fetch everywhere, met by every radial.
+        VkClearColorValue open{};
+        open.float32[0] = glsl::kOceanOpenFetch;
+        open.float32[1] = 0.0f;
+        for (const AllocatedImage* f : {&fetch_[0], &fetch_[1], &effective_}) {
+            barrier(cmd, f->image, kColorRange, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vkCmdClearColorImage(cmd, f->image, VK_IMAGE_LAYOUT_GENERAL, &open, 1, &kColorRange);
+            barrier(cmd, f->image, kColorRange, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+        }
     });
     return true;
 }
@@ -207,6 +268,166 @@ bool SeaBedMap::createCombine() {
     return true;
 }
 
+bool SeaBedMap::createFetch() {
+    VkDevice device = ctx_->getDevice();
+    VkDescriptorSetLayoutBinding b[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        b[i].binding = i;
+        b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutCI.bindingCount = 4;
+    layoutCI.pBindings = b;
+    if (vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &fetchSetLayout_) != VK_SUCCESS) {
+        LOG_ERROR("SeaBedMap: failed to create the fetch pass's set layout - no water drawn");
+        return false;
+    }
+    VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(FetchPushGPU)};
+    VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plCI.setLayoutCount = 1;
+    plCI.pSetLayouts = &fetchSetLayout_;
+    plCI.pushConstantRangeCount = 1;
+    plCI.pPushConstantRanges = &push;
+    if (vkCreatePipelineLayout(device, &plCI, nullptr, &fetchLayout_) != VK_SUCCESS) {
+        LOG_ERROR("SeaBedMap: failed to create the fetch pass's layout - no water drawn");
+        return false;
+    }
+    VkShaderModule module;
+    if (!module.loadFromFile(device, "assets/shaders/sea_bed_fetch.comp.spv")) {
+        LOG_ERROR("SeaBedMap: failed to load assets/shaders/sea_bed_fetch.comp.spv - no water drawn");
+        return false;
+    }
+    VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpCI.stage = module.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+    cpCI.layout = fetchLayout_;
+    const bool built = vkCreateComputePipelines(device, ctx_->getPipelineCache(), 1, &cpCI, nullptr,
+                                                &fetchPipeline_) == VK_SUCCESS;
+    module.destroy();
+    if (!built) {
+        LOG_ERROR("SeaBedMap: failed to create the fetch pass's pipeline - no water drawn");
+        return false;
+    }
+
+    VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 8};
+    VkDescriptorPoolCreateInfo poolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolCI.maxSets = 2;
+    poolCI.poolSizeCount = 1;
+    poolCI.pPoolSizes = &size;
+    if (vkCreateDescriptorPool(device, &poolCI, nullptr, &fetchPool_) != VK_SUCCESS) {
+        LOG_ERROR("SeaBedMap: failed to create the fetch pass's pool - no water drawn");
+        return false;
+    }
+    const VkDescriptorSetLayout layouts[2] = {fetchSetLayout_, fetchSetLayout_};
+    VkDescriptorSetAllocateInfo setAlloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    setAlloc.descriptorPool = fetchPool_;
+    setAlloc.descriptorSetCount = 2;
+    setAlloc.pSetLayouts = layouts;
+    if (vkAllocateDescriptorSets(device, &setAlloc, fetchSets_.data()) != VK_SUCCESS) {
+        LOG_ERROR("SeaBedMap: failed to allocate the fetch pass's sets - no water drawn");
+        return false;
+    }
+    for (int s = 0; s < 2; ++s) {
+        // Set 0 reads the second grid and writes the first; set 1 back.
+        // Both add into the effective fetch.
+        const VkDescriptorImageInfo images[4] = {
+            {.sampler = VK_NULL_HANDLE, .imageView = bed_.imageView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+            {.sampler = VK_NULL_HANDLE, .imageView = fetch_[1 - s].imageView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+            {.sampler = VK_NULL_HANDLE, .imageView = fetch_[s].imageView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+            {.sampler = VK_NULL_HANDLE, .imageView = effective_.imageView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+        };
+        VkWriteDescriptorSet w[4]{};
+        for (uint32_t i = 0; i < 4; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = fetchSets_[s];
+            w[i].dstBinding = i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[i].pImageInfo = &images[i];
+        }
+        vkUpdateDescriptorSets(device, 4, w, 0, nullptr);
+    }
+    return true;
+}
+
+void SeaBedMap::recordFetch(VkCommandBuffer cmd, glm::vec2 windToward) {
+    const float length = glm::length(windToward);
+    if (length < 1e-6f) return;  // still air raises no waves to limit
+    fetchWind_ = windToward / length;
+    // The water of the frames before read the fetch this overwrites, and
+    // the bed it is found from has just been written.
+    VkMemoryBarrier2 before{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    before.srcStageMask = kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    before.srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    before.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    before.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &before;
+    cmdPipelineBarrier2(cmd, dep);
+
+    FetchPushGPU push{};
+    push.texelYards = 2.0f * kHalfExtent / static_cast<float>(kFetchTexels);
+    push.range = kRange;
+    push.openFetch = glsl::kOceanOpenFetch;
+    // A radial that runs off the map is at least as long as the map is
+    // wide from its middle.
+    push.leastUnmet = kHalfExtent;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fetchPipeline_);
+    VkMemoryBarrier2 between = before;
+    between.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    between.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    dep.pMemoryBarriers = &between;
+    const auto dispatch = [&](int set) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fetchLayout_, 0, 1, &fetchSets_[set], 0,
+                                nullptr);
+        vkCmdPushConstants(cmd, fetchLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(cmd, kFetchTexels / kGroup, kFetchTexels / kGroup, 1);
+        cmdPipelineBarrier2(cmd, dep);
+    };
+    // Each radial: the shore into the first grid, then each pass from one
+    // grid into the other - an even number of them, so it ends in the first
+    // - then its share into the effective fetch, read from the first.
+    static_assert(kFetchPasses % 2 == 0, "a radial's fetch ends in the first grid");
+    for (int radial = 0; radial < glsl::kSeaFetchRadials; ++radial) {
+        // The map's texels run along the world's x and y; the grid's rows
+        // along the radial.
+        push.upwind = glsl::seaFetchRadialUpwind(-fetchWind_, radial);
+        push.share = glsl::seaFetchRadialShare(radial);
+        push.first = radial == 0 ? 1 : 0;
+        push.mode = kFetchReadShore;
+        push.step = 0.0f;
+        dispatch(0);
+        push.mode = kFetchDouble;
+        for (int pass = 1; pass <= kFetchPasses; ++pass) {
+            push.step = static_cast<float>(1 << (pass - 1));
+            dispatch(pass % 2 == 0 ? 0 : 1);
+        }
+        push.mode = kFetchAdd;
+        dispatch(1);  // reads the first grid
+    }
+    // For the water's vertices and pixels.
+    VkMemoryBarrier2 after{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    after.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    after.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    after.dstStageMask = kWaterStages;
+    after.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    dep.pMemoryBarriers = &after;
+    cmdPipelineBarrier2(cmd, dep);
+}
+
+bool SeaBedMap::wantsFetch(glm::vec2 windToward) const {
+    if (!drawn_ || !fetchPipeline_) return false;
+    const float length = glm::length(windToward);
+    if (length < 1e-6f) return false;
+    return glm::dot(windToward / length, fetchWind_) < kFetchTurnCos;
+}
+
+void SeaBedMap::refetch(VkCommandBuffer cmd, glm::vec2 windToward) {
+    recordFetch(cmd, windToward);
+}
+
 void SeaBedMap::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
@@ -217,6 +438,13 @@ void SeaBedMap::shutdown() {
     }
     for (auto& v : views_) destroyImage(device, ctx_->getAllocator(), v);
     destroyImage(device, ctx_->getAllocator(), bed_);
+    for (auto& f : fetch_) destroyImage(device, ctx_->getAllocator(), f);
+    destroyImage(device, ctx_->getAllocator(), effective_);
+    destroy(device, fetchPool_);
+    fetchSets_ = {};
+    destroy(device, fetchPipeline_);
+    destroy(device, fetchLayout_);
+    destroy(device, fetchSetLayout_);
     destroy(device, combinePool_);
     combineSet_ = VK_NULL_HANDLE;
     destroy(device, combinePipeline_);
@@ -292,7 +520,7 @@ void SeaBedMap::endView(VkCommandBuffer cmd, SeaBedView view) {
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 }
 
-void SeaBedMap::finish(VkCommandBuffer cmd, double now) {
+void SeaBedMap::finish(VkCommandBuffer cmd, double now, glm::vec2 windToward) {
     // The water of the frames before read the map this overwrites.
     barrier(cmd, bed_.image, kColorRange, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             kWaterStages, VK_ACCESS_2_SHADER_READ_BIT,
@@ -304,7 +532,8 @@ void SeaBedMap::finish(VkCommandBuffer cmd, double now) {
     vkCmdDispatch(cmd, kTexels / kGroup, kTexels / kGroup, 1);
     barrier(cmd, bed_.image, kColorRange, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-            kWaterStages, VK_ACCESS_2_SHADER_READ_BIT);
+            kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    recordFetch(cmd, windToward);
 
     frame_ = drawing_;
     drawnAt_ = now;

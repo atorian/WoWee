@@ -58,44 +58,69 @@ void OceanSea::advance(double deltaSeconds, float speedYardsPerSecond, glm::vec2
     }
     started_ = true;
     time_ = std::fmod(time_ + std::max(deltaSeconds, 0.0), static_cast<double>(ocean::kOceanRepeatSeconds));
-    tabulateShoaling();
+    tabulateKept();
 }
 
-static_assert(OceanSea::kShoalingEntries == 2 * ocean::kOceanCascades * ocean::kOceanShoalingSteps,
-              "the table holds a height and a slope share for every cascade at every step");
+static_assert(OceanSea::kKeptEntries ==
+                  2 * ocean::kOceanCascades * ocean::kOceanFetchRows * ocean::kOceanShoalingSteps,
+              "the table holds a height and a slope share for every cascade at every fetch and depth");
 
-void OceanSea::tabulateShoaling() {
+void OceanSea::tabulateKept() {
+    constexpr int kDepths = ocean::kOceanShoalingSteps;
+    constexpr int kFetches = ocean::kOceanFetchRows;
+    // What each ring keeps at each depth and each fetch, apart.
+    std::array<std::array<float, kDepths>, kRings> byDepth{};
+    std::array<std::array<float, kFetches>, kRings> byFetch{};
+    for (int i = 0; i < kRings; ++i) {
+        const Ring r = ringAt(i);
+        const float omega = ocean::oceanAngularSpeed(r.k);
+        for (int d = 0; d < kDepths; ++d) byDepth[i][d] = ocean::oceanDepthFactor(omega, ocean::oceanShoalingDepth(d));
+        for (int f = 0; f < kFetches; ++f) {
+            byFetch[i][f] = ocean::oceanFetchFactor(r.k, speed_, ocean::oceanFetchDistance(f));
+        }
+    }
     for (int kind = 0; kind < 2; ++kind) {
         for (int c = 0; c < ocean::kOceanCascades; ++c) {
-            for (int step = 0; step < ocean::kOceanShoalingSteps; ++step) {
-                const float depth = ocean::oceanShoalingDepth(step);
-                // Each ring of the cascade's band, weighted by what it holds:
-                // its slope, or its height (slope over k squared).
-                double kept = 0.0, whole = 0.0;
-                for (int i = 0; i < kRings; ++i) {
-                    const Ring r = ringAt(i);
-                    if (r.k < ocean::oceanBandLow(c) || r.k >= ocean::oceanBandHigh(c)) continue;
-                    const double weight = kind == kShoalingSlope ? slopeSq_[i] : slopeSq_[i] / (r.k * r.k);
-                    whole += weight;
-                    kept += weight * ocean::oceanDepthFactor(ocean::oceanAngularSpeed(r.k), depth);
+            for (int f = 0; f < kFetches; ++f) {
+                for (int d = 0; d < kDepths; ++d) {
+                    // Each ring of the cascade's band, weighted by what it
+                    // holds: its slope, or its height (slope over k squared).
+                    double keptEnergy = 0.0, whole = 0.0;
+                    for (int i = 0; i < kRings; ++i) {
+                        const Ring r = ringAt(i);
+                        if (r.k < ocean::oceanBandLow(c) || r.k >= ocean::oceanBandHigh(c)) continue;
+                        const double weight = kind == kKeptSlope ? slopeSq_[i] : slopeSq_[i] / (r.k * r.k);
+                        whole += weight;
+                        keptEnergy += weight * byDepth[i][d] * byFetch[i][f];
+                    }
+                    // Energy kept, as a share of amplitude: its root. A
+                    // cascade that holds nothing in this wind keeps all of
+                    // its nothing.
+                    const float share = whole > 0.0 ? static_cast<float>(std::sqrt(keptEnergy / whole)) : 1.0f;
+                    const int entry = ((kind * ocean::kOceanCascades + c) * kFetches + f) * kDepths + d;
+                    kept_[entry / 4][entry % 4] = share;
                 }
-                // Energy kept, as a share of amplitude: its root. A cascade
-                // that holds nothing in this wind keeps all of its nothing.
-                const float share = whole > 0.0 ? static_cast<float>(std::sqrt(kept / whole)) : 1.0f;
-                const int entry = (kind * ocean::kOceanCascades + c) * ocean::kOceanShoalingSteps + step;
-                shoaling_[entry / 4][entry % 4] = share;
             }
         }
     }
 }
 
-float OceanSea::shoaling(int kind, int cascade, float depth) const {
-    const glm::vec2 slot = ocean::oceanShoalingSlot(depth);
-    const int base = (kind * ocean::kOceanCascades + cascade) * ocean::kOceanShoalingSteps;
-    const auto at = [&](int step) { return shoaling_[(base + step) / 4][(base + step) % 4]; };
-    const int below = static_cast<int>(slot.x);
-    if (below < 0) return slot.y * at(0);
-    return at(below) + (at(below + 1) - at(below)) * slot.y;
+float OceanSea::kept(int kind, int cascade, float depth, float fetch) const {
+    constexpr int kDepths = ocean::kOceanShoalingSteps;
+    const glm::vec2 depthSlot = ocean::oceanShoalingSlot(depth);
+    const glm::vec2 fetchSlot = ocean::oceanFetchSlot(fetch);
+    const int base = (kind * ocean::kOceanCascades + cascade) * ocean::kOceanFetchRows;
+    // A step below the first is no depth, or no fetch: nothing kept.
+    const auto at = [&](int row, int step) {
+        if (row < 0 || step < 0) return 0.0f;
+        const int entry = (base + row) * kDepths + step;
+        return kept_[entry / 4][entry % 4];
+    };
+    const int f = static_cast<int>(fetchSlot.x);
+    const int d = static_cast<int>(depthSlot.x);
+    const float nearRow = at(f, d) + (at(f, d + 1) - at(f, d)) * depthSlot.y;
+    const float farRow = at(f + 1, d) + (at(f + 1, d + 1) - at(f + 1, d)) * depthSlot.y;
+    return nearRow + (farRow - nearRow) * fetchSlot.y;
 }
 
 float OceanSea::meanSquareSlope() const {

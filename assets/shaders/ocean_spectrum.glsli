@@ -190,6 +190,56 @@ vec2 oceanShoalingSlot(float depth) {
     return vec2(below, at - below);
 }
 
+/// How much of the sea a wave of `k` keeps `fetch` yards downwind of the
+/// shore, in a wind of `speedYards`. A wind raises waves only over the
+/// water it has blown across: JONSWAP (Hasselmann et al. 1973) found the sea
+/// peaking at w U / g = 22 X^-0.33 for a fetch made X = g fetch / U^2 - a
+/// pond's waves a hand's breadth long in a wind that raises thirty-yard
+/// waves at sea. The spectrum here peaks at w U / g = 1, the open sea's;
+/// a shorter fetch moves its Phillips fall up to the fetch's peak, and the
+/// short waves above it, which saturate within yards, are as they were.
+const float kOceanJonswapPeak = 22.0;
+const float kOceanJonswapPower = -0.33;
+float oceanFetchFactor(float k, float speedYards, float fetch) {
+    if (speedYards <= 0.0) return 1.0;
+    if (fetch <= 0.0) return 0.0;
+    float openPeak = kOceanGravity / (speedYards * speedYards);
+    float scaledFetch = kOceanGravity * fetch / (speedYards * speedYards);
+    float peak = max(1.0, kOceanJonswapPeak * pow(scaledFetch, kOceanJonswapPower));
+    float fetchPeak = openPeak * peak * peak;
+    // exp(-(fetchPeak / k)^2) over the open sea's exp(-(openPeak / k)^2).
+    return exp(-(fetchPeak * fetchPeak - openPeak * openPeak) / (k * k));
+}
+
+/// The fetches each cascade's share of the sea is tabulated at
+/// (OceanSea::keptTable): kOceanFetchSteps of them, from two yards, each
+/// 2^0.6 longer than the last, to a thousand yards; past those, a row more
+/// for the open sea, which no shore limits.
+const int kOceanFetchSteps = 16;
+const int kOceanFetchRows = kOceanFetchSteps + 1;
+const float kOceanFetchShortest = 2.0;
+const float kOceanFetchStepLog2 = 0.6;
+/// Farther than any shore the sea bed's map can find: the open sea.
+const float kOceanOpenFetch = 1e6;
+
+float oceanFetchDistance(int row) {
+    return row >= kOceanFetchSteps ? kOceanOpenFetch
+                                   : kOceanFetchShortest * exp2(kOceanFetchStepLog2 * float(row));
+}
+
+/// Where `fetch` falls among the rows: x the row below, y how far toward
+/// the next. Above the shortest x is -1, from nothing at the shore to the
+/// shortest's; past the longest tabulated it runs over one step more to the
+/// open sea's row, and stays there.
+vec2 oceanFetchSlot(float fetch) {
+    if (fetch <= kOceanFetchShortest) return vec2(-1.0, max(fetch, 0.0) / kOceanFetchShortest);
+    float at = log2(fetch / kOceanFetchShortest) / kOceanFetchStepLog2;
+    float last = float(kOceanFetchSteps);
+    if (at >= last) return vec2(last - 1.0, 1.0);
+    float below = floor(at);
+    return vec2(below, at - below);
+}
+
 /// How far a point of the water rides toward the crests, 0 to 1. Under a
 /// passing wave a point goes round a circle as wide as the wave is high,
 /// which carries it toward each crest: crests sharp, troughs wide. Riding

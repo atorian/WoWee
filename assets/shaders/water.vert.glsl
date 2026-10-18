@@ -40,19 +40,20 @@ layout(push_constant) uniform Push {
 
 const int MAX_WAKE_POINTS = 32;
 const int OCEAN_CASCADES = 3;  // kOceanCascadeCount in ocean_waves.hpp
-const int OCEAN_SHOALING_VEC4S = 24;  // OceanSea::kShoalingEntries / 4
+const int OCEAN_KEPT_VEC4S = 408;  // OceanSea::kKeptEntries / 4
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
     vec4 wakeBounds;
     vec4 wakePoints[MAX_WAKE_POINTS];
     vec4 oceanCascades[OCEAN_CASCADES];  // xy = origin, z = 1 / patch, w = patch (yards)
     vec4 oceanSea;                       // x = rms height, y = ride, z = mean square slope
-    vec4 oceanShoaling[OCEAN_SHOALING_VEC4S];
+    vec4 oceanKept[OCEAN_KEPT_VEC4S];
     mat4 seaBedMatrix;
     vec4 seaBed;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
+layout(set = 2, binding = 6) uniform sampler2D seaFetchMap;
 
 #include "ocean_surface.glsli"
 #include "water_surface.glsli"

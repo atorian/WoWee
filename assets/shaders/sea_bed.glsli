@@ -17,6 +17,105 @@
 /// are modelled apart, and never meet exactly.
 const float kSeaBedGroundedYards = 1.0;
 
+// How far the wind has blown over the water before it reaches each point -
+// its fetch, which is what lets a wind raise waves (ocean_spectrum.glsli's
+// oceanFetchFactor). Not the distance to the shore straight upwind alone: a
+// wind sea arrives from a spread of ways round the wind, and a post or a
+// rock straight upwind leaves the water behind it the waves from either
+// side. The Shore Protection Manual's effective fetch (1977) takes that in:
+// the fetch along radials every six degrees out to 42 either side of the
+// wind, each weighted by the square of its cosine, over the sum of their
+// cosines. A breakwater still shelters the harbour behind it, and an
+// enclosed bay is as calm as its size makes it.
+//
+// Each radial's fetch is found in a grid of its own, turned so that its rows
+// run up that radial: texel (i, j) of it lies upwind of texel (i - 1, j),
+// and its middle is the map's. The bed is read into it, then each row is
+// walked by doubling: every point starts at no fetch where it is shore and
+// at the open sea's elsewhere, and each pass takes the shorter of its own
+// and that of the point `step` texels upwind of it plus the step, the step
+// doubling from one - after passes of 1, 2, 4 ... every offset along the row
+// has been tried, exactly, so each point has the nearest shore up its
+// radial within the grid. Beyond the grid is the open sea.
+
+/// Shore is the bed within a hand's breadth of the water, or above it.
+const float kSeaBedShoreYards = 0.1;
+bool seaBedIsShore(float bedDepth, float range) {
+    return bedDepth * range <= kSeaBedShoreYards;
+}
+
+/// The radials: kSeaFetchRadials of them, kSeaFetchRadialStep apart,
+/// centred on the wind.
+const int kSeaFetchRadials = 15;
+const float kSeaFetchRadialStep = 0.10471976;  // six degrees
+float seaFetchRadialAngle(int radial) {
+    return (float(radial) - 0.5 * float(kSeaFetchRadials - 1)) * kSeaFetchRadialStep;
+}
+/// Toward where radial `radial` comes from, for a wind from `upwind`.
+vec2 seaFetchRadialUpwind(vec2 upwind, int radial) {
+    float a = seaFetchRadialAngle(radial);
+    float c = cos(a), s = sin(a);
+    return vec2(c * upwind.x - s * upwind.y, s * upwind.x + c * upwind.y);
+}
+/// What radial `radial`'s fetch counts for in the effective fetch.
+float seaFetchRadialShare(int radial) {
+    float cosines = 0.0;
+    for (int r = 0; r < kSeaFetchRadials; ++r) cosines += cos(seaFetchRadialAngle(r));
+    float c = cos(seaFetchRadialAngle(radial));
+    return c * c / cosines;
+}
+
+/// The map's texture coordinate of the fetch grid's point `gridUv` (both 0
+/// to 1 across), for a radial from `upwind` (unit, the map's x and y); and
+/// back.
+vec2 seaFetchGridToMap(vec2 gridUv, vec2 upwind) {
+    vec2 p = gridUv - vec2(0.5);
+    vec2 across = vec2(-upwind.y, upwind.x);
+    return vec2(0.5) + p.x * upwind + p.y * across;
+}
+vec2 seaFetchMapToGrid(vec2 mapUv, vec2 upwind) {
+    vec2 p = mapUv - vec2(0.5);
+    vec2 across = vec2(-upwind.y, upwind.x);
+    return vec2(0.5) + vec2(dot(p, upwind), dot(p, across));
+}
+
+/// A texel of a radial's grid is shore when a quarter of it is, of the
+/// `samples` points of the map read across it: a breakwater half a texel
+/// thick stays a wall, and a post is no wider than the texel it stands in.
+const int kSeaFetchShoreSamplesSide = 4;
+bool seaFetchCellIsShore(int shoreSamples, int samples) {
+    return shoreSamples * 4 >= samples;
+}
+
+float seaBedFetchStart(bool shore, float openFetch) {
+    return shore ? 0.0 : openFetch;
+}
+
+/// One pass: a point's fetch, given the fetch the point `stepYards` upwind
+/// of it has.
+float seaBedFetchPass(float here, float upwind, float stepYards) {
+    return min(here, upwind + stepYards);
+}
+
+/// What one radial adds to the effective fetch at a point: x its share of
+/// the fetch it found, y its share again if it met no shore within the
+/// grid (`fetch` is `openFetch`, the mark for none). A radial that met none
+/// is not known to reach the open sea - it ran out of map, `toEdge` yards
+/// up it - so x takes the least it can be, and no less than `leastUnmet`:
+/// close to the map's upwind edge that would be no water at all. The water
+/// takes the open sea's for those where it is the sea (seaFetchFor).
+vec2 seaFetchRadialPart(float fetch, float toEdge, float share, float openFetch, float leastUnmet) {
+    if (fetch < 0.5 * openFetch) return vec2(share * fetch, 0.0);
+    return vec2(share * max(toEdge, leastUnmet), share);
+}
+
+/// The effective fetch at a point from its two sums: for the sea, a radial
+/// that met no shore within the map runs on to the open sea; for inland
+/// water it is taken for the least it can be.
+float seaFetchFor(vec2 sums, bool openSea, float openFetch) {
+    return openSea ? sums.x + sums.y * openFetch : sums.x;
+}
+
 /// The bed's depth under the water, in the views' terms (0 at the water,
 /// 1 at the range's foot), from the depths the three views read there.
 float seaBedDepth(float groundFromAbove, float buildingFromAbove, float buildingFromBelow, float range) {

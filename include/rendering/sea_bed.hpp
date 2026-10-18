@@ -74,18 +74,30 @@ public:
     [[nodiscard]] glm::mat4 viewMatrix(SeaBedView view) const;
     void beginView(VkCommandBuffer cmd, SeaBedView view);
     void endView(VkCommandBuffer cmd, SeaBedView view);
-    void finish(VkCommandBuffer cmd, double now);
+    /// Make the map of the bed out of the views, and its fetch for a wind
+    /// blowing toward `windToward` (sea_bed.glsli).
+    void finish(VkCommandBuffer cmd, double now, glm::vec2 windToward);
 
-    /// The map the water samples (r32f, the bed's depth as the views count
-    /// it, in GENERAL), and what its depths mean; not drawn until finished
-    /// once.
+    /// Whether the wind has turned far enough from the one the fetch was
+    /// found for that it wants finding again over the same bed.
+    [[nodiscard]] bool wantsFetch(glm::vec2 windToward) const;
+    void refetch(VkCommandBuffer cmd, glm::vec2 windToward);
+
+    /// The maps the water samples, both r32f in GENERAL over the same square,
+    /// read texel by texel: the bed's depth as the views count it, and each
+    /// point's effective fetch in yards (kOceanOpenFetch's share where a
+    /// radial meets no shore within the map).
+    /// What the depths mean is frame(); neither is drawn until finished once.
     [[nodiscard]] VkImageView view() const { return bed_.imageView; }
+    [[nodiscard]] VkImageView fetchView() const { return effective_.imageView; }
     [[nodiscard]] VkSampler sampler() const { return sampler_; }
     [[nodiscard]] const SeaBedFrame& frame() const { return frame_; }
     [[nodiscard]] bool isDrawn() const { return drawn_; }
 
 private:
     bool createCombine();
+    bool createFetch();
+    void recordFetch(VkCommandBuffer cmd, glm::vec2 windToward);
 
     VkContext* ctx_ = nullptr;
     VkRenderPass renderPass_ = VK_NULL_HANDLE;  // the shadow pass's; not ours
@@ -99,6 +111,21 @@ private:
     VkPipeline combinePipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool combinePool_ = VK_NULL_HANDLE;
     VkDescriptorSet combineSet_ = VK_NULL_HANDLE;
+
+    // The effective fetch (sea_bed.glsli), kFetchTexels a side over the
+    // map's square: each radial's found back and forth between two turned
+    // grids, ending in the first, and its share added into the third, which
+    // lies along the map's axes and is what the water reads.
+    static constexpr int kFetchTexels = 256;
+    std::array<AllocatedImage, 2> fetch_{};
+    AllocatedImage effective_{};
+    VkDescriptorSetLayout fetchSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout fetchLayout_ = VK_NULL_HANDLE;
+    VkPipeline fetchPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool fetchPool_ = VK_NULL_HANDLE;
+    /// [0] reads the second and writes the first, [1] the other way.
+    std::array<VkDescriptorSet, 2> fetchSets_{};
+    glm::vec2 fetchWind_{0.0f};
 
     SeaBedFrame frame_{};
     SeaBedFrame drawing_{};

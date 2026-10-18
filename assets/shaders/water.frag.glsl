@@ -95,8 +95,8 @@ layout(set = 2, binding = 2) uniform sampler2D ReflectionColor;
 const int MAX_WAKE_POINTS = 32;
 // kOceanCascadeCount in ocean_waves.hpp.
 const int OCEAN_CASCADES = 3;
-// OceanSea::kShoalingEntries / 4.
-const int OCEAN_SHOALING_VEC4S = 24;
+// OceanSea::kKeptEntries / 4.
+const int OCEAN_KEPT_VEC4S = 408;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
@@ -109,16 +109,16 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     vec4 oceanCascades[OCEAN_CASCADES];
     vec4 oceanSea;
     // How much of each cascade's height and slope the water keeps at the
-    // shoaling table's depths (OceanSea::shoalingTable).
-    vec4 oceanShoaling[OCEAN_SHOALING_VEC4S];
+    // table's depths and fetches (OceanSea::keptTable).
+    vec4 oceanKept[OCEAN_KEPT_VEC4S];
     // The sea bed under the water (SeaBedMap): world to its clip space, and
-    // x = the height of depth 0, y = yards to depth 1, z = 1 once drawn,
-    // w = texels a side.
+    // x = the height of depth 0, y = yards to depth 1, z = 1 once drawn.
     mat4 seaBedMatrix;
     vec4 seaBed;
 };
 layout(set = 2, binding = 4) uniform sampler2DArray oceanSurface;
 layout(set = 2, binding = 5) uniform sampler2D seaBedMap;
+layout(set = 2, binding = 6) uniform sampler2D seaFetchMap;
 
 #include "ocean_surface.glsli"
 

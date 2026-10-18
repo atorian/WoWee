@@ -132,12 +132,17 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     oceanBinding.descriptorCount = 1;
     oceanBinding.stageFlags = reflUBOBinding.stageFlags;
 
-    // What lies under the water (SeaBedMap): the waves lie down as it comes up.
+    // What lies under the water (SeaBedMap): the waves lie down as it comes
+    // up, and are as long as the fetch to the shore upwind lets the wind
+    // raise them.
     VkDescriptorSetLayoutBinding seaBedBinding = oceanBinding;
     seaBedBinding.binding = 5;
+    VkDescriptorSetLayoutBinding fetchBinding = oceanBinding;
+    fetchBinding.binding = 6;
 
     sceneSetLayout = createDescriptorSetLayout(device,
-        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding, seaBedBinding});
+        {sceneColorBinding, sceneDepthBinding, reflColorBinding, reflUBOBinding, oceanBinding, seaBedBinding,
+         fetchBinding});
     if (!sceneSetLayout) {
         LOG_ERROR("WaterRenderer: failed to create scene set layout");
         return false;
@@ -148,10 +153,10 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
 
-    // Pool needs 5 combined image samplers + 1 uniform buffer per frame
+    // Pool needs 6 combined image samplers + 1 uniform buffer per frame
     std::array<VkDescriptorPoolSize, 2> scenePoolSizes{};
     scenePoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    scenePoolSizes[0].descriptorCount = 5 * SCENE_HISTORY_FRAMES;
+    scenePoolSizes[0].descriptorCount = 6 * SCENE_HISTORY_FRAMES;
     scenePoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     scenePoolSizes[1].descriptorCount = SCENE_HISTORY_FRAMES;
     VkDescriptorPoolCreateInfo scenePoolInfo{};
@@ -265,8 +270,8 @@ void WaterRenderer::advanceWindWaves(double deltaSeconds, float windSpeed, glm::
     ocean_.advance(deltaSeconds, windSpeed, windDirection, nearby);
     for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
     frameUBO_.oceanSea = ocean_.seaState();
-    const auto& shoaling = ocean_.sea().shoalingTable();
-    std::copy(shoaling.begin(), shoaling.end(), frameUBO_.oceanShoaling);
+    const auto& kept = ocean_.sea().keptTable();
+    std::copy(kept.begin(), kept.end(), frameUBO_.oceanKept);
 }
 
 std::optional<float> WaterRenderer::highestOpenWaterNear(glm::vec2 centre, float halfExtent) const {
@@ -603,6 +608,13 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
         w5.pImageInfo = &seaBedInfo;
         writes.push_back(w5);
 
+        VkDescriptorImageInfo fetchInfo = seaBedInfo;
+        fetchInfo.imageView = seaBed_->fetchView();
+        VkWriteDescriptorSet w6 = w4;
+        w6.dstBinding = 6;
+        w6.pImageInfo = &fetchInfo;
+        writes.push_back(w6);
+
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
@@ -761,9 +773,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // The sea bed as it was last drawn - this frame, if it was drawn in it.
     const SeaBedFrame& bed = seaBed_->frame();
     frameUBO_.seaBedMatrix = bed.viewProjection();
-    frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f,
-                                 static_cast<float>(SeaBedMap::kTexels));
-    // The wake as it stands, into this frame's slot - safe now, the frame has
+    frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f, 0.0f);    // The wake as it stands, into this frame's slot - safe now, the frame has
     // waited for the GPU to finish with it.
     uploadFrameUBO();
     VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
