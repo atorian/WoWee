@@ -62,15 +62,17 @@ public:
     /// The same at the table's depths (oceanShoalingDepth) and fetches
     /// (oceanFetchDistance), packed as the water's shaders read it: entry
     /// ((kind * cascades + cascade) * fetch rows + row) * depth steps + step,
-    /// four to a vec4.
+    /// four to a vec4. Worked out when first asked for after an advance, so
+    /// a frame that draws no water does not pay for it.
     static constexpr int kKeptEntries = 2 * 3 * 17 * 16;
-    [[nodiscard]] const std::array<glm::vec4, kKeptEntries / 4>& keptTable() const { return kept_; }
+    [[nodiscard]] const std::array<glm::vec4, kKeptEntries / 4>& keptTable() const;
 
 private:
-    void tabulateKept();
+    void tabulateKept() const;
 
     std::array<float, kRings> slopeSq_{};
-    std::array<glm::vec4, kKeptEntries / 4> kept_{};
+    mutable std::array<glm::vec4, kKeptEntries / 4> kept_{};
+    mutable bool keptCurrent_ = false;
     double time_ = 0.0;
     float speed_ = 0.0f;
     glm::vec2 toward_{1.0f, 0.0f};

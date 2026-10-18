@@ -64,6 +64,12 @@ public:
     /// The field `deltaSeconds` on, centred near `nearby` (the camera), with
     /// `movers` the bodies in the water now.
     void advance(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers);
+    /// A frame with none of the water in view, `deltaSeconds` long, in place
+    /// of advance and record: the field is not stepped. When the water comes
+    /// back it goes on from where it was; after long enough for its waves to
+    /// have died away, it comes back still. Either way, what the bodies did
+    /// unseen leaves no wake.
+    void rest(double deltaSeconds);
     /// Its steps for this frame. Outside any render pass, before the water.
     void record(VkCommandBuffer cmd);
 
@@ -104,6 +110,10 @@ private:
     double pendingSeconds_ = 0.0;
     int pendingSteps_ = 0;
     bool ran_ = false;
+    /// How long the water has been out of view, and whether the next record
+    /// lays the field still first.
+    double unseenSeconds_ = 0.0;
+    bool stillPending_ = false;
     // As water_wake_passes.glsli's WakeMovers has them, in field yards.
     std::array<glm::vec4, kMaxMovers> place_{};
     std::array<glm::vec4, kMaxMovers> shape_{};

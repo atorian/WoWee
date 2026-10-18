@@ -1722,7 +1722,7 @@ void Renderer::endFrame() {
     // scene is finished but the water is not yet over it; copying again here
     // would replace that with an image containing the water.
     if (!waterDrawsInContinuePass() && !waterAblated()
-        && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->hasSurfaces()
+        && waterRenderer && waterRenderer->isRefractionEnabled() && waterRenderer->inView()
         && currentImageIndex < vkCtx->getSwapchainImages().size()) {
         waterRenderer->captureSceneHistory(
             currentCmd,
@@ -2304,6 +2304,10 @@ void Renderer::update(float deltaTime) {
         swimEffects->update(*camera, viewerMotion_, characterPosition, liquidScene_, deltaTime);
     }
 
+    // Whether there is water in view this frame: the sea, its wake, the sea
+    // bed under it and its mirror are worked out only while there is.
+    if (waterRenderer && camera) waterRenderer->updateInView(*camera);
+
     // What every body in the water leaves in it: the wake round the camera.
     updateWaterWake(deltaTime);
 
@@ -2594,6 +2598,10 @@ void Renderer::updateWind(float deltaTime) {
 
 void Renderer::updateWaterWake(float deltaTime) {
     if (!waterRenderer || !camera) return;
+    if (!waterRenderer->inView()) {
+        waterRenderer->restWake(deltaTime);
+        return;
+    }
     const glm::vec3 eye = camera->getPosition();
     // The bodies whose middle is within the wake's reach of the camera, and
     // in water: the player, every NPC and creature the renderer draws.
@@ -3588,7 +3596,8 @@ void Renderer::renderWorld() {
         // lighting reads its depth here, for the surfaces of the next frame.
         recordRtLighting(sceneDepth, sceneExtent, depthIsMsaa);
 
-        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && !waterAblated()) {
+        if (sceneColor != VK_NULL_HANDLE && waterRenderer->isRefractionEnabled() && waterRenderer->inView() &&
+            !waterAblated()) {
             waterRenderer->captureSceneHistory(currentCmd, sceneColor, sceneDepth,
                                                sceneExtent, depthIsMsaa,
                                                vkCtx->getCurrentFrame());
@@ -4643,7 +4652,7 @@ bool Renderer::waterReflectionAblated() const {
 }
 
 void Renderer::renderReflectionPass() {
-    if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->hasSurfaces()) return;
+    if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->inView()) return;
     if (waterReflectionAblated()) return;
     if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
 
@@ -5395,7 +5404,7 @@ void Renderer::buildFrameGraph() {
         [this](VkCommandBuffer) {
             renderSeaBedPass();
         });
-    renderGraph_->setPassEnabled("sea_bed", seaBed_ && waterRenderer && waterRenderer->hasSurfaces() &&
+    renderGraph_->setPassEnabled("sea_bed", seaBed_ && waterRenderer && waterRenderer->inView() &&
                                                 !waterAblated());
 
     // Where rain and snow cannot reach → read by the precipitation. After
@@ -5409,7 +5418,7 @@ void Renderer::buildFrameGraph() {
     renderGraph_->setPassEnabled("shelter", shelter_ && weather_.mix().any());
 
     // The sea → outputs the surface every water surface is carried by and
-    // lit from. Only while there is water to draw; the sea's clock and its
+    // lit from. Only while there is water in view; the sea's clock and its
     // wind go on regardless, and it catches up when water comes back.
     auto oceanSurface = renderGraph_->findResource("ocean_surface");
     renderGraph_->addPass("ocean_waves", {}, {oceanSurface},
@@ -5419,7 +5428,7 @@ void Renderer::buildFrameGraph() {
                 if (vkCtx) vkCtx->gpuMark(currentCmd, "ocean waves");
             }
         });
-    renderGraph_->setPassEnabled("ocean_waves", waterRenderer && waterRenderer->hasSurfaces() &&
+    renderGraph_->setPassEnabled("ocean_waves", waterRenderer && waterRenderer->inView() &&
                                                     !waterAblated());
 
     // Reflection pre-pass → outputs reflection_texture (reads scene, so after shadow)

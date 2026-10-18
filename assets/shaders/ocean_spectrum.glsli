@@ -200,15 +200,24 @@ vec2 oceanShoalingSlot(float depth) {
 /// short waves above it, which saturate within yards, are as they were.
 const float kOceanJonswapPeak = 22.0;
 const float kOceanJonswapPower = -0.33;
-float oceanFetchFactor(float k, float speedYards, float fetch) {
-    if (speedYards <= 0.0) return 1.0;
-    if (fetch <= 0.0) return 0.0;
+/// The wavenumber the sea `fetch` yards downwind of the shore peaks at in a
+/// wind of `speedYards` (not still): the open sea's, g / U^2, or above it.
+float oceanFetchPeak(float speedYards, float fetch) {
     float openPeak = kOceanGravity / (speedYards * speedYards);
     float scaledFetch = kOceanGravity * fetch / (speedYards * speedYards);
     float peak = max(1.0, kOceanJonswapPeak * pow(scaledFetch, kOceanJonswapPower));
-    float fetchPeak = openPeak * peak * peak;
-    // exp(-(fetchPeak / k)^2) over the open sea's exp(-(openPeak / k)^2).
+    return openPeak * peak * peak;
+}
+/// What a wave of `k` keeps of the open sea's, where the sea peaks at
+/// `fetchPeak` and the open sea at `openPeak`: exp(-(fetchPeak / k)^2)
+/// over the open sea's exp(-(openPeak / k)^2).
+float oceanFetchKept(float k, float openPeak, float fetchPeak) {
     return exp(-(fetchPeak * fetchPeak - openPeak * openPeak) / (k * k));
+}
+float oceanFetchFactor(float k, float speedYards, float fetch) {
+    if (speedYards <= 0.0) return 1.0;
+    if (fetch <= 0.0) return 0.0;
+    return oceanFetchKept(k, kOceanGravity / (speedYards * speedYards), oceanFetchPeak(speedYards, fetch));
 }
 
 /// The fetches each cascade's share of the sea is tabulated at

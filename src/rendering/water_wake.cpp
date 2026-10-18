@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 
 namespace wowee::rendering::glsl {
 namespace {
@@ -39,6 +40,11 @@ constexpr int kMostStepsPerFrame = 4;
 constexpr float kWakeHeadPerYard = 0.35f;
 /// How far under the surface a body still marks it.
 constexpr float kWakeReach = 0.6f;
+
+/// How long the field takes to settle unstepped: its waves fall as
+/// exp(-kWakeDamping t / 2), to a twentieth in this long, by when its foam
+/// (kWakeFoamSeconds to 1/e) is gone too.
+const double kSettleSeconds = 2.0 * std::log(20.0) / glsl::kWakeDamping;
 
 /// Must match WakeMovers in water_wake_passes.glsli (std140).
 struct MoversGPU {
@@ -75,6 +81,34 @@ void computeBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStages, VkAcce
 
 constexpr VkPipelineStageFlags2 kWaterStages =
     VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+
+/// Clear `images` to still water and leave them in GENERAL: from
+/// `oldLayout`, once `srcStages` are done with them.
+void clearToStill(VkCommandBuffer cmd, std::initializer_list<const AllocatedImage*> images, VkImageLayout oldLayout,
+                  VkPipelineStageFlags2 srcStages, VkAccessFlags2 srcAccess) {
+    const VkImageSubresourceRange range{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
+                                        .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+    for (const AllocatedImage* img : images) {
+        VkImageMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = srcStages;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        b.oldLayout = oldLayout;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img->image;
+        b.subresourceRange = range;
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &b;
+        cmdPipelineBarrier2(cmd, dep);
+        const VkClearColorValue still{};
+        vkCmdClearColorImage(cmd, img->image, VK_IMAGE_LAYOUT_GENERAL, &still, 1, &range);
+    }
+    computeBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+}
 
 }  // namespace
 
@@ -125,27 +159,8 @@ bool WaterWake::initialize(VkContext* ctx, const SeaBedMap* seaBed) {
 
     // Still water, in GENERAL for good.
     ctx_->immediateSubmit([&](VkCommandBuffer cmd) {
-        const VkImageSubresourceRange range{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
-                                            .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-        for (const AllocatedImage* img : {&surface_, &state_, &spectrum_}) {
-            VkImageMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-            b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-            b.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = img->image;
-            b.subresourceRange = range;
-            VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            dep.imageMemoryBarrierCount = 1;
-            dep.pImageMemoryBarriers = &b;
-            cmdPipelineBarrier2(cmd, dep);
-            const VkClearColorValue still{};
-            vkCmdClearColorImage(cmd, img->image, VK_IMAGE_LAYOUT_GENERAL, &still, 1, &range);
-        }
-        computeBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+        clearToStill(cmd, {&surface_, &state_, &spectrum_}, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE);
     });
 
     if (!createPasses()) return false;
@@ -279,7 +294,19 @@ void WaterWake::shutdown() {
     ctx_ = nullptr;
 }
 
+void WaterWake::rest(double deltaSeconds) {
+    unseenSeconds_ += std::max(deltaSeconds, 0.0);
+}
+
 void WaterWake::advance(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers) {
+    // Back in view. Where the bodies went unseen is not a path they swam
+    // this frame; and a field left long enough has settled.
+    if (unseenSeconds_ > 0.0) {
+        lastSeen_.clear();
+        if (unseenSeconds_ >= kSettleSeconds) stillPending_ = true;
+        unseenSeconds_ = 0.0;
+    }
+
     // The field's corner, a whole number of texels from the world's, so a
     // move of the camera moves the field by whole texels and leaves its
     // waves where they were.
@@ -366,6 +393,13 @@ void WaterWake::record(VkCommandBuffer cmd) {
     push.stepSeconds = glsl::kWakeStepSeconds;
 
     // The last frame's water read the surface, and its passes the rest.
+    // Back after the waves would have died away: still water to go on from.
+    if (stillPending_) {
+        clearToStill(cmd, {&surface_, &state_, &spectrum_}, VK_IMAGE_LAYOUT_GENERAL,
+                     kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+        stillPending_ = false;
+    }
     computeBarrier(cmd, kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);

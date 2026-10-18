@@ -135,6 +135,15 @@ public:
     void advanceWake(double deltaSeconds, glm::vec2 nearby, const std::vector<WaterMover>& movers) {
         wake_.advance(deltaSeconds, nearby, movers);
     }
+    /// A frame with none of the water in view: the wake waits (WaterWake::rest).
+    void restWake(double deltaSeconds) { wake_.rest(deltaSeconds); }
+
+    /// Whether any of the water is in `camera`'s view now, its crests in.
+    /// Only then is there a sea to build (recordWaves), a wake to step, a
+    /// sea bed to draw it over and a mirror to draw for it; render draws
+    /// nothing otherwise. Once a frame, before any of them.
+    bool updateInView(const Camera& camera);
+    [[nodiscard]] bool inView() const { return inView_; }
     /// Build this frame's sea surface (OceanWaves::record) and step the
     /// wake (WaterWake::record): outside any render pass, before the water
     /// is drawn.
@@ -181,6 +190,14 @@ private:
         // Material descriptor set (set 1)
         VkDescriptorSet materialSet = VK_NULL_HANDLE;
     };
+
+    /// The box `surface` may be drawn in, as far as its waves carry it, for
+    /// culling it against the camera's view.
+    struct Bounds {
+        glm::vec3 min;
+        glm::vec3 max;
+    };
+    [[nodiscard]] Bounds boundsOf(const DrawnSurface& surface) const;
 
     void createWaterMesh(DrawnSurface& drawn, const LiquidSurface& surface);
     void destroyWaterMesh(DrawnSurface& drawn);
@@ -288,6 +305,7 @@ private:
 
     std::vector<DrawnSurface> drawn_;
     bool renderingEnabled = true;
+    bool inView_ = false;
     // On from the start. The renderer keeps it always on, but did so only when
     // the interface applied its saved settings, so until then - and in a
     // renderer with no interface, scene_render - the water had no capture of
