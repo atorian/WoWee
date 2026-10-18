@@ -1907,6 +1907,8 @@ void Application::benchmarkFrameEnded(float frameSeconds) {
                                        static_cast<uint64_t>(terrainDraw->getBakedDrawnChunkCount()));
             benchmark_->noteSceneCount("terrain chunks crossfading",
                                        static_cast<uint64_t>(terrainDraw->getCrossfadeDrawnChunkCount()));
+            benchmark_->noteSceneCount("terrain bake atlases, MB",
+                                       terrainDraw->getBakeAtlasBytes() >> 20);
         }
         if (const auto* m2 = renderer->getM2Renderer()) {
             benchmark_->noteSceneCount("M2 instances", m2->getInstanceCount());

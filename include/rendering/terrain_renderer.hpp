@@ -225,6 +225,8 @@ public:
     /// band from both it and their layers.
     [[nodiscard]] int getBakedDrawnChunkCount() const { return bakedDrawnChunks_; }
     [[nodiscard]] int getCrossfadeDrawnChunkCount() const { return crossfadeDrawnChunks_; }
+    /// Video memory the tiles' bake atlases hold between them.
+    [[nodiscard]] uint64_t getBakeAtlasBytes() const { return bake_.atlasBytes(); }
 
     /**
      * Initialize terrain shadow pipeline (must be called after initialize()).
