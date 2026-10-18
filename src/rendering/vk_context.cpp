@@ -6,6 +6,8 @@
 
 #include <fstream>
 #include "rendering/vk_utils.hpp"
+#include "rendering/pipeline_cache_file.hpp"
+#include "rendering/host_image_copy.hpp"
 #include "core/logger.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <VkBootstrap.h>
@@ -1223,50 +1225,72 @@ bool VkContext::writeGpuMemoryMap(const std::string& path) const {
 // Pipeline cache persistence
 // ---------------------------------------------------------------------------
 
-static std::string getPipelineCachePath() {
-#ifdef _WIN32
-    if (const char* appdata = std::getenv("APPDATA"))
-        return std::string(appdata) + "\\wowee\\pipeline_cache.bin";
-    return ".\\pipeline_cache.bin";
-#elif defined(__APPLE__)
-    if (const char* home = std::getenv("HOME"))
-        return std::string(home) + "/Library/Caches/wowee/pipeline_cache.bin";
-    return "./pipeline_cache.bin";
-#else
-    if (const char* home = std::getenv("HOME"))
-        return std::string(home) + "/.local/share/wowee/pipeline_cache.bin";
-    return "./pipeline_cache.bin";
-#endif
+bool VkContext::useHostImageCopy(VkFormat format) const {
+    if (!hostImageCopySupported_) return false;
+    std::lock_guard<std::mutex> lock(hostCopyFormatsMutex_);
+    if (const auto it = hostCopyFormats_.find(format); it != hostCopyFormats_.end()) return it->second;
+
+    // The memory types a small single-level texture of this format may bind
+    // to, with the host-transfer usage and without it.
+    const auto memoryTypes = [&](VkImageUsageFlags extra) -> std::optional<uint32_t> {
+        VkImageCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = format;
+        info.extent = {.width = 64, .height = 64, .depth = 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | extra;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage image = VK_NULL_HANDLE;
+        if (vkCreateImage(device, &info, nullptr, &image) != VK_SUCCESS) return std::nullopt;
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device, image, &requirements);
+        vkDestroyImage(device, image, nullptr);
+        return requirements.memoryTypeBits;
+    };
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memory);
+    uint32_t deviceLocal = 0;
+    for (uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+        if (memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) deviceLocal |= 1u << i;
+    }
+
+    const auto withHostCopy = memoryTypes(VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT);
+    const auto without = memoryTypes(0);
+    const bool use = withHostCopy && without && hostCopyKeepsDeviceMemory(*withHostCopy, *without, deviceLocal);
+    if (!use) {
+        LOG_INFO("Host image copy: not used for format ", static_cast<int>(format),
+                 withHostCopy ? " - it would keep the texture out of video memory (memory types 0x"
+                              : " - the driver refuses the usage (types 0x",
+                 std::hex, withHostCopy.value_or(0), " against 0x", without.value_or(0), std::dec,
+                 "); these upload through a staging buffer");
+    }
+    hostCopyFormats_.emplace(format, use);
+    return use;
 }
 
 bool VkContext::createPipelineCache() {
-    // NVIDIA drivers have their own built-in pipeline/shader disk cache.
-    // Using VkPipelineCache on NVIDIA 590.x causes vkCmdBeginRenderPass to
-    // SIGSEGV inside libnvidia-glcore - skip entirely on NVIDIA GPUs.
-    if (gpuVendorId_ == 0x10DE) {
-        LOG_INFO("Pipeline cache: skipped (NVIDIA driver provides built-in caching)");
+    // Used on every vendor. It was skipped on NVIDIA after a crash in
+    // vkCmdBeginRenderPass on the Linux 590.x driver was put down to it - so
+    // there every pipeline was compiled again at every start, which is the
+    // hitch in the first seconds in the world. The saved cache is checked
+    // against this device and driver before the driver sees it
+    // (loadPipelineCacheFile), and WOWEE_NO_PIPELINE_CACHE=1 turns it off for
+    // telling a driver fault apart from a cache one.
+    if (const char* off = std::getenv("WOWEE_NO_PIPELINE_CACHE"); off && *off && *off != '0') {
+        LOG_WARNING("Pipeline cache: off (WOWEE_NO_PIPELINE_CACHE) - every pipeline is compiled at"
+                    " every start");
         return true;
     }
 
-    std::string path = getPipelineCachePath();
-
-    // Try to load existing cache data from disk.
-    std::vector<char> cacheData;
-    {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (file.is_open()) {
-            auto size = file.tellg();
-            if (size > 0) {
-                cacheData.resize(static_cast<size_t>(size));
-                file.seekg(0);
-                file.read(cacheData.data(), size);
-                if (!file) {
-                    LOG_WARNING("Pipeline cache file read failed, starting with empty cache");
-                    cacheData.clear();
-                }
-            }
-        }
-    }
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    const std::vector<char> cacheData =
+        loadPipelineCacheFile(kPipelineCachePath, PipelineCacheIdentity::of(props));
 
     VkPipelineCacheCreateInfo cacheCI{};
     cacheCI.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
@@ -1290,41 +1314,68 @@ bool VkContext::createPipelineCache() {
     }
 
     if (!cacheData.empty()) {
-        LOG_INFO("Pipeline cache loaded from disk (", cacheData.size(), " bytes)");
+        LOG_INFO("Pipeline cache loaded from ", kPipelineCachePath.string(), " (", cacheData.size(), " bytes)");
     } else {
         LOG_INFO("Pipeline cache created (empty)");
     }
+    // What is on disk already; only growth beyond it is worth writing again.
+    pipelineCacheSavedBytes_ = cacheData.size();
+    pipelineCacheCheckedAt_ = std::chrono::steady_clock::now();
     return true;
 }
 
-void VkContext::savePipelineCache() {
+std::vector<char> VkContext::pipelineCacheData() const {
+    size_t dataSize = 0;
+    if (vkGetPipelineCacheData(device, pipelineCache_, &dataSize, nullptr) != VK_SUCCESS) {
+        LOG_WARNING("Pipeline cache: its size could not be queried - not saved");
+        return {};
+    }
+    std::vector<char> data(dataSize);
+    if (dataSize == 0) return data;
+    if (vkGetPipelineCacheData(device, pipelineCache_, &dataSize, data.data()) != VK_SUCCESS) {
+        LOG_WARNING("Pipeline cache: its contents could not be read - not saved");
+        return {};
+    }
+    data.resize(dataSize);
+    return data;
+}
+
+void VkContext::savePipelineCacheIfGrown() {
     if (!pipelineCache_ || !device) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - pipelineCacheCheckedAt_ < std::chrono::seconds(30)) return;
+    pipelineCacheCheckedAt_ = now;
+    // Still writing the last one: next time.
+    if (pipelineCacheWrite_.valid() &&
+        pipelineCacheWrite_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return;
+    }
+    if (pipelineCacheWrite_.valid()) pipelineCacheWrite_.get();
 
     size_t dataSize = 0;
-    if (vkGetPipelineCacheData(device, pipelineCache_, &dataSize, nullptr) != VK_SUCCESS || dataSize == 0) {
-        LOG_WARNING("Failed to query pipeline cache size");
+    if (vkGetPipelineCacheData(device, pipelineCache_, &dataSize, nullptr) != VK_SUCCESS ||
+        dataSize <= pipelineCacheSavedBytes_) {
         return;
     }
+    std::vector<char> data = pipelineCacheData();
+    if (data.empty()) return;
+    pipelineCacheSavedBytes_ = data.size();
+    pipelineCacheWrite_ = std::async(std::launch::async, [data = std::move(data)]() {
+        if (!savePipelineCacheFile(kPipelineCachePath, data)) return false;
+        LOG_INFO("Pipeline cache saved to ", kPipelineCachePath.string(), " (", data.size(), " bytes)");
+        return true;
+    });
+}
 
-    std::vector<char> data(dataSize);
-    if (vkGetPipelineCacheData(device, pipelineCache_, &dataSize, data.data()) != VK_SUCCESS) {
-        LOG_WARNING("Failed to retrieve pipeline cache data");
-        return;
+void VkContext::savePipelineCache() {
+    if (pipelineCacheWrite_.valid()) pipelineCacheWrite_.get();
+    if (!pipelineCache_ || !device) return;
+
+    const std::vector<char> data = pipelineCacheData();
+    if (data.empty()) return;
+    if (savePipelineCacheFile(kPipelineCachePath, data)) {
+        LOG_INFO("Pipeline cache saved to ", kPipelineCachePath.string(), " (", data.size(), " bytes)");
     }
-
-    std::string path = getPipelineCachePath();
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) {
-        LOG_WARNING("Failed to open pipeline cache file for writing: ", path);
-        return;
-    }
-
-    file.write(data.data(), static_cast<std::streamsize>(dataSize));
-    file.close();
-
-    LOG_INFO("Pipeline cache saved to disk (", dataSize, " bytes)");
 }
 
 /// Asks for an unrotated swapchain where the surface allows it.
@@ -3294,6 +3345,8 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     }
 
     currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    savePipelineCacheIfGrown();
 }
 
 VkCommandBuffer VkContext::beginSingleTimeCommands() {

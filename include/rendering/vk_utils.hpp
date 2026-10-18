@@ -213,12 +213,13 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
 /// records the copy and returns; destroying the source at that point frees
 /// memory the GPU has not read yet, and what lands in the target is whatever
 /// the allocator handed back. The grass field found that one: it came out of
-/// the copy in patches that popped in and out as it was rebuilt.
+/// the copy in patches that popped in and out as it was rebuilt. So the
+/// staging buffer is handed to the batch, which frees it after the copy.
 ///
 /// False when the staging buffer could not be made or mapped, in which case
-/// the target is untouched.
+/// the target is untouched. `targetOffset` is where in the target, in bytes.
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
-    VkBuffer target);
+    VkBuffer target, VkDeviceSize targetOffset = 0);
 
 // Environment variable utility functions
 inline size_t envSizeMBOrDefault(const char* name, size_t defMb) {

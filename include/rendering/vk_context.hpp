@@ -12,7 +12,9 @@
 #include <VkBootstrap.h>
 #include <SDL3/SDL.h>
 #include <vector>
+#include <chrono>
 #include <functional>
+#include <future>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -339,6 +341,11 @@ public:
 
     /// Whether a texture can be uploaded without a staging buffer.
     [[nodiscard]] bool isHostImageCopySupported() const { return hostImageCopySupported_; }
+    /// Whether a single-level texture of `format` should go up by host image
+    /// copy: supported, and an image made for it keeps the device-local memory
+    /// it would have had (hostCopyKeepsDeviceMemory). Asked of the driver once
+    /// per format; any thread.
+    [[nodiscard]] bool useHostImageCopy(VkFormat format) const;
     [[nodiscard]] PFN_vkCopyMemoryToImageEXT copyMemoryToImageFn() const { return copyMemoryToImage_; }
     [[nodiscard]] PFN_vkTransitionImageLayoutEXT transitionImageLayoutHostFn() const {
         return transitionImageLayoutHost_;
@@ -378,7 +385,17 @@ private:
     bool createCommandPools();
     bool createSyncObjects();
     bool createPipelineCache();
+    /// The cache's contents now, or empty (logged) when they cannot be had.
+    [[nodiscard]] std::vector<char> pipelineCacheData() const;
+    /// Writes the cache at exit, after any write still running.
     void savePipelineCache();
+    /// Every half minute from endFrame: when pipelines have been built since
+    /// the last save, the cache is written again on a worker thread, so a
+    /// client that crashes or is killed keeps what it compiled.
+    void savePipelineCacheIfGrown();
+    size_t pipelineCacheSavedBytes_ = 0;
+    std::chrono::steady_clock::time_point pipelineCacheCheckedAt_{};
+    std::future<bool> pipelineCacheWrite_;
     /// Depth buffer, MSAA images, the main render pass and the swapchain
     /// framebuffers: everything that depends on the swapchain's size and
     /// sample count.
@@ -491,6 +508,9 @@ private:
     /// barriers around the copy. Detected, so the staging path stays for
     /// devices without it.
     bool hostImageCopySupported_ = false;
+    // useHostImageCopy's answer per format, asked of the driver once.
+    mutable std::mutex hostCopyFormatsMutex_;
+    mutable std::unordered_map<VkFormat, bool> hostCopyFormats_;
     /// VK_EXT_memory_budget: the heap budgets are the driver's, not an estimate.
     bool memoryBudgetSupported_ = false;
     class ContextTextureDevice;

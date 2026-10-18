@@ -376,9 +376,6 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
-    /// The prepared tiles kept in memory to be finalized again without
-    /// reading them from disk, against the budget they are kept under.
-    [[nodiscard]] core::CacheStats tileCacheStats() const;
     [[nodiscard]] int getPendingTileCount() const {
         std::lock_guard<std::mutex> lock(queueMutex);
         return static_cast<int>(pendingTiles.size());
@@ -524,19 +521,11 @@ private:
     // finalize (GPU-upload + free) before more tiles are prepared.
     static constexpr size_t maxReadyQueueSize_ = 3;
 
-    // In-RAM tile cache (LRU) to avoid re-reading from disk
-    struct CachedTile {
-        std::shared_ptr<PendingTile> tile;
-        size_t bytes = 0;
-        std::list<TileCoord>::iterator lruIt;
-    };
-    // THREAD-SAFE: protected by tileCacheMutex_.
-    std::unordered_map<TileCoord, CachedTile, TileCoord::Hash> tileCache_;
-    std::list<TileCoord> tileCacheLru_;
-    size_t tileCacheBudgetBytes_ = 8ull * 1024 * 1024 * 1024; // Dynamic, set at init based on RAM
-    mutable std::mutex tileCacheMutex_;
-
-    std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
+    // A revisited tile is prepared again. Its files - the ADT, its models and
+    // buildings - come from the asset manager's file cache when they are
+    // still there; a whole prepared tile is not kept, since finalizing hands
+    // its contents to the GPU and the decoded textures it holds would be a
+    // second copy of hundreds of megabytes.
     void logMissingAdtOnce(const std::string& adtPath);
     std::atomic<bool> workerRunning{false};
     core::JobGroup standaloneJobs_;

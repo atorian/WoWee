@@ -561,7 +561,14 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             }
         }
     };
-    for (const auto& inst : scene_->instances) addInstanceRibbons(inst);
+    // Only the instances that carry emitters, as renderM2Particles does: a
+    // ribbon emitter is an emitter as far as particleInstanceIndices_ is
+    // concerned (M2ModelGPU::hasEmitters). This walked every instance in the
+    // world, asking each whether its model had ribbons - the walk the particle
+    // pass dropped for costing 2 ms of a 16 ms frame.
+    for (size_t idx : scene_->particleInstanceIndices_) {
+        if (idx < scene_->instances.size()) addInstanceRibbons(scene_->instances[idx]);
+    }
     for (const auto& [id, posed] : scene_->posedEmitters_) addInstanceRibbons(posed.inst);
 
     // Periodic diagnostic: spell ribbon draw count
@@ -570,7 +577,9 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         if (++ribbonDiagFrame_ % 300 == 1) {
             size_t spellRibbonDraws = 0;
             size_t spellRibbonVerts = 0;
-            for (const auto& inst : scene_->instances) {
+            for (size_t idx : scene_->particleInstanceIndices_) {
+                if (idx >= scene_->instances.size()) continue;
+                const M2Instance& inst = scene_->instances[idx];
                 if (!inst.cachedModel || !inst.cachedModel->isSpellEffect) continue;
                 for (const auto& ribbon : inst.ribbons) {
                     if (ribbon.edges.size() >= 2) {

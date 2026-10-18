@@ -783,7 +783,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             VkComputePipelineCreateInfo cpCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             cpCi.stage = cullComp.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
             cpCi.layout = cullPipelineLayout_;
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCi, nullptr, &cullPipeline_) != VK_SUCCESS) {
+            if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCi, nullptr, &cullPipeline_) != VK_SUCCESS) {
                 LOG_ERROR("M2Renderer: failed to create cull compute pipeline");
                 cullPipeline_ = VK_NULL_HANDLE;
             }
@@ -818,7 +818,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             VkComputePipelineCreateInfo hizCpCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             hizCpCi.stage = cullHiZComp.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
             hizCpCi.layout = cullHiZPipelineLayout_;
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &hizCpCi, nullptr, &cullHiZPipeline_) != VK_SUCCESS) {
+            if (vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &hizCpCi, nullptr, &cullHiZPipeline_) != VK_SUCCESS) {
                 LOG_WARNING("M2Renderer: failed to create HiZ cull compute pipeline - HiZ disabled");
                 cullHiZPipeline_ = VK_NULL_HANDLE;
                 vkDestroyPipelineLayout(device, cullHiZPipelineLayout_, nullptr);

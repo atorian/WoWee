@@ -151,6 +151,30 @@ wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
             ${CMAKE_SOURCE_DIR}/src/core/resource_telemetry.cpp)
 
+# The pipeline cache kept between runs: checked against the device, written
+# whole or not at all.
+wowee_add_test(test_pipeline_cache_file
+    SOURCES test_pipeline_cache_file.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/pipeline_cache_file.cpp)
+target_link_libraries(test_pipeline_cache_file PRIVATE wowee_base)
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_pipeline_cache_file PRIVATE Vulkan::Vulkan)
+endif()
+
+# Which textures go up by host image copy: none it would keep out of video memory.
+wowee_add_test(test_host_image_copy
+    SOURCES test_host_image_copy.cpp)
+
+# The ranges the terrain's shared geometry pages hand out and take back.
+wowee_add_test(test_range_allocator
+    SOURCES test_range_allocator.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/range_allocator.cpp)
+
+# Which of the two memory pressure levels a share of free RAM is.
+wowee_add_test(test_memory_pressure
+    SOURCES test_memory_pressure.cpp)
+target_link_libraries(test_memory_pressure PRIVATE wowee_base)
+
 # What the video memory is used for, from the allocator's detailed map: each
 # allocation by its usage flags, in VRAM or system memory. No device.
 wowee_add_test(test_gpu_memory

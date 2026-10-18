@@ -69,8 +69,9 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
     // no queue submission and no barriers: the pixels go into the image and
     // the layout moves on the host. Mipped textures still take the staging
     // path, because their levels are built by a GPU blit chain that has to
-    // read back from the image anyway.
-    const bool useHostCopy = ctx.isHostImageCopySupported() && !generateMips;
+    // read back from the image anyway. Nor where the usage would move the
+    // image out of video memory (VkContext::useHostImageCopy).
+    const bool useHostCopy = !generateMips && ctx.useHostImageCopy(format);
 
     AllocatedBuffer staging{};
     if (!useHostCopy) {

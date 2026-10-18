@@ -3325,6 +3325,16 @@ void Renderer::renderWorld() {
                             terrainRenderer ? terrainRenderer->getRenderedChunkCount() : 0,
                             " culled ",
                             terrainRenderer ? terrainRenderer->getCulledChunkCount() : 0);
+                if (terrainRenderer) {
+                    // Whether the resident tiles' geometry fits the shared
+                    // pages, or chunks are drawn from buffers of their own.
+                    const TerrainGeometryStats geo = terrainRenderer->geometryStats();
+                    LOG_WARNING("  terrain geometry: ", terrainRenderer->getChunkCount(),
+                                " chunks resident, ", geo.pages, " pages, vertices ",
+                                geo.verticesUsed, "/", geo.vertexCapacity, ", indices ",
+                                geo.indicesUsed, "/", geo.indexCapacity, ", ",
+                                geo.ownBufferChunks, " chunks with buffers of their own");
+                }
             }
         }
 

@@ -996,6 +996,7 @@ set(WOWEE_SOURCES
     # Rendering (Vulkan infrastructure)
     src/rendering/pass_ablation.cpp
     src/rendering/vk_context.cpp
+    src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
@@ -1019,6 +1020,7 @@ set(WOWEE_SOURCES
     src/rendering/wall_sweep.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
@@ -2753,6 +2755,7 @@ add_executable(wowee_editor
 
     # Rendering core
     src/rendering/vk_context.cpp
+    src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
@@ -2768,6 +2771,7 @@ add_executable(wowee_editor
     src/rendering/vk_pipeline.cpp
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/range_allocator.cpp
     src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_instance.cpp
