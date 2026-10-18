@@ -2621,9 +2621,16 @@ void Renderer::updateWind(float deltaTime) {
     inputs.weatherIntensity = environment_.weatherIntensity;
     inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
     inputs.fixedWind = environment_.wind;
-    wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
-                 windZones_);
+    CpuStageTimes* stages = vkCtx ? &vkCtx->cpuStages() : nullptr;
+    {
+        std::optional<CpuStage> stage;
+        if (stages) stage.emplace(*stages, "rendererUpdate/weather and wind", "wind field");
+        wind_.update(deltaTime, inputs, windZones_.rowFor(environment_.areaId, environment_.zoneId),
+                     windZones_);
+    }
     if (waterRenderer) {
+        std::optional<CpuStage> stage;
+        if (stages) stage.emplace(*stages, "rendererUpdate/weather and wind", "water waves");
         const WindState& wind = wind_.state();
         waterRenderer->advanceWindWaves(deltaTime, wind.speed * wind.gust, wind.direction,
                                         glm::vec2(characterPosition.x, characterPosition.y));

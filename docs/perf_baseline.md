@@ -45,6 +45,11 @@ client (`WOWEE_BENCHMARK_DIR` overrides) and its summary line to the log:
 - the scene it flew over: M2 / WMO instances, characters, terrain tiles
   (average and most).
 
+`WOWEE_BENCHMARK_MSAA=1|2|4|8` runs at that sample count without changing the
+saved setting - what the scene costs in pixels against what it costs in
+geometry. The scene counts include terrain chunks drawn and the M2 and WMO
+draw calls.
+
 Vsync and the frame cap are the player's settings and the run keeps them; a
 CPU-bound frame is not affected, but a fast one is held to the display.
 
@@ -85,6 +90,8 @@ are broken down by `CpuStageTimes` (`include/rendering/cpu_stage_times.hpp`):
 | `beginFrame/sky set`, `M2 cull`, `grass` | the sky's set, the M2 and grass cull dispatches |
 | `beginFrame/graph build`, `beginFrame/graph/<pass>` | the frame graph, and each pre-pass recorded (`shadow_pass`, `volumetric_fog`, `sea_bed`, `ocean_waves`, `reflection_pass`, `minimap_composite`, `offscreen_composites`) |
 | `beginFrame/sky capture` | the sky background drawn before the scene pass |
+| `rendererUpdate/...` | `Renderer::update` by phase: lighting, `weather and wind` (`wind field`, `water waves`), terrain streaming, sky/effects, characters, `M2 animation wait`, character emitters, cleanup |
+| `presentWorldToRenderer`, `followRendererUpdate` | the client's work either side of the renderer's update in the Present phase |
 | `renderWorld/prepare WMO`, `prepare M2`, `prepare characters`, `dispatch`, `wait for workers` | the main thread's share of the parallel recording, and its wait for the slowest worker |
 | `endFrame/post-process`, `interface`, `submit`, `present` | recording the post-process and the interface, `vkQueueSubmit`, `vkQueuePresentKHR` |
 
@@ -216,6 +223,44 @@ The numbers move by a few percent between runs of the same build (an
 earlier run of the same routes: Dalaran 31.2 fps, p95 38.2; Stormwind 38.4,
 p95 29.8; Orgrimmar 44.0, p95 29.0) - compare changes larger than that, or
 run each side twice.
+
+### Dalaran by sample count
+
+The same route with `WOWEE_BENCHMARK_MSAA` (the run's sample count, the saved
+setting untouched), commit `64907c4`, 2560x1369, nothing else running. The
+last row records the world inline (`WOWEE_SINGLE_THREAD_RECORD=1`).
+
+| MSAA | fps | p50 | p95 | > 33.3 ms | GPU avg | terrain | wmo | m2 | rt (scene+lighting) | wait for GPU (CPU) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 8x | 32.9 | 29.2 | 35.1 | 12.6% | 28.7 | 11.1 | 8.2 | 2.2 | 3.8 | 4.3 |
+| 4x | 36.9 | 25.9 | 31.6 | 2.1% | 25.7 | 9.1 | 7.1 | 2.2 | 3.9 | 3.3 |
+| 1x | 40.4 | 23.1 | 30.2 | 0.8% | 21.8 | 5.6 | 5.8 | 1.9 | 3.5 | 0.1 |
+| 1x inline | 36.7 | 25.5 | 32.4 | 2.0% | 21.9 | 5.7 | 6.0 | 1.8 | 3.7 | 0.0 |
+
+Per frame, whatever the sample count: 4900 terrain chunks, 7000 WMO draw
+calls, 2660 M2 draw calls. Dalaran has no grass (0.00 ms inline).
+
+- **Terrain is half fill**: 11.1 ms at 8x, 5.6 at 1x. WMO loses 2.4 ms of
+  8.2, so it is mostly its 7000 draws and their vertices.
+- **At 1x the frame is CPU-bound**: the CPU no longer waits for the GPU at
+  all, and the GPU (21.8 ms) waits for a 23 ms CPU frame. Below 8x, sample
+  count buys little more; the CPU is next.
+- The CPU frame at 1x, per frame:
+
+  | part | ms |
+  |---|---|
+  | `beginFrame/graph/shadow_pass` - recording the shadow casters | 5.1 |
+  | `rendererUpdate/weather and wind/water waves` - `ocean_.advance()` on the CPU | 4.1 |
+  | `renderWorld/rt scene sync` - WMO/M2 `syncRtScene` | 3.2 |
+  | `beginFrame/graph/reflection_pass` (only without MSAA) | 2.2 |
+  | `renderWorld/wait for workers` | 2.1 |
+  | `rendererUpdate/M2 animation wait` | 1.7 |
+  | `renderWorld/rt lighting` recording | 1.4 (p95 7.2) |
+  | `beginFrame/M2 cull` | 0.7 |
+
+  The water waves are the surprise: 4.1 ms every frame in a city with no sea
+  in view, from the ocean state the wind's waves added (`61cd56c` and after).
+- Recording inline costs 3.7 fps against the parallel workers.
 
 scene_render's static Dalaran scene (`dalaran.json`, 1280x720, hidden window)
 is held by its swapchain's FIFO present at 60 fps: `acquire image` takes 8 ms
