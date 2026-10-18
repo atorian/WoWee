@@ -1145,6 +1145,14 @@ void M2Renderer::shutdown() {
     destroy(device, shadowPipelineLayout_);
     for (auto& pool : shadowTexPool_) { if (pool) { vkDestroyDescriptorPool(device, pool, nullptr); pool = VK_NULL_HANDLE; } }
     destroyShadowParamsSet(device, alloc, shadowParams_);
+    // The casters' buffers (their sets are freed with the pool).
+    for (uint32_t i = 0; i < kShadowTexPoolFrames; ++i) {
+        destroy(alloc, shadowInstanceBuffer_[i], shadowInstanceAlloc_[i]);
+        shadowInstanceMapped_[i] = nullptr;
+        shadowInstanceSet_[i] = VK_NULL_HANDLE;
+    }
+    destroy(device, shadowInstanceDescPool_);
+    destroy(device, shadowInstanceSetLayout_);
 
     initialized_ = false;
 }

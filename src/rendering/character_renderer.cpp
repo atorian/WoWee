@@ -3305,7 +3305,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pc.offset = 0;
-    pc.size = sizeof(ShadowPush);  // one combined matrix, plus the sway slot
+    pc.size = sizeof(ShadowPush);  // one combined matrix and the flags
     VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plCI.setLayoutCount = 2;
     plCI.pSetLayouts = setLayouts;

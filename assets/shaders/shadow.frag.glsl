@@ -2,12 +2,10 @@
 
 layout(set = 0, binding = 0) uniform sampler2D uTexture;
 
+// Every shadow pass keeps its flags here, after its matrix: ShadowPush and
+// M2ShadowPush (vk_frame_data.hpp, m2_renderer.hpp).
 layout(push_constant) uniform Push {
-    mat4 lightSpaceModel;
-    vec4 sway;
-    ivec4 flags;            // x useTexture, y alphaTest, z foliageSway, w alpha ref in 255ths (0: a half)
-    vec4 wind;
-    vec4 windPhases;
+    layout(offset = 64) ivec4 flags; // x useTexture, y alphaTest, z bent in the wind, w alpha ref in 255ths (0: a half)
 } push;
 
 layout(location = 0) in vec2 TexCoord;

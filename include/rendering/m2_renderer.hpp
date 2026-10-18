@@ -997,6 +997,45 @@ private:
     static constexpr uint32_t kShadowTexPoolFrames = 2;
     VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
 
+    // The shadow passes draw instanced: a batch of a model is one draw, its
+    // casters its instances (m2_shadow.vert.glsl). They were a draw and a push
+    // each, and recording those was most of the shadow pass - 4.8 of its 6.3
+    // ms in Dalaran.
+    struct M2ShadowPush {
+        glm::mat4 lightSpace;          // the map's, the sun's or the units'
+        /// x: sample the texture. y: alpha-test it. z: bend in the wind.
+        /// w: where the alpha test cuts, in 255ths; 0 is a half. At the
+        /// offset shadow.frag reads them from, as ShadowPush has them.
+        glm::ivec4 flags{0};
+        /// x trunk, y branch, z leaf phase; w the branch and leaf scale
+        /// (shadowWindFor). The same for every caster.
+        glm::vec4 windPhases{0.0f};
+    };
+    /// One caster, as m2_shadow.vert.glsl reads it (std430).
+    struct M2ShadowInstance {
+        glm::mat4 model;
+        /// xy: the world origin, which gives the wind its per-tree phase.
+        /// z: the height the bend is normalised against. w: its amplitude,
+        /// with the distance fade applied; zero for what does not bend.
+        glm::vec4 sway{0.0f};
+        /// The wind toward in the model's own xy, the lean and the swing
+        /// (shadowWindFor).
+        glm::vec4 wind{0.0f};
+    };
+    /// Casters one frame's maps may hold between them: the sun's, then the
+    /// units' again. Dalaran's sun map takes a few hundred.
+    static constexpr uint32_t kMaxShadowInstances = 16384;
+    VkDescriptorSetLayout shadowInstanceSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool shadowInstanceDescPool_ = VK_NULL_HANDLE;
+    ::VkBuffer shadowInstanceBuffer_[kShadowTexPoolFrames] = {};
+    VmaAllocation shadowInstanceAlloc_[kShadowTexPoolFrames] = {};
+    void* shadowInstanceMapped_[kShadowTexPoolFrames] = {};
+    VkDescriptorSet shadowInstanceSet_[kShadowTexPoolFrames] = {};
+    /// How many of this frame's slots the maps drawn so far have used.
+    uint32_t shadowInstanceCount_ = 0;
+    bool shadowInstancesFullSaid_ = false;
+    bool createShadowInstanceBuffers();
+
     // Particle pipelines
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
 

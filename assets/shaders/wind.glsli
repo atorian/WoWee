@@ -7,11 +7,11 @@
 //
 // Every caller is handed the same numbers in the same shape: the main passes
 // from the PerFrame block (perFrameFoliageWind and friends below, when the
-// includer declares WIND_PER_FRAME), the shadow pass from its push constants
-// (foliageWindFromShadowPush). They call the identical function, so a tree
-// and its shadow cannot drift apart again - which is how this file came to
-// exist: m2.vert.glsl and shadow.vert.glsl each kept a copy of three sine
-// layers that a comment said matched.
+// includer declares WIND_PER_FRAME), the shadow pass from its caster's data
+// and its push constants (foliageWindFromShadowCaster). They call the
+// identical function, so a tree and its shadow cannot drift apart again -
+// which is how this file came to exist: m2.vert.glsl and shadow.vert.glsl
+// each kept a copy of three sine layers that a comment said matched.
 //
 // TIME. Nothing here reads a clock. Each moving layer has a phase the CPU
 // accumulates, phase += dt * rate(speed), so the rate can follow the wind
@@ -68,9 +68,9 @@ vec2 foliageWindSway(FoliageWind w, vec3 pos, vec3 restPos, vec2 worldRef, float
     return (w.dir * alongAmt + across * acrossAmt) * amp;
 }
 
-// The shadow pass's push constants (ShadowPush::wind, ::windPhases), as
-// shadowWindFor in wind_field.hpp packs them for one caster.
-FoliageWind foliageWindFromShadowPush(vec4 wind, vec4 phases) {
+// A shadow caster's wind (M2ShadowInstance::wind) and the frame's phases
+// (M2ShadowPush::windPhases), as shadowWindFor in wind_field.hpp packs them.
+FoliageWind foliageWindFromShadowCaster(vec4 wind, vec4 phases) {
     FoliageWind w;
     w.dir = vec2(wind.x, wind.y);
     w.lean = wind.z;

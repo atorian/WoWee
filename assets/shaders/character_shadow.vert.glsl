@@ -2,11 +2,9 @@
 
 #define MAX_BONES 240u  // must match CharacterRenderer::MAX_BONES
 
-// Shares ShadowPush with the other shadow passes: one combined matrix, and a
-// sway slot a character has no use for.
+// ShadowPush, as the terrain's and the buildings' passes take it.
 layout(push_constant) uniform Push {
     mat4 lightSpaceModel;   // light-space * model, multiplied on the CPU
-    vec4 sway;              // unused here; a character does not bend in the wind
 } push;
 
 layout(set = 1, binding = 0) readonly buffer BoneSSBO {

@@ -373,13 +373,13 @@ TEST_CASE("A tree and its shadow sway together whichever way it faces", "[wind][
         const auto gpu = field.gpu();
         toPerFrame(gpu);
         for (const auto& model : trees) {
-            const auto push = wowee::rendering::shadowWindFor(gpu, model);
+            const auto caster = wowee::rendering::shadowWindFor(gpu, model);
             const glm::vec2 origin(model[3]);
             for (const auto& v : vertices) {
                 const glm::vec2 tree = wind_shader::foliageWindSway(
                     wind_shader::perFrameFoliageWind(model), v, v, origin, 0.8f);
                 const glm::vec2 shadow = wind_shader::foliageWindSway(
-                    wind_shader::foliageWindFromShadowPush(push.wind, push.phases), v, v, origin, 0.8f);
+                    wind_shader::foliageWindFromShadowCaster(caster.wind, caster.phases), v, v, origin, 0.8f);
                 REQUIRE(shadow.x == Approx(tree.x).margin(1e-5));
                 REQUIRE(shadow.y == Approx(tree.y).margin(1e-5));
             }

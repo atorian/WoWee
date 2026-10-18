@@ -11,6 +11,7 @@
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/cpu_stage_times.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -2258,6 +2259,75 @@ void M2Renderer::renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameS
     drawingAfterWater_ = false;
 }
 
+bool M2Renderer::createShadowInstanceBuffers() {
+    if (shadowInstanceSetLayout_) return true;
+    VkDevice device = vkCtx_->getDevice();
+    static_assert(sizeof(M2ShadowInstance) == 96, "M2ShadowInstance is m2_shadow.vert's std430 layout");
+    static_assert(offsetof(M2ShadowPush, flags) == offsetof(ShadowPush, flags),
+                  "shadow.frag reads every shadow pass's flags at one offset");
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo layoutCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutCi.bindingCount = 1;
+    layoutCi.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(device, &layoutCi, nullptr, &shadowInstanceSetLayout_) != VK_SUCCESS) {
+        LOG_ERROR("M2Renderer: could not create the shadow casters' set layout; doodads cast no shadow");
+        return false;
+    }
+
+    VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                  .descriptorCount = kShadowTexPoolFrames};
+    VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolCi.maxSets = kShadowTexPoolFrames;
+    poolCi.poolSizeCount = 1;
+    poolCi.pPoolSizes = &poolSize;
+    if (vkCreateDescriptorPool(device, &poolCi, nullptr, &shadowInstanceDescPool_) != VK_SUCCESS) {
+        LOG_ERROR("M2Renderer: could not create the shadow casters' descriptor pool; doodads cast no shadow");
+        return false;
+    }
+
+    const VkDeviceSize size = VkDeviceSize(kMaxShadowInstances) * sizeof(M2ShadowInstance);
+    for (uint32_t i = 0; i < kShadowTexPoolFrames; ++i) {
+        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = size;
+        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo allocInfo{};
+        if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &shadowInstanceBuffer_[i],
+                            &shadowInstanceAlloc_[i], &allocInfo) != VK_SUCCESS ||
+            !allocInfo.pMappedData) {
+            LOG_ERROR("M2Renderer: could not allocate the shadow casters' buffer (",
+                      size / 1024, " KB); doodads cast no shadow");
+            return false;
+        }
+        shadowInstanceMapped_[i] = allocInfo.pMappedData;
+
+        VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        setAi.descriptorPool = shadowInstanceDescPool_;
+        setAi.descriptorSetCount = 1;
+        setAi.pSetLayouts = &shadowInstanceSetLayout_;
+        if (vkAllocateDescriptorSets(device, &setAi, &shadowInstanceSet_[i]) != VK_SUCCESS) {
+            LOG_ERROR("M2Renderer: could not allocate the shadow casters' set; doodads cast no shadow");
+            return false;
+        }
+        VkDescriptorBufferInfo bufInfo{.buffer = shadowInstanceBuffer_[i], .offset = 0, .range = size};
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = shadowInstanceSet_[i];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &bufInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+    return true;
+}
+
 bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     if (!vkCtx_ || shadowRenderPass == VK_NULL_HANDLE) return false;
     VkDevice device = vkCtx_->getDevice();
@@ -2289,13 +2359,17 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
         }
     }
 
-    // Create shadow pipeline layout: set 1 = shadowParams_.layout, push constants = 128 bytes
+    if (!createShadowInstanceBuffers()) return false;
+
+    // Set 0: the texture and the params, as every shadow pass has them. Set 1:
+    // the casters (M2ShadowInstance).
     VkPushConstantRange pc{};
     // The fragment stage reads the alpha-test flags out of the same block.
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = sizeof(ShadowPush);  // one combined matrix, plus the sway slot
-    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParams_.layout}, {pc});
+    pc.size = sizeof(M2ShadowPush);
+    shadowPipelineLayout_ = createPipelineLayout(
+        device, {shadowParams_.layout, shadowInstanceSetLayout_}, {pc});
     if (!shadowPipelineLayout_) {
         LOG_ERROR("M2Renderer: failed to create shadow pipeline layout");
         return false;
@@ -2303,7 +2377,7 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 
     // Load shadow shaders
     VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/shadow.vert.spv")) {
+    if (!vertShader.loadFromFile(device, "assets/shaders/m2_shadow.vert.spv")) {
         LOG_ERROR("M2Renderer: failed to load shadow vertex shader");
         return false;
     }
@@ -2312,11 +2386,8 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
         return false;
     }
 
-    // M2 vertex layout: 18 floats = 72 bytes stride
-    // loc0=pos(off0), loc1=normal(off12), loc2=texCoord0(off24), loc5=texCoord1(off32),
-    // loc3=boneWeights(off40), loc4=boneIndices(off56)
-    // Shadow shader locations: 0=aPos, 1=aTexCoord, 2=aBoneWeights, 3=aBoneIndicesF
-    // useBones=0 so locations 2,3 are never used
+    // M2 vertex layout: 18 floats = 72 bytes stride; the shadow takes the
+    // position (offset 0) and the first texture coordinate (offset 24).
     VkVertexInputBindingDescription vertBind{};
     vertBind.binding = 0;
     vertBind.stride = 18 * sizeof(float);
@@ -2324,8 +2395,6 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     std::vector<VkVertexInputAttributeDescription> vertAttrs = {
         {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,    .offset = 0},                     // aPos       -> position
         {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,       .offset = 6 * sizeof(float)},     // aTexCoord  -> texCoord0
-        {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 10 * sizeof(float)},    // aBoneWeights
-        {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 14 * sizeof(float)},    // aBoneIndicesF
     };
 
     shadowPipeline_ = buildShadowPipeline(
@@ -2437,6 +2506,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // a second time for it cost as much as the sun's whole cull - the walk is
     // a cache miss per instance, and there are tens of thousands of them.
     // Filtering in place keeps each bucket sorted by model.
+    // The cull and the recording timed apart, under the map's own stage.
+    const std::string_view stageGroup = resetDescriptors
+        ? std::string_view("beginFrame/graph/shadow_pass/sun: m2")
+        : std::string_view("beginFrame/graph/shadow_pass/units: m2");
+    std::optional<CpuStage> cullStage(std::in_place, vkCtx_->cpuStages(), stageGroup, "cull");
     const bool fromSolarCasters = !resetDescriptors && solarCastersFresh_;
     solarCastersFresh_ = false;
     if (fromSolarCasters) {
@@ -2493,21 +2567,26 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         solarCastersFresh_ = resetDescriptors;
     }
 
-    // Helper lambda to draw instances with a given foliageSway setting
-    auto drawPass = [&](bool foliagePass) {
-        // What this pass is, carried with each draw rather than written into a
-        // buffer both passes share. The uniform buffer this used to be is read
-        // when a draw executes, not when it is recorded, so writing it again
-        // for the foliage pass decided what the solid pass's draws saw as
-        // well - and one mapped copy across frames in flight let a CPU write
-        // land inside the previous frame's reads. A foliage batch that lost
-        // its alpha test that way casts the whole leaf quad, which is the
-        // canopy's outline in solid black instead of its cutout. The flags are
-        // set per draw below, in ShadowPush.
+    // The casters' data goes into this frame's buffer, the sun's map first and
+    // the units' after it, and each model's casters sit side by side so a
+    // batch of the model is one draw of all of them.
+    if (resetDescriptors) shadowInstanceCount_ = 0;
+    auto* casterData = static_cast<M2ShadowInstance*>(shadowInstanceMapped_[frameIdx]);
+    const VkDescriptorSet casterSet = shadowInstanceSet_[frameIdx];
+    if (!casterData || !casterSet) return;
 
+    auto drawPass = [&](bool foliagePass) {
+        // What each draw is - the texture, the alpha test, the bend - is
+        // carried with it in push constants rather than written into a buffer
+        // both passes share. A uniform buffer is read when a draw executes,
+        // not when it is recorded, so writing it again for the foliage pass
+        // decided what the solid pass's draws saw as well; a foliage batch
+        // that lost its alpha test that way casts the whole leaf quad.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 1, &shadowParams_.set, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
+            1, 1, &casterSet, 0, nullptr);
 
         const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
         for (std::size_t g = 0; g < casters.size();) {
@@ -2525,12 +2604,44 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                                           model.shadowWindFoliage, model.isGroundDetail,
                                           model.boundMin.z, model.boundMax.z,
                                           model.isStandingCloth);
-            const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
             // Bent in the wind only where the main pass bends it: foliage,
             // mode 1. Ground clutter (mode 2) plays its own animation there
             // and takes no shader wind, and its shadow swaying anyway was a
             // shadow moving under a plant that did not.
             const bool windBent = foliagePass && sway.mode == 1;
+
+            const uint32_t count = static_cast<uint32_t>(groupEnd - g);
+            if (shadowInstanceCount_ + count > kMaxShadowInstances) {
+                if (!shadowInstancesFullSaid_) {
+                    shadowInstancesFullSaid_ = true;
+                    LOG_WARNING("Shadow pass: more than ", kMaxShadowInstances,
+                                " doodads cast into this frame's maps; ", model.name,
+                                " and the casters after it throw no shadow while it lasts");
+                }
+                break;
+            }
+            const uint32_t firstCaster = shadowInstanceCount_;
+            shadowInstanceCount_ += count;
+            for (std::size_t k = g; k < groupEnd; ++k) {
+                const auto& instance = scene_->instances[casters[k].second];
+                M2ShadowInstance& out = casterData[firstCaster + (k - g)];
+                out.model = instance.modelMatrix;
+                if (windBent) {
+                    // The instance's own origin is what gives the wind its
+                    // per-tree phase; the height and amplitude are the
+                    // model's. The wind's direction is turned into the
+                    // model's own space here, where the main pass turns it
+                    // on the GPU: the sway is applied before the model matrix.
+                    const glm::vec3 origin(instance.modelMatrix[3]);
+                    const float fade = m2WindDistanceFade(glm::length(origin - cachedCamPos_));
+                    out.sway = glm::vec4(origin.x, origin.y, sway.refHeight, sway.amp * fade);
+                    out.wind = shadowWindFor(wind, instance.modelMatrix).wind;
+                } else {
+                    out.sway = glm::vec4(0.0f);
+                    out.wind = glm::vec4(0.0f);
+                }
+            }
+
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -2571,43 +2682,29 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                         shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
                 }
 
-                for (std::size_t k = g; k < groupEnd; ++k) {
-                    const auto& instance = scene_->instances[casters[k].second];
-                    // The instance's own origin is what gives the wind its
-                    // per-tree phase; the height and amplitude beside it are
-                    // the model's.
-                    //
-                    // The wind's direction is turned into the model's own
-                    // space here, where the main pass turns it on the GPU:
-                    // the sway is applied before the model matrix.
-                    const glm::vec3 origin = glm::vec3(instance.modelMatrix[3]);
-                    const float fade = windBent
-                        ? m2WindDistanceFade(glm::length(origin - cachedCamPos_)) : 0.0f;
-                    const ShadowWindPush casterWind = windBent
-                        ? shadowWindFor(wind, instance.modelMatrix) : ShadowWindPush{};
-                    ShadowPush push{
-                        .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
-                        .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y * fade),
-                        .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0,
-                                            windBent ? 1 : 0,
-                                            batch.drawState.alphaTest == 4 ? 224 : 0),
-                        .wind = casterWind.wind,
-                        .windPhases = casterWind.phases};
-                    vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(ShadowPush), &push);
-                    vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
-                }
+                const M2ShadowPush push{
+                    .lightSpace = lightSpaceMatrix,
+                    .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0, windBent ? 1 : 0,
+                                        batch.drawState.alphaTest == 4 ? 224 : 0),
+                    .windPhases = wind.phases};
+                vkCmdPushConstants(cmd, shadowPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(M2ShadowPush), &push);
+                vkCmdDrawIndexed(cmd, batch.indexCount, count, batch.indexStart, 0, firstCaster);
             }
-            castersDrawn[foliagePass ? 1 : 0] += static_cast<uint32_t>(groupEnd - g);
+            castersDrawn[foliagePass ? 1 : 0] += count;
             g = groupEnd;
         }
     };
 
-    // Pass 1: non-foliage (no wind displacement)
-    drawPass(false);
-    // Pass 2: foliage (wind displacement enabled, per-batch alpha-tested textures)
-    drawPass(true);
+    cullStage.reset();
+    {
+        CpuStage recordStage(vkCtx_->cpuStages(), stageGroup, "record");
+        // Pass 1: non-foliage (no wind displacement)
+        drawPass(false);
+        // Pass 2: foliage (wind displacement enabled, per-batch alpha-tested textures)
+        drawPass(true);
+    }
 
     // Contact coverage differs from the solar footprint; do not report that as flicker.
     if (!resetDescriptors) return;

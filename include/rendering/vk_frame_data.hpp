@@ -5,6 +5,7 @@
 #include "rendering/local_lights.hpp"
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 
 namespace wowee {
 namespace rendering {
@@ -75,23 +76,18 @@ struct WMOPushConstants {
     LocalLightSet localLights = kNoLocalLights;
 };
 
-// Push constants for shadow rendering passes.
+// Push constants for the terrain's, the buildings' and the characters'
+// shadow passes: the light-space and model matrices multiplied on the CPU,
+// since nothing in their shadow shaders wants them apart.
 //
-// Two matrices filled 128 bytes exactly, which is all Vulkan guarantees for
-// push constants - and left no room for the sway a foliage caster needs to
-// match the tree it belongs to. The light-space and model matrices are
-// multiplied on the CPU instead, since nothing in the shadow shaders wanted
-// them apart: the fragment shader's world position was never read.
+// The doodads' pass has its own block (M2ShadowPush), drawn instanced with
+// its casters' matrices and wind in a buffer; it keeps `flags` at the same
+// offset, since shadow.frag reads them for every caster.
 struct ShadowPush {
     glm::mat4 lightSpaceModel;
-    /// xy: the instance's world origin, which gives the wind its per-tree
-    /// phase. z: the height the bend is normalised against. w: its amplitude,
-    /// with the distance fade already applied. All zero for anything that
-    /// does not sway.
-    glm::vec4 sway{0.0f};
-    /// x: sample the texture. y: alpha-test it. z: bend in the wind.
-    /// w: where the alpha test cuts, in 255ths; 0 is a half. A WMO's alpha
-    /// key cuts at 224, as the original client's does.
+    /// x: sample the texture. y: alpha-test it. z: bend in the wind (the
+    /// doodads' pass only). w: where the alpha test cuts, in 255ths; 0 is a
+    /// half. A WMO's alpha key cuts at 224, as the original client's does.
     ///
     /// These were in the uniform buffer, and the M2 pass writes that buffer
     /// twice a frame - once for its solid casters, once for its foliage. A
@@ -103,15 +99,8 @@ struct ShadowPush {
     /// canopy. Push constants are recorded into the command buffer with the
     /// draw, so there is nothing left to race.
     glm::ivec4 flags{0};
-    /// The wind as foliageWindSway takes it (wind.glsli), the same numbers the
-    /// main pass reads from GPUPerFrameData: xy the direction it blows toward
-    /// in the model's own xy (windDirectionInModel), z the lean, w the swing.
-    glm::vec4 wind{0.0f};
-    /// x trunk, y branch, z leaf phase; w the branch and leaf scale.
-    glm::vec4 windPhases{0.0f};
 };
-static_assert(sizeof(ShadowPush) == 128,
-              "ShadowPush is all the push constant space Vulkan guarantees");
+static_assert(offsetof(ShadowPush, flags) == 64, "shadow.frag reads the flags at offset 64");
 
 // Uniform buffer for shadow rendering parameters (matches shader std140 layout)
 struct ShadowParamsUBO {

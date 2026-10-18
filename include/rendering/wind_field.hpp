@@ -118,16 +118,16 @@ inline glm::vec2 windDirectionInModel(const glm::mat4& model, const glm::vec2& d
     return len > 1e-6f ? glm::vec2(d) / len : glm::vec2(1.0f, 0.0f);
 }
 
-/// What the shadow pass's push constants carry of the wind for one caster
-/// (ShadowPush::wind and ::windPhases), read back by foliageWindFromShadowPush
-/// in wind.glsli: the frame's wind with its direction turned into the
-/// caster's own space.
-struct ShadowWindPush {
+/// What the shadow passes carry of the wind for one caster, read back by
+/// foliageWindFromShadowPush in wind.glsli: the frame's wind with its
+/// direction turned into the caster's own space (M2ShadowInstance::wind), and
+/// the phases every caster shares (M2ShadowPush::windPhases).
+struct ShadowCasterWind {
     glm::vec4 wind{0.0f};    ///< xy toward in the model's xy, z lean, w swing
     glm::vec4 phases{0.0f};  ///< trunk, branch, leaf, detail
 };
 
-inline ShadowWindPush shadowWindFor(const WindGpu& wind, const glm::mat4& model) {
+inline ShadowCasterWind shadowWindFor(const WindGpu& wind, const glm::mat4& model) {
     return {glm::vec4(windDirectionInModel(model, glm::vec2(wind.dirLean)), wind.dirLean.z,
                       wind.dirLean.w),
             wind.phases};
