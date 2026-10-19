@@ -22,11 +22,12 @@ layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 #include "sky_atmosphere.glsli"
 
 layout(push_constant) uniform Push {
-    vec4 zenithColor;     // DBC skyTopColor
-    vec4 midColor;        // DBC skyMiddleColor
-    vec4 horizonColor;    // DBC skyBand1Color
-    vec4 fogColorPush;    // DBC skyBand2Color
-    vec4 sunDirAndTime;   // xyz = sun direction, w = timeOfDay
+    vec4 zenithColor;
+    vec4 midColor;
+    vec4 horizonColor;
+    vec4 band2Color;
+    vec4 smogColor;
+    vec4 fogColorPush;
 } push;
 
 layout(location = 0) in vec2 TexCoord;
@@ -51,10 +52,9 @@ void main() {
     mat3 invViewRot = transpose(mat3(view));
     vec3 worldDir = normalize(invViewRot * viewDir);
 
-    vec3 sunDir = push.sunDirAndTime.xyz;
-
-    vec3 sky = atmosphereSkyColor(worldDir, sunDir, push.zenithColor.rgb,
+    vec3 sky = atmosphereSkyColor(worldDir, push.zenithColor.rgb,
                                   push.midColor.rgb, push.horizonColor.rgb,
+                                  push.band2Color.rgb, push.smogColor.rgb,
                                   push.fogColorPush.rgb);
 
     if (volumetricParams.x > 0.5) {

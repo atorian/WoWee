@@ -1,3 +1,4 @@
+#include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
 #include "core/zone_tracker.hpp"
@@ -1824,7 +1825,6 @@ void GameScreen::saveSettings() {
     out << "shadows=" << (settingsPanel_.pendingShadows ? 1 : 0) << "\n";
     out << "shadow_distance=" << settingsPanel_.pendingShadowDistance << "\n";
     out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
-    out << "fog_sky_blend=" << settingsPanel_.pendingFogSkyBlend << "\n";
     out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
     out << "light_shafts=" << settingsPanel_.pendingVolumetricFog << "\n";
     out << "ray_traced_lighting=" << settingsPanel_.pendingRtLighting << "\n";
@@ -2065,8 +2065,14 @@ void GameScreen::loadSettings() {
             else if (key == "grass_distance") settingsPanel_.pendingGrassDistance = std::clamp(std::stoi(val), 30, 800);
             else if (key == "shadows") settingsPanel_.pendingShadows = (std::stoi(val) != 0);
             else if (key == "shadow_distance") settingsPanel_.pendingShadowDistance = std::clamp(std::stof(val), 40.0f, 500.0f);
-            else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), 400.0f, 2400.0f);
-            else if (key == "fog_sky_blend") settingsPanel_.pendingFogSkyBlend = std::clamp(std::stof(val), 0.0f, 1.0f);
+            else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), rendering::kMinViewDistance, rendering::kMaxViewDistance);
+            else if (key == "fog_sky_blend") {
+                static bool warned = false;
+                if (!warned) {
+                    LOG_WARNING("Setting fog_sky_blend is obsolete; the zone's authored fog colour is used");
+                    warned = true;
+                }
+            }
             else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "light_shafts") settingsPanel_.pendingVolumetricFog = std::clamp(std::stoi(val), 0, 3);
             else if (key == "ray_traced_lighting") settingsPanel_.pendingRtLighting = std::clamp(std::stoi(val), 0, 3);

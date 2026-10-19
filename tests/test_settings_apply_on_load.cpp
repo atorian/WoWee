@@ -15,6 +15,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "test_support.hpp"
+#include "rendering/view_distance.hpp"
 
 #include <fstream>
 #include <regex>
@@ -124,8 +125,8 @@ TEST_CASE("the graphics defaults have one home", "[settings]") {
 
     // And they have to be reachable on the sliders that show them, or the
     // panel opens on a value it cannot represent.
-    CHECK(wowee::ui::kDefaultViewDistance >= 400.0f);
-    CHECK(wowee::ui::kDefaultViewDistance <= 2400.0f);
+    CHECK(wowee::ui::kDefaultViewDistance >= wowee::rendering::kMinViewDistance);
+    CHECK(wowee::ui::kDefaultViewDistance <= wowee::rendering::kMaxViewDistance);
     CHECK(wowee::ui::kDefaultGroundClutter >= 0);
     CHECK(wowee::ui::kDefaultGroundClutter <= 150);
 }
@@ -428,7 +429,6 @@ TEST_CASE("the login screen starts where the schema says", "[settings]") {
     const std::vector<std::pair<const char*, const char*>> mirrored = {
         {"antialiasing", "antiAliasing"},
         {"shadowdistance", "shadowDistance"},
-        {"fogskyblend", "fogSkyBlend"},
         {"fogstrength", "fogStrength"},
         {"parallaxquality", "pomQuality"},
         {"upscaling", "upscalingMode"},

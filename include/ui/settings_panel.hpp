@@ -57,9 +57,6 @@ public:
     bool pendingShadows = true;
     float pendingShadowDistance = 300.0f;
     float pendingViewDistance = kDefaultViewDistance;
-    /// How far the distance fog takes the sky's colour. See
-    /// LightingManager::setFogSkyBlend.
-    float pendingFogSkyBlend = 0.7f;
     /// How much distance fog. See LightingManager::setFogStrength.
     float pendingFogStrength = 0.4f;
     /// Volumetric fog: 0 off, 1-3 the volume's size. See VolumetricFog.

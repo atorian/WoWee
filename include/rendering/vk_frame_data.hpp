@@ -42,9 +42,9 @@ struct GPUPerFrameData {
     glm::mat4 rtViewProj;
     glm::vec4 rtCameraPos;
     glm::vec4 rtParams;
-    // Appended so existing shader prefixes keep their offsets. The distant
-    // haze samples the real sky, with the procedural gradient as a fallback.
-    glm::vec4 fogSkyTop{0.0f}; // rgb = zenith, w = sky tint amount
+    // Sky colours for water reflections, followed by view-distance metadata.
+    // Surface distance fog uses fogColor directly.
+    glm::vec4 fogSkyTop{0.0f}; // rgb = zenith, w = reserved
     glm::vec4 fogSkyMiddle{0.0f}; // w = actual sky capture valid
     glm::vec4 fogSkyBand1{0.0f}; // w = common horizontal geometry limit
     glm::vec4 fogSkyBand2{0.0f};
@@ -58,6 +58,7 @@ struct GPUPerFrameData {
     glm::vec4 windDirLean{1.0f, 0.0f, 0.0f, 0.0f}; // xy toward (world, unit), z lean, w swing
     glm::vec4 windPhases{0.0f};  // x trunk, y branch, z leaf phase, w branch/leaf scale
     glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
+    glm::vec4 skySmogColor{0.0f}; // appended: horizon band for water sky reflections
 };
 
 // Push constants for the model matrix (most common case)

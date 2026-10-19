@@ -31,6 +31,7 @@ struct LightingParams {
     glm::vec3 skyMiddleColor{0.7f, 0.85f, 1.0f};   // Sky horizon color
     glm::vec3 skyBand1Color{0.9f, 0.95f, 1.0f};    // Sky band 1
     glm::vec3 skyBand2Color{1.0f, 0.98f, 0.9f};    // Sky band 2
+    glm::vec3 skySmogColor{0.5f, 0.6f, 0.7f};    // Horizon band, LightIntBand channel 6
 
     /// The sun's and the moon's disc and glare, LightIntBand channel 9. Not the
     /// light the sun casts (diffuseColor): Tirisfal's sun lights the ground a
@@ -61,6 +62,7 @@ struct LightingParams {
             .skyMiddleColor = glm::vec3(0.0f),
             .skyBand1Color = glm::vec3(0.0f),
             .skyBand2Color = glm::vec3(0.0f),
+            .skySmogColor = glm::vec3(0.0f),
             .sunColor = glm::vec3(0.0f),
             .cloudSunlitColor = glm::vec3(0.0f),
             .cloudFillColor = glm::vec3(0.0f),
@@ -250,11 +252,6 @@ public:
     /// takes its own light instead - see interior_light.glsli.
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
-    /// How far the distance fog is pulled toward the sky's horizon colour.
-    /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
-    /// LightingManager::update.
-    void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
-    [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
     /// How much distance fog, as a multiplier on the zone's own fog distances.
     /// 1 is the DBC unchanged, above 1 is thicker, 0 is none; the default
     /// 0.4 thins the authored fog, which reads too heavy here. See
@@ -393,7 +390,6 @@ private:
     /// When update last ran, for smoothing by real time rather than by frame.
     std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
-    float fogSkyBlend_ = 0.7f;
     float fogStrength_ = 0.4f;
 
     // Last values the sky diagnostic reported, so it prints on a change

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/view_distance.hpp"
+
 #include <cmath>
 
 #include "rendering/texture_cache.hpp"
@@ -264,7 +266,7 @@ public:
     void setFrustumCulling(bool enabled) { frustumCullingEnabled = enabled; }
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
-    void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
+    void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, kMinViewDistance, kMaxViewDistance); }
     [[nodiscard]] float viewDistance() const { return maxViewDistance_; }
 
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}

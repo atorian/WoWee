@@ -848,7 +848,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "grassdistance", "waterrefraction", "upscaling", "fsrquality",
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
-    "fogskyblend", "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
+    "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
     "raytracedlighting",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
@@ -989,7 +989,6 @@ constexpr FieldBinding kFieldBindings[] = {
     // not in the schema - but they still have to be readable and writable,
     // because that is how those panels reach them.
     {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
-    {.key = "fogskyblend",    .asFloat = &SettingsPanel::pendingFogSkyBlend},
     {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
     {.key = "lightshafts",    .asInt   = &SettingsPanel::pendingVolumetricFog},
     {.key = "raytracedlighting", .asInt = &SettingsPanel::pendingRtLighting},
@@ -1379,12 +1378,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (renderer) renderer->setRtLightingMode(pendingRtLighting);
     } else if (key == "mistdensity") {
         if (renderer) renderer->setVolumetricFogDensity(pendingVolumetricDensity);
-    } else if (key == "fogskyblend") {
-        if (renderer) {
-            if (auto* lighting = renderer->getLightingManager()) {
-                lighting->setFogSkyBlend(pendingFogSkyBlend);
-            }
-        }
     } else if (key == "framegen") {
         if (post) post->setAmdFsr3FramegenEnabled(pendingAMDFramegen);
     } else if (key == "fsrjittersign") {

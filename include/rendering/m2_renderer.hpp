@@ -2,6 +2,8 @@
 
 #include "collision/m2_shape.hpp"
 #include "rendering/chunked_vector.hpp"
+#include "rendering/view_distance.hpp"
+
 #include "rendering/texture_cache.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/instance_index_set.hpp"
@@ -857,7 +859,7 @@ public:
                    : viewDistanceAbsolute_;
     }
     void setViewDistance(float distance) {
-        viewDistanceRaw_ = std::clamp(distance, 400.0f, 2400.0f);
+        viewDistanceRaw_ = std::clamp(distance, kMinViewDistance, kMaxViewDistance);
         // And the distance itself, as a ceiling. The scale multiplies a
         // constant tuned for scene density - 2800 yards where models are
         // sparse - so at 2400 it put doodads 5600 yards out while the terrain

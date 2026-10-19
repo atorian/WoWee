@@ -99,6 +99,7 @@ inline LightingParams sampleLightParams(const LightParamsProfile& profile,
     params.skyMiddleColor = sampleColorBand(profile.colorBands[P::SKY_MIDDLE_COLOR], timeHalfMinutes);
     params.skyBand1Color = sampleColorBand(profile.colorBands[P::SKY_BAND1_COLOR], timeHalfMinutes);
     params.skyBand2Color = sampleColorBand(profile.colorBands[P::SKY_BAND2_COLOR], timeHalfMinutes);
+    params.skySmogColor = sampleColorBand(profile.colorBands[P::SKY_SMOG_COLOR], timeHalfMinutes);
     params.sunColor = sampleColorBand(profile.colorBands[P::SUN_COLOR], timeHalfMinutes);
     params.cloudSunlitColor =
         sampleColorBand(profile.colorBands[P::CLOUD_SUNLIT_COLOR], timeHalfMinutes);
@@ -144,6 +145,7 @@ inline LightingParams blendTowardStorm(const LightingParams& clear, const Lighti
     out.skyMiddleColor = glm::mix(clear.skyMiddleColor, storm.skyMiddleColor, w);
     out.skyBand1Color = glm::mix(clear.skyBand1Color, storm.skyBand1Color, w);
     out.skyBand2Color = glm::mix(clear.skyBand2Color, storm.skyBand2Color, w);
+    out.skySmogColor = glm::mix(clear.skySmogColor, storm.skySmogColor, w);
     out.sunColor = glm::mix(clear.sunColor, storm.sunColor, w);
     out.cloudSunlitColor = glm::mix(clear.cloudSunlitColor, storm.cloudSunlitColor, w);
     out.cloudFillColor = glm::mix(clear.cloudFillColor, storm.cloudFillColor, w);
@@ -181,6 +183,7 @@ inline std::optional<LightingParams> blendLightingParams(
         sum.skyMiddleColor += p.skyMiddleColor * w;
         sum.skyBand1Color += p.skyBand1Color * w;
         sum.skyBand2Color += p.skyBand2Color * w;
+        sum.skySmogColor += p.skySmogColor * w;
         sum.sunColor += p.sunColor * w;
         sum.cloudSunlitColor += p.cloudSunlitColor * w;
         sum.cloudFillColor += p.cloudFillColor * w;
@@ -203,6 +206,7 @@ inline std::optional<LightingParams> blendLightingParams(
     sum.skyMiddleColor *= inv;
     sum.skyBand1Color *= inv;
     sum.skyBand2Color *= inv;
+    sum.skySmogColor *= inv;
     sum.sunColor *= inv;
     sum.cloudSunlitColor *= inv;
     sum.cloudFillColor *= inv;

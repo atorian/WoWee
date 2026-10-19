@@ -195,3 +195,22 @@ TEST_CASE("Weather blends the light toward the storm row, all the way at a quart
     CHECK(matches(lightIn("wowee_zone_light_quarter", 12, 12.0f, 0.25f).skyTopColor, stormSky));
     CHECK(matches(lightIn("wowee_zone_light_heavy", 12, 12.0f, 0.8f).skyTopColor, stormSky));
 }
+
+TEST_CASE("distance fog retains its authored colour instead of the middle sky", "[light][fog]") {
+    const LightingParams lit = lightIn("wowee_authored_fog", 4395, 12.0f);
+    const glm::vec3 expected = rgb(noonColour(7));
+    CHECK(glm::length(lit.fogColor - expected) < 2e-3f);
+}
+
+TEST_CASE("the sky receives the authored smog and fog in clear and storm light", "[light][fog]") {
+    for (float weather : {0.0f, 0.125f, 0.25f}) {
+        const LightingParams lit = lightIn("wowee_sky_fog_channels", 4395, 12.0f, weather);
+        const auto sky = wowee::rendering::skyParamsFromLighting(12, 12, weather, &lit, false);
+        const float stormWeight = std::min(1.0f, 4.0f * weather);
+        const auto expected = [&](uint32_t channel) {
+            return glm::mix(rgb(noonColour(channel)), rgb(stormNoonColour(channel)), stormWeight);
+        };
+        CHECK(glm::length(sky.skyFogColor - expected(7)) < 2e-3f);
+        CHECK(glm::length(sky.skySmogColor - expected(6)) < 2e-3f);
+    }
+}

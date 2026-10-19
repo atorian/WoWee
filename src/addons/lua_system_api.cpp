@@ -26,6 +26,7 @@
 #include "ui/display_modes.hpp"
 #include "ui/widget_tree.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/view_distance.hpp"
 #include "addons/lua_engine.hpp"
 #include "game/bg_score_defs.hpp"
 #include "game/calendar_month.hpp"
@@ -4891,12 +4892,8 @@ constexpr CVarRange kCVarRanges[] = {
     // and a scale you cannot undo from inside the game is worse than one that
     // is merely too small.
     {"uiscale", 0.64f, ui::WidgetTree::kMaxUserScale},
-    // View distance. The shipped table stops at 1277 - the number the original
-    // client's own renderer could reach - and this one draws to 2400, so the
-    // slider could not ask for the range the engine has. Both ends are what
-    // Renderer::setViewDistance clamps to, so the control now covers exactly
-    // what the client can do and nothing it cannot.
-    {"farclip", 400.0f, 2400.0f},
+    // The CVar control and the renderer share the same accepted range.
+    {"farclip", rendering::kMinViewDistance, rendering::kMaxViewDistance},
     // Texture filtering. The shipped slider counts Blizzard's six modes -
     // bilinear and trilinear before the anisotropic steps - and this client's
     // setting is the five its samplers have, off and then 2x to 16x, so a

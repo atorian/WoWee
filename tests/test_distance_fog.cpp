@@ -11,6 +11,7 @@ using glm::max;
 using glm::mix;
 using glm::pow;
 using glm::smoothstep;
+using glm::sqrt;
 #include "../assets/shaders/sky_atmosphere.glsli"
 #include "../assets/shaders/sunlit_air.glsli"
 }
@@ -31,46 +32,36 @@ TEST_CASE("zone light blending has no fallback sky or extra fog distance", "[lig
     CHECK(fallback.skyBand2Color.r == 1.0f);
 }
 
-TEST_CASE("distant haze uses the horizon and nadir instead of the middle sky", "[light][fog]") {
+TEST_CASE("sky below the horizon and fully fogged terrain use the same authored colour", "[light][fog]") {
     using namespace fog_math;
     const vec3 top(.2f, .15f, .3f), middle(.7f, .6f, .8f);
-    const vec3 band1(.35f, .2f, .4f), fringe(.25f, .1f, .3f);
-    const vec3 sun(0, 0, 1);
+    const vec3 band1(.35f, .2f, .4f), band2(.25f, .1f, .3f);
+    const vec3 smog(.5f, .4f, .1f), fog(.1f, .08f, .2f);
     const auto sky = [&](vec3 ray) {
-        return atmosphereSkyColor(ray, sun, top, middle, band1, fringe);
+        return atmosphereSkyColor(ray, top, middle, band1, band2, smog, fog);
     };
-    // No sun disk on these rays. Existing horizon haze is shared with skybox.
-    const vec3 horizon = sky(vec3(1, 0, 0));
-    CHECK(horizon.r < middle.r);
-    CHECK(horizon.g < middle.g);
-    const vec3 below = sky(glm::normalize(vec3(1, 0, -.4f)));
-    CHECK(below.r < horizon.r);
-    CHECK(below.g < horizon.g);
-    CHECK(sky(vec3(0, 0, -1)).r < horizon.r);
-
-    const vec3 authored(.7f, .75f, .8f);
-    // Ships far beyond the fog end converge on the same directional background.
-    CHECK(distanceFogTint(authored, below, 2000, 100, 800, .7f) == below);
-    CHECK(distanceFogTint(authored, below, 2000, 100, 800, 0) == authored);
-    CHECK(distanceFogTint(authored, below, 800, 100, 800, 1) == below);
-    const vec3 atEnd = distanceFogTint(authored, below, 800, 100, 800, .7f);
-    const vec3 farther = distanceFogTint(authored, below, 1100, 100, 800, .7f);
-    CHECK(atEnd == below);
-    CHECK(farther == below);
+    const vec3 distant = mix(fog, vec3(1.0f), distanceFogVisibility(2000, 100, 800));
+    CHECK(sky(glm::normalize(vec3(1, 0, -.2f))) == distant);
+    CHECK(sky(vec3(0, 0, -1)) == distant);
+    CHECK(sky(vec3(0, 0, 1)) == top);
+    // A green smog channel has its own place close to the horizon; it must
+    // not be skipped on the way from the upper sky to the fog below it.
+    const vec3 nearHorizon = atmosphereSkyColor(glm::normalize(vec3(1, 0, .02f)),
+        vec3(1, 0, 0), vec3(1, 0, 0), vec3(1, 0, 0), vec3(1, 0, 0),
+        vec3(0, 1, 0), vec3(0, 0, 1));
+    CHECK(nearHorizon.g > nearHorizon.r);
+    CHECK(nearHorizon.g > nearHorizon.b);
 }
 
-TEST_CASE("the sky dome has no glow of its own round the sun", "[light][fog]") {
-    // WoW.exe's dome is its LightIntBand gradient alone; the glow round the
-    // sun is the glare sprite (sky_sun.hpp). The dome painted one in fixed
-    // warm colours, and then in the zone's halo, on top of the sprite.
+TEST_CASE("the sky dome adds no azimuth-dependent colour to its bands", "[light][fog]") {
     using namespace fog_math;
     const vec3 top(.15f, .3f, .25f), middle(.17f, .37f, .29f);
-    const vec3 band1(.25f, .4f, .33f), fringe(.33f, .58f, .53f);
-    const vec3 sun = glm::normalize(vec3(0, .6f, .8f));
-    // Toward the sun and the same height on the far side of the sky.
-    const vec3 away = glm::normalize(vec3(0, -.6f, .8f));
-    const vec3 toward = atmosphereSkyColor(sun, sun, top, middle, band1, fringe);
-    const vec3 opposite = atmosphereSkyColor(away, sun, top, middle, band1, fringe);
+    const vec3 band1(.25f, .4f, .33f), band2(.33f, .58f, .53f);
+    const vec3 smog(.3f), fog(.2f, .15f, .3f);
+    const vec3 toward = atmosphereSkyColor(glm::normalize(vec3(0, .6f, .8f)),
+        top, middle, band1, band2, smog, fog);
+    const vec3 opposite = atmosphereSkyColor(glm::normalize(vec3(0, -.6f, .8f)),
+        top, middle, band1, band2, smog, fog);
     CHECK(glm::length(toward - opposite) < 1e-6f);
 }
 
@@ -112,22 +103,4 @@ TEST_CASE("fog leaves nearby surfaces clear and has finite degenerate ranges", "
     const auto ray = glm::normalize(d);
     const auto translated = glm::normalize((p + d) - p);
     CHECK(ray == translated);
-}
-
-TEST_CASE("actual authored sky absorbs distant silhouettes before geometry clipping", "[light][fog]") {
-    using namespace fog_math;
-    const vec3 purpleSky(.18f, .07f, .31f), yellowZone(.9f, .7f, .15f);
-    const vec3 brightShip(1.0f);
-    const auto distant = [&](float distance) {
-        return mix(distanceFogTint(yellowZone, purpleSky, distance, 100, 800, .7f),
-                   brightShip, distanceFogVisibility(distance, 100, 800));
-    };
-    CHECK(distant(50) == brightShip);
-    CHECK(distant(800) == purpleSky);
-    CHECK(distant(1400) == purpleSky);
-    CHECK(worldGeometryVisibility(2000, 2400) == 1.0f);
-    CHECK(worldGeometryVisibility(2400, 2400) == 0.0f);
-    CHECK(worldGeometryVisibility(3000, 2400) == 0.0f);
-    CHECK(worldGeometryVisibility(2220, 2400) == Catch::Approx(.5f));
-    CHECK(worldGeometryVisibility(4000, 0) == 1.0f);
 }
