@@ -487,6 +487,13 @@ private:
     /// processPendingUnloads hands them to the frame profile and starts them
     /// again.
     std::array<float, 5> unloadPartMs_{};
+    /// The same for finishing tiles, by what inside a phase the time went
+    /// to; processReadyTiles hands them on and starts them again.
+    enum FinalizePart : size_t {
+        kPartTerrainTextures, kPartTerrainChunks, kPartTerrainWater,
+        kPartM2ModelLoad, kPartM2InstanceCreate, kFinalizePartCount
+    };
+    std::array<float, kFinalizePartCount> finalizePartMs_{};
     /// Tiles around the neighbour the camera is about to cross into, queued
     /// before it gets there. Cleared on each crossing.
     std::vector<TileCoord> prefetchedCenters_;

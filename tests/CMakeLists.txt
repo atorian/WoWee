@@ -1744,10 +1744,11 @@ wowee_add_test(test_scene_pick SOURCES test_scene_pick.cpp)
 # unit, refreshed a few a frame for a crowd.
 wowee_add_test(test_sight_cache SOURCES test_sight_cache.cpp)
 
-# ── test_swap_remove_index ───────────────────────────────────
-# The M2 renderer's index lists, corrected for each swap-remove instead of
-# rebuilt over every instance: they must match a rebuild after any removals.
-wowee_add_test(test_swap_remove_index SOURCES test_swap_remove_index.cpp)
+# ── test_instance_index_set ──────────────────────────────────
+# The M2 renderer's animated, particle and light sets, kept right across
+# swap-removes, batch removals and hiding instead of rebuilt over every
+# instance: they must match a rebuild after any of them.
+wowee_add_test(test_instance_index_set SOURCES test_instance_index_set.cpp)
 
 # ── test_instance_random ─────────────────────────────────────
 # Each M2 instance's own random numbers: independent of the others, so

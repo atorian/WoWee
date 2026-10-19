@@ -1000,6 +1000,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 if (std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
             }
+            finalizePartMs_[kPartTerrainTextures] += std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - stepStart).count();
             if (ft.terrainTexNext < ft.terrainTexKeys.size()) return false;
             ft.terrainPreloaded = true;
             return false;
@@ -1026,6 +1028,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     ft.terrainChunkNext, 4);
             } while (!allDone && std::chrono::duration<float, std::milli>(
                          std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_);
+            finalizePartMs_[kPartTerrainChunks] += std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - stepStart).count();
             if (!allDone) {
                 return false; // More chunks remain - yield to time budget
             }
@@ -1037,7 +1041,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         if (!ft.terrainWaterDone) {
             ft.terrainWaterDone = true;
             if (liquidScene) {
+                const auto waterStart = std::chrono::steady_clock::now();
                 liquidScene->addTerrainTile(pending->terrain, x, y);
+                finalizePartMs_[kPartTerrainWater] += std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - waterStart).count();
             } else {
                 LOG_WARNING("Water: no liquid scene for tile [", x, ",", y,
                             "] - its water is neither drawn nor swum in");
@@ -1077,7 +1084,11 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                    (uploaded == 0 || std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_)) {
                 auto& m2Ready = pending->m2Models[ft.m2ModelIndex];
-                if (m2Renderer->loadModel(m2Ready.model, m2Ready.modelId)) {
+                const auto modelStart = std::chrono::steady_clock::now();
+                const bool modelLoaded = m2Renderer->loadModel(m2Ready.model, m2Ready.modelId);
+                finalizePartMs_[kPartM2ModelLoad] += std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - modelStart).count();
+                if (modelLoaded) {
                     ft.uploadedM2ModelIds.insert(m2Ready.modelId);
                     // Track uploaded model IDs so background threads can skip re-reading
                     std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
@@ -1125,7 +1136,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 if (!m2Renderer->hasModel(p.modelId)) {
                     continue;
                 }
+                const auto instanceStart = std::chrono::steady_clock::now();
                 uint32_t instId = m2Renderer->createInstance(p.modelId, p.position, p.rotation, p.scale);
+                finalizePartMs_[kPartM2InstanceCreate] += std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - instanceStart).count();
                 if (instId) {
                     ft.m2InstanceIds.push_back(instId);
                     if (p.uniqueId != 0) {
@@ -1281,7 +1295,12 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                    (uploaded == 0 || std::chrono::duration<float, std::milli>(
                         std::chrono::steady_clock::now() - stepStart).count() < stepBudgetMs_)) {
                 auto& doodad = pending->wmoDoodads[ft.wmoDoodadIndex];
-                if (!m2Renderer->loadModel(doodad.model, doodad.modelId)) {
+                const auto modelStart = std::chrono::steady_clock::now();
+                const bool modelLoaded = m2Renderer->loadModel(doodad.model, doodad.modelId);
+                const auto instanceStart = std::chrono::steady_clock::now();
+                finalizePartMs_[kPartM2ModelLoad] +=
+                    std::chrono::duration<float, std::milli>(instanceStart - modelStart).count();
+                if (!modelLoaded) {
                     ft.wmoDoodadIndex++;
                     uploaded++;
                     continue;
@@ -1300,6 +1319,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     m2Renderer->setInteriorLight(wmoDoodadInstId, doodad.interiorLight);
                     ft.m2InstanceIds.push_back(wmoDoodadInstId);
                 }
+                finalizePartMs_[kPartM2InstanceCreate] += std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - instanceStart).count();
                 ft.wmoDoodadIndex++;
                 uploaded++;
             }
@@ -1613,7 +1634,17 @@ void TerrainManager::processReadyTiles() {
         stages.add("rendererUpdate/terrain", "finalize: submit uploads",
                    std::chrono::duration<float, std::milli>(
                        std::chrono::steady_clock::now() - submitStart).count());
+        static constexpr const char* kPartNames[] = {
+            "terrain textures", "terrain chunks", "terrain water", "M2 model loads", "M2 instances made",
+        };
+        static_assert(std::size(kPartNames) == kFinalizePartCount);
+        for (size_t p = 0; p < kFinalizePartCount; ++p) {
+            if (finalizePartMs_[p] > 0.0f) {
+                stages.add("rendererUpdate/terrain/finalize parts", kPartNames[p], finalizePartMs_[p]);
+            }
+        }
     }
+    finalizePartMs_ = {};
 }
 
 void TerrainManager::processPendingUnloads() {
@@ -1693,6 +1724,8 @@ void TerrainManager::processOneReadyTile() {
 
         if (vkCtx) vkCtx->endUploadBatchSync();  // Sync - load screen needs data ready
     }
+    // Behind a loading screen, not a frame anyone sees.
+    finalizePartMs_ = {};
 }
 
 void TerrainManager::unloadTile(int x, int y) {

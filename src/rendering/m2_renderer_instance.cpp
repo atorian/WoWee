@@ -2,7 +2,6 @@
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
-#include "rendering/swap_remove_index.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
@@ -239,15 +238,14 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
     // the view, shadow and GPU cull passes gather from, the spatial grid the
     // floor and wall queries gather from, and the animated, particle and light
     // lists. The few walks over every instance check the flag itself.
-    bool changed = false;
     for (const uint32_t id : instanceIds) {
         auto idxIt = scene_->instanceIndexById.find(id);
         if (idxIt == scene_->instanceIndexById.end()) continue;
         auto& inst = scene_->instances[idxIt->second];
         if (inst.hidden == hidden) continue;
-        changed = true;
         inst.hidden = hidden;
         if (hidden) {
+            dropFromIndexSets(idxIt->second);
             scene_->cullGrid_.remove(id);
             eraseBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, id);
             // What it had emitted goes with it rather than hanging where it
@@ -264,9 +262,9 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             inst.lastCullVisible = 1;
             inst.hizPrevCulledFrames = 2;
             inst.megaBoneUploadedSlot[0] = inst.megaBoneUploadedSlot[1] = 0;
+            fileInIndexSets(idxIt->second);
         }
     }
-    if (changed) rebuildInstanceIndexLists();
 }
 
 void M2Renderer::setInstanceHighlight(uint32_t instanceId, float amount) {
@@ -539,34 +537,38 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         scene_->instances.pop_back();
     }
 
-    // The index lists follow the one move rather than being rebuilt over
+    // The index sets follow the one move rather than being rebuilt over
     // every instance, which made a despawn of a few dozen objects cost tens
-    // of milliseconds (swap_remove_index.hpp).
-    for (auto* list : {&scene_->animatedInstanceIndices_, &scene_->particleOnlyInstanceIndices_,
-                       &scene_->particleInstanceIndices_, &scene_->lightInstanceIndices_}) {
-        swapRemoveIndex(*list, idx, last);
-    }
+    // of milliseconds.
+    dropFromIndexSets(idx);
+    if (idx < last) moveInIndexSets(last, idx);
 }
 
-void M2Renderer::rebuildInstanceIndexLists() {
-    // Rebuild the lightweight auxiliary index vectors (animated, particle, light).
-    // These are small vectors of indices that are rebuilt cheaply.
-    scene_->animatedInstanceIndices_.clear();
-    scene_->particleOnlyInstanceIndices_.clear();
-    scene_->particleInstanceIndices_.clear();
-    scene_->lightInstanceIndices_.clear();
-    for (size_t i = 0; i < scene_->instances.size(); i++) {
-        auto& ri = scene_->instances[i];
-        // Not animated, emitting or lighting anything while out of the world.
-        if (ri.hidden) continue;
-        if (ri.cachedHasEmitters) scene_->particleInstanceIndices_.push_back(i);
-        if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
-            scene_->animatedInstanceIndices_.push_back(i);
-        else if (ri.cachedHasEmitters)
-            scene_->particleOnlyInstanceIndices_.push_back(i);
-        if (ri.cachedModel && ri.cachedModel->canThrowLocalLight())
-            scene_->lightInstanceIndices_.push_back(i);
-    }
+void M2Renderer::fileInIndexSets(size_t index) {
+    const M2Instance& ri = scene_->instances[index];
+    // Not animated, emitting or lighting anything while out of the world.
+    if (ri.hidden) return;
+    if (ri.cachedHasEmitters) scene_->particleInstanceIndices_.insert(index);
+    if (ri.cachedHasAnimation && !ri.cachedDisableAnimation)
+        scene_->animatedInstanceIndices_.insert(index);
+    else if (ri.cachedHasEmitters)
+        scene_->particleOnlyInstanceIndices_.insert(index);
+    if (ri.cachedModel && ri.cachedModel->canThrowLocalLight())
+        scene_->lightInstanceIndices_.insert(index);
+}
+
+void M2Renderer::dropFromIndexSets(size_t index) {
+    scene_->animatedInstanceIndices_.erase(index);
+    scene_->particleOnlyInstanceIndices_.erase(index);
+    scene_->particleInstanceIndices_.erase(index);
+    scene_->lightInstanceIndices_.erase(index);
+}
+
+void M2Renderer::moveInIndexSets(size_t from, size_t to) {
+    scene_->animatedInstanceIndices_.move(from, to);
+    scene_->particleOnlyInstanceIndices_.move(from, to);
+    scene_->particleInstanceIndices_.move(from, to);
+    scene_->lightInstanceIndices_.move(from, to);
 }
 
 void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject) {
@@ -696,13 +698,14 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     std::sort(holes.begin(), holes.end(), std::greater<>());
     for (size_t hole : holes) {
         const size_t last = scene_->instances.size() - 1;
+        dropFromIndexSets(hole);
         if (hole != last) {
             scene_->instances[hole] = std::move(scene_->instances[last]);
             scene_->instanceIndexById[scene_->instances[hole].id] = hole;
+            moveInIndexSets(last, hole);
         }
         scene_->instances.pop_back();
     }
-    rebuildInstanceIndexLists();
 }
 
 void M2Renderer::clear() {

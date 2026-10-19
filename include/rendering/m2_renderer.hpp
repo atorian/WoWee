@@ -3,6 +3,7 @@
 #include "rendering/texture_cache.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/instance_index_set.hpp"
 #include "rendering/instance_random.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/m2_cull_grid.hpp"
@@ -1299,9 +1300,14 @@ private:
     // Optional query-space culling for collision/raycast hot paths.
     CollisionFocus collisionFocus;
 
-    /// The animated, particle and light index lists, from the
-    /// instances as they now stand - after a removal has moved some of them.
-    void rebuildInstanceIndexLists();
+    /// Files the instance at `index` in the animated, particle and light
+    /// sets it belongs to; a hidden one in none.
+    void fileInIndexSets(size_t index);
+    /// Takes the instance at `index` out of all of them.
+    void dropFromIndexSets(size_t index);
+    /// The instance at `from` now lives at `to`, its place taken by a
+    /// swap-remove.
+    void moveInIndexSets(size_t from, size_t to);
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
 
@@ -1455,9 +1461,9 @@ private:
 
     // Animation update buffers (avoid per-frame allocation)
 
-    // Fast-path instance index lists: appended on create, corrected on each
-    // removal (swap_remove_index.hpp), rebuilt when instances are hidden or
-    // removed in a batch.
+    // Fast-path instance index sets (instance_index_set.hpp): filed on
+    // create and when shown, taken out on removal and when hidden, and
+    // following each instance a swap-remove moves - never rebuilt.
 
     // M2 particle emitter system. Each emitter holds as many particles as its
     // pool allows (m2EmitterPool), with no cap per instance; each instance
@@ -1567,10 +1573,10 @@ private:
         std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
         std::vector<uint32_t> cullSubmittedIds_[2];
         std::vector<uint32_t> cullReadableIds_[2];
-        std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
-        std::vector<size_t> particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
-        std::vector<size_t> particleInstanceIndices_;    // ALL instances with particle emitters
-        std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
+        InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
+        InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
+        InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
+        InstanceIndexSet lightInstanceIndices_;        // models that can throw a local light
         std::vector<size_t> boneWorkIndices_;        // Reused each frame
         std::vector<std::future<void>> animFutures_; // Reused each frame
     };

@@ -192,25 +192,16 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // authored at. The load-time census gives the authored height; a game
     // object's scale comes from the server and is only known here.
     censusInstance(instance);
-    scene_->instances.push_back(instance);
-    size_t idx = scene_->instances.size() - 1;
+    scene_->instances.push_back(std::move(instance));
+    const size_t idx = scene_->instances.size() - 1;
+    const M2Instance& placed = scene_->instances[idx];
     // Track special instances for fast-path iteration
-    if (mdlRef.hasEmitters()) {
-        scene_->particleInstanceIndices_.push_back(idx);
-    }
-    if (mdlRef.hasAnimation && !mdlRef.disableAnimation) {
-        scene_->animatedInstanceIndices_.push_back(idx);
-    } else if (mdlRef.hasEmitters()) {
-        scene_->particleOnlyInstanceIndices_.push_back(idx);
-    }
-    if (mdlRef.canThrowLocalLight()) {
-        scene_->lightInstanceIndices_.push_back(idx);
-    }
-    scene_->instanceIndexById[instance.id] = idx;
+    fileInIndexSets(idx);
+    scene_->instanceIndexById[placed.id] = idx;
     fileInCullGrid(scene_->instances[idx]);
-    insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    insertBounds(scene_->spatialGrid, placed.worldBoundsMin, placed.worldBoundsMax, placed.id);
 
-    return instance.id;
+    return placed.id;
 }
 
 uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
@@ -298,24 +289,15 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     // authored at. The load-time census gives the authored height; a game
     // object's scale comes from the server and is only known here.
     censusInstance(instance);
-    scene_->instances.push_back(instance);
-    size_t idx = scene_->instances.size() - 1;
-    if (mdl2.hasEmitters()) {
-        scene_->particleInstanceIndices_.push_back(idx);
-    }
-    if (mdl2.hasAnimation && !mdl2.disableAnimation) {
-        scene_->animatedInstanceIndices_.push_back(idx);
-    } else if (mdl2.hasEmitters()) {
-        scene_->particleOnlyInstanceIndices_.push_back(idx);
-    }
-    if (mdl2.canThrowLocalLight()) {
-        scene_->lightInstanceIndices_.push_back(idx);
-    }
-    scene_->instanceIndexById[instance.id] = idx;
+    scene_->instances.push_back(std::move(instance));
+    const size_t idx = scene_->instances.size() - 1;
+    const M2Instance& placed = scene_->instances[idx];
+    fileInIndexSets(idx);
+    scene_->instanceIndexById[placed.id] = idx;
     fileInCullGrid(scene_->instances[idx]);
-    insertBounds(scene_->spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
+    insertBounds(scene_->spatialGrid, placed.worldBoundsMin, placed.worldBoundsMax, placed.id);
 
-    return instance.id;
+    return placed.id;
 }
 
 // WOWEE_SKY_M2_MAX_BATCH=<n> draws only the sky model's first n layers.
