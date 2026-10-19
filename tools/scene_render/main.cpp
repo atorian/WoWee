@@ -682,6 +682,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     std::printf("scene_render: world M2 draw calls: %u in the kept frame\n",
                 renderer.getM2Renderer()->getDrawCallCount());
+    std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
+                renderer.getWMORenderer()->getShadowDrawCallCount());
     if (!renderer.captureScreenshot(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;

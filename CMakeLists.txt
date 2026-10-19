@@ -2216,6 +2216,12 @@ if(WOWEE_BUILD_TESTS)
     # Brought back, it is drawn whole again.
     wowee_add_scene_test(scene_transport_shown_again transport_shown_again.json
                          "world M2 draw calls: [1-9][0-9]* in")
+    # Nor does the hidden hull cast a shadow onto the sea it is not on.
+    wowee_add_scene_test(scene_hidden_transport_casts_nothing transport_hidden.json
+                         "WMO shadow draw calls: 0 in")
+    # Shown again, it does.
+    wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
+                         "WMO shadow draw calls: [1-9][0-9]* in")
 endif()
 
 # ---- Tool: rt_probe ----

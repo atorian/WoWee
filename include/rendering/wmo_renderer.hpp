@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <atomic>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -176,13 +177,6 @@ public:
     uint32_t reserveInstanceId() { return nextInstanceId++; }
 
     /**
-     * Update the world position of an existing instance (e.g., for transports)
-     * @param instanceId Instance to update
-     * @param position New world position
-     */
-    void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
-
-    /**
      * Update the full transform of an existing instance (for moving transports)
      * @param instanceId Instance to update
      * @param transform World transform matrix
@@ -263,11 +257,19 @@ public:
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     void prepareRender();
+    /// The passes that draw the buildings in colour. Each culls into a draw
+    /// list of its own: the water's reflection is recorded on the main thread
+    /// and the view on a frame worker, and they share nothing they write.
+    enum class Pass : uint8_t { View, Reflection, Count };
+
     /// viewerPos is the character; portal culling seeds from it as well as from
     /// the camera, because at a doorway the two stand in different groups and
     /// neither alone is reliably the right place to start.
+    ///
+    /// Culls the scene into the pass's draw list, then records from that list
+    /// alone: the recording reads no instance.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const glm::vec3* viewerPos = nullptr);
+                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View);
 
     /**
      * Initialize shadow pipeline (Phase 7)
@@ -316,7 +318,10 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return lastDrawCalls; }
+    uint32_t getDrawCallCount() const { return passLists_[static_cast<size_t>(Pass::View)].drawCalls; }
+    /// Draw calls the depth-only passes recorded this frame, from the frame's
+    /// first one (the sun's) on.
+    uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
 
     /**
      * Normal mapping / Parallax Occlusion Mapping settings
@@ -363,12 +368,12 @@ public:
     /**
      * Get number of groups culled by portals last frame
      */
-    uint32_t getPortalCulledGroups() const { return lastPortalCulledGroups; }
+    uint32_t getPortalCulledGroups() const { return passLists_[static_cast<size_t>(Pass::View)].portalCulled; }
 
     /**
      * Get number of groups culled by distance last frame
      */
-    uint32_t getDistanceCulledGroups() const { return lastDistanceCulledGroups; }
+    uint32_t getDistanceCulledGroups() const { return passLists_[static_cast<size_t>(Pass::View)].distanceCulled; }
 
     /**
      * Enable/disable GPU occlusion query culling (stubbed in Vulkan)
@@ -631,20 +636,16 @@ private:
         };
         std::vector<DoodadInfo> doodads;
 
-        // A moving transport (ship hull, elevator). It keeps ordinary collision -
-        // a rider gets exact deck height from getInstanceFloorHeight, but everyone
-        // else needs the hull solid to walk aboard in the first place. The flag
-        // only restricts how far from the feet the static floor query will accept
-        // this deck, so a lift cycling past a bystander cannot become their ground
-        // (the Undercity elevator yo-yo).
-        bool isTransport = false;
-
         /// Loaded, positioned, and not in the world right now. See
         /// setInstanceHidden.
         bool hidden = false;
 
         void updateModelMatrix();
     };
+
+    /// The instance with this id, through the id index; null for none.
+    WMOInstance* findInstance(uint32_t instanceId);
+    const WMOInstance* findInstance(uint32_t instanceId) const;
 
     /// Recomputes one instance's world and per-group bounds after its
     /// model matrix has changed.
@@ -842,9 +843,7 @@ private:
     float maxGroupDistance = 500.0f;
     float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
-    uint32_t lastDrawCalls = 0;
-    mutable uint32_t lastPortalCulledGroups = 0;
-    mutable uint32_t lastDistanceCulledGroups = 0;
+    uint32_t shadowDrawCalls_ = 0;
 
     /// See contentRevision(). Bumped by markContentChanged().
     uint64_t contentRevision_ = 1;
@@ -853,21 +852,57 @@ private:
     // Parallel visibility culling
     uint32_t numCullThreads_ = 1;
 
-    struct InstanceDrawList {
-        size_t instanceIndex;
-        const ModelData* model = nullptr;     // cached pointer; saves a hashmap find per instance per frame
-        std::vector<uint32_t> visibleGroups;  // group indices that passed culling
+    /// One instance as a pass draws it: what the recording needs, copied out
+    /// of the scene by the cull, so the recording reads no instance.
+    struct DrawEntry {
+        glm::mat4 modelMatrix{1.0f};
+        float scale = 1.0f;
+        /// Valid for the frame: models are unloaded only between frames.
+        const ModelData* model = nullptr;
+        /// The model's groups this pass draws.
+        std::vector<uint32_t> groups;
+    };
+
+    /// What one pass draws, rebuilt by its cull each time it runs. Entries
+    /// past `used` are last frame's, kept for their capacity and never read.
+    struct DrawList {
+        std::vector<DrawEntry> entries;
+        size_t used = 0;
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
+        uint32_t drawCalls = 0;
+        /// The portal walk's result for the instance being culled.
+        std::unordered_set<uint32_t> portalGroups;
+
+        void clear() {
+            used = 0;
+            portalCulled = distanceCulled = drawCalls = 0;
+        }
+        DrawEntry& add() {
+            if (used == entries.size()) entries.emplace_back();
+            DrawEntry& entry = entries[used++];
+            entry.groups.clear();
+            return entry;
+        }
+        /// Takes back the entry add() gave, when it ended up drawing nothing.
+        void dropLast() { --used; }
+        [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
     };
+    DrawList passLists_[static_cast<size_t>(Pass::Count)];
+    /// The depth-only passes', one at a time on the main thread.
+    DrawList shadowList_;
+
+    /// The instances the camera sees and their groups that are drawn.
+    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
+    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
+                    DrawList& list) const;
+    /// The instances, shown, and groups that reach a shadow map of this centre and reach.
+    void cullShadow(const glm::vec3& shadowCenter, float cullRadius, DrawList& list) const;
 
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
         std::vector<WMOInstance> instances;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
-        std::vector<size_t> visibleInstances_;      // reused per frame
-        std::vector<InstanceDrawList> drawLists_;    // reused per frame
-        std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;

@@ -775,14 +775,14 @@ void WMORenderer::refreshInstanceBounds(WMOInstance& inst) {
     }
 }
 
-void WMORenderer::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
+WMORenderer::WMOInstance* WMORenderer::findInstance(uint32_t instanceId) {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end()) return;
-    auto& inst = scene_->instances[idxIt->second];
-    inst.position = position;
-    inst.updateModelMatrix();
-    refreshInstanceBounds(inst);
-    if (collision_) collision_->moveWmo(instanceId, inst.modelMatrix);
+    return idxIt == scene_->instanceIndexById.end() ? nullptr : &scene_->instances[idxIt->second];
+}
+
+const WMORenderer::WMOInstance* WMORenderer::findInstance(uint32_t instanceId) const {
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    return idxIt == scene_->instanceIndexById.end() ? nullptr : &scene_->instances[idxIt->second];
 }
 
 void WMORenderer::setInstanceIsTransport(uint32_t instanceId, bool isTransport) {
@@ -849,9 +849,8 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
 }
 
 void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId, const glm::mat4& localTransform) {
-    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
-                          [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it == scene_->instances.end()) {
+    WMOInstance* it = findInstance(instanceId);
+    if (!it) {
         // Nothing to parent to. The M2 was already created, so silently dropping
         // it here leaves it stranded at the origin, drawn nowhere and owned by
         // no one - invisible in a way that looks exactly like a load failure.
@@ -879,9 +878,8 @@ void WMORenderer::addDoodadToInstance(uint32_t instanceId, uint32_t m2InstanceId
 size_t WMORenderer::setInstanceDoodadAnimation(uint32_t instanceId, uint32_t animationId,
                                                bool loop) {
     if (!m2Renderer_) return 0;
-    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
-                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it == scene_->instances.end()) return 0;
+    const WMOInstance* it = findInstance(instanceId);
+    if (!it) return 0;
     for (const auto& doodad : it->doodads) {
         // A no-op for a doodad without that sequence, so the barrels and
         // lanterns sharing the deck are left alone.
@@ -891,9 +889,8 @@ size_t WMORenderer::setInstanceDoodadAnimation(uint32_t instanceId, uint32_t ani
 }
 
 size_t WMORenderer::instanceDoodadCount(uint32_t instanceId) const {
-    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
-                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    return it == scene_->instances.end() ? 0 : it->doodads.size();
+    const WMOInstance* it = findInstance(instanceId);
+    return it ? it->doodads.size() : 0;
 }
 
 const std::vector<WMORenderer::DoodadTemplate>* WMORenderer::getDoodadTemplates(uint32_t modelId) const {
@@ -905,15 +902,13 @@ const std::vector<WMORenderer::DoodadTemplate>* WMORenderer::getDoodadTemplates(
 }
 
 bool WMORenderer::hasInstance(uint32_t instanceId) const {
-    return std::find_if(scene_->instances.begin(), scene_->instances.end(),
-                        [instanceId](const WMOInstance& inst) { return inst.id == instanceId; })
-           != scene_->instances.end();
+    return findInstance(instanceId) != nullptr;
 }
 
 void WMORenderer::removeInstance(uint32_t instanceId) {
-    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
-                          [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
-    if (it != scene_->instances.end()) {
+    auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt != scene_->instanceIndexById.end()) {
+        auto it = scene_->instances.begin() + static_cast<std::ptrdiff_t>(idxIt->second);
         if (m2Renderer_) {
             std::vector<uint32_t> doodadIds;
             doodadIds.reserve(it->doodads.size());
@@ -1052,67 +1047,44 @@ void WMORenderer::prepareRender() {
 }
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                         const glm::vec3* viewerPos) {
-    if (!opaquePipeline_ || scene_->instances.empty()) {
-        lastDrawCalls = 0;
-        return;
-    }
-
-    lastDrawCalls = 0;
-
-    // Extract frustum planes for proper culling
-    glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
-    Frustum frustum;
-    frustum.extractFromMatrix(viewProj);
-
-    lastPortalCulledGroups = 0;
-    lastDistanceCulledGroups = 0;
-
-    // ── Phase 1: Visibility culling ──────────────────────────
-    // Was loadedModels.count(modelId) per instance - but cullInstance below
-    // already does loadedModels.find() and bails on miss, so this pre-filter
-    // was a redundant hashmap lookup per instance every frame. Just include
-    // every instance; the cull step prunes unloaded ones.
-    scene_->visibleInstances_.clear();
-    scene_->visibleInstances_.reserve(scene_->instances.size());
-    for (size_t i = 0; i < scene_->instances.size(); ++i) {
-        scene_->visibleInstances_.push_back(i);
-    }
-
-    glm::vec3 camPos = camera.getPosition();
+                         const glm::vec3* viewerPos, Pass pass) {
+    DrawList& list = passLists_[static_cast<size_t>(pass)];
     // Portal culling seeds from both the camera and the character. Either one
     // alone has a way to be wrong - a third-person camera can end up inside a
     // wall or a broom cupboard, and a character can sit in a loose interior AABB
     // while visually outside - and being wrong here does not mean drawing a
     // little too much, it means the building vanishes. Seeding from both is a
     // superset of either, so it can only ever add groups.
-    const glm::vec3 portalViewerPos = viewerPos ? *viewerPos : camPos;
-    bool doPortalCull = portalCulling && cullingEnabled_;
-    bool doDistanceCull = distanceCulling && cullingEnabled_;
+    cullView(camera, viewerPos ? *viewerPos : camera.getPosition(), list);
+    if (!opaquePipeline_) return;
+    recordView(cmd, perFrameSet, camera.getPosition(), list);
+}
 
-    auto cullInstance = [&](size_t instIdx, InstanceDrawList& result) {
-        // Retire the slot before anything can return. drawLists_ is reused
-        // across frames, so a slot that bails out below would otherwise keep
-        // last frame's model pointer - and unloading a map clears
-        // loadedModels, which frees what that pointer names. The draw loop
-        // only tests it against null, so a stale one is followed.
-        result.model = nullptr;
-        result.visibleGroups.clear();
-        result.portalCulled = 0;
-        result.distanceCulled = 0;
-        result.instanceIndex = instIdx;
+void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
+    list.clear();
 
-        if (instIdx >= scene_->instances.size()) return;
-        const auto& instance = scene_->instances[instIdx];
+    // Extract frustum planes for proper culling
+    glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
+    Frustum frustum;
+    frustum.extractFromMatrix(viewProj);
+
+    const glm::vec3 camPos = camera.getPosition();
+    const bool doPortalCull = portalCulling && cullingEnabled_;
+    const bool doDistanceCull = distanceCulling && cullingEnabled_;
+
+    for (const WMOInstance& instance : scene_->instances) {
         // Somewhere else entirely - see setInstanceHidden.
-        if (instance.hidden) return;
+        if (instance.hidden) continue;
         auto mdlIt = loadedModels.find(instance.modelId);
-        if (mdlIt == loadedModels.end()) return;
+        if (mdlIt == loadedModels.end()) continue;
         const ModelData& model = mdlIt->second;
 
-        result.model = &model;   // cache so the draw-list loop doesn't redo the hash lookup
+        DrawEntry& entry = list.add();
+        entry.modelMatrix = instance.modelMatrix;
+        entry.scale = instance.scale;
+        entry.model = &model;
 
-        // Portal-based visibility - reuse member scratch buffer (avoid per-frame alloc)
+        // Portal-based visibility, into the pass's own scratch set.
         bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
         const glm::vec3 localRealCam =
             glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
@@ -1156,7 +1128,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             }
         }
         if (usePortalCulling) {
-            scene_->portalVisibleGroupSet_.clear();
+            list.portalGroups.clear();
             // Both viewpoints seed the walk. The frustum belongs to the camera,
             // so its group is the principled start - but at a doorway or in a
             // hallway the camera and the character stand in different groups,
@@ -1172,16 +1144,15 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             const glm::vec3 localViewer =
                 glm::vec3(instance.invModelMatrix * glm::vec4(portalViewerPos, 1.0f));
             getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum,
-                                       instance.modelMatrix, scene_->portalVisibleGroupSet_);
+                                       instance.modelMatrix, list.portalGroups);
             // Use the unordered_set directly - was copying into portalVisibleGroups_,
             // sorting it, and binary-searching per group. The set lookup is O(1)
             // per group and skips the per-instance copy + sort.
         }
 
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-            if (usePortalCulling &&
-                scene_->portalVisibleGroupSet_.find(static_cast<uint32_t>(gi)) == scene_->portalVisibleGroupSet_.end()) {
-                result.portalCulled++;
+            if (usePortalCulling && !list.portalGroups.contains(static_cast<uint32_t>(gi))) {
+                list.portalCulled++;
                 continue;
             }
 
@@ -1191,7 +1162,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                                                     glm::vec2(gMin), glm::vec2(gMax));
                 const glm::vec2 delta = nearest - glm::vec2(camPos);
                 if (glm::dot(delta, delta) > viewDistance_ * viewDistance_) {
-                    result.distanceCulled++;
+                    list.distanceCulled++;
                     continue;
                 }
             }
@@ -1207,24 +1178,21 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                     ? std::min(viewDistance_, maxGroupDistance)
                     : viewDistance_;
                 if (distSq > groupViewDistance * groupViewDistance) {
-                    result.distanceCulled++;
+                    list.distanceCulled++;
                     continue;
                 }
             }
 
-            result.visibleGroups.push_back(static_cast<uint32_t>(gi));
+            entry.groups.push_back(static_cast<uint32_t>(gi));
         }
-    };
-
-    // Resize drawLists to match (reuses previous capacity)
-    scene_->drawLists_.resize(scene_->visibleInstances_.size());
-
-    // Sequential culling (parallel dispatch overhead > savings for typical instance counts)
-    for (size_t j = 0; j < scene_->visibleInstances_.size(); ++j) {
-        cullInstance(scene_->visibleInstances_[j], scene_->drawLists_[j]);
+        if (entry.groups.empty()) list.dropLast();
     }
+}
 
-    // ── Phase 2: Vulkan draw ────────────────────────────────
+void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
+                             DrawList& list) const {
+    if (list.used == 0) return;
+
     // Select pipeline based on wireframe mode
     VkPipeline activePipeline = (wireframeMode && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
@@ -1236,17 +1204,14 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
     // Track which pipeline is currently bound: 0=opaque, 1=transparent, 2=glass
     int currentPipelineKind = 0;
 
-    for (const auto& dl : scene_->drawLists_) {
-        if (dl.instanceIndex >= scene_->instances.size() || dl.model == nullptr) continue;
-        const auto& instance = scene_->instances[dl.instanceIndex];
-        const ModelData& model = *dl.model;
-
+    for (const DrawEntry& entry : list.drawn()) {
+        const ModelData& model = *entry.model;
 
         // Push model matrix. The cloth half is written per batch below; this
         // sets the instance's matrix and clears the cloth for everything that
         // is not one.
         WMOPushConstants push{};
-        push.model = instance.modelMatrix;
+        push.model = entry.modelMatrix;
         push.cloth = glm::vec4(0.0f);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                             0, sizeof(WMOPushConstants), &push);
@@ -1256,7 +1221,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
         static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
 
         // Render visible groups
-        for (uint32_t gi : dl.visibleGroups) {
+        for (uint32_t gi : entry.groups) {
             const auto& group = model.groups[gi];
 
             // Only skip antiportal geometry
@@ -1264,7 +1229,7 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
 
             // Skip distance-only LOD shell groups when camera is close to the group
             if (group.isLOD) {
-                glm::vec3 groupCenter = instance.modelMatrix * glm::vec4(
+                glm::vec3 groupCenter = entry.modelMatrix * glm::vec4(
                     (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f);
                 float groupDistSq = glm::dot(camPos - groupCenter, camPos - groupCenter);
                 if (groupDistSq < LOD_SHELL_DIST_SQ) continue;
@@ -1281,10 +1246,10 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             // The lights nearest the group's bounding sphere
             // (local_lights.hpp).
             if (frameLights_ && !frameLights_->empty()) {
-                const glm::vec3 center = glm::vec3(instance.modelMatrix * glm::vec4(
+                const glm::vec3 center = glm::vec3(entry.modelMatrix * glm::vec4(
                     (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f));
                 const float radius = 0.5f * glm::length(group.boundingBoxMax - group.boundingBoxMin) *
-                                     instance.scale;
+                                     entry.scale;
                 const LocalLightSet groupLights = pickLocalLights(*frameLights_, center, radius);
                 vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                    offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet),
@@ -1332,13 +1297,10 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
-                    lastDrawCalls++;
+                    list.drawCalls++;
                 }
             }
         }
-
-        lastPortalCulledGroups += dl.portalCulled;
-        lastDistanceCulledGroups += dl.distanceCulled;
     }
 }
 
@@ -1416,48 +1378,26 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                               const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
-    if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (scene_->instances.empty() || loadedModels.empty()) return;
-
-    // Once a frame, by the frame's first depth-only pass: the sets a later
-    // one reuses are still in this frame's command buffer.
-    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (resetDescriptors) {
-        if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-            vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
-        }
-        shadowTexSetCache_.clear();
-    }
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-        0, 1, &shadowParams_.set, 0, nullptr);
-
-    // WMO shadow cull uses the ortho half-extent (shadow map coverage) rather than
-    // the proximity radius so that distant buildings whose shadows reach the player
-    // are still rendered into the shadow map.
-    const float wmoCullRadius = std::max(shadowRadius, 180.0f);
-    const float wmoCullRadiusSq = wmoCullRadius * wmoCullRadius;
-
-    for (const auto& instance : scene_->instances) {
+void WMORenderer::cullShadow(const glm::vec3& shadowCenter, float cullRadius, DrawList& list) const {
+    list.clear();
+    const float cullRadiusSq = cullRadius * cullRadius;
+    for (const WMOInstance& instance : scene_->instances) {
+        // Not in the world, so not between the sun and anything in it - a
+        // ship whose route is on the other map darkened the sea it had left.
+        if (instance.hidden) continue;
         // Distance cull using world bounding box - WMO origins can be far from
         // their geometry, so point-based culling misses large buildings.
         glm::vec3 closest = glm::clamp(shadowCenter, instance.worldBoundsMin, instance.worldBoundsMax);
         glm::vec3 diff = closest - shadowCenter;
-        if (glm::dot(diff, diff) > wmoCullRadiusSq) continue;
+        if (glm::dot(diff, diff) > cullRadiusSq) continue;
         auto modelIt = loadedModels.find(instance.modelId);
         if (modelIt == loadedModels.end()) continue;
         const ModelData& model = modelIt->second;
 
-        // A building does not sway, so the sway slot stays zero.
-        ShadowPush push{.lightSpaceModel = lightSpaceMatrix * instance.modelMatrix};
-        vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(ShadowPush), &push);
-        bool cutoutBound = false;
-
+        DrawEntry& entry = list.add();
+        entry.modelMatrix = instance.modelMatrix;
+        entry.scale = instance.scale;
+        entry.model = &model;
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             const auto& group = model.groups[gi];
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
@@ -1473,9 +1413,51 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                 const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
                 glm::vec3 gClosest = glm::clamp(shadowCenter, gMin, gMax);
                 glm::vec3 gDiff = gClosest - shadowCenter;
-                if (glm::dot(gDiff, gDiff) > wmoCullRadiusSq) continue;
+                if (glm::dot(gDiff, gDiff) > cullRadiusSq) continue;
             }
+            entry.groups.push_back(static_cast<uint32_t>(gi));
+        }
+        if (entry.groups.empty()) list.dropLast();
+    }
+}
 
+void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
+                               const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
+    if (!shadowPipeline_ || !shadowParams_.set) return;
+
+    // Once a frame, by the frame's first depth-only pass: the sets a later
+    // one reuses are still in this frame's command buffer.
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (resetDescriptors) {
+        shadowDrawCalls_ = 0;
+        if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
+            vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+        }
+        shadowTexSetCache_.clear();
+    }
+
+    // WMO shadow cull uses the ortho half-extent (shadow map coverage) rather than
+    // the proximity radius so that distant buildings whose shadows reach the player
+    // are still rendered into the shadow map.
+    cullShadow(shadowCenter, std::max(shadowRadius, 180.0f), shadowList_);
+    if (shadowList_.used == 0) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
+        0, 1, &shadowParams_.set, 0, nullptr);
+
+    for (const DrawEntry& entry : shadowList_.drawn()) {
+        const ModelData& model = *entry.model;
+
+        // A building does not sway, so the sway slot stays zero.
+        ShadowPush push{.lightSpaceModel = lightSpaceMatrix * entry.modelMatrix};
+        vkCmdPushConstants(cmd, shadowPipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(ShadowPush), &push);
+        bool cutoutBound = false;
+
+        for (uint32_t gi : entry.groups) {
+            const auto& group = model.groups[gi];
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -1503,6 +1485,7 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                 }
                 for (const auto& dr : mb.draws) {
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
+                    ++shadowDrawCalls_;
                 }
             }
         }

@@ -4798,7 +4798,7 @@ void Renderer::renderReflectionPass() {
             terrainRenderer->render(currentCmd, reflDescSet, *camera);
         }
         if (wmoRenderer) {
-            wmoRenderer->render(currentCmd, reflDescSet, *camera);
+            wmoRenderer->render(currentCmd, reflDescSet, *camera, nullptr, WMORenderer::Pass::Reflection);
         }
     }
 
