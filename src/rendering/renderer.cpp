@@ -2430,13 +2430,13 @@ void Renderer::update(float deltaTime) {
     endPhase("characters");
 
 
-    // M2Renderer::update may rebuild the instance spatial index when streaming
-    // marked it dirty. Footprint spawning below performs an M2 floor query and
-    // traverses that same index. Joining only after footsteps allowed the main
-    // thread to walk unordered_map nodes while the animation worker cleared and
-    // rebuilt them, producing a SIGSEGV in M2Renderer::gatherCandidates. Keep
-    // the useful overlap with character animation and audio above, but finish
-    // structural M2 work before any main-thread collision query.
+    // Joined before the footprints below, which query M2 floors. The update no
+    // longer rebuilds the spatial index - every create, move and removal keeps
+    // it current on this thread - but it once did, and joining after the
+    // footsteps then let this thread walk the index while the worker cleared
+    // it: a SIGSEGV in M2Renderer::gatherCandidates. Nothing the main thread
+    // does to M2 instances may overlap the update until scene changes go
+    // through a single point in the frame.
     if (m2AnimLaunched) {
         try { m2AnimFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }

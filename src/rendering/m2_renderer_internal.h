@@ -26,19 +26,6 @@ namespace wowee {
 namespace rendering {
 namespace m2_internal {
 
-// ---- RNG helpers ----
-inline std::mt19937& rng() {
-    static std::mt19937 gen(std::random_device{}());
-    return gen;
-}
-inline uint32_t randRange(uint32_t maxExclusive) {
-    if (maxExclusive == 0) return 0;
-    return std::uniform_int_distribution<uint32_t>(0, maxExclusive - 1)(rng());
-}
-inline float randFloat(float lo, float hi) {
-    return std::uniform_real_distribution<float>(lo, hi)(rng());
-}
-
 // World-space center of a skinned batch. Glow cards on swinging lanterns are
 // bone animated; using only modelMatrix * bind-pose center leaves both their
 // sprite and the pool of local light fixed at the fixture origin.

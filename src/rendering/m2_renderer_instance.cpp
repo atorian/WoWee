@@ -2,6 +2,7 @@
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
+#include "rendering/swap_remove_index.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
@@ -458,8 +459,8 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     inst.position = glm::vec3(transform[3]);
 
     // The dedup map is keyed on position, so it has to move with the instance.
-    // It did not, and only rebuildSpatialIndex ever put it right - which this
-    // path deliberately avoids. A ship's doodads are created at the origin and
+    // It did not, and only a rebuild of the whole index ever put it right -
+    // which this path deliberately avoids. A ship's doodads are created at the origin and
     // moved here a frame later, so the origin key stayed pointing at them and
     // the next ship of the same class was handed the first ship's sails instead
     // of its own. Both hulls then wrote their transform to the one instance, so
@@ -528,7 +529,8 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     scene_->instanceIndexById.erase(instanceId);
-    if (idx < scene_->instances.size() - 1) {
+    const size_t last = scene_->instances.size() - 1;
+    if (idx < last) {
         uint32_t movedId = scene_->instances.back().id;
         scene_->instances[idx] = std::move(scene_->instances.back());
         scene_->instances.pop_back();
@@ -537,7 +539,13 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         scene_->instances.pop_back();
     }
 
-    rebuildInstanceIndexLists();
+    // The index lists follow the one move rather than being rebuilt over
+    // every instance, which made a despawn of a few dozen objects cost tens
+    // of milliseconds (swap_remove_index.hpp).
+    for (auto* list : {&scene_->animatedInstanceIndices_, &scene_->particleOnlyInstanceIndices_,
+                       &scene_->particleInstanceIndices_, &scene_->lightInstanceIndices_}) {
+        swapRemoveIndex(*list, idx, last);
+    }
 }
 
 void M2Renderer::rebuildInstanceIndexLists() {
@@ -748,56 +756,6 @@ void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
 void M2Renderer::resetQueryStats() {
     queryTimeMs = 0.0;
     queryCallCount = 0;
-}
-
-void M2Renderer::rebuildSpatialIndex() {
-    scene_->spatialGrid.clear();
-    scene_->instanceIndexById.clear();
-    scene_->boneSeedInstanceByModel_.clear();
-    scene_->instanceDedupMap_.clear();
-    scene_->instanceIndexById.reserve(scene_->instances.size());
-    scene_->animatedInstanceIndices_.clear();
-    scene_->particleOnlyInstanceIndices_.clear();
-    scene_->particleInstanceIndices_.clear();
-    scene_->lightInstanceIndices_.clear();
-
-    for (size_t i = 0; i < scene_->instances.size(); i++) {
-        auto& inst = scene_->instances[i];
-        scene_->instanceIndexById[inst.id] = i;
-
-        // Re-cache model pointer (may have changed after model map modifications)
-        auto mdlIt = models.find(inst.modelId);
-        inst.cachedModel = (mdlIt != models.end()) ? &mdlIt->second : nullptr;
-
-        // Rebuild dedup map (skip ground detail)
-        if (!inst.cachedIsGroundDetail) {
-            DedupKey dk{.modelId = inst.modelId,
-                        .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
-                        .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
-                        .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
-            scene_->instanceDedupMap_[dk] = inst.id;
-        }
-
-        // In none of the per-frame lists or the spatial grid while hidden
-        // (setInstancesHidden); fileInCullGrid below leaves it out as well.
-        if (inst.hidden) continue;
-        if (inst.cachedHasEmitters) {
-            scene_->particleInstanceIndices_.push_back(i);
-        }
-        if (inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
-            scene_->animatedInstanceIndices_.push_back(i);
-        } else if (inst.cachedHasEmitters) {
-            scene_->particleOnlyInstanceIndices_.push_back(i);
-        }
-        if (inst.cachedModel && inst.cachedModel->canThrowLocalLight()) {
-            scene_->lightInstanceIndices_.push_back(i);
-        }
-
-        insertBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
-    }
-    scene_->cullGrid_.clear();
-    for (const auto& inst : scene_->instances) fileInCullGrid(inst);
-    scene_->spatialIndexDirty_ = false;
 }
 
 void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax,

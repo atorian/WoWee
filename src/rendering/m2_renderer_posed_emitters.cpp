@@ -222,6 +222,7 @@ uint32_t M2Renderer::createPosedEmitters(uint32_t modelHandle) {
     PosedEmitters& posed = scene_->posedEmitters_[id];
     posed.modelHandle = modelHandle;
     posed.inst.id = id;
+    posed.inst.random = InstanceRandom(id);
     posed.inst.cachedModel = &modelIt->second.gpu;
     posed.inst.boneMatrices.assign(modelIt->second.boneCount, glm::mat4(1.0f));
     return id;

@@ -136,7 +136,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
         if (em.bone < inst.boneMatrices.size()) emitterBone = inst.boneMatrices[em.bone];
         const glm::vec3 emitterWorld =
             glm::vec3(inst.modelMatrix * emitterBone * glm::vec4(em.position, 1.0f));
-        const float rate = m2EmitterRate(authoredRate, em.emissionRateVary, distN(particleRng_),
+        const float rate = m2EmitterRate(authoredRate, em.emissionRateVary, distN(inst.random),
                                          particleDensity_,
                                          m2EmissionDistanceLod(glm::length(emitterWorld - cachedCamPos_)));
         inst.emitterPools[ei] = std::max(inst.emitterPools[ei],
@@ -174,17 +174,17 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             p.emitterIndex = static_cast<int>(ei);
             // Born somewhere within this step, as the client does, so that a
             // frame's particles do not move as one sheet.
-            p.life = dist01(particleRng_) * dt;
+            p.life = dist01(inst.random) * dt;
             p.maxLife = m2ParticleLife(life);
             p.tileIndex = 0.0f;
             p.sizeFactor = m2ScaleVaryFactor(em.scaleVary,
                                              (em.flags & pipeline::kM2EmitterIndependentScaleVary) != 0,
-                                             distN(particleRng_), distN(particleRng_));
-            p.spinRandBase = distN(particleRng_);
-            p.spinRandRate = distN(particleRng_);
-            p.spinSign = (em.flags & pipeline::kM2EmitterRandomSpin) && dist01(particleRng_) < 0.5f
+                                             distN(inst.random), distN(inst.random));
+            p.spinRandBase = distN(inst.random);
+            p.spinRandRate = distN(inst.random);
+            p.spinSign = (em.flags & pipeline::kM2EmitterRandomSpin) && dist01(inst.random) < 0.5f
                 ? -1.0f : 1.0f;
-            p.twinkleOffset = static_cast<uint32_t>(particleRng_()) & (kM2TwinkleSlots - 1);
+            p.twinkleOffset = static_cast<uint32_t>(inst.random()) & (kM2TwinkleSlots - 1);
 
             const auto track = [&](const pipeline::M2AnimationTrack& t) {
                 return interpFloat(t, inst.animTime, inst.globalSequenceTime,
@@ -197,16 +197,16 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             // and sends them out from the centre, or up with flag 0x100. A
             // zSource sends either away from that point on the emitter's axis.
             const float speed = track(em.emissionSpeed) *
-                                (1.0f + distN(particleRng_) * track(em.speedVariation));
+                                (1.0f + distN(inst.random) * track(em.speedVariation));
             const float verticalRange = track(em.verticalRange);
             const float horizontalRange = track(em.horizontalRange);
             glm::vec3 offset(0.0f);
             glm::vec3 dir(0.0f, 0.0f, 1.0f);
             if (em.emitterType == 2) {
                 offset = m2SphereSpawnOffset(track(em.emissionAreaLength), track(em.emissionAreaWidth),
-                                             dist01(particleRng_),
-                                             distN(particleRng_) * verticalRange,
-                                             distN(particleRng_) * horizontalRange);
+                                             dist01(inst.random),
+                                             distN(inst.random) * verticalRange,
+                                             distN(inst.random) * horizontalRange);
                 if (!(em.flags & pipeline::kM2EmitterSphereUp)) {
                     const float len = glm::length(offset);
                     dir = len > 0.0f ? offset / len : glm::vec3(0.0f, 0.0f, 1.0f);
@@ -223,10 +223,10 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 }
                 if (em.emitterType == 1) {
                     offset = m2PlaneSpawnOffset(track(em.emissionAreaLength), track(em.emissionAreaWidth),
-                                                distN(particleRng_), distN(particleRng_));
+                                                distN(inst.random), distN(inst.random));
                 }
-                dir = m2ConeDirection(distN(particleRng_) * verticalRange,
-                                      distN(particleRng_) * horizontalRange);
+                dir = m2ConeDirection(distN(inst.random) * verticalRange,
+                                      distN(inst.random) * horizontalRange);
             }
             if (const float zSource = track(em.zSource); zSource != 0.0f) {
                 dir = m2ZSourceDirection(offset, zSource);
@@ -260,9 +260,9 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             // yard a second and sank, and the candle showed no light at all.
             if (std::abs(speed) < 0.01f && gpu.isFireflyEffect) {
                 p.velocity = rotMat * glm::vec3(
-                    distN(particleRng_) * 0.6f,
-                    distN(particleRng_) * 0.6f,
-                    distN(particleRng_) * 0.3f
+                    distN(inst.random) * 0.6f,
+                    distN(inst.random) * 0.6f,
+                    distN(inst.random) * 0.3f
                 );
             }
 
@@ -271,7 +271,7 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
             const uint32_t totalTiles = tilesX * tilesY;
             if ((em.flags & pipeline::kM2EmitterRandomCell) && totalTiles > 1) {
                 distTile = std::uniform_int_distribution<int>(0, static_cast<int>(totalTiles - 1));
-                p.tileIndex = static_cast<float>(distTile(particleRng_));
+                p.tileIndex = static_cast<float>(distTile(inst.random));
             }
 
             inst.particles.push_back(p);

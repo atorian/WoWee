@@ -63,8 +63,8 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             instance.currentSequenceIndex = 0;
             instance.idleSequenceIndex = 0;
             instance.animDuration = static_cast<float>(model.sequences[0].duration);
-            instance.animTime = static_cast<float>(randRange(std::max(1u, model.sequences[0].duration)));
-            instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
+            instance.animTime = static_cast<float>(instance.random.below(std::max(1u, model.sequences[0].duration)));
+            instance.variationTimer = instance.random.uniform(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
         }
 
     auto seedIt = scene_->boneSeedInstanceByModel_.find(modelId);
@@ -102,7 +102,7 @@ void M2Renderer::seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& ins
     instance.currentSequenceIndex = 0;
     instance.idleSequenceIndex = 0;
     instance.animDuration = static_cast<float>(model.sequences[0].duration);
-    instance.animTime = static_cast<float>(randRange(model.sequences[0].duration));
+    instance.animTime = static_cast<float>(instance.random.below(model.sequences[0].duration));
 }
 
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
@@ -142,6 +142,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    instance.random = InstanceRandom(instance.id);
     instance.modelId = modelId;
     instance.position = position;
     if (mdlRef.isGroundDetail) {
@@ -244,6 +245,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     M2Instance instance;
     instance.id = nextInstanceId++;
+    instance.random = InstanceRandom(instance.id);
     instance.modelId = modelId;
     instance.position = position;  // Used for frustum culling
     instance.rotation = glm::vec3(0.0f);
@@ -279,7 +281,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         // so the phase is spread.
         //
         // createInstance above now does the same.
-        instance.animTime = randFloat(0.0f, 10000.0f);
+        instance.animTime = instance.random.uniform(0.0f, 10000.0f);
         seedUnanimatedSequence(mdl2, instance);
     }
 
@@ -336,9 +338,9 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
     const glm::mat4 viewProjection = projection * view;
     cachedView_ = view;
     ZoneScopedN("M2Renderer::update");
-    if (scene_->spatialIndexDirty_) {
-        rebuildSpatialIndex();
-    }
+    // The spatial grid, the cull grid and the id map are kept up to date by
+    // every create, move and removal on the main thread; this update, which
+    // runs on a frame worker, only reads them.
 
     float dtMs = deltaTime * 1000.0f;
 
@@ -511,7 +513,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                     instance.animDuration = static_cast<float>(model.sequences[instance.idleSequenceIndex].duration);
                 }
                 instance.animTime = 0.0f;
-                instance.variationTimer = randFloat(rendering::M2_LOOP_VARIATION_TIMER_MIN_MS, rendering::M2_LOOP_VARIATION_TIMER_MAX_MS);
+                instance.variationTimer = instance.random.uniform(rendering::M2_LOOP_VARIATION_TIMER_MIN_MS, rendering::M2_LOOP_VARIATION_TIMER_MAX_MS);
             } else {
                 // Use iterative subtraction instead of fmod() to preserve precision
                 float duration = std::max(1.0f, instance.animDuration);
@@ -526,7 +528,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
             model.idleVariationIndices.size() > 1) {
             instance.variationTimer -= dtMs;
             if (instance.variationTimer <= 0.0f) {
-                int pick = static_cast<int>(randRange(static_cast<uint32_t>(model.idleVariationIndices.size())));
+                int pick = static_cast<int>(instance.random.below(static_cast<uint32_t>(model.idleVariationIndices.size())));
                 int newSeq = model.idleVariationIndices[pick];
                 if (newSeq != instance.currentSequenceIndex && newSeq < static_cast<int>(model.sequences.size())) {
                     instance.playingVariation = true;
@@ -534,7 +536,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                     instance.animDuration = static_cast<float>(model.sequences[newSeq].duration);
                     instance.animTime = 0.0f;
                 } else {
-                    instance.variationTimer = randFloat(rendering::M2_IDLE_VARIATION_TIMER_MIN_MS, rendering::M2_IDLE_VARIATION_TIMER_MAX_MS);
+                    instance.variationTimer = instance.random.uniform(rendering::M2_IDLE_VARIATION_TIMER_MIN_MS, rendering::M2_IDLE_VARIATION_TIMER_MAX_MS);
                 }
             }
         }

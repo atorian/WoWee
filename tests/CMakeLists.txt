@@ -1744,6 +1744,16 @@ wowee_add_test(test_scene_pick SOURCES test_scene_pick.cpp)
 # unit, refreshed a few a frame for a crowd.
 wowee_add_test(test_sight_cache SOURCES test_sight_cache.cpp)
 
+# ── test_swap_remove_index ───────────────────────────────────
+# The M2 renderer's index lists, corrected for each swap-remove instead of
+# rebuilt over every instance: they must match a rebuild after any removals.
+wowee_add_test(test_swap_remove_index SOURCES test_swap_remove_index.cpp)
+
+# ── test_instance_random ─────────────────────────────────────
+# Each M2 instance's own random numbers: independent of the others, so
+# instances can be updated in parallel and still behave the same.
+wowee_add_test(test_instance_random SOURCES test_instance_random.cpp)
+
 # ── test_plural_escape ───────────────────────────────────────
 # WoW's |4singular:plural; escape, which nothing resolved - so the logout
 # prompt read "5 |4Second:Seconds; until logout" and seventy-four other

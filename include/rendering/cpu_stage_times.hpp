@@ -3,7 +3,9 @@
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <span>
@@ -32,28 +34,33 @@ public:
         float milliseconds = 0.0f;
     };
 
-    /// The start of the renderer's frame.
-    void clear() { count_ = 0; }
+    /// The start of the renderer's frame. Not while parts may still be added.
+    void clear() { count_.store(0, std::memory_order_relaxed); }
 
+    /// Safe from several threads at once: each part claims its own slot. Read
+    /// the entries only after every thread that adds has been joined.
     void add(std::string_view group, std::string_view name, float milliseconds) {
-        if (count_ == entries_.size()) {
-            if (!overflowReported_) {
-                overflowReported_ = true;
+        const size_t slot = count_.fetch_add(1, std::memory_order_relaxed);
+        if (slot >= entries_.size()) {
+            count_.store(entries_.size(), std::memory_order_relaxed);
+            if (!overflowReported_.exchange(true)) {
                 LOG_WARNING("Renderer stage timing: more than ", entries_.size(),
                             " parts in one frame; '", group, "/", name,
                             "' and the rest of the frame are left out of the frame profile");
             }
             return;
         }
-        entries_[count_++] = Entry{group, name, milliseconds};
+        entries_[slot] = Entry{group, name, milliseconds};
     }
 
-    [[nodiscard]] std::span<const Entry> entries() const { return {entries_.data(), count_}; }
+    [[nodiscard]] std::span<const Entry> entries() const {
+        return {entries_.data(), std::min(count_.load(std::memory_order_relaxed), entries_.size())};
+    }
 
 private:
     std::array<Entry, 64> entries_{};
-    size_t count_ = 0;
-    bool overflowReported_ = false;
+    std::atomic<size_t> count_{0};
+    std::atomic<bool> overflowReported_{false};
 };
 
 /// Times what runs between its construction and its end as one part, and

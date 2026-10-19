@@ -3,6 +3,7 @@
 #include "rendering/texture_cache.hpp"
 #include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
+#include "rendering/instance_random.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
@@ -302,6 +303,8 @@ static_assert(sizeof(M2ParticleQuad) == 31 * sizeof(float), "M2ParticleQuad is r
  */
 struct M2Instance {
     uint32_t id = 0;     // Unique instance ID
+    /// Its own random numbers, seeded from the id (instance_random.hpp).
+    InstanceRandom random;
     uint32_t modelId;
     glm::vec3 position;
     glm::vec3 rotation;  // Euler angles in degrees
@@ -1294,7 +1297,6 @@ private:
     // Optional query-space culling for collision/raycast hot paths.
     CollisionFocus collisionFocus;
 
-    void rebuildSpatialIndex();
     /// The animated, particle and light index lists, from the
     /// instances as they now stand - after a removal has moved some of them.
     void rebuildInstanceIndexLists();
@@ -1451,11 +1453,13 @@ private:
 
     // Animation update buffers (avoid per-frame allocation)
 
-    // Fast-path instance index lists (rebuilt in rebuildSpatialIndex / on create)
+    // Fast-path instance index lists: appended on create, corrected on each
+    // removal (swap_remove_index.hpp), rebuilt when instances are hidden or
+    // removed in a batch.
 
     // M2 particle emitter system. Each emitter holds as many particles as its
-    // pool allows (m2EmitterPool), with no cap per instance.
-    std::mt19937 particleRng_{123};
+    // pool allows (m2EmitterPool), with no cap per instance; each instance
+    // draws its particles' randomness from its own generator.
     /// Particles drawn per emitter of the instance being written; scratch.
     std::vector<uint32_t> drawnPerEmitter_;
     bool skyMode_ = false;
@@ -1567,7 +1571,6 @@ private:
         std::vector<size_t> lightInstanceIndices_;       // models that can throw a local light
         std::vector<size_t> boneWorkIndices_;        // Reused each frame
         std::vector<std::future<void>> animFutures_; // Reused each frame
-        bool spatialIndexDirty_ = false;
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;
