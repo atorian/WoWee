@@ -31,7 +31,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
-namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; }
+namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; }
 
 namespace rendering {
 
@@ -106,6 +106,9 @@ struct PendingTile {
         uint32_t modelId;
         uint32_t uniqueId;
         pipeline::WMOModel model;
+        /// Its CPU-side upload work, done here on the worker
+        /// (WMORenderer::prepareModel); finalizing it is uploads and materials.
+        std::shared_ptr<WmoModelPrep> prep;
         glm::vec3 position;
         glm::vec3 rotation;
         float scale = 1.0f;
@@ -479,6 +482,11 @@ private:
     /// Time one finalization step may take before it yields, set per frame by
     /// processReadyTiles from how near the tile being finished is.
     float stepBudgetMs_ = 4.0f;
+    /// What unloading tiles cost this frame by part (M2 instances, WMO
+    /// instances, terrain chunks, water, the tile's parsed data);
+    /// processPendingUnloads hands them to the frame profile and starts them
+    /// again.
+    std::array<float, 5> unloadPartMs_{};
     /// Tiles around the neighbour the camera is about to cross into, queued
     /// before it gets there. Cleared on each crossing.
     std::vector<TileCoord> prefetchedCenters_;

@@ -30,6 +30,14 @@ looking at it:
 | `dalaran` | Dalaran's centre (571; 5804, 624, 647) | 12:00 | r 100, 35 above |
 | `stormwind` | Trade District (0; -8833, 628, 94) | 16:30 | r 90, 30 above |
 | `orgrimmar` | Valley of Strength (1; 1676, -4315, 61) | 09:00 | r 70, 30 above |
+| `bootybay` | Stormwind - Westfall - Stranglethorn coast - Booty Bay - Darkshire - back (0) | 13:00 | ~14,500 yd at 260 high; fly it in 240 s |
+
+`bootybay` is not a lap round a city: it flies twice the load radius out and
+back (`tools/benchmark.sh bootybay 240`, about 60 yd/s), so
+terrain streams in ahead and out behind the whole flight. Its frames carry
+what finishing and unloading tiles cost the main thread, under
+`rendererUpdate/terrain` (`finalize: ...` by phase, `unload` and its parts);
+the city laps settle first and never see that work.
 
 The report goes to `logs/benchmark-<route>-<YYYYMMDD-HHMMSS>.txt` beside the
 client (`WOWEE_BENCHMARK_DIR` overrides) and its summary line to the log:

@@ -63,6 +63,15 @@ public:
         return pool;
     }
 
+    // One thread for work no frame waits for and no caller needs back:
+    // letting go of a streamed tile's parsed data, of a model evicted from a
+    // cache (releaseInBackground below). On the main thread, freeing what a
+    // city tile carried was 50 ms of one frame.
+    static ThreadPool& background() {
+        static ThreadPool pool(1);
+        return pool;
+    }
+
     // Schedule fn on a worker thread. The returned future carries fn's result
     // or any exception it threw (same semantics as std::async). `label` names
     // the kind of work in the pool's timings; a string literal.
@@ -153,6 +162,22 @@ private:
     std::mutex timingsMutex_;
     std::vector<TaskTiming> timings_;
 };
+
+/// Lets go of `data` on ThreadPool::background(): its destructor, and the
+/// freeing of everything it holds, run there rather than on the caller's
+/// thread. Only for data that nothing on another thread still reads, whose
+/// destructor touches nothing but its own memory - no GPU handles, no
+/// renderer it belongs to.
+template <class T>
+void releaseInBackground(std::unique_ptr<T> data) {
+    if (!data) return;
+    (void)ThreadPool::background().submit("release", [held = std::move(data)]() mutable { held.reset(); });
+}
+template <class T>
+void releaseInBackground(std::shared_ptr<T> data) {
+    if (!data) return;
+    (void)ThreadPool::background().submit("release", [held = std::move(data)]() mutable { held.reset(); });
+}
 
 } // namespace core
 } // namespace wowee

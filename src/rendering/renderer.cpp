@@ -2253,7 +2253,7 @@ void Renderer::update(float deltaTime) {
     // The stage timer around this call said only that it took 50-70 ms a
     // frame for seconds at a time in Dalaran.
     struct UpdatePhase { const char* name; float ms; };
-    std::array<UpdatePhase, 12> phases{};
+    std::array<UpdatePhase, 16> phases{};
     size_t phaseCount = 0;
     auto phaseStart = updateStart;
     auto endPhase = [&](const char* name) {
@@ -2451,7 +2451,7 @@ void Renderer::update(float deltaTime) {
 
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
-
+    endPhase("footprints");
 
     // Periodic cache hygiene: drop model GPU data no longer referenced by active instances.
     static float modelCleanupTimer = 0.0f;
@@ -2460,13 +2460,13 @@ void Renderer::update(float deltaTime) {
         if (wmoRenderer) {
             wmoRenderer->cleanupUnusedModels();
         }
+        endPhase("unused WMO models");
         if (m2Renderer) {
             m2Renderer->cleanupUnusedModels();
         }
+        endPhase("unused M2 models");
         modelCleanupTimer = 0.0f;
     }
-
-    endPhase("footprints and cleanup");
     auto updateEnd = std::chrono::steady_clock::now();
     lastUpdateMs = std::chrono::duration<double, std::milli>(updateEnd - updateStart).count();
     if (lastUpdateMs > 40.0) {

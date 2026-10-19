@@ -1002,6 +1002,8 @@ set(WOWEE_SOURCES
     src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/gpu_allocations.cpp
+    src/rendering/uniform_slot_pool.cpp
+    src/rendering/uniform_slot_pool_device.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp
@@ -1056,6 +1058,7 @@ set(WOWEE_SOURCES
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
@@ -2814,6 +2817,8 @@ add_executable(wowee_editor
     src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
     src/rendering/gpu_allocations.cpp
+    src/rendering/uniform_slot_pool.cpp
+    src/rendering/uniform_slot_pool_device.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp
@@ -2838,6 +2843,7 @@ add_executable(wowee_editor
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_model_classifier.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp

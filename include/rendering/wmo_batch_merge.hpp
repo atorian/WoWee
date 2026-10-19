@@ -30,8 +30,15 @@
 namespace wowee::rendering {
 
 /// Everything a merged batch takes from the material of the batches in it.
+///
+/// Worked out before the model's textures load (WMORenderer::prepareModel),
+/// so the texture is named by its place in the model, not by what loaded: a
+/// texture that fails to load is drawn white until a retry gives it its own,
+/// and so stays in a merged batch of its own either way.
 struct WmoBatchState {
-    const void* texture = nullptr;  ///< the texture bound, fallback included
+    /// Which of the model's textures is bound: the first of its texture list
+    /// that names the same file, UINT32_MAX for none (the white fallback).
+    uint32_t texture = UINT32_MAX;
     uint32_t blendMode = 0;         ///< MOMT blend mode: 1 alpha-tests, 2+ blends
     /// The light the batch is drawn with. A group's transition and interior
     /// batches on one texture are lit apart, so they draw apart.
@@ -46,11 +53,6 @@ struct WmoBatchState {
     float clothDrop = 0.0f;
     float clothCentreX = 0.0f;
     float clothCentreY = 0.0f;
-    /// The model texture this batch wanted, when its load failed. Every such
-    /// batch binds the white fallback, so this keeps each failed texture in a
-    /// merged batch of its own, which a retry can then give its texture alone.
-    /// UINT32_MAX when the texture loaded.
-    uint32_t pendingTexture = UINT32_MAX;
 
     bool operator==(const WmoBatchState&) const = default;
 };

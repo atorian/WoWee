@@ -10,6 +10,7 @@
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/wmo_batch_merge.hpp"
+#include "wmo_model_prep.hpp"
 #include "rendering/wmo_lighting.hpp"
 #include "rendering/wmo_group_containment.hpp"
 #include <cstdlib>
@@ -28,6 +29,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
@@ -43,6 +45,7 @@
 
 namespace wowee {
 namespace rendering {
+
 
 namespace {
 /// The strength a building's normal map is derived with (Sobel gradient
@@ -261,6 +264,8 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
         core::Logger::getInstance().error("WMORenderer: failed to create descriptor pool");
         return false;
     }
+    materialSlots_ = UniformSlotPool::forDevice(vkCtx_->getAllocator(), vkCtx_->getPhysicalDevice(),
+                                                sizeof(WMOMaterialUBO), 1024, "WMO materials");
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
@@ -321,6 +326,7 @@ void WMORenderer::shutdown() {
     if (!vkCtx_) {
         loadedModels.clear();
         scene_->loadingModels_.clear();
+        preparedHere_.clear();
         scene_->instances.clear();
         scene_->spatialGrid.clear();
         scene_->instanceIndexById.clear();
@@ -347,6 +353,7 @@ void WMORenderer::shutdown() {
         for (auto& group : model.groups) destroyGroupGPU(group);
     }
     scene_->loadingModels_.clear();
+    preparedHere_.clear();
 
     failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
@@ -367,6 +374,7 @@ void WMORenderer::shutdown() {
     // will run to drain the queue, so anything left in it either leaks or is
     // run later against a dead pool.
     vkCtx_->flushDeferredCleanup();
+    if (materialSlots_) materialSlots_->release();
 
     // Destroy pipelines
     destroy(device, opaquePipeline_);
@@ -400,10 +408,23 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
 WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         const pipeline::WMOModel& model, uint32_t id, float budgetMs) {
     if (!model.isValid()) {
-        core::Logger::getInstance().error("Cannot load invalid WMO model");
+        core::Logger::getInstance().error("Cannot load invalid WMO model ", id);
         return ModelLoadResult::Failed;
     }
+    // Prepared here, once, on the first call for the model - and not at all
+    // for a model that is resident already, which is most calls.
+    auto prepIt = preparedHere_.find(id);
+    if (prepIt == preparedHere_.end()) {
+        if (const auto admitted = admitModel(id, !model.textures.empty())) return *admitted;
+        prepIt = preparedHere_.emplace(id, prepareModel(model)).first;
+    }
+    const std::shared_ptr<WmoModelPrep> prep = prepIt->second;
+    const ModelLoadResult result = loadPreparedIncremental(*prep, id, budgetMs);
+    if (result != ModelLoadResult::InProgress) preparedHere_.erase(id);
+    return result;
+}
 
+std::optional<WMORenderer::ModelLoadResult> WMORenderer::admitModel(uint32_t id, bool hasTexturePaths) {
     // Check if already loaded
     auto existingIt = loadedModels.find(id);
     if (existingIt != loadedModels.end()) {
@@ -411,7 +432,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         // assets were fully available), it can remain permanently white because
         // merged batches cache texture pointers at load time. Do a one-time reload for
         // models that have texture paths but no resolved non-white textures.
-        if (assetManager && !model.textures.empty()) {
+        if (assetManager && hasTexturePaths) {
             bool hasResolvedTexture = false;
             for (const TextureRef& tex : existingIt->second.textures) {
                 if (tex && tex != whiteTexture_) {
@@ -453,32 +474,41 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
         ++modelLimitRejectWarnings_;
         return ModelLoadResult::Failed;
     }
+    return std::nullopt;
+}
 
-    core::Logger::getInstance().debug("Loading WMO model ", id, " with ", model.groups.size(), " groups, ",
-                                      model.textures.size(), " textures...");
+WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& prep, uint32_t id,
+                                                                  float budgetMs) {
+    // A load not yet begun may have nothing to do: the model may be resident
+    // already, or the cache full.
+    if (scene_->loadingModels_.find(id) == scene_->loadingModels_.end()) {
+        if (const auto admitted = admitModel(id, !prep.texturePaths.empty())) return *admitted;
+        if (prep.groups.empty()) {
+            core::Logger::getInstance().warning("No valid groups loaded for WMO ", id,
+                                                " - it has nothing to draw and is not placed");
+            return ModelLoadResult::Failed;
+        }
+        core::Logger::getInstance().debug("Loading WMO model ", id, " with ", prep.groups.size(),
+                                          " groups, ", prep.texturePaths.size(), " textures...");
+    }
 
     // The accumulating model lives across calls, so a resumed load picks up its
     // textures, materials and the groups already uploaded.
     ModelData& modelData = scene_->loadingModels_[id];
-    modelData.id = id;
-    modelData.boundingBoxMin = model.boundingBoxMin;
-    modelData.boundingBoxMax = model.boundingBoxMax;
-    modelData.wmoAmbientColor = model.ambientColor;
-    std::string lowerSourcePath = model.sourcePath;
-    std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
-    std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool isStormwindCityWmo =
-        lowerSourcePath.find("\\buildings\\stormwind\\stormwind.wmo") != std::string::npos;
-    {
-        glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
-        float horiz = std::max(ext.x, ext.y);
-        float vert = ext.z;
-        modelData.isLowPlatform = (vert < 6.0f && horiz > 20.0f);
-    }
 
-    core::Logger::getInstance().debug("  WMO bounds: min=(", model.boundingBoxMin.x, ", ", model.boundingBoxMin.y, ", ", model.boundingBoxMin.z,
-                                      ") max=(", model.boundingBoxMax.x, ", ", model.boundingBoxMax.y, ", ", model.boundingBoxMax.z, ")");
+    // Where a step of the load goes, in the frame profile under "WMO model
+    // load": a model too large for one step spends it in one of these.
+    struct LoadParts {
+        CpuStageTimes& t;
+        const char* current = "setup and textures";
+        std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+        void to(const char* next) {
+            const auto now = std::chrono::steady_clock::now();
+            t.add("WMO model load", current, std::chrono::duration<float, std::milli>(now - since).count());
+            current = next; since = now;
+        }
+        ~LoadParts() { to(nullptr); }
+    } loadParts{vkCtx_->cpuStages()};
 
     // Batch all GPU uploads (textures, VBs, IBs) into a single command buffer
     // submission with one fence wait, instead of one per upload.
@@ -487,117 +517,52 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     // Textures and materials are model-level and done once; a resumed call has
     // them already and goes straight to the remaining groups.
     if (!modelData.setupDone) {
+        // What the model says of itself, as prepared. Set again on a resumed
+        // call that is still loading textures; it is the same each time.
+        modelData.id = id;
+        modelData.boundingBoxMin = prep.boundingBoxMin;
+        modelData.boundingBoxMax = prep.boundingBoxMax;
+        modelData.wmoAmbientColor = prep.ambientColor;
+        modelData.isLowPlatform = prep.isLowPlatform;
+        modelData.textureNames = prep.textureNames;
+        modelData.materialTextureIndices = prep.materialTextureIndices;
+        modelData.materialBlendModes = prep.materialBlendModes;
+        modelData.materialFlags = prep.materialFlags;
+        modelData.materialSidnColors = prep.materialSidnColors;
 
-    // Load textures for this model
-    core::Logger::getInstance().debug("  WMO has ", model.textures.size(), " texture paths, ", model.materials.size(), " materials");
-    if (assetManager && !model.textures.empty()) {
-        const auto texStart = std::chrono::steady_clock::now();
-        for (size_t i = modelData.nextTextureIndex; i < model.textures.size(); i++) {
-            if (budgetMs > 0.0f && i > modelData.nextTextureIndex) {
-                const float spent = std::chrono::duration<float, std::milli>(
-                    std::chrono::steady_clock::now() - texStart).count();
-                if (spent >= budgetMs) {
-                    modelData.nextTextureIndex = i;
-                    vkCtx_->endUploadBatch();
-                    return ModelLoadResult::InProgress;  // resume at this texture
+        // Load textures for this model
+        if (assetManager && !prep.texturePaths.empty()) {
+            const auto texStart = std::chrono::steady_clock::now();
+            for (size_t i = modelData.nextTextureIndex; i < prep.texturePaths.size(); i++) {
+                if (budgetMs > 0.0f && i > modelData.nextTextureIndex) {
+                    const float spent = std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - texStart).count();
+                    if (spent >= budgetMs) {
+                        modelData.nextTextureIndex = i;
+                        vkCtx_->endUploadBatch();
+                        return ModelLoadResult::InProgress;  // resume at this texture
+                    }
                 }
+                LoadedTexture loaded = loadTexture(prep.texturePaths[i]);
+                modelData.textures.push_back(std::move(loaded.diffuse));
+                modelData.normalMaps.push_back(std::move(loaded.normalHeight));
             }
-            const auto& texPath = model.textures[i];
-            core::Logger::getInstance().debug("    Loading texture ", i, ": ", texPath);
-            LoadedTexture loaded = loadTexture(texPath);
-            modelData.textures.push_back(std::move(loaded.diffuse));
-            modelData.normalMaps.push_back(std::move(loaded.normalHeight));
-            // Store lowercase texture name for material detection
-            std::string lowerPath = texPath;
-            std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            modelData.textureNames.push_back(lowerPath);
         }
-        core::Logger::getInstance().debug("  Loaded ", modelData.textures.size(), " textures for WMO");
+        modelData.nextTextureIndex = prep.texturePaths.size();
+        modelData.setupDone = true;
     }
 
-    // Store material -> texture index mapping
-    // IMPORTANT: mat.texture1 is a byte offset into MOTX, not an array index!
-    // We need to convert it using the textureOffsetToIndex map
-    core::Logger::getInstance().debug("  textureOffsetToIndex map has ", model.textureOffsetToIndex.size(), " entries");
-    static int matLogCount = 0;
-    auto resolveTextureIndex = [&](uint32_t textureField) -> uint32_t {
-        auto it = model.textureOffsetToIndex.find(textureField);
-        if (it != model.textureOffsetToIndex.end()) {
-            return it->second;
-        }
-        // Some files may store direct index instead of MOTX byte offset.
-        if (textureField < model.textures.size()) {
-            return textureField;
-        }
-        return std::numeric_limits<uint32_t>::max();
-    };
-
-    for (size_t i = 0; i < model.materials.size(); i++) {
-        const auto& mat = model.materials[i];
-        uint32_t texIndex = 0;  // Default to first texture
-        const uint32_t t1 = resolveTextureIndex(mat.texture1);
-        const uint32_t t2 = resolveTextureIndex(mat.texture2);
-        const uint32_t t3 = resolveTextureIndex(mat.texture3);
-
-        // Prefer first valid non-empty texture among texture1/2/3.
-        auto pickValid = [&](uint32_t idx) -> bool {
-            if (idx == std::numeric_limits<uint32_t>::max()) return false;
-            if (idx >= model.textures.size()) return false;
-            if (model.textures[idx].empty()) return false;
-            texIndex = idx;
-            return true;
-        };
-        if (!pickValid(t1)) {
-            if (!pickValid(t2)) {
-                pickValid(t3);
-            }
-        }
-
-        if (matLogCount < 20) {
-            core::Logger::getInstance().debug("  Material ", i,
-                ": tex1=", mat.texture1, "->", t1,
-                " tex2=", mat.texture2, "->", t2,
-                " tex3=", mat.texture3, "->", t3,
-                " chosen=", texIndex);
-            matLogCount++;
-        }
-
-        modelData.materialTextureIndices.push_back(texIndex);
-        modelData.materialBlendModes.push_back(mat.blendMode);
-        modelData.materialFlags.push_back(mat.flags);
-        modelData.materialSidnColors.push_back(mat.sidnColor);
-    }
-
-
-    modelData.nextTextureIndex = model.textures.size();
-    modelData.setupDone = true;
-    }  // end one-time setup
-
-    // Reads only the model, so it is rebuilt cheaply on every resumed call
-    // rather than kept alive across them.
-    // Helper: look up group name from MOGN raw data via MOGI nameOffset
-    auto getGroupName = [&](uint32_t groupIdx) -> std::string {
-        if (groupIdx < model.groupInfo.size()) {
-            int32_t nameOff = model.groupInfo[groupIdx].nameOffset;
-            if (nameOff >= 0 && static_cast<size_t>(nameOff) < model.groupNameRaw.size()) {
-                const char* str = reinterpret_cast<const char*>(model.groupNameRaw.data() + nameOff);
-                size_t maxLen = model.groupNameRaw.size() - nameOff;
-                return std::string(str, strnlen(str, maxLen));
-            }
-        }
-        return {};
-    };
-
-    // Create GPU resources for each group, a bounded number per call. A model
-    // with hundreds of groups would otherwise upload them all in one step: the
-    // worst measured was 286 groups at 131ms, against an 8ms budget.
+    // Upload each group and make its materials, a bounded number per call. A
+    // model with hundreds of groups would otherwise upload them all in one
+    // step: the worst measured was 286 groups at 131ms, against an 8ms budget.
+    loadParts.to("groups");
     const auto groupStart = std::chrono::steady_clock::now();
-    for (size_t gi = modelData.nextGroupIndex; gi < model.groups.size(); gi++) {
-        if (budgetMs > 0.0f) {
+    const size_t firstGroupThisCall = modelData.nextGroupIndex;
+    for (size_t gi = modelData.nextGroupIndex; gi < prep.groups.size(); gi++) {
+        if (budgetMs > 0.0f && gi > firstGroupThisCall) {
             const float spent = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - groupStart).count();
-            if (spent >= budgetMs && gi + 1 < model.groups.size()) {
+            if (spent >= budgetMs) {
                 // Resume AT this group, not after it. Marking it done before
                 // deciding whether to stop dropped one group on the floor at
                 // every budget break, and a dropped group is a missing piece of
@@ -609,200 +574,40 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             }
         }
         modelData.nextGroupIndex = gi + 1;
-        const auto& wmoGroup = model.groups[gi];
-        // Skip empty groups
-        if (wmoGroup.vertices.empty() || wmoGroup.indices.empty()) {
-            continue;
-        }
+        WmoModelPrep::Group& prepared = prep.groups[gi];
+        GroupResources resources = std::move(prepared.resources);
 
-        GroupResources resources;
-        if (createGroupResources(wmoGroup, resources, wmoGroup.flags)) {
-            // Detect distance-only LOD/exterior shell groups:
-            // 1. Very low vertex count (<100) - portal connectors, tiny shells
-            // 2. ALWAYS_DRAW (0x10000) with low verts - distant LOD stand-ins
-            // 3. Pure OUTDOOR groups (0x8 set, 0x2000 not set) in large WMOs -
-            //    exterior cityscape shells (e.g. "city01" in Stormwind)
-            bool alwaysDraw = (wmoGroup.flags & 0x10000) != 0;
-            size_t nVerts = wmoGroup.vertices.size();
-            bool isLargeWmo = model.nGroups > 50;
-            // Detect facade groups by name (exterior face of buildings)
-            std::string gname = getGroupName(static_cast<uint32_t>(gi));
-            bool isFacade = false;
-            bool isCityShell = false;
-            if (!gname.empty()) {
-                std::string lower = gname;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                isFacade = lower.find("facade") != std::string::npos;
-                // "city01" etc are exterior cityscape shells in large WMOs
-                isCityShell = (lower.find("city") == 0 && lower.size() <= 8);
-            }
-            bool isIndoor = (wmoGroup.flags & 0x2000) != 0;
-            const bool isStormwindCathedralShell = isStormwindCityWmo && isLargeWmo &&
-                                                   isIndoor && (wmoGroup.flags & 0x80) != 0;
-            if ((nVerts < 100 && isLargeWmo && !isIndoor) ||
-                (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
-                (isFacade && isLargeWmo && !isIndoor) ||
-                (isCityShell && !isIndoor && isLargeWmo) ||
-                isStormwindCathedralShell) {
-                resources.isLOD = true;
-            }
-            modelData.groups.push_back(resources);
-            modelData.loadedGroups++;
-        }
-    }
+        AllocatedBuffer vertBuf = uploadBuffer(*vkCtx_, prepared.vertices.data(),
+            prepared.vertices.size() * sizeof(WMOVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        resources.vertexBuffer = vertBuf.buffer;
+        resources.vertexAlloc = vertBuf.allocation;
+        AllocatedBuffer idxBuf = uploadBuffer(*vkCtx_, prepared.indices.data(),
+            prepared.indices.size() * sizeof(uint16_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        resources.indexBuffer = idxBuf.buffer;
+        resources.indexAlloc = idxBuf.allocation;
+        // In the staging copy now; the preparation need not hold them.
+        prepared.vertices = {};
+        prepared.indices = {};
 
-    if (modelData.loadedGroups == 0) {
-        core::Logger::getInstance().warning("No valid groups loaded for WMO ", id);
-        vkCtx_->endUploadBatch();
-        scene_->loadingModels_.erase(id);
-        return ModelLoadResult::Failed;
-    }
-
-    // Build pre-merged batches for each group (texture-sorted for efficient rendering)
-    size_t mergeGroupIndex = 0;
-    for (auto& groupRes : modelData.groups) {
-        // The group this one was uploaded from, for the vertices a batch draws.
-        // Only used to measure cloth; a mismatch leaves banners still rather
-        // than swaying the wrong triangles.
-        const pipeline::WMOGroup* srcGroup = nullptr;
-        if (mergeGroupIndex < model.groups.size() &&
-            model.groups[mergeGroupIndex].batches.size() == groupRes.batches.size()) {
-            srcGroup = &model.groups[mergeGroupIndex];
-        }
-        ++mergeGroupIndex;
-        // What each batch draws with. Batches merge only when all of it
-        // matches; see rendering/wmo_batch_merge.hpp.
-        std::vector<WmoBatchState> batchStates;
-        std::vector<VkTexture*> batchTextures;
-        /// Which of the model's textures each batch draws, UINT32_MAX for none.
-        std::vector<uint32_t> batchTextureIndices;
-        batchStates.reserve(groupRes.batches.size());
-        batchTextures.reserve(groupRes.batches.size());
-        batchTextureIndices.reserve(groupRes.batches.size());
-
-        for (const auto& batch : groupRes.batches) {
+        // Its merged batches, with the textures the model has now.
+        const auto groupIndex = static_cast<uint32_t>(modelData.groups.size());
+        resources.mergedBatches.reserve(prepared.merges.size());
+        for (auto& merge : prepared.merges) {
+            const WmoBatchState& state = merge.state;
+            const uint32_t texIndex = state.texture;
             VkTexture* tex = whiteTexture_.get();
             uint32_t pendingTexture = UINT32_MAX;
-            uint32_t usedTexture = UINT32_MAX;
-
-            if (batch.materialId < modelData.materialTextureIndices.size()) {
-                uint32_t texIndex = modelData.materialTextureIndices[batch.materialId];
-                if (texIndex < modelData.textures.size()) {
-                    tex = modelData.textures[texIndex].get();
-                    usedTexture = texIndex;
-                    if (!tex) tex = whiteTexture_.get();
-                    if (tex == whiteTexture_.get() && texIndex < modelData.textureNames.size() &&
-                        !modelData.textureNames[texIndex].empty()) {
-                        pendingTexture = texIndex;
-                    }
-                } else {
-                    LOG_WARNING("WMO ", id, " batch materialId=", batch.materialId,
-                                " texIndex=", texIndex, " >= textures size ",
-                                modelData.textures.size(), " - white fallback");
-                }
-            } else {
-                LOG_WARNING("WMO ", id, " batch materialId=", batch.materialId,
-                            " >= materialTextureIndices size ",
-                            modelData.materialTextureIndices.size(), " - white fallback");
-            }
-
-            uint32_t blendMode = 0;
-            if (batch.materialId < modelData.materialBlendModes.size()) {
-                blendMode = modelData.materialBlendModes[batch.materialId];
-            }
-
-            uint32_t matFlags = 0;
-            if (batch.materialId < modelData.materialFlags.size()) {
-                matFlags = modelData.materialFlags[batch.materialId];
-            }
-            // F_SIDN: the material glows in its sidnColor - windows and lamps.
-            uint32_t sidnColor = 0;
-            if ((matFlags & 0x10) != 0 && batch.materialId < modelData.materialSidnColors.size()) {
-                sidnColor = modelData.materialSidnColors[batch.materialId];
-            }
-
-            bool isLava = false;
-            bool isCloth = false;
-            uint8_t emissiveLevel = 0;
-            if (batch.materialId < modelData.materialTextureIndices.size()) {
-                uint32_t ti = modelData.materialTextureIndices[batch.materialId];
-                if (ti < modelData.textureNames.size()) {
-                    const auto& texName = modelData.textureNames[ti];
-                    // Case-insensitive search for material types
-                    std::string texNameLower = texName;
-                    std::transform(texNameLower.begin(), texNameLower.end(), texNameLower.begin(), ::tolower);
-                    if (texNameLower.find("stormwindlampglass.blp") != std::string::npos) {
-                        emissiveLevel = 1;  // authored lamp glass: bright
-                    } else if (texNameLower.find("mm_clockface") != std::string::npos) {
-                        // Darkshire's town hall clock, and any building sharing the
-                        // face: backlit by a flickering fire in the tower.
-                        emissiveLevel = 2;
-                    }
-                    isLava = (texNameLower.find("lava") != std::string::npos ||
-                              texNameLower.find("molten") != std::string::npos ||
-                              texNameLower.find("magma") != std::string::npos);
-                    // Cloth painted into the building: the gate banners of
-                    // Stormwind are geometry in the city's own WMO, textured
-                    // STORMWINDBANNER01, not doodads with models of their own.
-                    // A flagstone is a floor, as ever.
-                    isCloth = texNameLower.find("banner") != std::string::npos ||
-                              texNameLower.find("tapestry") != std::string::npos ||
-                              texNameLower.find("pennant") != std::string::npos ||
-                              (texNameLower.find("flag") != std::string::npos &&
-                               texNameLower.find("flagstone") == std::string::npos);
+            if (texIndex < modelData.textures.size()) {
+                tex = modelData.textures[texIndex].get();
+                if (!tex) tex = whiteTexture_.get();
+                if (tex == whiteTexture_.get() && texIndex < modelData.textureNames.size() &&
+                    !modelData.textureNames[texIndex].empty()) {
+                    pendingTexture = texIndex;
                 }
             }
-
-            // Where that cloth hangs, from the vertices this batch draws:
-            // the top edge it is held at, how far it falls, and its middle -
-            // which is what makes two banners on one gate swing out of step.
-            float clothTop = 0.0f, clothDrop = 0.0f;
-            float clothCx = 0.0f, clothCy = 0.0f;
-            if (isCloth && srcGroup) {
-                float minZ = std::numeric_limits<float>::max();
-                float maxZ = -std::numeric_limits<float>::max();
-                float minX = minZ, maxX = maxZ, minY = minZ, maxY = maxZ;
-                for (uint32_t i = 0; i < batch.indexCount; ++i) {
-                    const uint32_t at = batch.startIndex + i;
-                    if (at >= srcGroup->indices.size()) break;
-                    const uint16_t vi = srcGroup->indices[at];
-                    if (vi >= srcGroup->vertices.size()) continue;
-                    const auto& v = srcGroup->vertices[vi].position;
-                    minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
-                    minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
-                    minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
-                }
-                if (maxZ > minZ) {
-                    clothTop = maxZ;
-                    clothDrop = maxZ - minZ;
-                    clothCx = (minX + maxX) * 0.5f;
-                    clothCy = (minY + maxY) * 0.5f;
-                } else {
-                    isCloth = false;
-                }
-            }
-
-            batchStates.push_back({ .texture = tex, .blendMode = blendMode,
-                                    .lighting = wmoBatchLighting(model.flags, groupRes.groupFlags,
-                                                                 batch.kind, matFlags),
-                                    .sidnColor = sidnColor, .isLava = isLava,
-                                    .emissiveLevel = emissiveLevel,
-                                    .clothTop = clothTop, .clothDrop = clothDrop,
-                                    .clothCentreX = clothCx, .clothCentreY = clothCy,
-                                    .pendingTexture = pendingTexture });
-            batchTextures.push_back(tex);
-            batchTextureIndices.push_back(usedTexture);
-        }
-
-        std::vector<GroupResources::MergedBatch> merged;
-        for (const auto& members : groupWmoBatches(batchStates)) {
-            const WmoBatchState& state = batchStates[members.front()];
-            VkTexture* tex = batchTextures[members.front()];
-            const uint32_t texIndex = batchTextureIndices[members.front()];
             GroupResources::MergedBatch mb;
             mb.texture = tex;
-            mb.pendingTextureIndex = state.pendingTexture;
+            mb.pendingTextureIndex = pendingTexture;
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
             mb.isTransparent = state.blendMode >= 2;
@@ -814,142 +619,44 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
             mb.clothCentreX = state.clothCentreX;
             mb.clothCentreY = state.clothCentreY;
             mb.lighting = state.lighting;
-            if (mb.hasTexture) {
-                attachNormalHeightMap(modelData, texIndex, mb);
-            }
-            for (size_t i : members) {
-                const auto& batch = groupRes.batches[i];
-                GroupResources::MergedBatch::DrawRange dr;
-                dr.firstIndex = batch.startIndex;
-                dr.indexCount = batch.indexCount;
-                mb.draws.push_back(dr);
-            }
-            merged.push_back(std::move(mb));
-        }
-
-        // Allocate descriptor sets and UBOs for each merged batch
-        groupRes.mergedBatches.reserve(merged.size());
-        bool anyTextured = false;
-        for (auto& mb : merged) {
-            if (mb.hasTexture) anyTextured = true;
-            createMergedBatchMaterial(modelData, groupRes, mb);
-
+            mb.draws = std::move(merge.draws);
+            if (mb.hasTexture) attachNormalHeightMap(modelData, texIndex, mb);
+            createMergedBatchMaterial(modelData, resources, mb);
             if (mb.pendingTextureIndex != UINT32_MAX) {
                 modelData.pendingTextureBatches.emplace_back(
-                    static_cast<uint32_t>(mergeGroupIndex - 1),
-                    static_cast<uint32_t>(groupRes.mergedBatches.size()));
+                    groupIndex, static_cast<uint32_t>(resources.mergedBatches.size()));
             }
-            groupRes.mergedBatches.push_back(std::move(mb));
+            resources.mergedBatches.push_back(std::move(mb));
         }
-        groupRes.allUntextured = !anyTextured && !groupRes.mergedBatches.empty();
+        modelData.groups.push_back(std::move(resources));
+        modelData.loadedGroups++;
     }
 
     vkCtx_->endUploadBatch();
+    loadParts.to("portals, doodads");
 
-    // Copy portal data for visibility culling
-    modelData.portalVertices = model.portalVertices;
-    for (const auto& portal : model.portals) {
-        PortalData pd;
-        pd.startVertex = portal.startVertex;
-        pd.vertexCount = portal.vertexCount;
-        // Compute portal plane from vertices if we have them
-        if (portal.vertexCount >= 3 && portal.startVertex + portal.vertexCount <= model.portalVertices.size()) {
-            glm::vec3 v0 = model.portalVertices[portal.startVertex];
-            glm::vec3 v1 = model.portalVertices[portal.startVertex + 1];
-            glm::vec3 v2 = model.portalVertices[portal.startVertex + 2];
-            // Degenerate portal (collinear or coincident verts) → cross is
-            // zero → normalize returns NaN. Fall back to up-axis instead of
-            // poisoning the portal-frustum cull.
-            glm::vec3 cross = glm::cross(v1 - v0, v2 - v0);
-            float crossLen = glm::length(cross);
-            if (crossLen > 1e-6f) {
-                pd.normal = cross / crossLen;
-                pd.distance = glm::dot(pd.normal, v0);
-            } else {
-                pd.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                pd.distance = 0.0f;
-            }
-        } else {
-            pd.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-            pd.distance = 0.0f;
-        }
-        modelData.portals.push_back(pd);
-    }
-    for (const auto& ref : model.portalRefs) {
-        PortalRef pr;
-        pr.portalIndex = ref.portalIndex;
-        pr.groupIndex = ref.groupIndex;
-        pr.side = ref.side;
-        modelData.portalRefs.push_back(pr);
-    }
-    // Build per-group portal ref ranges from WMOGroup data
-    modelData.groupPortalRefs.resize(model.groups.size(), {0, 0});
-    for (size_t gi = 0; gi < model.groups.size(); gi++) {
-        modelData.groupPortalRefs[gi] = {model.groups[gi].portalStart, model.groups[gi].portalCount};
-    }
+    // Portals and doodad placements, as prepared.
+    modelData.portalVertices = std::move(prep.portalVertices);
+    modelData.portals = std::move(prep.portals);
+    modelData.portalRefs = std::move(prep.portalRefs);
+    modelData.groupPortalRefs = std::move(prep.groupPortalRefs);
+    modelData.doodadTemplates = std::move(prep.doodadTemplates);
 
-    if (!modelData.portals.empty()) {
-        core::Logger::getInstance().debug("WMO portals: ", modelData.portals.size(),
-                                          " refs: ", modelData.portalRefs.size());
-    }
-
-    // Store doodad templates (M2 models placed in WMO) for instancing later
-    if (!model.doodadSets.empty() && !model.doodads.empty()) {
-        const auto& doodadSet = model.doodadSets[0];  // Use first doodad set
-        for (uint32_t di = 0; di < doodadSet.count; di++) {
-            uint32_t doodadIdx = doodadSet.startIndex + di;
-            if (doodadIdx >= model.doodads.size()) break;
-
-            const auto& doodad = model.doodads[doodadIdx];
-            auto nameIt = model.doodadNames.find(doodad.nameIndex);
-            if (nameIt == model.doodadNames.end()) continue;
-
-            std::string m2Path = nameIt->second;
-            if (m2Path.empty()) continue;
-
-            m2Path = pipeline::modelPathToM2(m2Path);
-
-            // Build doodad's local transform (WoW coordinates)
-            // WMO doodads use quaternion rotation
-            glm::quat fixedRotation(doodad.rotation.w, doodad.rotation.x, doodad.rotation.y, doodad.rotation.z);
-
-            glm::mat4 localTransform(1.0f);
-            localTransform = glm::translate(localTransform, doodad.position);
-            localTransform *= glm::mat4_cast(fixedRotation);
-            localTransform = glm::scale(localTransform, glm::vec3(doodad.scale));
-
-            DoodadTemplate doodadTemplate;
-            doodadTemplate.m2Path = m2Path;
-            doodadTemplate.localTransform = localTransform;
-            modelData.doodadTemplates.push_back(doodadTemplate);
-
-        }
-
-        if (!modelData.doodadTemplates.empty()) {
-            core::Logger::getInstance().debug("WMO has ", modelData.doodadTemplates.size(), " doodad templates");
-        }
-    }
-
-    modelData.setupDone = true;
-
-    // Every non-empty source group must have arrived. Uploading them across
-    // several calls under a time budget makes it possible to lose one at a
-    // resume point without anything else noticing: the model still loads, still
+    // Every group that draws must have arrived. Uploading them across several
+    // calls under a time budget makes it possible to lose one at a resume
+    // point without anything else noticing: the model still loads, still
     // renders, and is simply missing pieces of itself.
-    size_t expectedGroups = 0;
-    for (const auto& g : model.groups) {
-        if (!g.vertices.empty() && !g.indices.empty()) expectedGroups++;
-    }
-    if (modelData.groups.size() != expectedGroups) {
+    if (modelData.groups.size() != prep.groups.size()) {
         core::Logger::getInstance().error(
-            "WMO ", id, " uploaded ", modelData.groups.size(), " of ", expectedGroups,
+            "WMO ", id, " uploaded ", modelData.groups.size(), " of ", prep.groups.size(),
             " groups - geometry is missing from this model");
     }
 
     // Read before the move: the log line below reports what was stored, and
     // modelData no longer owns it afterwards.
     const uint32_t loadedGroupCount = modelData.loadedGroups;
-    registerRtModel(id, modelData);
+    loadParts.to("ray tracing and commit");
+    registerRtModel(id, modelData, prep);
     if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
     loadedModels[id] = std::move(modelData);
     scene_->loadingModels_.erase(id);
@@ -985,6 +692,12 @@ void WMORenderer::unloadModel(uint32_t id) {
     for (auto& group : it->second.groups) {
         destroyGroupGPU(group, /*defer=*/true);
     }
+    // Its groups, GPU handles handed to the deferred deletion above, are
+    // collision geometry and grids now - the bulk of a city model, let go on
+    // the background thread. Its textures go here: the cache they are shared
+    // through is the main thread's.
+    core::releaseInBackground(
+        std::make_unique<std::vector<GroupResources>>(std::move(it->second.groups)));
 
     loadedModels.erase(it);
     markContentChanged();
@@ -1287,6 +1000,9 @@ void WMORenderer::clearInstances() {
         for (auto& group : model.groups) destroyGroupGPU(group, true);
     }
     *scene_ = InstanceState{};
+    // The preparations of those unfinished loads have handed over the
+    // groups uploaded so far; a load begun again starts from a new one.
+    preparedHere_.clear();
     markContentChanged();
     core::Logger::getInstance().info("Cleared all WMO instances");
 }
@@ -1513,11 +1229,9 @@ void WMORenderer::prepareRender() {
         for (auto& [modelId, model] : loadedModels) {
             for (auto& group : model.groups) {
                 for (auto& mb : group.mergedBatches) {
-                    if (!mb.materialUBO) continue;
-                    VmaAllocationInfo allocInfo{};
-                    vmaGetAllocationInfo(vkCtx_->getAllocator(), mb.materialUBOAlloc, &allocInfo);
-                    if (allocInfo.pMappedData) {
-                        auto* ubo = reinterpret_cast<WMOMaterialUBO*>(allocInfo.pMappedData);
+                    if (!mb.materialSlot) continue;
+                    {
+                        auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
                         ubo->enableNormalMap = normalMappingEnabled_ ? 1 : 0;
                         ubo->enablePOM = pomEnabled_ ? 1 : 0;
                         ubo->pomScale = 0.012f;
@@ -2071,200 +1785,6 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
     return total;
 }
 
-bool WMORenderer::createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags) {
-    if (group.vertices.empty() || group.indices.empty()) {
-        return false;
-    }
-
-    resources.groupFlags = groupFlags;
-
-    resources.vertexCount = group.vertices.size();
-    resources.indexCount = group.indices.size();
-    resources.boundingBoxMin = group.boundingBoxMin;
-    resources.boundingBoxMax = group.boundingBoxMax;
-
-    std::vector<WMOVertex> vertices;
-    vertices.reserve(group.vertices.size());
-
-    for (const auto& v : group.vertices) {
-        WMOVertex vd;
-        vd.position = v.position;
-        vd.normal = v.normal;
-        vd.texCoord = v.texCoord;
-        vd.color = v.color;
-        vd.tangent = glm::vec4(0.0f);
-        vertices.push_back(vd);
-    }
-
-    // Compute tangents using Lengyel's method
-    {
-        std::vector<glm::vec3> tan1(vertices.size(), glm::vec3(0.0f));
-        std::vector<glm::vec3> tan2(vertices.size(), glm::vec3(0.0f));
-
-        const auto& indices = group.indices;
-        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-            uint16_t i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];
-            if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) continue;
-
-            const glm::vec3& p0 = vertices[i0].position;
-            const glm::vec3& p1 = vertices[i1].position;
-            const glm::vec3& p2 = vertices[i2].position;
-            const glm::vec2& uv0 = vertices[i0].texCoord;
-            const glm::vec2& uv1 = vertices[i1].texCoord;
-            const glm::vec2& uv2 = vertices[i2].texCoord;
-
-            glm::vec3 dp1 = p1 - p0;
-            glm::vec3 dp2 = p2 - p0;
-            glm::vec2 duv1 = uv1 - uv0;
-            glm::vec2 duv2 = uv2 - uv0;
-
-            float det = duv1.x * duv2.y - duv1.y * duv2.x;
-            if (std::abs(det) < 1e-8f) continue;  // degenerate UVs
-            float r = 1.0f / det;
-
-            glm::vec3 sdir = (dp1 * duv2.y - dp2 * duv1.y) * r;
-            glm::vec3 tdir = (dp2 * duv1.x - dp1 * duv2.x) * r;
-
-            tan1[i0] += sdir; tan1[i1] += sdir; tan1[i2] += sdir;
-            tan2[i0] += tdir; tan2[i1] += tdir; tan2[i2] += tdir;
-        }
-
-        for (size_t i = 0; i < vertices.size(); i++) {
-            // Vertex normals from corrupt WMO data could be zero-length or
-            // NaN. glm::normalize on either returns NaN that contaminates
-            // the entire Gram-Schmidt tangent below; fall back to up-axis.
-            glm::vec3 n;
-            float normLen = glm::length(vertices[i].normal);
-            if (std::isfinite(normLen) && normLen > 1e-6f) {
-                n = vertices[i].normal / normLen;
-            } else {
-                n = glm::vec3(0, 0, 1);
-            }
-            glm::vec3 t = tan1[i];
-
-            if (glm::dot(t, t) < 1e-8f) {
-                // Fallback: generate tangent perpendicular to normal
-                glm::vec3 up = (std::abs(n.y) < 0.999f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-                t = glm::normalize(glm::cross(n, up));
-            }
-
-            // Gram-Schmidt orthogonalize
-            t = glm::normalize(t - n * glm::dot(n, t));
-            float w = (glm::dot(glm::cross(n, t), tan2[i]) < 0.0f) ? -1.0f : 1.0f;
-            vertices[i].tangent = glm::vec4(t, w);
-        }
-    }
-
-    // Upload vertex buffer to GPU
-    AllocatedBuffer vertBuf = uploadBuffer(*vkCtx_, vertices.data(),
-        vertices.size() * sizeof(WMOVertex),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    resources.vertexBuffer = vertBuf.buffer;
-    resources.vertexAlloc = vertBuf.allocation;
-
-    // Upload index buffer to GPU
-    AllocatedBuffer idxBuf = uploadBuffer(*vkCtx_, group.indices.data(),
-        group.indices.size() * sizeof(uint16_t),
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    resources.indexBuffer = idxBuf.buffer;
-    resources.indexAlloc = idxBuf.allocation;
-
-    // Store collision geometry for floor raycasting.
-    // Use MOPY per-triangle flags to exclude detail/decorative geometry (flag 0x04)
-    // from collision - these are things like gears, railings, etc.
-    resources.collisionVertices.reserve(group.vertices.size());
-    for (const auto& v : group.vertices) {
-        resources.collisionVertices.push_back(v.position);
-    }
-    if ((groupFlags & pipeline::kWMOGroupIndoor) && (groupFlags & pipeline::kWMOGroupHasVertexColors)) {
-        resources.collisionVertexColors.reserve(group.vertices.size());
-        for (const auto& v : group.vertices) {
-            resources.collisionVertexColors.push_back(glm::vec3(v.color));
-        }
-    }
-    if (!group.triFlags.empty()) {
-        // Store all triangles but tag each with MOPY flags for collision filtering
-        resources.collisionIndices = group.indices;
-        size_t numTris = group.indices.size() / 3;
-        resources.triMopyFlags.resize(numTris, 0);
-        for (size_t t = 0; t < numTris; t++) {
-            resources.triMopyFlags[t] = (t < group.triFlags.size()) ? group.triFlags[t] : 0;
-        }
-    } else {
-        resources.collisionIndices = group.indices;
-    }
-
-    // Compute actual bounding box from vertices (WMO header bboxes can be unreliable)
-    if (!resources.collisionVertices.empty()) {
-        resources.boundingBoxMin = resources.collisionVertices[0];
-        resources.boundingBoxMax = resources.collisionVertices[0];
-        for (const auto& v : resources.collisionVertices) {
-            resources.boundingBoxMin = glm::min(resources.boundingBoxMin, v);
-            resources.boundingBoxMax = glm::max(resources.boundingBoxMax, v);
-        }
-    }
-
-    // Build 2D spatial grid for fast collision triangle lookup
-    resources.buildCollisionGrid();
-
-    // What this group offers to stand on, said once per group.
-    //
-    // Darkshore's bridges are walked through, and they are WMOs rather than
-    // doodads - world/wmo/kalimdor/collidabledoodads/darkshore/bridge - so the
-    // floor under them is this list. A group that draws and has no triangles
-    // here, or whose triangles are all detail, is a floor that cannot be found,
-    // and neither shows up as anything but falling.
-    {
-        size_t hull = 0, renderedSolid = 0, detail = 0;
-        for (uint8_t mopy : resources.triMopyFlags) {
-            if (mopy & 0x08) ++hull;
-            if ((mopy & 0x20) && !(mopy & 0x04)) ++renderedSolid;
-            if (mopy & 0x04) ++detail;
-        }
-        // At warning, because the log carries nothing below it - which is why
-        // the first attempt at this said nothing at all.
-        //
-        // Only a group that offers no floor. Every group saying its counts is
-        // thousands of lines and buries the ones that matter; a group with no
-        // triangles at all, or none that block, is the whole of what "walked
-        // through it" looks like from here.
-        const size_t tris = resources.collisionIndices.size() / 3;
-        resources.noBlockingTriangles = (tris > 0 && hull == 0 && renderedSolid == 0);
-        if (tris == 0 || resources.noBlockingTriangles) {
-            LOG_WARNING("WMO group offers no floor: verts=",
-                        resources.collisionVertices.size(),
-                        " tris=", tris,
-                        " hull(0x08)=", hull,
-                        " renderedSolid(0x20 not 0x04)=", renderedSolid,
-                        " detail(0x04)=", detail,
-                        " - nothing here blocks, so anything standing on this "
-                        "group falls through it");
-        }
-    }
-
-    // Create batches
-    if (!group.batches.empty()) {
-        for (size_t i = 0; i < group.batches.size(); ++i) {
-            const auto& batch = group.batches[i];
-            GroupResources::Batch resBatch;
-            resBatch.startIndex = batch.startIndex;
-            resBatch.indexCount = batch.indexCount;
-            resBatch.materialId = batch.materialId;
-            resBatch.kind = group.batchKind(i);
-            resources.batches.push_back(resBatch);
-        }
-    } else {
-        // No batches defined - render entire group as one batch
-        GroupResources::Batch batch;
-        batch.startIndex = 0;
-        batch.indexCount = resources.indexCount;
-        batch.materialId = 0;
-        resources.batches.push_back(batch);
-    }
-
-    return true;
-}
-
 // renderGroup removed - draw calls are inlined in render()
 
 void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
@@ -2281,7 +1801,8 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
                 vkFreeDescriptorSets(device, materialDescPool_, 1, &mb.materialSet);
                 mb.materialSet = VK_NULL_HANDLE;
             }
-            destroy(allocator, mb.materialUBO, mb.materialUBOAlloc);
+            if (materialSlots_) materialSlots_->free(mb.materialSlot);
+            mb.materialSlot = {};
         }
     } else {
         // Deferred destruction - previous frame's command buffer may still
@@ -2294,18 +1815,18 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         group.indexBuffer = VK_NULL_HANDLE;
 
         // Snapshot material handles (::VkBuffer = raw Vulkan handle, not RAII wrapper)
-        struct MatSnapshot { VkDescriptorSet set; ::VkBuffer ubo; VmaAllocation uboAlloc; };
+        struct MatSnapshot { VkDescriptorSet set; UniformSlotPool::Slot slot; };
         std::vector<MatSnapshot> mats;
         mats.reserve(group.mergedBatches.size());
         for (auto& mb : group.mergedBatches) {
-            mats.push_back({.set = mb.materialSet, .ubo = mb.materialUBO, .uboAlloc = mb.materialUBOAlloc});
+            mats.push_back({.set = mb.materialSet, .slot = mb.materialSlot});
             mb.materialSet = VK_NULL_HANDLE;
-            mb.materialUBO = VK_NULL_HANDLE;
+            mb.materialSlot = {};
         }
 
         VkDescriptorPool pool = materialDescPool_;
         vkCtx_->deferAfterAllFrameFences([device, allocator, pool, vb, vbAlloc, ib, ibAlloc,
-                                      mats = std::move(mats)]() {
+                                      slots = materialSlots_, mats = std::move(mats)]() {
             if (vb) gpuDestroyBuffer(allocator, vb, vbAlloc);
             if (ib) gpuDestroyBuffer(allocator, ib, ibAlloc);
             for (auto& m : mats) {
@@ -2313,7 +1834,7 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
                     VkDescriptorSet s = m.set;
                     vkFreeDescriptorSets(device, pool, 1, &s);
                 }
-                if (m.ubo) gpuDestroyBuffer(allocator, m.ubo, m.uboAlloc);
+                if (slots) slots->free(m.slot);
             }
         });
     }
@@ -2333,19 +1854,19 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     // The baseline probe reproduces the lighting from before a portal-interior
     // group could be sunlit at all: every batch of one baked, and unshadowed.
     const bool portalInterior = (group.groupFlags & 0x2000) != 0;
-    const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
-                               std::getenv("WOWEE_ORGRIMMAR_SHADOW_BASELINE");
+    static const bool baselineProbe = std::getenv("WOWEE_ORGRIMMAR_PROBE") &&
+                                      std::getenv("WOWEE_ORGRIMMAR_SHADOW_BASELINE");
     const WmoBatchLighting lighting = baselineProbe && portalInterior
         ? WmoBatchLighting{ .light = WmoLight::VertexColour }
         : mb.lighting;
 
-    // Create material UBO
-    VmaAllocator allocator = vkCtx_->getAllocator();
-    AllocatedBuffer matBuf = createBuffer(allocator, sizeof(WMOMaterialUBO),
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU);
-    mb.materialUBO = matBuf.buffer;
-    mb.materialUBOAlloc = matBuf.allocation;
+    // Its parameters, in a slot rather than a buffer of its own.
+    mb.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
+    if (!mb.materialSlot) {
+        // The pool has said why; a batch with no parameters is not drawn.
+        mb.materialSet = VK_NULL_HANDLE;
+        return;
+    }
 
     // Write material params
     WMOMaterialUBO matData{};
@@ -2372,9 +1893,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.wmoAmbientG = model.wmoAmbientColor.g;
     matData.wmoAmbientB = model.wmoAmbientColor.b;
     matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
-    if (matBuf.info.pMappedData) {
-        memcpy(matBuf.info.pMappedData, &matData, sizeof(matData));
-    }
+    memcpy(mb.materialSlot.mapped, &matData, sizeof(matData));
 
     // Allocate and write descriptor set
     mb.materialSet = allocateMaterialSet();
@@ -2403,8 +1922,8 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
 
     VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = mb.materialUBO;
-    bufInfo.offset = 0;
+    bufInfo.buffer = mb.materialSlot.buffer;
+    bufInfo.offset = mb.materialSlot.offset;
     bufInfo.range = sizeof(WMOMaterialUBO);
 
     VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
@@ -2471,8 +1990,7 @@ void WMORenderer::retryPendingTextures() {
             // The old set and buffer may still be read by a frame in flight, so
             // the batch gets new ones and the old go once every slot has fenced.
             const VkDescriptorSet oldSet = mb.materialSet;
-            const ::VkBuffer oldUbo = mb.materialUBO;
-            const VmaAllocation oldUboAlloc = mb.materialUBOAlloc;
+            const UniformSlotPool::Slot oldSlot = mb.materialSlot;
             mb.texture = loaded.diffuse.get();
             model.textures[texIndex] = std::move(loaded.diffuse);
             if (texIndex < model.normalMaps.size()) model.normalMaps[texIndex] = std::move(loaded.normalHeight);
@@ -2482,14 +2000,13 @@ void WMORenderer::retryPendingTextures() {
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
             VkDevice device = vkCtx_->getDevice();
-            VmaAllocator allocator = vkCtx_->getAllocator();
             VkDescriptorPool pool = materialDescPool_;
-            vkCtx_->deferAfterAllFrameFences([device, allocator, pool, oldSet, oldUbo, oldUboAlloc]() {
+            vkCtx_->deferAfterAllFrameFences([device, pool, oldSet, oldSlot, slots = materialSlots_]() {
                 if (oldSet) {
                     VkDescriptorSet set = oldSet;
                     vkFreeDescriptorSets(device, pool, 1, &set);
                 }
-                if (oldUbo) gpuDestroyBuffer(allocator, oldUbo, oldUboAlloc);
+                if (slots) slots->free(oldSlot);
             });
             core::Logger::getInstance().info("WMO ", model.id, " got texture '",
                                              model.textureNames[texIndex], "' on a retry");
@@ -4482,40 +3999,31 @@ void WMORenderer::collectGrassClearings(float minX, float minY, float maxX, floa
 namespace wowee {
 namespace rendering {
 
-void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model) {
+void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep) {
     if (!rtScene_ || rtModelMeshes_.count(modelId)) return;
-    RtScene::MeshSource src;
-    for (const auto& group : model.groups) {
-        // Distance shells and groups the renderer never draws would cast
-        // shadows the player cannot see the source of.
-        if (group.isLOD || group.allUntextured || (group.groupFlags & 0x4000000u)) continue;
-        if (group.collisionVertices.empty()) continue;
-        const uint32_t base = static_cast<uint32_t>(src.positions.size());
-        src.positions.insert(src.positions.end(), group.collisionVertices.begin(),
-                             group.collisionVertices.end());
-        for (const auto& batch : group.batches) {
-            const uint32_t mat = batch.materialId;
-            const uint32_t blend = mat < model.materialBlendModes.size() ? model.materialBlendModes[mat] : 0;
-            if (blend >= 2) continue;  // blended: glass, light cards, water sheets
-            glm::vec3 albedo(0.5f);
-            float opacity = 1.0f;
-            if (mat < model.materialTextureIndices.size()) {
-                const uint32_t ti = model.materialTextureIndices[mat];
-                if (ti < model.textures.size() && model.textures[ti]) {
-                    albedo = model.textures[ti]->averageColor();
-                    if (blend == 1) opacity = model.textures[ti]->alphaCoverage();
-                }
-            }
-            const float surface = packRtSurface(albedo, opacity);
-            const uint32_t end = std::min<uint32_t>(batch.startIndex + batch.indexCount,
-                                                    static_cast<uint32_t>(group.collisionIndices.size()));
-            for (uint32_t i = batch.startIndex; i + 2 < end; i += 3) {
-                src.indices.push_back(base + group.collisionIndices[i]);
-                src.indices.push_back(base + group.collisionIndices[i + 1]);
-                src.indices.push_back(base + group.collisionIndices[i + 2]);
-                src.surfaces.push_back(surface);
+    // Each material's colour from the texture it has now, then each triangle
+    // the preparation kept takes its material's.
+    const auto surfaceOf = [&](uint32_t mat) {
+        const uint32_t blend = mat < model.materialBlendModes.size() ? model.materialBlendModes[mat] : 0;
+        glm::vec3 albedo(0.5f);
+        float opacity = 1.0f;
+        if (mat < model.materialTextureIndices.size()) {
+            const uint32_t ti = model.materialTextureIndices[mat];
+            if (ti < model.textures.size() && model.textures[ti]) {
+                albedo = model.textures[ti]->averageColor();
+                if (blend == 1) opacity = model.textures[ti]->alphaCoverage();
             }
         }
+        return packRtSurface(albedo, opacity);
+    };
+    std::vector<float> materialSurface(model.materialBlendModes.size());
+    for (uint32_t m = 0; m < materialSurface.size(); ++m) materialSurface[m] = surfaceOf(m);
+    const float unknownSurface = surfaceOf(UINT32_MAX);
+    RtScene::MeshSource src = std::move(prep.rtMesh);
+    src.surfaces.resize(prep.rtTriangleMaterial.size());
+    for (size_t t = 0; t < prep.rtTriangleMaterial.size(); ++t) {
+        const uint32_t m = prep.rtTriangleMaterial[t];
+        src.surfaces[t] = m < materialSurface.size() ? materialSurface[m] : unknownSurface;
     }
     const RtScene::MeshId mesh = rtScene_->addMesh(std::move(src));
     if (mesh != RtScene::kInvalid) rtModelMeshes_[modelId] = mesh;

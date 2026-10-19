@@ -602,6 +602,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         ci.pPoolSizes = sizes;
         ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool_);
+        materialSlots_ = UniformSlotPool::forDevice(ctx->getAllocator(), ctx->getPhysicalDevice(),
+                                                    sizeof(M2MaterialUBO), 1024, "M2 materials");
     }
     {
         VkDescriptorPoolSize sizes[] = {
@@ -1072,6 +1074,7 @@ void M2Renderer::shutdown() {
     // Model and bone destruction above is deferred; drain it now while the
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
+    if (materialSlots_) materialSlots_->release();
 
     // The models gave their textures back with them; the fallbacks go too.
     failedTextureRetryAt_.clear();
@@ -1168,12 +1171,12 @@ void M2Renderer::destroyModelGPU(M2ModelGPU& model) {
     const VkDevice device = vkCtx_->getDevice();
     const VmaAllocator alloc = vkCtx_->getAllocator();
     const VkDescriptorPool pool = materialDescPool_;
-    vkCtx_->deferAfterAllFrameFences([retired, device, alloc, pool]() {
+    vkCtx_->deferAfterAllFrameFences([retired, device, alloc, pool, slots = materialSlots_]() {
         destroy(alloc, retired->vertexBuffer, retired->vertexAlloc);
         destroy(alloc, retired->indexBuffer, retired->indexAlloc);
         for (auto& batch : retired->batches) {
             if (batch.materialSet) vkFreeDescriptorSets(device, pool, 1, &batch.materialSet);
-            destroy(alloc, batch.materialUBO, batch.materialUBOAlloc);
+            if (slots) slots->free(batch.materialSlot);
         }
         for (auto set : retired->particleTexSets) {
             if (set) vkFreeDescriptorSets(device, pool, 1, &set);
@@ -1357,8 +1360,8 @@ void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
     VkDescriptorImageInfo imgInfo = batchImageInfo(*batchTex, batch.texFlags);
 
     VkDescriptorBufferInfo matBufInfo{};
-    matBufInfo.buffer = batch.materialUBO;
-    matBufInfo.offset = 0;
+    matBufInfo.buffer = batch.materialSlot.buffer;
+    matBufInfo.offset = batch.materialSlot.offset;
     matBufInfo.range = sizeof(M2MaterialUBO);
 
     VkWriteDescriptorSet writes[3] = {};
@@ -1432,7 +1435,7 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     in.groundDetail = model.isGroundDetail;
     in.foliageLike = model.isFoliageLike;
     batch.drawState = m2BatchDrawState(in);
-    if (!batch.materialUBOMapped) return;
+    if (!batch.materialSlot) return;
 
     M2MaterialUBO mat{};
     mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
@@ -1448,7 +1451,7 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
         batch.blendMode >= 2 && (batch.materialFlags & 0x04) == 0 ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
-    std::memcpy(batch.materialUBOMapped, &mat, sizeof(mat));
+    std::memcpy(batch.materialSlot.mapped, &mat, sizeof(mat));
 }
 
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
@@ -2362,21 +2365,17 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
 
     // Allocate Vulkan descriptor sets and UBOs for each batch
     for (auto& bgpu : gpuModel.batches) {
-        // Create combined UBO for M2Params (binding 1) + M2Material (binding 2)
-        // We allocate them as separate buffers for clarity
-        VmaAllocationInfo matAllocInfo{};
+        // Its M2Material parameters (binding 2), in a slot rather than a
+        // buffer of its own.
+        bgpu.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
+        if (!bgpu.materialSlot) {
+            // The pool has said why; a batch with no parameters is not drawn.
+            bgpu.materialSet = VK_NULL_HANDLE;
+            continue;
+        }
         {
-            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = sizeof(M2MaterialUBO);
-            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &bgpu.materialUBO, &bgpu.materialUBOAlloc, &matAllocInfo);
-
-            bgpu.materialUBOMapped = matAllocInfo.pMappedData;
             writeBatchMaterial(gpuModel, bgpu);
-            const auto& mat = *static_cast<const M2MaterialUBO*>(bgpu.materialUBOMapped);
+            const auto& mat = *static_cast<const M2MaterialUBO*>(bgpu.materialSlot.mapped);
 
             // What the sky model's layers are actually being given, once each.
             //

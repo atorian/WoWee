@@ -9,6 +9,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/range_allocator.hpp"
 #include "rendering/terrain_bake.hpp"
+#include "rendering/uniform_slot_pool.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include "pipeline/terrain_mesh.hpp"
@@ -67,8 +68,8 @@ struct TerrainChunkGPU {
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
 
     // Per-chunk params UBO (hasLayer1/2/3)
-    ::VkBuffer paramsUBO = VK_NULL_HANDLE;
-    VmaAllocation paramsAlloc = VK_NULL_HANDLE;
+    /// Its TerrainParamsUBO, a slot of the renderer's paramsSlots_.
+    UniformSlotPool::Slot paramsSlot;
 
     // The chunk's textures, held: what its material set names stays resident
     // as long as the chunk does. The alpha maps are its own.
@@ -352,6 +353,8 @@ private:
     // was dropped for good: terrain that simply was not there, in whichever
     // direction the player had travelled furthest.
     VkDescriptorPool materialDescPool = VK_NULL_HANDLE;
+    /// Every chunk's TerrainParamsUBO (uniform_slot_pool.hpp).
+    std::shared_ptr<UniformSlotPool> paramsSlots_;
     static constexpr uint32_t MAX_MATERIAL_SETS = 160 * 1024;  // 640 tiles
 
     // Loaded terrain chunks
@@ -386,20 +389,28 @@ private:
     int crossfadeDrawnChunks_ = 0;
     /// Enqueue a chunk just added for its bake.
     void queueBake(const TerrainChunkGPU& chunk);
-    void refreshChunkAt();
+    /// Puts a chunk just made at the end of `chunks`, records its place in
+    /// chunkAt_ and its tile's list, and queues its bake.
+    void addChunk(TerrainChunkGPU&& chunk);
     /// Where each chunk is in `chunks`, by its place on the map, so a chunk
-    /// can ask its neighbours' levels; rebuilt after the list changes.
+    /// can ask its neighbours' levels. Kept up as chunks come and go: rebuilt
+    /// from all of them whenever the list changed, it was 30,000-40,000
+    /// inserts on every frame a tile streamed in or out.
     std::unordered_map<uint64_t, uint32_t> chunkAt_;
-    bool chunkAtStale_ = true;
-    /// The chunks of each tile and a sphere round all of theirs, rebuilt with
-    /// chunkAt_: the shadow pass tests a tile before its chunks, and a tile
-    /// outside the map has no chunk inside it.
+    /// The chunks of each tile and a sphere round all of theirs: the shadow
+    /// pass tests a tile before its chunks, and a tile outside the map has no
+    /// chunk inside it. Kept up with chunkAt_.
     struct ShadowTile {
+        int tileX = 0, tileY = 0;
         glm::vec3 centre{0.0f};
         float radius = 0.0f;
         std::vector<uint32_t> chunks;
     };
     std::vector<ShadowTile> shadowTiles_;
+    /// Which of shadowTiles_ each tile is, by tile.
+    std::unordered_map<uint64_t, uint32_t> tileAt_;
+    /// The sphere round all of a tile's chunks.
+    void boundTile(ShadowTile& tile) const;
     /// This frame's level for each chunk in `chunks`, -1 where it is not drawn.
     std::vector<int8_t> frameLevels_;
     /// The visible chunks of this frame, in `chunks` order, with their levels.

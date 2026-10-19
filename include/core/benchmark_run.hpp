@@ -34,7 +34,8 @@ struct BenchmarkRoute {
     std::vector<Waypoint> loop;
 };
 
-/// The routes WOWEE_BENCHMARK flies: dalaran, stormwind, orgrimmar.
+/// The routes WOWEE_BENCHMARK flies: laps of dalaran, stormwind and
+/// orgrimmar, and bootybay, a crossing that streams terrain the whole way.
 [[nodiscard]] const std::vector<BenchmarkRoute>& benchmarkRoutes();
 [[nodiscard]] const BenchmarkRoute* findBenchmarkRoute(std::string_view name);
 

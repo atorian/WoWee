@@ -17,6 +17,7 @@
 #include "pipeline/wowee_building.hpp"
 #include "pipeline/wowee_collision.hpp"
 #include "core/memory_monitor.hpp"
+#include "core/thread_pool.hpp"
 #include "core/profiler.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/adt_loader.hpp"
@@ -903,6 +904,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                 ready.modelId = static_cast<uint32_t>(std::hash<std::string>{}(wmoPath));
                 if (ready.modelId == 0) ready.modelId = 1;
                 ready.uniqueId = placement.uniqueId;
+                ready.prep = WMORenderer::prepareModel(wmoModel);
                 ready.model = std::move(wmoModel);
                 ready.position = pos;
                 ready.rotation = rot;
@@ -1165,8 +1167,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                     ft.wmoModelIndex++;
                     continue;
                 }
-                const auto result = wmoRenderer->loadModelIncremental(
-                    wmoReady.model, wmoReady.modelId, kWmoGroupBudgetMs);
+                const auto result = wmoReady.prep
+                    ? wmoRenderer->loadPreparedIncremental(*wmoReady.prep, wmoReady.modelId, kWmoGroupBudgetMs)
+                    : wmoRenderer->loadModelIncremental(wmoReady.model, wmoReady.modelId, kWmoGroupBudgetMs);
                 if (result == WMORenderer::ModelLoadResult::InProgress) {
                     break;  // same model resumes on the next call
                 }
@@ -1550,6 +1553,10 @@ void TerrainManager::processReadyTiles() {
         return "?";
     };
 
+    // What each phase cost this frame, for the frame profile under
+    // rendererUpdate/terrain - one entry a phase, however many steps it took.
+    std::array<float, static_cast<size_t>(FinalizationPhase::DONE) + 1> phaseMs{};
+
     while (!finalizingTiles_.empty()) {
         auto& ft = finalizingTiles_.front();
         const auto phaseBefore = ft.phase;
@@ -1557,6 +1564,7 @@ void TerrainManager::processReadyTiles() {
         bool done = advanceFinalization(ft);
         const float stepMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - stepStart).count();
+        phaseMs[static_cast<size_t>(phaseBefore)] += stepMs;
         // Reported the first time a phase overruns, and after that only when
         // it overruns worse than it ever has. Every tile streamed in runs
         // every phase, so a phase that is over budget is over budget for as
@@ -1577,6 +1585,10 @@ void TerrainManager::processReadyTiles() {
             }
         }
         if (done) {
+            // What the worker read and prepared for it - parsed models,
+            // decoded textures, the WMOs' preparations - is let go on the
+            // background thread: freed here, a city tile's was 50 ms.
+            core::releaseInBackground(std::move(ft.pending));
             finalizingTiles_.pop_front();
         }
         float elapsed = std::chrono::duration<float, std::milli>(
@@ -1584,7 +1596,24 @@ void TerrainManager::processReadyTiles() {
         if (elapsed >= budgetMs) break;
     }
 
+    const auto submitStart = std::chrono::steady_clock::now();
     if (vkCtx) vkCtx->endUploadBatch();  // Async - submits but doesn't wait
+
+    if (vkCtx) {
+        static constexpr const char* kStageNames[] = {
+            "finalize: terrain", "finalize: M2 models", "finalize: M2 instances",
+            "finalize: WMO models", "finalize: WMO instances", "finalize: WMO doodads",
+            "finalize: water", "finalize: ambient and commit", "finalize: done",
+        };
+        static_assert(std::size(kStageNames) == std::tuple_size_v<decltype(phaseMs)>);
+        auto& stages = vkCtx->cpuStages();
+        for (size_t p = 0; p < phaseMs.size(); ++p) {
+            if (phaseMs[p] > 0.0f) stages.add("rendererUpdate/terrain", kStageNames[p], phaseMs[p]);
+        }
+        stages.add("rendererUpdate/terrain", "finalize: submit uploads",
+                   std::chrono::duration<float, std::milli>(
+                       std::chrono::steady_clock::now() - submitStart).count());
+    }
 }
 
 void TerrainManager::processPendingUnloads() {
@@ -1618,6 +1647,20 @@ void TerrainManager::processPendingUnloads() {
             std::chrono::steady_clock::now() - budgetStart).count();
         if (elapsed >= budgetMs) break;
     }
+
+    if (unloaded > 0 && terrainRenderer && terrainRenderer->getVkContext()) {
+        auto& stages = terrainRenderer->getVkContext()->cpuStages();
+        stages.add("rendererUpdate/terrain", "unload",
+                   std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - budgetStart).count());
+        static constexpr const char* kPartNames[] = {
+            "M2 instances", "WMO instances and liquids", "terrain chunks", "water", "tile data",
+        };
+        static_assert(std::size(kPartNames) == std::tuple_size_v<decltype(unloadPartMs_)>);
+        for (size_t p = 0; p < unloadPartMs_.size(); ++p) {
+            stages.add("rendererUpdate/terrain/unload", kPartNames[p], unloadPartMs_[p]);
+        }
+    }
+    unloadPartMs_ = {};
 
     if (unloaded > 0) {
         LOG_DEBUG("Unloaded ", unloaded, " distant tiles (", pendingUnloadQueue_.size(),
@@ -1689,6 +1732,7 @@ void TerrainManager::unloadTile(int x, int y) {
                 std::lock_guard<std::mutex> lock(preparedWmoUniqueIdsMutex_);
                 preparedWmoUniqueIds_.erase(uid);
             }
+            core::releaseInBackground(std::move(fit->pending));
             finalizingTiles_.erase(fit);
             return;
         }
@@ -1713,11 +1757,20 @@ void TerrainManager::unloadTile(int x, int y) {
         preparedWmoUniqueIds_.erase(uid);
     }
 
+    using clock = std::chrono::steady_clock;
+    auto partStart = clock::now();
+    auto endPart = [&](size_t part) {
+        const auto now = clock::now();
+        unloadPartMs_[part] += std::chrono::duration<float, std::milli>(now - partStart).count();
+        partStart = now;
+    };
+
     // Remove M2 doodad instances
     if (m2Renderer) {
         m2Renderer->removeInstances(tile->m2InstanceIds);
         LOG_DEBUG("  Removed ", tile->m2InstanceIds.size(), " M2 instances");
     }
+    endPart(0);
 
     // Remove WMO instances and their liquids
     if (wmoRenderer) {
@@ -1730,18 +1783,25 @@ void TerrainManager::unloadTile(int x, int y) {
         wmoRenderer->removeInstances(tile->wmoInstanceIds);
         LOG_DEBUG("  Removed ", tile->wmoInstanceIds.size(), " WMO instances");
     }
+    endPart(1);
 
     // Remove terrain chunks for this tile
     if (terrainRenderer) {
         terrainRenderer->removeTile(x, y);
     }
+    endPart(2);
 
     // Remove water surfaces for this tile
     if (liquidScene) {
         liquidScene->removeTile(x, y);
     }
+    endPart(3);
 
+    // The parsed tile - heights, layers, alpha maps - goes on the background
+    // thread; nothing reads it once it is out of loadedTiles.
+    core::releaseInBackground(std::move(it->second));
     loadedTiles.erase(it);
+    endPart(4);
 }
 
 void TerrainManager::stopWorkers() {

@@ -7,6 +7,7 @@
 #include "rendering/spatial_grid.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/uniform_slot_pool.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -76,9 +77,8 @@ struct M2ModelGPU {
         /// False for shader 0x8000, which the client does not draw.
         bool shaderDrawn = true;
         VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
-        ::VkBuffer materialUBO = VK_NULL_HANDLE;
-        VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
-        void* materialUBOMapped = nullptr;  // cached mapped pointer (avoids per-frame vmaGetAllocationInfo)
+        /// Its M2MaterialUBO, a slot of materialSlots_ (uniform_slot_pool.hpp).
+        UniformSlotPool::Slot materialSlot;
         uint32_t indexStart = 0;   // offset in indices (not bytes)
         uint32_t indexCount = 0;
         bool hasAlpha = false;
@@ -1064,6 +1064,8 @@ private:
 
     // Descriptor pools
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
+    /// Every batch's material parameters (uniform_slot_pool.hpp).
+    std::shared_ptr<UniformSlotPool> materialSlots_;
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
     std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
         std::make_shared<std::atomic<uint64_t>>(0);

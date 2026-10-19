@@ -19,6 +19,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <functional>
 #include <cstdlib>
 #include <unordered_set>
 #include <limits>
@@ -213,6 +214,8 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         LOG_ERROR("TerrainRenderer: failed to create descriptor pool");
         return false;
     }
+    paramsSlots_ = UniformSlotPool::forDevice(vkCtx->getAllocator(), vkCtx->getPhysicalDevice(),
+                                              sizeof(TerrainParamsUBO), 1024, "Terrain chunk parameters");
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
@@ -311,6 +314,7 @@ void TerrainRenderer::shutdown() {
     // sets from are still alive. Without this every resident chunk's vertex and
     // index buffers outlived the device: twenty thousand of each.
     vkCtx->flushDeferredCleanup();
+    if (paramsSlots_) paramsSlots_->release();
     // After the flush, which destroyed the atlases clear() let go; before the
     // material layout its pipeline layout names.
     bake_.shutdown();
@@ -390,9 +394,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
             }
 
             registerRtChunk(gpuChunk, chunk);
-            chunks.push_back(std::move(gpuChunk));
-            chunkAtStale_ = true;
-            queueBake(chunks.back());
+            addChunk(std::move(gpuChunk));
         }
     }
 
@@ -464,9 +466,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
         }
 
         registerRtChunk(gpuChunk, chunk);
-        chunks.push_back(std::move(gpuChunk));
-        chunkAtStale_ = true;
-        queueBake(chunks.back());
+        addChunk(std::move(gpuChunk));
         uploaded++;
     }
 
@@ -526,26 +526,12 @@ bool TerrainRenderer::createChunkParamsUBO(TerrainChunkGPU& gpuChunk) {
     params.hasLayer2 = gpuChunk.layerCount >= 2 ? 1 : 0;
     params.hasLayer3 = gpuChunk.layerCount >= 3 ? 1 : 0;
 
-    VkBufferCreateInfo bufCI{};
-    bufCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufCI.size = sizeof(TerrainParamsUBO);
-    bufCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-
-    VmaAllocationCreateInfo allocCI{};
-    allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-    allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-    VmaAllocationInfo mapInfo{};
-    // Check the return value - a null UBO handle would leave the GPU reading
-    // from an invalid descriptor, crashing the driver under memory pressure
-    // rather than losing one chunk.
-    if (gpuCreateBuffer(vkCtx->getAllocator(), &bufCI, &allocCI,
-                        &gpuChunk.paramsUBO, &gpuChunk.paramsAlloc, &mapInfo) != VK_SUCCESS) {
-        return false;
-    }
-    if (mapInfo.pMappedData) {
-        std::memcpy(mapInfo.pMappedData, &params, sizeof(params));
-    }
+    // A slot rather than a buffer of its own. None - the pool could not make
+    // a block, and has said so - would leave the GPU reading an invalid
+    // descriptor, so the caller retries the chunk instead.
+    gpuChunk.paramsSlot = paramsSlots_ ? paramsSlots_->allocate() : UniformSlotPool::Slot{};
+    if (!gpuChunk.paramsSlot) return false;
+    std::memcpy(gpuChunk.paramsSlot.mapped, &params, sizeof(params));
     return true;
 }
 
@@ -949,8 +935,8 @@ bool TerrainRenderer::writeMaterialDescriptors(VkDescriptorSet set, const Terrai
     }
 
     VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = chunk.paramsUBO;
-    bufInfo.offset = 0;
+    bufInfo.buffer = chunk.paramsSlot.buffer;
+    bufInfo.offset = chunk.paramsSlot.offset;
     bufInfo.range = sizeof(TerrainParamsUBO);
 
     VkWriteDescriptorSet writes[kMaterialBindingCount] = {};
@@ -1063,9 +1049,6 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     // a tile's go in one page, so this is a bind per page, not per chunk.
     constexpr int32_t kNothingBound = -2;
     int32_t boundPage = kNothingBound;
-
-    // Where each chunk is, by its place on the map, for its neighbours.
-    refreshChunkAt();
 
     // Where the bake takes over from the layers, for this view.
     const TerrainBakeBand bakeBand = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
@@ -1195,35 +1178,38 @@ void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
 
 }
 
-void TerrainRenderer::refreshChunkAt() {
-    if (!chunkAtStale_) return;
-    chunkAt_.clear();
-    chunkAt_.reserve(chunks.size());
-    std::unordered_map<uint64_t, size_t> tileSlot;
-    shadowTiles_.clear();
-    for (uint32_t i = 0; i < chunks.size(); ++i) {
-        chunkAt_[chunkMapKey(chunks[i].tileX * 16 + chunks[i].chunkX,
-                             chunks[i].tileY * 16 + chunks[i].chunkY)] = i;
-        const auto [slot, added] = tileSlot.try_emplace(chunkMapKey(chunks[i].tileX, chunks[i].tileY),
-                                                        shadowTiles_.size());
-        if (added) shadowTiles_.emplace_back();
-        shadowTiles_[slot->second].chunks.push_back(i);
+void TerrainRenderer::boundTile(ShadowTile& tile) const {
+    // The sphere holds every one of its chunks' spheres.
+    glm::vec3 lo(std::numeric_limits<float>::max());
+    glm::vec3 hi(std::numeric_limits<float>::lowest());
+    for (const uint32_t i : tile.chunks) {
+        lo = glm::min(lo, chunks[i].boundingSphereCenter);
+        hi = glm::max(hi, chunks[i].boundingSphereCenter);
     }
-    // Each tile's sphere holds every one of its chunks' spheres.
-    for (ShadowTile& tile : shadowTiles_) {
-        glm::vec3 lo(std::numeric_limits<float>::max());
-        glm::vec3 hi(std::numeric_limits<float>::lowest());
-        for (const uint32_t i : tile.chunks) {
-            lo = glm::min(lo, chunks[i].boundingSphereCenter);
-            hi = glm::max(hi, chunks[i].boundingSphereCenter);
-        }
-        tile.centre = (lo + hi) * 0.5f;
-        for (const uint32_t i : tile.chunks) {
-            tile.radius = std::max(tile.radius, glm::length(chunks[i].boundingSphereCenter - tile.centre) +
-                                                    chunks[i].boundingSphereRadius);
-        }
+    tile.centre = (lo + hi) * 0.5f;
+    tile.radius = 0.0f;
+    for (const uint32_t i : tile.chunks) {
+        tile.radius = std::max(tile.radius, glm::length(chunks[i].boundingSphereCenter - tile.centre) +
+                                                chunks[i].boundingSphereRadius);
     }
-    chunkAtStale_ = false;
+}
+
+void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
+    const auto index = static_cast<uint32_t>(chunks.size());
+    chunks.push_back(std::move(chunk));
+    const TerrainChunkGPU& added = chunks.back();
+    chunkAt_[chunkMapKey(added.tileX * 16 + added.chunkX, added.tileY * 16 + added.chunkY)] = index;
+    const auto [slot, newTile] = tileAt_.try_emplace(chunkMapKey(added.tileX, added.tileY),
+                                                     static_cast<uint32_t>(shadowTiles_.size()));
+    if (newTile) {
+        shadowTiles_.emplace_back();
+        shadowTiles_.back().tileX = added.tileX;
+        shadowTiles_.back().tileY = added.tileY;
+    }
+    ShadowTile& tile = shadowTiles_[slot->second];
+    tile.chunks.push_back(index);
+    boundTile(tile);
+    queueBake(added);
 }
 
 void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
@@ -1236,7 +1222,6 @@ void TerrainRenderer::recordBake(VkCommandBuffer cmd) {
     // Every atlas a chunk already names, ready before this frame draws it.
     bake_.prepareNewAtlases(cmd);
     if (bakeQueue_.empty()) return;
-    refreshChunkAt();
 
     // This frame's share, grouped by tile: one rendering scope and one set of
     // mips an atlas.
@@ -1404,7 +1389,6 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
         return ls.z <= centreLs.z + (shadowRadius + radius) * scaleZ;
     };
 
-    refreshChunkAt();
     uint32_t shadowChunksDrawn = 0;
     for (const ShadowTile& tile : shadowTiles_) {
         if (!mayCast(tile.centre, tile.radius)) continue;
@@ -1441,20 +1425,40 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
 }
 
 void TerrainRenderer::removeTile(int tileX, int tileY) {
-    int removed = 0;
-    auto it = chunks.begin();
-    while (it != chunks.end()) {
-        if (it->tileX == tileX && it->tileY == tileY) {
-            destroyChunkGPU(*it);
-            it = chunks.erase(it);
-            removed++;
-        } else {
-            ++it;
+    // Only the tile's own chunks are touched: each is filled by the last chunk
+    // of the list, and that one's place and its tile's entry are moved with
+    // it. Erasing each of the 256 where it was found moved every chunk after
+    // it, 256 times over a list of 30,000-40,000 - 200-250 ms on the main
+    // thread for each tile left behind in flight.
+    const auto tileIt = tileAt_.find(chunkMapKey(tileX, tileY));
+    if (tileIt != tileAt_.end()) {
+        const uint32_t tileSlot = tileIt->second;
+        std::vector<uint32_t> leaving = std::move(shadowTiles_[tileSlot].chunks);
+        // Highest first: everything past the place being filled has gone or
+        // stays, so the chunk moved into it is never one still to leave.
+        std::sort(leaving.begin(), leaving.end(), std::greater<>());
+        for (const uint32_t index : leaving) {
+            TerrainChunkGPU& chunk = chunks[index];
+            chunkAt_.erase(chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY));
+            destroyChunkGPU(chunk);
+            const auto last = static_cast<uint32_t>(chunks.size() - 1);
+            if (index != last) {
+                chunk = std::move(chunks[last]);
+                chunkAt_[chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY)] = index;
+                auto& moversTile = shadowTiles_[tileAt_.at(chunkMapKey(chunk.tileX, chunk.tileY))].chunks;
+                *std::find(moversTile.begin(), moversTile.end(), last) = index;
+            }
+            chunks.pop_back();
         }
-    }
-    if (removed > 0) {
-        chunkAtStale_ = true;
-        LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
+        // The tile's entry goes the same way.
+        const auto lastSlot = static_cast<uint32_t>(shadowTiles_.size() - 1);
+        if (tileSlot != lastSlot) {
+            shadowTiles_[tileSlot] = std::move(shadowTiles_[lastSlot]);
+            tileAt_[chunkMapKey(shadowTiles_[tileSlot].tileX, shadowTiles_[tileSlot].tileY)] = tileSlot;
+        }
+        shadowTiles_.pop_back();
+        tileAt_.erase(chunkMapKey(tileX, tileY));
+        LOG_DEBUG("Removed ", leaving.size(), " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
     // Its chunks still queued find nothing at their place and are dropped.
     bake_.releaseTile(tileX, tileY);
@@ -1467,7 +1471,9 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
-    chunkAtStale_ = true;
+    chunkAt_.clear();
+    shadowTiles_.clear();
+    tileAt_.clear();
     bakeQueue_.clear();
     bake_.releaseAll();
     renderedChunks = 0;
@@ -1528,8 +1534,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     VmaAllocation vertexAlloc = chunk.vertexAlloc;
     ::VkBuffer indexBuffer = chunk.indexBuffer;
     VmaAllocation indexAlloc = chunk.indexAlloc;
-    ::VkBuffer paramsUBO = chunk.paramsUBO;
-    VmaAllocation paramsAlloc = chunk.paramsAlloc;
+    const UniformSlotPool::Slot paramsSlot = chunk.paramsSlot;
     VkDescriptorPool pool = materialDescPool;
     VkDescriptorSet materialSet = chunk.materialSet;
     // The chunk's ranges in its geometry page, given back once no frame in
@@ -1554,8 +1559,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.vertexAlloc = VK_NULL_HANDLE;
     chunk.indexBuffer = VK_NULL_HANDLE;
     chunk.indexAlloc = VK_NULL_HANDLE;
-    chunk.paramsUBO = VK_NULL_HANDLE;
-    chunk.paramsAlloc = VK_NULL_HANDLE;
+    chunk.paramsSlot = {};
     chunk.materialSet = VK_NULL_HANDLE;
     chunk.baseTexture.reset();
     for (TextureRef& t : chunk.layerTextures) t.reset();
@@ -1565,7 +1569,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     chunk.normalGrid.reset();
 
     vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
-                                     paramsUBO, paramsAlloc, pool, materialSet,
+                                     paramsSlot, slots = paramsSlots_, pool, materialSet,
                                      page, baseVertex, vertexCount, firstIndex, indexCount]() {
         if (page) {
             page->vertexRanges.free(baseVertex, vertexCount);
@@ -1579,10 +1583,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
             AllocatedBuffer ab{}; ab.buffer = indexBuffer; ab.allocation = indexAlloc;
             destroyBuffer(allocator, ab);
         }
-        if (paramsUBO) {
-            AllocatedBuffer ab{}; ab.buffer = paramsUBO; ab.allocation = paramsAlloc;
-            destroyBuffer(allocator, ab);
-        }
+        if (slots) slots->free(paramsSlot);
         if (materialSet && pool) {
             VkDescriptorSet set = materialSet;
             vkFreeDescriptorSets(device, pool, 1, &set);

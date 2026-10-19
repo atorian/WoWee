@@ -9,6 +9,7 @@
 #include "rendering/wmo_lighting.hpp"
 #include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/uniform_slot_pool.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/grass_clearing.hpp"
@@ -41,6 +42,9 @@ class M2Renderer;
 class RtScene;
 class VkContext;
 class VkTexture;
+struct WMOVertex;
+/// A WMO model's CPU-side work, done before its upload (WMORenderer::prepareModel).
+struct WmoModelPrep;
 
 /**
  * WMO (World Model Object) Renderer (Vulkan)
@@ -110,8 +114,25 @@ public:
     /// Upload a model a few groups at a time. InProgress means call again with
     /// the same arguments; a single large model can otherwise take over a
     /// hundred milliseconds, which lands as a visible hitch when terrain
-    /// streaming finalises a tile.
+    /// streaming finalises a tile. Prepares the model here (prepareModel) on
+    /// the first call; a caller with a thread of its own prepares it there and
+    /// calls loadPreparedIncremental instead.
     ModelLoadResult loadModelIncremental(const pipeline::WMOModel& model, uint32_t id, float budgetMs);
+
+    /// Everything a model's upload works out on the CPU, done ahead of it:
+    /// its vertices with their tangents, each group's collision geometry and
+    /// grid, which batches draw together, its portals and doodad placements,
+    /// and the mesh it adds to the ray-traced scene. Reads only the model and
+    /// touches nothing of a renderer, so any thread may call it - the terrain
+    /// workers do, beside parsing the file. On the main thread this was most
+    /// of a large model's upload: 8-10 ms a step and 10 ms more to finish.
+    [[nodiscard]] static std::shared_ptr<WmoModelPrep> prepareModel(const pipeline::WMOModel& model);
+
+    /// loadModelIncremental for a prepared model: what is left is uploading,
+    /// binding textures and making materials, a group at a time under the
+    /// budget. Takes the prepared data as it uploads it, so pass the same
+    /// preparation to every call for one model.
+    ModelLoadResult loadPreparedIncremental(WmoModelPrep& prep, uint32_t id, float budgetMs);
 
     /**
      * Check if a WMO model is currently resident in the renderer
@@ -498,6 +519,9 @@ public:
     void setDeferNormalMaps(bool defer) { deferNormalMaps_ = defer; }
 
 private:
+    // Holds a model's group resources before their upload.
+    friend struct WmoModelPrep;
+
     const std::vector<LocalLight>* frameLights_ = nullptr;
     // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     struct WMOMaterialUBO {
@@ -561,8 +585,8 @@ private:
             VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
             VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
-            ::VkBuffer materialUBO = VK_NULL_HANDLE;
-            VmaAllocation materialUBOAlloc = VK_NULL_HANDLE;
+            /// Its WMOMaterialUBO, a slot of materialSlots_.
+            UniformSlotPool::Slot materialSlot;
             bool hasTexture = false;
             bool alphaTest = false;
             bool isTransparent = false;     // blendMode >= 2
@@ -811,10 +835,18 @@ private:
                            float glX, float glY, float glZ,
                            float zMarginDown = 0.0f, float zMarginUp = 0.0f) const;
 
-    /**
-     * Create GPU resources for a WMO group
-     */
-    bool createGroupResources(const pipeline::WMOGroup& group, GroupResources& resources, uint32_t groupFlags = 0);
+    /// A group's resources as far as the CPU takes them - bounds, collision
+    /// and its grid, batches - and the vertices, tangents included, its
+    /// buffer is to hold. False for a group with nothing to draw. Any thread.
+    static bool prepareGroupResources(const pipeline::WMOGroup& group, GroupResources& resources,
+                                      std::vector<WMOVertex>& vertices);
+
+    /// Whether a model may start loading now: Complete when it is resident
+    /// already, Failed when the cache is full, nothing when it may load.
+    std::optional<ModelLoadResult> admitModel(uint32_t id, bool hasTexturePaths);
+    /// Preparations loadModelIncremental made itself, for models whose loads
+    /// are still in progress.
+    std::unordered_map<uint32_t, std::shared_ptr<WmoModelPrep>> preparedHere_;
 
     /**
      * Check if group is visible in frustum
@@ -912,7 +944,9 @@ private:
     };
     std::unordered_map<uint32_t, RtInstanceRecord> rtInstances_;  // WMO instance id ->
     uint64_t rtSyncGeneration_ = 0;
-    void registerRtModel(uint32_t modelId, const ModelData& model);
+    /// Adds the mesh the preparation built to the ray-traced scene, its
+    /// triangles coloured by the textures the model now has.
+    void registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep);
     void releaseRtModel(uint32_t modelId);
 
     // Current map name for zone-specific floor cache
@@ -942,6 +976,8 @@ private:
 
     // Descriptor pool for material sets
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
+    /// Every merged batch's material parameters (uniform_slot_pool.hpp).
+    std::shared_ptr<UniformSlotPool> materialSlots_;
     static constexpr uint32_t MAX_MATERIAL_SETS = 32768;
 
     /// When a path that would not load, or found no room, is worth asking for

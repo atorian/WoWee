@@ -31,6 +31,21 @@ BenchmarkRoute orbit(std::string name, uint32_t mapId, uint32_t zoneId, glm::vec
     return route;
 }
 
+/// A flight from a character standing at `path`'s first point, `groundZ`,
+/// along `path` at `altitude`, looking ahead at the next point
+/// `lookDrop` lower, and back from the last point to the first: the terrain
+/// streams in ahead of it and out behind it the whole way.
+BenchmarkRoute crossing(std::string name, uint32_t mapId, uint32_t zoneId, float groundZ, float hour,
+                        const std::vector<glm::vec2>& path, float altitude, float lookDrop) {
+    const glm::vec2 start = path.front();
+    BenchmarkRoute route{std::move(name), mapId, zoneId, glm::vec3(start, groundZ), hour, {}};
+    for (size_t i = 0; i < path.size(); ++i) {
+        const glm::vec2 next = path[(i + 1) % path.size()];
+        route.loop.push_back({glm::vec3(path[i], altitude), glm::vec3(next, altitude - lookDrop)});
+    }
+    return route;
+}
+
 /// Uniform Catmull-Rom through p1 and p2.
 glm::vec3 catmullRom(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2, const glm::vec3& p3,
                      float t) {
@@ -58,6 +73,17 @@ const std::vector<BenchmarkRoute>& benchmarkRoutes() {
         orbit("stormwind", 0, 1519, {-8833.0f, 628.0f, 94.0f}, 16.5f, 90.0f, 30.0f, 4.0f),
         // Orgrimmar's Valley of Strength in the morning.
         orbit("orgrimmar", 1, 1637, {1676.0f, -4315.0f, 61.0f}, 9.0f, 70.0f, 30.0f, 4.0f),
+        // Out of Stormwind over Goldshire, Sentinel Hill and Moonbrook, down
+        // Stranglethorn's coast past Grom'gol to Booty Bay, and back north
+        // over Darkshire: about 14,500 yards, twice the load radius away
+        // from the start, so tiles stream in ahead and out behind the whole
+        // way. Farms, inns, towers, a port - the hitches of finishing and
+        // unloading tiles, which the city laps never see once settled.
+        crossing("bootybay", 0, 12, 94.0f, 13.0f,
+                 {{-8833.0f, 628.0f}, {-9460.0f, 62.0f}, {-10600.0f, 1040.0f}, {-11000.0f, 1500.0f},
+                  {-11800.0f, 1000.0f}, {-12400.0f, 200.0f}, {-14300.0f, 450.0f}, {-12600.0f, -400.0f},
+                  {-10560.0f, -1150.0f}, {-9500.0f, -300.0f}},
+                 260.0f, 160.0f),
     };
     return routes;
 }

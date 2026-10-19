@@ -4372,6 +4372,11 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                                      std::chrono::steady_clock::now() - start).count());
             };
             timed("presentWorldToRenderer", [&] { presentWorldToRenderer(deltaTime); });
+            // Before the renderer's update, which streams terrain, culls and
+            // lights around the camera: placed after it, the flight was drawn
+            // from the route while the world was kept around the character
+            // standing at the start, and nothing ever streamed in or out.
+            placeBenchmarkCamera();
             timed("rendererUpdate", [&] { renderer->update(deltaTime); });
             timed("followRendererUpdate", [&] { followRendererUpdate(deltaTime); });
             if (std::getenv("WOWEE_SHADOW_PROBE_SCENE")) {
@@ -4406,7 +4411,6 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                     if (!logged) { LOG_INFO("Orgrimmar shadow probe: caster on WMO floor z=", floorZ); logged = true; }
                 }
             }
-            placeBenchmarkCamera();
         } catch (const std::bad_alloc& e) {
             LOG_ERROR("OOM during Application::update stage 'renderer->update': ", e.what());
             throw;

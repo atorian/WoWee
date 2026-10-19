@@ -1754,6 +1754,17 @@ wowee_add_test(test_swap_remove_index SOURCES test_swap_remove_index.cpp)
 # instances can be updated in parallel and still behave the same.
 wowee_add_test(test_instance_random SOURCES test_instance_random.cpp)
 
+# ── test_uniform_slot_pool ───────────────────────────────────
+# Materials' uniform buffers as slots of a few large buffers: live slots never
+# overlap, freed ones are reused before a block is made, offsets are aligned.
+wowee_add_test(test_uniform_slot_pool
+    SOURCES test_uniform_slot_pool.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/uniform_slot_pool.cpp
+            ${TEST_COMMON_SOURCES})
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_uniform_slot_pool PRIVATE Vulkan::Vulkan)
+endif()
+
 # ── test_plural_escape ───────────────────────────────────────
 # WoW's |4singular:plural; escape, which nothing resolved - so the logout
 # prompt read "5 |4Second:Seconds; until logout" and seventy-four other
