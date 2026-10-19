@@ -186,6 +186,9 @@ struct M2ModelGPU {
     bool isBoat = false;            // Small boat; bobs if it turns out to be afloat
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch is drawn in the blended pass (blendMode >= 2 or blendedByOpacity)
+    /// Whether any batch is drawn as a glow sprite, so the view's cull asks
+    /// it of the batches only for the models that have one.
+    bool hasGlowSprites = false;
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
 
     // Particle emitter data (kept from M2Model)
@@ -405,8 +408,6 @@ struct M2Instance {
     // in-flight dispatch draws immediately instead of waiting ~2 frames for its
     // first cull result.
     uint8_t lastCullVisible = 1;
-    /// The point lights picked for this instance this frame (local_lights.hpp).
-    LocalLightSet frameLocalLights = kNoLocalLights;
     // Consecutive frames this instance has been culled (capped at 3), used for
     // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
     // visible") so a freshly spawned instance skips the HiZ test rather than
@@ -1310,9 +1311,37 @@ private:
     // became 18ms for a single createInstance once a zone held tens of
     // thousands of them.
 
+    /// An instance as this frame's passes draw it: what the recording needs
+    /// of it, copied out of the scene by the cull, so that the recording reads
+    /// no instance. A render thread working from a snapshot records from these
+    /// and never from the scene the game thread is changing.
+    struct DrawInstance {
+        glm::mat4 modelMatrix{1.0f};
+        /// Valid for the frame: models are unloaded only between frames.
+        const M2ModelGPU* model = nullptr;
+        InteriorLightGPU interiorLight;
+        /// The point lights nearest its origin (local_lights.hpp).
+        LocalLightSet localLights = kNoLocalLights;
+        glm::vec3 position{0.0f};
+        float scale = 1.0f;
+        float fade = 1.0f;
+        float highlight = 0.0f;
+        float animTime = 0.0f;
+        float globalSequenceTime = 0.0f;
+        int sequenceIndex = 0;
+        uint32_t megaBoneOffset = 0;
+        /// How many bones it has posed; none yet for an animated model is
+        /// an instance whose bones are still to come, and is not drawn.
+        uint32_t boneCount = 0;
+        bool afloat = false;
+    };
+    /// What the view's cull kept this frame, one per visible instance.
+    std::vector<DrawInstance> drawInstances_;
+
     // Persistent render buffers (avoid per-frame allocation/deallocation)
     struct VisibleEntry {
-        uint32_t index;
+        /// Into drawInstances_.
+        uint32_t draw;
         uint32_t modelId;
         float distSq;
         float effectiveMaxDistSq;
@@ -1326,6 +1355,24 @@ private:
     };
     std::vector<GlowSprite> glowSprites_;  // Reused each frame
 
+    /// The view's half of render(): folds the GPU's cull verdicts into the
+    /// instances, keeps what the camera sees, copies it into drawInstances_,
+    /// sorts the two lists and makes the glow sprites. Reads the scene and
+    /// writes only the verdicts into it.
+    void cullView(const Camera& camera);
+    /// The opaque pass, from the lists cullView made; reads no instance.
+    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    /// The glow sprites the opaque pass would draw of one instance at this
+    /// level of detail and distance fade.
+    void appendGlowSprites(const M2Instance& instance, const M2ModelGPU& model, uint16_t lod,
+                           float fadeAlpha, const glm::vec3& camPos,
+                           std::vector<GlowSprite>& out) const;
+    /// Why the opaque pass leaves a batch out at this level of detail, or
+    /// null when it draws it. `onlyBatchModel` is the WOWEE_M2_ONLY_BATCH
+    /// diagnostic naming this model.
+    [[nodiscard]] const char* opaqueBatchSkip(const M2ModelGPU& model, size_t batchIndex, uint16_t lod,
+                                              bool onlyBatchModel) const;
+
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
     /// The casters this frame, grouped by model: [0] solid, [1] foliage.
@@ -1338,7 +1385,35 @@ private:
     /// sorting them by model turns both into once per model.
     ///
     /// Kept as members so a frame's worth of casters costs no allocation.
-    std::vector<std::pair<uint32_t, uint32_t>> shadowCasters_[2];
+    struct ShadowCaster {
+        uint32_t modelId;
+        /// Into shadowDraws_.
+        uint32_t draw;
+        bool operator<(const ShadowCaster& other) const {
+            return modelId != other.modelId ? modelId < other.modelId : draw < other.draw;
+        }
+    };
+    /// A caster as the depth-only passes draw it, copied out of the scene by
+    /// the sun's cull, so neither the contact map's filter nor the recording
+    /// reads an instance.
+    struct ShadowDraw {
+        glm::mat4 modelMatrix{1.0f};
+        const M2ModelGPU* model = nullptr;
+        glm::vec3 position{0.0f};
+        float scale = 1.0f;
+    };
+    std::vector<ShadowCaster> shadowCasters_[2];
+    std::vector<ShadowDraw> shadowDraws_;
+    /// The casters of one map, culled into shadowCasters_ and shadowDraws_ -
+    /// from the scene for the sun's, from the sun's own for the contact map.
+    void cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shadowRadius, bool sunMap,
+                           bool reuseCull);
+    /// One of the two caster passes, from shadowCasters_; reads no instance.
+    /// Adds the casters it drew to `castersDrawn`.
+    void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
+                             bool foliagePass, uint32_t& castersDrawn);
+    /// The shadow pass's set binding this texture, made once a frame.
+    VkDescriptorSet shadowTexSet(VkTexture* tex);
     /// Set by the sun's pass once it has culled into shadowCasters_, and
     /// consumed by the contact pass that follows it in the same frame.
     bool solarCastersFresh_ = false;
@@ -1402,6 +1477,16 @@ private:
         uint32_t count = 0;
     };
     std::vector<ParticleRun> particleRuns_;
+    /// The particles in view, written into this frame's buffer as runs.
+    /// Reads the scene; returns how many particles went in.
+    size_t gatherM2Particles();
+    /// The runs gatherM2Particles wrote; reads no instance.
+    void recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    /// The ribbon trails, written into this frame's buffer with a draw each.
+    /// Reads the scene; returns how many vertices went in.
+    size_t gatherM2Ribbons();
+    /// The draws gatherM2Ribbons made; reads no instance.
+    void recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// Quads the particle buffer holds: a whole frame's, a particle that is
     /// both head and tail taking two. The client has no frame budget at all -
     /// each emitter draws at most m2EmitterDrawCap - so this is sized for the

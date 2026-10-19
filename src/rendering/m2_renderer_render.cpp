@@ -1026,6 +1026,190 @@ static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push b
 // Where in its draw distance a doodad starts to fade out.
 constexpr float kFadeStartFraction = 0.75f;
 
+// The level of detail a model is drawn at this far away. Down to the nearest
+// level the model actually has, not all the way back to full detail: a model
+// carrying 0 and 1 and asked for 3 was drawn at 0 - the most expensive level
+// there is - at the distance where it mattered least.
+uint16_t m2LodFor(const M2ModelGPU& model, float distSq) {
+    uint16_t lod = 0;
+    if (distSq > 150.0f * 150.0f) lod = 3;
+    else if (distSq > 80.0f * 80.0f) lod = 2;
+    else if (distSq > 40.0f * 40.0f) lod = 1;
+    while (lod > 0 && !(model.availableLODs & (1u << lod))) --lod;
+    return lod;
+}
+
+// How far through its fade-out an instance this far away is: 1 until the
+// fade starts, 0 at the end of its draw distance.
+float m2DistanceFade(const M2ModelGPU& model, float distSq, float effectiveMaxDistSq) {
+    const float fadeFrac = model.disableAnimation ? 0.55f : kFadeStartFraction;
+    const float fadeStartDistSq = effectiveMaxDistSq * fadeFrac * fadeFrac;
+    if (distSq <= fadeStartDistSq) return 1.0f;
+    return std::clamp((effectiveMaxDistSq - distSq) / (effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
+}
+
+// WOWEE_M2_BATCH_DIAG: the model whose batches the draw diagnostics speak of,
+// lower case; empty for none.
+const std::string& m2BatchDiagModel() {
+    static const std::string name = [] {
+        const char* v = std::getenv("WOWEE_M2_BATCH_DIAG");
+        std::string t = v ? v : "";
+        std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return t;
+    }();
+    return name;
+}
+
+// Whether the batch diagnostics name this model.
+bool m2BatchDiagNames(const M2ModelGPU& model) {
+    const std::string& wanted = m2BatchDiagModel();
+    if (wanted.empty()) return false;
+    std::string lowerName = model.name;
+    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowerName.find(wanted) != std::string::npos;
+}
+
+}  // namespace
+
+const char* M2Renderer::opaqueBatchSkip(const M2ModelGPU& model, size_t batchIndex, uint16_t lod,
+                                        bool onlyBatchModel) const {
+    // WOWEE_M2_ONLY_BATCH=<n> draws just that batch of the named model and
+    // hides the rest.
+    //
+    // Everything checkable has now been checked on these trees and every
+    // answer came back correct: the trunk mesh is continuous from root to tip,
+    // its submesh level matches, its texture loads, its mips preserve
+    // coverage, and the draw diagnostic says every batch reaches the frame. A
+    // section still looks missing. Seeing the trunk by itself is the
+    // difference between the trunk being wrong and the canopy eating it, and
+    // no amount of reading the files can tell those apart.
+    static const int kOnlyBatch = [] {
+        const char* v = std::getenv("WOWEE_M2_ONLY_BATCH");
+        return (v && *v) ? std::atoi(v) : -1;
+    }();
+    const auto& batch = model.batches[batchIndex];
+    if (kOnlyBatch >= 0 && onlyBatchModel && batchIndex != static_cast<size_t>(kOnlyBatch)) {
+        return "WOWEE_M2_ONLY_BATCH";
+    }
+    if (batch.indexCount == 0) return "no indices";
+    if (!batch.shaderDrawn) return "shader 0x8000";
+    if (!model.isGroundDetail && batch.submeshLevel != lod) return "submeshLevel is not this LOD";
+    if (batch.batchOpacity <= kM2BatchHiddenOpacity) return "opacity is zero";
+    if (!skyBatchAllowed(skyMode_, batchIndex)) return "sky batch rule";
+    if (suppressBakedStars_ && batch.starLayer) return "baked star layer";
+    return nullptr;
+}
+
+void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& model, uint16_t lod,
+                                   float fadeAlpha, const glm::vec3& camPos,
+                                   std::vector<GlowSprite>& out) const {
+    // The groups the opaque pass leaves out altogether.
+    if (skipGroundDetail_ && model.isGroundDetail) return;
+    if (!model.vertexBuffer || !model.indexBuffer) return;
+    const bool onlyBatchModel = m2BatchDiagNames(model);
+    for (size_t bi = 0; bi < model.batches.size(); bi++) {
+        const auto& batch = model.batches[bi];
+        if (opaqueBatchSkip(model, bi, lod, onlyBatchModel)) continue;
+        if (!m2WantsGlowSprite(glowCardOf(model, batch))) continue;
+
+        glm::vec3 worldPos;
+        if (model.isGroundFire && !model.particleEmitters.empty()) {
+            worldPos = glm::vec3(std::numeric_limits<float>::max());
+            for (const auto& emitter : model.particleEmitters) {
+                glm::mat4 boneXform(1.0f);
+                if (emitter.bone < inst.boneMatrices.size()) {
+                    boneXform = inst.boneMatrices[emitter.bone];
+                }
+                const glm::vec3 emitterWorld = glm::vec3(
+                    inst.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
+                if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
+            }
+        } else {
+            worldPos = animatedBatchWorldCenter(inst, batch);
+        }
+        // Preserved emissive glass writes opaque depth before this additive
+        // point sprite. Move only the visual halo just beyond the
+        // camera-facing glass surface so depth testing does not reject it;
+        // the associated local light remains at the true batch center.
+        if (batch.preserveGlowMesh) {
+            const glm::vec3 towardCamera = camPos - worldPos;
+            const float lenSq = glm::dot(towardCamera, towardCamera);
+            if (lenSq > 0.0001f) {
+                worldPos += towardCamera * glm::inversesqrt(lenSq) *
+                    (batch.glowSize * inst.scale * 1.25f);
+            }
+        }
+        GlowSprite gs;
+        gs.worldPos = worldPos;
+        if (batch.glowTint == 1 || model.isElvenLike)
+            gs.color = glm::vec4(0.48f, 0.72f, 1.0f, 1.05f);
+        else if (batch.glowTint == 2)
+            gs.color = glm::vec4(1.0f, 0.28f, 0.22f, 1.10f);
+        else
+            gs.color = glm::vec4(1.0f, 0.82f, 0.46f, 1.15f);
+        // Match the parent M2's distance fade instead of a separate hard
+        // 180-unit cutoff, which made tunnel lights pop on.
+        gs.color.a *= fadeAlpha;
+        gs.size = batch.glowSize * inst.scale * (batch.preserveGlowMesh ? 2.0f : 1.45f);
+        if (batch.preserveGlowMesh) gs.color.a *= 1.25f;
+
+        // A fixture with real particle flames should read as flames with a
+        // halo behind them. The sprite is sized from its glow card's
+        // geometric radius, which on a chandelier spans the whole fixture - an
+        // additive blob about a unit across, against candle flames of 0.15, so
+        // the glow swallowed them entirely. Cap it just above what a small
+        // glow card already produces (the 0.5 floor times 1.45), so candles,
+        // lanterns and torches are untouched and only oversized cards are
+        // clamped.
+        if (!model.particleEmitters.empty() && model.isLanternLike) {
+            constexpr float kMaxHaloRadius = 0.75f;
+            gs.size = std::min(gs.size, kMaxHaloRadius * inst.scale);
+        }
+
+        // Fire burning inside a hearth. The sprite is a point billboard
+        // carrying one depth value for the whole quad, so as soon as its
+        // centre shows through the fireplace opening the entire square draws -
+        // brick surround included, which reads as the fire glowing through the
+        // masonry. Sized from the glow card's geometric radius these spheres
+        // are wider than the opening, so keep them inside it.
+        const bool hearthFire = model.isBrazierOrFire || model.isGroundFire || model.isForge;
+        if (hearthFire) {
+            constexpr float kMaxFireGlowRadius = 0.5f;
+            gs.size = std::min(gs.size, kMaxFireGlowRadius * inst.scale);
+        }
+
+        // Flame guttering. The phase comes from the lamp's own world position,
+        // so two lanterns on the same street never pulse together - a
+        // synchronised row of lamps reads as a rendering artifact, not
+        // firelight. Two detuned sines keep any single lamp from looping
+        // visibly. Alpha and size move together, since a brighter flame also
+        // looks slightly larger. Same clock and parameters as the local light
+        // in gatherLocalLights, so the sprite and the pool of light it casts
+        // rise and fall together.
+        {
+            const float flicker = lampFlicker(inst.position, lampFlickerClockSeconds(), 0.82f, 0.12f, 0.06f);
+            gs.color.a *= flicker;
+            gs.size *= 0.98f + 0.02f * flicker;
+        }
+        out.push_back(gs);
+        GlowSprite halo = gs;
+        halo.color.a *= batch.preserveGlowMesh ? 0.34f : 0.42f;
+        halo.size *= batch.preserveGlowMesh ? 2.2f : 1.8f;
+        // The halo is nearly twice the sprite, so capping only the sprite
+        // would leave the bleed to the halo.
+        if (hearthFire) {
+            constexpr float kMaxFireHaloRadius = 0.85f;
+            halo.size = std::min(halo.size, kMaxFireHaloRadius * inst.scale);
+        }
+        out.push_back(halo);
+    }
+}
+
+namespace {
+
 // Fill the sway half of the push constants for one model.
 //
 // Two modes, and the split is about who owns the idle motion. Ground clutter
@@ -1058,6 +1242,28 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         return;
     }
 
+    // Where this pass's three milliseconds go.
+    //
+    // Recording the M2 secondary is the largest single piece of CPU work in
+    // the frame - renderWorld waits on the slowest worker and this is always
+    // it - and the stage around it cannot see whether that is the cull or the
+    // recording itself.
+    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    const auto t0 = std::chrono::steady_clock::now();
+    cullView(camera);
+    const auto t1 = std::chrono::steady_clock::now();
+    recordView(cmd, perFrameSet);
+    if (!m2Profile) return;
+    static auto lastSaid = std::chrono::steady_clock::now();
+    const auto t2 = std::chrono::steady_clock::now();
+    if (t2 - lastSaid <= std::chrono::seconds(10)) return;
+    lastSaid = t2;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    LOG_WARNING("  m2 record: cull ", ms(t0, t1), "ms, draws ", ms(t1, t2), "ms over ",
+                sortedVisible_.size(), " visible of ", scene_->instances.size(), " instances");
+}
+
+void M2Renderer::cullView(const Camera& camera) {
     // Debug: log once when we start rendering
     static bool loggedOnce = false;
     if (!loggedOnce) {
@@ -1089,8 +1295,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
     // Reuse persistent buffers (clear instead of reallocating)
     glowSprites_.clear();
-
-    lastDrawCallCount = 0;
+    drawInstances_.clear();
 
     // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
@@ -1163,23 +1368,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
     }
 
-    const float fadeStartFraction = kFadeStartFraction;
     const glm::vec3 camPos = camera.getPosition();
-
-    // Where this pass's three milliseconds go.
-    //
-    // Recording the M2 secondary is the largest single piece of CPU work in
-    // the frame - renderWorld waits on the slowest worker and this is always
-    // it - and the stage around it cannot see whether that is the cull, the
-    // sort or the recording itself.
-    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
-    const auto m2T0 = std::chrono::steady_clock::now();
 
     // Build sorted visible instance list
     sortedVisible_.clear();
     transparentVisible_.clear();
-    skyDiagDrawsOpaque_ = 0;
-    skyDiagDrawsTransparent_ = 0;
     const size_t expectedVisible = std::min(scene_->instances.size() / 3, size_t(600));
     if (sortedVisible_.capacity() < expectedVisible) {
         sortedVisible_.reserve(expectedVisible);
@@ -1214,7 +1407,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     struct VisibleChunk {
         std::vector<VisibleEntry> opaque;
         std::vector<VisibleEntry> transparent;
+        /// Indexed by the entries' draw, from zero in each chunk.
+        std::vector<DrawInstance> draws;
+        std::vector<GlowSprite> glows;
     };
+    const bool haveLights = frameLights_ && !frameLights_->empty();
 
     // Visibility classification is independent per instance and was the
     // remaining monolithic M2 CPU pass. Split dense scenes across a few pool
@@ -1280,14 +1477,46 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 if (distSq > effectiveMaxDistSq) continue;
             }
 
-            VisibleEntry visible{.index = i, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
             // A faded instance is drawn blended, all of it - see M2Instance::fade.
             const bool faded = instance.fade < 0.999f;
-            if (!faded) out.opaque.push_back(visible);
-            if (faded || (instance.cachedModel &&
-                instance.cachedModel->hasTransparentBatches)) {
-                out.transparent.push_back(visible);
+            const bool transparent = faded || (instance.cachedModel &&
+                                               instance.cachedModel->hasTransparentBatches);
+            // What the passes will draw of it, so they need not come back here.
+            const uint32_t draw = static_cast<uint32_t>(out.draws.size());
+            out.draws.push_back(DrawInstance{
+                .modelMatrix = instance.modelMatrix,
+                .model = instance.cachedModel,
+                .interiorLight = instance.interiorLight,
+                .localLights = haveLights
+                    ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
+                    : kNoLocalLights,
+                .position = instance.position,
+                .scale = instance.scale,
+                .fade = instance.fade,
+                .highlight = instance.highlight,
+                .animTime = instance.animTime,
+                .globalSequenceTime = instance.globalSequenceTime,
+                .sequenceIndex = instance.currentSequenceIndex,
+                .megaBoneOffset = instance.megaBoneOffset,
+                .boneCount = static_cast<uint32_t>(instance.boneMatrices.size()),
+                .afloat = instance.afloat > 0,
+            });
+            VisibleEntry visible{.draw = draw, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
+            if (!faded) {
+                out.opaque.push_back(visible);
+                if (instance.cachedModel && instance.cachedModel->hasGlowSprites) {
+                    const M2ModelGPU& model = *instance.cachedModel;
+                    const bool needsAnimation = model.hasAnimation && !model.disableAnimation;
+                    const bool posed = !needsAnimation ||
+                        (!instance.boneMatrices.empty() && instance.megaBoneOffset != 0);
+                    if (posed) {
+                        appendGlowSprites(instance, model, m2LodFor(model, distSq),
+                                          m2DistanceFade(model, distSq, effectiveMaxDistSq), camPos,
+                                          out.glows);
+                    }
+                }
             }
+            if (transparent) out.transparent.push_back(visible);
         }
     };
 
@@ -1310,12 +1539,16 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     for (auto& future : visibilityFutures) future.get();
 
     for (auto& chunk : chunks) {
-        sortedVisible_.insert(sortedVisible_.end(),
-                              std::make_move_iterator(chunk.opaque.begin()),
-                              std::make_move_iterator(chunk.opaque.end()));
-        transparentVisible_.insert(transparentVisible_.end(),
-                                   std::make_move_iterator(chunk.transparent.begin()),
-                                   std::make_move_iterator(chunk.transparent.end()));
+        // Each chunk numbered its draws from zero; they follow the ones
+        // before it here.
+        const uint32_t base = static_cast<uint32_t>(drawInstances_.size());
+        drawInstances_.insert(drawInstances_.end(), chunk.draws.begin(), chunk.draws.end());
+        for (VisibleEntry& e : chunk.opaque) e.draw += base;
+        for (VisibleEntry& e : chunk.transparent) e.draw += base;
+        sortedVisible_.insert(sortedVisible_.end(), chunk.opaque.begin(), chunk.opaque.end());
+        transparentVisible_.insert(transparentVisible_.end(), chunk.transparent.begin(),
+                                   chunk.transparent.end());
+        glowSprites_.insert(glowSprites_.end(), chunk.glows.begin(), chunk.glows.end());
     }
 
     // WOWEE_M2_CULL_CHECK=1: classify the whole world as well, the way this
@@ -1392,21 +1625,18 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // What it did cost was a hash map over every visible instance, two index
     // vectors and a copy of the whole list, every frame, in the pass that
     // turned out to be the largest single piece of CPU work in the frame.
-    const auto m2T1 = std::chrono::steady_clock::now();
     std::sort(sortedVisible_.begin(), sortedVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.modelId < b.modelId; });
-    const auto m2T2 = std::chrono::steady_clock::now();
-    // Reported at the end of the pass; see m2Profile above.
-    struct M2Phases { double cull, sort, record; std::size_t visible, instances; };
-    const auto sayPhases = [&](const M2Phases& p) {
-        static auto lastSaid = std::chrono::steady_clock::now();
-        const auto now = std::chrono::steady_clock::now();
-        if (now - lastSaid <= std::chrono::seconds(10)) return;
-        lastSaid = now;
-        LOG_WARNING("  m2 record: cull ", p.cull, "ms, sort ", p.sort,
-                    "ms, draws ", p.record, "ms over ", p.visible,
-                    " visible of ", p.instances, " instances");
-    };
+    // Pass 2 is drawn back to front, one instance at a time.
+    std::sort(transparentVisible_.begin(), transparentVisible_.end(),
+              [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
+}
+
+void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    lastDrawCallCount = 0;
+    skyDiagDrawsOpaque_ = 0;
+    skyDiagDrawsTransparent_ = 0;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
 
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
@@ -1456,7 +1686,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // written to the instance SSBO; the shader reads it via gl_InstanceIndex.
     {
         struct PendingInstance {
-            uint32_t instanceIdx;
+            /// Into drawInstances_.
+            uint32_t draw;
             float fadeAlpha;
             bool useBones;
             uint16_t targetLOD;
@@ -1472,14 +1703,14 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             while (groupEnd < sortedVisible_.size() && sortedVisible_[groupEnd].modelId == groupModelId)
                 groupEnd++;
 
-            // Pull the model through the first entry's instance.cachedModel pointer
-            // (set at addInstance) instead of doing models.find(groupModelId) per group.
-            const auto& firstEntry = sortedVisible_[visStart];
-            if (firstEntry.index >= scene_->instances.size() || !scene_->instances[firstEntry.index].cachedModel) {
+            // The model the cull took from the first entry's instance, rather
+            // than a models.find(groupModelId) per group.
+            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model;
+            if (!groupModel) {
                 visStart = groupEnd;
                 continue;
             }
-            const M2ModelGPU& model = *scene_->instances[firstEntry.index].cachedModel;
+            const M2ModelGPU& model = *groupModel;
             if (skipGroundDetail_ && model.isGroundDetail) {
                 visStart = groupEnd;
                 continue;
@@ -1495,42 +1726,22 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             pending.clear();
             for (size_t vi = visStart; vi < groupEnd; vi++) {
                 const auto& entry = sortedVisible_[vi];
-                if (entry.index >= scene_->instances.size()) continue;
-                auto& instance = scene_->instances[entry.index];
+                const DrawInstance& instance = drawInstances_[entry.draw];
 
-                // Distance-based fade alpha
-                float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
-                float fadeStartDistSq = entry.effectiveMaxDistSq * fadeFrac * fadeFrac;
-                float fadeAlpha = 1.0f;
-                if (entry.distSq > fadeStartDistSq) {
-                    fadeAlpha = std::clamp((entry.effectiveMaxDistSq - entry.distSq) /
-                                          (entry.effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
-                }
-                // Ground detail used to be held at 0.82 here. This is the
-                // opaque pass: nothing blended it, so it was a number with no
-                // effect - and now that the cutout pipeline turns alpha into
-                // coverage, keeping it would punch a fifth of the pixels out
-                // of every tuft of grass in reach.
-                float instanceFadeAlpha = fadeAlpha;
+                // Distance-based fade alpha. Ground detail used to be held at
+                // 0.82 here. This is the opaque pass: nothing blended it, so it
+                // was a number with no effect - and now that the cutout
+                // pipeline turns alpha into coverage, keeping it would punch a
+                // fifth of the pixels out of every tuft of grass in reach.
+                const float fadeAlpha = m2DistanceFade(model, entry.distSq, entry.effectiveMaxDistSq);
 
                 // Bone readiness check
-                if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;
-                bool needsBones = modelNeedsAnimation && !instance.boneMatrices.empty();
+                if (modelNeedsAnimation && instance.boneCount == 0) continue;
+                bool needsBones = modelNeedsAnimation && instance.boneCount > 0;
                 if (needsBones && instance.megaBoneOffset == 0) continue;
 
-                // LOD selection
-                uint16_t desiredLOD = 0;
-                if (entry.distSq > 150.0f * 150.0f) desiredLOD = 3;
-                else if (entry.distSq > 80.0f * 80.0f) desiredLOD = 2;
-                else if (entry.distSq > 40.0f * 40.0f) desiredLOD = 1;
-                // Down to the nearest level the model actually has, not all
-                // the way back to full detail. A model carrying 0 and 1 and
-                // asked for 3 was drawn at 0 - the most expensive level there
-                // is - at the distance where it mattered least.
-                uint16_t targetLOD = desiredLOD;
-                while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
-
-                pending.push_back({.instanceIdx = entry.index, .fadeAlpha = instanceFadeAlpha, .useBones = needsBones, .targetLOD = targetLOD});
+                pending.push_back({.draw = entry.draw, .fadeAlpha = fadeAlpha, .useBones = needsBones,
+                                   .targetLOD = m2LodFor(model, entry.distSq)});
             }
 
             if (pending.empty()) { visStart = groupEnd; continue; }
@@ -1549,22 +1760,18 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             size_t writtenInstances = 0;
             for (const auto& p : pending) {
                 if (instanceDataCount_ >= MAX_INSTANCE_DATA) break;
-                auto& inst = scene_->instances[p.instanceIdx];
+                const DrawInstance& inst = drawInstances_[p.draw];
                 auto& e = instSSBO[instanceDataCount_];
                 e.model = inst.modelMatrix;
                 e.uv = M2UVTransform{};
                 e.uv2 = M2UVTransform{};
-                // The lights nearest the model's origin (local_lights.hpp).
-                inst.frameLocalLights = frameLights_ && !frameLights_->empty()
-                    ? pickLocalLights(*frameLights_, glm::vec3(inst.modelMatrix[3]), 0.0f)
-                    : kNoLocalLights;
-                e.localLights = inst.frameLocalLights;
+                e.localLights = inst.localLights;
                 e.fadeAlpha = p.fadeAlpha;
                 e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
-                e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
+                e.boneCount = static_cast<int32_t>(inst.boneCount);
                 e.highlight = inst.highlight;
-                e.flags = inst.afloat > 0 ? 1 : 0;
+                e.flags = inst.afloat ? 1 : 0;
                 e.interiorLight = inst.interiorLight;
                 instanceDataCount_++;
                 ++writtenInstances;
@@ -1610,50 +1817,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 // readings of the model data in a row said every batch was
                 // present and correct, which it is, so the answer has to come
                 // from the frame rather than from the file.
-                static const std::string kDrawDiag = [] {
-                    const char* v = std::getenv("WOWEE_M2_BATCH_DIAG");
-                    std::string t = v ? v : "";
-                    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) {
-                        return static_cast<char>(std::tolower(c));
-                    });
-                    return t;
-                }();
-                bool diagThisModel = false;
-                if (!kDrawDiag.empty()) {
-                    std::string lowerName = model.name;
-                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    diagThisModel = lowerName.find(kDrawDiag) != std::string::npos;
-                }
-                // WOWEE_M2_ONLY_BATCH=<n> draws just that batch of the named
-                // model and hides the rest.
-                //
-                // Everything checkable has now been checked on these trees and
-                // every answer came back correct: the trunk mesh is continuous
-                // from root to tip, its submesh level matches, its texture
-                // loads, its mips preserve coverage, and the draw diagnostic
-                // says every batch reaches the frame. A section still looks
-                // missing. Seeing the trunk by itself is the difference
-                // between the trunk being wrong and the canopy eating it, and
-                // no amount of reading the files can tell those apart.
-                static const int kOnlyBatch = [] {
-                    const char* v = std::getenv("WOWEE_M2_ONLY_BATCH");
-                    return (v && *v) ? std::atoi(v) : -1;
-                }();
+                const bool diagThisModel = m2BatchDiagNames(model);
                 for (size_t bi = 0; bi < model.batches.size(); bi++) {
                     const auto& batch = model.batches[bi];
-                    const char* skipped = nullptr;
-                    if (kOnlyBatch >= 0 && diagThisModel &&
-                        bi != static_cast<size_t>(kOnlyBatch)) {
-                        skipped = "WOWEE_M2_ONLY_BATCH";
-                    }
-                    else if (batch.indexCount == 0) skipped = "no indices";
-                    else if (!batch.shaderDrawn) skipped = "shader 0x8000";
-                    else if (!model.isGroundDetail && batch.submeshLevel != lod)
-                        skipped = "submeshLevel is not this LOD";
-                    else if (batch.batchOpacity <= kM2BatchHiddenOpacity) skipped = "opacity is zero";
-                    else if (!skyBatchAllowed(skyMode_, bi)) skipped = "sky batch rule";
-                    else if (suppressBakedStars_ && batch.starLayer) skipped = "baked star layer";
+                    const char* skipped = opaqueBatchSkip(model, bi, lod, diagThisModel);
                     if (diagThisModel) {
                         static std::set<std::pair<const void*, size_t>> saidDraw;
                         if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
@@ -1666,133 +1833,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         }
                     }
                     if (skipped) continue;
-                    const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
-                    M2GlowCardBatch glowCard;
-                    glowCard.glowSize = batch.glowSize;
-                    glowCard.blendMode = batch.blendMode;
-                    glowCard.lanternGlowHint = batch.lanternGlowHint;
-                    glowCard.glowCardLike = batch.glowCardLike;
-                    glowCard.unlit = batchUnlit;
-                    glowCard.preserveGlowMesh = batch.preserveGlowMesh;
-                    glowCard.modelIsElvenLike = model.isElvenLike;
-                    glowCard.modelIsLanternLike = model.isLanternLike;
-                    glowCard.modelIsTorch = model.isTorch;
-                    glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
-                    glowCard.modelIsSpellEffect = model.isSpellEffect;
-                    const bool shouldUseGlowSprite = m2WantsGlowSprite(glowCard);
-                    if (shouldUseGlowSprite) {
-                        // Generate glow sprites for each instance in the group
-                        for (size_t j = lodIdx; j < lodEnd; j++) {
-                            auto& inst = scene_->instances[pending[j].instanceIdx];
-                            glm::vec3 worldPos;
-                            if (model.isGroundFire &&
-                                !model.particleEmitters.empty()) {
-                                worldPos = glm::vec3(std::numeric_limits<float>::max());
-                                for (const auto& emitter : model.particleEmitters) {
-                                    glm::mat4 boneXform(1.0f);
-                                    if (emitter.bone < inst.boneMatrices.size()) {
-                                        boneXform = inst.boneMatrices[emitter.bone];
-                                    }
-                                    const glm::vec3 emitterWorld = glm::vec3(
-                                        inst.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
-                                    if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
-                                }
-                            } else {
-                                worldPos = animatedBatchWorldCenter(inst, batch);
-                            }
-                            // Preserved emissive glass writes opaque depth before
-                            // this additive point sprite. Move only the visual
-                            // halo just beyond the camera-facing glass surface so
-                            // depth testing does not reject it; the associated
-                            // local light remains at the true batch center.
-                            if (batch.preserveGlowMesh) {
-                                const glm::vec3 towardCamera = camPos - worldPos;
-                                const float lenSq = glm::dot(towardCamera, towardCamera);
-                                if (lenSq > 0.0001f) {
-                                    worldPos += towardCamera * glm::inversesqrt(lenSq) *
-                                        (batch.glowSize * inst.scale * 1.25f);
-                                }
-                            }
-                            GlowSprite gs;
-                            gs.worldPos = worldPos;
-                            if (batch.glowTint == 1 || model.isElvenLike)
-                                gs.color = glm::vec4(0.48f, 0.72f, 1.0f, 1.05f);
-                            else if (batch.glowTint == 2)
-                                gs.color = glm::vec4(1.0f, 0.28f, 0.22f, 1.10f);
-                            else
-                                gs.color = glm::vec4(1.0f, 0.82f, 0.46f, 1.15f);
-                            // Match the parent M2's distance fade instead of a separate
-                            // hard 180-unit cutoff, which made tunnel lights pop on.
-                            gs.color.a *= pending[j].fadeAlpha;
-                            gs.size = batch.glowSize * inst.scale *
-                                (batch.preserveGlowMesh ? 2.0f : 1.45f);
-                            if (batch.preserveGlowMesh) gs.color.a *= 1.25f;
-
-                            // A fixture with real particle flames should read as
-                            // flames with a halo behind them. The sprite is sized
-                            // from its glow card's geometric radius, which on a
-                            // chandelier spans the whole fixture - an additive
-                            // blob about a unit across, against candle flames of
-                            // 0.15, so the glow swallowed them entirely. Cap it
-                            // just above what a small glow card already produces
-                            // (the 0.5 floor times 1.45), so candles, lanterns
-                            // and torches are untouched and only oversized cards
-                            // are clamped.
-                            if (!model.particleEmitters.empty() && model.isLanternLike) {
-                                constexpr float kMaxHaloRadius = 0.75f;
-                                gs.size = std::min(gs.size, kMaxHaloRadius * inst.scale);
-                            }
-
-                            // Fire burning inside a hearth. The sprite is a point
-                            // billboard carrying one depth value for the whole
-                            // quad, so as soon as its centre shows through the
-                            // fireplace opening the entire square draws - brick
-                            // surround included, which reads as the fire glowing
-                            // through the masonry. Sized from the glow card's
-                            // geometric radius these spheres are wider than the
-                            // opening, so keep them inside it.
-                            const bool hearthFire = model.isBrazierOrFire ||
-                                                    model.isGroundFire ||
-                                                    model.isForge;
-                            if (hearthFire) {
-                                constexpr float kMaxFireGlowRadius = 0.5f;
-                                gs.size = std::min(gs.size, kMaxFireGlowRadius * inst.scale);
-                            }
-
-                            // Flame guttering. The phase comes from the lamp's own
-                            // world position, so two lanterns on the same street
-                            // never pulse together - a synchronised row of lamps
-                            // reads as a rendering artifact, not firelight. Two
-                            // detuned sines keep any single lamp from looping
-                            // visibly. Alpha and size move together, since a
-                            // brighter flame also looks slightly larger.
-                            {
-                                // Matches the phase used for this lamp's local
-                                // light, so the sprite and the pool of light it
-                                // casts breathe together.
-                                // Same clock and parameters as the local light in
-                                // gatherLocalLights, so the sprite and the pool of
-                                // light it casts rise and fall together.
-                                const float flicker = lampFlicker(
-                                    inst.position, lampFlickerClockSeconds(),
-                                    0.82f, 0.12f, 0.06f);
-                                gs.color.a *= flicker;
-                                gs.size    *= 0.98f + 0.02f * flicker;
-                            }
-                            glowSprites_.push_back(gs);
-                            GlowSprite halo = gs;
-                            halo.color.a *= batch.preserveGlowMesh ? 0.34f : 0.42f;
-                            halo.size *= batch.preserveGlowMesh ? 2.2f : 1.8f;
-                            // The halo is nearly twice the sprite, so capping only
-                            // the sprite would leave the bleed to the halo.
-                            if (hearthFire) {
-                                constexpr float kMaxFireHaloRadius = 0.85f;
-                                halo.size = std::min(halo.size, kMaxFireHaloRadius * inst.scale);
-                            }
-                            glowSprites_.push_back(halo);
-                        }
-                        if (m2GlowSpriteReplacesMesh(glowCard)) continue;
-                    }
+                    // A glow card's sprites were made by the cull
+                    // (appendGlowSprites); the card itself is left out where
+                    // the sprite stands in for it.
+                    const M2GlowCardBatch glowCard = glowCardOf(model, batch);
+                    if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) continue;
 
                     // Opaque gate - transparent glow cards were handled above so their
                     // sprites are generated before the mesh moves to pass 2, and
@@ -1825,15 +1870,15 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         }
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             const auto& p = pending[j];
-                            auto& inst = scene_->instances[p.instanceIdx];
+                            const DrawInstance& inst = drawInstances_[p.draw];
                             M2UVTransform uv, uv2;
                             if (tt) {
-                                uv = m2SampleUVTransform(*tt, inst.currentSequenceIndex,
+                                uv = m2SampleUVTransform(*tt, inst.sequenceIndex,
                                                          inst.animTime, inst.globalSequenceTime,
                                                          model.globalSequenceDurations);
                             }
                             if (tt2) {
-                                uv2 = m2SampleUVTransform(*tt2, inst.currentSequenceIndex,
+                                uv2 = m2SampleUVTransform(*tt2, inst.sequenceIndex,
                                                           inst.animTime, inst.globalSequenceTime,
                                                           model.globalSequenceDurations);
                             }
@@ -1845,7 +1890,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.model = inst.modelMatrix;
                             e.uv = uv;
                             e.uv2 = uv2;
-                            e.localLights = inst.frameLocalLights;
+                            e.localLights = inst.localLights;
                             e.fadeAlpha = p.fadeAlpha * batch.batchOpacity;
                             if (skyMode_) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
@@ -1856,9 +1901,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             }
                             e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                             e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
-                            e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
+                            e.boneCount = static_cast<int32_t>(inst.boneCount);
                             e.highlight = inst.highlight;
-                            e.flags = inst.afloat > 0 ? 1 : 0;
+                            e.flags = inst.afloat ? 1 : 0;
                             e.interiorLight = inst.interiorLight;
                             instanceDataCount_++;
                         }
@@ -1927,18 +1972,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         skyDiagLastOpaque_ = skyDiagDrawsOpaque_;
         skyDiagLastTransparent_ = skyDiagDrawsTransparent_;
     }
-
-    if (m2Profile) {
-        const auto m2T3 = std::chrono::steady_clock::now();
-        const auto ms = [](auto a, auto b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-        sayPhases({.cull = ms(m2T0, m2T1),
-                   .sort = ms(m2T1, m2T2),
-                   .record = ms(m2T2, m2T3),
-                   .visible = sortedVisible_.size(),
-                   .instances = scene_->instances.size()});
-    }
 }
 
 void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
@@ -1948,13 +1981,10 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     // =====================================================================
     // Transparent geometry must be drawn individually per instance in back-to-
     // front order for correct alpha compositing.  Each draw writes one
-    // M2InstanceGPU entry and issues a single-instance indexed draw.
-    std::sort(transparentVisible_.begin(), transparentVisible_.end(),
-              [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
-
+    // M2InstanceGPU entry and issues a single-instance indexed draw. The cull
+    // sorted them back to front.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
-    const float fadeStartFraction = kFadeStartFraction;
 
     // The sets the opaque pass bound, again: this may be a different command
     // buffer from the one it recorded into.
@@ -1979,16 +2009,14 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
 
     for (const auto& entry : transparentVisible_) {
-        if (entry.index >= scene_->instances.size()) continue;
-        auto& instance = scene_->instances[entry.index];
+        const DrawInstance& instance = drawInstances_[entry.draw];
 
-        // Model boundary: read cachedModel off the instance - was doing a
-        // per-boundary models.find() even though every instance already has
-        // the pointer cached at addInstance time.
+        // Model boundary: the model the cull took off the instance, rather
+        // than a models.find() per boundary.
         if (entry.modelId != currentModelId) {
             currentModelId = entry.modelId;
             currentModelValid = false;
-            currentModel = instance.cachedModel;
+            currentModel = instance.model;
             if (!currentModel) continue;
             if (!currentModel->hasTransparentBatches) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
@@ -2001,30 +2029,17 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 
         const M2ModelGPU& model = *currentModel;
 
-        // Fade alpha
-        float fadeAlpha = 1.0f;
-        float fadeFrac = model.disableAnimation ? 0.55f : fadeStartFraction;
-        float fadeStartDistSq = entry.effectiveMaxDistSq * fadeFrac * fadeFrac;
-        if (entry.distSq > fadeStartDistSq) {
-            fadeAlpha = std::clamp((entry.effectiveMaxDistSq - entry.distSq) /
-                                  (entry.effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
-        }
-        float instanceFadeAlpha = fadeAlpha * instance.fade;
+        float instanceFadeAlpha =
+            m2DistanceFade(model, entry.distSq, entry.effectiveMaxDistSq) * instance.fade;
         const bool instanceFaded = instance.fade < 0.999f;
         if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
 
         bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
-        if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;
-        bool needsBones = modelNeedsAnimation && !instance.boneMatrices.empty();
+        if (modelNeedsAnimation && instance.boneCount == 0) continue;
+        bool needsBones = modelNeedsAnimation && instance.boneCount > 0;
         if (needsBones && instance.megaBoneOffset == 0) continue;
 
-        uint16_t desiredLOD = 0;
-        if (entry.distSq > 150.0f * 150.0f) desiredLOD = 3;
-        else if (entry.distSq > 80.0f * 80.0f) desiredLOD = 2;
-        else if (entry.distSq > 40.0f * 40.0f) desiredLOD = 1;
-        // The nearest level the model has; see the note in the batched path.
-        uint16_t targetLOD = desiredLOD;
-        while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
+        const uint16_t targetLOD = m2LodFor(model, entry.distSq);
 
         for (const size_t batchIndex : model.materialDrawOrder) {
             const auto& batch = model.batches[batchIndex];
@@ -2050,7 +2065,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 layerOpacity *= m2SampleBatchOpacity(
                     model.colorAlphaTracks, batch.colorTrackIndex,
                     model.textureWeightTracks, batch.weightTrackIndex,
-                    instance.currentSequenceIndex, instance.animTime,
+                    instance.sequenceIndex, instance.animTime,
                     instance.globalSequenceTime, model.globalSequenceDurations);
             }
             if (layerOpacity <= kM2BatchHiddenOpacity) continue;
@@ -2070,20 +2085,8 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 if (skipBlend >= 0 && batch.blendMode == skipBlend) continue;
             }
 
-            // Skip glow sprites (handled in opaque pass)
-            const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
-            M2GlowCardBatch glowCard;
-            glowCard.glowSize = batch.glowSize;
-            glowCard.blendMode = batch.blendMode;
-            glowCard.lanternGlowHint = batch.lanternGlowHint;
-            glowCard.glowCardLike = batch.glowCardLike;
-            glowCard.unlit = batchUnlit;
-            glowCard.preserveGlowMesh = batch.preserveGlowMesh;
-            glowCard.modelIsElvenLike = model.isElvenLike;
-            glowCard.modelIsLanternLike = model.isLanternLike;
-            glowCard.modelIsTorch = model.isTorch;
-            glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
-            glowCard.modelIsSpellEffect = model.isSpellEffect;
+            // Skip glow sprites (made by the cull, drawn below)
+            const M2GlowCardBatch glowCard = glowCardOf(model, batch);
             if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
                 continue;
             }
@@ -2105,7 +2108,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 if (const auto* tt = m2TextureTransformAt(model.textureTransformLookup,
                                                           model.textureTransforms,
                                                           batch.textureAnimIndex)) {
-                    uv = m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                    uv = m2SampleUVTransform(*tt, instance.sequenceIndex,
                                              instance.animTime, instance.globalSequenceTime,
                                              model.globalSequenceDurations);
                 }
@@ -2116,7 +2119,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 if (const auto* tt = m2TextureTransformAt(model.textureTransformLookup,
                                                           model.textureTransforms,
                                                           static_cast<size_t>(batch.textureAnimIndex) + 1)) {
-                    uv2 = m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                    uv2 = m2SampleUVTransform(*tt, instance.sequenceIndex,
                                               instance.animTime, instance.globalSequenceTime,
                                               model.globalSequenceDurations);
                 }
@@ -2129,9 +2132,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.model = instance.modelMatrix;
             e.uv = uv;
             e.uv2 = uv2;
-            e.localLights = frameLights_ && !frameLights_->empty()
-                ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
-                : kNoLocalLights;
+            e.localLights = instance.localLights;
             e.fadeAlpha = instanceFadeAlpha * layerOpacity;
             if (skyMode_) {
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
@@ -2142,9 +2143,9 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             }
             e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
-            e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
+            e.boneCount = static_cast<int32_t>(instance.boneCount);
             e.highlight = instance.highlight;
-            e.flags = instance.afloat > 0 ? 1 : 0;
+            e.flags = instance.afloat ? 1 : 0;
             e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
 
@@ -2403,24 +2404,10 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
-                              const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
-                              bool reuseCull) {
-    if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (scene_->instances.empty() || models.empty()) return;
-
-    // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
-    const uint32_t frameIdx = vkCtx_->getCurrentFrame();
-    VkDescriptorPool curShadowTexPool = shadowTexPool_[frameIdx];
-    if (resetDescriptors && curShadowTexPool) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), curShadowTexPool, 0);
-    }
+VkDescriptorSet M2Renderer::shadowTexSet(VkTexture* tex) {
     // Cache: texture imageView -> allocated descriptor set (avoids duplicates within frame)
-    // Reuse persistent map - pool reset already invalidated the sets.
-    if (resetDescriptors) shadowTexSetCache_.clear();
     auto& texSetCache = shadowTexSetCache_;
-
-    auto getTexDescSet = [&](VkTexture* tex) -> VkDescriptorSet {
+    {
         VkImageView iv = tex->getImageView();
         auto cacheIt = texSetCache.find(iv);
         if (cacheIt != texSetCache.end()) return cacheIt->second;
@@ -2428,7 +2415,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         VkDescriptorSet set = VK_NULL_HANDLE;
         VkDescriptorSetAllocateInfo ai{};
         ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        ai.descriptorPool = curShadowTexPool;
+        ai.descriptorPool = shadowTexPool_[vkCtx_->getCurrentFrame()];
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &shadowParams_.layout;
         if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
@@ -2458,12 +2445,11 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
         texSetCache[iv] = set;
         return set;
-    };
+    }
+}
 
-    // How many casters each pass drew, so a shadow that comes and goes can say
-    // whether its caster was culled or its texture was missing.
-    uint32_t castersDrawn[2] = {0, 0};
-
+void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shadowRadius, bool sunMap,
+                                   bool reuseCull) {
     // Cull once, into the two passes, grouped by model.
     //
     // This walked every instance in the world twice - once per pass - doing a
@@ -2479,12 +2465,12 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // cast across the whole view while sitting far outside any player
     // sphere - sphere culling made such shadows pop on/off at the cull
     // boundary as the player moved (large-area flicker at low sun).
-    auto insideFootprint = [&](const M2Instance& instance, const M2ModelGPU& model) {
-        const glm::vec4 clip = lightSpaceMatrix * glm::vec4(instance.position, 1.0f);
+    auto insideFootprint = [&](const glm::vec3& position, float scale, const M2ModelGPU& model) {
+        const glm::vec4 clip = lightSpaceMatrix * glm::vec4(position, 1.0f);
         // Orthographic projection: w == 1, NDC directly comparable.
         // Inflate by the model's bounding sphere converted to NDC
         // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
-        const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
+        const float margin = (model.boundRadius * scale) / shadowRadius * 1.5f;
         if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
         return clip.z >= -margin && clip.z <= 1.0f + margin;
     };
@@ -2494,33 +2480,26 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // the sun's pass culled a moment ago. Walking every instance in the world
     // a second time for it cost as much as the sun's whole cull - the walk is
     // a cache miss per instance, and there are tens of thousands of them.
-    // Filtering in place keeps each bucket sorted by model.
-    // The cull and the recording timed apart, under the map's own stage.
-    const std::string_view stageGroup = resetDescriptors
-        ? std::string_view("beginFrame/graph/shadow_pass/sun: m2")
-        : std::string_view("beginFrame/graph/shadow_pass/units: m2");
-    std::optional<CpuStage> cullStage(std::in_place, vkCtx_->cpuStages(), stageGroup, "cull");
-    const bool fromSolarCasters = !resetDescriptors && solarCastersFresh_;
+    // Filtering in place keeps each bucket sorted by model, and the casters
+    // carry what the filter needs, so it reads no instance.
+    const bool fromSolarCasters = !sunMap && solarCastersFresh_;
     solarCastersFresh_ = false;
     if (fromSolarCasters) {
         for (auto& bucket : shadowCasters_) {
-            std::erase_if(bucket, [&](const std::pair<uint32_t, uint32_t>& caster) {
-                // Only ever this frame's list, but an index that no longer
-                // names the instance it was culled as is dropped, not drawn.
-                if (caster.second >= scene_->instances.size()) return true;
-                const auto& instance = scene_->instances[caster.second];
-                if (instance.modelId != caster.first || !instance.cachedModel) return true;
-                return !insideFootprint(instance, *instance.cachedModel);
+            std::erase_if(bucket, [&](const ShadowCaster& caster) {
+                const ShadowDraw& draw = shadowDraws_[caster.draw];
+                return !insideFootprint(draw.position, draw.scale, *draw.model);
             });
         }
     } else {
         shadowCasters_[0].clear();
         shadowCasters_[1].clear();
+        shadowDraws_.clear();
         auto castsHere = [&](const M2Instance& instance) {
             if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap ||
                 instance.finishing || instance.hidden) return false;
             if (!instance.cachedModel) return false;
-            return insideFootprint(instance, *instance.cachedModel);
+            return insideFootprint(instance.position, instance.scale, *instance.cachedModel);
         };
         // The columns the light's box reaches, chosen by the light alone: a
         // caster outside the camera's view still throws its shadow into it.
@@ -2535,15 +2514,18 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         for (const uint32_t i : shadowCandidates_) {
             const auto& instance = scene_->instances[i];
             if (!castsHere(instance)) continue;
-            shadowCasters_[instance.cachedModel->shadowWindFoliage ? 1 : 0].emplace_back(
-                instance.modelId, i);
+            const uint32_t draw = static_cast<uint32_t>(shadowDraws_.size());
+            shadowDraws_.push_back({.modelMatrix = instance.modelMatrix, .model = instance.cachedModel,
+                                    .position = instance.position, .scale = instance.scale});
+            shadowCasters_[instance.cachedModel->shadowWindFoliage ? 1 : 0].push_back(
+                {.modelId = instance.modelId, .draw = draw});
         }
 
         // WOWEE_M2_CULL_CHECK=1: count the casters across the whole world too.
         // These must agree exactly: the columns are rejected only when no
         // position in them could pass the same test.
         static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
-        if (cullCheck && resetDescriptors) {
+        if (cullCheck && sunMap) {
             size_t whole = 0;
             for (const auto& instance : scene_->instances) whole += castsHere(instance) ? 1 : 0;
             const size_t kept = shadowCasters_[0].size() + shadowCasters_[1].size();
@@ -2561,18 +2543,19 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         for (auto& bucket : shadowCasters_) {
             if (!std::is_sorted(bucket.begin(), bucket.end())) std::sort(bucket.begin(), bucket.end());
         }
-        solarCastersFresh_ = resetDescriptors;
+        solarCastersFresh_ = sunMap;
     }
+}
 
+void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
+                                     const WindGpu& wind, bool foliagePass, uint32_t& castersDrawn) {
     // The casters' data goes into this frame's buffer, the sun's map first and
     // the units' after it, and each model's casters sit side by side so a
     // batch of the model is one draw of all of them.
-    if (resetDescriptors) shadowInstanceCount_ = 0;
+    const uint32_t frameIdx = vkCtx_->getCurrentFrame();
     auto* casterData = static_cast<M2ShadowInstance*>(shadowInstanceMapped_[frameIdx]);
     const VkDescriptorSet casterSet = shadowInstanceSet_[frameIdx];
-    if (!casterData || !casterSet) return;
-
-    auto drawPass = [&](bool foliagePass) {
+    {
         // What each draw is - the texture, the alpha test, the bend - is
         // carried with it in push constants rather than written into a buffer
         // both passes share. A uniform buffer is read when a draw executes,
@@ -2587,13 +2570,13 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
 
         const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
         for (std::size_t g = 0; g < casters.size();) {
-            const uint32_t modelId = casters[g].first;
+            const uint32_t modelId = casters[g].modelId;
             std::size_t groupEnd = g;
-            while (groupEnd < casters.size() && casters[groupEnd].first == modelId) ++groupEnd;
+            while (groupEnd < casters.size() && casters[groupEnd].modelId == modelId) ++groupEnd;
 
-            const auto& firstInstance = scene_->instances[casters[g].second];
-            if (!firstInstance.cachedModel) { g = groupEnd; continue; }
-            const M2ModelGPU& model = *firstInstance.cachedModel;
+            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model;
+            if (!groupModel) { g = groupEnd; continue; }
+            const M2ModelGPU& model = *groupModel;
 
             // Once per model, not once per instance: the bend comes from the
             // model's own bounds and its kind, and so do the buffers.
@@ -2620,7 +2603,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             const uint32_t firstCaster = shadowInstanceCount_;
             shadowInstanceCount_ += count;
             for (std::size_t k = g; k < groupEnd; ++k) {
-                const auto& instance = scene_->instances[casters[k].second];
+                const ShadowDraw& instance = shadowDraws_[casters[k].draw];
                 M2ShadowInstance& out = casterData[firstCaster + (k - g)];
                 out.model = instance.modelMatrix;
                 if (windBent) {
@@ -2671,7 +2654,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 // instance: the texture is the batch's, and every instance of
                 // this model shares it.
                 if (alphaCutout && batch.texture) {
-                    VkDescriptorSet texSet = getTexDescSet(batch.texture);
+                    VkDescriptorSet texSet = shadowTexSet(batch.texture);
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
                 } else {
@@ -2689,18 +2672,46 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                                    0, sizeof(M2ShadowPush), &push);
                 vkCmdDrawIndexed(cmd, batch.indexCount, count, batch.indexStart, 0, firstCaster);
             }
-            castersDrawn[foliagePass ? 1 : 0] += count;
+            castersDrawn += count;
             g = groupEnd;
         }
-    };
+    }
+}
 
-    cullStage.reset();
+void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, const WindGpu& wind,
+                              const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
+                              bool reuseCull) {
+    if (!shadowPipeline_ || !shadowParams_.set) return;
+    if (scene_->instances.empty() || models.empty()) return;
+
+    // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
+    const uint32_t frameIdx = vkCtx_->getCurrentFrame();
+    if (resetDescriptors && shadowTexPool_[frameIdx]) {
+        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIdx], 0);
+    }
+    // Reuse persistent map - pool reset already invalidated the sets.
+    if (resetDescriptors) shadowTexSetCache_.clear();
+
+    // How many casters each pass drew, so a shadow that comes and goes can say
+    // whether its caster was culled or its texture was missing.
+    uint32_t castersDrawn[2] = {0, 0};
+
+    // The cull and the recording timed apart, under the map's own stage.
+    const std::string_view stageGroup = resetDescriptors
+        ? std::string_view("beginFrame/graph/shadow_pass/sun: m2")
+        : std::string_view("beginFrame/graph/shadow_pass/units: m2");
+    {
+        CpuStage cullStage(vkCtx_->cpuStages(), stageGroup, "cull");
+        cullShadowCasters(lightSpaceMatrix, shadowRadius, resetDescriptors, reuseCull);
+    }
+    if (resetDescriptors) shadowInstanceCount_ = 0;
+    if (!shadowInstanceMapped_[frameIdx] || !shadowInstanceSet_[frameIdx]) return;
     {
         CpuStage recordStage(vkCtx_->cpuStages(), stageGroup, "record");
         // Pass 1: non-foliage (no wind displacement)
-        drawPass(false);
+        recordShadowCasters(cmd, lightSpaceMatrix, wind, false, castersDrawn[0]);
         // Pass 2: foliage (wind displacement enabled, per-batch alpha-tested textures)
-        drawPass(true);
+        recordShadowCasters(cmd, lightSpaceMatrix, wind, true, castersDrawn[1]);
     }
 
     // Contact coverage differs from the solar footprint; do not report that as flicker.

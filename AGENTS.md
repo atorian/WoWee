@@ -100,6 +100,11 @@ collision/  -> pipeline/                                   (wowee_collision: not
   `WOWEE_RENDER_CLIENT_SOURCES`) draws what it is handed and knows nothing of
   the game, the interface, the sound or the network.
   `tools/render_dependency_check.py` enforces it through `sweep_guard`.
+  A pass is a cull and a recording: the cull reads the scene (the instances)
+  and copies what the pass needs of each one it keeps into a list; the
+  `record*` functions read that list and never `scene_`, so a render thread
+  can record from a snapshot while the game thread changes the scene.
+  `tools/record_scene_check.py` holds it at zero.
 - **The collision world** (`src/collision`, `wowee_collision`,
   `collision::CollisionWorld`, `renderer->collision()`) is what is solid:
   terrain heights, building and doodad shapes and where they stand, and every

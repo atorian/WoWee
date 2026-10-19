@@ -6,6 +6,7 @@
 #include "collision/geometry.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_billboard.hpp"
+#include "rendering/m2_glow_card.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/profiler.hpp"
@@ -26,6 +27,23 @@
 namespace wowee {
 namespace rendering {
 namespace m2_internal {
+
+/// What the glow-card rules ask of a batch and its model (m2_glow_card.hpp).
+inline M2GlowCardBatch glowCardOf(const M2ModelGPU& model, const M2ModelGPU::BatchGPU& batch) {
+    M2GlowCardBatch glowCard;
+    glowCard.glowSize = batch.glowSize;
+    glowCard.blendMode = batch.blendMode;
+    glowCard.lanternGlowHint = batch.lanternGlowHint;
+    glowCard.glowCardLike = batch.glowCardLike;
+    glowCard.unlit = (batch.materialFlags & 0x01) != 0;
+    glowCard.preserveGlowMesh = batch.preserveGlowMesh;
+    glowCard.modelIsElvenLike = model.isElvenLike;
+    glowCard.modelIsLanternLike = model.isLanternLike;
+    glowCard.modelIsTorch = model.isTorch;
+    glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
+    glowCard.modelIsSpellEffect = model.isSpellEffect;
+    return glowCard;
+}
 
 // World-space center of a skinned batch. Glow cards on swinging lanterns are
 // bone animated; using only modelMatrix * bind-pose center leaves both their

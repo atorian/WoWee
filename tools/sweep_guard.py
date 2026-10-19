@@ -214,6 +214,13 @@ CHECKS = [
     ("scene_write_check.py",
      r"^(\d+) direct changes to the scene from the client", 0,
      "changes to the renderers' scene made past SceneCommands"),
+    # A pass culls the scene into a list and records from the list alone, so
+    # a render thread working from a snapshot never reads the instances the
+    # game thread is changing. Held at zero from stage 4b of the threading
+    # plan, when the M2 and WMO recordings stopped reading the scene.
+    ("record_scene_check.py",
+     r"^(\d+) reads of the scene while recording", 0,
+     "reads of the renderers' scene from their recording functions"),
     # The game says what happened and is handed what it asks; it does not
     # drive the client's presentation. Held where it stood when the check was
     # written, and lowered to zero (AGENTS.md, "Layers"): the CVar store moved

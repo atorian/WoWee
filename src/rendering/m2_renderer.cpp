@@ -2323,6 +2323,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         if (!gpuModel.batches[bi].pendingTextureKey.empty())
             pendingBatchTextures_.push_back({modelId, bi});
     }
+    gpuModel.hasGlowSprites = std::any_of(gpuModel.batches.begin(), gpuModel.batches.end(),
+        [&](const M2ModelGPU::BatchGPU& b) { return m2WantsGlowSprite(glowCardOf(gpuModel, b)); });
 
     registerRtModel(gpuModel, model);
     // No rebuild of the spatial index for this. It used to be marked dirty

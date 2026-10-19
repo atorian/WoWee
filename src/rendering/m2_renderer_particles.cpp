@@ -471,11 +471,17 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
 // Ribbon rendering
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (gatherM2Ribbons() == 0) return;
+    recordM2Ribbons(cmd, perFrameSet);
+}
+
+size_t M2Renderer::gatherM2Ribbons() {
+    ribbonDraws_.clear();
     const ::VkBuffer ribbonBuffer = frameBuffer(ribbonVB_);
-    if (!blended().ribbon || !blended().ribbonAdditive || !ribbonBuffer) return;
+    if (!blended().ribbon || !blended().ribbonAdditive || !ribbonBuffer) return 0;
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
     static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
-    if (kNoRibbons) return;
+    if (kNoRibbons) return 0;
 
     // The edges carry their own vertices, laid across the emitter's Y axis
     // when they were born (updateRibbons). The strip used to be widened here
@@ -484,7 +490,6 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     float* dst     = static_cast<float*>(frameMapped(ribbonVB_));
     size_t written = 0;
 
-    ribbonDraws_.clear();
     auto& draws = ribbonDraws_;
 
     const auto addInstanceRibbons = [&](const M2Instance& inst) {
@@ -596,7 +601,14 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         }
     }
 
-    if (draws.empty() || written == 0) return;
+    if (draws.empty()) return 0;
+    return written;
+}
+
+void M2Renderer::recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (ribbonDraws_.empty()) return;
+    const ::VkBuffer ribbonBuffer = frameBuffer(ribbonVB_);
+    const auto& draws = ribbonDraws_;
 
     VkExtent2D ext = vkCtx_->getSwapchainExtent();
     VkViewport vp{};
@@ -627,12 +639,18 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 }
 
 void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (gatherM2Particles() == 0) return;
+    recordM2Particles(cmd, perFrameSet);
+}
+
+size_t M2Renderer::gatherM2Particles() {
+    particleRuns_.clear();
     const ::VkBuffer particleBuffer = frameBuffer(m2ParticleVB_);
-    if (!particleBuffer) return;
+    if (!particleBuffer) return 0;
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
     // tells a particle artifact apart from a skinned-geometry one.
     static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
-    if (kNoParticles) return;
+    if (kNoParticles) return 0;
 
     // Collect all particles from all instances, grouped by texture+blend.
     // Reuse persistent map - keep the bucket structure, drop last frame's set.
@@ -645,7 +663,6 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // vector per group and copied in afterwards; see ParticleRun.
     auto* const vbBase = static_cast<M2ParticleQuad*>(frameMapped(m2ParticleVB_));
     uint32_t vbWritten = 0;
-    particleRuns_.clear();
     ParticleGroup* runGroup = nullptr;
 
     size_t totalParticles = 0;
@@ -904,7 +921,13 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         }
     }
 
-    if (totalParticles == 0) return;
+    if (totalParticles == 0) particleRuns_.clear();
+    return totalParticles;
+}
+
+void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    if (particleRuns_.empty()) return;
+    const ::VkBuffer particleBuffer = frameBuffer(m2ParticleVB_);
 
     // Bind per-frame set (set 0) for particle pipeline
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
