@@ -472,7 +472,9 @@ bool SpellVisualSystem::ensureModel(const std::string& path, uint32_t modelId) {
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (out.textures.count(key)) continue;
             auto blp = am->loadTexture(key, true);
-            if (blp.isValid()) out.textures[key] = std::move(blp);
+            if (!blp.isValid()) continue;
+            blp.analyzeAlpha();
+            out.textures[key] = std::move(blp);
         }
         out.model = std::move(model);
         out.ok = true;

@@ -218,6 +218,7 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
             auto normal = pixels.empty() ? rendering::EncodedNormalMap{} :
                 rendering::WMORenderer::prepareNormalHeightMap(pixels.data(), image.width, image.height, normalMaps);
             if (normal.valid()) result->normals[key] = std::move(normal);
+            image.analyzeAlpha();
         } else LOG_WARNING("Instance texture unavailable: ", key, "; renderer will use its fallback");
         result->wmoTextures[key] = std::move(image);
     }
@@ -254,8 +255,10 @@ std::shared_ptr<WorldLoader::PreparedMap> WorldLoader::prepareMap(pipeline::Asse
                 for (const auto& texture : m2->textures) {
                     if (!token.current()) return result;
                     const auto key = textureKey(texture.filename);
-                    if (!key.empty() && !result->m2Textures.contains(key))
-                        result->m2Textures[key] = assets.loadTexture(key, true);
+                    if (key.empty() || result->m2Textures.contains(key)) continue;
+                    auto image = assets.loadTexture(key, true);
+                    if (image.isValid()) image.analyzeAlpha();
+                    result->m2Textures[key] = std::move(image);
                 }
             } else LOG_WARNING("Instance doodad model invalid or missing: ", m2Path, "; doodad omitted");
         }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -91,6 +92,16 @@ struct BLPImage {
     ///   bark, Zangarmarsh caps and Nagrand trunks all land above 79.
     [[nodiscard]] bool alphaIsSilhouette() const;
 
+    /// Read the alpha once and keep the answers, so that hasTransparency and
+    /// alphaIsSilhouette are lookups from then on.
+    ///
+    /// Both walk every block of level 0, and an upscaled 1024x1024 sidecar
+    /// takes 2-10 ms to walk - most of what an M2 model cost the frame that
+    /// uploaded it. The loader workers that prepare a texture call this before
+    /// handing it over, so the frame that uploads it only reads the result.
+    /// Call it last: the answers describe the pixels as they were then.
+    void analyzeAlpha();
+
     /// What this will occupy once uploaded, which the texture caches spend
     /// their budget against. Block-compressed is its own levels; decoded is
     /// the base plus the third a generated mip chain adds.
@@ -114,6 +125,19 @@ struct BLPImage {
         const size_t base = static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull;
         return base + (base / 3);
     }
+
+private:
+    struct AlphaFacts {
+        bool transparent = false;
+        bool silhouette = false;
+    };
+    /// What analyzeAlpha found; empty until it runs, and the two questions
+    /// scan the pixels each time they are asked.
+    std::optional<AlphaFacts> alphaFacts_;
+
+    [[nodiscard]] bool scanTransparency() const;
+    /// The silhouette verdict for an image already known to be transparent.
+    [[nodiscard]] bool scanSilhouette() const;
 };
 
 /**

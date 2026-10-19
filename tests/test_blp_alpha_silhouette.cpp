@@ -127,6 +127,31 @@ TEST_CASE("too few transparent texels decide nothing", "[blp]") {
     CHECK_FALSE(image.alphaIsSilhouette());
 }
 
+TEST_CASE("an image analysed on a worker answers as a scan would after it is handed over", "[blp]") {
+    // The loader workers read the alpha once and move the image to the frame
+    // that uploads it, which then asks the same two questions. The answers it
+    // gets must be the ones scanning the blocks there would have given.
+    struct Case {
+        const char* name;
+        std::vector<uint8_t> block;
+        bool transparent;
+        bool silhouette;
+    };
+    const std::vector<Case> cases{
+        {"bark", dxt5Block(0, 107, 84, 47), true, false},
+        {"cards", dxt5Block(0, 7, 6, 4), true, true},
+        {"solid", dxt5Block(255, 107, 84, 47), false, false},
+    };
+    for (const auto& c : cases) {
+        INFO(c.name);
+        BLPImage worker = dxt5Image(c.block);
+        worker.analyzeAlpha();
+        const BLPImage handedOver = std::move(worker);
+        CHECK(handedOver.hasTransparency() == c.transparent);
+        CHECK(handedOver.alphaIsSilhouette() == c.silhouette);
+    }
+}
+
 TEST_CASE("the decoded backing scan agrees with the block one", "[blp]") {
     // The same property test_blp_alpha_scan makes of hasTransparency, for the
     // same reason: the block reader rebuilds by hand what the decoder writes,

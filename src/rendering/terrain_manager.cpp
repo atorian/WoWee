@@ -602,6 +602,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
             auto blp = assetManager->loadTexture(texKey, true);
             if (blp.isValid()) {
+                blp.analyzeAlpha();
                 pending->preloadedM2Textures[texKey] = std::move(blp);
             }
         }
@@ -804,6 +805,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                                 if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
                                 auto blp = assetManager->loadTexture(texKey, true);
                                 if (blp.isValid()) {
+                                    blp.analyzeAlpha();
                                     pending->preloadedM2Textures[texKey] = std::move(blp);
                                 }
                             }
@@ -903,6 +905,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                         if (normals.valid()) {
                             pending->preloadedWMONormalMaps[blpKey] = std::move(normals);
                         }
+                        blp.analyzeAlpha();
                         pending->preloadedWMOTextures[blpKey] = std::move(blp);
                     }
                 }
@@ -941,6 +944,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
             if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
         }
+        if (blp.isValid()) blp.analyzeAlpha();
         pending->preloadedTextures[texPath] = std::move(blp);
     }
 

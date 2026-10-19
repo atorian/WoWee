@@ -1254,6 +1254,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                         if (result.predecodedTextures.find(texKey) != result.predecodedTextures.end()) continue;
                         auto blp = am->loadTexture(texKey);
                         if (blp.isValid()) {
+                            blp.analyzeAlpha();
                             result.predecodedTextures[texKey] = std::move(blp);
                         }
                     }
@@ -1343,7 +1344,9 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (result.predecodedTextures.count(texKey)) continue;
                         auto blp = am->loadTexture(texKey, true);
-                        if (blp.isValid()) result.predecodedTextures[texKey] = std::move(blp);
+                        if (!blp.isValid()) continue;
+                        blp.analyzeAlpha();
+                        result.predecodedTextures[texKey] = std::move(blp);
                     }
 
                     result.m2Model = std::move(model);

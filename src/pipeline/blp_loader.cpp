@@ -10,6 +10,20 @@ namespace wowee {
 namespace pipeline {
 
 bool BLPImage::hasTransparency() const {
+    return alphaFacts_ ? alphaFacts_->transparent : scanTransparency();
+}
+
+bool BLPImage::alphaIsSilhouette() const {
+    if (alphaFacts_) return alphaFacts_->silhouette;
+    return scanTransparency() && scanSilhouette();
+}
+
+void BLPImage::analyzeAlpha() {
+    const bool transparent = scanTransparency();
+    alphaFacts_ = AlphaFacts{.transparent = transparent, .silhouette = transparent && scanSilhouette()};
+}
+
+bool BLPImage::scanTransparency() const {
     if (!isBlockCompressed()) {
         for (size_t i = 3; i < data.size(); i += 4) {
             if (data[i] != 255) return true;
@@ -104,9 +118,7 @@ constexpr uint64_t kMinClearTexels = 64;
 
 }  // namespace
 
-bool BLPImage::alphaIsSilhouette() const {
-    if (!hasTransparency()) return false;
-
+bool BLPImage::scanSilhouette() const {
     uint64_t clearTexels = 0;
     uint64_t lumaSum = 0;
 
