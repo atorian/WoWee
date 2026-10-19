@@ -115,7 +115,10 @@ public:
     /// what billboard bones turn against; without one they stay as authored.
     void update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view);
 
-    /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
+    /// Gives each posed instance its bone buffer for this frame slot and fills
+    /// it, once, where the slot's copy is older than the pose. Main thread,
+    /// after the slot's fence and before any pass draws a character - the
+    /// shadow maps included - so every pass only binds.
     void prepareRender(uint32_t frameIndex);
     /// Which instances a render call draws. A faded one - an aura's
     /// translucent body, a ghost, a fade-in - writes depth, so whatever is
@@ -417,6 +420,27 @@ private:
         uint64_t loadSerial = 0;
     };
 
+    /// What a character wears and shows of its model: the geosets drawn, the
+    /// textures put in place of the model's own, and whether its head's skin
+    /// extra is drawn.
+    ///
+    /// Never changed once made. A setter makes the next one from a copy, so a
+    /// pass's draw list holds the dress it saw while the instance moves on to
+    /// another - which is what a recording from a snapshot needs. They change
+    /// with equipment, not by the frame.
+    struct CharacterDress {
+        // Geoset visibility - which submesh IDs to render
+        // Empty = render all (for non-character models)
+        std::unordered_set<uint16_t> activeGeosets;
+        /// Draw the Skin Extra (texture type 8) head-detail batch. True only
+        /// where the instance has been set up to composite it - the player.
+        bool drawSkinExtra = false;
+        // Per-geoset-group texture overrides (group → texture).
+        std::unordered_map<uint16_t, TextureRef> groupTextureOverrides;
+        // Per-texture-slot overrides (slot → texture).
+        std::unordered_map<uint16_t, TextureRef> textureSlotOverrides;
+    };
+
     // Character instance
     struct CharacterInstance {
         uint32_t id;
@@ -439,22 +463,13 @@ private:
         float globalSequenceTime = 0.0f; // Separate timer for global sequences (accumulates without wrapping at sequence duration)
         bool animationLoop = true;
         uint32_t oneShotReturnAnim = 0; // Anim to resume when a one-shot ends (0 = Stand)
-        bool isDead = false;  // Prevents movement while in death state
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
+        /// Moved on whenever boneMatrices are written, so each frame slot's
+        /// bone buffer is filled when its copy is older, and only then.
+        uint32_t bonesVersion = 0;
 
-        // Geoset visibility - which submesh IDs to render
-        // Empty = render all (for non-character models)
-        std::unordered_set<uint16_t> activeGeosets;
-        /// Draw the Skin Extra (texture type 8) head-detail batch. True only
-        /// where the instance has been set up to composite it - the player.
-        bool drawSkinExtra = false;
-
-        // Per-geoset-group texture overrides (group → texture), held by the
-        // instance.
-        std::unordered_map<uint16_t, TextureRef> groupTextureOverrides;
-
-        // Per-texture-slot overrides (slot → texture), held by the instance.
-        std::unordered_map<uint16_t, TextureRef> textureSlotOverrides;
+        /// See CharacterDress; replaced, never changed in place.
+        std::shared_ptr<const CharacterDress> dress = std::make_shared<const CharacterDress>();
 
         // Weapon attachments (weapons parented to this instance's bones)
         std::vector<WeaponAttachment> weaponAttachments;
@@ -511,7 +526,55 @@ private:
         VmaAllocation boneAlloc[2] = {};
         void* boneMapped[2] = {};
         VkDescriptorSet boneSet[2] = {};
+        /// The bonesVersion each slot's buffer holds; none to begin with.
+        uint32_t uploadedBonesVersion[2] = {UINT32_MAX, UINT32_MAX};
     };
+
+    /// Replaces the instance's dress with a changed copy of it.
+    template <class Change>
+    static void redress(CharacterInstance& instance, Change&& change) {
+        auto next = std::make_shared<CharacterDress>(*instance.dress);
+        change(*next);
+        instance.dress = std::move(next);
+    }
+
+    /// An instance as a pass draws it: what the recording needs of it,
+    /// copied out of the scene by the cull, so the recording reads no
+    /// instance. The dress is shared, not copied.
+    struct DrawCharacter {
+        glm::mat4 modelMatrix{1.0f};
+        /// Valid for the frame: models are unloaded only between frames.
+        const M2ModelGPU* model = nullptr;
+        std::shared_ptr<const CharacterDress> dress;
+        /// This frame slot's bones; null for an instance without any.
+        VkDescriptorSet boneSet = VK_NULL_HANDLE;
+        InteriorLightGPU interiorLight;
+        LocalLightSet localLights = kNoLocalLights;
+        glm::vec3 stateTint{1.0f};
+        /// Its own opacity, its state's and the camera's, as drawn.
+        float opacity = 1.0f;
+        float animationTime = 0.0f;
+        float globalSequenceTime = 0.0f;
+        int sequenceIndex = -1;
+        uint32_t id = 0;
+        uint32_t modelId = 0;
+        bool isSceneModel = false;
+        bool hasOverrideModelMatrix = false;
+    };
+    /// Each colour part's list (All, Solid, Faded): the solid part records on
+    /// a frame worker and the faded one on the main thread after the water.
+    std::vector<DrawCharacter> drawLists_[3];
+    /// The depth-only passes', one at a time on the main thread.
+    std::vector<DrawCharacter> shadowList_;
+    /// The instances this part draws, in the camera's view.
+    void cullCharacters(const Camera& camera, Part part, std::vector<DrawCharacter>& list) const;
+    void recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
+                          const std::vector<DrawCharacter>& list);
+    /// The shown instances with bones within the shadow's reach.
+    void cullShadowCasters(const glm::vec3& shadowCenter, float shadowRadius,
+                           std::vector<DrawCharacter>& list) const;
+    void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
+                             const std::vector<DrawCharacter>& list);
 
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
@@ -708,7 +771,7 @@ private:
     /// The texture of one of a batch's stages, its slot override applied.
     /// Shared by the main pass and the shadow pass, which needs stage 0 to
     /// cut a silhouette rather than a rectangle.
-    [[nodiscard]] BatchTexture resolveBatchTexture(const CharacterInstance& inst,
+    [[nodiscard]] BatchTexture resolveBatchTexture(const CharacterDress& dress,
                                                    const M2ModelGPU& gm,
                                                    const pipeline::M2Batch& b,
                                                    uint32_t stage = 0) const;

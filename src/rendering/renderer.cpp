@@ -1565,6 +1565,13 @@ void Renderer::beginFrame() {
         // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
         if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
     }
+    // The characters' bones into this slot's buffers, once, now that its
+    // fence is passed and before the shadow maps draw them: every pass after
+    // this only binds them.
+    if (characterRenderer) {
+        CpuStage stage(stages, "beginFrame", "prepare characters");
+        characterRenderer->prepareRender(vkCtx->getCurrentFrame());
+    }
 
     {
         CpuStage stage(stages, "beginFrame", "per-frame UBO");
@@ -3224,16 +3231,13 @@ void Renderer::renderWorld() {
         if (m2Renderer && camera) m2Renderer->prepareRender(frameIdx, *camera);
         if (drawSkyModels && camera)
             skyboxModelRenderer_->prepareRender(frameIdx, *camera);
+        // The characters' bones went up in beginFrame, before the shadow maps.
         auto prepM2End = std::chrono::steady_clock::now();
-        if (characterRenderer) characterRenderer->prepareRender(frameIdx);
-        auto prepEnd = std::chrono::steady_clock::now();
         const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
         const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
-        const double prepCharMs = std::chrono::duration<double, std::milli>(prepEnd - prepM2End).count();
         CpuStageTimes& stages = vkCtx->cpuStages();
         stages.add("renderWorld", "prepare WMO", static_cast<float>(prepWmoMs));
         stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
-        stages.add("renderWorld", "prepare characters", static_cast<float>(prepCharMs));
         // From here to the wait the main thread hands work out and records its
         // own share; then it waits for the slowest worker.
         std::optional<CpuStage> dispatchStage(std::in_place, stages, "renderWorld", "dispatch");
@@ -3433,7 +3437,7 @@ void Renderer::renderWorld() {
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
         // when a frame runs long instead of leaving renderWorld as one opaque number.
-        const double prepTotalMs = prepWmoMs + prepM2Ms + prepCharMs;
+        const double prepTotalMs = prepWmoMs + prepM2Ms;
         const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
 
         // The same breakdown on a timer, not only when a frame runs long.
@@ -3450,8 +3454,7 @@ void Renderer::renderWorld() {
             if (sayNow - lastSaid > std::chrono::seconds(10)) {
                 lastSaid = sayNow;
                 LOG_WARNING("  renderWorld: prepare ", prepTotalMs,
-                            "ms (wmo ", prepWmoMs, " m2 ", prepM2Ms,
-                            " char ", prepCharMs, "), workers terrain ",
+                            "ms (wmo ", prepWmoMs, " m2 ", prepM2Ms, "), workers terrain ",
                             lastTerrainRenderMs, " wmo ", lastWMORenderMs,
                             " m2 ", lastM2RenderMs, " (worst ", worstWorkerMs,
                             "), terrain chunks drawn ",
@@ -3473,7 +3476,7 @@ void Renderer::renderWorld() {
 
         if (prepTotalMs + worstWorkerMs > 40.0) {
             LOG_WARNING("SLOW renderWorld breakdown: prepare=", prepTotalMs,
-                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms, " char=", prepCharMs,
+                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms,
                         ") workers: terrain=", lastTerrainRenderMs,
                         " wmo=", lastWMORenderMs, " m2=", lastM2RenderMs,
                         // Terrain is usually the critical path here, and its cost
@@ -3595,7 +3598,6 @@ void Renderer::renderWorld() {
         }
 
         if (characterRenderer && camera && !skipChars) {
-            characterRenderer->prepareRender(frameIdx);
             GpuPass pass(*vkCtx, currentCmd, "characters");
             characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
         }

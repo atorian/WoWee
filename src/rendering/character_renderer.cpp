@@ -811,8 +811,8 @@ void CharacterRenderer::requestNormalMaps() {
         if (model == models.end()) continue;
         const float distance = glm::distance(instance.position, lastCameraPos_);
         for (const TextureRef& texture : model->second.textureIds) consider(texture, distance);
-        for (const auto& [slot, texture] : instance.textureSlotOverrides) consider(texture, distance);
-        for (const auto& [group, texture] : instance.groupTextureOverrides) consider(texture, distance);
+        for (const auto& [slot, texture] : instance.dress->textureSlotOverrides) consider(texture, distance);
+        for (const auto& [group, texture] : instance.dress->groupTextureOverrides) consider(texture, distance);
     }
     if (wanted.empty()) return;
 
@@ -2038,13 +2038,6 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     auto& model = models[instance.modelId].data;
     instance.oneShotReturnAnim = loop ? 0 : oneShotReturnAnim;
 
-    // Track death state for preventing movement while dead
-    if (animationId == 1) {
-        instance.isDead = true;
-    } else if (instance.isDead && animationId == 0) {
-        instance.isDead = false;  // Respawned
-    }
-
     // Find animation sequence index by ID
     instance.currentAnimationId = animationId;
     instance.currentSequenceIndex = -1;
@@ -2391,6 +2384,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
     size_t numBones = model.bones.size();
     instance.boneMatrices.resize(numBones);
+    ++instance.bonesVersion;
 
     const auto& gsd = model.globalSequenceDurations;
 
@@ -2600,6 +2594,17 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
                 write.pBufferInfo = &bufInfo;
                 vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
             }
+            instance.uploadedBonesVersion[frameIndex] = UINT32_MAX;
+        }
+
+        // The pose into this slot's buffer, once. Every pass after this binds
+        // it: the view, the faded part after the water and the shadow maps
+        // used to copy it again each, two or three times a frame.
+        if (instance.boneMapped[frameIndex] &&
+            instance.uploadedBonesVersion[frameIndex] != instance.bonesVersion) {
+            memcpy(instance.boneMapped[frameIndex], instance.boneMatrices.data(),
+                   static_cast<size_t>(numBones) * sizeof(glm::mat4));
+            instance.uploadedBonesVersion[frameIndex] = instance.bonesVersion;
         }
     }
 }
@@ -2613,6 +2618,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     if (scene_->instances.empty() || !pipes.opaque) {
         return;
     }
+    std::vector<DrawCharacter>& list = drawLists_[static_cast<size_t>(part)];
+    cullCharacters(camera, part, list);
+    recordCharacters(cmd, perFrameSet, part, list);
+}
+
+void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
+                                       std::vector<DrawCharacter>& list) const {
+    list.clear();
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
     const float renderRadiusSq = renderRadius * renderRadius;
     // Default frustum-cull radius when model bounds aren't available.
@@ -2623,7 +2636,89 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Extract frustum planes for per-instance visibility testing
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
 
+    for (const auto& pair : scene_->instances) {
+        const auto& instance = pair.second;
+
+        // Skip invisible instances (e.g., player in first-person mode), and
+        // the weapons and armour of a body put away for a form.
+        if (!isShown(instance)) continue;
+        const CharacterInstance& look = drawnAs(instance);
+
+        // Character instance culling: test both distance and frustum visibility
+        if (!instance.hasOverrideModelMatrix && !instance.isSceneModel) {
+            glm::vec3 toInst = instance.position - camPos;
+            float distSq = glm::dot(toInst, toInst);
+
+            // Distance cull: skip if beyond render radius
+            if (distSq > renderRadiusSq) continue;
+
+            // Compute per-instance bounding radius from model data when available.
+            float cullRadius = kDefaultCharacterCullRadius;
+            auto mIt = models.find(instance.modelId);
+            if (mIt != models.end()) {
+                float modelR = mIt->second.data.boundRadius;
+                if (modelR > 0.01f)
+                    cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
+            }
+
+            // Frustum cull: skip if outside view frustum
+            if (!frustum.intersectsSphere(instance.position, cullRadius)) continue;
+        }
+
+        if (!instance.cachedModel) continue;
+        const auto& gpuModel = *instance.cachedModel;
+
+        // Skip models without GPU buffers
+        if (!gpuModel.vertexBuffer) continue;
+
+        // Skip fully transparent instances. An aura's opacity caps the
+        // instance's own rather than multiplying it, so a stealthed unit
+        // that also carries the stealth state kit is not drawn twice as faint.
+        // The camera's closeness fades it on top of that: the player with the
+        // camera pressed against them. An attachment is drawn as its body is.
+        const float drawOpacity = std::min(look.opacity, look.stateAlpha) * look.cameraFade;
+        if (drawOpacity <= 0.0f) continue;
+        // A faded body goes with the faded ones, after the blended world.
+        const bool fadedInstance = drawOpacity < 0.999f;
+        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
+
+        // Its bones were put in this slot's buffer by prepareRender, before
+        // recording; an instance with bones and no buffer is not drawn.
+        const bool hasBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES) > 0;
+        if (hasBones && (!instance.boneBuffer[frameIndex] || !instance.boneSet[frameIndex])) continue;
+
+        // Set model matrix (use override for weapon instances)
+        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
+                                                                      : getModelMatrix(instance);
+        list.push_back(DrawCharacter{
+            .modelMatrix = modelMatrix,
+            .model = &gpuModel,
+            .dress = instance.dress,
+            .boneSet = hasBones ? instance.boneSet[frameIndex] : VK_NULL_HANDLE,
+            .interiorLight = instance.interiorLight,
+            // The lights nearest the unit's origin, as the client picks them
+            // for any model.
+            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
+                                        : kNoLocalLights,
+            .stateTint = look.stateTint,
+            .opacity = drawOpacity,
+            .animationTime = instance.animationTime,
+            .globalSequenceTime = instance.globalSequenceTime,
+            .sequenceIndex = instance.currentSequenceIndex,
+            .id = instance.id,
+            .modelId = instance.modelId,
+            .isSceneModel = instance.isSceneModel,
+            .hasOverrideModelMatrix = instance.hasOverrideModelMatrix,
+        });
+    }
+}
+
+void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
+                                         const std::vector<DrawCharacter>& list) {
+    const PipelineSet& pipes =
+        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
     uint32_t frameSlot = frameIndex % 2u;
 
@@ -2738,85 +2833,24 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkPipeline currentPipeline = pipes.opaque;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
-    for (auto& pair : scene_->instances) {
-        auto& instance = pair.second;
+    for (const DrawCharacter& instance : list) {
+        const auto& gpuModel = *instance.model;
+        const CharacterDress& dress = *instance.dress;
+        const float drawOpacity = instance.opacity;
 
-        // Skip invisible instances (e.g., player in first-person mode), and
-        // the weapons and armour of a body put away for a form.
-        if (!isShown(instance)) continue;
-        const CharacterInstance& look = drawnAs(instance);
-
-        // Character instance culling: test both distance and frustum visibility
-        if (!instance.hasOverrideModelMatrix && !instance.isSceneModel) {
-            glm::vec3 toInst = instance.position - camPos;
-            float distSq = glm::dot(toInst, toInst);
-
-            // Distance cull: skip if beyond render radius
-            if (distSq > renderRadiusSq) continue;
-
-            // Compute per-instance bounding radius from model data when available.
-            float cullRadius = kDefaultCharacterCullRadius;
-            auto mIt = models.find(instance.modelId);
-            if (mIt != models.end()) {
-                float modelR = mIt->second.data.boundRadius;
-                if (modelR > 0.01f)
-                    cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
-            }
-
-            // Frustum cull: skip if outside view frustum
-            if (!frustum.intersectsSphere(instance.position, cullRadius)) continue;
-        }
-
-        if (!instance.cachedModel) continue;
-        const auto& gpuModel = *instance.cachedModel;
-
-        // Skip models without GPU buffers
-        if (!gpuModel.vertexBuffer) continue;
-
-        // Skip fully transparent instances. An aura's opacity caps the
-        // instance's own rather than multiplying it, so a stealthed unit
-        // that also carries the stealth state kit is not drawn twice as faint.
-        // The camera's closeness fades it on top of that: the player with the
-        // camera pressed against them. An attachment is drawn as its body is.
-        const float drawOpacity = std::min(look.opacity, look.stateAlpha) * look.cameraFade;
-        if (drawOpacity <= 0.0f) continue;
-        // A faded body goes with the faded ones, after the blended world.
-        const bool fadedInstance = drawOpacity < 0.999f;
-        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
-
-        // Set model matrix (use override for weapon instances)
-        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                                      : getModelMatrix(instance);
-        // The lights nearest the unit's origin, as the client picks them for
-        // any model.
         const CharacterPushConstants push{
-            .model = modelMatrix,
+            .model = instance.modelMatrix,
             .interiorLight = instance.interiorLight,
-            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
-                                        : kNoLocalLights,
+            .localLights = instance.localLights,
         };
         vkCmdPushConstants(cmd, pipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
 
-        // Upload bone matrices to SSBO
-        int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
-        if (numBones > 0) {
-            // GPU allocation is performed by prepareRender() before command
-            // recording. Never allocate buffers/descriptors from the draw loop.
-            if (!instance.boneBuffer[frameIndex] || !instance.boneSet[frameIndex]) continue;
-
-            // Upload bone matrices
-            if (instance.boneMapped[frameIndex]) {
-                memcpy(instance.boneMapped[frameIndex], instance.boneMatrices.data(),
-                       numBones * sizeof(glm::mat4));
-            }
-
-            // Bind bone descriptor set (set 2)
-            if (instance.boneSet[frameIndex]) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipelineLayout_, 2, 1, &instance.boneSet[frameIndex], 0, nullptr);
-            }
+        // Bind bone descriptor set (set 2), filled by prepareRender.
+        if (instance.boneSet) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 2, 1, &instance.boneSet, 0, nullptr);
         }
 
         // Bind vertex and index buffers
@@ -2828,11 +2862,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // invisible stalker's skin is exactly that. It used to be drawn
         // whole with its first texture.
         if (!gpuModel.data.batches.empty()) {
-            bool applyGeosetFilter = !instance.activeGeosets.empty();
+            bool applyGeosetFilter = !dress.activeGeosets.empty();
             if (applyGeosetFilter) {
                 bool hasRenderableGeoset = false;
                 for (const auto& batch : gpuModel.data.batches) {
-                    if (instance.activeGeosets.find(batch.submeshId) != instance.activeGeosets.end()) {
+                    if (dress.activeGeosets.find(batch.submeshId) != dress.activeGeosets.end()) {
                         hasRenderableGeoset = true;
                         break;
                     }
@@ -2895,7 +2929,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 if (pass == 0 && bm != 0) continue;  // pass 0: opaque only
                 if (pass == 1 && bm == 0) continue;   // pass 1: non-opaque only
                 if (applyGeosetFilter) {
-                    if (instance.activeGeosets.find(batch.submeshId) == instance.activeGeosets.end()) {
+                    if (dress.activeGeosets.find(batch.submeshId) == dress.activeGeosets.end()) {
                         continue;
                     }
                 } else {
@@ -2924,7 +2958,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // spent all its lines on the character-select models before a
                 // single NPC had spawned.
                 const bool worldCharacter =
-                    !instance.textureSlotOverrides.empty() || instance.drawSkinExtra;
+                    !dress.textureSlotOverrides.empty() || dress.drawSkinExtra;
                 if (batch.submeshId == 0 && worldCharacter && headBatchCanaryCount_ < 24) {
                     ++headBatchCanaryCount_;
                     uint32_t chosenType = 0;
@@ -2933,18 +2967,18 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (sl < gpuModel.data.textures.size())
                             chosenType = gpuModel.data.textures[sl].type;
                     }
-                    const VkTexture* rt = resolveBatchTexture(instance, gpuModel, batch).texture->get();
+                    const VkTexture* rt = resolveBatchTexture(dress, gpuModel, batch).texture->get();
                     // At debug: this canary was for heads resolving to the
                     // white texture, and they resolve to a texture. Twenty-four
                     // of them a session is noise in a log read for faults.
                     core::Logger::getInstance().debug(
-                        "Head batch: instance=", pair.first, " model=", instance.modelId,
+                        "Head batch: instance=", instance.id, " model=", instance.modelId,
                         " geoset=", batch.submeshId, " firstSlotType=", chosenType,
                         " resolved=", (rt == whiteTexture_.get() ? "WHITE"
                                        : (rt == nullptr ? "null" : "texture")),
                         " ptr=", static_cast<const void*>(rt),
-                        " overrides=", instance.textureSlotOverrides.size(),
-                        " drawSkinExtra=", (instance.drawSkinExtra ? 1 : 0),
+                        " overrides=", dress.textureSlotOverrides.size(),
+                        " drawSkinExtra=", (dress.drawSkinExtra ? 1 : 0),
                         " verts=", gpuModel.vertexCount);
                 }
                 // Note on the Skin Extra batch, since it has been misread twice:
@@ -2962,11 +2996,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // batches whose track evaluates to ~0 for the current sequence.
                 const float batchColorAlpha = glm::clamp(
                     evalBatchColorAlpha(gpuModel.data, batch,
-                                        instance.currentSequenceIndex,
+                                        instance.sequenceIndex,
                                         instance.animationTime,
                                         instance.globalSequenceTime) *
                     evalBatchTextureWeight(gpuModel.data, batch,
-                                           instance.currentSequenceIndex,
+                                           instance.sequenceIndex,
                                            instance.animationTime,
                                            instance.globalSequenceTime),
                     0.0f, 1.0f);
@@ -2974,7 +3008,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     continue;
                 }
                 // Resolve texture for this batch (prefer hair textures for hair geosets).
-                const BatchTexture resolved = resolveBatchTexture(instance, gpuModel, batch);
+                const BatchTexture resolved = resolveBatchTexture(dress, gpuModel, batch);
                 // The model's or the instance's reference, so what is read
                 // about the texture - its alpha, its normal map - comes from
                 // its cache entry; nothing is copied, which would take the
@@ -2982,8 +3016,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const TextureRef* texRef = resolved.texture;
                 uint8_t wrapFlags = resolved.wrapFlags;
                 const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
-                auto groupTexIt = instance.groupTextureOverrides.find(batchGroup);
-                if (groupTexIt != instance.groupTextureOverrides.end() && groupTexIt->second) {
+                auto groupTexIt = dress.groupTextureOverrides.find(batchGroup);
+                if (groupTexIt != dress.groupTextureOverrides.end() && groupTexIt->second) {
                     texRef = &groupTexIt->second;
                 }
 
@@ -3025,8 +3059,8 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (texType != 6) {
                             for (size_t ti = 0; ti < gpuModel.textureIds.size(); ti++) {
                                 const TextureRef* candidate = &gpuModel.textureIds[ti];
-                                auto itO = instance.textureSlotOverrides.find(static_cast<uint16_t>(ti));
-                                if (itO != instance.textureSlotOverrides.end() && itO->second) {
+                                auto itO = dress.textureSlotOverrides.find(static_cast<uint16_t>(ti));
+                                if (itO != dress.textureSlotOverrides.end() && itO->second) {
                                     candidate = &itO->second;
                                 }
                                 if (*candidate != whiteTexture_ && *candidate) {
@@ -3087,7 +3121,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // Create per-batch material UBO
                 CharMaterialUBO matData{};
                 matData.opacity = drawOpacity * batchColorAlpha;
-                matData.stateTint = glm::vec4(look.stateTint, 1.0f);
+                matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
                 // The colour half of the batch's M2Color, beside the alpha
                 // half above. The generic M2 path tints with the same value.
                 if (batch.colorIndex < gpuModel.data.colorRGB.size())
@@ -3110,7 +3144,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         ? size_t{0xFFFF} : size_t{batch.textureAnimIndex} + stage;
                     const auto* tt = m2TextureTransformAt(gpuModel.data.textureTransformLookup,
                                                           gpuModel.data.textureTransforms, animLookup);
-                    return tt ? m2SampleUVTransform(*tt, instance.currentSequenceIndex,
+                    return tt ? m2SampleUVTransform(*tt, instance.sequenceIndex,
                                                     instance.animationTime, instance.globalSequenceTime,
                                                     gpuModel.data.globalSequenceDurations)
                               : M2UVTransform{};
@@ -3120,7 +3154,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
                 if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
                     matData.uvTransform2 = stageUVTransform(1);
-                    const BatchTexture second = resolveBatchTexture(instance, gpuModel, batch, 1);
+                    const BatchTexture second = resolveBatchTexture(dress, gpuModel, batch, 1);
                     secondWrapFlags = second.wrapFlags;
                     VkTexture* secondImage = second.texture->get();
                     if (secondImage && secondImage->isValid() && *second.texture != whiteTexture_) {
@@ -3384,102 +3418,66 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
 
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
     if (frameIndex >= 2) return;
-    VkDevice device = vkCtx_->getDevice();
 
     // This frame slot's fence was waited on in beginFrame, so last time's sets
     // are finished with and the pool can be handed back whole.
     if (resetDescriptors && frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-        vkResetDescriptorPool(device, shadowTexPool_[frameIndex], 0);
+        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
     }
     if (resetDescriptors) shadowTexSetCache_.clear();
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+    cullShadowCasters(shadowCenter, shadowRadius, shadowList_);
+    recordShadowCasters(cmd, lightSpaceMatrix, shadowList_);
+}
 
+void CharacterRenderer::cullShadowCasters(const glm::vec3& shadowCenter, float shadowRadius,
+                                          std::vector<DrawCharacter>& list) const {
+    list.clear();
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     const float shadowRadiusSq = shadowRadius * shadowRadius;
-    // Which set is bound at 0 right now, so a run of opaque batches does not
-    // rebind the same fallback for each one.
-    VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
-    for (auto& pair : scene_->instances) {
-        auto& inst = pair.second;
+    for (const auto& pair : scene_->instances) {
+        const auto& inst = pair.second;
         if (!isShown(inst)) continue;
-
-        // Distance cull against shadow frustum
-        glm::vec3 diff = inst.position - shadowCenter;
-        if (glm::dot(diff, diff) > shadowRadiusSq) continue;
-
         if (!inst.cachedModel) continue;
         const M2ModelGPU& gpuModel = *inst.cachedModel;
         if (!gpuModel.vertexBuffer) continue;
+        // Only what has bones posed into this slot's buffer casts.
+        if (!inst.boneSet[frameIndex]) continue;
 
-        glm::mat4 modelMat = inst.hasOverrideModelMatrix
+        const glm::mat4 modelMat = inst.hasOverrideModelMatrix
             ? inst.overrideModelMatrix
             : getModelMatrix(inst);
 
-        // Ensure bone SSBO is allocated and upload bone matrices
-        int numBones = std::min(static_cast<int>(inst.boneMatrices.size()), MAX_BONES);
-        if (numBones > 0) {
-            if (!inst.boneBuffer[frameIndex]) {
-                VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-                bci.size = MAX_BONES * sizeof(glm::mat4);
-                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                VmaAllocationCreateInfo aci{};
-                aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-                aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                VmaAllocationInfo ai{};
-                if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                    &inst.boneBuffer[frameIndex], &inst.boneAlloc[frameIndex], &ai) != VK_SUCCESS) {
-                    inst.boneBuffer[frameIndex] = VK_NULL_HANDLE;
-                    inst.boneAlloc[frameIndex] = VK_NULL_HANDLE;
-                    inst.boneMapped[frameIndex] = nullptr;
-                    continue;
-                }
-                inst.boneMapped[frameIndex] = ai.pMappedData;
+        // Distance cull against the shadow's reach, from where the model is
+        // drawn. A weapon's own position is never set - it hangs off its
+        // wielder's bone through its matrix - so it was culled from the
+        // world's origin and cast nothing anywhere else.
+        glm::vec3 diff = glm::vec3(modelMat[3]) - shadowCenter;
+        if (glm::dot(diff, diff) > shadowRadiusSq) continue;
 
-                // Initialize all bone slots to identity so out-of-range indices
-                // produce correct (neutral) transforms instead of GPU garbage
-                if (inst.boneMapped[frameIndex]) {
-                    auto* dst = static_cast<glm::mat4*>(inst.boneMapped[frameIndex]);
-                    for (int j = 0; j < MAX_BONES; j++) dst[j] = glm::mat4(1.0f);
-                }
+        list.push_back(DrawCharacter{
+            .modelMatrix = modelMat,
+            .model = &gpuModel,
+            .dress = inst.dress,
+            .boneSet = inst.boneSet[frameIndex],
+            .id = inst.id,
+            .modelId = inst.modelId,
+        });
+    }
+}
 
-                VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                dsAI.descriptorPool = boneDescPool_;
-                dsAI.descriptorSetCount = 1;
-                dsAI.pSetLayouts = &boneSetLayout_;
-                VkResult dsRes = vkAllocateDescriptorSets(device, &dsAI, &inst.boneSet[frameIndex]);
-                if (dsRes != VK_SUCCESS) {
-                    LOG_ERROR("CharacterRenderer[shadow]: bone descriptor allocation failed (instance=",
-                              inst.id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
-                    if (inst.boneBuffer[frameIndex]) {
-                        gpuDestroyBuffer(vkCtx_->getAllocator(),
-                                         inst.boneBuffer[frameIndex], inst.boneAlloc[frameIndex]);
-                        inst.boneBuffer[frameIndex] = VK_NULL_HANDLE;
-                        inst.boneAlloc[frameIndex] = VK_NULL_HANDLE;
-                        inst.boneMapped[frameIndex] = nullptr;
-                    }
-                }
+void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
+                                            const std::vector<DrawCharacter>& list) {
+    if (list.empty()) return;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
 
-                if (inst.boneSet[frameIndex]) {
-                    VkDescriptorBufferInfo bInfo{};
-                    bInfo.buffer = inst.boneBuffer[frameIndex];
-                    bInfo.offset = 0;
-                    bInfo.range = bci.size;
-                    VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    w.dstSet = inst.boneSet[frameIndex];
-                    w.dstBinding = 0;
-                    w.descriptorCount = 1;
-                    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    w.pBufferInfo = &bInfo;
-                    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
-                }
-            }
-            if (inst.boneMapped[frameIndex]) {
-                memcpy(inst.boneMapped[frameIndex], inst.boneMatrices.data(),
-                       numBones * sizeof(glm::mat4));
-            }
-        }
-
-        if (!inst.boneSet[frameIndex]) continue;
+    // Which set is bound at 0 right now, so a run of opaque batches does not
+    // rebind the same fallback for each one.
+    VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
+    for (const DrawCharacter& inst : list) {
+        const M2ModelGPU& gpuModel = *inst.model;
+        const glm::mat4& modelMat = inst.modelMatrix;
 
         // Params at set 1 and bones at set 2, together, per instance.
         //
@@ -3491,7 +3489,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         // from a set the GPU no longer considered bound, which GPU-assisted
         // validation reports as indexing a descriptor array of length zero,
         // thousands of times a session.
-        VkDescriptorSet sets[2] = {shadowParams_.set, inst.boneSet[frameIndex]};
+        VkDescriptorSet sets[2] = {shadowParams_.set, inst.boneSet};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 2, sets, 0, nullptr);
         currentTexSet = shadowParams_.set;
@@ -3504,7 +3502,8 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
         vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-        bool applyGeosetFilter = !inst.activeGeosets.empty();
+        const CharacterDress& dress = *inst.dress;
+        bool applyGeosetFilter = !dress.activeGeosets.empty();
         for (const auto& batch : gpuModel.data.batches) {
             uint16_t blendMode = 0;
             if (batch.materialIndex < gpuModel.data.materials.size()) {
@@ -3513,7 +3512,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             if (blendMode >= 2) continue; // skip transparent
             if (!characterBatchShading(gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
             if (applyGeosetFilter &&
-                inst.activeGeosets.find(batch.submeshId) == inst.activeGeosets.end()) continue;
+                dress.activeGeosets.find(batch.submeshId) == dress.activeGeosets.end()) continue;
             if (!applyGeosetFilter) {
                 uint16_t grp = batch.submeshId / 100;
                 if (grp == 17 || grp == 18) continue;
@@ -3524,7 +3523,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
             // binding 0 changes, so the bones stay bound from above.
             VkDescriptorSet texSet = shadowParams_.set;
             if (blendMode == 1) {
-                const TextureRef& tex = *resolveBatchTexture(inst, gpuModel, batch).texture;
+                const TextureRef& tex = *resolveBatchTexture(dress, gpuModel, batch).texture;
                 if (tex && tex != whiteTexture_) {
                     texSet = shadowTexDescSet(tex.get(), frameIndex);
                 }
@@ -3643,7 +3642,7 @@ void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<Loca
 }
 
 CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
-        const CharacterInstance& inst, const M2ModelGPU& gm, const pipeline::M2Batch& b,
+        const CharacterDress& dress, const M2ModelGPU& gm, const pipeline::M2Batch& b,
         uint32_t stage) const {
     // The stage's own texture, as the client takes it: textures[lookup[index +
     // stage]]. With one texture bound, this used to pick among the stages - a
@@ -3669,8 +3668,8 @@ CharacterRenderer::BatchTexture CharacterRenderer::resolveBatchTexture(
     // loincloth under a set of plate legs, and on everyone else, whose model
     // is shared and carries no skin of its own, white. Hair, the cloak and
     // the eye glow are not type 1; their slots keep them apart.
-    auto itO = inst.textureSlotOverrides.find(texSlot);
-    if (itO != inst.textureSlotOverrides.end() && itO->second) texPtr = &itO->second;
+    auto itO = dress.textureSlotOverrides.find(texSlot);
+    if (itO != dress.textureSlotOverrides.end() && itO->second) texPtr = &itO->second;
     return {.texture = *texPtr ? texPtr : &whiteTexture_, .wrapFlags = wrapFlags};
 }
 
@@ -3873,35 +3872,39 @@ void CharacterRenderer::addLookCompanion(uint32_t instanceId, uint32_t companion
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {
     auto it = scene_->instances.find(instanceId);
     if (it != scene_->instances.end()) {
-        it->second.activeGeosets = geosets;
+        redress(it->second, [&](CharacterDress& dress) { dress.activeGeosets = geosets; });
     }
 }
 
 void CharacterRenderer::setDrawSkinExtra(uint32_t instanceId, bool enabled) {
     auto it = scene_->instances.find(instanceId);
     if (it != scene_->instances.end()) {
-        it->second.drawSkinExtra = enabled;
+        redress(it->second, [&](CharacterDress& dress) { dress.drawSkinExtra = enabled; });
     }
 }
 
 void CharacterRenderer::setGroupTextureOverride(uint32_t instanceId, uint16_t geosetGroup, TextureRef texture) {
     auto it = scene_->instances.find(instanceId);
     if (it == scene_->instances.end()) return;
-    if (texture) it->second.groupTextureOverrides[geosetGroup] = std::move(texture);
-    else it->second.groupTextureOverrides.erase(geosetGroup);
+    redress(it->second, [&](CharacterDress& dress) {
+        if (texture) dress.groupTextureOverrides[geosetGroup] = std::move(texture);
+        else dress.groupTextureOverrides.erase(geosetGroup);
+    });
 }
 
 void CharacterRenderer::setTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot, TextureRef texture) {
     auto it = scene_->instances.find(instanceId);
     if (it == scene_->instances.end()) return;
-    if (texture) it->second.textureSlotOverrides[textureSlot] = std::move(texture);
-    else it->second.textureSlotOverrides.erase(textureSlot);
+    redress(it->second, [&](CharacterDress& dress) {
+        if (texture) dress.textureSlotOverrides[textureSlot] = std::move(texture);
+        else dress.textureSlotOverrides.erase(textureSlot);
+    });
 }
 
 void CharacterRenderer::clearTextureSlotOverride(uint32_t instanceId, uint16_t textureSlot) {
     auto it = scene_->instances.find(instanceId);
     if (it != scene_->instances.end()) {
-        it->second.textureSlotOverrides.erase(textureSlot);
+        redress(it->second, [&](CharacterDress& dress) { dress.textureSlotOverrides.erase(textureSlot); });
     }
 }
 

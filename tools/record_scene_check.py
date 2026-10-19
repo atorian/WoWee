@@ -9,10 +9,11 @@ can only ever read the list: the game thread is changing the scene meanwhile.
 So no recording function may reach the scene, and the count of places that do
 is held at zero.
 
-The recording functions are the M2 and WMO renderers' `record*` members
-(M2Renderer::recordView, recordTransparentPass, recordShadowCasters,
-recordM2Particles, recordM2Ribbons; WMORenderer::recordView). A reach is any
-use of `scene_`, the renderer's instance state.
+The recording functions are the M2, WMO and character renderers' `record*`
+members (M2Renderer::recordView, recordTransparentPass, recordShadowCasters,
+recordM2Particles, recordM2Ribbons; WMORenderer::recordView;
+CharacterRenderer::recordCharacters, recordShadowCasters). A reach is any use
+of `scene_`, the renderer's instance state.
 
     tools/record_scene_check.py
 
@@ -28,8 +29,10 @@ FILES = (
     "src/rendering/m2_renderer.cpp", "src/rendering/m2_renderer_render.cpp",
     "src/rendering/m2_renderer_particles.cpp", "src/rendering/m2_renderer_instance.cpp",
     "src/rendering/m2_renderer_posed_emitters.cpp", "src/rendering/wmo_renderer.cpp",
+    "src/rendering/character_renderer.cpp",
 )
-DEFINITION = re.compile(r"^\w[\w:<>,\s\*&]*\b(M2Renderer|WMORenderer)::(record\w*)\s*\(", re.M)
+DEFINITION = re.compile(
+    r"^\w[\w:<>,\s\*&]*\b(M2Renderer|WMORenderer|CharacterRenderer)::(record\w*)\s*\(", re.M)
 SCENE = re.compile(r"\bscene_\b")
 LINE_COMMENT = re.compile(r"//.*$")
 
