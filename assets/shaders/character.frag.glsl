@@ -48,7 +48,6 @@ layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
-layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
@@ -207,31 +206,10 @@ vec4 fogVolumeAt(vec3 worldPos) {
 // included.
 vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     float fogFactor = distanceFogVisibility(dist, fogParams.x, fogParams.y);
-    vec3 haze = fogColor.rgb;
-    vec4 air = vec4(0.0, 0.0, 0.0, 1.0);
-    if (volumetricParams.x > 0.5) air = fogVolumeAt(worldPos);
-    color = color * air.a + air.rgb;
-    haze = haze * air.a + air.rgb;
-    vec3 ray = (worldPos - viewPos.xyz) / max(dist, 0.001);
-    vec3 sky;
-    if (fogSkyMiddle.w > 0.5) {
-        vec4 clip = projection * view * vec4(worldPos, 1.0);
-        vec2 uv = clip.xy / max(clip.w, 0.001) * 0.5 + 0.5;
-        // This is already the real sky behind all the air. Do not fog it twice.
-        sky = textureLod(uSceneSky, uv, 0.0).rgb;
-    } else {
-        sky = atmosphereSkyColor(ray, normalize(-lightDir.xyz), fogSkyTop.rgb,
-                                 fogSkyMiddle.rgb, fogSkyBand1.rgb, fogSkyBand2.rgb);
-        sky = sky * air.a + air.rgb;
-    }
-    if (fogFactor < 1.0 && fogSkyTop.w > 0.0)
-        haze = distanceFogTint(haze, sky, dist, fogParams.x, fogParams.y, fogSkyTop.w);
-    color = mix(haze, color, fogFactor);
-    // Geometry fades into the actual background before the common hard limit.
-    // This also hides the edge of the detailed terrain without bright silhouettes.
-    if (fogSkyMiddle.w > 0.5) {
-        float visible = worldGeometryVisibility(length(worldPos.xy - viewPos.xy), fogSkyBand1.w);
-        color = mix(sky, color, visible);
+    color = mix(fogColor.rgb, color, fogFactor);
+    if (volumetricParams.x > 0.5) {
+        vec4 air = fogVolumeAt(worldPos);
+        color = color * air.a + air.rgb;
     }
     return color;
 }
@@ -411,8 +389,7 @@ void main() {
         // The blend multiplies by the colour and ignores alpha, so fog and the
         // fade go into the colour, toward the multiplication identity. Mixing
         // toward the fog colour would tint everything behind the layer.
-        float visibility = distanceFogVisibility(dist, fogParams.x, fogParams.y) * opacity *
-            worldGeometryVisibility(length(FragPos.xy - viewPos.xy), fogSkyBand1.w);
+        float visibility = distanceFogVisibility(dist, fogParams.x, fogParams.y) * opacity;
         if (volumetricParams.x > 0.5) visibility *= fogVolumeAt(FragPos).a;
         result = mix(vec3(modulateNeutral), result, clamp(visibility, 0.0, 1.0));
     } else {

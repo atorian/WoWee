@@ -1,6 +1,7 @@
 #include "ui/settings_schema.hpp"
 
 #include "ui/graphics_defaults.hpp"
+#include "rendering/view_distance.hpp"
 
 namespace wowee {
 namespace ui {
@@ -55,10 +56,10 @@ constexpr SettingDesc kSchema[] = {
      "How far sunlight shadows reach, in yards. A shorter distance\n"
      "makes these shadows sharper. Nearby character and object shadows\n"
      "keep their detail at any distance setting.", "", 300},
-    {"viewdistance", "View distance", SettingKind::Float, 400, 2400, 50, "Graphics", "View",
-     "How far into the distance the world is drawn, in yards. The single\n"
-     "largest cost in the picture: terrain, buildings and creatures are all\n"
-     "drawn to this range.", "", 1900},
+    {"viewdistance", "View distance", SettingKind::Float, rendering::kMinViewDistance, rendering::kMaxViewDistance, 50, "Graphics", "View",
+     "Maximum distance for terrain, water and buildings, in yards. Higher\n"
+     "values load more of the world and use more memory. Fog can hide distant\n"
+     "surfaces; creatures and scenery have separate visibility limits.", "", 1900},
     // It used to be left out, deferred to the Effects panel of the game's own
     // Video options - as were ground clutter, its radius, brightness,
     // particle and weather detail, environment detail and texture filtering.
@@ -82,10 +83,6 @@ constexpr SettingDesc kSchema[] = {
      "How heavy the distance fog is, against the zone's own design.\n"
      "1 is as designed. Below 1 thins it and 0 removes it; above 1\n"
      "brings it closer.", "", 0.4f},
-    {"fogskyblend", "Fog takes the sky's colour", SettingKind::Float, 0, 1, 0.05f, "Graphics", "",
-     "How much distant fog is tinted toward the sky behind it, so the\n"
-     "horizon does not stand out pale against a dark sky. 0 uses the\n"
-     "zone's fog colour alone; 1 matches the sky.", "", 0.7f},
     // The light shafts' own thickness. Their switch and its quality are on
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",

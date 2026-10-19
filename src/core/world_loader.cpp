@@ -390,7 +390,8 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                 done = load.status.result == WorldLoadResult::Ready;
                 if (done) {
                     if (terrain->getRemainingTileCount() > 0) LOG_WARNING(load.status.reason, " (map=", load.entry.mapId, ")");
-                    terrain->setLoadRadius(6);
+                    terrain->setLoadRadius(renderer_->getTerrainLoadRadius());
+                    terrain->setUnloadRadius(renderer_->getTerrainUnloadRadius());
                 }
             } else { fail("Terrain manager unavailable"); return status(); }
             if (done) {

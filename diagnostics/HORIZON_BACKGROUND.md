@@ -1,5 +1,46 @@
 # Horizon background — 2026-10-11
 
+## Authored colours — 2026-10-19
+
+After the rollback below, the colour correction removes the restored
+middle-sky tint as well. Surface fog now keeps the zone's LightIntBand fog
+colour. The sky and water's fallback reflection use all six authored bands,
+including the previously missing smog and fog bands, without an invented
+dark nadir or horizon haze. The radial interpolation follows the dome profile
+documented in noclip.website's WorldOfWarcraft/mesh.ts; it does not reproduce
+the original polygonal mesh exactly.
+
+The obsolete fog_sky_blend control is removed; legacy settings are ignored
+with a warning. Distance fog strength and volumetric fog controls remain.
+The volumetric implementation itself is unchanged.
+
+The authored-fog regression was observed failing before the correction.
+The dev build and sweep_guard completed, but final post-change test execution
+and a matched visual comparison were deferred when the user requested no
+further builds or launches. The rollback validation below predates this
+colour correction.
+
+## Rollback — 2026-10-19
+
+At the user's request, surface haze no longer samples the sky background or
+converges on it with distance, and the extra geometry-to-sky fade is removed.
+The pre-change, uniform fog/sky-middle tint is restored in LightingManager.
+Ordinary distance fog, volumetric air, correct light accumulation and geometry
+culling remain. Sky capture remains in use for water reflections. The original
+implementation and its validation below describe the superseded behaviour.
+
+Rollback validation: the dev client and scene_render build successfully;
+light/fog tests pass (230 assertions in 18 cases). The six affected fragment
+shaders pass spirv-val for Vulkan 1.2 and match the runtime copies. An offline
+Stormwind transport scene at 06:37, with fog strength 0.75 and sky tint 0.5,
+shows the restored distinct distant silhouette; before/after images are in
+build-dev/scratch/rollback-fog-{before,after}.png. This checks the requested
+rollback, not visual parity with the stock client. The client was relaunched
+from build-dev/bin with a complete profile copy on D: and reached IN_WORLD
+on Isengard Tirion x2.
+The full sweep_guard passes on the configured Python 3.14 runtime; checks
+requiring absent Data/interface or framexml_run are explicitly skipped.
+
 The follow-up screenshot still has yellow Gundrak/transport silhouettes against the purple Dalaran sky, and a distant castle with no visible island underneath it. This supersedes the first directional-gradient treatment in DISTANCE_FOG.md.
 
 ## Causes

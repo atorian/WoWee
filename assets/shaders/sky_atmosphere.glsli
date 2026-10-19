@@ -1,67 +1,43 @@
-// The same atmospheric background for the skybox and distant surfaces.
-// Clouds/stars stay in their own sky layers; they are not painted on objects.
-// No glow round the sun: WoW.exe's sky dome is its LightIntBand gradient
-// alone, and the glow is a sprite of its own (sky_sun.hpp, sunGlare.blp).
-vec3 atmosphereSkyColor(vec3 worldDir, vec3 sunDir, vec3 zenith,
-                        vec3 middle, vec3 horizon, vec3 fringe) {
-    // Elevation: +1 = zenith, 0 = horizon, -1 = nadir
-    float elev = worldDir.z;
-    float elevClamped = clamp(elev, 0.0f, 1.0f);
+// Six authored sky colours, shared by the sky dome and water reflections.
+// The radial profile is the WoW dome documented by noclip's mesh.ts:
+// https://github.com/magcius/noclip.website/blob/main/src/WorldOfWarcraft/mesh.ts
+// (radius, height), from top to bottom: (0,.29289323), (.49034798,.13914520),
+// (.56799996,.08489323), (.64133203,.02416122), (.65308857,.01345474),
+// (.6875,-.005). Its bottom pole has the same fog colour as the last ring.
+// Intersect the viewing ray with each conical band; do not invent a dark
+// nadir, horizon glow or night tint on top of the authored colours.
+vec3 skyDomeBand(float slope, float upperRadius, float upperHeight,
+                 float lowerRadius, float lowerHeight, vec3 upper, vec3 lower) {
+    float radialSpan = lowerRadius - upperRadius;
+    float heightSpan = lowerHeight - upperHeight;
+    float weight = (upperHeight - slope * upperRadius) /
+                   max(slope * radialSpan - heightSpan, 0.000001f);
+    return mix(upper, lower, clamp(weight, 0.0f, 1.0f));
+}
 
-    // --- 3-band sky gradient using DBC colors ---
-    // Zenith dominates upper sky, mid color fills the middle,
-    // horizon band at the bottom with a thin fog fringe.
-    vec3 sky;
-    if (elevClamped > 0.4f) {
-        // Upper sky: mid -> zenith
-        float t = (elevClamped - 0.4f) / 0.6f;
-        sky = mix(middle, zenith, t);
-    } else if (elevClamped > 0.05f) {
-        // Lower sky: horizon -> mid (wide band)
-        float t = (elevClamped - 0.05f) / 0.35f;
-        sky = mix(horizon, middle, t);
-    } else {
-        // Thin fog fringe right at horizon
-        float t = elevClamped / 0.05f;
-        sky = mix(fringe, horizon, t);
-    }
-
-    // --- Below-horizon darkening (nadir) ---
-    if (elev < 0.0f) {
-        float nadirFade = clamp(-elev * 3.0f, 0.0f, 1.0f);
-        vec3 nadirColor = fringe * 0.3f;
-        sky = mix(fringe, nadirColor, nadirFade);
-    }
-
-    float sunAboveHorizon = clamp(sunDir.z, 0.0f, 1.0f);
-
-    // --- Subtle horizon haze ---
-    float hazeDensity = exp(-elevClamped * 12.0f) * 0.06f;
-    sky += horizon * hazeDensity * sunAboveHorizon;
-
-    // --- Night: slight moonlight tint ---
-    if (sunDir.z < 0.0f) {
-        float moonlight = clamp(-sunDir.z * 0.5f, 0.0f, 0.15f);
-        sky += vec3(0.02f, 0.03f, 0.08f) * moonlight;
-    }
-
-    return sky;
+vec3 atmosphereSkyColor(vec3 worldDir, vec3 zenith, vec3 middle,
+                        vec3 band1, vec3 band2, vec3 smog, vec3 fog) {
+    float horizontal = sqrt(worldDir.x * worldDir.x + worldDir.y * worldDir.y);
+    if (horizontal == 0.0f) return worldDir.z > 0.0f ? zenith : fog;
+    float slope = worldDir.z / horizontal;
+    if (slope >= 0.13914520f / 0.49034798f)
+        return skyDomeBand(slope, 0.0f, 0.29289323f, 0.49034798f, 0.13914520f,
+                           zenith, middle);
+    if (slope >= 0.08489323f / 0.56799996f)
+        return skyDomeBand(slope, 0.49034798f, 0.13914520f, 0.56799996f, 0.08489323f,
+                           middle, band1);
+    if (slope >= 0.02416122f / 0.64133203f)
+        return skyDomeBand(slope, 0.56799996f, 0.08489323f, 0.64133203f, 0.02416122f,
+                           band1, band2);
+    if (slope >= 0.01345474f / 0.65308857f)
+        return skyDomeBand(slope, 0.64133203f, 0.02416122f, 0.65308857f, 0.01345474f,
+                           band2, smog);
+    if (slope > -0.005f / 0.6875f)
+        return skyDomeBand(slope, 0.65308857f, 0.01345474f, 0.6875f, -0.005f,
+                           smog, fog);
+    return fog;
 }
 
 float distanceFogVisibility(float dist, float start, float end) {
     return clamp((end - dist) / max(end - start, 0.001f), 0.0f, 1.0f);
-}
-
-vec3 distanceFogTint(vec3 authored, vec3 sky, float dist,
-                     float start, float end, float skyBlend) {
-    // Match the background by the fog end, rather than retaining a colored
-    // silhouette after every surface detail has already disappeared.
-    float tail = smoothstep(start, max(end, start + 1.0f), dist);
-    float blend = clamp(skyBlend * (1.0f + tail), 0.0f, 1.0f);
-    return mix(authored, sky, blend);
-}
-
-float worldGeometryVisibility(float horizontalDistance, float range) {
-    if (range <= 0.0f) return 1.0f; // portraits/standalone scenes
-    return 1.0f - smoothstep(0.85f * range, range, horizontalDistance);
 }

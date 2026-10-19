@@ -13,13 +13,14 @@ namespace rendering {
 
 // Push constant struct - must match skybox.frag.glsl layout
 struct SkyPushConstants {
-    glm::vec4 zenithColor;    // DBC skyTopColor
-    glm::vec4 midColor;       // DBC skyMiddleColor
-    glm::vec4 horizonColor;   // DBC skyBand1Color
-    glm::vec4 fogColor;       // DBC skyBand2Color / fogColor blend
-    glm::vec4 sunDirAndTime;  // xyz = sun direction, w = timeOfDay
+    glm::vec4 zenithColor;
+    glm::vec4 midColor;
+    glm::vec4 horizonColor;
+    glm::vec4 band2Color;
+    glm::vec4 smogColor;
+    glm::vec4 fogColor;
 };
-static_assert(sizeof(SkyPushConstants) == 80, "SkyPushConstants size mismatch");
+static_assert(sizeof(SkyPushConstants) == 96, "SkyPushConstants size mismatch");
 
 Skybox::Skybox() = default;
 
@@ -44,7 +45,7 @@ bool Skybox::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(SkyPushConstants);  // 80 bytes
+    pushRange.size = sizeof(SkyPushConstants);  // six colour bands
 
     // Create pipeline layout with perFrameLayout (set 0) + push constants
     pipelineLayout = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -124,15 +125,13 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
         return;
     }
 
-    // Compute sun direction from directionalDir (light points toward scene, sun is opposite)
-    glm::vec3 sunDir = -glm::normalize(params.directionalDir);
-
     SkyPushConstants push{};
-    push.zenithColor   = glm::vec4(params.skyTopColor, 1.0f);
-    push.midColor      = glm::vec4(params.skyMiddleColor, 1.0f);
-    push.horizonColor  = glm::vec4(params.skyBand1Color, 1.0f);
-    push.fogColor      = glm::vec4(params.skyBand2Color, 1.0f);
-    push.sunDirAndTime = glm::vec4(sunDir, params.timeOfDay);
+    push.zenithColor  = glm::vec4(params.skyTopColor, 1.0f);
+    push.midColor     = glm::vec4(params.skyMiddleColor, 1.0f);
+    push.horizonColor = glm::vec4(params.skyBand1Color, 1.0f);
+    push.band2Color   = glm::vec4(params.skyBand2Color, 1.0f);
+    push.smogColor    = glm::vec4(params.skySmogColor, 1.0f);
+    push.fogColor     = glm::vec4(params.skyFogColor, 1.0f);
 
     // Bind pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

@@ -817,16 +817,11 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
-        const float skyBlend = lightingManager->isIndoors() ? 0.0f
-            : glm::clamp(lightingManager->getFogSkyBlend(), 0.0f, 1.0f);
-        currentFrameData.fogSkyTop = glm::vec4(lp.skyTopColor, skyBlend);
+        currentFrameData.fogSkyTop = glm::vec4(lp.skyTopColor, 0.0f);
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
         currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
-
-        // A haze of the weather's own is its own colour, not the sky's
-        // behind it.
-        currentFrameData.fogSkyTop.w *= 1.0f - 0.9f * std::max(weather_.mix().sand, weather_.mix().mist);
+        currentFrameData.skySmogColor = glm::vec4(lp.skySmogColor, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
@@ -4353,7 +4348,7 @@ void Renderer::setSharpStars(bool enabled) {
 }
 
 void Renderer::setViewDistance(float distance) {
-    viewDistance_ = glm::clamp(distance, 400.0f, 2400.0f);
+    viewDistance_ = glm::clamp(distance, kMinViewDistance, kMaxViewDistance);
 
     if (terrainRenderer) terrainRenderer->setViewDistance(viewDistance_);
     if (wmoRenderer) wmoRenderer->setViewDistance(viewDistance_);
@@ -4366,7 +4361,10 @@ void Renderer::setViewDistance(float distance) {
 
 int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = core::coords::TILE_SIZE;
-    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
+    // One tile beyond the visible circle covers the camera's position inside
+    // its tile. Derive the radius from the setting instead of capping it at
+    // six tiles, which would leave the far end of a 4000-yard view unloaded.
+    return std::max(2, static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1);
 }
 
 // ──────────────────────────────────────────────────────
@@ -5103,6 +5101,7 @@ void Renderer::hazeLightForWeather() {
         p.skyMiddleColor = haze(p.skyMiddleColor, 0.8f, 0.5f);
         p.skyBand1Color = haze(p.skyBand1Color, 0.85f, 0.6f);
         p.skyBand2Color = haze(p.skyBand2Color, 0.85f, 0.6f);
+        p.skySmogColor = haze(p.skySmogColor, 0.85f, 0.6f);
         p.cloudFillColor = haze(p.cloudFillColor, 0.6f, 0.4f);
         p.cloudBaseColor = haze(p.cloudBaseColor, 0.6f, 0.4f);
         p.fogStart = glm::mix(glm::mix(p.fogStart, 2.0f, w.sand), 10.0f, w.mist * 0.8f);

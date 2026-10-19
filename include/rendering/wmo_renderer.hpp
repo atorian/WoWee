@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/view_distance.hpp"
+
 #include "rendering/normal_map_encoding.hpp"
 #include "rendering/texture_cache.hpp"
 #include "rendering/collision_geometry.hpp"
@@ -331,7 +333,7 @@ public:
     }
     bool isDistanceCullingEnabled() const { return distanceCulling; }
     float getMaxGroupDistance() const { return maxGroupDistance; }
-    void setViewDistance(float distance) { viewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
+    void setViewDistance(float distance) { viewDistance_ = std::clamp(distance, kMinViewDistance, kMaxViewDistance); }
 
     /**
      * Get number of groups culled by portals last frame

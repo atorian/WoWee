@@ -48,7 +48,7 @@ TEST_CASE("a non-game-object ignores the floor", "[m2][viewdist]") {
 TEST_CASE("raising the view distance never shortens an instance's range", "[m2][viewdist]") {
     const float base = 1000.0f * 1000.0f;
     float previous = 0.0f;
-    for (float viewDistance = 400.0f; viewDistance <= 2400.0f; viewDistance += 100.0f) {
+    for (float viewDistance = 400.0f; viewDistance <= 4000.0f; viewDistance += 100.0f) {
         const float d = m2InstanceMaxDistSq(base, 3.0f, true, kGameObjectFloor, viewDistance);
         REQUIRE(d >= previous);
         previous = d;

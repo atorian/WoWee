@@ -1,3 +1,4 @@
+#include "rendering/view_distance.hpp"
 #include "ui/auth_screen.hpp"
 #include <future>
 #include <chrono>
@@ -1723,8 +1724,14 @@ void AuthScreen::loadLoginGraphicsState() {
         if (key == "graphics_preset")       loginGfx_.preset        = clampI(std::stoi(val), 0, kGraphicsPresetCount);
         else if (key == "shadows")          loginGfx_.shadows        = (val == "1");
         else if (key == "shadow_distance")  loginGfx_.shadowDistance = clampF(std::stof(val), 40.0f, 500.0f);
-        else if (key == "view_distance")    loginGfx_.viewDistance   = clampF(std::stof(val), 400.0f, 2400.0f);
-        else if (key == "fog_sky_blend")    loginGfx_.fogSkyBlend    = clampF(std::stof(val), 0.0f, 1.0f);
+        else if (key == "view_distance")    loginGfx_.viewDistance   = clampF(std::stof(val), rendering::kMinViewDistance, rendering::kMaxViewDistance);
+        else if (key == "fog_sky_blend") {
+            static bool warned = false;
+            if (!warned) {
+                LOG_WARNING("Setting fog_sky_blend is obsolete; the zone's authored fog colour is used");
+                warned = true;
+            }
+        }
         else if (key == "fog_strength")     loginGfx_.fogStrength    = clampF(std::stof(val), 0.0f, 2.0f);
         else if (key == "sharp_stars")      loginGfx_.sharpStars     = (val == "1");
         else if (key == "antialiasing")     loginGfx_.antiAliasing   = clampI(std::stoi(val), 0, 3);
@@ -1764,7 +1771,7 @@ void AuthScreen::saveLoginGraphicsState() {
     cfg["shadows"]               = loginGfx_.shadows        ? "1" : "0";
     cfg["shadow_distance"]       = std::to_string(static_cast<int>(loginGfx_.shadowDistance));
     cfg["view_distance"]         = std::to_string(static_cast<int>(loginGfx_.viewDistance));
-    cfg["fog_sky_blend"]         = std::to_string(loginGfx_.fogSkyBlend);
+    cfg.erase("fog_sky_blend");
     cfg["fog_strength"]          = std::to_string(loginGfx_.fogStrength);
     cfg["sharp_stars"]           = loginGfx_.sharpStars      ? "1" : "0";
     cfg["antialiasing"]          = std::to_string(loginGfx_.antiAliasing);
@@ -1928,7 +1935,7 @@ void AuthScreen::renderLoginSettingsSheet(float screenW, float screenH) {
         }
         {
             const auto [ra, rb] = labelled("View distance");
-            ui_.sliderFloat("gfx.viewdist", ra, rb, &loginGfx_.viewDistance, 400.0f, 2400.0f);
+            ui_.sliderFloat("gfx.viewdist", ra, rb, &loginGfx_.viewDistance, rendering::kMinViewDistance, rendering::kMaxViewDistance);
             right.gap(px(8));
         }
         {

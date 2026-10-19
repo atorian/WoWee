@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/view_distance.hpp"
+
 #include <chrono>
 #include "core/job_group.hpp"
 #include <functional>

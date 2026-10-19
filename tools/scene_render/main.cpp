@@ -61,8 +61,8 @@
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "fxaa": false,                      // FXAA, drawn through its own target
+//     "viewDistance": 1900.0,             // world geometry range, in yards
 //     "fogStrength": 0.4,                 // the settings panel's atmosphere:
-//     "fogSkyBlend": 0.7,                 //   distance fog, its pull to the sky,
 //     "volumetricFog": 2,                 //   volumetric quality 0-3 and density,
 //     "volumetricDensity": 1.0,           //   and the sun's rays
 //     "sunShafts": true,
@@ -476,12 +476,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     renderer.setWorldEnvironment(environment);
     renderer.setWorldInView(true);
+    if (scene.contains("viewDistance")) {
+        renderer.setViewDistance(scene["viewDistance"].get<float>());
+        std::printf("scene_render: view distance %g, terrain load radius %d\n",
+                    renderer.getViewDistance(), renderer.getTerrainLoadRadius());
+    }
 
     // The atmosphere settings, as the settings panel sets them. Unset, each
     // keeps the renderer's own default, not the panel's.
     if (auto* lighting = renderer.getLightingManager()) {
         if (scene.contains("fogStrength")) lighting->setFogStrength(scene["fogStrength"].get<float>());
-        if (scene.contains("fogSkyBlend")) lighting->setFogSkyBlend(scene["fogSkyBlend"].get<float>());
+        if (scene.contains("fogSkyBlend"))
+            LOG_WARNING("scene_render: fogSkyBlend is obsolete; the zone's authored fog colour is used");
     }
     if (scene.contains("volumetricFog")) renderer.setVolumetricFogQuality(scene["volumetricFog"].get<int>());
     if (scene.contains("volumetricDensity")) {

@@ -494,9 +494,9 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
     }
 
-    // Keep the authored fog colour. The surface shaders blend it toward the
-    // actual sky band along each camera ray; one CPU-side mid-sky tint made
-    // buildings below the horizon stand out as pale silhouettes.
+    // Keep LightIntBand's fog colour intact. The sky dome has its own smog
+    // and fog bands; mixing the middle sky into surfaces produces a different
+    // hue and leaves pale silhouettes against the authored sky models.
 
     // How much fog, as a multiplier on the distances the zone asks for.
     //
@@ -600,6 +600,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_.skyMiddleColor = glm::mix(currentParams_.skyMiddleColor, newParams.skyMiddleColor, blendFactor);
     currentParams_.skyBand1Color = glm::mix(currentParams_.skyBand1Color, newParams.skyBand1Color, blendFactor);
     currentParams_.skyBand2Color = glm::mix(currentParams_.skyBand2Color, newParams.skyBand2Color, blendFactor);
+    currentParams_.skySmogColor = glm::mix(currentParams_.skySmogColor, newParams.skySmogColor, blendFactor);
     currentParams_.sunColor = glm::mix(currentParams_.sunColor, newParams.sunColor, blendFactor);
     currentParams_.cloudSunlitColor =
         glm::mix(currentParams_.cloudSunlitColor, newParams.cloudSunlitColor, blendFactor);
