@@ -134,76 +134,44 @@ bool WMORenderer::prepareGroupResources(const pipeline::WMOGroup& group, GroupRe
         }
     }
 
-    // Store collision geometry for floor raycasting.
-    // Use MOPY per-triangle flags to exclude detail/decorative geometry (flag 0x04)
-    // from collision - these are things like gears, railings, etc.
-    resources.collisionVertices.reserve(group.vertices.size());
-    for (const auto& v : group.vertices) {
-        resources.collisionVertices.push_back(v.position);
-    }
+    // What the group is solid with: every triangle, each tagged with its MOPY
+    // flags, which decide what blocks (detail - gears, railings - does not).
+    std::vector<glm::vec3> collisionVertices;
+    collisionVertices.reserve(group.vertices.size());
+    for (const auto& v : group.vertices) collisionVertices.push_back(v.position);
+    // The floor's colour lights a unit standing on it, in an interior group
+    // that has colours.
+    std::vector<glm::vec3> vertexColors;
     if ((groupFlags & pipeline::kWMOGroupIndoor) && (groupFlags & pipeline::kWMOGroupHasVertexColors)) {
-        resources.collisionVertexColors.reserve(group.vertices.size());
-        for (const auto& v : group.vertices) {
-            resources.collisionVertexColors.push_back(glm::vec3(v.color));
-        }
+        vertexColors.reserve(group.vertices.size());
+        for (const auto& v : group.vertices) vertexColors.push_back(glm::vec3(v.color));
     }
-    resources.collisionIndices = group.indices;
+    std::vector<uint8_t> mopyFlags;
     if (!group.triFlags.empty()) {
-        // Store all triangles but tag each with MOPY flags for collision filtering
-        size_t numTris = group.indices.size() / 3;
-        resources.triMopyFlags.resize(numTris, 0);
+        const size_t numTris = group.indices.size() / 3;
+        mopyFlags.resize(numTris, 0);
         for (size_t t = 0; t < numTris; t++) {
-            resources.triMopyFlags[t] = (t < group.triFlags.size()) ? group.triFlags[t] : 0;
+            mopyFlags[t] = (t < group.triFlags.size()) ? group.triFlags[t] : 0;
         }
     }
 
-    // Compute actual bounding box from vertices (WMO header bboxes can be unreliable)
-    if (!resources.collisionVertices.empty()) {
-        resources.boundingBoxMin = resources.collisionVertices[0];
-        resources.boundingBoxMax = resources.collisionVertices[0];
-        for (const auto& v : resources.collisionVertices) {
+    // The box from the vertices themselves: WMO header boxes can be wrong.
+    if (!collisionVertices.empty()) {
+        resources.boundingBoxMin = collisionVertices[0];
+        resources.boundingBoxMax = collisionVertices[0];
+        for (const auto& v : collisionVertices) {
             resources.boundingBoxMin = glm::min(resources.boundingBoxMin, v);
             resources.boundingBoxMax = glm::max(resources.boundingBoxMax, v);
         }
     }
 
-    // Build 2D spatial grid for fast collision triangle lookup
-    resources.buildCollisionGrid();
-
-    // What this group offers to stand on, said once per group.
-    //
-    // Darkshore's bridges are walked through, and they are WMOs rather than
-    // doodads - world/wmo/kalimdor/collidabledoodads/darkshore/bridge - so the
-    // floor under them is this list. A group that draws and has no triangles
-    // here, or whose triangles are all detail, is a floor that cannot be found,
-    // and neither shows up as anything but falling.
-    {
-        size_t hull = 0, renderedSolid = 0, detail = 0;
-        for (uint8_t mopy : resources.triMopyFlags) {
-            if (mopy & 0x08) ++hull;
-            if ((mopy & 0x20) && !(mopy & 0x04)) ++renderedSolid;
-            if (mopy & 0x04) ++detail;
-        }
-        // At warning, because the log carries nothing below it - which is why
-        // the first attempt at this said nothing at all.
-        //
-        // Only a group that offers no floor. Every group saying its counts is
-        // thousands of lines and buries the ones that matter; a group with no
-        // triangles at all, or none that block, is the whole of what "walked
-        // through it" looks like from here.
-        const size_t tris = resources.collisionIndices.size() / 3;
-        resources.noBlockingTriangles = (tris > 0 && hull == 0 && renderedSolid == 0);
-        if (tris == 0 || resources.noBlockingTriangles) {
-            LOG_WARNING("WMO group offers no floor: verts=",
-                        resources.collisionVertices.size(),
-                        " tris=", tris,
-                        " hull(0x08)=", hull,
-                        " renderedSolid(0x20 not 0x04)=", renderedSolid,
-                        " detail(0x04)=", detail,
-                        " - nothing here blocks, so anything standing on this "
-                        "group falls through it");
-        }
-    }
+    // Says at warning when the group offers no floor at all: Darkshore's
+    // bridges are WMOs whose every triangle is detail, and a floor that cannot
+    // be found shows up as nothing but falling.
+    resources.shape = collision::WmoGroupShape::build(
+        groupFlags, resources.boundingBoxMin, resources.boundingBoxMax,
+        std::move(collisionVertices), group.indices, std::move(vertexColors),
+        std::move(mopyFlags));
 
     // Create batches
     if (!group.batches.empty()) {
@@ -543,20 +511,21 @@ std::shared_ptr<WmoModelPrep> WMORenderer::prepareModel(const pipeline::WMOModel
     for (const auto& g : prep->groups) {
         const GroupResources& group = g.resources;
         if (group.isLOD || group.allUntextured || (group.groupFlags & 0x4000000u)) continue;
-        if (group.collisionVertices.empty()) continue;
+        const collision::WmoGroupShape& shape = *group.shape;
+        if (shape.vertices.empty()) continue;
         const uint32_t base = static_cast<uint32_t>(prep->rtMesh.positions.size());
-        prep->rtMesh.positions.insert(prep->rtMesh.positions.end(), group.collisionVertices.begin(),
-                                      group.collisionVertices.end());
+        prep->rtMesh.positions.insert(prep->rtMesh.positions.end(), shape.vertices.begin(),
+                                      shape.vertices.end());
         for (const auto& batch : group.batches) {
             const uint32_t mat = batch.materialId;
             const uint32_t blend = mat < prep->materialBlendModes.size() ? prep->materialBlendModes[mat] : 0;
             if (blend >= 2) continue;  // blended: glass, light cards, water sheets
             const uint32_t end = std::min<uint32_t>(batch.startIndex + batch.indexCount,
-                                                    static_cast<uint32_t>(group.collisionIndices.size()));
+                                                    static_cast<uint32_t>(shape.indices.size()));
             for (uint32_t i = batch.startIndex; i + 2 < end; i += 3) {
-                prep->rtMesh.indices.push_back(base + group.collisionIndices[i]);
-                prep->rtMesh.indices.push_back(base + group.collisionIndices[i + 1]);
-                prep->rtMesh.indices.push_back(base + group.collisionIndices[i + 2]);
+                prep->rtMesh.indices.push_back(base + shape.indices[i]);
+                prep->rtMesh.indices.push_back(base + shape.indices[i + 1]);
+                prep->rtMesh.indices.push_back(base + shape.indices[i + 2]);
                 prep->rtTriangleMaterial.push_back(mat);
             }
         }

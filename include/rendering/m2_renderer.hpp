@@ -1,11 +1,10 @@
 #pragma once
 
+#include "collision/m2_shape.hpp"
 #include "rendering/texture_cache.hpp"
-#include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/instance_index_set.hpp"
 #include "rendering/instance_random.hpp"
-#include "rendering/spatial_grid.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
@@ -44,6 +43,7 @@ namespace wowee {
 namespace pipeline {
     class AssetManager;
 }
+namespace collision { class CollisionWorld; }
 
 namespace rendering {
 
@@ -157,38 +157,10 @@ struct M2ModelGPU {
     bool isForge = false;           // Smithy forge (contained fire, lights its surroundings)
     AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
 
-    // Collision mesh with spatial grid (from M2 bounding geometry)
-    struct CollisionMesh {
-        std::vector<glm::vec3> vertices;
-        std::vector<uint16_t> indices;
-        uint32_t triCount = 0;
-        /// The box around the vertices, in model space.
-        glm::vec3 boundMin{0.0f};
-        glm::vec3 boundMax{0.0f};
-
-        struct TriBounds { float minZ, maxZ; };
-        std::vector<TriBounds> triBounds;
-
-        static constexpr float CELL_SIZE = 4.0f;
-        glm::vec2 gridOrigin{0.0f};
-        int gridCellsX = 0, gridCellsY = 0;
-        std::vector<std::vector<uint32_t>> cellFloorTris;
-        std::vector<std::vector<uint32_t>> cellWallTris;
-
-        void build();
-        /// The triangles of one of the two cell arrays that a query box
-        /// reaches. The two queries below differ only in which they pass.
-        void gatherTrisInRange(const std::vector<std::vector<uint32_t>>& cells,
-                               float minX, float minY, float maxX, float maxY,
-                               std::vector<uint32_t>& out) const;
-
-        void getFloorTrisInRange(float minX, float minY, float maxX, float maxY,
-                                 std::vector<uint32_t>& out) const;
-        void getWallTrisInRange(float minX, float minY, float maxX, float maxY,
-                                std::vector<uint32_t>& out) const;
-        [[nodiscard]] bool valid() const { return triCount > 0; }
-    };
-    CollisionMesh collision;
+    /// What the model is solid with, shared with the collision world; none
+    /// for a model without a collision mesh, an invisible trap or a spell
+    /// effect.
+    std::shared_ptr<const collision::M2Shape> collision;
 
     std::string name;
 
@@ -414,8 +386,6 @@ struct M2Instance {
     uint8_t afloatTries = 0;
     float afloatRecheck = 0.0f;
     bool cachedIsValid = false;
-    bool skipCollision = false;    // Fully non-collidable visual/effect instance
-    bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
     /// The light of the WMO interior group the instance stands in, if any.
     InteriorLightGPU interiorLight;
     float cachedBoundRadius = 0.0f;
@@ -742,29 +712,6 @@ public:
     /// unknown instance or a degenerate (zero-radius) model.
     bool getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const;
 
-    /// The world-space box of an instance's collision geometry.
-    ///
-    /// What a lift's deck actually covers, as opposed to how far its origin is
-    /// from you. Boarding a generic M2 transport is decided on a radius around
-    /// that origin, which is why standing beside an Undercity lift shaft
-    /// attaches you to the car.
-    ///
-    /// `placement`, when given, is where the instance's owner has it this
-    /// frame - a transport moved since the scene's changes were last made -
-    /// rather than where the instance last stood.
-    bool getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin, glm::vec3& outMax,
-                                const glm::mat4* placement = nullptr) const;
-
-    /// The floor one named instance offers under a point, ignoring every other.
-    ///
-    /// Asked of a lift car, this is "is its deck under your feet" - which a box
-    /// around the car cannot answer, because an axis-aligned box covers the
-    /// doorway and the ground just outside it.
-    /// `placement` as for getInstanceWorldBounds.
-    std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
-                                                float glX, float glY, float glZ,
-                                                const glm::mat4* placement = nullptr) const;
-
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
@@ -801,24 +748,10 @@ public:
      *  last call. Lets callers that track uploaded models drop stale entries. */
     std::vector<uint32_t> drainReapedModelIds();
 
-    bool checkCollision(const glm::vec3& from, const glm::vec3& to,
-                        glm::vec3& adjustedPos, float playerRadius = 0.5f) const;
-    std::optional<float> getFloorHeight(float glX, float glY, float glZ, float* outNormalZ = nullptr) const;
-
-    /// Every doodad the floor query would consider here, and what each one
-    /// contributes. The WMO side has had debugDumpGroupsAtPosition for this
-    /// since the Undercity pull was first chased; the M2 side had nothing, so
-    /// a floor that should have come from a lift deck and did not left no
-    /// trace at all beyond "m2=-99999".
-    void debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const;
-    /// How far along a ray the first doodad collision triangle lies, up to
-    /// maxDistance: the camera's doodad collision.
-    [[nodiscard]] float raycastCollision(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
-    void setCollisionFocus(const glm::vec3& worldPos, float radius);
-
-    void resetQueryStats();
-    [[nodiscard]] double getQueryTimeMs() const { return queryTimeMs; }
-    [[nodiscard]] uint32_t getQueryCallCount() const { return queryCallCount; }
+    /// Where the instances with a collision mesh are placed, moved, hidden and
+    /// removed as they are here, so the world they are solid in always has
+    /// what this draws. Not given to the sky's renderer.
+    void setCollisionWorld(collision::CollisionWorld* world) { collision_ = world; }
 
     void recreatePipelines();
 
@@ -1319,8 +1252,9 @@ private:
     TextureRef glowTexture_;
     VkDescriptorSet glowTexDescSet_ = VK_NULL_HANDLE;  // cached glow texture descriptor (allocated once)
 
-    // Optional query-space culling for collision/raycast hot paths.
-    CollisionFocus collisionFocus;
+    collision::CollisionWorld* collision_ = nullptr;
+    /// Places an instance in the collision world, when its model has a shape.
+    void placeInCollision(const M2Instance& instance);
 
     /// Files the instance at `index` in the animated, particle and light
     /// sets it belongs to; a hidden one in none.
@@ -1330,7 +1264,6 @@ private:
     /// The instance at `from` now lives at `to`, its place taken by a
     /// swap-remove.
     void moveInIndexSets(size_t from, size_t to);
-    void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
 
     /// Instances by 64-yard column, for the view and shadow passes to reject
@@ -1375,12 +1308,6 @@ private:
     // model. Finding one by scanning every instance is O(n) per spawn, which
     // became 18ms for a single createInstance once a zone held tens of
     // thousands of them.
-    // Collision scratch buffers are thread_local (see m2_renderer.cpp) for thread-safety.
-
-    // Collision query profiling - atomic because getFloorHeight is dispatched
-    // on async threads from camera_controller while the main thread reads these.
-    mutable std::atomic<double> queryTimeMs{0.0};
-    mutable std::atomic<uint32_t> queryCallCount{0};
 
     // Persistent render buffers (avoid per-frame allocation/deallocation)
     struct VisibleEntry {
@@ -1584,7 +1511,6 @@ private:
         std::vector<M2Instance> instances;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
         std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
-        SpatialGrid spatialGrid;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
         M2CullGrid cullGrid_;
         /// Instances filed or refiled in cullGrid_ - added, moved, shown -

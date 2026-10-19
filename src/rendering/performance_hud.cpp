@@ -1,4 +1,5 @@
 #include "rendering/performance_hud.hpp"
+#include "collision/collision_world.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/vk_context.hpp"
@@ -206,18 +207,12 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
                     renderer->getLastTerrainRenderMs(),
                     renderer->getLastWMORenderMs(),
                     renderer->getLastM2RenderMs());
-        auto* wmoRenderer = renderer->getWMORenderer();
-        auto* m2Renderer = renderer->getM2Renderer();
-        if (wmoRenderer || m2Renderer) {
+        {
+            const auto wmoQueries = renderer->collision().wmoQueryStats();
+            const auto m2Queries = renderer->collision().m2QueryStats();
             ImGui::Text("Collision queries:");
-            if (wmoRenderer) {
-                ImGui::Text("  WMO: %.2f ms (%u calls)",
-                            wmoRenderer->getQueryTimeMs(), wmoRenderer->getQueryCallCount());
-            }
-            if (m2Renderer) {
-                ImGui::Text("  M2:  %.2f ms (%u calls)",
-                            m2Renderer->getQueryTimeMs(), m2Renderer->getQueryCallCount());
-            }
+            ImGui::Text("  WMO: %.2f ms (%u calls)", wmoQueries.milliseconds, wmoQueries.calls);
+            ImGui::Text("  M2:  %.2f ms (%u calls)", m2Queries.milliseconds, m2Queries.calls);
         }
 
         // Frame time graph
@@ -447,7 +442,6 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Text("Instances: %u", wmoRenderer->getInstanceCount());
             ImGui::Text("Triangles: %u", wmoRenderer->getTotalTriangleCount());
             ImGui::Text("Draw Calls: %u", wmoRenderer->getDrawCallCount());
-            ImGui::Text("Floor Cache: %zu", wmoRenderer->getFloorCacheSize());
             ImGui::Text("Dist Culled: %u groups", wmoRenderer->getDistanceCulledGroups());
             if (wmoRenderer->isOcclusionCullingEnabled()) {
                 ImGui::Text("Occl Culled: %u groups", wmoRenderer->getOcclusionCulledGroups());

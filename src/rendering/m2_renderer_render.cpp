@@ -200,7 +200,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
     fileInCullGrid(scene_->instances[idx]);
-    insertBounds(scene_->spatialGrid, placed.worldBoundsMin, placed.worldBoundsMax, placed.id);
+    placeInCollision(placed);
 
     return placed.id;
 }
@@ -297,7 +297,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
     fileInCullGrid(scene_->instances[idx]);
-    insertBounds(scene_->spatialGrid, placed.worldBoundsMin, placed.worldBoundsMax, placed.id);
+    placeInCollision(placed);
 
     return placed.id;
 }

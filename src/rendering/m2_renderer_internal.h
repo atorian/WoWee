@@ -2,7 +2,8 @@
 // All functions are inline to allow inclusion in multiple translation units.
 #pragma once
 
-#include "rendering/collision_geometry.hpp"
+#include "collision/collision_world.hpp"
+#include "collision/geometry.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_billboard.hpp"
 #include "rendering/m2_track_sampler.hpp"
@@ -104,109 +105,20 @@ inline float computeGroundDetailDownOffset(const M2ModelGPU& model, float scale)
     return pivotComp + terrainSink;
 }
 
-/// The model-space box an instance is filed under for collision queries: its
+/// The model-space box an instance's world bounds are made from: its
 /// collision mesh's, or for a model without one - which collides with
 /// nothing - its visual bounds.
 inline void collisionLocalBounds(const M2ModelGPU& model, glm::vec3& outMin, glm::vec3& outMax) {
-    if (model.collision.valid()) {
-        outMin = model.collision.boundMin;
-        outMax = model.collision.boundMax;
+    if (model.collision) {
+        outMin = model.collision->boundMin;
+        outMax = model.collision->boundMax;
     } else {
         outMin = model.boundMin;
         outMax = model.boundMax;
     }
 }
 
-inline bool segmentIntersectsAABB(const glm::vec3& from, const glm::vec3& to,
-                                  const glm::vec3& bmin, const glm::vec3& bmax,
-                                  float& outEnterT) {
-    glm::vec3 d = to - from;
-    float tEnter = 0.0f;
-    float tExit = 1.0f;
-
-    for (int axis = 0; axis < 3; axis++) {
-        if (std::abs(d[axis]) < 1e-6f) {
-            if (from[axis] < bmin[axis] || from[axis] > bmax[axis]) {
-                return false;
-            }
-            continue;
-        }
-
-        float inv = 1.0f / d[axis];
-        float t0 = (bmin[axis] - from[axis]) * inv;
-        float t1 = (bmax[axis] - from[axis]) * inv;
-        if (t0 > t1) std::swap(t0, t1);
-
-        tEnter = std::max(tEnter, t0);
-        tExit = std::min(tExit, t1);
-        if (tEnter > tExit) return false;
-    }
-
-    outEnterT = tEnter;
-    return tExit >= 0.0f && tEnter <= 1.0f;
-}
-
-inline void transformAABB(const glm::mat4& modelMatrix,
-                          const glm::vec3& localMin,
-                          const glm::vec3& localMax,
-                          glm::vec3& outMin,
-                          glm::vec3& outMax) {
-    const glm::vec3 corners[8] = {
-        {localMin.x, localMin.y, localMin.z},
-        {localMin.x, localMin.y, localMax.z},
-        {localMin.x, localMax.y, localMin.z},
-        {localMin.x, localMax.y, localMax.z},
-        {localMax.x, localMin.y, localMin.z},
-        {localMax.x, localMin.y, localMax.z},
-        {localMax.x, localMax.y, localMin.z},
-        {localMax.x, localMax.y, localMax.z}
-    };
-
-    outMin = glm::vec3(std::numeric_limits<float>::max());
-    outMax = glm::vec3(-std::numeric_limits<float>::max());
-    for (const auto& c : corners) {
-        glm::vec3 wc = glm::vec3(modelMatrix * glm::vec4(c, 1.0f));
-        outMin = glm::min(outMin, wc);
-        outMax = glm::max(outMax, wc);
-    }
-}
-
-// Closest point on triangle to a point (Ericson, Real-Time Collision Detection §5.1.5).
-inline glm::vec3 closestPointOnTriangle(const glm::vec3& p,
-                                         const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
-    glm::vec3 ab = b - a, ac = c - a, ap = p - a;
-    float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return a;
-    glm::vec3 bp = p - b;
-    float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return b;
-    float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
-        float v = d1 / (d1 - d3);
-        return a + v * ab;
-    }
-    glm::vec3 cp = p - c;
-    float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return c;
-    float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
-        float w = d2 / (d2 - d6);
-        return a + w * ac;
-    }
-    float va = d3 * d6 - d5 * d4;
-    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
-        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + w * (c - b);
-    }
-    float denom = 1.0f / (va + vb + vc);
-    float v = vb * denom;
-    float w = vc * denom;
-    return a + ab * v + ac * w;
-}
-
-// ---- Thread-local scratch buffers for collision queries ----
-// Defined in m2_renderer_instance.cpp (inline thread_local causes LLD linker
-// errors on Windows ARM64, so the definitions live in the single TU that uses them).
+using collision::transformAABB;
 
 /// Bone transforms for one instance.
 ///

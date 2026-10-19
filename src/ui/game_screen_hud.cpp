@@ -21,7 +21,7 @@
 #include "rendering/scene_commands.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
-#include "rendering/wmo_renderer.hpp"
+#include "collision/collision_world.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/world_map.hpp"
@@ -996,13 +996,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
     laps.lap("gather");
     static SightCache sight;
-    rendering::WMORenderer* wmo = services_.renderer ? services_.renderer->getWMORenderer() : nullptr;
+    const collision::CollisionWorld* world =
+        services_.renderer ? &services_.renderer->collision() : nullptr;
     // Timed on its own: the collision queries are the part of a plate that
     // costs, and the part the cache exists to ration.
     float sightMs = 0.0f;
-    const auto sightQuery = [wmo, &sightMs](const glm::vec3& from, const glm::vec3& to) {
+    const auto sightQuery = [world, &sightMs](const glm::vec3& from, const glm::vec3& to) {
         const auto start = std::chrono::steady_clock::now();
-        const bool blocked = wmo->segmentBlocked(from, to);
+        const bool blocked = world->wmoSegmentBlocked(collision::Reach::everywhere(), from, to);
         sightMs += std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - start).count();
         return blocked;
@@ -1109,7 +1110,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         //
         // After the frustum, so a unit off screen costs no collision query.
         // Cached per unit and refreshed a few a frame (SightCache).
-        if (wmo && sight.blocked(guid, camPos, renderPos)) {
+        if (world && sight.blocked(guid, camPos, renderPos)) {
             continue;
         }
 
@@ -1652,7 +1653,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     }
     // The stale answers this frame asked for, a few of them: after the loop,
     // so every plate has had its say about which are stale.
-    if (wmo) sight.refresh(sightQuery);
+    if (world) sight.refresh(sightQuery);
     laps.lap("plates");
     if (services_.interfaceStages) {
         services_.interfaceStages->add("uiManager->render/nameplates", "plates: sight queries", sightMs);

@@ -6,7 +6,7 @@
 #include "game/entity.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/renderer.hpp"
-#include "rendering/wmo_renderer.hpp"
+#include "collision/collision_world.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,7 +43,7 @@ ScenePick pickScene(game::GameHandler& gameHandler,
     ScenePick pick;
     const uint64_t myGuid = gameHandler.getPlayerGuid();
     auto* renderer = core::Application::getInstance().getRenderer();
-    const rendering::WMORenderer* wmo = renderer ? renderer->getWMORenderer() : nullptr;
+    const collision::CollisionWorld* world = renderer ? &renderer->collision() : nullptr;
 
     for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
         if (!entity) continue;
@@ -122,9 +122,9 @@ ScenePick pickScene(game::GameHandler& gameHandler,
         // gate drawn as a building, and the line to its centre crosses the
         // object itself.
         const bool objectIsBuilding = type == game::ObjectType::GAMEOBJECT && !hasBounds;
-        if (wmo && !objectIsBuilding &&
-            wmo->segmentBlocked(ray.origin,
-                                       ray.origin + ray.direction * std::max(centerT, hitT))) {
+        if (world && !objectIsBuilding &&
+            world->wmoSegmentBlocked(collision::Reach::everywhere(), ray.origin,
+                                     ray.origin + ray.direction * std::max(centerT, hitT))) {
             continue;
         }
 

@@ -1,4 +1,5 @@
 #include "rendering/terrain_manager.hpp"
+#include "collision/collision_world.hpp"
 
 #include <vector>
 
@@ -139,6 +140,10 @@ TerrainManager::TerrainManager() {
 
 TerrainManager::~TerrainManager() {
     stopWorkers();
+    // Its tiles' ground goes with it: the map they belonged to is being left.
+    if (collision_) {
+        for (const auto& [coord, tile] : loadedTiles) collision_->removeTerrainTile(coord.x, coord.y);
+    }
 }
 
 void TerrainManager::setWMORenderer(WMORenderer* renderer) {
@@ -512,6 +517,9 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
     auto pending = std::make_shared<PendingTile>();
     pending->token = mapToken_;
     pending->coord = coord;
+    // The ground the world's queries read, taken here beside the mesh rather
+    // than on the main thread at the commit.
+    pending->heights = collision::TerrainTileHeights::build(*terrainPtr, x, y);
     pending->terrain = std::move(*terrainPtr);
     pending->mesh = std::move(mesh);
 
@@ -1376,7 +1384,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             }
         }
 
-        // Commit tile to loadedTiles
+        // Commit tile to loadedTiles, and its ground to the world's.
+        if (collision_) collision_->addTerrainTile(pending->heights);
         auto tile = std::make_unique<TerrainTile>();
         tile->coord = coord;
         tile->terrain = std::move(pending->terrain);
@@ -1798,6 +1807,9 @@ void TerrainManager::unloadTile(int x, int y) {
         partStart = now;
     };
 
+    // Its ground first: nothing may stand on a tile that is going.
+    if (collision_) collision_->removeTerrainTile(x, y);
+
     // Remove M2 doodad instances
     if (m2Renderer) {
         m2Renderer->removeInstances(tile->m2InstanceIds);
@@ -1877,8 +1889,8 @@ void TerrainManager::getTileBounds(const TileCoord& coord, float& minX, float& m
     // These were named for one axis and computed from the other. Everything
     // that reads them guesses a chunk index and then checks the guess against
     // the chunk's own position, so the fault showed as the guess missing and
-    // the search widening - never as a wrong answer, until getAreaIdAt asked
-    // the same question without checking.
+    // the search widening - never as a wrong answer, until the area lookup
+    // asked the same question without checking.
     const float maxRenderX = (32 - coord.y) * TILE_SIZE;
     const float maxRenderY = (32 - coord.x) * TILE_SIZE;
 
@@ -2432,27 +2444,6 @@ const pipeline::MapChunk* TerrainManager::findChunkAt(float glX, float glY,
     return nullptr;
 }
 
-std::optional<float> TerrainManager::getHeightAt(float glX, float glY) const {
-    float fracX = 0.0f, fracY = 0.0f;
-    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY);
-    if (!chunk) return std::nullopt;
-
-    // The one sampler, shared with the mesh builder and the clutter scatterer.
-    //
-    // This was a second bilinear interpolation of the four outer corners, which
-    // is not the surface that gets drawn: the mesh fans four triangles from each
-    // quad's centre vertex, and MCVT puts that vertex wherever the artist needed
-    // it. The two answers differed by whatever the centre was offset by, so the
-    // floor came out below the visible ground and the player sank into a slope.
-    const glm::vec3 surface = pipeline::TerrainMeshGenerator::chunkSurfacePoint(
-        chunk->position, chunk->heightMap, fracX, fracY, CHUNK_SIZE / 8.0f);
-    return surface.z;
-}
-
-bool TerrainManager::isTileLoadedAt(float glX, float glY) const {
-    return loadedTiles.find(worldToTile(glX, glY)) != loadedTiles.end();
-}
-
 TerrainManager::TileMemory TerrainManager::tileMemory() const {
     TileMemory out;
     for (const auto& [coord, tile] : loadedTiles) {
@@ -2460,53 +2451,6 @@ TerrainManager::TileMemory TerrainManager::tileMemory() const {
         out.terrainBytes += sizeof(pipeline::ADTTerrain) + pipeline::heapBytes(tile->terrain);
     }
     return out;
-}
-
-bool TerrainManager::isHoleAt(float glX, float glY) const {
-    float fracX = 0.0f, fracY = 0.0f;
-    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY);
-    if (!chunk || chunk->holes == 0) return false;
-
-    // The quad, in the order the mesh builder passes to isHole: it walks
-    // `for y { for x { if (chunk.isHole(y, x)) continue; ... } }` over vertices
-    // at `y * 17 + x`, which is the grid getHeightAt samples as
-    // `heights[gy * 17 + gx]`. Reading the quad from the same two fractions is
-    // what keeps the surface stood on and the surface drawn agreeing about
-    // which quads are there.
-    const int qy = glm::clamp(static_cast<int>(std::floor(fracY)), 0, 7);
-    const int qx = glm::clamp(static_cast<int>(std::floor(fracX)), 0, 7);
-    return chunk->isHole(qy, qx);
-}
-
-bool TerrainManager::chunkHasHoles(float glX, float glY) const {
-    // Through the one finder, which was the third copy of "which chunk is
-    // under this point" in this file. This one took its index from the tile's
-    // corner and read it out of the array without checking the chunk it landed
-    // on - the same shape as the area lookup, and wrong in the same way at a
-    // tile's edge.
-    float fracX = 0.0f, fracY = 0.0f;
-    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY);
-    return chunk != nullptr && chunk->holes != 0;
-}
-
-std::optional<uint32_t> TerrainManager::getAreaIdAt(float glX, float glY) const {
-    // Through the one finder, as the height and the holes go.
-    //
-    // This had its own copy of "which chunk is under this point": an index
-    // worked out from the tile's corner and read straight out of the array,
-    // with nothing comparing the chunk it landed on against the point it was
-    // asked about. The other two check, and a check is what turns a wrong
-    // index into the right chunk - so the ground under the player was read
-    // correctly while the area under the same feet came from a chunk some way
-    // off, and near a tile's edge that chunk belongs to another zone.
-    //
-    // Which is what the zone flickering in Duskwood was: the border moved as
-    // the player walked, the zone name announced itself, and the dark-zone
-    // override - which pins Duskwood's hour - came and went with it.
-    float fracX = 0.0f, fracY = 0.0f;
-    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY);
-    if (!chunk || chunk->areaId == 0) return std::nullopt;
-    return chunk->areaId;
 }
 
 std::optional<std::string> TerrainManager::getDominantTextureAt(float glX, float glY) const {

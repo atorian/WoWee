@@ -12,7 +12,7 @@
 
 #include <glm/glm.hpp>
 
-#include "rendering/collision_geometry.hpp"
+#include "collision/geometry.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_range_allocator.hpp"
 
@@ -37,7 +37,8 @@ std::vector<RtTriangle> randomSoup(uint32_t count, uint32_t seed, float spread, 
 float bruteForce(const std::vector<RtTriangle>& tris, const glm::vec3& o, const glm::vec3& d) {
     float best = -1.0f;
     for (const auto& t : tris) {
-        const float h = rayTriangleIntersect(o, d, glm::vec3(t.v0), glm::vec3(t.v1), glm::vec3(t.v2));
+        const float h = wowee::collision::rayTriangleIntersect(o, d, glm::vec3(t.v0), glm::vec3(t.v1),
+                                                               glm::vec3(t.v2));
         if (h > 0.0f && (best < 0.0f || h < best)) best = h;
     }
     return best;

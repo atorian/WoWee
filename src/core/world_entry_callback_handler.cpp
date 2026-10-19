@@ -1,4 +1,5 @@
 #include "core/world_entry_callback_handler.hpp"
+#include "collision/collision_world.hpp"
 #include "game/game_events.hpp"
 #include "core/frame_phase.hpp"
 #include "core/player_view.hpp"
@@ -45,20 +46,12 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
 
 // Sample best floor height at (x, y) from terrain, WMO, and M2 (eliminates 3x duplication)
 std::optional<float> WorldEntryCallbackHandler::sampleBestFloorAt(float x, float y, float probeZ) const {
-    std::optional<float> terrainFloor;
-    std::optional<float> wmoFloor;
-    std::optional<float> m2Floor;
-
     if (!renderer_) return std::nullopt;
-    if (renderer_->getTerrainManager()) {
-        terrainFloor = renderer_->getTerrainManager()->getHeightAt(x, y);
-    }
-    if (renderer_->getWMORenderer()) {
-        wmoFloor = renderer_->getWMORenderer()->getFloorHeight(x, y, probeZ);
-    }
-    if (renderer_->getM2Renderer()) {
-        m2Floor = renderer_->getM2Renderer()->getFloorHeight(x, y, probeZ);
-    }
+    const collision::CollisionWorld& world = renderer_->collision();
+    const auto everywhere = collision::Reach::everywhere();
+    const std::optional<float> terrainFloor = world.terrainHeight(x, y);
+    const std::optional<float> wmoFloor = world.wmoFloor(everywhere, x, y, probeZ);
+    const std::optional<float> m2Floor = world.m2Floor(everywhere, x, y, probeZ);
 
     std::optional<float> best;
     if (terrainFloor) best = terrainFloor;
@@ -483,10 +476,9 @@ void WorldEntryCallbackHandler::setupCallbacks() {
 
 void WorldEntryCallbackHandler::update(float deltaTime) {
     // Hearth teleport: keep player frozen until terrain loads at destination
-    if (hearthTeleportPending_ && renderer_ && renderer_->getTerrainManager()) {
+    if (hearthTeleportPending_ && renderer_) {
         hearthTeleportTimer_ -= deltaTime;
-        auto terrainH = renderer_->getTerrainManager()->getHeightAt(
-            hearthTeleportPos_.x, hearthTeleportPos_.y);
+        auto terrainH = renderer_->collision().terrainHeight(hearthTeleportPos_.x, hearthTeleportPos_.y);
         if (terrainH || hearthTeleportTimer_ <= 0.0f) {
             // Terrain loaded (or timeout) - snap to floor and release
             if (terrainH) {

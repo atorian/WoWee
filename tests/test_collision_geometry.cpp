@@ -14,11 +14,11 @@
 
 #include <glm/glm.hpp>
 
-#include "rendering/collision_geometry.hpp"
+#include "collision/geometry.hpp"
 
-using wowee::rendering::CollisionFocus;
-using wowee::rendering::pointAABBDistanceSq;
-using wowee::rendering::rayTriangleIntersect;
+using wowee::collision::pointAABBDistanceSq;
+using wowee::collision::rayTriangleIntersect;
+using wowee::collision::Reach;
 
 namespace {
 
@@ -160,28 +160,25 @@ TEST_CASE("a ray misses what it does not point at", "[collision]") {
     }
 }
 
-TEST_CASE("an unset focus excludes nothing", "[collision]") {
-    // Radius zero means no restriction. Reading it as an empty sphere would
-    // make the whole world non-solid rather than merely slow, which is the
-    // failure worth being explicit about.
-    CollisionFocus focus;
-    CHECK_FALSE(focus.excludes({-1, -1, -1}, {1, 1, 1}));
-    CHECK_FALSE(focus.excludes({1000, 1000, 1000}, {1001, 1001, 1001}));
+TEST_CASE("an unlimited reach excludes nothing", "[collision]") {
+    // Everywhere means no restriction, and so does a radius of zero. Reading
+    // zero as an empty sphere would make the whole world non-solid rather than
+    // merely slow, which is the failure worth being explicit about.
+    const Reach everywhere = Reach::everywhere();
+    CHECK_FALSE(everywhere.excludes({-1, -1, -1}, {1, 1, 1}));
+    CHECK_FALSE(everywhere.excludes({1000, 1000, 1000}, {1001, 1001, 1001}));
 
-    SECTION("and setting it to zero radius clears it again") {
-        focus.set({0, 0, 0}, 5.0f);
-        CHECK(focus.enabled);
-        focus.set({0, 0, 0}, 0.0f);
-        CHECK_FALSE(focus.enabled);
-        CHECK_FALSE(focus.excludes({1000, 1000, 1000}, {1001, 1001, 1001}));
+    SECTION("nor does a reach of no radius") {
+        const Reach none = Reach::around({0, 0, 0}, 0.0f);
+        CHECK_FALSE(none.limited());
+        CHECK_FALSE(none.excludes({1000, 1000, 1000}, {1001, 1001, 1001}));
     }
 }
 
-TEST_CASE("a focus measures to the box, not to its centre", "[collision]") {
+TEST_CASE("a reach measures to the box, not to its centre", "[collision]") {
     // A long building whose origin is far away is still under the player's
     // feet at one end. Measuring to the centre would drop it out of the query.
-    CollisionFocus focus;
-    focus.set({0, 0, 0}, 10.0f);
+    const Reach focus = Reach::around({0, 0, 0}, 10.0f);
 
     const glm::vec3 longMin(-5.0f, -1.0f, -1.0f), longMax(500.0f, 1.0f, 1.0f);
     CHECK_FALSE(focus.excludes(longMin, longMax));

@@ -14,9 +14,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rendering/spatial_grid.hpp"
+#include "collision/spatial_grid.hpp"
 
-using namespace wowee::rendering;
+using namespace wowee::collision;
 
 namespace {
 

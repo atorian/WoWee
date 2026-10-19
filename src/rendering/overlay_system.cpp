@@ -1,4 +1,5 @@
 #include "rendering/overlay_system.hpp"
+#include "collision/collision_world.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
@@ -141,9 +142,7 @@ void OverlaySystem::initSelectionCircle() {
 
 void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                            VkCommandBuffer cmd,
-                                           const HeightQuery2D& terrainHeight,
-                                           const HeightQuery3D& wmoHeight,
-                                           const HeightQuery3D& m2Height) {
+                                           const collision::CollisionWorld& world) {
     if (!selCircleVisible_) return;
     initSelectionCircle();
     if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE) return;
@@ -166,9 +165,10 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
             floorZ = std::max(floorZ, h);
         };
 
-        if (terrainHeight) considerFloor(terrainHeight(selCirclePos_.x, selCirclePos_.y));
-        if (wmoHeight) considerFloor(wmoHeight(selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 3.0f));
-        if (m2Height) considerFloor(m2Height(selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 2.0f));
+        const auto everywhere = collision::Reach::everywhere();
+        considerFloor(world.terrainHeight(selCirclePos_.x, selCirclePos_.y));
+        considerFloor(world.wmoFloor(everywhere, selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 3.0f));
+        considerFloor(world.m2Floor(everywhere, selCirclePos_.x, selCirclePos_.y, selCirclePos_.z + 2.0f));
 
         selCircleFloorCachePos_ = selCirclePos_;
         selCircleFloorCacheZ_ = floorZ;

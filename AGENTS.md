@@ -89,16 +89,27 @@ whatever the code looks like inside.
 Dependencies point one way - who may include whom:
 
 ```
-core/       -> game/, rendering/, audio/, ui/, pipeline/   (the client: owns and wires everything)
-ui/         -> game/, rendering/, pipeline/
+core/       -> game/, rendering/, collision/, audio/, ui/, pipeline/   (the client: owns and wires everything)
+ui/         -> game/, rendering/, collision/, pipeline/
 game/       -> pipeline/, network/                         (not rendering/, audio/, ui/, core/application)
-rendering/  -> pipeline/                                   (wowee_render: not game/, ui/, audio/, network/)
+rendering/  -> collision/, pipeline/                       (wowee_render: not game/, ui/, audio/, network/)
+collision/  -> pipeline/                                   (wowee_collision: nothing above it)
 ```
 
 - **wowee_render** (`src/rendering` less the client's presentation listed in
   `WOWEE_RENDER_CLIENT_SOURCES`) draws what it is handed and knows nothing of
   the game, the interface, the sound or the network.
   `tools/render_dependency_check.py` enforces it through `sweep_guard`.
+- **The collision world** (`src/collision`, `wowee_collision`,
+  `collision::CollisionWorld`, `renderer->collision()`) is what is solid:
+  terrain heights, building and doodad shapes and where they stand, and every
+  floor, wall, ray, sight-line and inside-a-building query. The renderers
+  place what they draw in it as they place it in their own lists; nothing asks
+  a renderer where the floor is. Every query takes a `collision::Reach` -
+  `Reach::everywhere()`, or the player's (`CameraController::collisionReach()`)
+  for what is only worth asking near the player. A test drives it with no
+  device (`tests/test_collision_world.cpp`);
+  `tools/collision_dependency_check.py` keeps it below the renderer.
 - **The game** (`src/game`, the `wowee_game` library) is the protocol and the
   state it builds. It does not draw, play sounds or reach the `Application`:
   it publishes what happened on the event bus and is handed what it must ask

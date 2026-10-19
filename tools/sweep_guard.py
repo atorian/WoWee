@@ -200,6 +200,12 @@ CHECKS = [
     ("render_dependency_check.py",
      r"^(\d+) includes of the client from the renderer library", 0,
      "client includes in the renderer library"),
+    # The collision world sits under the renderer: the renderers place what
+    # they draw in it and everyone else asks it, so it knows nothing above
+    # pipeline/.
+    ("collision_dependency_check.py",
+     r"^(\d+) includes from the collision world above itself", 0,
+     "includes of the renderer, game or client from the collision world"),
     # The scene changes only inside the frame's Present phase, through
     # rendering::SceneCommands: a renderer drawing from a snapshot on its own
     # thread needs it to change in one place. Some 200 calls from six phases

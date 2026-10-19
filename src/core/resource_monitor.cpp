@@ -1,4 +1,5 @@
 #include "core/resource_monitor.hpp"
+#include "collision/collision_world.hpp"
 
 #include "core/env_flag.hpp"
 #include "core/logger.hpp"
@@ -206,9 +207,8 @@ void ResourceMonitor::sampleMemory(const rendering::Renderer& renderer) {
         memoryParts_.push_back({"M2 models", m2->modelDataBytes()});
         memoryParts_.push_back({"M2 instances", m2->instanceBytes()});
     }
-    if (const auto* wmo = renderer.getWMORenderer()) {
-        memoryParts_.push_back({"WMO collision", wmo->collisionBytes()});
-    }
+    // Placements, ground and every shape, M2 and WMO, counted once.
+    memoryParts_.push_back({"collision world", renderer.collision().bytes()});
     if (const auto* terrain = renderer.getTerrainManager()) {
         const auto tiles = terrain->tileMemory();
         memoryParts_.push_back({"terrain tiles", tiles.terrainBytes});

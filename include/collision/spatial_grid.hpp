@@ -12,20 +12,18 @@
 #include <unordered_set>
 #include <vector>
 
-namespace wowee {
-namespace rendering {
+namespace wowee::collision {
 
-/// The uniform grid the M2 and WMO renderers narrow a collision query with.
-///
-/// Both kept their own copy of this, identical down to the hash constants and
-/// the cell size, because both answer the same question: which of the tens of
+/// The uniform grid a collision query is narrowed with: which of the tens of
 /// thousands of instances in a zone could possibly overlap this box. Scanning
 /// them all is what it replaces.
 ///
 /// A miss here does not crash. It hands the caller too few candidates and the
-/// player walks through a wall, so both callers keep a fallback that scans
-/// everything when the grid answers nothing, and the arithmetic below is
-/// pinned by tests/test_spatial_grid.cpp.
+/// player walks through a wall, so the arithmetic below is pinned by
+/// tests/test_spatial_grid.cpp, and CollisionWorld files every placement on
+/// every change rather than rebuilding. There is no scan of everything behind
+/// it: the renderers each had one, run whenever the grid answered nothing -
+/// which in open country, with nothing near, was every query.
 
 /// 64 world units, which is a little under an ADT chunk.
 inline constexpr float kSpatialCellSize = 64.0f;
@@ -163,7 +161,7 @@ struct CellRange {
 
 /// Which cells of a dense grid a query box covers, or nothing when it misses.
 ///
-/// This is the other kind of grid in the renderer: where SpatialGrid above is a
+/// This is the other kind of grid here: where SpatialGrid above is a
 /// hash of cells over a whole zone, a WMO group carries a dense grid of its own
 /// triangles, sized to its bounding box. Three queries walked it, for any
 /// triangle, for floors and for walls, and each computed the cell rectangle
@@ -195,5 +193,4 @@ inline std::optional<CellRange> cellRangeCovering(
     return range;
 }
 
-}  // namespace rendering
-}  // namespace wowee
+}  // namespace wowee::collision

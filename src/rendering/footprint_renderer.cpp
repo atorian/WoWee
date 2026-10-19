@@ -1,4 +1,5 @@
 #include "rendering/footprint_renderer.hpp"
+#include "collision/collision_world.hpp"
 #include "pipeline/m2_loader.hpp"
 
 #include "core/logger.hpp"
@@ -289,12 +290,12 @@ float FootprintRenderer::resolveFloorHeight(const glm::vec3& position) const {
         if (!height || *height < position.z - 1.25f || *height > position.z + 0.85f) return;
         floor = floor ? std::max(*floor, *height) : *height;
     };
-    if (auto* terrain = owner_->getTerrainManager())
-        consider(terrain->getHeightAt(position.x, position.y));
-    if (auto* wmo = owner_->getWMORenderer())
-        consider(wmo->getFloorHeight(position.x, position.y, position.z + 3.0f));
-    if (auto* m2 = owner_->getM2Renderer())
-        consider(m2->getFloorHeight(position.x, position.y, position.z + 2.0f));
+    // Wherever the walker is, not only near the player.
+    const collision::CollisionWorld& world = owner_->collision();
+    const auto everywhere = collision::Reach::everywhere();
+    consider(world.terrainHeight(position.x, position.y));
+    consider(world.wmoFloor(everywhere, position.x, position.y, position.z + 3.0f));
+    consider(world.m2Floor(everywhere, position.x, position.y, position.z + 2.0f));
     return floor.value_or(position.z);
 }
 

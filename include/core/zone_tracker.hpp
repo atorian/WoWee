@@ -9,6 +9,7 @@ namespace pipeline { class AssetManager; }
 namespace game { class GameHandler; class ZoneManager; }
 namespace audio { class AudioCoordinator; }
 namespace rendering { class TerrainManager; }
+namespace collision { class CollisionWorld; }
 
 namespace core {
 
@@ -28,8 +29,11 @@ public:
     /// The zone table, music included, from the client's DBCs.
     void loadZoneTable(pipeline::AssetManager* assets);
 
-    /// Resolve the zone for this frame. Any of the pointers may be null.
-    void update(const rendering::TerrainManager* terrain, const glm::vec3& playerPosition,
+    /// Resolve the zone for this frame: from the area of the ground under the
+    /// player, as `world` has it, and failing that from the streamed tile, the
+    /// server and the music. Any of the pointers may be null.
+    void update(const collision::CollisionWorld& world,
+                const rendering::TerrainManager* terrain, const glm::vec3& playerPosition,
                 const game::GameHandler* game, const audio::AudioCoordinator* audio);
 
     /// The zone the player is in; 0 when nothing knows.

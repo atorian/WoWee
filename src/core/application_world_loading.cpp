@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "collision/collision_world.hpp"
 #include "core/map_scope.hpp"
 #include "core/frame_phase.hpp"
 #include "core/logger.hpp"
@@ -173,9 +174,10 @@ void Application::mapRenderersReady(const WorldLoader::Entry& entry, const std::
 }
 
 void Application::placeOnInstanceFloor(const WorldLoader::Entry& entry) {
-    if (auto* wmo = renderer->getWMORenderer()) {
+    if (renderer) {
         auto position = renderer->getCharacterPosition();
-        if (auto floor = wmo->getFloorHeight(position.x, position.y, position.z + 5)) {
+        if (auto floor = renderer->collision().wmoFloor(collision::Reach::everywhere(),
+                                                        position.x, position.y, position.z + 5)) {
             position.z = *floor + 0.1f;
             renderer->getCharacterPosition() = position;
             if (gameHandler) {

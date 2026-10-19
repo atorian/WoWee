@@ -49,7 +49,7 @@ public:
     [[nodiscard]] static std::filesystem::path defaultLastWorldFile();
 
     struct Entry { uint32_t mapId; float x, y, z; };
-    enum class Stage { Idle, Preparing, Prepared, Geometry, Collision, GeometryReady, Warmup, Finished, Failed };
+    enum class Stage { Idle, Preparing, Prepared, Geometry, GeometryReady, Warmup, Finished, Failed };
 
     /// Lifecycle commands are issued by ClientLoop in Transitions.
     class Session {

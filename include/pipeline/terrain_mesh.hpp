@@ -244,11 +244,6 @@ private:
      */
     static void decompressNormal(const int8_t* compressedNormal, float* normal);
 
-    /**
-     * Get height at grid position from WoW's 9x9+8x8 layout
-     */
-    static float getHeightAt(const HeightMap& heightMap, int x, int y);
-
 
 
     // Terrain constants

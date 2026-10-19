@@ -1,5 +1,6 @@
 #pragma once
 
+#include "collision/geometry.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_boom.hpp"
 #include "rendering/movement_limits.hpp"
@@ -12,11 +13,9 @@
 #include <optional>
 
 namespace wowee {
+namespace collision { class CollisionWorld; }
 namespace rendering {
 
-class TerrainManager;
-class WMORenderer;
-class M2Renderer;
 class LiquidScene;
 
 class CameraController {
@@ -53,10 +52,14 @@ public:
     }
     [[nodiscard]] bool isExtendedZoom() const { return extendedZoom_; }
     void setEnabled(bool enabled) { this->enabled = enabled; }
-    void setTerrainManager(TerrainManager* tm) { terrainManager = tm; }
-    void setWMORenderer(WMORenderer* wmo) { wmoRenderer = wmo; }
-    void setM2Renderer(M2Renderer* m2) { m2Renderer = m2; }
+    /// The solid world the camera and the player collide with; none between
+    /// maps, when there is nothing to stand on.
+    void setCollisionWorld(const collision::CollisionWorld* world) { collision_ = world; }
     void setLiquidScene(const LiquidScene* scene) { liquidScene = scene; }
+    /// How far round the player the collision queries look: the radius kept
+    /// round the character followed, or the free camera. Everything else that
+    /// is only asked about near the player - the game's movers - asks with it.
+    [[nodiscard]] const collision::Reach& collisionReach() const { return reach_; }
 
     /// Holds the view still while something else owns the finger that is
     /// moving the mouse. The on-screen stick is that something: SDL reports the
@@ -343,7 +346,8 @@ public:
 
 private:
     Camera* camera;
-    TerrainManager* terrainManager = nullptr;
+    const collision::CollisionWorld* collision_ = nullptr;
+    collision::Reach reach_ = collision::Reach::everywhere();
     /// One frame's input and physics setup, handed to whichever camera mode is
     /// running.
     ///
@@ -420,8 +424,6 @@ private:
     /// `includeDoodads` adds M2 collision, which the free-fly camera does not use.
     glm::vec3 sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to, bool includeDoodads);
 
-    WMORenderer* wmoRenderer = nullptr;
-    M2Renderer* m2Renderer = nullptr;
     const LiquidScene* liquidScene = nullptr;
     CharacterRenderer* characterRenderer = nullptr;
     uint32_t playerInstanceId = 0;
@@ -615,8 +617,6 @@ private:
     bool cachedInsideInteriorWMO = false;
     int insideStateCheckCounter_ = 0;
     glm::vec3 lastInsideStateCheckPos_ = glm::vec3(0.0f);
-    int insideWMOCheckCounter = 0;
-    glm::vec3 lastInsideWMOCheckPos = glm::vec3(0.0f);
 
     // Cached camera WMO floor query (skip if camera moved < 0.3 units)
     glm::vec3 lastCamFloorQueryPos = glm::vec3(0.0f);

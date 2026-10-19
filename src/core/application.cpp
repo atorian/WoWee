@@ -42,7 +42,7 @@
 #include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
-#include "rendering/wall_sweep.hpp"
+#include "collision/collision_world.hpp"
 #include "rendering/animation_controller.hpp"
 #include <bit>
 #include <unordered_set>
@@ -158,29 +158,41 @@ namespace {
 // The walls of the loaded world, for movers the game plays back between
 // their reports. Server and render coordinates are the same axes: each of
 // serverToCanonical and canonicalToRender swaps x and y.
-class RendererMovementCollision final : public game::MovementCollision {
+class WorldMovementCollision final : public game::MovementCollision {
 public:
-    explicit RendererMovementCollision(rendering::Renderer& renderer) : renderer_(renderer) {}
+    WorldMovementCollision(const collision::CollisionWorld& world,
+                           std::function<collision::Reach()> playerReach)
+        : world_(world), playerReach_(std::move(playerReach)) {}
 
     glm::vec3 slide(const glm::vec3& from, const glm::vec3& to) const override {
-        const auto* wmo = renderer_.getWMORenderer();
-        const auto* m2 = renderer_.getM2Renderer();
-        // Collision geometry is only consulted around the local player - the
-        // focus the camera sets. Further away nothing is found, so nothing is
-        // asked: the wall checks reach this far past where the mover starts.
+        // Walls are only consulted around the local player, within the reach
+        // the camera keeps. A mover further away is not asked about: the wall
+        // checks reach this far past where it starts.
         constexpr float kWallQueryReach = 8.0f;
-        if (wmo && !wmo->getCollisionFocus().reaches(from, kWallQueryReach)) return to;
-        return rendering::sweepMoverAgainstWalls(wmo, m2, from, to, /*insideWMO=*/false);
+        const collision::Reach reach = playerReach_();
+        if (!reach.reaches(from, kWallQueryReach)) return to;
+        return world_.sweepMover(reach, from, to, /*insideWmo=*/false);
     }
 
 private:
-    rendering::Renderer& renderer_;
+    const collision::CollisionWorld& world_;
+    std::function<collision::Reach()> playerReach_;
 };
 
-std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
+/// How far round the player collision is asked about: the reach the camera
+/// keeps, or everywhere before there is one.
+collision::Reach playerReach(const rendering::CameraController* camera) {
+    return camera ? camera->collisionReach() : collision::Reach::everywhere();
+}
+
+/// The floor a moving unit is drawn on. Building and doodad floors are only
+/// asked within `reach` - the player's surroundings - and further away the
+/// unit keeps to the terrain and the height the server sends.
+std::optional<float> movingEntityFloor(rendering::Renderer* renderer, const collision::Reach& reach,
                                         const glm::vec3& renderPos,
                                         const std::optional<glm::vec3>& previousRenderPos) {
     if (!renderer) return std::nullopt;
+    const collision::CollisionWorld& world = renderer->collision();
 
     // Server movement Z is the reference surface.  In WMO overlap regions the
     // outdoor heightfield may be a roof many units above a tunnel/interior, so
@@ -197,9 +209,7 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
         }
     };
 
-    if (auto* terrain = renderer->getTerrainManager()) {
-        consider(terrain->getHeightAt(renderPos.x, renderPos.y));
-    }
+    consider(world.terrainHeight(renderPos.x, renderPos.y));
     // Outdoor movers almost always match the terrain heightfield. Avoid the
     // expensive WMO/M2 collision walks in that common case. Tunnel, bridge,
     // and interior overlaps still use full arbitration because raw terrain is
@@ -207,16 +217,11 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
     if (best && std::abs(*best - renderPos.z) <= 0.35f) {
         return best;
     }
-    if (auto* wmo = renderer->getWMORenderer()) {
-        // Closest to the mover's own feet, so a creature or another player
-        // under an overhang is not snapped up to the floor of the level above
-        // them - the same flip that pulled the local player between levels.
-        consider(wmo->getFloorHeight(renderPos.x, renderPos.y, probeZ, nullptr,
-                                     renderPos.z));
-    }
-    if (auto* m2 = renderer->getM2Renderer()) {
-        consider(m2->getFloorHeight(renderPos.x, renderPos.y, probeZ));
-    }
+    // Closest to the mover's own feet, so a creature or another player under
+    // an overhang is not snapped up to the floor of the level above them -
+    // the same flip that pulled the local player between levels.
+    consider(world.wmoFloor(reach, renderPos.x, renderPos.y, probeZ, nullptr, renderPos.z));
+    consider(world.m2Floor(reach, renderPos.x, renderPos.y, probeZ));
 
     // A jump between floors, named once a second while it is happening.
     //
@@ -234,13 +239,9 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
         const auto now = std::chrono::steady_clock::now();
         if (now - lastFloorJumpLog > std::chrono::seconds(1) && floorJumpBudget.take()) {
             lastFloorJumpLog = now;
-            std::optional<float> terrainF, wmoF, m2F;
-            if (auto* t = renderer->getTerrainManager())
-                terrainF = t->getHeightAt(renderPos.x, renderPos.y);
-            if (auto* w = renderer->getWMORenderer())
-                wmoF = w->getFloorHeight(renderPos.x, renderPos.y, probeZ);
-            if (auto* mm = renderer->getM2Renderer())
-                m2F = mm->getFloorHeight(renderPos.x, renderPos.y, probeZ);
+            const auto terrainF = world.terrainHeight(renderPos.x, renderPos.y);
+            const auto wmoF = world.wmoFloor(reach, renderPos.x, renderPos.y, probeZ);
+            const auto m2F = world.m2Floor(reach, renderPos.x, renderPos.y, probeZ);
             LOG_WARNING("Floor jump: player z=", renderPos.z, " prev z=",
                         previousRenderPos->z, " -> chose ", *best,
                         " (terrain=", terrainF ? *terrainF : -99999.0f,
@@ -462,7 +463,8 @@ bool Application::initialize() {
     gameServices_.cvars = &cvars_;
     gameServices_.makeConnection = [] { return std::make_unique<network::WorldSocket>(); };
     gameServices_.accountDataDir = core::getConfigRoot() + "/account_data";
-    movementCollision_ =std::make_unique<RendererMovementCollision>(*renderer);
+    movementCollision_ = std::make_unique<WorldMovementCollision>(
+        renderer->collision(), [this] { return playerReach(getCameraController()); });
     gameServices_.movementCollision = movementCollision_.get();
 
     // Create game handler with explicit service dependencies
@@ -2227,12 +2229,12 @@ void Application::keyForClient(const SDL_Event& event) {
     // to print, the flag never moved, and every press logged "Shadows: OFF"
     // while they stayed on.
     //
-    // F8: Debug WMO floor at current position
+    // F8: what the floor queries see at the current position
     if (event.key.scancode == SDL_SCANCODE_F8 && event.key.repeat == 0) {
-        if (renderer && renderer->getWMORenderer()) {
+        if (renderer) {
             glm::vec3 pos = renderer->getCharacterPosition();
-            LOG_WARNING("F8: WMO floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
-            renderer->getWMORenderer()->debugDumpGroupsAtPosition(pos.x, pos.y, pos.z);
+            LOG_WARNING("F8: floor debug at render pos (", pos.x, ", ", pos.y, ", ", pos.z, ")");
+            renderer->collision().logFloorCandidates(pos.x, pos.y, pos.z);
         }
     }
 }
@@ -2384,16 +2386,6 @@ void Application::shutdown() {
                 ctx->noteDeviceLost("application shutdown", result);
             }
             ctx->flushDeferredCleanup();
-        }
-    }
-
-    // Save floor cache before renderer is destroyed
-    if (renderer && renderer->getWMORenderer()) {
-        size_t cacheSize = renderer->getWMORenderer()->getFloorCacheSize();
-        if (cacheSize > 0) {
-            LOG_DEBUG("Saving WMO floor cache (", cacheSize, " entries)...");
-            renderer->getWMORenderer()->saveFloorCache();
-            LOG_DEBUG("Floor cache saved.");
         }
     }
 
@@ -2850,12 +2842,9 @@ void Application::applyServerMovementState(float deltaTime) {
     if (landingClampActive) {
         if (renderer && gameHandler) {
             glm::vec3 p = renderer->getCharacterPosition();
-            std::optional<float> terrainFloor;
-            std::optional<float> wmoFloor;
-            std::optional<float> m2Floor;
-            if (renderer->getTerrainManager()) {
-                terrainFloor = renderer->getTerrainManager()->getHeightAt(p.x, p.y);
-            }
+            const collision::CollisionWorld& world = renderer->collision();
+            const auto everywhere = collision::Reach::everywhere();
+            const std::optional<float> terrainFloor = world.terrainHeight(p.x, p.y);
             // Ground truth for this landing: where the flight itself left
             // the player, captured once when the clamp armed. Both the probe
             // height and the candidate selection below key off it.
@@ -2884,13 +2873,9 @@ void Application::applyServerMovementState(float deltaTime) {
             // for still works.
             constexpr float kLandingProbeAbove = 2.0f;
             const float probeZ = referenceZ + kLandingProbeAbove;
-            if (renderer->getWMORenderer()) {
-                wmoFloor = renderer->getWMORenderer()->getFloorHeight(p.x, p.y, probeZ);
-            }
-            if (renderer->getM2Renderer()) {
-                // Include M2 floors (bridges/platforms) in landing recovery.
-                m2Floor = renderer->getM2Renderer()->getFloorHeight(p.x, p.y, probeZ);
-            }
+            const std::optional<float> wmoFloor = world.wmoFloor(everywhere, p.x, p.y, probeZ);
+            // Include M2 floors (bridges/platforms) in landing recovery.
+            const std::optional<float> m2Floor = world.m2Floor(everywhere, p.x, p.y, probeZ);
 
             // Pick whichever floor candidate is closest to where the taxi flight
             // itself left the player, rather than unconditionally preferring
@@ -3412,8 +3397,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                         !_creatureSwimmingState.count(guid);
             if (entity->isEntityMoving() && groundCreature) {
-                if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
-                                                    previousRenderPos)) {
+                if (auto floorZ = movingEntityFloor(renderer.get(), playerReach(getCameraController()),
+                                                    renderPos, previousRenderPos)) {
                     renderPos.z = *floorZ;
                 }
             }
@@ -3594,8 +3579,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             if (airborne) {
                 // In the air the arc decides the height, short of sinking into
                 // the floor the player is about to land on.
-                if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
-                                                    previousMountPos);
+                if (auto floorZ = movingEntityFloor(renderer.get(), playerReach(getCameraController()),
+                                                    renderPos, previousMountPos);
                     floorZ && *floorZ > renderPos.z) {
                     renderPos.z = *floorZ;
                 }
@@ -3611,8 +3596,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     std::abs(previousMountPos->z - renderPos.z) < kWalkOnFromDrawnFloor) {
                     probe.z = previousMountPos->z;
                 }
-                if (auto floorZ = movingEntityFloor(renderer.get(), probe,
-                                                    previousMountPos)) {
+                if (auto floorZ = movingEntityFloor(renderer.get(), playerReach(getCameraController()),
+                                                    probe, previousMountPos)) {
                     renderPos.z = *floorZ;
                 }
             }
@@ -3967,8 +3952,8 @@ void Application::setActiveMapName(const std::string& name) {
 void Application::presentWorldToRenderer(float deltaTime) {
     playerView_->beforeRendererUpdate(deltaTime);
 
-    zoneTracker_->update(renderer->getTerrainManager(), renderer->getCharacterPosition(),
-                         gameHandler.get(), audioCoordinator_.get());
+    zoneTracker_->update(renderer->collision(), renderer->getTerrainManager(),
+                         renderer->getCharacterPosition(), gameHandler.get(), audioCoordinator_.get());
 
     rendering::WorldEnvironment environment;
     environment.zoneId = zoneTracker_->zoneId();
@@ -4314,7 +4299,7 @@ void Application::updateWorld(float deltaTime) {
 
 void Application::streamScene(float /*deltaTime*/, const FramePlan& plan) {
     const auto stage = worldLoader_ ? worldLoader_->stage() : WorldLoader::Stage::Idle;
-    const bool sceneReady = stage == WorldLoader::Stage::Geometry || stage == WorldLoader::Stage::Collision ||
+    const bool sceneReady = stage == WorldLoader::Stage::Geometry ||
                             stage == WorldLoader::Stage::GeometryReady || stage == WorldLoader::Stage::Warmup;
     if (plan.loading && sceneReady && renderer && renderer->getCharacterRenderer()) {
         if (entitySpawner_) entitySpawner_->update();
@@ -4392,9 +4377,9 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                 glm::vec3 feet = renderer->getCharacterPosition();
                 static std::optional<float> floor;
                 if (!floor) {
-                    floor = renderer->getWMORenderer()->getFloorHeight(
+                    floor = renderer->collision().wmoFloor(collision::Reach::everywhere(),
                         feet.x, feet.y, feet.z + 3.0f, nullptr, feet.z - 3.0f);
-                    if (!floor) floor = renderer->getTerrainManager()->getHeightAt(feet.x, feet.y);
+                    if (!floor) floor = renderer->collision().terrainHeight(feet.x, feet.y);
                     if (floor) LOG_INFO("Shadow scene: map=", gameHandler->getCurrentMapId(),
                                        " floor=", *floor, " x=", feet.x, " y=", feet.y);
                 }
@@ -4408,8 +4393,9 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                 renderer->getCamera()->setPosition(glm::vec3(1658.0f, -4315.0f, 68.0f));
                 renderer->getCamera()->setRotation(55.0f, -3.0f);
                 if (std::getenv("WOWEE_ORGRIMMAR_SHADOW_PROBE")) {
-                    static const float floorZ = renderer->getWMORenderer()->getFloorHeight(
-                        1676.0f, -4315.0f, 75.0f, nullptr, 61.0f).value_or(61.0f);
+                    static const float floorZ = renderer->collision().wmoFloor(
+                        collision::Reach::everywhere(), 1676.0f, -4315.0f, 75.0f, nullptr, 61.0f)
+                        .value_or(61.0f);
                     const glm::vec3 feet(1676.0f, -4315.0f, floorZ + 0.03f);
                     renderer->getCharacterPosition() = feet;
                     renderer->scene().characters().setInstancePosition(
@@ -5759,8 +5745,8 @@ void Application::spawnPlayerCharacter() {
     auto* camCtrl = getCameraController();
     glm::vec3 spawnPos = camCtrl ? camCtrl->getDefaultPosition()
                                  : (camera->getPosition() - glm::vec3(0.0f, 0.0f, 5.0f));
-    if (spawnSnapToGround && renderer->getTerrainManager()) {
-        auto terrainH = renderer->getTerrainManager()->getHeightAt(spawnPos.x, spawnPos.y);
+    if (spawnSnapToGround) {
+        auto terrainH = renderer->collision().terrainHeight(spawnPos.x, spawnPos.y);
         if (terrainH) {
             spawnPos.z = *terrainH + 0.1f;
         }

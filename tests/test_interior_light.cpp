@@ -6,8 +6,9 @@
 #include <catch_amalgamated.hpp>
 
 #include "pipeline/wmo_loader.hpp"
+#include "collision/geometry.hpp"
+#include "collision/wmo_group_containment.hpp"
 #include "rendering/interior_light.hpp"
-#include "rendering/wmo_group_containment.hpp"
 
 #include <glm/glm.hpp>
 
@@ -20,9 +21,9 @@ using glm::vec4;
 #include "../assets/shaders/interior_light.glsli"
 }
 
-using wowee::rendering::colorAtPoint;
+using wowee::collision::colorAtPoint;
+using wowee::collision::groupContainsPoint;
 using wowee::rendering::doodadInteriorLight;
-using wowee::rendering::groupContainsPoint;
 using wowee::rendering::InteriorLight;
 using wowee::rendering::InteriorLightGPU;
 using wowee::rendering::packInteriorLight;

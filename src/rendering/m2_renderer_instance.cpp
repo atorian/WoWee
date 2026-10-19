@@ -28,13 +28,12 @@
 namespace wowee {
 namespace rendering {
 
-// Thread-local scratch buffers for collision queries (moved from header to
-// avoid inline thread_local TLS init linker errors on Windows ARM64 / LLD).
-namespace m2_internal {
-thread_local std::vector<size_t> tl_m2_candidateScratch;
-thread_local std::unordered_set<uint32_t> tl_m2_candidateIdScratch;
-thread_local std::vector<uint32_t> tl_m2_collisionTriScratch;
-} // namespace m2_internal
+void M2Renderer::placeInCollision(const M2Instance& instance) {
+    if (!collision_ || !instance.cachedModel || !instance.cachedModel->collision) return;
+    collision_->placeM2(instance.id, instance.cachedModel->collision, instance.modelMatrix,
+                        instance.scale);
+    if (instance.hidden) collision_->setM2Hidden(instance.id, true);
+}
 
 void M2Renderer::fileInCullGrid(const M2Instance& instance) {
     // A hidden instance is in no column, however it moves meanwhile.
@@ -198,11 +197,6 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
 
-    // The box the instance is filed under, which is what it has to be taken
-    // out of once it has moved.
-    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
-    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
-
     inst.position = position;
     inst.updateModelMatrix();
     // Use cachedModel instead of a fresh models.find() - the pointer was set
@@ -214,13 +208,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         inst.recomputeCachedCullFactors();
     }
     fileInCullGrid(inst);
-
-    // Incrementally update spatial grid; a hidden instance is not in it and
-    // is filed where it then is once shown.
-    if (!inst.hidden) {
-        refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
-                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
-    }
+    if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
 void M2Renderer::setInstanceFade(uint32_t instanceId, float alpha) {
@@ -234,20 +222,20 @@ void M2Renderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
 }
 
 void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bool hidden) {
-    // Out of the world is out of every index the passes walk: the cull grid
-    // the view, shadow and GPU cull passes gather from, the spatial grid the
-    // floor and wall queries gather from, and the animated, particle and light
-    // lists. The few walks over every instance check the flag itself.
+    // Out of the world is out of every index the passes walk - the cull grid
+    // the view, shadow and GPU cull passes gather from, and the animated,
+    // particle and light lists - and out of the collision world: no floor or
+    // wall. The few walks over every instance check the flag itself.
     for (const uint32_t id : instanceIds) {
         auto idxIt = scene_->instanceIndexById.find(id);
         if (idxIt == scene_->instanceIndexById.end()) continue;
         auto& inst = scene_->instances[idxIt->second];
         if (inst.hidden == hidden) continue;
         inst.hidden = hidden;
+        if (collision_) collision_->setM2Hidden(id, hidden);
         if (hidden) {
             dropFromIndexSets(idxIt->second);
             scene_->cullGrid_.remove(id);
-            eraseBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, id);
             // What it had emitted goes with it rather than hanging where it
             // was, or reappearing there, stale, when it comes back.
             inst.particles.clear();
@@ -255,7 +243,6 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             for (auto& ribbon : inst.ribbons) ribbon = M2Instance::RibbonState{};
         } else {
             fileInCullGrid(inst);
-            insertBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, id);
             // Back as if newly placed: no cull verdict to trust, and its bone
             // slots were handed to others while it was away, so the bones are
             // uploaded again wherever it lands.
@@ -449,16 +436,12 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return;
     // Reject NaN matrix - would propagate into the model matrix uniform
-    // and the spatial-grid bounds, leaving stale grid cells pointing at
-    // a NaN-bounded instance.
+    // and the grids' bounds, leaving stale cells pointing at a NaN-bounded
+    // instance.
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++)
             if (!std::isfinite(transform[c][r])) return;
     auto& inst = scene_->instances[idxIt->second];
-
-    // Remove old grid cells before updating bounds
-    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
-    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
     const glm::vec3 oldPosition = inst.position;
 
     // Update model matrix directly
@@ -503,14 +486,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         inst.recomputeCachedCullFactors();
     }
     fileInCullGrid(inst);
-
-    // Incrementally update spatial grid (remove old cells, add new cells).
-    // A hidden instance is not in it; showing it files it where it then is.
-    if (!inst.hidden) {
-        refileBounds(scene_->spatialGrid, oldBoundsMin, oldBoundsMax,
-                     inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
-    }
-    // No spatialIndexDirty_ = true - handled incrementally
+    if (collision_) collision_->moveM2(instanceId, inst.modelMatrix, inst.scale);
 }
 
 void M2Renderer::removeInstance(uint32_t instanceId) {
@@ -522,8 +498,7 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
 
     auto& inst = scene_->instances[idx];
 
-    // Remove from spatial grid incrementally (same pattern as the move-update path)
-    eraseBounds(scene_->spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    if (collision_) collision_->removeM2(instanceId);
     scene_->cullGrid_.remove(instanceId);
 
     // Remove from dedup map
@@ -595,15 +570,11 @@ void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject)
 }
 
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
-    auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
-    scene_->instances[idxIt->second].skipCollision = skip;
+    if (collision_) collision_->setM2SkipCollision(instanceId, skip);
 }
 
 void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
-    auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return;
-    scene_->instances[idxIt->second].skipWallCollision = skip;
+    if (collision_) collision_->setM2SkipWalls(instanceId, skip);
 }
 
 void M2Renderer::setInteriorLight(uint32_t instanceId, const std::optional<InteriorLight>& light) {
@@ -660,15 +631,13 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
     ++instanceLayoutRevision_;
 
     // A tile's doodads leave together, and this used to compact the array and
-    // then rebuild the whole spatial index - every grid cell, the id map and
-    // the dedup map, for every instance still in the world. That was the
-    // 70-130 ms hitch each tile unload cost while moving. Only what the
-    // leaving instances own is touched now: their cells, their dedup keys and
-    // the slots they vacate. The grid files ids, not indices, so a survivor
-    // moved into a vacated slot keeps its cells as they are.
+    // then rebuild the whole index - the id map and the dedup map, for every
+    // instance still in the world. That was the 70-130 ms hitch each tile
+    // unload cost while moving. Only what the leaving instances own is
+    // touched now: their dedup keys, their placements and the slots they
+    // vacate.
     std::unordered_set<uint32_t> toRemove;
     toRemove.reserve(instanceIds.size());
-    std::unordered_set<GridCell, GridCellHash> touchedCells;
     std::vector<size_t> holes;
     holes.reserve(instanceIds.size());
     for (uint32_t id : instanceIds) {
@@ -677,13 +646,7 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         if (!toRemove.insert(id).second) continue;
         auto& inst = scene_->instances[idxIt->second];
         holes.push_back(idxIt->second);
-
-        const GridCell minCell = toSpatialCell(inst.worldBoundsMin);
-        const GridCell maxCell = toSpatialCell(inst.worldBoundsMax);
-        for (int z = minCell.z; z <= maxCell.z; z++)
-            for (int y = minCell.y; y <= maxCell.y; y++)
-                for (int x = minCell.x; x <= maxCell.x; x++)
-                    touchedCells.insert(GridCell{.x = x, .y = y, .z = z});
+        if (collision_) collision_->removeM2(id);
 
         if (!inst.cachedIsGroundDetail) {
             DedupKey dk{.modelId = inst.modelId,
@@ -701,13 +664,6 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         scene_->instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
-
-    for (const GridCell& cell : touchedCells) {
-        auto it = scene_->spatialGrid.find(cell);
-        if (it == scene_->spatialGrid.end()) continue;
-        std::erase_if(it->second, [&](uint32_t id) { return toRemove.count(id) != 0; });
-        if (it->second.empty()) scene_->spatialGrid.erase(it);
-    }
 
     // Fill the holes from the back, highest first, so a slot being filled is
     // never one still waiting to be emptied: everything past the highest
@@ -742,7 +698,7 @@ void M2Renderer::clear() {
     models.clear();
     pinnedModelIds_.clear();
     scene_->instances.clear();
-    scene_->spatialGrid.clear();
+    if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
     scene_->boneSeedInstanceByModel_.clear();
@@ -767,38 +723,7 @@ void M2Renderer::clearInstances() {
     ++instanceLayoutRevision_;
     for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};
-}
-
-void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
-    collisionFocus.set(worldPos, radius);
-}
-
-void M2Renderer::resetQueryStats() {
-    queryTimeMs = 0.0;
-    queryCallCount = 0;
-}
-
-void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax,
-                                  std::vector<size_t>& outIndices) const {
-    outIndices.clear();
-
-    gatherIds(scene_->spatialGrid, queryMin, queryMax, tl_m2_candidateIdScratch,
-              [&](uint32_t id) {
-                  auto idxIt = scene_->instanceIndexById.find(id);
-                  if (idxIt != scene_->instanceIndexById.end()) {
-                      outIndices.push_back(idxIt->second);
-                  }
-              });
-
-    // Safety fallback to preserve collision correctness if the spatial index
-    // misses candidates (e.g. during streaming churn).
-    if (outIndices.empty() && !scene_->instances.empty()) {
-        outIndices.reserve(scene_->instances.size());
-        for (size_t i = 0; i < scene_->instances.size(); i++) {
-            // Hidden is out of the world, and the grid above leaves it out.
-            if (!scene_->instances[i].hidden) outIndices.push_back(i);
-        }
-    }
+    if (collision_) collision_->clearM2();
 }
 
 void M2Renderer::setModelPinned(uint32_t modelId, bool pinned) {
@@ -938,7 +863,6 @@ TextureRef M2Renderer::loadTexture(const std::string& path) {
 uint64_t M2Renderer::modelDataBytes() const {
     using pipeline::heapBytes;
     using pipeline::vectorBytes;
-    const auto cells = [](const std::vector<uint32_t>& v) { return vectorBytes(v); };
     const auto track = [](const pipeline::M2AnimationTrack& t) { return heapBytes(t); };
     uint64_t total = 0;
     for (const auto& [id, m] : models) {
@@ -954,9 +878,8 @@ uint64_t M2Renderer::modelDataBytes() const {
         total += vectorBytes(m.colorAlphaTracks, track) + vectorBytes(m.textureWeightTracks, track);
         total += vectorBytes(m.lights, [](const pipeline::M2Light& l) { return heapBytes(l); });
         total += vectorBytes(m.batches) + vectorBytes(m.materialDrawOrder);
-        const auto& c = m.collision;
-        total += vectorBytes(c.vertices) + vectorBytes(c.indices) + vectorBytes(c.triBounds) +
-                 vectorBytes(c.cellFloorTris, cells) + vectorBytes(c.cellWallTris, cells);
+        // The collision shape is the collision world's to count: it is
+        // shared, and outlives the model while a placement holds it.
     }
     return total;
 }
@@ -980,412 +903,6 @@ uint32_t M2Renderer::getTotalTriangleCount() const {
         }
     }
     return total;
-}
-
-void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const {
-    LOG_WARNING("=== M2 Floor Debug at render(", glX, ", ", glY, ", ", glZ, ") ===");
-    glm::vec3 queryMin(glX - 2.0f, glY - 2.0f, glZ - 6.0f);
-    glm::vec3 queryMax(glX + 2.0f, glY + 2.0f, glZ + 8.0f);
-    gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
-    int reported = 0;
-    for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = scene_->instances[idx];
-        const char* rejected = nullptr;
-        if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) {
-            rejected = "outside the collision focus";
-        } else if (!instance.cachedModel) {
-            rejected = "no model";
-        } else if (instance.scale <= 0.001f) {
-            rejected = "zero scale";
-        } else if (instance.skipCollision) {
-            rejected = "skipCollision";
-        }
-        const M2ModelGPU* model = instance.cachedModel;
-        const bool authored = model && model->collision.valid();
-        if (!rejected && model) {
-            if (!authored) rejected = "no collision mesh";
-            else if (model->isInvisibleTrap || model->isSpellEffect) rejected = "an effect or a trap";
-        }
-        if (++reported > 12) { LOG_WARNING("  ... and more"); break; }
-        LOG_WARNING("  '", model ? model->name : std::string("?"),
-                    "' isGameObject=", instance.isGameObject ? 1 : 0,
-                    " authoredCollision=", authored ? 1 : 0,
-                    " tris=", authored ? model->collision.triCount : 0u,
-                    " bounds z ", instance.worldBoundsMin.z, "..", instance.worldBoundsMax.z,
-                    (rejected ? "  REJECTED: " : "  considered"), (rejected ? rejected : ""));
-    }
-    if (reported == 0) {
-        LOG_WARNING("  nothing at all - no doodad instance overlaps this spot,"
-                    " so a deck underfoot is not in the spatial grid here");
-    }
-    LOG_WARNING("=== Total: ", reported, " M2 candidates ===");
-}
-
-bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
-                                        glm::vec3& outMax, const glm::mat4* placement) const {
-    auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return false;
-    const auto& inst = scene_->instances[idxIt->second];
-    if (!inst.cachedModel) return false;
-    if (placement) {
-        glm::vec3 localMin, localMax;
-        collisionLocalBounds(*inst.cachedModel, localMin, localMax);
-        transformAABB(*placement, localMin, localMax, outMin, outMax);
-        return true;
-    }
-    outMin = inst.worldBoundsMin;
-    outMax = inst.worldBoundsMax;
-    return true;
-}
-
-std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
-                                                       float glX, float glY,
-                                                       float glZ, const glm::mat4* placement) const {
-    auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) {
-        return std::nullopt;
-    }
-    const auto& instance = scene_->instances[idxIt->second];
-    // Out of the world, it is nobody's floor.
-    if (instance.hidden) return std::nullopt;
-    if (!instance.cachedModel || instance.scale <= 0.001f) return std::nullopt;
-    const M2ModelGPU& model = *instance.cachedModel;
-    if (!model.collision.valid()) return std::nullopt;
-
-    // Same cast as getFloorHeight: world-down through the instance transform,
-    // so a car placed with any pitch still sees a ray along gravity. Placed
-    // where its owner says it is now, when it says so.
-    const glm::mat4& modelMatrix = placement ? *placement : instance.modelMatrix;
-    const glm::mat4 invModelMatrix = placement ? glm::inverse(*placement) : instance.invModelMatrix;
-    const glm::vec3 localRayOrigin = glm::vec3(
-        invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
-    const glm::vec3 localRayEnd = glm::vec3(
-        invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
-    const glm::vec3 localRayVector = localRayEnd - localRayOrigin;
-    const float localRayLength = glm::length(localRayVector);
-    if (localRayLength <= 1e-5f) return std::nullopt;
-    const glm::vec3 localRayDir = localRayVector / localRayLength;
-
-    model.collision.getFloorTrisInRange(
-        std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
-        std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
-        std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
-        std::max(localRayOrigin.y, localRayEnd.y) + 1.0f,
-        tl_m2_collisionTriScratch);
-
-    std::optional<float> best;
-    for (uint32_t ti : tl_m2_collisionTriScratch) {
-        if (ti >= model.collision.triCount) continue;
-        const auto& verts = model.collision.vertices;
-        const auto& idx = model.collision.indices;
-        const float tHit = rayTriangleIntersect(localRayOrigin, localRayDir,
-                                                verts[idx[ti * 3]],
-                                                verts[idx[ti * 3 + 1]],
-                                                verts[idx[ti * 3 + 2]]);
-        if (tHit < 0.0f || tHit > localRayLength) continue;
-        const glm::vec3 worldHit = glm::vec3(
-            modelMatrix * glm::vec4(localRayOrigin + localRayDir * tHit, 1.0f));
-        // At or under the probe, and the highest such - the deck rather than
-        // whatever structure the car carries beneath it.
-        if (worldHit.z <= glZ && (!best || worldHit.z > *best)) best = worldHit.z;
-    }
-    return best;
-}
-
-std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ, float* outNormalZ) const {
-    QueryTimer timer(&queryTimeMs, &queryCallCount);
-    std::optional<float> bestFloor;
-    float bestNormalZ = 1.0f;  // Default to flat
-
-    glm::vec3 queryMin(glX - 2.0f, glY - 2.0f, glZ - 6.0f);
-    glm::vec3 queryMax(glX + 2.0f, glY + 2.0f, glZ + 8.0f);
-    gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
-
-    for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = scene_->instances[idx];
-        if (collisionFocus.excludes(instance.worldBoundsMin,
-                                    instance.worldBoundsMax)) {
-            continue;
-        }
-
-        if (!instance.cachedModel) continue;
-        if (instance.scale <= 0.001f) continue;
-
-        const M2ModelGPU& model = *instance.cachedModel;
-        // A doodad is stood on by its collision mesh and by nothing else, as
-        // in the client: a model that ships none - a bush, a sign, grass - is
-        // not there to collide with. The floor used to fall back to the top
-        // of a box shrunk from the model's bounds by rules keyed on its name
-        // (bridge, planter, statue, fountain), which put floors on top of
-        // things the client walks through.
-        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
-        if (instance.skipCollision) continue;
-
-        // Vertical ray against the collision triangles.
-        {
-            // Cast world-down through the instance transform. Using local -Z
-            // only works for yaw-only placements; pitched flat models (notably
-            // Exodarplatform01, placed as the Azuremyst flight-master ramp)
-            // otherwise see a ray that is diagonal relative to world gravity.
-            const glm::vec3 localRayOrigin = glm::vec3(
-                instance.invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
-            const glm::vec3 localRayEnd = glm::vec3(
-                instance.invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
-            glm::vec3 localRayVector = localRayEnd - localRayOrigin;
-            const float localRayLength = glm::length(localRayVector);
-            if (localRayLength <= 1e-5f) continue;
-            const glm::vec3 localRayDir = localRayVector / localRayLength;
-
-            model.collision.getFloorTrisInRange(
-                std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
-                std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
-                std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
-                std::max(localRayOrigin.y, localRayEnd.y) + 1.0f,
-                tl_m2_collisionTriScratch);
-
-            float bestWorldHitZ = -std::numeric_limits<float>::max();
-            float bestHitNormalZ = 1.0f;
-            bool hitAny = false;
-
-            for (uint32_t ti : tl_m2_collisionTriScratch) {
-                if (ti >= model.collision.triCount) continue;
-
-                const auto& verts = model.collision.vertices;
-                const auto& idx   = model.collision.indices;
-                const auto& v0 = verts[idx[ti * 3]];
-                const auto& v1 = verts[idx[ti * 3 + 1]];
-                const auto& v2 = verts[idx[ti * 3 + 2]];
-
-                // The intersection is already two-sided, so the reversed
-                // winding this used to retry answers the same thing.
-                const float tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v1, v2);
-                if (tHit < 0.0f || tHit > localRayLength) continue;
-
-                const glm::vec3 localHit = localRayOrigin + localRayDir * tHit;
-                const glm::vec3 worldHit = glm::vec3(
-                    instance.modelMatrix * glm::vec4(localHit, 1.0f));
-
-                // Walkable normal check (world space)
-                glm::vec3 worldN(0.0f, 0.0f, 1.0f);  // Default to flat
-                glm::vec3 localN = glm::cross(v1 - v0, v2 - v0);
-                float nLen = glm::length(localN);
-                if (nLen > 0.001f) {
-                    localN /= nLen;
-                    if (localN.z < 0.0f) localN = -localN;
-                    glm::vec3 transformedN = glm::vec3(
-                        instance.modelMatrix * glm::vec4(localN, 0.0f));
-                    float wnLen = glm::length(transformedN);
-                    if (wnLen > 0.001f) {
-                        worldN = transformedN / wnLen;
-                    } // else: keep worldN = (0,0,1) flat default
-                    if (std::abs(worldN.z) < 0.35f) continue; // too steep (~70° max slope)
-                }
-
-                if (worldHit.z <= glZ + 3.0f && worldHit.z > bestWorldHitZ) {
-                    bestWorldHitZ = worldHit.z;
-                    hitAny = true;
-                    bestHitNormalZ = std::abs(worldN.z);
-                }
-            }
-
-            if (hitAny) {
-                if (!bestFloor || bestWorldHitZ > *bestFloor) {
-                    bestFloor = bestWorldHitZ;
-                    bestNormalZ = bestHitNormalZ;
-                }
-            }
-        }
-    }
-
-    // Output surface normal if requested
-    if (outNormalZ) {
-        *outNormalZ = bestNormalZ;
-    }
-
-    return bestFloor;
-}
-
-bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
-                                 glm::vec3& adjustedPos, float playerRadius) const {
-    QueryTimer timer(&queryTimeMs, &queryCallCount);
-    adjustedPos = to;
-    bool collided = false;
-
-    glm::vec3 queryMin = glm::min(from, to) - glm::vec3(7.0f, 7.0f, 5.0f);
-    glm::vec3 queryMax = glm::max(from, to) + glm::vec3(7.0f, 7.0f, 5.0f);
-    gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
-
-    // Check against all M2 instances in local space (rotation-aware).
-    for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = scene_->instances[idx];
-        if (collisionFocus.excludes(instance.worldBoundsMin,
-                                    instance.worldBoundsMax)) {
-            continue;
-        }
-
-        const float broadMargin = playerRadius + 1.0f;
-        if (from.x < instance.worldBoundsMin.x - broadMargin && adjustedPos.x < instance.worldBoundsMin.x - broadMargin) continue;
-        if (from.x > instance.worldBoundsMax.x + broadMargin && adjustedPos.x > instance.worldBoundsMax.x + broadMargin) continue;
-        if (from.y < instance.worldBoundsMin.y - broadMargin && adjustedPos.y < instance.worldBoundsMin.y - broadMargin) continue;
-        if (from.y > instance.worldBoundsMax.y + broadMargin && adjustedPos.y > instance.worldBoundsMax.y + broadMargin) continue;
-        if (from.z > instance.worldBoundsMax.z + 2.5f && adjustedPos.z > instance.worldBoundsMax.z + 2.5f) continue;
-        if (from.z + 2.5f < instance.worldBoundsMin.z && adjustedPos.z + 2.5f < instance.worldBoundsMin.z) continue;
-
-        if (!instance.cachedModel) continue;
-
-        const M2ModelGPU& model = *instance.cachedModel;
-        // Only a collision mesh blocks, as in the client. A model without one
-        // used to be stopped by a box made from its bounds and shaped by its
-        // name - a tree's trunk, a crate, a narrow post.
-        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
-        if (instance.skipCollision || instance.skipWallCollision) continue;
-        if (instance.scale <= 0.001f) continue;
-
-        // Closest-point push against the collision triangles.
-        {
-            glm::vec3 localFrom = glm::vec3(instance.invModelMatrix * glm::vec4(from, 1.0f));
-            glm::vec3 localPos  = glm::vec3(instance.invModelMatrix * glm::vec4(adjustedPos, 1.0f));
-            float localRadius = playerRadius / instance.scale;
-
-            model.collision.getWallTrisInRange(
-                std::min(localFrom.x, localPos.x) - localRadius - 1.0f,
-                std::min(localFrom.y, localPos.y) - localRadius - 1.0f,
-                std::max(localFrom.x, localPos.x) + localRadius + 1.0f,
-                std::max(localFrom.y, localPos.y) + localRadius + 1.0f,
-                tl_m2_collisionTriScratch);
-
-            constexpr float PLAYER_HEIGHT = 2.0f;
-            constexpr float MAX_TOTAL_PUSH = 0.02f; // Cap total push per instance
-            bool pushed = false;
-            float totalPushX = 0.0f, totalPushY = 0.0f;
-
-            for (uint32_t ti : tl_m2_collisionTriScratch) {
-                if (ti >= model.collision.triCount) continue;
-                if (localPos.z + PLAYER_HEIGHT < model.collision.triBounds[ti].minZ ||
-                    localPos.z > model.collision.triBounds[ti].maxZ) continue;
-
-                // Step-up: only skip wall when player is rising (jumping over it)
-                constexpr float MAX_STEP_UP = 1.2f;
-                bool rising = (localPos.z > localFrom.z + 0.05f);
-                if (rising && localPos.z + MAX_STEP_UP >= model.collision.triBounds[ti].maxZ) continue;
-
-                // Early out if we already pushed enough this instance
-                float totalPushSoFar = std::sqrt(totalPushX * totalPushX + totalPushY * totalPushY);
-                if (totalPushSoFar >= MAX_TOTAL_PUSH) break;
-
-                const auto& verts = model.collision.vertices;
-                const auto& idx   = model.collision.indices;
-                const auto& v0 = verts[idx[ti * 3]];
-                const auto& v1 = verts[idx[ti * 3 + 1]];
-                const auto& v2 = verts[idx[ti * 3 + 2]];
-
-                glm::vec3 closest = closestPointOnTriangle(localPos, v0, v1, v2);
-                glm::vec3 diff = localPos - closest;
-                float distXY = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-
-                if (distXY < localRadius && distXY > 1e-4f) {
-                    // Gentle push - very small fraction of penetration
-                    float penetration = localRadius - distXY;
-                    float pushDist = std::clamp(penetration * 0.08f, 0.001f, 0.015f);
-                    float dx = (diff.x / distXY) * pushDist;
-                    float dy = (diff.y / distXY) * pushDist;
-                    localPos.x += dx;
-                    localPos.y += dy;
-                    totalPushX += dx;
-                    totalPushY += dy;
-                    pushed = true;
-                } else if (distXY < 1e-4f) {
-                    // On the plane - soft push along triangle normal XY
-                    glm::vec3 n = glm::cross(v1 - v0, v2 - v0);
-                    float nxyLen = std::sqrt(n.x * n.x + n.y * n.y);
-                    if (nxyLen > 1e-4f) {
-                        float pushDist = std::min(localRadius, 0.015f);
-                        float dx = (n.x / nxyLen) * pushDist;
-                        float dy = (n.y / nxyLen) * pushDist;
-                        localPos.x += dx;
-                        localPos.y += dy;
-                        totalPushX += dx;
-                        totalPushY += dy;
-                        pushed = true;
-                    }
-                }
-            }
-
-            if (pushed) {
-                glm::vec3 worldPos = glm::vec3(instance.modelMatrix * glm::vec4(localPos, 1.0f));
-                adjustedPos.x = worldPos.x;
-                adjustedPos.y = worldPos.y;
-                collided = true;
-                // Which doodad is in the way, once per model.
-                //
-                // A model that blocks unexpectedly is reported as "I am
-                // stuck on this", and the model's name is the one thing
-                // needed to look at its collision mesh.
-                //
-                // Once per distinct model, not per frame: walking into
-                // something touches it every frame for as long as you lean on
-                // it.
-                static std::set<std::string> saidBlocked;
-                if (!model.name.empty() && saidBlocked.insert(model.name).second) {
-                    LOG_INFO("Collision: blocked by '", model.name,
-                             "' (its collision mesh)");
-                }
-            }
-        }
-    }
-
-    return collided;
-}
-
-float M2Renderer::raycastCollision(const glm::vec3& origin, const glm::vec3& direction,
-                                   float maxDistance) const {
-    // The client's world line test with doodad collision (flag 0x1, render
-    // spec 6c): the segment against each doodad's collision triangles. It
-    // used to be against each doodad's bounding box, so the camera stopped at
-    // the box around a tree's crown or a bush that has nothing to collide
-    // with, and skipped doodads under about 0.75 yd outright.
-    QueryTimer timer(&queryTimeMs, &queryCallCount);
-    float closestHit = maxDistance;
-
-    const glm::vec3 rayEnd = origin + direction * maxDistance;
-    const glm::vec3 queryMin = glm::min(origin, rayEnd) - glm::vec3(1.0f);
-    const glm::vec3 queryMax = glm::max(origin, rayEnd) + glm::vec3(1.0f);
-    gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
-
-    for (size_t idx : tl_m2_candidateScratch) {
-        const auto& instance = scene_->instances[idx];
-        if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) continue;
-        if (!instance.cachedModel || instance.scale <= 0.001f) continue;
-        const M2ModelGPU& model = *instance.cachedModel;
-        if (!model.collision.valid() || model.isInvisibleTrap || model.isSpellEffect) continue;
-
-        float tEnter = 0.0f;
-        if (!segmentIntersectsAABB(origin, origin + direction * closestHit,
-                                   instance.worldBoundsMin, instance.worldBoundsMax, tEnter)) {
-            continue;
-        }
-
-        // In model space; the segment's parameter is the same in both.
-        const glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(origin, 1.0f));
-        const glm::vec3 localEnd = glm::vec3(
-            instance.invModelMatrix * glm::vec4(origin + direction * closestHit, 1.0f));
-        const glm::vec3 localVector = localEnd - localOrigin;
-        const float localLength = glm::length(localVector);
-        if (localLength <= 1e-5f) continue;
-        const glm::vec3 localDir = localVector / localLength;
-
-        const auto& verts = model.collision.vertices;
-        const auto& indices = model.collision.indices;
-        float nearest = localLength;
-        for (uint32_t ti = 0; ti < model.collision.triCount; ++ti) {
-            const float t = rayTriangleIntersect(localOrigin, localDir, verts[indices[ti * 3]],
-                                                 verts[indices[ti * 3 + 1]],
-                                                 verts[indices[ti * 3 + 2]]);
-            if (t >= 0.0f && t < nearest) nearest = t;
-        }
-        closestHit *= nearest / localLength;
-    }
-    return closestHit;
 }
 
 void M2Renderer::recreatePipelines() {

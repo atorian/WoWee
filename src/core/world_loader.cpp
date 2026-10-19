@@ -1,4 +1,5 @@
 #include "core/world_loader.hpp"
+#include "collision/collision_world.hpp"
 #include "core/frame_phase.hpp"
 #include "core/thread_pool.hpp"
 #include "core/coordinates.hpp"
@@ -397,16 +398,6 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                 }
             } else { fail("Terrain manager unavailable"); return status(); }
             if (done) {
-                load.stage = Stage::Collision;
-                load.status = {WorldLoadResult::Pending, "Building collision cache...", 0.88f};
-                if (auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr) {
-                    wmo->loadFloorCache();
-                    if (wmo->getFloorCacheSize() == 0) wmo->beginFloorCachePrecompute();
-                }
-            }
-        } else if (stage() == Stage::Collision) {
-            auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr;
-            if (!wmo || wmo->precomputeFloorCacheStep(256)) {
                 load.stage = Stage::GeometryReady;
                 load.status = {WorldLoadResult::Pending, "Preparing creatures...", 0.97f};
             }
@@ -421,15 +412,17 @@ void WorldLoader::observeReadiness(bool spawnsPending) {
     auto* ctx = renderer_ ? renderer_->getVkContext() : nullptr;
     // Nothing to fall through in a scene nobody draws.
     bool ground = renderer_ == nullptr;
-    if (auto* wmo = renderer_ ? renderer_->getWMORenderer() : nullptr) {
-        const auto floor = wmo->getFloorHeight(load.spawn.x, load.spawn.y, load.spawn.z + 5);
+    if (renderer_) {
+        const collision::CollisionWorld& world = renderer_->collision();
+        const auto floor = world.wmoFloor(collision::Reach::everywhere(), load.spawn.x, load.spawn.y,
+                                          load.spawn.z + 5);
         ground = floor && std::abs(*floor - load.spawn.z) < 15;
+        if (!ground) {
+            const auto height = world.terrainHeight(load.spawn.x, load.spawn.y);
+            ground = height && std::abs(*height - load.spawn.z) < 15;
+        }
     }
     auto* terrain = renderer_ ? renderer_->getTerrainManager() : nullptr;
-    if (!ground && terrain) {
-        const auto height = terrain->getHeightAt(load.spawn.x, load.spawn.y);
-        ground = height && std::abs(*height - load.spawn.z) < 15;
-    }
     if (ctx) ctx->pollUploadBatches();
     const bool wasReady = load.status.result == WorldLoadResult::Ready;
     load.status = load.warmup.observe(secondsSince(load.stageStarted), !spawnsPending, ground,

@@ -4,6 +4,7 @@
 #include "core/cache_stats.hpp"
 #include "core/job_group.hpp"
 
+#include "collision/terrain_heights.hpp"
 #include "core/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -31,6 +32,7 @@
 namespace wowee {
 
 namespace pipeline { class AssetManager; }
+namespace collision { class CollisionWorld; }
 namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; }
 
 namespace rendering {
@@ -82,6 +84,8 @@ struct PendingTile {
     TileCoord coord;
     pipeline::ADTTerrain terrain;
     pipeline::TerrainMesh mesh;
+    /// Its ground for the collision world, handed over at the commit.
+    std::shared_ptr<const collision::TerrainTileHeights> heights;
 
     // Pre-loaded M2 data
     struct M2Ready {
@@ -290,6 +294,9 @@ public:
                                 std::vector<uint32_t>& outWeights) const;
     /// Where the tiles' and buildings' liquid goes as they stream in and out.
     void setLiquidScene(LiquidScene* scene) { liquidScene = scene; }
+    /// Where each tile's ground goes as it is committed and leaves as it is
+    /// unloaded - and every tile still loaded when this manager goes.
+    void setCollisionWorld(collision::CollisionWorld* world) { collision_ = world; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     /// Also fixes how the workers encode the normal maps they prepare for it.
     void setWMORenderer(WMORenderer* renderer);
@@ -300,51 +307,10 @@ public:
     void setAmbientEmitterSink(AmbientEmitterSink sink) { ambientEmitterSink_ = std::move(sink); }
 
     /**
-     * Get terrain height at GL coordinates
-     * @param glX GL X position
-     * @param glY GL Y position
-     * @return Height (GL Z) if terrain loaded at that position, empty otherwise
-     */
-    [[nodiscard]] std::optional<float> getHeightAt(float glX, float glY) const;
-
-    /**
-     * True when the MCNK chunk containing this position is cut by terrain holes.
-     * getHeightAt interpolates straight across a hole and reports a surface that
-     * is not there, so anything reasoning about "below the terrain" has to know
-     * the heightfield is fiction here - hole-cut chunks are how cave mouths and
-     * below-ground entrances are opened up. Answered per chunk rather than per
-     * quad: this only ever gates a safety net, and being coarse in the safe
-     * direction beats depending on the hole bit's axis order.
-     */
-    [[nodiscard]] bool chunkHasHoles(float glX, float glY) const;
-
-    /**
-     * True when the single terrain quad under this position is cut away.
-     * chunkHasHoles answers for a whole 33x33-yard chunk, which is far too
-     * coarse to decide whether the player is standing on ground: a chunk
-     * containing one cave mouth would report every yard of it as empty. This
-     * is the per-quad question, matched to the quads the mesh builder skips.
-     */
-    [[nodiscard]] bool isHoleAt(float glX, float glY) const;
-
-    /**
-     * Whether the tile covering a world position has finished streaming in.
-     *
-     * getHeightAt answers nothing both for a hole, which the character should
-     * fall through, and for a tile that has not arrived yet, which it should
-     * not. Physics cannot tell those apart from the height alone, and on a
-     * slow device the second one is what happens at every login: the character
-     * enters the world before the ground does and falls until the server kills
-     * it.
-     */
-    [[nodiscard]] bool isTileLoadedAt(float glX, float glY) const;
-
-    /**
-     * The chunk under a world position, plus the offsets within it that
-     * getHeightAt samples and isHoleAt reads a quad from. Shared so those two
-     * cannot drift: the first copy of this search that was written by hand
-     * omitted the full-scan fallback and answered "no hole" for chunks the
-     * index guess missed.
+     * The chunk under a world position, plus the offsets within it: what the
+     * renderer's own lookups of the parsed tile (textures, clutter) read.
+     * The world's height, hole and area queries are CollisionWorld's, over
+     * the same search.
      */
     const pipeline::MapChunk* findChunkAt(float glX, float glY,
                                           float& fracX, float& fracY,
@@ -366,9 +332,6 @@ public:
         glm::vec3 highlight{0.65f};
     };
     [[nodiscard]] TerrainTextureTones getTerrainTextureTones(const std::string& texturePath);
-
-    /** Get the precise MCNK AreaTable ID at a world position. */
-    [[nodiscard]] std::optional<uint32_t> getAreaIdAt(float glX, float glY) const;
 
 
     /**
@@ -457,6 +420,7 @@ private:
     LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
+    collision::CollisionWorld* collision_ = nullptr;
     /// How the workers encode WMO normal maps: the device's, read once when
     /// the renderer is set rather than from the workers.
     NormalMapFormat wmoNormalMapFormat_ = NormalMapFormat::Rgba8;

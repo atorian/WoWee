@@ -1067,7 +1067,7 @@ void M2Renderer::shutdown() {
     }
     ++instanceLayoutRevision_;
     scene_->instances.clear();
-    scene_->spatialGrid.clear();
+    if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
     scene_->instanceDedupMap_.clear();
@@ -1220,114 +1220,6 @@ VkDescriptorSet M2Renderer::allocateBoneSet() {
     return set;
 }
 
-// ---------------------------------------------------------------------------
-// M2 collision mesh: build spatial grid + classify triangles
-// ---------------------------------------------------------------------------
-void M2ModelGPU::CollisionMesh::build() {
-    if (indices.size() < 3 || vertices.empty()) return;
-    triCount = static_cast<uint32_t>(indices.size() / 3);
-
-    // Bounding box for grid
-    glm::vec3 bmin(std::numeric_limits<float>::max());
-    glm::vec3 bmax(-std::numeric_limits<float>::max());
-    for (const auto& v : vertices) {
-        bmin = glm::min(bmin, v);
-        bmax = glm::max(bmax, v);
-    }
-    boundMin = bmin;
-    boundMax = bmax;
-
-    gridOrigin = glm::vec2(bmin.x, bmin.y);
-    gridCellsX = std::max(1, std::min(32, static_cast<int>(std::ceil((bmax.x - bmin.x) / CELL_SIZE))));
-    gridCellsY = std::max(1, std::min(32, static_cast<int>(std::ceil((bmax.y - bmin.y) / CELL_SIZE))));
-
-    cellFloorTris.resize(static_cast<size_t>(gridCellsX) * static_cast<size_t>(gridCellsY));
-    cellWallTris.resize(static_cast<size_t>(gridCellsX) * static_cast<size_t>(gridCellsY));
-    triBounds.resize(triCount);
-
-    for (uint32_t ti = 0; ti < triCount; ti++) {
-        uint16_t i0 = indices[ti * 3];
-        uint16_t i1 = indices[ti * 3 + 1];
-        uint16_t i2 = indices[ti * 3 + 2];
-        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) continue;
-
-        const auto& v0 = vertices[i0];
-        const auto& v1 = vertices[i1];
-        const auto& v2 = vertices[i2];
-
-        triBounds[ti].minZ = std::min({v0.z, v1.z, v2.z});
-        triBounds[ti].maxZ = std::max({v0.z, v1.z, v2.z});
-
-        glm::vec3 normal = glm::cross(v1 - v0, v2 - v0);
-        float normalLen = glm::length(normal);
-        float absNz = (normalLen > 0.001f) ? std::abs(normal.z / normalLen) : 0.0f;
-        bool isFloor = (absNz >= 0.35f);  // ~70° max slope (relaxed for steep stairs)
-        bool isWall  = (absNz < 0.65f);
-
-        float triMinX = std::min({v0.x, v1.x, v2.x});
-        float triMaxX = std::max({v0.x, v1.x, v2.x});
-        float triMinY = std::min({v0.y, v1.y, v2.y});
-        float triMaxY = std::max({v0.y, v1.y, v2.y});
-
-        int cxMin = std::clamp(static_cast<int>((triMinX - gridOrigin.x) / CELL_SIZE), 0, gridCellsX - 1);
-        int cxMax = std::clamp(static_cast<int>((triMaxX - gridOrigin.x) / CELL_SIZE), 0, gridCellsX - 1);
-        int cyMin = std::clamp(static_cast<int>((triMinY - gridOrigin.y) / CELL_SIZE), 0, gridCellsY - 1);
-        int cyMax = std::clamp(static_cast<int>((triMaxY - gridOrigin.y) / CELL_SIZE), 0, gridCellsY - 1);
-
-        for (int cy = cyMin; cy <= cyMax; cy++) {
-            for (int cx = cxMin; cx <= cxMax; cx++) {
-                int ci = cy * gridCellsX + cx;
-                if (isFloor) cellFloorTris[ci].push_back(ti);
-                if (isWall)  cellWallTris[ci].push_back(ti);
-            }
-        }
-    }
-}
-
-/// The triangles of one cell array that a query box reaches, deduplicated.
-///
-/// Floors and walls are asked separately and the two queries differed in one
-/// token: which array they read. A triangle spanning several cells is filed
-/// under each, so the sort and unique are not tidiness - a caller that tests
-/// the same triangle twice counts two hits, and a raycast then reports an even
-/// number of crossings where there was one surface.
-void M2ModelGPU::CollisionMesh::gatherTrisInRange(
-        const std::vector<std::vector<uint32_t>>& cells,
-        float minX, float minY, float maxX, float maxY,
-        std::vector<uint32_t>& out) const {
-    out.clear();
-    if (gridCellsX == 0 || gridCellsY == 0) return;
-
-    const int cxMin = std::clamp(static_cast<int>((minX - gridOrigin.x) / CELL_SIZE), 0, gridCellsX - 1);
-    const int cxMax = std::clamp(static_cast<int>((maxX - gridOrigin.x) / CELL_SIZE), 0, gridCellsX - 1);
-    const int cyMin = std::clamp(static_cast<int>((minY - gridOrigin.y) / CELL_SIZE), 0, gridCellsY - 1);
-    const int cyMax = std::clamp(static_cast<int>((maxY - gridOrigin.y) / CELL_SIZE), 0, gridCellsY - 1);
-
-    const size_t cellCount = static_cast<size_t>(cxMax - cxMin + 1) *
-                             static_cast<size_t>(cyMax - cyMin + 1);
-    out.reserve(cellCount * 8);
-    for (int cy = cyMin; cy <= cyMax; cy++) {
-        for (int cx = cxMin; cx <= cxMax; cx++) {
-            const auto& cell = cells[cy * gridCellsX + cx];
-            out.insert(out.end(), cell.begin(), cell.end());
-        }
-    }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-}
-
-void M2ModelGPU::CollisionMesh::getFloorTrisInRange(
-        float minX, float minY, float maxX, float maxY,
-        std::vector<uint32_t>& out) const {
-    gatherTrisInRange(cellFloorTris, minX, minY, maxX, maxY, out);
-}
-
-void M2ModelGPU::CollisionMesh::getWallTrisInRange(
-        float minX, float minY, float maxX, float maxY,
-        std::vector<uint32_t>& out) const {
-    gatherTrisInRange(cellWallTris, minX, minY, maxX, maxY, out);
-}
-
 bool M2Renderer::hasModel(uint32_t modelId) const {
     return models.find(modelId) != models.end();
 }
@@ -1458,6 +1350,14 @@ void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
     auto it = models.find(modelId);
     if (it != models.end()) {
         it->second.isSpellEffect = true;
+        // An effect collides with nothing: none of its instances is solid,
+        // and those placed later are given no shape to be.
+        if (it->second.collision && collision_) {
+            for (const auto& inst : scene_->instances) {
+                if (inst.modelId == modelId) collision_->removeM2(inst.id);
+            }
+        }
+        it->second.collision.reset();
         for (auto& batch : it->second.batches) writeBatchMaterial(it->second, batch);
         // Spell effects MUST have bone animation for ribbons/particles to work.
         // The classifier may have set disableAnimation=true based on name tokens
@@ -1807,12 +1707,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     }
 
     // Build collision mesh + spatial grid from M2 bounding geometry
-    gpuModel.collision.vertices = model.collisionVertices;
-    gpuModel.collision.indices = model.collisionIndices;
-    gpuModel.collision.build();
-    if (gpuModel.collision.valid()) {
-        core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision.triCount,
-            " tris, grid ", gpuModel.collision.gridCellsX, "x", gpuModel.collision.gridCellsY);
+    gpuModel.collision = collision::M2Shape::build(model.name, model.collisionVertices,
+                                                   model.collisionIndices);
+    if (gpuModel.collision) {
+        core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision->triCount,
+            " tris, grid ", gpuModel.collision->gridCellsX, "x", gpuModel.collision->gridCellsY);
     }
 
     // Identify idle variation sequences (animation ID 0 = Stand)
@@ -2360,6 +2259,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                       size.x, " x ", size.y, " x ", size.z, ")");
         }
     }
+    // A trap volume or an effect is not there to collide with, whatever mesh
+    // it ships.
+    if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect) gpuModel.collision.reset();
 
     vkCtx_->endUploadBatch();
 

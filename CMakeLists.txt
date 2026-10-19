@@ -678,6 +678,12 @@ endif()
 
 # Source files
 set(WOWEE_SOURCES
+    # Collision
+    src/collision/collision_world.cpp
+    src/collision/m2_shape.cpp
+    src/collision/terrain_heights.cpp
+    src/collision/wmo_shape.cpp
+
     # Core
     src/core/application.cpp
     src/core/application_world_loading.cpp
@@ -1024,7 +1030,6 @@ set(WOWEE_SOURCES
     src/rendering/amd_fsr3_runtime.cpp
     src/rendering/camera.cpp
     src/rendering/camera_controller.cpp
-    src/rendering/wall_sweep.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
     src/rendering/terrain_bake.cpp
@@ -1228,9 +1233,14 @@ set(WOWEE_SOURCES
 #                   the memory monitor; coordinates, data paths and the
 #                   profiler are header-only and come with its include path
 #   wowee_pipeline  asset formats and loaders; depends on wowee_base only
+#   wowee_collision the solid world: terrain heights, building and doodad
+#                   shapes and placements, and every floor, wall and ray query
+#                   over them; depends on wowee_pipeline only
 #   wowee_render    the Vulkan renderer: the context, every sub-renderer, the
 #                   sky, light, shadows and post-processing, and the frame that
-#                   puts them together; depends on wowee_pipeline only. Told
+#                   puts them together; depends on wowee_collision and
+#                   wowee_pipeline, and places what it draws in the
+#                   collision world. Told
 #                   what the game knows (WorldEnvironment) and how the viewer
 #                   moves (ViewerMotion) rather than asking, so a scene can be
 #                   drawn without the client - see tools/scene_render.
@@ -1255,6 +1265,9 @@ set(WOWEE_BASE_SOURCES
 set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_PIPELINE_SOURCES INCLUDE REGEX "^src/pipeline/")
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_BASE_SOURCES} ${WOWEE_PIPELINE_SOURCES})
+set(WOWEE_COLLISION_SOURCES ${WOWEE_SOURCES})
+list(FILTER WOWEE_COLLISION_SOURCES INCLUDE REGEX "^src/collision/")
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_COLLISION_SOURCES})
 set(WOWEE_RENDER_CLIENT_SOURCES
     src/rendering/animation_controller.cpp
     src/rendering/camera_controller.cpp
@@ -1784,8 +1797,16 @@ target_precompile_headers(wowee_pipeline PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
 )
 
+add_library(wowee_collision STATIC ${WOWEE_COLLISION_SOURCES})
+target_link_libraries(wowee_collision PUBLIC wowee_pipeline wowee_base)
+target_precompile_headers(wowee_collision PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
+
 add_library(wowee_render STATIC ${WOWEE_RENDER_SOURCES})
-target_link_libraries(wowee_render PUBLIC wowee_pipeline wowee_base SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
+target_link_libraries(wowee_render PUBLIC wowee_collision wowee_pipeline wowee_base SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
 # Its private headers sit beside its sources (rendering/m2_renderer_internal.h).
 target_include_directories(wowee_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(wowee_render SYSTEM PUBLIC
@@ -1841,11 +1862,11 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game
+    set_target_properties(wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game
                           PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_pipeline wowee_net wowee_protocol wowee_base)
+target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_collision wowee_pipeline wowee_net wowee_protocol wowee_base)
 
 # Compiler warnings.
 #
@@ -1979,7 +2000,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_pipeline wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_base wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)

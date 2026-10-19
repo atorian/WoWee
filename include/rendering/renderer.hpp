@@ -38,6 +38,7 @@
 namespace wowee {
 namespace rendering { class VkContext; }
 namespace pipeline { class AssetManager; }
+namespace collision { class CollisionWorld; }
 
 namespace rendering {
 
@@ -217,6 +218,10 @@ public:
     const WindState& windState() const { return wind_.state(); }
     /// The one way the client changes the scene (scene_commands.hpp).
     SceneCommands& scene() { return *scene_; }
+    /// The solid world of what is drawn: where the floor is, what a mover
+    /// slides along. The renderers place what they draw in it; everyone else
+    /// asks it.
+    [[nodiscard]] const collision::CollisionWorld& collision() const { return *collision_; }
     /// Makes the changes asked of scene() now: at the start of the frame's
     /// Present, and first thing in update().
     void applySceneCommands();
@@ -293,6 +298,10 @@ public:
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
 
 private:
+    /// First of the members, so it is built before and destroyed after every
+    /// renderer and terrain manager that places things in it.
+    std::unique_ptr<collision::CollisionWorld> collision_;
+
     std::function<void(VkCommandBuffer)> afterInterface_;
     std::function<void(VkCommandBuffer)> interface_;
 

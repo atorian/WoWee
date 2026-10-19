@@ -82,23 +82,4 @@ struct InteriorLightProbe {
     };
 }
 
-/// The vertex colour of a triangle at a point on it, interpolated between
-/// its corners.
-[[nodiscard]] inline glm::vec3 colorAtPoint(const glm::vec3& p, const glm::vec3& v0,
-                                            const glm::vec3& v1, const glm::vec3& v2,
-                                            const glm::vec3& c0, const glm::vec3& c1,
-                                            const glm::vec3& c2) {
-    const glm::vec3 e1 = v1 - v0;
-    const glm::vec3 e2 = v2 - v0;
-    const glm::vec3 d = p - v0;
-    const float d11 = glm::dot(e1, e1);
-    const float d12 = glm::dot(e1, e2);
-    const float d22 = glm::dot(e2, e2);
-    const float denom = d11 * d22 - d12 * d12;
-    if (denom == 0.0f) return c0;  // degenerate: no inside to interpolate across
-    const float w1 = (d22 * glm::dot(d, e1) - d12 * glm::dot(d, e2)) / denom;
-    const float w2 = (d11 * glm::dot(d, e2) - d12 * glm::dot(d, e1)) / denom;
-    return c0 * (1.0f - w1 - w2) + c1 * w1 + c2 * w2;
-}
-
 }  // namespace wowee::rendering

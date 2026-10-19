@@ -1,5 +1,5 @@
 #include "rendering/camera_controller.hpp"
-#include "rendering/wall_sweep.hpp"
+#include "collision/collision_world.hpp"
 
 #include "core/env_flag.hpp"
 #include "rendering/swim_wall.hpp"
@@ -18,9 +18,6 @@
 #include <utility>
 #include "core/thread_pool.hpp"
 #include <imgui.h>
-#include "rendering/terrain_manager.hpp"
-#include "rendering/wmo_renderer.hpp"
-#include "rendering/m2_renderer.hpp"
 #include "rendering/liquid_scene.hpp"
 #include "rendering/character_renderer.hpp"
 #include "game/opcodes.hpp"
@@ -206,7 +203,7 @@ void CameraController::startIntroPan(float durationSec, float orbitDegrees) {
 }
 float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const glm::vec3& camDir,
                                                    float maxDist) const {
-    if (!terrainManager || maxDist <= MIN_DISTANCE) return maxDist;
+    if (!collision_ || maxDist <= MIN_DISTANCE) return maxDist;
 
     // Clearance the camera keeps above the terrain surface along the whole ray.
     // Enough to keep the near plane out of the ground and no more: the quarter
@@ -217,7 +214,7 @@ float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const
     // If the pivot itself sits below the heightfield (caves, WMO basements,
     // terrain holes under cities), the heightfield is not the relevant occluder
     // here - skip limiting rather than pinning the camera to first-person.
-    auto pivotH = terrainManager->getHeightAt(pivot.x, pivot.y);
+    auto pivotH = collision_->terrainHeight(pivot.x, pivot.y);
     if (pivotH && pivot.z < *pivotH - 0.2f) return maxDist;
 
     // Coarse march in ~1.25-unit steps (capped so worst case stays cheap),
@@ -228,14 +225,14 @@ float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const
     for (int i = 1; i <= steps; ++i) {
         float t = stepLen * static_cast<float>(i);
         glm::vec3 p = pivot + camDir * t;
-        auto h = terrainManager->getHeightAt(p.x, p.y);
+        auto h = collision_->terrainHeight(p.x, p.y);
         if (h && p.z < *h + kClearance) {
             float lo = prevT;
             float hi = t;
             for (int j = 0; j < 4; ++j) {
                 float mid = 0.5f * (lo + hi);
                 glm::vec3 mp = pivot + camDir * mid;
-                auto mh = terrainManager->getHeightAt(mp.x, mp.y);
+                auto mh = collision_->terrainHeight(mp.x, mp.y);
                 if (mh && mp.z < *mh + kClearance) hi = mid; else lo = mid;
             }
             return std::max(MIN_DISTANCE, lo);
@@ -247,8 +244,8 @@ float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const
 
 std::optional<float> CameraController::cameraTerrainFloor(float x, float y,
                                                          const glm::vec3& targetPos) const {
-    if (!terrainManager) return std::nullopt;
-    auto feetH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+    if (!collision_) return std::nullopt;
+    auto feetH = collision_->terrainHeight(targetPos.x, targetPos.y);
     if (feetH && targetPos.z < *feetH - 0.2f) return std::nullopt;
 
     // The near plane is wider than a point. On a ridge or a bank the ground a
@@ -262,8 +259,8 @@ std::optional<float> CameraController::cameraTerrainFloor(float x, float y,
     for (const auto& [ox, oy] : {std::pair{0.0f, 0.0f},
                                  std::pair{kFootprint, 0.0f}, std::pair{-kFootprint, 0.0f},
                                  std::pair{0.0f, kFootprint}, std::pair{0.0f, -kFootprint}}) {
-        if (terrainManager->isHoleAt(x + ox, y + oy)) continue;
-        auto h = terrainManager->getHeightAt(x + ox, y + oy);
+        if (collision_->terrainHoleAt(x + ox, y + oy)) continue;
+        auto h = collision_->terrainHeight(x + ox, y + oy);
         if (h && (!best || *h > *best)) best = h;
     }
     return best;
@@ -285,9 +282,9 @@ void CameraController::triggerShake(float magnitude, float frequency, float dura
 
 glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to,
                                               bool includeDoodads) {
-    return sweepMoverAgainstWalls(wmoRenderer,
-                                  includeDoodads && !externalFollow_ ? m2Renderer : nullptr,
-                                  from, to, cachedInsideWMO);
+    if (!collision_) return to;
+    return collision_->sweepMover(reach_, from, to, cachedInsideWMO,
+                                  includeDoodads && !externalFollow_);
 }
 
 // The camera that orbits a character and moves it.
@@ -318,12 +315,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
     prevTargetPos = *followTarget;
     glm::vec3 targetPos = *followTarget;
     if (!externalFollow_) {
-        if (wmoRenderer) {
-            wmoRenderer->setCollisionFocus(targetPos, COLLISION_FOCUS_RADIUS_THIRD_PERSON);
-        }
-        if (m2Renderer) {
-            m2Renderer->setCollisionFocus(targetPos, COLLISION_FOCUS_RADIUS_THIRD_PERSON);
-        }
+        reach_ = collision::Reach::around(targetPos, COLLISION_FOCUS_RADIUS_THIRD_PERSON);
     }
 
     if (!externalFollow_) {
@@ -365,9 +357,9 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 std::optional<float> terrainH;
                 std::optional<float> wmoH;
                 std::optional<float> m2H;
-                if (terrainManager) terrainH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
-                if (wmoRenderer) wmoH = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 2.0f);
-                if (m2Renderer) m2H = m2Renderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 1.0f);
+                if (collision_) terrainH = collision_->terrainHeight(targetPos.x, targetPos.y);
+                if (collision_) wmoH = collision_->wmoFloor(reach_, targetPos.x, targetPos.y, targetPos.z + 2.0f);
+                if (collision_) m2H = collision_->m2Floor(reach_, targetPos.x, targetPos.y, targetPos.z + 1.0f);
                 auto floorH = selectHighestFloor(terrainH, wmoH, m2H);
 
                 // Prefer measured depth from floor; if floor sample is missing,
@@ -407,17 +399,17 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 if (swimming && inWater && f.nowForward && f.forward3D.z > -0.20f && !f.xDown) {
                     auto queryFloorAt = [&](float x, float y, float probeZ) -> std::optional<float> {
                         std::optional<float> best;
-                        if (terrainManager) {
-                            best = terrainManager->getHeightAt(x, y);
+                        if (collision_) {
+                            best = collision_->terrainHeight(x, y);
                         }
-                        if (wmoRenderer) {
+                        if (collision_) {
                             float nz = 1.0f;
-                            auto wh = wmoRenderer->getFloorHeight(x, y, probeZ, &nz);
+                            auto wh = collision_->wmoFloor(reach_, x, y, probeZ, &nz);
                             if (wh && nz >= 0.40f && (!best || *wh > *best)) best = wh;
                         }
-                        if (m2Renderer && !externalFollow_) {
+                        if (collision_ && !externalFollow_) {
                             float nz = 1.0f;
-                            auto mh = m2Renderer->getFloorHeight(x, y, probeZ, &nz);
+                            auto mh = collision_->m2Floor(reach_, x, y, probeZ, &nz);
                             if (mh && nz >= 0.35f && (!best || *mh > *best)) best = mh;
                         }
                         return best;
@@ -569,15 +561,15 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 }
             };
 
-            if (terrainManager) {
-                considerFloor(terrainManager->getHeightAt(targetPos.x, targetPos.y));
+            if (collision_) {
+                considerFloor(collision_->terrainHeight(targetPos.x, targetPos.y));
             }
-            if (wmoRenderer) {
-                auto wh = wmoRenderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 2.0f);
+            if (collision_) {
+                auto wh = collision_->wmoFloor(reach_, targetPos.x, targetPos.y, targetPos.z + 2.0f);
                 considerFloor(wh);
             }
-            if (m2Renderer && !externalFollow_) {
-                auto mh = m2Renderer->getFloorHeight(targetPos.x, targetPos.y, targetPos.z + 2.0f);
+            if (collision_ && !externalFollow_) {
+                auto mh = collision_->m2Floor(reach_, targetPos.x, targetPos.y, targetPos.z + 2.0f);
                 considerFloor(mh);
             }
 
@@ -593,8 +585,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             // A structure floor found beneath the feet still owns the vertical,
             // so a cave or an interior that genuinely sits below the heightmap
             // keeps swimming as it did.
-            if (terrainManager && !floorH) {
-                auto th = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+            if (collision_ && !floorH) {
+                auto th = collision_->terrainHeight(targetPos.x, targetPos.y);
                 if (th && *th > targetPos.z) floorH = th;
             }
 
@@ -638,11 +630,11 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             // holds them half a yard above the floor, so a beach shelving up
             // under them stays passable and they swim ashore as before.
             constexpr float SWIM_TERRAIN_WALL_CLEARANCE = 0.9f;
-            if (terrainManager) {
+            if (collision_) {
                 const SwimStep allowed = swimStepAgainstTerrain(
                     {followTarget->x, followTarget->y}, {stepPos.x, stepPos.y},
                     targetPos.z + SWIM_TERRAIN_WALL_CLEARANCE,
-                    [&](float x, float y) { return terrainManager->getHeightAt(x, y); });
+                    [&](float x, float y) { return collision_->terrainHeight(x, y); });
                 stepPos.x = allowed.x;
                 stepPos.y = allowed.y;
             }
@@ -714,18 +706,18 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             // The ground holds a flying mount up - see flightStepAgainstGround.
             // Not where a WMO floor lies at the feet under the heightfield: that
             // is a tunnel burrowing under unholed ground, flown into, not over.
-            if (terrainManager) {
+            if (collision_) {
                 // Half a heightfield cell, as the slope reading in
                 // sampleFloorUnderFeet uses, for the same reason.
                 constexpr float kGroundNormalSpacing = 2.0f;
                 const glm::vec3 slid = movement::flightStepAgainstGround(
                     [this](float x, float y) -> std::optional<float> {
-                        if (terrainManager->isHoleAt(x, y)) return std::nullopt;
-                        return terrainManager->getHeightAt(x, y);
+                        if (collision_->terrainHoleAt(x, y)) return std::nullopt;
+                        return collision_->terrainHeight(x, y);
                     },
                     flightFrom, targetPos, kGroundNormalSpacing);
                 if (slid != targetPos &&
-                    !(wmoRenderer && wmoRenderer->getFloorHeight(
+                    !(collision_ && collision_->wmoFloor(reach_,
                           targetPos.x, targetPos.y, targetPos.z + 1.5f))) {
                     targetPos = slid;
                 }
@@ -813,7 +805,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 
     // Refresh inside-WMO state before collision/grounding so we don't use stale
     // terrain-first caches while entering enclosed tunnel/building spaces.
-    if (wmoRenderer && !externalFollow_) {
+    if (collision_ && !externalFollow_) {
         glm::vec3 insideDelta = targetPos - lastInsideStateCheckPos_;
         float insideDistSq = glm::dot(insideDelta, insideDelta);
         if (++insideStateCheckCounter_ >= 2 || insideDistSq > 0.1225f) {
@@ -822,9 +814,9 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
 
             bool prevInside = cachedInsideWMO;
             bool prevInsideInterior = cachedInsideInteriorWMO;
-            cachedInsideWMO = wmoRenderer->isInsideWMO(targetPos.x, targetPos.y, targetPos.z + 1.0f, nullptr);
+            cachedInsideWMO = collision_->insideWmo(reach_, targetPos.x, targetPos.y, targetPos.z + 1.0f, nullptr);
             cachedInsideInteriorWMO = cachedInsideWMO &&
-                wmoRenderer->isInsideInteriorWMO(targetPos.x, targetPos.y, targetPos.z + 1.0f);
+                collision_->insideInteriorWmo(reach_, targetPos.x, targetPos.y, targetPos.z + 1.0f);
             if (cachedInsideWMO != prevInside || cachedInsideInteriorWMO != prevInsideInterior) {
                 hasCachedFloor_ = false;
                 hasCachedCamFloor = false;
@@ -856,13 +848,13 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
     // counts - the ray is two-sided, and the underside of a doorway lintel
     // over a jumping head is open space below a ceiling, not a solid to stop
     // at.
-    if (!grounded && !swimming && !isFlightAirborne() && !externalFollow_ && wmoRenderer) {
+    if (!grounded && !swimming && !isFlightAirborne() && !externalFollow_ && collision_) {
         constexpr float kAirborneStepUp = 1.2f;    // groundFollowedCharacter's stepUpBudget
         constexpr float kBodyHeight = 2.0f;        // checkWallCollision's PLAYER_HEIGHT
         const float feetZ = targetPos.z;
         const float landableZ = feetZ + kAirborneStepUp;
         bool facesUp = false;
-        const auto top = wmoRenderer->getFloorHeight(
+        const auto top = collision_->wmoFloor(reach_,
             targetPos.x, targetPos.y, feetZ + kBodyHeight, nullptr,
             std::numeric_limits<float>::quiet_NaN(), &facesUp);
         if (top && facesUp && *top > feetZ && *top > landableZ) {
@@ -936,7 +928,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         std::future<FloorResult> m2Future;
         bool wmoAsync = false, m2Async = false;
         float px = targetPos.x, py = targetPos.y;
-        if (wmoRenderer) {
+        if (collision_) {
             wmoAsync = true;
             // Closest to the feet, not the highest below the probe.
             //
@@ -982,21 +974,21 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             wmoFuture = core::ThreadPool::frameWorkers().submit("camera: WMO floor",
                 [this, px, py, wmoProbeZ, feetRef]() -> FloorResult {
                     float nz = 1.0f;
-                    auto h = wmoRenderer->getFloorHeight(px, py, wmoProbeZ, &nz, feetRef);
+                    auto h = collision_->wmoFloor(reach_, px, py, wmoProbeZ, &nz, feetRef);
                     return {h, nz};
                 });
         }
-        if (m2Renderer && !externalFollow_) {
+        if (collision_ && !externalFollow_) {
             m2Async = true;
             m2Future = core::ThreadPool::frameWorkers().submit("camera: M2 floor",
                 [this, px, py, wmoProbeZ]() -> FloorResult {
                     float nz = 1.0f;
-                    auto h = m2Renderer->getFloorHeight(px, py, wmoProbeZ, &nz);
+                    auto h = collision_->m2Floor(reach_, px, py, wmoProbeZ, &nz);
                     return {h, nz};
                 });
         }
-        if (terrainManager) {
-            terrainH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+        if (collision_) {
+            terrainH = collision_->terrainHeight(targetPos.x, targetPos.y);
             // ...and how steep it is there, which the height alone cannot say.
             // Sampled at a third of a yard: wide enough not to read the
             // interpolation inside one heightfield cell as a cliff, narrow
@@ -1017,7 +1009,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
                 constexpr float kSlopeSampleSpacing = 2.0f;
                 const float nz = movement::heightfieldNormalZ(
                     [this](float sx, float sy) {
-                        return terrainManager->getHeightAt(sx, sy);
+                        return collision_->terrainHeight(sx, sy);
                     },
                     targetPos.x, targetPos.y, kSlopeSampleSpacing);
                 // The slope limit does NOT remove the ground.
@@ -1072,7 +1064,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         // group (tram entrance buildings) the heightfield under the city
         // is meaningless, so it gets no veto - otherwise entry becomes
         // dependent on approach angle.
-        if (atTunnelSeam && !cachedInsideInteriorWMO && terrainManager) {
+        if (atTunnelSeam && !cachedInsideInteriorWMO && collision_) {
             glm::vec3 moveDir = targetPos - lastCollisionCheckPos_;
             moveDir.z = 0.0f;
             const float moveLen = glm::length(moveDir);
@@ -1080,7 +1072,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
                 atTunnelSeam = false;  // stationary - nothing to enter
             } else {
                 const glm::vec3 aheadPos = targetPos + moveDir * (2.5f / moveLen);
-                auto terrainAhead = terrainManager->getHeightAt(aheadPos.x, aheadPos.y);
+                auto terrainAhead = collision_->terrainHeight(aheadPos.x, aheadPos.y);
                 atTunnelSeam = !terrainAhead ||
                                *terrainAhead > targetPos.z + 2.2f;
             }
@@ -1110,7 +1102,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         // A terrain hole is the artist saying there is no ground
         // here - it is how cave mouths and sunken entrances get
         // opened up, and the mesh builder already skips those
-        // quads, so nothing is drawn over them. getHeightAt does
+        // quads, so nothing is drawn over them. terrainHeight does
         // not ask: it interpolates straight across the gap and
         // reports a surface right at the player's feet, which then
         // wins the floor selection against the real floor below.
@@ -1124,8 +1116,8 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         // Only ever hand the floor to the building underneath - a
         // hole with nothing below it keeps the heightfield it has
         // always had, so this cannot open a pit anywhere new.
-        if (terrainH && wmoH && terrainManager &&
-            terrainManager->isHoleAt(targetPos.x, targetPos.y)) {
+        if (terrainH && wmoH && collision_ &&
+            collision_->terrainHoleAt(targetPos.x, targetPos.y)) {
             terrainH = std::nullopt;
         }
 
@@ -1216,7 +1208,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         // collision triangles and is not marked skipCollision, so what is
         // wanted here is which test the instance fails, or whether it is a
         // candidate at all.
-        if (!groundH && m2Renderer) {
+        if (!groundH && collision_) {
             static std::chrono::steady_clock::time_point lastNoFloorDump{};
             const auto nowNoFloor = std::chrono::steady_clock::now();
             if (nowNoFloor - lastNoFloorDump > std::chrono::seconds(5)) {
@@ -1229,12 +1221,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
                 LOG_WARNING("Centre floor probe found nothing (feet ", targetPos.z,
                             ") - the recovery passes have not run yet");
                 if (floorDiagEnabled()) {
-                    if (wmoRenderer) {
-                        wmoRenderer->debugDumpGroupsAtPosition(
-                            targetPos.x, targetPos.y, targetPos.z);
-                    }
-                    m2Renderer->debugDumpFloorCandidatesAt(
-                        targetPos.x, targetPos.y, targetPos.z);
+                    collision_->logFloorCandidates(targetPos.x, targetPos.y, targetPos.z);
                 }
             }
         }
@@ -1270,12 +1257,12 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         // casts one ray. A drop nothing around the feet can account for is a
         // real one and is passed through untouched - walking off a ledge still
         // works.
-        if (groundH && grounded && wmoRenderer &&
+        if (groundH && grounded && collision_ &&
             *groundH < lastGroundZ - 4.0f && targetPos.z > lastGroundZ - 4.0f) {
             const float lipProbeZ = std::max(targetPos.z, lastGroundZ) + stepUpBudget + 0.6f;
             auto lip = highestWalkableFloor(
                 [this](float x, float y, float z, float* nz) {
-                    return wmoRenderer->getFloorHeight(x, y, z, nz);
+                    return collision_->wmoFloor(reach_, x, y, z, nz);
                 },
                 targetPos.x, targetPos.y, feetCross(0.35f), lipProbeZ,
                 MIN_WALKABLE_NORMAL_WMO,
@@ -1328,25 +1315,17 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             // the jump line printed and no group data behind it. Whatever
             // is worth naming is worth dumping; the five second limiter is
             // what keeps it cheap, not the size of the drop.
-            if (wmoRenderer && std::abs(*groundH - lastGroundZ) > 0.35f) {
+            if (collision_ && std::abs(*groundH - lastGroundZ) > 0.35f) {
                 static std::chrono::steady_clock::time_point lastFloorDump{};
                 if (floorDiagEnabled() && now - lastFloorDump > std::chrono::seconds(5)) {
                     lastFloorDump = now;
                     core::Logger::getInstance().warning(
-                        "Player floor jump: dumping WMO groups at the "
+                        "Player floor jump: dumping the floors at the "
                         "pull (feet ", targetPos.z, " -> ", *groundH, ")");
-                    wmoRenderer->debugDumpGroupsAtPosition(
-                        targetPos.x, targetPos.y, targetPos.z);
-                    // And the doodads, which is where the Undercity pull
-                    // actually lives: every one of these jumps happens while
-                    // the player is attached to a lift, and m2 comes back
-                    // empty each time even though UndeadElevator ships 68
-                    // collision triangles. The WMO dump alone could never say
-                    // why, because the deck it is looking for is not a WMO.
-                    if (m2Renderer) {
-                        m2Renderer->debugDumpFloorCandidatesAt(
-                            targetPos.x, targetPos.y, targetPos.z);
-                    }
+                    // The buildings' groups and the doodads both: the
+                    // Undercity pull happens while the player is attached to
+                    // a lift, and the deck it is looking for is not a WMO.
+                    collision_->logFloorCandidates(targetPos.x, targetPos.y, targetPos.z);
                 }
             }
         }
@@ -1445,10 +1424,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             const auto nearLastGround = [&](std::optional<float> h) {
                 return h && std::abs(*h - lastGroundZ) <= 2.0f;
             };
-            if (wmoRenderer) {
+            if (collision_) {
                 if (nearLastGround(highestWalkableFloor(
                         [this](float x, float y, float z, float* nz) {
-                            return wmoRenderer->getFloorHeight(x, y, z, nz);
+                            return collision_->wmoFloor(reach_, x, y, z, nz);
                         },
                         targetPos.x, targetPos.y, feetCross(0.35f), lastGroundZ + 1.5f,
                         MIN_WALKABLE_NORMAL_WMO,
@@ -1456,10 +1435,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                     nearStructureSpace = true;
                 }
             }
-            if (!nearStructureSpace && m2Renderer && !externalFollow_) {
+            if (!nearStructureSpace && collision_ && !externalFollow_) {
                 if (nearLastGround(highestWalkableFloor(
                         [this](float x, float y, float z, float* nz) {
-                            return m2Renderer->getFloorHeight(x, y, z, nz);
+                            return collision_->m2Floor(reach_, x, y, z, nz);
                         },
                         targetPos.x, targetPos.y, feetCross(0.35f), lastGroundZ + 1.5f,
                         MIN_WALKABLE_NORMAL_M2,
@@ -1575,7 +1554,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
         // 1b. Multi-sample WMO floors when in/near WMO space to avoid
         // falling through narrow board/plank gaps where center ray misses.
-        if (wmoRenderer && nearWmoSpace) {
+        if (collision_ && nearWmoSpace) {
             const float wmoMultiBaseZ = grounded ? std::max(targetPos.z, lastGroundZ) : lastGroundZ;
             const float wmoProbeZ = wmoMultiBaseZ + stepUpBudget + 0.6f;
             const float minWalkableWmo =
@@ -1587,7 +1566,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
             auto wh = highestWalkableFloor(
                 [this](float x, float y, float z, float* nz) {
-                    return wmoRenderer->getFloorHeight(x, y, z, nz);
+                    return collision_->wmoFloor(reach_, x, y, z, nz);
                 },
                 targetPos.x, targetPos.y, feetCross(0.35f), wmoProbeZ, minWalkableWmo,
                 {.minZ = lastGroundZ - 3.5f, .maxZ = maxZ});
@@ -1596,11 +1575,11 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
         // WMO recovery probe: when no floor is found while descending, do a wider
         // footprint sample around the player to catch narrow plank/stair misses.
-        if (!groundH && wmoRenderer && hasRealGround_ && verticalVelocity <= 0.0f) {
+        if (!groundH && collision_ && hasRealGround_ && verticalVelocity <= 0.0f) {
             const float rescueProbeZ = std::max(lastGroundZ, targetPos.z) + stepUpBudget + 1.2f;
             auto rescueFloor = highestWalkableFloor(
                 [this](float x, float y, float z, float* nz) {
-                    return wmoRenderer->getFloorHeight(x, y, z, nz);
+                    return collision_->wmoFloor(reach_, x, y, z, nz);
                 },
                 targetPos.x, targetPos.y, feetRing(0.65f), rescueProbeZ,
                 MIN_WALKABLE_NORMAL_WMO,
@@ -1610,11 +1589,11 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
         // M2 recovery probe: Booty Bay-style wooden platforms can be represented
         // as M2 collision where center probes intermittently miss.
-        if (!groundH && m2Renderer && !externalFollow_ && hasRealGround_ && verticalVelocity <= 0.0f) {
+        if (!groundH && collision_ && !externalFollow_ && hasRealGround_ && verticalVelocity <= 0.0f) {
             const float rescueProbeZ = std::max(lastGroundZ, targetPos.z) + stepUpBudget + 1.4f;
             auto rescueFloor = highestWalkableFloor(
                 [this](float x, float y, float z, float* nz) {
-                    return m2Renderer->getFloorHeight(x, y, z, nz);
+                    return collision_->m2Floor(reach_, x, y, z, nz);
                 },
                 targetPos.x, targetPos.y, feetRing(0.75f), rescueProbeZ,
                 MIN_WALKABLE_NORMAL_M2,
@@ -1624,7 +1603,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
         // Path recovery probe: sample structure floors along the movement segment
         // (prev -> current) to catch narrow plank gaps missed at endpoints.
-        if (!groundH && hasRealGround_ && (wmoRenderer || (m2Renderer && !externalFollow_))) {
+        if (!groundH && hasRealGround_ && collision_) {
             std::optional<float> segmentFloor;
             const float probeZ = std::max(lastGroundZ, targetPos.z) + stepUpBudget + 1.2f;
             const float ts[] = {0.25f, 0.5f, 0.75f};
@@ -1632,18 +1611,18 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 float sx = prevTargetPos.x + (targetPos.x - prevTargetPos.x) * t;
                 float sy = prevTargetPos.y + (targetPos.y - prevTargetPos.y) * t;
 
-                if (wmoRenderer) {
+                if (collision_) {
                     float nz = 1.0f;
-                    auto wh = wmoRenderer->getFloorHeight(sx, sy, probeZ, &nz);
+                    auto wh = collision_->wmoFloor(reach_, sx, sy, probeZ, &nz);
                     if (wh && nz >= MIN_WALKABLE_NORMAL_WMO &&
                         *wh <= lastGroundZ + stepUpBudget + 0.9f &&
                         *wh >= lastGroundZ - 3.0f) {
                         if (!segmentFloor || *wh > *segmentFloor) segmentFloor = wh;
                     }
                 }
-                if (m2Renderer && !externalFollow_) {
+                if (collision_ && !externalFollow_) {
                     float nz = 1.0f;
-                    auto mh = m2Renderer->getFloorHeight(sx, sy, probeZ, &nz);
+                    auto mh = collision_->m2Floor(reach_, sx, sy, probeZ, &nz);
                     if (mh && nz >= MIN_WALKABLE_NORMAL_M2 &&
                         *mh <= lastGroundZ + stepUpBudget + 0.9f &&
                         *mh >= lastGroundZ - 3.0f) {
@@ -1658,7 +1637,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
 
         // 2. Multi-sample for M2 objects (rugs, planks, bridges, ships) -
         //    these are narrow and need offset probes to detect reliably.
-        if (m2Renderer && !externalFollow_) {
+        if (collision_ && !externalFollow_) {
             // Not highestWalkableFloor: this one prefers an M2 floor even when
             // it is slightly lower than the terrain, so a ship's deck wins over
             // the water under it.
@@ -1666,7 +1645,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             float m2ProbeZ = std::max(targetPos.z, lastGroundZ) + 6.0f;
             for (const auto& o : offsets) {
                 float m2NormalZ = 1.0f;
-                auto m2H = m2Renderer->getFloorHeight(
+                auto m2H = collision_->m2Floor(reach_,
                     targetPos.x + o.x, targetPos.y + o.y, m2ProbeZ, &m2NormalZ);
 
                 // Reject steep M2 slopes
@@ -1748,22 +1727,22 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 // structure the player is standing in is right above them.
                 const float probeZ = targetPos.z + 1.5f;
                 bool structureBelowTerrain = false;
-                if (wmoRenderer &&
-                    wmoRenderer->getFloorHeight(targetPos.x, targetPos.y, probeZ)) {
+                if (collision_ &&
+                    collision_->wmoFloor(reach_, targetPos.x, targetPos.y, probeZ)) {
                     structureBelowTerrain = true;
                 }
-                if (!structureBelowTerrain && m2Renderer &&
-                    m2Renderer->getFloorHeight(targetPos.x, targetPos.y, probeZ)) {
+                if (!structureBelowTerrain && collision_ &&
+                    collision_->m2Floor(reach_, targetPos.x, targetPos.y, probeZ)) {
                     structureBelowTerrain = true;
                 }
                 // A hole-cut chunk is how a cave mouth or a below-ground
-                // entrance is opened in the first place. getHeightAt
+                // entrance is opened in the first place. terrainHeight
                 // interpolates straight across the hole, so the surface this
                 // rescue would push up to is not there at all - and the
                 // structure underneath may still be too far below to have been
                 // found by the probes above.
-                if (!structureBelowTerrain && terrainManager &&
-                    terrainManager->chunkHasHoles(targetPos.x, targetPos.y)) {
+                if (!structureBelowTerrain && collision_ &&
+                    collision_->terrainChunkHasHoles(targetPos.x, targetPos.y)) {
                     structureBelowTerrain = true;
                 }
 
@@ -1802,13 +1781,13 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
         // back on it. The centre is asked first, so the four around it cost
         // nothing on the frames that matter least - every one where the answer
         // is no.
-        if (!isFlightAirborne() && !hoverActive_ && !externalFollow_ && wmoRenderer &&
+        if (!isFlightAirborne() && !hoverActive_ && !externalFollow_ && collision_ &&
             nearWmoSpace && groundH && centerTerrainH && *groundH == *centerTerrainH) {
             constexpr float kWaistHeight = 1.8f;
             const float feetZ = targetPos.z;
             const auto slabAt = [&](const glm::vec2& o) -> std::optional<float> {
                 float nz = 1.0f;
-                const auto h = wmoRenderer->getFloorHeight(
+                const auto h = collision_->wmoFloor(reach_,
                     targetPos.x + o.x, targetPos.y + o.y, feetZ + kWaistHeight, &nz);
                 if (!h || nz < MIN_WALKABLE_NORMAL_WMO) return std::nullopt;
                 if (*h <= feetZ + stepUpBudget || *h >= feetZ + kWaistHeight) return std::nullopt;
@@ -1859,8 +1838,8 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                          << " wmo="     << say(centerWmoH)
                          << " m2="      << say(centerM2H)
                          << " chose="   << say(groundH)
-                         << " hole="    << (terrainManager &&
-                                terrainManager->isHoleAt(targetPos.x, targetPos.y))
+                         << " hole="    << (collision_ &&
+                                collision_->terrainHoleAt(targetPos.x, targetPos.y))
                          << " insideWMO="      << cachedInsideWMO
                          << " insideInterior=" << cachedInsideInteriorWMO
                          << " grounded="       << grounded
@@ -2009,7 +1988,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // Pivot point at upper chest/neck.
     float mountedOffset = mounted_ ? mountHeightOffset_ : 0.0f;
     float pivotLift = 0.0f;
-    if (terrainManager && !externalFollow_ && !cachedInsideInteriorWMO) {
+    if (collision_ && !externalFollow_ && !cachedInsideInteriorWMO) {
         float plx = targetPos.x - lastPivotLiftQueryPos_.x;
         float ply = targetPos.y - lastPivotLiftQueryPos_.y;
         float movedSq = plx * plx + ply * ply;
@@ -2025,8 +2004,8 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
 
             // Estimate where camera sits horizontally and ensure enough terrain clearance.
             glm::vec3 probeCam = targetPos + (-f.forward3D) * currentDistance;
-            auto terrainAtCam = terrainManager->getHeightAt(probeCam.x, probeCam.y);
-            auto terrainAtPivot = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+            auto terrainAtCam = collision_->terrainHeight(probeCam.x, probeCam.y);
+            auto terrainAtPivot = collision_->terrainHeight(targetPos.x, targetPos.y);
 
             float desiredLift = 0.0f;
             if (terrainAtCam) {
@@ -2087,16 +2066,6 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // the ease back out after a collision.
     cameraBoomApproach(currentDistance, boomEase_, userTargetDistance, deltaTime);
 
-    if (wmoRenderer) {
-        glm::vec3 wmoCheckDelta = targetPos - lastInsideWMOCheckPos;
-        float distFromLastCheckSq = glm::dot(wmoCheckDelta, wmoCheckDelta);
-        if (++insideWMOCheckCounter >= 10 || distFromLastCheckSq > 4.0f) {
-            wmoRenderer->updateActiveGroup(targetPos.x, targetPos.y, targetPos.z + 1.0f);
-            insideWMOCheckCounter = 0;
-            lastInsideWMOCheckPos = targetPos;
-        }
-    }
-
     // ===== The boom (CGCamera, WoW.exe 0x605d60) =====
     // One ray from the look-at point back to where the camera would be,
     // against the WMOs, the doodads' collision and the ground. The first
@@ -2108,9 +2077,9 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // seconds, so the camera stayed close long after the wall had passed.
     const float boomReach = cameraBoomReach(currentDistance, userTargetDistance);
     float boomHit = boomReach;
-    if (wmoRenderer) boomHit = std::min(boomHit, wmoRenderer->raycastBoundingBoxes(pivot, camDir, boomReach));
-    if (m2Renderer) boomHit = std::min(boomHit, m2Renderer->raycastCollision(pivot, camDir, boomReach));
-    if (terrainManager && !cachedInsideInteriorWMO) {
+    if (collision_) boomHit = std::min(boomHit, collision_->wmoRaycast(reach_, pivot, camDir, boomReach));
+    if (collision_) boomHit = std::min(boomHit, collision_->m2Raycast(reach_, pivot, camDir, boomReach));
+    if (collision_ && !cachedInsideInteriorWMO) {
         boomHit = std::min(boomHit, raymarchTerrainCameraLimit(pivot, camDir, boomReach));
     }
     collisionDistance = cameraBoomPlace(currentDistance, boomEase_, boomHit, boomReach);
@@ -2122,7 +2091,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
     // runs, and the camera is kept in front of the first thing any of them
     // meets. (The spec has the sweep run from the camera inward, at medium
     // confidence; run that way it ignores what is nearest the character.)
-    if ((wmoRenderer || m2Renderer) && collisionDistance > MIN_DISTANCE) {
+    if (collision_ && collisionDistance > MIN_DISTANCE) {
         const float nearPlane = camera->getNearPlane();
         const float halfH = nearPlane * std::tan(glm::radians(camera->getFovDegrees()) * 0.5f) * 1.75f;
         const float halfW = halfH * camera->getAspectRatio();
@@ -2139,8 +2108,8 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             if (length < 1e-3f) continue;
             const glm::vec3 dir = along / length;
             float hit = length;
-            if (wmoRenderer) hit = std::min(hit, wmoRenderer->raycastBoundingBoxes(from, dir, length));
-            if (m2Renderer) hit = std::min(hit, m2Renderer->raycastCollision(from, dir, length));
+            if (collision_) hit = std::min(hit, collision_->wmoRaycast(reach_, from, dir, length));
+            if (collision_) hit = std::min(hit, collision_->m2Raycast(reach_, from, dir, length));
             if (hit < length) clear = std::min(clear, std::max(hit - kCameraBoomPad, 0.0f) / length);
         }
         if (clear < 1.0f) {
@@ -2152,8 +2121,8 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
 
     // Camera collision: terrain-only floor clamping
     auto getTerrainFloorAt = [&](float x, float y) -> std::optional<float> {
-        if (terrainManager) {
-            return terrainManager->getHeightAt(x, y);
+        if (collision_) {
+            return collision_->terrainHeight(x, y);
         }
         return std::nullopt;
     };
@@ -2248,7 +2217,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             camTerrainH = getTerrainFloorAt(smoothedCamPos.x, smoothedCamPos.y);
         }
         std::optional<float> camWmoH;
-        if (wmoRenderer) {
+        if (collision_) {
             // Skip expensive WMO floor query if camera barely moved
             float cdx = smoothedCamPos.x - lastCamFloorQueryPos.x;
             float cdy = smoothedCamPos.y - lastCamFloorQueryPos.y;
@@ -2262,7 +2231,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
                     // triangles above the camera don't get treated as floor.
                     camFloorProbeZ = std::min(smoothedCamPos.z, targetPos.z + 1.0f);
                 }
-                camWmoH = wmoRenderer->getFloorHeight(
+                camWmoH = collision_->wmoFloor(reach_,
                     smoothedCamPos.x, smoothedCamPos.y, camFloorProbeZ);
 
                 if (cachedInsideInteriorWMO && camWmoH) {
@@ -2405,12 +2374,7 @@ void CameraController::updateThirdPersonCamera(float deltaTime, FrameInput& f) {
 void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
     // Free-fly camera mode (original behavior)
     glm::vec3 newPos = camera->getPosition();
-    if (wmoRenderer) {
-        wmoRenderer->setCollisionFocus(newPos, COLLISION_FOCUS_RADIUS_FREE_FLY);
-    }
-    if (m2Renderer) {
-        m2Renderer->setCollisionFocus(newPos, COLLISION_FOCUS_RADIUS_FREE_FLY);
-    }
+    reach_ = collision::Reach::around(newPos, COLLISION_FOCUS_RADIUS_FREE_FLY);
     float feetZ = newPos.z - eyeHeight;
 
     // Check for water at feet position
@@ -2430,9 +2394,9 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
         std::optional<float> terrainH;
         std::optional<float> wmoH;
         std::optional<float> m2H;
-        if (terrainManager) terrainH = terrainManager->getHeightAt(newPos.x, newPos.y);
-        if (wmoRenderer) wmoH = wmoRenderer->getFloorHeight(newPos.x, newPos.y, feetZ + 2.0f);
-        if (m2Renderer && !externalFollow_) m2H = m2Renderer->getFloorHeight(newPos.x, newPos.y, feetZ + 1.0f);
+        if (collision_) terrainH = collision_->terrainHeight(newPos.x, newPos.y);
+        if (collision_) wmoH = collision_->wmoFloor(reach_, newPos.x, newPos.y, feetZ + 2.0f);
+        if (collision_ && !externalFollow_) m2H = collision_->m2Floor(reach_, newPos.x, newPos.y, feetZ + 1.0f);
         auto floorH = selectHighestFloor(terrainH, wmoH, m2H);
         // Hysteresis: starting to swim needs deeper water than continuing to
         // swim does. With one threshold, a character wading at the boundary
@@ -2536,17 +2500,17 @@ void CameraController::updateFreeFlyCamera(float /*deltaTime*/, FrameInput& f) {
             std::optional<float> terrainH;
             std::optional<float> wmoH;
             std::optional<float> m2H;
-            if (terrainManager) {
-                terrainH = terrainManager->getHeightAt(x, y);
+            if (collision_) {
+                terrainH = collision_->terrainHeight(x, y);
             }
             float feetZ = newPos.z - eyeHeight;
             float wmoProbeZ = std::max(feetZ, lastGroundZ) + 1.5f;
             float m2ProbeZ = std::max(feetZ, lastGroundZ) + 6.0f;
-            if (wmoRenderer) {
-                wmoH = wmoRenderer->getFloorHeight(x, y, wmoProbeZ);
+            if (collision_) {
+                wmoH = collision_->wmoFloor(reach_, x, y, wmoProbeZ);
             }
-            if (m2Renderer && !externalFollow_) {
-                m2H = m2Renderer->getFloorHeight(x, y, m2ProbeZ);
+            if (collision_ && !externalFollow_) {
+                m2H = collision_->m2Floor(reach_, x, y, m2ProbeZ);
             }
             auto base = selectReachableFloor(terrainH, wmoH, feetZ, 1.0f);
             if (m2H && *m2H <= feetZ + 1.0f && (!base || *m2H > *base)) {
@@ -3374,17 +3338,17 @@ void CameraController::reset() {
         std::optional<float> terrainH;
         std::optional<float> wmoH;
         std::optional<float> m2H;
-        if (terrainManager) {
-            terrainH = terrainManager->getHeightAt(x, y);
+        if (collision_) {
+            terrainH = collision_->terrainHeight(x, y);
         }
         // Probe from the highest of terrain, refZ (server position), and defaultPosition.z
         // so we don't miss WMO floors above terrain (e.g. Stormwind city surface).
         float floorProbeZ = std::max(terrainH.value_or(refZ), refZ);
-        if (wmoRenderer) {
-            wmoH = wmoRenderer->getFloorHeight(x, y, floorProbeZ + 4.0f);
+        if (collision_) {
+            wmoH = collision_->wmoFloor(reach_, x, y, floorProbeZ + 4.0f);
         }
-        if (m2Renderer && !externalFollow_) {
-            m2H = m2Renderer->getFloorHeight(x, y, floorProbeZ + 4.0f);
+        if (collision_ && !externalFollow_) {
+            m2H = collision_->m2Floor(reach_, x, y, floorProbeZ + 4.0f);
         }
         auto h = selectReachableFloor(terrainH, wmoH, refZ, 16.0f);
         if (!h) {
@@ -3451,7 +3415,7 @@ void CameraController::reset() {
             if (*h > defaultPosition.z + MAX_SPAWN_SNAP_UP) continue;
 
             float score = r * 0.02f;
-            if (terrainManager) {
+            if (collision_) {
                 // Penalize steep/unstable spots.
                 int slopeSamples = 0;
                 float slopeAccum = 0.0f;
@@ -3459,7 +3423,7 @@ void CameraController::reset() {
                 const float dx[4] = {off, -off, 0.0f, 0.0f};
                 const float dy[4] = {0.0f, 0.0f, off, -off};
                 for (int s = 0; s < 4; s++) {
-                    auto hn = terrainManager->getHeightAt(x + dx[s], y + dy[s]);
+                    auto hn = collision_->terrainHeight(x + dx[s], y + dy[s]);
                     if (!hn) continue;
                     slopeAccum += std::abs(*hn - *h);
                     slopeSamples++;
@@ -3474,9 +3438,9 @@ void CameraController::reset() {
                     score += 8.0f;
                 }
             }
-            if (wmoRenderer) {
+            if (collision_) {
                 const glm::vec3 from(x, y, *h + 0.20f);
-                const bool insideWMO = wmoRenderer->isInsideWMO(x, y, *h + 1.5f, nullptr);
+                const bool insideWMO = collision_->insideWmo(reach_, x, y, *h + 1.5f, nullptr);
 
                 // Prefer outdoors for default hearth-like spawn points (offline only).
                 // In online mode, trust the server position even if inside a WMO.
@@ -3495,7 +3459,7 @@ void CameraController::reset() {
                 };
                 for (const auto& to : probes) {
                     glm::vec3 adjusted;
-                    if (wmoRenderer->checkWallCollision(from, to, adjusted)) {
+                    if (collision_->wmoWallSlide(reach_, from, to, adjusted, /*insideWmo=*/false)) {
                         wallHits++;
                     }
                 }
@@ -3520,7 +3484,7 @@ void CameraController::reset() {
                             *h + 0.20f
                         );
                         glm::vec3 adjusted;
-                        if (wmoRenderer->checkWallCollision(from, to, adjusted)) {
+                        if (collision_->wmoWallSlide(reach_, from, to, adjusted, /*insideWmo=*/false)) {
                             blocked++;
                         }
                     }
@@ -3584,11 +3548,6 @@ void CameraController::teleportTo(const glm::vec3& pos) {
     autoUnstuckFired_ = false;
     continuousFallTime_ = 0.0f;
 
-    // Invalidate active WMO group so it's re-detected at new position
-    if (wmoRenderer) {
-        wmoRenderer->updateActiveGroup(pos.x, pos.y, pos.z + 1.0f);
-    }
-
     if (thirdPerson && followTarget) {
         *followTarget = pos;
         camera->setRotation(yaw, pitch);
@@ -3609,7 +3568,7 @@ void CameraController::teleportTo(const glm::vec3& pos) {
 }
 
 bool CameraController::groundNotStreamedYet(float x, float y) const {
-    return terrainManager != nullptr && !terrainManager->isTileLoadedAt(x, y);
+    return collision_ != nullptr && !collision_->hasTerrainAt(x, y);
 }
 
 void CameraController::applyLookDelta(float dxPixels, float dyPixels) {

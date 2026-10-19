@@ -100,9 +100,7 @@ void PlayerView::connectMovement(game::GameHandler& game) {
 
 void PlayerView::attachWorld() {
     if (renderer_) {
-        cameraController_->setTerrainManager(renderer_->getTerrainManager());
-        cameraController_->setWMORenderer(renderer_->getWMORenderer());
-        cameraController_->setM2Renderer(renderer_->getM2Renderer());
+        cameraController_->setCollisionWorld(&renderer_->collision());
         cameraController_->setLiquidScene(&renderer_->liquidScene());
     }
     // Snap camera to ground
@@ -110,7 +108,7 @@ void PlayerView::attachWorld() {
 }
 
 void PlayerView::detachWorld() {
-    cameraController_->setTerrainManager(nullptr);
+    cameraController_->setCollisionWorld(nullptr);
 }
 
 void PlayerView::setCharacterFollow(uint32_t instanceId) {

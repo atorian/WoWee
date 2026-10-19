@@ -1,4 +1,5 @@
 #include "core/zone_tracker.hpp"
+#include "collision/collision_world.hpp"
 
 #include "audio/audio_coordinator.hpp"
 #include "game/game_handler.hpp"
@@ -22,7 +23,8 @@ uint32_t ZoneTracker::resolveAreaZoneId(uint32_t areaId) const {
     return zoneManager_->resolveAreaZoneId(areaId);
 }
 
-void ZoneTracker::update(const rendering::TerrainManager* terrain, const glm::vec3& playerPosition,
+void ZoneTracker::update(const collision::CollisionWorld& world,
+                         const rendering::TerrainManager* terrain, const glm::vec3& playerPosition,
                          const game::GameHandler* game, const audio::AudioCoordinator* audio) {
     // A zone remembered from the last map is worse than none: the sticky
     // answer below would hold Duskwood's pinned midnight over a continent
@@ -38,14 +40,14 @@ void ZoneTracker::update(const rendering::TerrainManager* terrain, const glm::ve
 
     onOutdoorPvpObjective_ = false;
     uint32_t tileZoneId = 0;
+    if (const auto areaId = world.areaIdAt(playerPosition.x, playerPosition.y)) {
+        onOutdoorPvpObjective_ = zoneManager_->isOutdoorPvpArea(*areaId);
+        areaId_ = *areaId;
+        lastResolvedZoneId_ = zoneManager_->resolveAreaZoneId(*areaId);
+        zoneId_ = lastResolvedZoneId_;
+        return;
+    }
     if (terrain) {
-        if (const auto areaId = terrain->getAreaIdAt(playerPosition.x, playerPosition.y)) {
-            onOutdoorPvpObjective_ = zoneManager_->isOutdoorPvpArea(*areaId);
-            areaId_ = *areaId;
-            lastResolvedZoneId_ = zoneManager_->resolveAreaZoneId(*areaId);
-            zoneId_ = lastResolvedZoneId_;
-            return;
-        }
         const auto tile = terrain->getCurrentTile();
         tileZoneId = zoneManager_->getZoneId(tile.x, tile.y);
     }

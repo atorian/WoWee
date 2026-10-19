@@ -2874,11 +2874,18 @@ wowee_add_test(test_quest_giver_status
             ${TEST_COMMON_SOURCES})
 
 # ── test_collision_geometry ──────────────────────────────────
-# The ray, box and focus tests every collision query is built from. Both
+# The ray, box and reach tests every collision query is built from. Both
 # renderers had their own copy, and a difference moves where the world is solid.
 wowee_add_test(test_collision_geometry
     SOURCES test_collision_geometry.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_collision_world ─────────────────────────────────────
+# The solid world of a map: floors, walls, sight lines and interiors of
+# buildings, doodads and terrain, as they are placed, moved, hidden and leave.
+wowee_add_test(test_collision_world
+    SOURCES test_collision_world.cpp)
+target_link_libraries(test_collision_world PRIVATE wowee_collision)
 
 # ── test_race_gender_suffix ──────────────────────────────────
 # The two-letter race code per-race models are suffixed with. Written out twice

@@ -2,14 +2,15 @@
 
 #include "game/transport_scene.hpp"
 
+#include <unordered_set>
+
 namespace wowee {
 namespace rendering { class Renderer; }
 
 namespace core {
 
-/// The transports' hulls as the renderer holds them. Asks the renderer for
-/// its WMO and M2 renderers on every call, since a world load rebuilds them;
-/// with none (no world loaded) nothing is posed and no floor is found.
+/// The transports' hulls as the client holds them: posed through the scene's
+/// changes, stood on through the collision world.
 class RendererTransportScene final : public game::TransportScene {
 public:
     explicit RendererTransportScene(rendering::Renderer& renderer) : renderer_(renderer) {}
@@ -31,6 +32,8 @@ public:
 
 private:
     rendering::Renderer& renderer_;
+    /// M2 hulls already reported as having no collision mesh.
+    mutable std::unordered_set<uint32_t> hullsWithoutCollision_;
 };
 
 } // namespace core

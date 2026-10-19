@@ -1,4 +1,5 @@
 #include "rendering/renderer.hpp"
+#include "collision/collision_world.hpp"
 #include "rendering/offscreen_composite.hpp"
 #include "rendering/frame_sink.hpp"
 #include "rendering/sun_direction.hpp"
@@ -104,7 +105,9 @@ namespace rendering {
 
 
 
-Renderer::Renderer() : scene_(std::make_unique<SceneCommands>(*this)) {}
+Renderer::Renderer()
+    : collision_(std::make_unique<collision::CollisionWorld>()),
+      scene_(std::make_unique<SceneCommands>(*this)) {}
 Renderer::~Renderer() = default;
 
 void Renderer::applySceneCommands() {
@@ -2275,26 +2278,29 @@ void Renderer::update(float deltaTime) {
     applySceneCommands();
     endPhase("scene commands");
 
-    if (wmoRenderer) wmoRenderer->resetQueryStats();
-    if (m2Renderer) m2Renderer->resetQueryStats();
+    collision_->resetQueryStats();
 
     // Resolve WMO containment before weather and ambience consume it. Server
     // weather remains authoritative outdoors, but particles must not follow the
     // camera through a roof into Ironforge or other enclosed WMOs.
-    const bool canQueryWmo = (camera && wmoRenderer);
     const glm::vec3 camPos = camera ? camera->getPosition() : glm::vec3(0.0f);
     uint32_t insideWmoId = 0;
-    const bool insideWmo = canQueryWmo &&
-        wmoRenderer->isInsideWMO(camPos.x, camPos.y, camPos.z, &insideWmoId);
+    const bool insideWmo = camera &&
+        collision_->insideWmo(collision::Reach::everywhere(), camPos.x, camPos.y, camPos.z,
+                              &insideWmoId);
     playerIndoors_ = insideWmo;
     insideWmoId_ = insideWmoId;
 
     // Characters, creatures and their weapons take the light of the interior
     // group they stand in. WMO doodads are told theirs when they are placed.
-    if (characterRenderer && wmoRenderer) {
+    if (characterRenderer) {
         characterRenderer->updateInteriorLight(
-            [this](const glm::vec3& p) { return wmoRenderer->interiorLightAt(p.x, p.y, p.z); },
-            wmoRenderer->contentRevision());
+            [this](const glm::vec3& p) -> std::optional<InteriorLight> {
+                const auto sample = collision_->interiorAt(p.x, p.y, p.z);
+                if (!sample) return std::nullopt;
+                return unitInteriorLight(sample->ambient, sample->floorColor);
+            },
+            collision_->wmoRevision());
     }
 
     // The weather drawn this frame, coming toward the realm's or the dev
@@ -2311,7 +2317,7 @@ void Renderer::update(float deltaTime) {
         // group is not enough: Stormwind's streets are exterior groups of the
         // city's WMO, and so are porches, bridges and archways.
         lightingManager->setIndoors(insideWmo &&
-            wmoRenderer->isInsideInteriorWMO(camPos.x, camPos.y, camPos.z));
+            collision_->insideInteriorWmo(collision::Reach::everywhere(), camPos.x, camPos.y, camPos.z));
 
         // The camera's eye under the surface, not the player swimming: on the
         // surface the camera is above the water and sees the dry light.
@@ -3350,10 +3356,7 @@ void Renderer::renderWorld() {
             VkCommandBuffer cmd = beginSecondary(SEC_SELECTION);
             setSecondaryViewportScissor(cmd);
             if (overlaySystem_) {
-                overlaySystem_->renderSelectionCircle(view, projection, cmd,
-                    terrainManager ? OverlaySystem::HeightQuery2D([&](float x, float y) { return terrainManager->getHeightAt(x, y); }) : OverlaySystem::HeightQuery2D{},
-                    wmoRenderer ? OverlaySystem::HeightQuery3D([&](float x, float y, float z) { return wmoRenderer->getFloorHeight(x, y, z); }) : OverlaySystem::HeightQuery3D{},
-                    m2Renderer ? OverlaySystem::HeightQuery3D([&](float x, float y, float z) { return m2Renderer->getFloorHeight(x, y, z); }) : OverlaySystem::HeightQuery3D{});
+                overlaySystem_->renderSelectionCircle(view, projection, cmd, *collision_);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3593,10 +3596,7 @@ void Renderer::renderWorld() {
         }
 
         if (overlaySystem_) {
-            overlaySystem_->renderSelectionCircle(view, projection, currentCmd,
-                terrainManager ? OverlaySystem::HeightQuery2D([&](float x, float y) { return terrainManager->getHeightAt(x, y); }) : OverlaySystem::HeightQuery2D{},
-                wmoRenderer ? OverlaySystem::HeightQuery3D([&](float x, float y, float z) { return wmoRenderer->getFloorHeight(x, y, z); }) : OverlaySystem::HeightQuery3D{},
-                m2Renderer ? OverlaySystem::HeightQuery3D([&](float x, float y, float z) { return m2Renderer->getFloorHeight(x, y, z); }) : OverlaySystem::HeightQuery3D{});
+            overlaySystem_->renderSelectionCircle(view, projection, currentCmd, *collision_);
         }
 
         if (characterRenderer && camera && !skipChars) {
@@ -3824,9 +3824,8 @@ std::optional<float> Renderer::cameraWaterDepth() const {
     if (!waterH) return std::nullopt;
     // That reach also finds a lake over a dry cave; the ground tells the two
     // apart. See camera_water_depth.hpp.
-    const auto groundH = terrainManager ? terrainManager->getHeightAt(camPos.x, camPos.y)
-                                        : std::nullopt;
-    const bool hole = terrainManager && terrainManager->isHoleAt(camPos.x, camPos.y);
+    const auto groundH = collision_->terrainHeight(camPos.x, camPos.y);
+    const bool hole = collision_->terrainHoleAt(camPos.x, camPos.y);
     return rendering::cameraWaterDepth(camPos.z, waterH, groundH, hole);
 }
 
@@ -4067,7 +4066,6 @@ void Renderer::destroyOffscreenWater1xFramebuffer() {
 void Renderer::setActiveMapName(const std::string& name) {
     if (terrainManager) terrainManager->setMapName(name);
     if (minimap) minimap->setMapName(name);
-    if (wmoRenderer) wmoRenderer->setMapName(name);
 }
 
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
@@ -4191,6 +4189,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (!m2Renderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("M2Renderer initialization failed");
         m2Renderer->setRtScene(rtScene_.get());
+        m2Renderer->setCollisionWorld(collision_.get());
         m2Renderer->setWaterHeightQuery([this](float x, float y, float z) -> std::optional<float> {
             return liquidScene_.nearestHeightAt(x, y, z, 3.0f);
         });
@@ -4226,6 +4225,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (!wmoRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("WMORenderer initialization failed");
         wmoRenderer->setRtScene(rtScene_.get());
+        wmoRenderer->setCollisionWorld(collision_.get());
         if (shadowRenderPass != VK_NULL_HANDLE) {
             if (!wmoRenderer->initializeShadow(shadowRenderPass))
                 LOG_WARNING("WMO shadow pipeline initialization failed");
@@ -4266,8 +4266,10 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
             terrainManager = nullptr;
             return false;
         }
-        // The liquid streams in with the terrain and the buildings.
+        // The liquid streams in with the terrain and the buildings, and the
+        // ground with the tiles.
         terrainManager->setLiquidScene(&liquidScene_);
+        terrainManager->setCollisionWorld(collision_.get());
         // Set M2 renderer for doodad loading during streaming
         if (m2Renderer) {
             terrainManager->setM2Renderer(m2Renderer.get());
@@ -5358,10 +5360,8 @@ void Renderer::renderVolumetricFog() {
     // second or two so a step off a ledge does not lift the whole bank of
     // mist with it; a teleport snaps it, and drops last frame's air too.
     float ground = characterPosition.z;
-    if (terrainManager) {
-        if (auto h = terrainManager->getHeightAt(characterPosition.x, characterPosition.y)) {
-            ground = std::min(ground, *h);
-        }
+    if (auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y)) {
+        ground = std::min(ground, *h);
     }
     if (!fogLayerBaseValid_ || std::abs(ground - fogLayerBase_) > 150.0f) {
         fogLayerBase_ = ground;

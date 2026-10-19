@@ -5,10 +5,10 @@
 #include <glm/mat4x4.hpp>
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
-#include <functional>
 #include <optional>
 
 namespace wowee {
+namespace collision { class CollisionWorld; }
 namespace rendering {
 
 class VkContext;
@@ -17,10 +17,6 @@ class VkContext;
 /// Extracted from Renderer to isolate overlay rendering resources.
 class OverlaySystem {
 public:
-    /// Height query callable: returns floor height at (x, y) or (x, y, probeZ).
-    using HeightQuery2D = std::function<std::optional<float>(float x, float y)>;
-    using HeightQuery3D = std::function<std::optional<float>(float x, float y, float probeZ)>;
-
     explicit OverlaySystem(VkContext* ctx);
     ~OverlaySystem();
 
@@ -30,11 +26,9 @@ public:
     // Selection circle
     void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color);
     void clearSelectionCircle();
+    /// Drawn on the ground under the target, as `world` has it.
     void renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
-                               VkCommandBuffer cmd,
-                               const HeightQuery2D& terrainHeight,
-                               const HeightQuery3D& wmoHeight,
-                               const HeightQuery3D& m2Height);
+                               VkCommandBuffer cmd, const collision::CollisionWorld& world);
 
     // Fullscreen color overlay (underwater tint, etc.)
     void renderOverlay(const glm::vec4& color, VkCommandBuffer cmd);

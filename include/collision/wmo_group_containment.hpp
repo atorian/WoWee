@@ -6,7 +6,7 @@
 
 #include <glm/glm.hpp>
 
-namespace wowee::rendering {
+namespace wowee::collision {
 
 using pipeline::kWMOGroupIndoor;
 
@@ -24,4 +24,4 @@ template <class Group>
            localPos.z >= group.boundingBoxMin.z && localPos.z <= group.boundingBoxMax.z;
 }
 
-}  // namespace wowee::rendering
+}  // namespace wowee::collision

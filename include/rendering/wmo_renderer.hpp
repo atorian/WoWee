@@ -1,13 +1,12 @@
 #pragma once
 
+#include "collision/wmo_shape.hpp"
 #include "rendering/normal_map_encoding.hpp"
 #include "rendering/texture_cache.hpp"
-#include "rendering/collision_geometry.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/wmo_lighting.hpp"
-#include "rendering/spatial_grid.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/uniform_slot_pool.hpp"
 
@@ -33,6 +32,7 @@ namespace pipeline {
     struct WMOGroup;
     class AssetManager;
 }
+namespace collision { class CollisionWorld; }
 
 namespace rendering {
 
@@ -139,11 +139,11 @@ public:
      * @param id WMO model identifier
      */
     bool isModelLoaded(uint32_t id) const;
-    /// Whether this instance's model has finished uploading its groups, and so
-    /// whether a failed floor query means "nothing under you" rather than "not
-    /// loaded yet". The two need telling apart: a rider held in place waiting
-    /// for collision that is already there waits forever.
-    bool instanceHasCollisionGeometry(uint32_t instanceId) const;
+
+    /// Where every instance is placed, moved, hidden and removed as it is
+    /// here, with its model's shape, so the world it is solid in always has
+    /// what this draws.
+    void setCollisionWorld(collision::CollisionWorld* world) { collision_ = world; }
 
     /**
      * Check if a WMO instance is still live in the renderer. Owners that cache
@@ -191,8 +191,8 @@ public:
 
     /// Mark an instance as a moving transport. Its collision still answers the
     /// static-world floor query (you walk onto a hull, you stand on a lift), but
-    /// only when the deck is genuinely underfoot - see getFloorHeight. Idempotent;
-    /// safe on every register.
+    /// only when the deck is genuinely underfoot - see
+    /// CollisionWorld::setWmoTransport. Idempotent; safe on every register.
     void setInstanceIsTransport(uint32_t instanceId, bool isTransport);
 
     /// Take an instance out of the world without unloading it.
@@ -202,8 +202,8 @@ public:
     /// and is not here at all. Its hull holds still on this map's slice while
     /// it is away, so without this it would sit invisible-but-solid over the
     /// tower, and a player could stand on a zeppelin that is on another
-    /// continent. Hidden instances are skipped by drawing and by every spatial
-    /// query, which is where collision comes from. Its child doodads
+    /// continent. Hidden instances are skipped by drawing and taken out of the
+    /// collision world. Its child doodads
     /// (addDoodadToInstance) are hidden and shown with it, in the M2 renderer.
     void setInstanceHidden(uint32_t instanceId, bool hidden);
 
@@ -295,9 +295,6 @@ public:
                                 wowee::rendering::VkShaderModule& fragShader);
     bool isInitialized() const { return initialized_; }
     uint32_t getModelCount() const { return loadedModels.size(); }
-    /// CPU memory for collision: each group's triangles, their bounds and
-    /// cell lists, and the precomputed floor heights.
-    [[nodiscard]] uint64_t collisionBytes() const;
 
     /**
      * Get number of active instances
@@ -392,39 +389,6 @@ public:
     void clearShadowMap() {}
 
     /**
-     * Get floor height at a GL position via ray-triangle intersection.
-     * @param outNormalZ If not null, receives the Z component of the floor surface normal
-     *                   (1.0 = flat, 0.0 = vertical). Useful for slope walkability checks.
-     */
-    /// The floor under (glX, glY), searching at or below glZ. By default it
-    /// returns the highest such floor, which is the step-up behaviour. Pass
-    /// `referenceZ` (the querier's actual feet height) to instead get the floor
-    /// closest to the feet - which is what keeps a player standing on the lower
-    /// of two stacked floors under an overhang, rather than being snapped up to
-    /// the level above them.
-    ///
-    /// The ray is two-sided, so the surface it answers may be the top of a
-    /// floor or the underside of a ceiling, and outNormalZ cannot tell them
-    /// apart. `outFacesUp` can: true when the triangle's own (outward) normal
-    /// points up.
-    std::optional<float> getFloorHeight(float glX, float glY, float glZ,
-                                        float* outNormalZ = nullptr,
-                                        float referenceZ =
-                                            std::numeric_limits<float>::quiet_NaN(),
-                                        bool* outFacesUp = nullptr) const;
-
-    /** Query floor collision from one moving WMO instance. `placement`, when
-     *  given, is where its owner has it this frame - a transport moved since
-     *  the scene's changes were last made - rather than where it last stood. */
-    std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
-                                                float glX, float glY, float glZ,
-                                                float* outNormalZ = nullptr,
-                                                const glm::mat4* placement = nullptr) const;
-
-    /** Dump diagnostic info about WMO groups overlapping a position */
-    void debugDumpGroupsAtPosition(float glX, float glY, float glZ) const;
-
-    /**
      * Append the 2D footprints of instances touching the given window, for
      * the grass generator's clearings - grass grows short and sparse beside
      * a building the way it does beside a road. Per-group boxes rather than
@@ -434,79 +398,9 @@ public:
     void collectGrassClearings(float minX, float minY, float maxX, float maxY,
                                std::vector<pipeline::GrassClearingSource>& out) const;
 
-    /**
-     * Check wall collision and adjust position
-     * @param from Starting position
-     * @param to Desired position
-     * @param adjustedPos Output adjusted position (pushed away from walls)
-     * @param insideWMO If true, use tighter collision for indoor precision
-     * @return true if collision occurred
-     */
-    bool checkWallCollision(const glm::vec3& from, const glm::vec3& to, glm::vec3& adjustedPos, bool insideWMO = false) const;
-
-    /// Whether solid WMO geometry stands between two points - a sight line
-    /// rather than a step, so no player radius and no step height. See the
-    /// definition for why checkWallCollision cannot answer this.
-    bool segmentBlocked(const glm::vec3& from, const glm::vec3& to) const;
-
-    /**
-     * Check if a position is inside any WMO
-     * @param outModelId If not null, receives the model ID of the WMO
-     * @return true if inside a WMO
-     */
-    bool isInsideWMO(float glX, float glY, float glZ, uint32_t* outModelId = nullptr) const;
-
-    /**
-     * Check if a position is inside an interior WMO group (flag 0x2000).
-     * Used to dim M2 lighting for doodads placed indoors.
-     */
-    bool isInsideInteriorWMO(float glX, float glY, float glZ) const;
-
-    /// The light of a character or creature at the point: from the floor
-    /// under it in the WMO interior group that holds it, or no value when no
-    /// interior group does. Anywhere in the world, not only near the player.
-    [[nodiscard]] std::optional<InteriorLight> interiorLightAt(float glX, float glY, float glZ) const;
-
-    /// Changes whenever the buildings the queries answer from do: an instance
-    /// created or removed, a model finished loading or unloaded. An answer
-    /// kept from an earlier revision may be out of date.
+    /// Changes whenever what is drawn does: an instance created or removed, a
+    /// model finished loading or unloaded.
     [[nodiscard]] uint64_t contentRevision() const { return contentRevision_; }
-
-    /**
-     * Raycast against WMO bounding boxes for camera collision
-     * @param origin Ray origin (e.g., character head position)
-     * @param direction Ray direction (normalized)
-     * @param maxDistance Maximum ray distance to check
-     * @return Distance to first intersection, or maxDistance if no hit
-     */
-    float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
-
-    /**
-     * Limit expensive collision/raycast queries to objects near a focus point.
-     */
-    void setCollisionFocus(const glm::vec3& worldPos, float radius);
-    [[nodiscard]] const CollisionFocus& getCollisionFocus() const { return collisionFocus; }
-
-    void resetQueryStats();
-    double getQueryTimeMs() const { return queryTimeMs; }
-    uint32_t getQueryCallCount() const { return queryCallCount; }
-
-    /**
-     * Update the tracked active WMO group based on player position.
-     * Called at low frequency (every ~10 frames or on significant movement).
-     */
-    void updateActiveGroup(float glX, float glY, float glZ);
-
-    // Floor cache persistence (zone-specific files)
-    void setMapName(const std::string& name) { scene_->mapName_ = name; }
-    const std::string& getMapName() const { return scene_->mapName_; }
-    bool saveFloorCache() const;  // Saves to cache/wmo_floor_<mapName>.bin
-    bool loadFloorCache();        // Loads from cache/wmo_floor_<mapName>.bin
-    size_t getFloorCacheSize() const { return scene_->precomputedFloorGrid.size(); }
-
-    /// Loading can yield between batches instead of blocking the client frame.
-    void beginFloorCachePrecompute();
-    bool precomputeFloorCacheStep(size_t maxSamples);
 
     // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
     void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
@@ -623,66 +517,9 @@ private:
         };
         std::vector<MergedBatch> mergedBatches;
 
-        // Collision geometry (positions only, for floor raycasting)
-        std::vector<glm::vec3> collisionVertices;
-        std::vector<uint16_t> collisionIndices;
-        /// MOCV per collision vertex, for an interior group that has them:
-        /// the floor's colour is what lights a unit standing on it. Empty
-        /// for every other group.
-        std::vector<glm::vec3> collisionVertexColors;
-
-        // 2D spatial grid for fast triangle lookup (built at load time).
-        // Bins triangles by their XY bounding box into grid cells.
-        static constexpr float COLLISION_CELL_SIZE = 4.0f;
-        int gridCellsX = 0;
-        int gridCellsY = 0;
-        glm::vec2 gridOrigin;  // XY of bounding box min
-        // cellTriangles[cellY * gridCellsX + cellX] = list of triangle start indices
-        std::vector<std::vector<uint32_t>> cellTriangles;
-
-        // Pre-classified triangle lists per cell (built at load time)
-        std::vector<std::vector<uint32_t>> cellFloorTriangles;  // abs(normal.z) >= 0.35
-        std::vector<std::vector<uint32_t>> cellWallTriangles;   // abs(normal.z) < 0.35
-
-        // Pre-computed per-triangle Z bounds for fast vertical reject
-        struct TriBounds { float minZ; float maxZ; };
-        std::vector<TriBounds> triBounds;  // indexed by triStart/3
-
-        // Pre-computed per-triangle normals (unit length, indexed by triStart/3)
-        std::vector<glm::vec3> triNormals;
-
-        // Per-collision-triangle MOPY flags (indexed by collision tri index, i.e. triStart/3)
-        std::vector<uint8_t> triMopyFlags;
-        /// True when no triangle in this group blocks: no collision hull, and
-        /// nothing rendered that is not detail. Detail never blocks, so such a
-        /// group is walk-through in its entirety - which is a thing to be
-        /// walked through only if it was meant to be, and Darkshore's bridges
-        /// are 428 triangles of it.
-        bool noBlockingTriangles = false;
-
-        // Scratch bitset for deduplicating triangle queries (sized to numTriangles)
-        mutable std::vector<uint8_t> triVisited;
-
-        // Build the spatial grid from collision geometry
-        void buildCollisionGrid();
-
-
-        // Get triangle indices for a local-space XY range (for wall collision)
-        /// The triangles of one of the three cell arrays that a query box
-        /// reaches, deduplicated. The three queries below differ only in
-        /// which array they pass.
-        void gatherCellTriangles(const std::vector<std::vector<uint32_t>>& cells,
-                                 float minX, float minY, float maxX, float maxY,
-                                 std::vector<uint32_t>& out) const;
-
-        void getTrianglesInRange(float minX, float minY, float maxX, float maxY,
-                                 std::vector<uint32_t>& out) const;
-
-        // Get pre-classified floor/wall triangles in range
-        void getFloorTrianglesInRange(float minX, float minY, float maxX, float maxY,
-                                      std::vector<uint32_t>& out) const;
-        void getWallTrianglesInRange(float minX, float minY, float maxX, float maxY,
-                                     std::vector<uint32_t>& out) const;
+        /// The group's triangles as the collision world and the ray-traced
+        /// mesh have them: shared, built on the worker that prepared the model.
+        std::shared_ptr<const collision::WmoGroupShape> shape;
     };
 
     /**
@@ -711,6 +548,9 @@ private:
         glm::vec3 boundingBoxMax;
         glm::vec3 wmoAmbientColor{0.5f, 0.5f, 0.5f};  // From MOHD, used for interior lighting
         bool isLowPlatform = false;
+        /// Its groups' shapes, gathered for the collision world once every
+        /// group is uploaded and the model is resident.
+        std::shared_ptr<const collision::WmoShape> shape;
 
         // Doodad templates (M2 models placed in WMO, stored for instancing)
         // Uses the public DoodadTemplate struct defined above
@@ -810,42 +650,8 @@ private:
     /// model matrix has changed.
     void refreshInstanceBounds(WMOInstance& inst);
 
-    /// Whether a collision focus is set and this instance is outside it.
-    bool outsideCollisionFocus(const WMOInstance& instance) const;
-
-    /// A group holding a point, and the point in its model's space.
-    struct GroupHolding {
-        const ModelData* model;
-        const WMOInstance* instance;
-        const GroupResources* group;
-        glm::vec3 localPos;
-    };
-
-    /// Which instances a query looks at: those inside the collision focus
-    /// around the player, or every one. The focus is for the player's
-    /// collision; a light looked up for a creature across town is not, and
-    /// filtered by it came out "outdoors" for every building more than twenty
-    /// yards from the player.
-    enum class QueryReach { CollisionFocus, Everywhere };
-
-    /// The first of a WMO's groups, or only of its interior ones, that holds
-    /// a point.
-    std::optional<GroupHolding> findGroupHolding(float glX, float glY, float glZ,
-                                                 bool interiorOnly, QueryReach reach) const;
-
-    /// Whether a point is inside any of a WMO's groups, or only its
-    /// interior ones. The two public queries above differ by that flag.
-    bool isInsideWMOGroups(float glX, float glY, float glZ,
-                           bool interiorOnly, uint32_t* outModelId) const;
-
-    /// Whether a point is inside an instance's world bounds, with the Z
-    /// window widened by the caller's margins.
-    bool withinWorldBounds(const WMOInstance& instance,
-                           float glX, float glY, float glZ,
-                           float zMarginDown = 0.0f, float zMarginUp = 0.0f) const;
-
     /// A group's resources as far as the CPU takes them - bounds, collision
-    /// and its grid, batches - and the vertices, tangents included, its
+    /// shape, batches - and the vertices, tangents included, its
     /// buffer is to hold. False for a group with nothing to draw. Any thread.
     static bool prepareGroupResources(const pipeline::WMOGroup& group, GroupResources& resources,
                                       std::vector<WMOVertex>& vertices);
@@ -931,8 +737,9 @@ private:
     void destroyGroupGPU(GroupResources& group, bool defer = false);
 
 
-    void rebuildSpatialIndex();
-    void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
+    /// Files every instance's index under its id again, after the list was
+    /// compacted.
+    void rebuildIndexById();
 
     // Vulkan context
     VkContext* vkCtx_ = nullptr;
@@ -958,7 +765,7 @@ private:
     void registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep);
     void releaseRtModel(uint32_t modelId);
 
-    // Current map name for zone-specific floor cache
+    collision::CollisionWorld* collision_ = nullptr;
 
     // Vulkan pipelines
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
@@ -1039,15 +846,9 @@ private:
     mutable uint32_t lastPortalCulledGroups = 0;
     mutable uint32_t lastDistanceCulledGroups = 0;
 
-    // Optional query-space culling for collision/raycast hot paths.
-    CollisionFocus collisionFocus;
-
     /// See contentRevision(). Bumped by markContentChanged().
     uint64_t contentRevision_ = 1;
     void markContentChanged() { ++contentRevision_; }
-
-    // Uniform grid for fast local collision queries.
-    // Collision scratch buffers are thread_local (see wmo_renderer.cpp) for thread-safety.
 
     // Parallel visibility culling
     uint32_t numCullThreads_ = 1;
@@ -1060,80 +861,13 @@ private:
         uint32_t distanceCulled = 0;
     };
 
-    // Collision query profiling - atomic because getFloorHeight is dispatched
-    // on async threads from camera_controller while the main thread reads these.
-    mutable std::atomic<double> queryTimeMs{0.0};
-    mutable std::atomic<uint32_t> queryCallCount{0};
-
-    // Floor height cache - persistent precomputed grid
-    static constexpr float FLOOR_GRID_CELL_SIZE = 2.0f;  // 2 unit grid cells
-    struct FloorCacheWork {
-        size_t instance = 0, count = 0, samples = 0, startSize = 0;
-        int x = 0, y = 0;
-    };
-    mutable uint32_t currentFrameId = 0;
-
-    uint64_t floorGridKey(float x, float y) const {
-        int32_t ix = static_cast<int32_t>(std::floor(x / FLOOR_GRID_CELL_SIZE));
-        int32_t iy = static_cast<int32_t>(std::floor(y / FLOOR_GRID_CELL_SIZE));
-        return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
-               static_cast<uint64_t>(static_cast<uint32_t>(iy));
-    }
-
-
-    // Active WMO group tracking - reduces per-query group iteration
-    struct ActiveGroupInfo {
-        uint32_t instanceIdx = UINT32_MAX;
-        uint32_t modelId = 0;
-        int32_t groupIdx = -1;
-        std::vector<uint32_t> neighborGroups;  // portal-connected groups
-        [[nodiscard]] bool isValid() const { return instanceIdx != UINT32_MAX && groupIdx >= 0; }
-        void invalidate() { instanceIdx = UINT32_MAX; groupIdx = -1; neighborGroups.clear(); }
-    };
-    mutable ActiveGroupInfo activeGroup_;
-
-    // Per-frame floor height dedup cache (same XY queried 3-5x per frame)
-    struct FrameFloorCache {
-        static constexpr size_t CAPACITY = 16;
-        struct Entry { uint64_t key; float resultZ; float normalZ; uint32_t frameId; };
-        Entry entries[CAPACITY] = {};
-
-        [[nodiscard]] uint64_t makeKey(float x, float y) const {
-            // 0.5-unit quantized grid
-            int32_t ix = static_cast<int32_t>(std::floor(x * 2.0f));
-            int32_t iy = static_cast<int32_t>(std::floor(y * 2.0f));
-            return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
-                   static_cast<uint64_t>(static_cast<uint32_t>(iy));
-        }
-
-        std::optional<float> get(float x, float y, uint32_t frame, float* outNormalZ = nullptr) const {
-            uint64_t k = makeKey(x, y);
-            size_t slot = k % CAPACITY;
-            const auto& e = entries[slot];
-            if (e.frameId == frame && e.key == k) {
-                if (outNormalZ) *outNormalZ = e.normalZ;
-                return e.resultZ;
-            }
-            return std::nullopt;
-        }
-
-        void put(float x, float y, float result, float normalZ, uint32_t frame) {
-            uint64_t k = makeKey(x, y);
-            size_t slot = k % CAPACITY;
-            entries[slot] = { .key = k, .resultZ = result, .normalZ = normalZ, .frameId = frame };
-        }
-    };
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
         std::vector<WMOInstance> instances;
-        SpatialGrid spatialGrid;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
         std::vector<size_t> visibleInstances_;      // reused per frame
         std::vector<InstanceDrawList> drawLists_;    // reused per frame
         std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
-        mutable std::unordered_map<uint64_t, float> precomputedFloorGrid;  // key -> floor height
-        std::optional<FloorCacheWork> floorCacheWork_;
-        std::string mapName_;
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;

@@ -5,7 +5,7 @@
 #include "game/game_handler.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
-#include "rendering/wmo_renderer.hpp"
+#include "collision/collision_world.hpp"
 #include "core/coordinates.hpp"
 #include "core/window.hpp"
 #include <imgui.h>
@@ -58,9 +58,9 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
     glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
 
     static SightCache sight;
-    rendering::WMORenderer* wmo = renderer->getWMORenderer();
-    const auto sightQuery = [wmo](const glm::vec3& from, const glm::vec3& to) {
-        return wmo->segmentBlocked(from, to);
+    const collision::CollisionWorld& world = renderer->collision();
+    const auto sightQuery = [&world](const glm::vec3& from, const glm::vec3& to) {
+        return world.wmoSegmentBlocked(collision::Reach::everywhere(), from, to);
     };
 
     // Update and render bubbles
@@ -98,7 +98,7 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         // one drawn over the building someone is standing behind says they are
         // in front of it - the same fault the nameplates had, answered by the
         // same query, and after the screen test for the same reason.
-        if (wmo && sight.blocked(bubble.senderGuid, camera->getPosition(), renderPos)) {
+        if (sight.blocked(bubble.senderGuid, camera->getPosition(), renderPos)) {
             continue;
         }
 
@@ -141,7 +141,7 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
                     ImGui::GetColorU32(textColor), bubble.message.c_str(), nullptr,
                     kWrapWidth);
     }
-    if (wmo) sight.refresh(sightQuery);
+    sight.refresh(sightQuery);
 }
 
 void ChatBubbleManager::setupCallback(game::GameHandler& gameHandler) {

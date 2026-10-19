@@ -4,7 +4,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
-#include "rendering/wmo_renderer.hpp"
+#include "collision/collision_world.hpp"
 #include "rendering/swim_effects.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -145,11 +145,11 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(const AnimationCon
         return audio::FootstepSurface::WATER;
     }
 
-    auto* wmoRenderer = ctx.renderer->getWMORenderer();
     auto* terrainManager = ctx.renderer->getTerrainManager();
-    if (wmoRenderer) {
-        auto wmoFloor = wmoRenderer->getFloorHeight(p.x, p.y, p.z + 1.5f);
-        auto terrainFloor = terrainManager ? terrainManager->getHeightAt(p.x, p.y) : std::nullopt;
+    {
+        const collision::CollisionWorld& world = ctx.renderer->collision();
+        const auto wmoFloor = world.wmoFloor(cameraController->collisionReach(), p.x, p.y, p.z + 1.5f);
+        const auto terrainFloor = world.terrainHeight(p.x, p.y);
         const bool standingOnWmo = wmoFloor && std::abs(*wmoFloor - p.z) <= 2.5f;
         if (standingOnWmo && (cameraController->isInsideWMO() ||
                              !terrainFloor || *wmoFloor >= *terrainFloor - 0.1f)) {
