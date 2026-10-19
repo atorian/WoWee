@@ -10280,6 +10280,12 @@ void LuaEngine::updateSizeChanges() {
     checkChangeReports();
 }
 
+uint64_t LuaEngine::heapBytes() const {
+    if (!L_) return 0;
+    return static_cast<uint64_t>(lua_gc(L_, LUA_GCCOUNT, 0)) * 1024u +
+           static_cast<uint64_t>(lua_gc(L_, LUA_GCCOUNTB, 0));
+}
+
 void LuaEngine::checkChangeReports() {
     // Under WOWEE_WIDGET_REPORT_CHECK, the whole-tree comparison the two passes
     // above used to make, as a check on the lists they now read instead: a

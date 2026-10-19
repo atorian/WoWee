@@ -58,8 +58,10 @@ struct TileCoord {
  */
 struct TerrainTile {
     TileCoord coord;
+    /// The parsed tile, which height, hole, area and texture queries read.
+    /// Not the mesh built from it: that is on the GPU once the tile commits,
+    /// nothing reads it after, and it was a gigabyte across a city's tiles.
     pipeline::ADTTerrain terrain;
-    pipeline::TerrainMesh mesh;
     bool loaded = false;
 
     // Tile bounds in world coordinates
@@ -376,6 +378,11 @@ public:
      * Get statistics
      */
     [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
+    /// CPU memory the loaded tiles hold: the parsed ADT data.
+    struct TileMemory {
+        uint64_t terrainBytes = 0;
+    };
+    [[nodiscard]] TileMemory tileMemory() const;
     [[nodiscard]] int getPendingTileCount() const {
         std::lock_guard<std::mutex> lock(queueMutex);
         return static_cast<int>(pendingTiles.size());

@@ -245,6 +245,15 @@ std::string ResourceTelemetry::describe(const ResourceSample& sample, const Fram
     const auto& process = sample.process;
     line << " | working set " << bytesOrNone(process.workingSetBytes) << ", private "
          << bytesOrNone(process.privateBytes);
+    if (process.heapAllocatedBytes && process.heapCommittedBytes) {
+        line << " (heap " << formatBytes(*process.heapAllocatedBytes) << " in use, "
+             << formatBytes(*process.heapCommittedBytes) << " committed";
+        if (process.privateBytes && *process.privateBytes > *process.heapCommittedBytes) {
+            line << "; " << formatBytes(*process.privateBytes - *process.heapCommittedBytes)
+                 << " outside the heap";
+        }
+        line << ")";
+    }
     line << " | system commit " << bytesOrNone(process.systemCommitUsedBytes) << " of "
          << bytesOrNone(process.systemCommitLimitBytes) << ", physical "
          << bytesOrNone(process.availablePhysicalBytes) << " free of "
@@ -269,6 +278,17 @@ std::string ResourceTelemetry::describe(const ResourceSample& sample, const Fram
     }
     for (const auto& count : sample.counts) {
         line << " | " << count.name << " " << count.value;
+    }
+    if (!sample.memory.empty()) {
+        uint64_t named = 0;
+        line << " | memory by owner:";
+        for (size_t i = 0; i < sample.memory.size(); ++i) {
+            line << (i == 0 ? " " : ", ") << sample.memory[i].name << " "
+                 << formatBytes(sample.memory[i].value);
+            // An indented name is a part of the one before it, not more.
+            if (sample.memory[i].name.rfind("  ", 0) != 0) named += sample.memory[i].value;
+        }
+        line << "; " << formatBytes(named) << " named";
     }
     return line.str();
 }

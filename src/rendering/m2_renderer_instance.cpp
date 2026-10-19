@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include "pipeline/heap_bytes.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
@@ -954,6 +955,43 @@ TextureRef M2Renderer::loadTexture(const std::string& path) {
     failedTextureRetryAt_.erase(key);
     LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
     return uploaded;
+}
+
+uint64_t M2Renderer::modelDataBytes() const {
+    using pipeline::heapBytes;
+    using pipeline::vectorBytes;
+    const auto cells = [](const std::vector<uint32_t>& v) { return vectorBytes(v); };
+    const auto track = [](const pipeline::M2AnimationTrack& t) { return heapBytes(t); };
+    uint64_t total = 0;
+    for (const auto& [id, m] : models) {
+        total += sizeof(M2ModelGPU);
+        total += vectorBytes(m.bones, [](const pipeline::M2Bone& b) { return heapBytes(b); });
+        total += vectorBytes(m.sequences) + vectorBytes(m.globalSequenceDurations);
+        total += vectorBytes(m.particleEmitters,
+                             [](const pipeline::M2ParticleEmitter& e) { return heapBytes(e); });
+        total += vectorBytes(m.ribbonEmitters,
+                             [](const pipeline::M2RibbonEmitter& e) { return heapBytes(e); });
+        total += vectorBytes(m.textureTransforms,
+                             [](const pipeline::M2TextureTransform& t) { return heapBytes(t); });
+        total += vectorBytes(m.colorAlphaTracks, track) + vectorBytes(m.textureWeightTracks, track);
+        total += vectorBytes(m.lights, [](const pipeline::M2Light& l) { return heapBytes(l); });
+        total += vectorBytes(m.batches) + vectorBytes(m.materialDrawOrder);
+        const auto& c = m.collision;
+        total += vectorBytes(c.vertices) + vectorBytes(c.indices) + vectorBytes(c.triBounds) +
+                 vectorBytes(c.cellFloorTris, cells) + vectorBytes(c.cellWallTris, cells);
+    }
+    return total;
+}
+
+uint64_t M2Renderer::instanceBytes() const {
+    using pipeline::vectorBytes;
+    uint64_t total = vectorBytes(scene_->instances);
+    for (const auto& inst : scene_->instances) {
+        total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.emitterAccumulators) +
+                 vectorBytes(inst.emitterPools) + vectorBytes(inst.particles) +
+                 vectorBytes(inst.ribbons);
+    }
+    return total;
 }
 
 uint32_t M2Renderer::getTotalTriangleCount() const {

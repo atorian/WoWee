@@ -286,6 +286,8 @@ public:
 
     lua_State* getState() { return L_; }
     [[nodiscard]] bool isInitialized() const { return L_ != nullptr; }
+    /// What the Lua state holds, as its collector counts it; zero with none.
+    [[nodiscard]] uint64_t heapBytes() const;
 
     /// Abort a chunk that runs longer than this many milliseconds, naming the
     /// Lua source and line it was on. Zero disables it.

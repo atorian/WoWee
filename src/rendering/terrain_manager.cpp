@@ -1356,7 +1356,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         auto tile = std::make_unique<TerrainTile>();
         tile->coord = coord;
         tile->terrain = std::move(pending->terrain);
-        tile->mesh = std::move(pending->mesh);
         tile->loaded = true;
         tile->m2InstanceIds = std::move(ft.m2InstanceIds);
         tile->wmoInstanceIds = std::move(ft.wmoInstanceIds);
@@ -2359,6 +2358,15 @@ std::optional<float> TerrainManager::getHeightAt(float glX, float glY) const {
 
 bool TerrainManager::isTileLoadedAt(float glX, float glY) const {
     return loadedTiles.find(worldToTile(glX, glY)) != loadedTiles.end();
+}
+
+TerrainManager::TileMemory TerrainManager::tileMemory() const {
+    TileMemory out;
+    for (const auto& [coord, tile] : loadedTiles) {
+        if (!tile) continue;
+        out.terrainBytes += sizeof(pipeline::ADTTerrain) + pipeline::heapBytes(tile->terrain);
+    }
+    return out;
 }
 
 bool TerrainManager::isHoleAt(float glX, float glY) const {

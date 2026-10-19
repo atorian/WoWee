@@ -1,5 +1,6 @@
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/liquid_types.hpp"
+#include "pipeline/heap_bytes.hpp"
 
 #include <span>
 #include "core/logger.hpp"
@@ -737,6 +738,21 @@ void ADTLoader::parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain) {
     }
 
     LOG_DEBUG("Loaded MH2O water data: ", totalLayers, " liquid layers across ", data.size(), " bytes");
+}
+
+uint64_t heapBytes(const ADTTerrain& t) {
+    const auto string = [](const std::string& s) { return stringBytes(s); };
+    uint64_t total = vectorBytes(t.textures, string) + vectorBytes(t.doodadNames, string) +
+                     vectorBytes(t.wmoNames, string) + vectorBytes(t.doodadIds) +
+                     vectorBytes(t.wmoIds) + vectorBytes(t.doodadPlacements) +
+                     vectorBytes(t.wmoPlacements);
+    for (const MapChunk& c : t.chunks) total += vectorBytes(c.layers) + vectorBytes(c.alphaMap);
+    for (const auto& water : t.waterData) {
+        total += vectorBytes(water.layers, [](const ADTTerrain::WaterLayer& l) {
+            return vectorBytes(l.heights) + vectorBytes(l.mask);
+        });
+    }
+    return total;
 }
 
 } // namespace pipeline

@@ -1,5 +1,6 @@
 #include "core/process_stats.hpp"
 
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 
 #include <chrono>
@@ -92,6 +93,29 @@ void readThreads(ProcessStats& stats, bool& said) {
         LOG_WARNING("Thread count not read: this process (", self, ") is not in the process "
                     "snapshot; the performance HUD and the resource log show none");
     }
+}
+
+void readHeaps(ProcessStats& stats, bool& said) {
+    HANDLE heaps[256];
+    const DWORD count = GetProcessHeaps(256, heaps);
+    if (count == 0 || count > 256) {
+        if (!said) {
+            said = true;
+            LOG_WARNING("Heap summary not read: GetProcessHeaps answered ", count,
+                        " (error ", GetLastError(), "); the resource log shows no heap figures");
+        }
+        return;
+    }
+    uint64_t allocated = 0, committed = 0;
+    for (DWORD i = 0; i < count; ++i) {
+        HEAP_SUMMARY summary{};
+        summary.cb = sizeof(summary);
+        if (!HeapSummary(heaps[i], 0, &summary)) continue;
+        allocated += summary.cbAllocated;
+        committed += summary.cbCommitted;
+    }
+    stats.heapAllocatedBytes = allocated;
+    stats.heapCommittedBytes = committed;
 }
 
 #elif defined(__APPLE__)
@@ -225,13 +249,23 @@ void readThreads(ProcessStats& stats, bool& said) {
 
 #endif
 
+#ifndef _WIN32
+void readHeaps(ProcessStats&, bool& said) {
+    if (said) return;
+    said = true;
+    LOG_WARNING("WOWEE_HEAP_SUMMARY: heap figures are read on Windows only; the resource log "
+                "shows none here");
+}
+#endif
+
 } // namespace
 
-ProcessStats ProcessStatsReader::read(bool withThreads) {
+ProcessStats ProcessStatsReader::read(bool withThreads, bool withHeaps) {
     ProcessStats stats;
     readProcessMemory(stats, saidProcessMemory_);
     readSystemMemory(stats, saidSystemMemory_);
     if (withThreads) readThreads(stats, saidThreads_);
+    if (withHeaps) readHeaps(stats, saidHeaps_);
     return stats;
 }
 
@@ -260,15 +294,32 @@ std::optional<ProcessStats> ProcessStatsSampler::latest() const {
 
 void ProcessStatsSampler::run() {
     constexpr int kThreadCountEvery = 5;
+    constexpr int kHeapSummaryEvery = 10;
+    static const bool heapSummary = envFlagEnabled("WOWEE_HEAP_SUMMARY", false);
+    if (heapSummary) {
+        LOG_WARNING("WOWEE_HEAP_SUMMARY: the process's heaps are summed every ",
+                    kHeapSummaryEvery, " s; each summary walks every block and holds the heap "
+                    "while it does");
+    }
     ProcessStatsReader reader;
     std::optional<uint32_t> threads;
+    std::optional<uint64_t> heapAllocated, heapCommitted;
     int reading = 0;
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stop_) {
         lock.unlock();
-        const bool withThreads = reading++ % kThreadCountEvery == 0;
-        ProcessStats stats = reader.read(withThreads);
+        const bool withThreads = reading % kThreadCountEvery == 0;
+        const bool withHeaps = heapSummary && reading % kHeapSummaryEvery == 0;
+        ++reading;
+        ProcessStats stats = reader.read(withThreads, withHeaps);
         if (withThreads) threads = stats.threadCount; else stats.threadCount = threads;
+        if (withHeaps) {
+            heapAllocated = stats.heapAllocatedBytes;
+            heapCommitted = stats.heapCommittedBytes;
+        } else {
+            stats.heapAllocatedBytes = heapAllocated;
+            stats.heapCommittedBytes = heapCommitted;
+        }
         lock.lock();
         latest_ = std::move(stats);
         wake_.wait_for(lock, std::chrono::seconds(1), [this] { return stop_; });

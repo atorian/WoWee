@@ -15,6 +15,7 @@
  * the original WoW Model Viewer (charcontrol.h, REGION_FAC=2).
  */
 #include <atomic>
+#include "pipeline/heap_bytes.hpp"
 #include "rendering/character_renderer.hpp"
 #include <stdexcept>
 #include "rendering/m2_billboard.hpp"
@@ -1832,6 +1833,13 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 
     vkCtx_->endUploadBatch();
 
+    // The vertices and indices are on the GPU now, and nothing reads them
+    // here again: what the rest of the client asked of them - how many there
+    // are, how high the model stands - is kept beside them (getModelShape).
+    // Six hundred character models kept them all for the life of the session.
+    std::vector<pipeline::M2Vertex>().swap(gpuModel.data.vertices);
+    std::vector<uint16_t>().swap(gpuModel.data.indices);
+
     // Precompute batch render order (priorityPlane, materialLayer). The result
     // depends only on the model, so caching it here removes the per-frame
     // per-instance allocate + sort from render().
@@ -2931,7 +2939,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         " ptr=", static_cast<const void*>(rt),
                         " overrides=", instance.textureSlotOverrides.size(),
                         " drawSkinExtra=", (instance.drawSkinExtra ? 1 : 0),
-                        " verts=", gpuModel.data.vertices.size());
+                        " verts=", gpuModel.vertexCount);
                 }
                 // Note on the Skin Extra batch, since it has been misread twice:
                 // it is NOT a layer over the head. On an HD character model it
@@ -3740,6 +3748,15 @@ const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const
     return &it->second.data;
 }
 
+std::optional<CharacterRenderer::ModelShape> CharacterRenderer::getModelShape(uint32_t modelId) const {
+    auto it = models.find(modelId);
+    if (it == models.end()) return std::nullopt;
+    const M2ModelGPU& m = it->second;
+    return ModelShape{.vertexCount = m.vertexCount,
+                      .boundMin = m.visualBoundMin,
+                      .boundMax = m.visualBoundMax};
+}
+
 const pipeline::M2Model* CharacterRenderer::getInstanceModelData(uint32_t instanceId) const {
     auto instIt = scene_->instances.find(instanceId);
     if (instIt == scene_->instances.end()) return nullptr;
@@ -4321,6 +4338,17 @@ bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachm
         it->localTransform = localTransform;
     }
     return true;
+}
+
+CharacterRenderer::ModelMemory CharacterRenderer::modelMemory() const {
+    ModelMemory out;
+    for (const auto& [id, gpu] : models) {
+        const auto& d = gpu.data;
+        out.totalBytes += sizeof(M2ModelGPU) + pipeline::heapBytes(d);
+        out.geometryBytes += pipeline::vectorBytes(d.vertices) + pipeline::vectorBytes(d.indices);
+        for (const auto& bone : d.bones) out.boneTrackBytes += pipeline::heapBytes(bone);
+    }
+    return out;
 }
 
 void CharacterRenderer::unloadModelIfUnused(uint32_t modelId) {

@@ -1809,8 +1809,9 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
             // eight without - human male, dwarf, undead male, gnome, troll
             // male, draenei female - were exactly the ones left wrong.
             constexpr size_t kShippedCharacterVertexCeiling = 12000;
+            const auto shape = charRenderer->getModelShape(modelId);
             const bool isHdCharacterModel =
-                modelData && modelData->vertices.size() > kShippedCharacterVertexCeiling;
+                shape && shape->vertexCount > kShippedCharacterVertexCeiling;
             if (modelData) {
                 for (size_t ti = 0; ti < modelData->textures.size(); ti++) {
                     uint32_t texType = modelData->textures[ti].type;

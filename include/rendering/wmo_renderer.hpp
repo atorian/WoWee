@@ -268,6 +268,9 @@ public:
                                 wowee::rendering::VkShaderModule& fragShader);
     bool isInitialized() const { return initialized_; }
     uint32_t getModelCount() const { return loadedModels.size(); }
+    /// CPU memory for collision: each group's triangles, their bounds and
+    /// cell lists, and the precomputed floor heights.
+    [[nodiscard]] uint64_t collisionBytes() const;
 
     /**
      * Get number of active instances

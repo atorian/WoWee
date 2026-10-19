@@ -66,6 +66,9 @@ struct ResourceSample {
     std::vector<Cache> caches;
     /// What is held where only the number is known: models, jobs in flight.
     std::vector<Count> counts;
+    /// The client's own memory by owner, in bytes: what each part of it
+    /// keeps after loading, set against the private commit it is part of.
+    std::vector<Count> memory;
 
     /// The device's video memory, as the driver counts it.
     struct VideoMemory {

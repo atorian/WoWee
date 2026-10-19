@@ -26,6 +26,7 @@
 #include <cmath>
 #include <algorithm>
 #include <type_traits>
+#include "pipeline/heap_bytes.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -2253,6 +2254,77 @@ std::string modelPathToM2(const std::string& modelPath) {
         return modelPath.substr(0, modelPath.size() - 4) + ".m2";
     }
     return modelPath;
+}
+
+uint64_t heapBytes(const M2AnimationTrack& track) {
+    return vectorBytes(track.sequences, [](const M2AnimationTrack::SequenceKeys& keys) {
+        return vectorBytes(keys.timestamps) + vectorBytes(keys.vec3Values) +
+               vectorBytes(keys.quatValues) + vectorBytes(keys.floatValues);
+    });
+}
+
+namespace {
+uint64_t heapBytes(const M2FBlock& block) {
+    return vectorBytes(block.timestamps) + vectorBytes(block.floatValues) +
+           vectorBytes(block.vec2Values) + vectorBytes(block.vec3Values);
+}
+} // namespace
+
+uint64_t heapBytes(const M2Bone& bone) {
+    return heapBytes(bone.translation) + heapBytes(bone.rotation) + heapBytes(bone.scale);
+}
+
+uint64_t heapBytes(const M2TextureTransform& transform) {
+    return heapBytes(transform.translation) + heapBytes(transform.rotation) +
+           heapBytes(transform.scale);
+}
+
+uint64_t heapBytes(const M2Light& light) {
+    return heapBytes(light.ambientColor) + heapBytes(light.ambientIntensity) +
+           heapBytes(light.diffuseColor) + heapBytes(light.diffuseIntensity) +
+           heapBytes(light.attenuationStart) + heapBytes(light.attenuationEnd) +
+           heapBytes(light.visibility);
+}
+
+uint64_t heapBytes(const M2ParticleEmitter& e) {
+    return heapBytes(e.emissionSpeed) + heapBytes(e.speedVariation) +
+           heapBytes(e.verticalRange) + heapBytes(e.horizontalRange) + heapBytes(e.gravity) +
+           heapBytes(e.lifespan) + heapBytes(e.emissionRate) + heapBytes(e.emissionAreaLength) +
+           heapBytes(e.emissionAreaWidth) + heapBytes(e.zSource) +
+           heapBytes(e.particleColor) + heapBytes(e.particleAlpha) + heapBytes(e.particleScale) +
+           heapBytes(e.headCellTrack) + heapBytes(e.tailCellTrack);
+}
+
+uint64_t heapBytes(const M2RibbonEmitter& e) {
+    return heapBytes(e.colorTrack) + heapBytes(e.alphaTrack) + heapBytes(e.heightAboveTrack) +
+           heapBytes(e.heightBelowTrack) + heapBytes(e.visibilityTrack);
+}
+
+uint64_t heapBytes(const M2Model& m) {
+    const auto track = [](const M2AnimationTrack& t) { return heapBytes(t); };
+    uint64_t total = stringBytes(m.name);
+    total += vectorBytes(m.vertices) + vectorBytes(m.indices);
+    total += vectorBytes(m.bones, [](const M2Bone& b) { return heapBytes(b); });
+    total += vectorBytes(m.sequences) + vectorBytes(m.globalSequenceDurations);
+    total += vectorBytes(m.footstepEventTimes,
+                         [](const std::vector<uint32_t>& v) { return vectorBytes(v); });
+    total += vectorBytes(m.boneLookupTable) + vectorBytes(m.batches);
+    total += vectorBytes(m.textures, [](const M2Texture& t) { return stringBytes(t.filename); });
+    total += vectorBytes(m.textureLookup) + vectorBytes(m.materials);
+    total += vectorBytes(m.textureTransforms,
+                         [](const M2TextureTransform& t) { return heapBytes(t); });
+    total += vectorBytes(m.textureTransformLookup) + vectorBytes(m.textureCoordLookup) +
+             vectorBytes(m.textureCombinerCombos) + vectorBytes(m.textureWeights);
+    total += vectorBytes(m.textureWeightTracks, track) + vectorBytes(m.textureWeightLookup);
+    total += vectorBytes(m.colorAlphas) + vectorBytes(m.colorRGB);
+    total += vectorBytes(m.colorAlphaTracks, track);
+    total += vectorBytes(m.attachments) + vectorBytes(m.cameras) + vectorBytes(m.attachmentLookup);
+    total += vectorBytes(m.particleEmitters, [](const M2ParticleEmitter& e) { return heapBytes(e); });
+    total += vectorBytes(m.ribbonEmitters, [](const M2RibbonEmitter& e) { return heapBytes(e); });
+    total += vectorBytes(m.lights, [](const M2Light& l) { return heapBytes(l); });
+    total += vectorBytes(m.collisionVertices) + vectorBytes(m.collisionIndices) +
+             vectorBytes(m.collisionNormals);
+    return total;
 }
 
 } // namespace pipeline

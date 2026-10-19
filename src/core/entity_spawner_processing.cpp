@@ -1789,13 +1789,10 @@ void EntitySpawner::processPendingMount() {
     // anything with a mast, a stack or handlebars. The motorcycle's tallest
     // vertex is 5.11 against a seat at 0.76, so the rider sat four yards over
     // the bike. It is only ever reached now when the model names no seat.
-    if (!haveSeatPoint && modelData && !modelData->vertices.empty()) {
-        float minZ =  std::numeric_limits<float>::max();
-        float maxZ = -std::numeric_limits<float>::max();
-        for (const auto& v : modelData->vertices) {
-            if (v.position.z < minZ) minZ = v.position.z;
-            if (v.position.z > maxZ) maxZ = v.position.z;
-        }
+    const auto shape = charRenderer->getModelShape(modelId);
+    if (!haveSeatPoint && shape && shape->vertexCount > 0) {
+        const float minZ = shape->boundMin.z;
+        const float maxZ = shape->boundMax.z;
         float extentZ = maxZ - minZ;
         LOG_INFO("Mount tight bounds: minZ=", minZ, " maxZ=", maxZ, " extentZ=", extentZ);
         if (extentZ > 0.5f) {
@@ -1948,13 +1945,9 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
         }
     }
 
-    if (const auto* md = cr->getModelData(modelId); md && !md->vertices.empty()) {
-        float minZ = std::numeric_limits<float>::max();
-        float maxZ = -std::numeric_limits<float>::max();
-        for (const auto& vertex : md->vertices) {
-            minZ = std::min(minZ, vertex.position.z);
-            maxZ = std::max(maxZ, vertex.position.z);
-        }
+    if (const auto shape = cr->getModelShape(modelId); shape && shape->vertexCount > 0) {
+        const float minZ = shape->boundMin.z;
+        const float maxZ = shape->boundMax.z;
         const float extent = maxZ - minZ;
         if (extent > 0.5f) {
             riderHeight = maxZ * 0.8f;

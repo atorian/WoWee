@@ -28,6 +28,14 @@ struct ProcessStats {
     std::optional<uint64_t> totalPhysicalBytes;
     /// Threads the process runs.
     std::optional<uint32_t> threadCount;
+    /// What the process's heaps hand out - everything new and malloc allocate,
+    /// large blocks included - and what they hold committed for it. The rest
+    /// of the private commit was taken past the heap: the graphics driver,
+    /// Vulkan's host memory, mapped files. Windows only, and only under
+    /// WOWEE_HEAP_SUMMARY: reading it walks every heap block, tens of
+    /// milliseconds, and the heap is held while it does.
+    std::optional<uint64_t> heapAllocatedBytes;
+    std::optional<uint64_t> heapCommittedBytes;
 };
 
 /// Reads ProcessStats, saying once per kind of figure when the platform
@@ -36,9 +44,10 @@ class ProcessStatsReader {
 public:
     /// Everything, or everything but the thread count, which is the costly
     /// figure on Windows.
-    [[nodiscard]] ProcessStats read(bool withThreads = true);
+    [[nodiscard]] ProcessStats read(bool withThreads = true, bool withHeaps = false);
 
 private:
+    bool saidHeaps_ = false;
     bool saidProcessMemory_ = false;
     bool saidSystemMemory_ = false;
     bool saidThreads_ = false;

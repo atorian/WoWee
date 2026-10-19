@@ -154,6 +154,9 @@ struct TerrainMesh {
     ChunkMesh& getChunk(int x, int y) { return chunks[y * 16 + x]; }
 };
 
+/// The heap memory the mesh holds (pipeline/heap_bytes.hpp).
+[[nodiscard]] uint64_t heapBytes(const TerrainMesh& mesh);
+
 /**
  * Terrain mesh generator
  *

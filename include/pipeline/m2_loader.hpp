@@ -404,6 +404,17 @@ struct M2Model {
     }
 };
 
+/// The heap memory a parsed model, or a part of one, holds: the capacity of
+/// every vector in it, nested ones included, and every string past its
+/// inline buffer. What the resource line counts CPU memory by.
+[[nodiscard]] uint64_t heapBytes(const M2AnimationTrack& track);
+[[nodiscard]] uint64_t heapBytes(const M2Bone& bone);
+[[nodiscard]] uint64_t heapBytes(const M2TextureTransform& transform);
+[[nodiscard]] uint64_t heapBytes(const M2Light& light);
+[[nodiscard]] uint64_t heapBytes(const M2ParticleEmitter& emitter);
+[[nodiscard]] uint64_t heapBytes(const M2RibbonEmitter& emitter);
+[[nodiscard]] uint64_t heapBytes(const M2Model& model);
+
 class M2Loader {
 public:
     /**

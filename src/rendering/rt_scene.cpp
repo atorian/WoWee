@@ -1,6 +1,7 @@
 #include "rendering/rt_scene.hpp"
 
 #include "core/logger.hpp"
+#include "pipeline/heap_bytes.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -927,7 +928,14 @@ RtScene::Stats RtScene::stats() const {
     s.triangles = liveTriangles_;
     auto sz = [](const AllocatedBuffer& b) { return b.buffer ? uint64_t(b.info.size) : 0ull; };
     s.gpuBytes = sz(triPool_.buffer) + sz(nodePool_.buffer) + sz(meshTable_);
-    for (const auto& m : meshes_) s.gpuBytes += sz(m.blasBuffer);
+    for (const auto& m : meshes_) {
+        s.gpuBytes += sz(m.blasBuffer);
+        s.sourceBytes += pipeline::vectorBytes(m.source.positions) +
+                         pipeline::vectorBytes(m.source.indices) +
+                         pipeline::vectorBytes(m.source.surfaces) +
+                         pipeline::vectorBytes(m.tris) + pipeline::vectorBytes(m.nodes);
+    }
+    s.sourceBytes += pipeline::vectorBytes(meshes_);
     return s;
 }
 

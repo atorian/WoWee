@@ -34,7 +34,21 @@ public:
 
     [[nodiscard]] const ResourceTelemetry& telemetry() const { return telemetry_; }
 
+    /// What the character's interface holds in Lua, as its engine counts it;
+    /// empty with no interface. Told by whoever owns the interface, which this
+    /// does not see.
+    void noteLuaHeap(std::optional<uint64_t> bytes) { luaHeapBytes_ = bytes; }
+
 private:
+    /// The client's own memory by owner (ResourceSample::memory).
+    void sampleMemory(const rendering::Renderer& renderer);
+    std::vector<ResourceSample::Count> memoryParts_;
+    /// WOWEE_MEMORY_BY_OWNER: walking the owners costs a frame some 30 ms in
+    /// a city, so it is asked for rather than always done.
+    bool memoryByOwner_ = false;
+    std::optional<double> lastMemoryAt_;
+    std::optional<uint64_t> luaHeapBytes_;
+
     [[nodiscard]] ResourceSample sample(const rendering::Renderer* renderer,
                                         const pipeline::AssetManager* assets,
                                         std::optional<uint32_t> latencyMs, double now);

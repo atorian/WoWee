@@ -167,7 +167,17 @@ public:
     /// and as it changes: a mount takes its rider's, so a Shadowform priest's
     /// mount goes dark and translucent with them. Ends with either instance.
     void addLookCompanion(uint32_t instanceId, uint32_t companionId);
+    /// The parsed model, less its vertices and indices: those go to the GPU
+    /// and are not kept. What callers want of them is in getModelShape.
     [[nodiscard]] const pipeline::M2Model* getModelData(uint32_t modelId) const;
+    /// How many vertices the model has and the tight box around them, in
+    /// bind pose; empty for a model not loaded.
+    struct ModelShape {
+        uint32_t vertexCount = 0;
+        glm::vec3 boundMin{0.0f};
+        glm::vec3 boundMax{0.0f};
+    };
+    [[nodiscard]] std::optional<ModelShape> getModelShape(uint32_t modelId) const;
     [[nodiscard]] const pipeline::M2Model* getInstanceModelData(uint32_t instanceId) const;
     void setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets);
     /// Opt an instance into the Skin Extra head-detail batch. Only a character
@@ -298,6 +308,14 @@ public:
 
     [[nodiscard]] size_t getInstanceCount() const { return scene_->instances.size(); }
     [[nodiscard]] size_t getModelCount() const { return models.size(); }
+    /// CPU memory the models keep after upload: the whole parsed model each,
+    /// and of that its vertices and indices, and its bones' animation tracks.
+    struct ModelMemory {
+        uint64_t totalBytes = 0;
+        uint64_t geometryBytes = 0;
+        uint64_t boneTrackBytes = 0;
+    };
+    [[nodiscard]] ModelMemory modelMemory() const;
     /// Normal maps queued, being derived, or derived and not yet uploaded.
     [[nodiscard]] size_t pendingNormalMapJobs() const;
 

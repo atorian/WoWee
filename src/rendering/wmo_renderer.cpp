@@ -1,4 +1,5 @@
 #include "rendering/collision_geometry.hpp"
+#include "pipeline/heap_bytes.hpp"
 #include "rendering/pom_quality.hpp"
 #include "rendering/placement_transform.hpp"
 #include "rendering/spatial_grid.hpp"
@@ -2035,6 +2036,28 @@ VkDescriptorSet WMORenderer::shadowTexSet(VkTexture* tex, uint32_t frameIndex) {
 
     shadowTexSetCache_[view] = set;
     return set;
+}
+
+uint64_t WMORenderer::collisionBytes() const {
+    using pipeline::vectorBytes;
+    const auto cells = [](const std::vector<uint32_t>& v) { return vectorBytes(v); };
+    uint64_t total = 0;
+    for (const auto& [id, model] : loadedModels) {
+        for (const auto& g : model.groups) {
+            total += vectorBytes(g.collisionVertices) + vectorBytes(g.collisionIndices) +
+                     vectorBytes(g.collisionVertexColors) + vectorBytes(g.triBounds) +
+                     vectorBytes(g.triNormals) + vectorBytes(g.triMopyFlags) +
+                     vectorBytes(g.triVisited) + vectorBytes(g.cellTriangles, cells) +
+                     vectorBytes(g.cellFloorTriangles, cells) +
+                     vectorBytes(g.cellWallTriangles, cells);
+        }
+    }
+    // An unordered_map node: the pair, the next pointer and the cached hash,
+    // and a bucket pointer for each.
+    const auto& floors = scene_->precomputedFloorGrid;
+    total += floors.size() * (sizeof(std::pair<const uint64_t, float>) + 2 * sizeof(void*)) +
+             floors.bucket_count() * sizeof(void*);
+    return total;
 }
 
 uint32_t WMORenderer::getTotalTriangleCount() const {

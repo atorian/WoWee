@@ -1077,8 +1077,8 @@ bool CharacterPreview::setBakedSkin(const std::string& bakePath) {
     // about its face and the table is the better answer - the same rule, and
     // the same vertex ceiling, the world spawner applies.
     constexpr size_t kShippedCharacterVertexCeiling = 12000;
-    if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
-        if (md->vertices.size() > kShippedCharacterVertexCeiling) return false;
+    if (const auto shape = charRenderer_->getModelShape(PREVIEW_MODEL_ID)) {
+        if (shape->vertexCount > kShippedCharacterVertexCeiling) return false;
     }
     TextureRef tex = charRenderer_->loadTexture(bakePath);
     if (!tex) return false;

@@ -1805,6 +1805,13 @@ void Application::frameFinished() {
     }
     std::optional<uint32_t> latencyMs;
     if (gameHandler && gameHandler->isInWorld()) latencyMs = gameHandler->getLatencyMs();
+    {
+        std::optional<uint64_t> luaBytes;
+        if (auto* addons = characterAddons(); addons && addons->getLuaEngine()) {
+            luaBytes = addons->getLuaEngine()->heapBytes();
+        }
+        resourceMonitor_->noteLuaHeap(luaBytes);
+    }
     resourceMonitor_->frameFinished(frameSeconds, renderer.get(), assetManager.get(), latencyMs);
 }
 

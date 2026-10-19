@@ -6,6 +6,7 @@
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/rt_scene.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/vk_context.hpp"
@@ -22,6 +23,8 @@ constexpr double kSampleIntervalSeconds = 1.0;
 /// How often the allocator's detailed map is built, when anything asks for it.
 /// It walks every allocation the allocator holds.
 constexpr double kVideoMapIntervalSeconds = 10.0;
+/// How often the client's own memory is counted by owner.
+constexpr double kMemoryIntervalSeconds = 10.0;
 
 ResourceTelemetry::Config telemetryConfig(bool frameProfile) {
     ResourceTelemetry::Config config;
@@ -41,6 +44,12 @@ ResourceMonitor::ResourceMonitor(bool frameProfile)
         gpuMemoryDumpPath_ = path;
         LOG_WARNING("WOWEE_GPU_MEMORY_DUMP: the allocator's detailed map is written to ",
                     gpuMemoryDumpPath_, " every ", kVideoMapIntervalSeconds, " s");
+    }
+    memoryByOwner_ = envFlagEnabled("WOWEE_MEMORY_BY_OWNER", false);
+    if (memoryByOwner_) {
+        LOG_WARNING("WOWEE_MEMORY_BY_OWNER: the client's memory is counted by owner every ",
+                    kMemoryIntervalSeconds, " s; each count walks every model, tile and M2 "
+                    "instance in one frame, some 30 ms in a city");
     }
     checkCounts_ = envFlagEnabled("WOWEE_GPU_MEMORY_CHECK", false);
     if (checkCounts_) {
@@ -174,7 +183,53 @@ ResourceSample ResourceMonitor::sample(const rendering::Renderer* renderer,
         out.counts.push_back({"character models", characters->getModelCount()});
         out.counts.push_back({"normal-map jobs", static_cast<uint64_t>(characters->pendingNormalMapJobs())});
     }
+    if (memoryByOwner_ && (!lastMemoryAt_ || now - *lastMemoryAt_ >= kMemoryIntervalSeconds)) {
+        lastMemoryAt_ = now;
+        sampleMemory(*renderer);
+    }
+    out.memory = memoryParts_;
     return out;
+}
+
+void ResourceMonitor::sampleMemory(const rendering::Renderer& renderer) {
+    // Walks every model, tile and M2 instance - 200,000 of those in a city -
+    // so it is done only when asked for, every few seconds, and timed.
+    const auto started = std::chrono::steady_clock::now();
+    memoryParts_.clear();
+    if (const auto* characters = renderer.getCharacterRenderer()) {
+        const auto m = characters->modelMemory();
+        memoryParts_.push_back({"character models", m.totalBytes});
+        memoryParts_.push_back({"  of which geometry", m.geometryBytes});
+        memoryParts_.push_back({"  of which bone tracks", m.boneTrackBytes});
+    }
+    if (const auto* m2 = renderer.getM2Renderer()) {
+        memoryParts_.push_back({"M2 models", m2->modelDataBytes()});
+        memoryParts_.push_back({"M2 instances", m2->instanceBytes()});
+    }
+    if (const auto* wmo = renderer.getWMORenderer()) {
+        memoryParts_.push_back({"WMO collision", wmo->collisionBytes()});
+    }
+    if (const auto* terrain = renderer.getTerrainManager()) {
+        const auto tiles = terrain->tileMemory();
+        memoryParts_.push_back({"terrain tiles", tiles.terrainBytes});
+    }
+    if (const auto* rt = renderer.getRtScene()) {
+        memoryParts_.push_back({"ray tracing sources", rt->stats().sourceBytes});
+    }
+    if (const auto* vk = renderer.getVkContext()) {
+        if (const auto byUse = vk->gpuMemoryByUse()) {
+            uint64_t host = 0;
+            for (uint64_t b : byUse->hostBytes) host += b;
+            memoryParts_.push_back({"Vulkan host memory", host});
+        }
+    }
+    if (luaHeapBytes_) memoryParts_.push_back({"Lua heap", *luaHeapBytes_});
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (ms > 5.0) {
+        LOG_WARNING("Resource line: counting the client's memory by owner took ", ms,
+                    " ms of one frame");
+    }
 }
 
 } // namespace wowee::core

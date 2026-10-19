@@ -170,6 +170,9 @@ struct ADTTerrain {
     [[nodiscard]] size_t getTextureCount() const { return textures.size(); }
 };
 
+/// The heap memory the parsed tile holds (pipeline/heap_bytes.hpp).
+[[nodiscard]] uint64_t heapBytes(const ADTTerrain& terrain);
+
 /**
  * ADT terrain loader
  *

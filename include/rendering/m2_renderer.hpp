@@ -832,6 +832,10 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
+    /// CPU memory the models keep after upload - bones and their animation
+    /// tracks, emitters, collision - and the instances with what each holds.
+    [[nodiscard]] uint64_t modelDataBytes() const;
+    [[nodiscard]] uint64_t instanceBytes() const;
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(scene_->instances.size()); }
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }

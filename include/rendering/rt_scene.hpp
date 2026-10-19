@@ -98,6 +98,9 @@ public:
         uint32_t instances = 0;
         uint64_t triangles = 0;
         uint64_t gpuBytes = 0;
+        /// CPU memory: every mesh's source geometry, kept whether or not
+        /// tracing is on, and whatever is built from it awaiting upload.
+        uint64_t sourceBytes = 0;
     };
     [[nodiscard]] Stats stats() const;
 

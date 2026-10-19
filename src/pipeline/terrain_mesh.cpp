@@ -1,5 +1,6 @@
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/adt_alpha.hpp"
+#include "pipeline/heap_bytes.hpp"
 #include <algorithm>
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -601,6 +602,18 @@ glm::vec3 TerrainMeshGenerator::chunkSurfacePoint(const float chunkPosition[3],
     const float wC = 1.0f - wA - wB;
     const float worldZ = chunkPosition[2] + (hA * wA + hB * wB + hC * wC);
     return glm::vec3(worldX, worldY, worldZ);
+}
+
+uint64_t heapBytes(const TerrainMesh& mesh) {
+    uint64_t total = vectorBytes(mesh.textures, [](const std::string& s) { return stringBytes(s); });
+    for (const ChunkMesh& c : mesh.chunks) {
+        total += vectorBytes(c.vertices) + vectorBytes(c.indices) + vectorBytes(c.lodIndices) +
+                 vectorBytes(c.normalGrid);
+        total += vectorBytes(c.layers, [](const ChunkMesh::LayerInfo& l) {
+            return vectorBytes(l.alphaData);
+        });
+    }
+    return total;
 }
 } // namespace pipeline
 } // namespace wowee
