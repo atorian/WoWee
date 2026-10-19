@@ -158,6 +158,39 @@ TEST_CASE("a seam only prefers the WMO floor when it is the way in") {
     }
 }
 
+// Inside a building the floor is whichever surface is under the feet - and a
+// doodad's top is one. In Dalaran the player stood still on a platform 2.5
+// yards over the building's floor, and once a second the pick put them on the
+// floor below, because inside it chose only between the terrain and the WMO.
+TEST_CASE("inside a building, a doodad underfoot is the floor", "[movement][floor]") {
+    using wowee::rendering::movement::floorUnderFeetInside;
+
+    SECTION("Dalaran: feet on the platform, the building's floor below it") {
+        // The log's own numbers: feet 660.08, terrain far below the city,
+        // WMO floor 657.515, the platform 660.087.
+        const auto floor = floorUnderFeetInside(185.997f, 657.515f, 660.087f, 660.08f);
+        REQUIRE(floor);
+        CHECK(*floor == 660.087f);
+    }
+
+    SECTION("feet on the building's floor beside the platform: the floor stays") {
+        const auto floor = floorUnderFeetInside(185.997f, 657.515f, 660.087f, 657.52f);
+        REQUIRE(floor);
+        CHECK(*floor == 657.515f);
+    }
+
+    SECTION("no doodad there: the terrain and the WMO floor as before") {
+        CHECK(*floorUnderFeetInside(26.0f, 24.7f, std::nullopt, 25.9f) == 26.0f);
+        CHECK(*floorUnderFeetInside(26.0f, 24.7f, std::nullopt, 24.8f) == 24.7f);
+    }
+
+    SECTION("only the doodad: it is the floor") {
+        const auto floor = floorUnderFeetInside(std::nullopt, std::nullopt, 12.0f, 12.1f);
+        REQUIRE(floor);
+        CHECK(*floor == 12.0f);
+    }
+}
+
 TEST_CASE("the floor pick anchors where the player actually stands", "[movement][floor]") {
     using wowee::rendering::movement::floorArbitrationAnchor;
     using wowee::rendering::movement::standingOnLastGround;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <optional>
 #include <glm/glm.hpp>
 
 namespace wowee::rendering::movement {
@@ -180,6 +181,28 @@ inline float floorArbitrationAnchor(bool grounded, float feetZ, float lastGround
 /// ramp a tunnel. Where the player is standing answers it and the gap does not.
 inline bool wmoFloorIsWayIn(float terrainZ, float feetZ, float stepUpBudget) {
     return terrainOutOfReach(terrainZ, feetZ, stepUpBudget);
+}
+
+/// The floor under the feet inside a building, or at a tunnel seam where the
+/// terrain is ground the player could be standing on: whichever candidate is
+/// actually under the feet, rather than oscillating between the ground above
+/// and a deep WMO floor below.
+///
+/// The doodads' floor is one of the candidates. It was left out, so inside a
+/// building the choice was the terrain or the building's floor and never the
+/// platform, the dais or the crate the player stood on: in Dalaran, standing
+/// still 2.5 yards up on one, the player was put on the floor below it once a
+/// second. Ties go to the terrain, then the WMO floor.
+inline std::optional<float> floorUnderFeetInside(const std::optional<float>& terrainZ,
+                                                 const std::optional<float>& wmoZ,
+                                                 const std::optional<float>& m2Z,
+                                                 float feetZ) {
+    std::optional<float> nearest;
+    for (const std::optional<float>* candidate : {&terrainZ, &wmoZ, &m2Z}) {
+        if (!*candidate) continue;
+        if (!nearest || std::abs(**candidate - feetZ) < std::abs(*nearest - feetZ)) nearest = *candidate;
+    }
+    return nearest;
 }
 
 } // namespace wowee::rendering::movement

@@ -1187,10 +1187,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             if (preferWmoAtSeam) {
                 groundH = wmoH;
             } else if (terrainH) {
-                // Both real and both reachable: whichever is actually under the
-                // feet, rather than oscillating between the ground above and a
-                // deep WMO floor below.
-                groundH = selectClosestFloor(terrainH, wmoH, targetPos.z);
+                groundH = movement::floorUnderFeetInside(terrainH, wmoH, m2H, targetPos.z);
             } else {
                 groundH = selectReachableFloor3(terrainH, wmoH, m2H, targetPos.z, stepUpBudget);
             }
