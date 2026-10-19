@@ -11,7 +11,7 @@
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
-namespace rendering { class Renderer; }
+namespace rendering { class Renderer; class VkContext; struct GpuMemoryByUse; }
 
 namespace core {
 
@@ -38,17 +38,20 @@ private:
     [[nodiscard]] ResourceSample sample(const rendering::Renderer* renderer,
                                         const pipeline::AssetManager* assets,
                                         std::optional<uint32_t> latencyMs, double now);
-    /// The device-local heap, and what it is used for as last broken down.
+    /// The device-local heap, and what it is used for.
     void sampleVideoMemory(const rendering::Renderer& renderer, double now, ResourceSample& out);
+    /// WOWEE_GPU_MEMORY_CHECK: the counts against the allocator's own map.
+    void checkCountsAgainstMap(const rendering::VkContext& vk,
+                               const rendering::GpuMemoryByUse& counted);
 
     bool loud_;
     /// Where WOWEE_GPU_MEMORY_DUMP asks for the allocator's detailed map to be
-    /// written each time video memory is broken down; empty when it does not.
+    /// written every few seconds; empty when it does not.
     std::string gpuMemoryDumpPath_;
-    /// Breaking video memory down walks every allocation, so it is done every
-    /// few seconds and the parts are carried between.
-    std::vector<ResourceSample::Count> videoMemoryParts_;
-    std::optional<double> lastVideoBreakdownAt_;
+    bool checkCounts_ = false;
+    bool warnedUncounted_ = false;
+    /// When the detailed map was last built, for either of the two above.
+    std::optional<double> lastMapAt_;
     ResourceTelemetry telemetry_;
     ProcessStatsSampler sampler_;
     std::chrono::steady_clock::time_point started_;

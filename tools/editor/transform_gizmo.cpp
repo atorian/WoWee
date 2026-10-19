@@ -22,7 +22,7 @@ bool TransformGizmo::initialize(rendering::VkContext* ctx, VkRenderPass renderPa
 void TransformGizmo::shutdown() {
     if (!vkCtx_) return;
     if (vertexBuffer_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
         vertexBuffer_ = VK_NULL_HANDLE;
     }
     if (pipeline_) { vkDestroyPipeline(vkCtx_->getDevice(), pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
@@ -99,7 +99,7 @@ void TransformGizmo::updateBuffers() {
     if (!vkCtx_ || !visible_) return;
 
     if (vertexBuffer_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
         vertexBuffer_ = VK_NULL_HANDLE;
     }
 
@@ -203,7 +203,7 @@ void TransformGizmo::updateBuffers() {
     allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &vertexBuffer_, &vertexAlloc_, &mapInfo) == VK_SUCCESS) {
         std::memcpy(mapInfo.pMappedData, verts.data(), verts.size() * sizeof(GizmoVertex));
     }

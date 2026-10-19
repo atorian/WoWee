@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/env_flag.hpp"
+#include "rendering/gpu_allocations.hpp"
 
 namespace wowee {
 namespace rendering {
@@ -75,7 +76,7 @@ inline void destroy(VkDevice device, VkSampler& sampler) {
 /// the same fault as forgetting the handle.
 inline void destroy(VmaAllocator allocator, VkBuffer& buffer, VmaAllocation& allocation) {
     if (buffer == VK_NULL_HANDLE) return;
-    vmaDestroyBuffer(allocator, buffer, allocation);
+    gpuDestroyBuffer(allocator, buffer, allocation);
     buffer = VK_NULL_HANDLE;
     allocation = VK_NULL_HANDLE;
 }

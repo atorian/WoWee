@@ -2283,14 +2283,14 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         VkDescriptorPool pool = materialDescPool_;
         vkCtx_->deferAfterAllFrameFences([device, allocator, pool, vb, vbAlloc, ib, ibAlloc,
                                       mats = std::move(mats)]() {
-            if (vb) vmaDestroyBuffer(allocator, vb, vbAlloc);
-            if (ib) vmaDestroyBuffer(allocator, ib, ibAlloc);
+            if (vb) gpuDestroyBuffer(allocator, vb, vbAlloc);
+            if (ib) gpuDestroyBuffer(allocator, ib, ibAlloc);
             for (auto& m : mats) {
                 if (m.set) {
                     VkDescriptorSet s = m.set;
                     vkFreeDescriptorSets(device, pool, 1, &s);
                 }
-                if (m.ubo) vmaDestroyBuffer(allocator, m.ubo, m.uboAlloc);
+                if (m.ubo) gpuDestroyBuffer(allocator, m.ubo, m.uboAlloc);
             }
         });
     }
@@ -2466,7 +2466,7 @@ void WMORenderer::retryPendingTextures() {
                     VkDescriptorSet set = oldSet;
                     vkFreeDescriptorSets(device, pool, 1, &set);
                 }
-                if (oldUbo) vmaDestroyBuffer(allocator, oldUbo, oldUboAlloc);
+                if (oldUbo) gpuDestroyBuffer(allocator, oldUbo, oldUboAlloc);
             });
             core::Logger::getInstance().info("WMO ", model.id, " got texture '",
                                              model.textureNames[texIndex], "' on a retry");

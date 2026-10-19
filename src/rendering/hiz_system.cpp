@@ -86,7 +86,7 @@ bool HiZSystem::createPyramidImage() {
         VmaAllocationCreateInfo allocCi{};
         allocCi.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-        if (vmaCreateImage(alloc, &imgCi, &allocCi, &pyramidImage_[f], &pyramidAlloc_[f], nullptr) != VK_SUCCESS) {
+        if (gpuCreateImage(alloc, &imgCi, &allocCi, &pyramidImage_[f], &pyramidAlloc_[f], nullptr) != VK_SUCCESS) {
             LOG_ERROR("HiZSystem: failed to create pyramid image for frame ", f);
             return false;
         }

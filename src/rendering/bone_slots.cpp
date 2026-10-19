@@ -20,7 +20,7 @@ void releaseBoneSlot(VkContext& ctx, VkDescriptorPool pool,
             vkFreeDescriptorSets(device, pool, 1, &set);
         }
         if (buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(alloc, buffer, allocation);
+            gpuDestroyBuffer(alloc, buffer, allocation);
         }
         return;
     }
@@ -37,7 +37,7 @@ void releaseBoneSlot(VkContext& ctx, VkDescriptorPool pool,
                 vkFreeDescriptorSets(device, pool, 1, &s);
             }
             if (buffer != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(alloc, buffer, allocation);
+                gpuDestroyBuffer(alloc, buffer, allocation);
             }
         });
 }

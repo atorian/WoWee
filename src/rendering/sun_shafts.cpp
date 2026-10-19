@@ -192,7 +192,7 @@ bool SunShafts::createTarget(Target& t, VkFormat format, VkImageUsageFlags usage
     imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo allocCI{};
     allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    if (vmaCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &t.image, &t.alloc, nullptr) != VK_SUCCESS) {
+    if (gpuCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &t.image, &t.alloc, nullptr) != VK_SUCCESS) {
         return false;
     }
     VkImageViewCreateInfo viewCI{};

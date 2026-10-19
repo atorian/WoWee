@@ -242,7 +242,7 @@ bool WaterWake::createPasses() {
         allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(ctx_->getAllocator(), &bufCI, &allocCI, &moverBuffers_[f], &moverAllocs_[f], &mapInfo) !=
+        if (gpuCreateBuffer(ctx_->getAllocator(), &bufCI, &allocCI, &moverBuffers_[f], &moverAllocs_[f], &mapInfo) !=
             VK_SUCCESS) {
             LOG_ERROR("WaterWake: failed to create its movers buffer - nothing moving through the water marks it");
             return false;

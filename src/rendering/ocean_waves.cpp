@@ -153,7 +153,7 @@ bool OceanWaves::createImage(Image& out, VkFormat format, uint32_t layers, uint3
     imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo allocCI{};
     allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    if (vmaCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &out.image, &out.alloc, nullptr) != VK_SUCCESS) {
+    if (gpuCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &out.image, &out.alloc, nullptr) != VK_SUCCESS) {
         LOG_ERROR("OceanWaves: vmaCreateImage failed for the ", name, " image");
         return false;
     }

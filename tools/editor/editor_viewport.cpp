@@ -59,10 +59,10 @@ void EditorViewport::shutdown() {
     if (!vkCtx_) return;
     vkDeviceWaitIdle(vkCtx_->getDevice());
 
-    if (npcMarkerVB_) { vmaDestroyBuffer(vkCtx_->getAllocator(), npcMarkerVB_, npcMarkerVBAlloc_); npcMarkerVB_ = VK_NULL_HANDLE; }
-    if (brushVB_) { vmaDestroyBuffer(vkCtx_->getAllocator(), brushVB_, brushVBAlloc_); brushVB_ = VK_NULL_HANDLE; }
-    if (pathVB_) { vmaDestroyBuffer(vkCtx_->getAllocator(), pathVB_, pathVBAlloc_); pathVB_ = VK_NULL_HANDLE; }
-    if (patrolVB_) { vmaDestroyBuffer(vkCtx_->getAllocator(), patrolVB_, patrolVBAlloc_); patrolVB_ = VK_NULL_HANDLE; }
+    if (npcMarkerVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), npcMarkerVB_, npcMarkerVBAlloc_); npcMarkerVB_ = VK_NULL_HANDLE; }
+    if (brushVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), brushVB_, brushVBAlloc_); brushVB_ = VK_NULL_HANDLE; }
+    if (pathVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), pathVB_, pathVBAlloc_); pathVB_ = VK_NULL_HANDLE; }
+    if (patrolVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), patrolVB_, patrolVBAlloc_); patrolVB_ = VK_NULL_HANDLE; }
     gizmo_.shutdown();
     waterRenderer_.shutdown();
 
@@ -370,7 +370,7 @@ void EditorViewport::setBrushIndicator(const glm::vec3& center, float radius, bo
 
     // Rebuild circle vertex buffer
     if (brushVB_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), brushVB_, brushVBAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), brushVB_, brushVBAlloc_);
         brushVB_ = VK_NULL_HANDLE;
     }
 
@@ -412,7 +412,7 @@ void EditorViewport::setBrushIndicator(const glm::vec3& center, float radius, bo
     allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &brushVB_, &brushVBAlloc_, &mapInfo) == VK_SUCCESS) {
         std::memcpy(mapInfo.pMappedData, verts.data(), verts.size() * sizeof(BV));
     }
@@ -422,7 +422,7 @@ void EditorViewport::setPathPreview(const glm::vec3& start, const glm::vec3& end
                                      float width, bool visible) {
     pathVisible_ = visible;
     if (pathVB_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), pathVB_, pathVBAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), pathVB_, pathVBAlloc_);
         pathVB_ = VK_NULL_HANDLE;
         pathVertCount_ = 0;
     }
@@ -476,7 +476,7 @@ void EditorViewport::setPathPreview(const glm::vec3& start, const glm::vec3& end
     allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &pathVB_, &pathVBAlloc_, &mapInfo) == VK_SUCCESS) {
         std::memcpy(mapInfo.pMappedData, verts.data(), verts.size() * sizeof(BV));
     }
@@ -484,7 +484,7 @@ void EditorViewport::setPathPreview(const glm::vec3& start, const glm::vec3& end
 
 void EditorViewport::setPatrolPath(const std::vector<glm::vec3>& points, float width) {
     if (patrolVB_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), patrolVB_, patrolVBAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), patrolVB_, patrolVBAlloc_);
         patrolVB_ = VK_NULL_HANDLE;
         patrolVertCount_ = 0;
     }
@@ -565,7 +565,7 @@ void EditorViewport::setPatrolPath(const std::vector<glm::vec3>& points, float w
     allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &patrolVB_, &patrolVBAlloc_, &mapInfo) == VK_SUCCESS) {
         std::memcpy(mapInfo.pMappedData, verts.data(), verts.size() * sizeof(BV));
     }
@@ -573,7 +573,7 @@ void EditorViewport::setPatrolPath(const std::vector<glm::vec3>& points, float w
 
 void EditorViewport::updateNpcMarkers(const std::vector<CreatureSpawn>& npcs) {
     if (npcMarkerVB_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), npcMarkerVB_, npcMarkerVBAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), npcMarkerVB_, npcMarkerVBAlloc_);
         npcMarkerVB_ = VK_NULL_HANDLE;
         npcMarkerVertCount_ = 0;
     }
@@ -640,7 +640,7 @@ void EditorViewport::updateNpcMarkers(const std::vector<CreatureSpawn>& npcs) {
     VmaAllocationCreateInfo ai{}; ai.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mi{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bi, &ai,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bi, &ai,
             &npcMarkerVB_, &npcMarkerVBAlloc_, &mi) == VK_SUCCESS)
         std::memcpy(mi.pMappedData, verts.data(), verts.size() * sizeof(MV));
 }
@@ -903,7 +903,7 @@ bool EditorViewport::createPerFrameResources() {
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+        if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
                 &perFrameUBOs_[i], &perFrameUBOAllocs_[i], &mapInfo) != VK_SUCCESS)
             return false;
         perFrameUBOMapped_[i] = mapInfo.pMappedData;
@@ -962,7 +962,7 @@ void EditorViewport::destroyPerFrameResources() {
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         if (perFrameUBOs_[i]) {
-            vmaDestroyBuffer(vkCtx_->getAllocator(), perFrameUBOs_[i], perFrameUBOAllocs_[i]);
+            rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), perFrameUBOs_[i], perFrameUBOAllocs_[i]);
             perFrameUBOs_[i] = VK_NULL_HANDLE;
         }
     }

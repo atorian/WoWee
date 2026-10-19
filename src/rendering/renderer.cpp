@@ -125,7 +125,7 @@ bool Renderer::createPerFrameResources() {
     VmaAllocationCreateInfo imgAllocCI{};
     imgAllocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-        if (vmaCreateImage(vkCtx->getAllocator(), &imgCI, &imgAllocCI,
+        if (gpuCreateImage(vkCtx->getAllocator(), &imgCI, &imgAllocCI,
                 &shadowDepthImage[i], &shadowDepthAlloc[i], nullptr) != VK_SUCCESS) {
             LOG_ERROR("Failed to create shadow depth image [", i, "]");
             return false;
@@ -423,7 +423,7 @@ bool Renderer::createPerFrameResources() {
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
+        if (gpuCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
                 &perFrameUBOs[i], &perFrameUBOAllocs[i], &mapInfo) != VK_SUCCESS) {
             LOG_ERROR("Failed to create per-frame UBO ", i);
             return false;
@@ -534,7 +534,7 @@ bool Renderer::createPerFrameResources() {
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
+        if (gpuCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
                 &reflPerFrameUBO, &reflPerFrameUBOAlloc, &mapInfo) != VK_SUCCESS) {
             LOG_ERROR("Failed to create reflection per-frame UBO");
             return false;
@@ -652,7 +652,7 @@ bool Renderer::createLightBuffer(LightBuffer& out, size_t lights) {
     allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo, &out.buffer, &out.alloc,
+    if (gpuCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo, &out.buffer, &out.alloc,
                         &mapInfo) != VK_SUCCESS) {
         LOG_ERROR("Failed to create the point light buffer for ", lights, " lights");
         out = {};
@@ -741,7 +741,7 @@ void Renderer::destroyPerFrameResources() {
     destroy(vkCtx->getAllocator(), neutralLightBuffer_.buffer, neutralLightBuffer_.alloc);
     neutralLightBuffer_ = {};
     if (reflPerFrameUBO) {
-        vmaDestroyBuffer(vkCtx->getAllocator(), reflPerFrameUBO, reflPerFrameUBOAlloc);
+        gpuDestroyBuffer(vkCtx->getAllocator(), reflPerFrameUBO, reflPerFrameUBOAlloc);
         reflPerFrameUBO = VK_NULL_HANDLE;
         reflPerFrameUBOMapped = nullptr;
     }
@@ -768,7 +768,7 @@ void Renderer::destroyPerFrameResources() {
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         if (shadowFramebuffer[i]) { vkDestroyFramebuffer(device, shadowFramebuffer[i], nullptr); shadowFramebuffer[i] = VK_NULL_HANDLE; }
         if (shadowDepthView[i]) { vkDestroyImageView(device, shadowDepthView[i], nullptr); shadowDepthView[i] = VK_NULL_HANDLE; }
-        if (shadowDepthImage[i]) { vmaDestroyImage(vkCtx->getAllocator(), shadowDepthImage[i], shadowDepthAlloc[i]); shadowDepthImage[i] = VK_NULL_HANDLE; shadowDepthAlloc[i] = VK_NULL_HANDLE; }
+        if (shadowDepthImage[i]) { gpuDestroyImage(vkCtx->getAllocator(), shadowDepthImage[i], shadowDepthAlloc[i]); shadowDepthImage[i] = VK_NULL_HANDLE; shadowDepthAlloc[i] = VK_NULL_HANDLE; }
         shadowDepthLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
         if (contactShadowFramebuffer_[i]) {
             vkDestroyFramebuffer(device, contactShadowFramebuffer_[i], nullptr);
@@ -1920,7 +1920,7 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
 
     VkBuffer stagingBuf = VK_NULL_HANDLE;
     VmaAllocation stagingAlloc = VK_NULL_HANDLE;
-    if (vmaCreateBuffer(alloc, &bufInfo, &allocCI, &stagingBuf, &stagingAlloc, nullptr) != VK_SUCCESS) {
+    if (gpuCreateBuffer(alloc, &bufInfo, &allocCI, &stagingBuf, &stagingAlloc, nullptr) != VK_SUCCESS) {
         LOG_WARNING("Screenshot: failed to create staging buffer");
         return false;
     }
@@ -1984,7 +1984,7 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
                             4, pixels, static_cast<int>(w * 4));
 
     vmaUnmapMemory(alloc, stagingAlloc);
-    vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+    gpuDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 
     if (ok) {
         LOG_INFO("Screenshot saved: ", outputPath);

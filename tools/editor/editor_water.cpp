@@ -27,7 +27,7 @@ void EditorWater::shutdown() {
     VkDevice dev = vkCtx_->getDevice();
 
     if (vertexBuffer_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
         vertexBuffer_ = VK_NULL_HANDLE;
     }
     if (pipeline_) { vkDestroyPipeline(dev, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
@@ -37,7 +37,7 @@ void EditorWater::shutdown() {
 
 void EditorWater::clear() {
     if (vertexBuffer_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
         vertexBuffer_ = VK_NULL_HANDLE;
         vertexCount_ = 0;
     }
@@ -100,7 +100,7 @@ void EditorWater::update(const pipeline::ADTTerrain& terrain, int tileX, int til
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &vertexBuffer_, &vertexAlloc_, &mapInfo) != VK_SUCCESS) {
         LOG_ERROR("Failed to create water vertex buffer");
         return;

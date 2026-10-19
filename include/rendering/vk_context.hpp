@@ -260,10 +260,14 @@ public:
     [[nodiscard]] std::vector<GpuHeapReading> gpuHeaps() const;
     /// The device-local heap the textures and targets live in: the largest.
     [[nodiscard]] std::optional<GpuHeapReading> deviceLocalHeap() const;
-    /// What every live allocation is for, by its usage flags. Walks every
-    /// allocation the allocator holds - tens of milliseconds in a city - so it
-    /// is for a sample every few seconds, never a frame.
+    /// What every live allocation is for, by its usage flags, as counted when
+    /// each was made and freed (gpu_allocations.hpp). Cheap enough for any
+    /// frame.
     [[nodiscard]] std::optional<GpuMemoryByUse> gpuMemoryByUse() const;
+    /// The same, found by walking every allocation in the allocator's detailed
+    /// map: 150-300 ms in a city. For checking the counts, never for a frame
+    /// the player sees.
+    [[nodiscard]] std::optional<GpuMemoryByUse> gpuMemoryByUseFromMap() const;
     /// Write the allocator's detailed map, every allocation with its size,
     /// usage and name, to `path`. A diagnostic; false, logged, on failure.
     bool writeGpuMemoryMap(const std::string& path) const;

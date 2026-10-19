@@ -24,7 +24,7 @@ void DeferredResources::buffer(VkBuffer& buffer, VmaAllocation& allocation) {
     auto retired = std::exchange(buffer, VK_NULL_HANDLE);
     auto retiredAlloc = std::exchange(allocation, VK_NULL_HANDLE);
     auto allocator = allocator_;
-    add([allocator, retired, retiredAlloc] { vmaDestroyBuffer(allocator, retired, retiredAlloc); });
+    add([allocator, retired, retiredAlloc] { gpuDestroyBuffer(allocator, retired, retiredAlloc); });
 }
 
 void DeferredResources::buffer(AllocatedBuffer& value) {
@@ -37,7 +37,7 @@ void DeferredResources::image(VkImage& image, VmaAllocation& allocation) {
     auto retired = std::exchange(image, VK_NULL_HANDLE);
     auto retiredAlloc = std::exchange(allocation, VK_NULL_HANDLE);
     auto allocator = allocator_;
-    add([allocator, retired, retiredAlloc] { vmaDestroyImage(allocator, retired, retiredAlloc); });
+    add([allocator, retired, retiredAlloc] { gpuDestroyImage(allocator, retired, retiredAlloc); });
 }
 
 void DeferredResources::image(AllocatedImage& value) {
@@ -63,7 +63,7 @@ AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
 
-    if (vmaCreateBuffer(allocator, &bufInfo, &allocInfo,
+    if (gpuCreateBuffer(allocator, &bufInfo, &allocInfo,
             &result.buffer, &result.allocation, &result.info) != VK_SUCCESS) {
         LOG_ERROR("Failed to create VMA buffer (size=", size, ")");
     }
@@ -99,7 +99,7 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo,
+    if (VkResult r = gpuCreateImage(allocator, &imgInfo, &allocInfo,
             &result.image, &result.allocation, nullptr); r != VK_SUCCESS) {
         // What the driver had left says whether this is memory or something
         // else: the caller decides what the frame does without the image.
@@ -170,7 +170,7 @@ void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image
         image.imageView = VK_NULL_HANDLE;
     }
     if (image.image) {
-        vmaDestroyImage(allocator, image.image, image.allocation);
+        gpuDestroyImage(allocator, image.image, image.allocation);
         image.image = VK_NULL_HANDLE;
         image.allocation = VK_NULL_HANDLE;
     }

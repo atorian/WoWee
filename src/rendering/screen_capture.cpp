@@ -49,7 +49,7 @@ bool ScreenCapture::initialize(VkContext* ctx, uint32_t width, uint32_t height) 
         allocCI.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
         allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VmaAllocationInfo info{};
-        if (vmaCreateBuffer(allocator, &bufCI, &allocCI, &buffer.buffer, &buffer.alloc, &info) != VK_SUCCESS ||
+        if (gpuCreateBuffer(allocator, &bufCI, &allocCI, &buffer.buffer, &buffer.alloc, &info) != VK_SUCCESS ||
             !info.pMappedData) {
             LOG_WARNING("ScreenCapture: could not allocate ", bytes / (1024 * 1024), " MB readback buffers");
             return false;
@@ -76,7 +76,7 @@ bool ScreenCapture::initialize(VkContext* ctx, uint32_t width, uint32_t height) 
     imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo imgAlloc{};
     imgAlloc.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    if (vmaCreateImage(allocator, &imgCI, &imgAlloc, &scaled_, &scaledAlloc_, nullptr) != VK_SUCCESS) {
+    if (gpuCreateImage(allocator, &imgCI, &imgAlloc, &scaled_, &scaledAlloc_, nullptr) != VK_SUCCESS) {
         LOG_WARNING("ScreenCapture: could not allocate the scaling image");
         return false;
     }

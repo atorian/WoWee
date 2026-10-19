@@ -438,8 +438,8 @@ void WaterRenderer::destroySceneHistoryResources() {
     for (auto& sh : sceneHistory) {
         if (sh.colorView) { vkDestroyImageView(device, sh.colorView, nullptr); sh.colorView = VK_NULL_HANDLE; }
         if (sh.depthView) { vkDestroyImageView(device, sh.depthView, nullptr); sh.depthView = VK_NULL_HANDLE; }
-        if (sh.colorImage) { vmaDestroyImage(vkCtx->getAllocator(), sh.colorImage, sh.colorAlloc); sh.colorImage = VK_NULL_HANDLE; sh.colorAlloc = VK_NULL_HANDLE; }
-        if (sh.depthImage) { vmaDestroyImage(vkCtx->getAllocator(), sh.depthImage, sh.depthAlloc); sh.depthImage = VK_NULL_HANDLE; sh.depthAlloc = VK_NULL_HANDLE; }
+        if (sh.colorImage) { gpuDestroyImage(vkCtx->getAllocator(), sh.colorImage, sh.colorAlloc); sh.colorImage = VK_NULL_HANDLE; sh.colorAlloc = VK_NULL_HANDLE; }
+        if (sh.depthImage) { gpuDestroyImage(vkCtx->getAllocator(), sh.depthImage, sh.depthAlloc); sh.depthImage = VK_NULL_HANDLE; sh.depthAlloc = VK_NULL_HANDLE; }
         sh.sceneSet = VK_NULL_HANDLE;
     }
     sceneColorSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
@@ -515,11 +515,11 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
     for (uint32_t f = 0; f < SCENE_HISTORY_FRAMES; f++) {
         auto& sh = sceneHistory[f];
 
-        if (vmaCreateImage(vkCtx->getAllocator(), &colorImgInfo, &allocCI, &sh.colorImage, &sh.colorAlloc, nullptr) != VK_SUCCESS) {
+        if (gpuCreateImage(vkCtx->getAllocator(), &colorImgInfo, &allocCI, &sh.colorImage, &sh.colorAlloc, nullptr) != VK_SUCCESS) {
             LOG_ERROR("WaterRenderer: failed to create scene color history image [", f, "]");
             return;
         }
-        if (vmaCreateImage(vkCtx->getAllocator(), &depthImgInfo, &allocCI, &sh.depthImage, &sh.depthAlloc, nullptr) != VK_SUCCESS) {
+        if (gpuCreateImage(vkCtx->getAllocator(), &depthImgInfo, &allocCI, &sh.depthImage, &sh.depthAlloc, nullptr) != VK_SUCCESS) {
             LOG_ERROR("WaterRenderer: failed to create scene depth history image [", f, "]");
             return;
         }
@@ -737,7 +737,7 @@ void WaterRenderer::updateMaterialUBO(DrawnSurface& surface) {
     allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
     VmaAllocationInfo mapInfo{};
-    vmaCreateBuffer(vkCtx->getAllocator(), &bufCI, &allocCI,
+    gpuCreateBuffer(vkCtx->getAllocator(), &bufCI, &allocCI,
                     &surface.materialUBO, &surface.materialAlloc, &mapInfo);
     if (mapInfo.pMappedData) {
         std::memcpy(mapInfo.pMappedData, &mat, sizeof(mat));
@@ -1214,7 +1214,7 @@ void WaterRenderer::createReflectionResources() {
     VmaAllocationCreateInfo allocCI{};
     allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (vmaCreateImage(allocator, &colorImgCI, &allocCI,
+    if (gpuCreateImage(allocator, &colorImgCI, &allocCI,
                        &reflectionColorImage, &reflectionColorAlloc, nullptr) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection color image");
         return;
@@ -1244,7 +1244,7 @@ void WaterRenderer::createReflectionResources() {
     depthImgCI.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     depthImgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vmaCreateImage(allocator, &depthImgCI, &allocCI,
+    if (gpuCreateImage(allocator, &depthImgCI, &allocCI,
                        &reflectionDepthImage, &reflectionDepthAlloc, nullptr) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection depth image");
         return;
@@ -1355,7 +1355,7 @@ void WaterRenderer::createReflectionResources() {
     uboAllocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(allocator, &bufCI, &uboAllocCI,
+    if (gpuCreateBuffer(allocator, &bufCI, &uboAllocCI,
                         &reflectionUBO, &reflectionUBOAlloc, &mapInfo) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection UBO");
         return;
@@ -1404,8 +1404,8 @@ void WaterRenderer::destroyReflectionResources() {
     if (reflectionRenderPass) { vkDestroyRenderPass(device, reflectionRenderPass, nullptr); reflectionRenderPass = VK_NULL_HANDLE; }
     if (reflectionColorView) { vkDestroyImageView(device, reflectionColorView, nullptr); reflectionColorView = VK_NULL_HANDLE; }
     if (reflectionDepthView) { vkDestroyImageView(device, reflectionDepthView, nullptr); reflectionDepthView = VK_NULL_HANDLE; }
-    if (reflectionColorImage) { vmaDestroyImage(allocator, reflectionColorImage, reflectionColorAlloc); reflectionColorImage = VK_NULL_HANDLE; }
-    if (reflectionDepthImage) { vmaDestroyImage(allocator, reflectionDepthImage, reflectionDepthAlloc); reflectionDepthImage = VK_NULL_HANDLE; }
+    if (reflectionColorImage) { gpuDestroyImage(allocator, reflectionColorImage, reflectionColorAlloc); reflectionColorImage = VK_NULL_HANDLE; }
+    if (reflectionDepthImage) { gpuDestroyImage(allocator, reflectionDepthImage, reflectionDepthAlloc); reflectionDepthImage = VK_NULL_HANDLE; }
     reflectionSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
     if (reflectionUBO) {
         AllocatedBuffer ab{}; ab.buffer = reflectionUBO; ab.allocation = reflectionUBOAlloc;

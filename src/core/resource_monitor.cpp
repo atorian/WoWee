@@ -1,5 +1,6 @@
 #include "core/resource_monitor.hpp"
 
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "rendering/character_renderer.hpp"
@@ -18,9 +19,9 @@ namespace wowee::core {
 namespace {
 
 constexpr double kSampleIntervalSeconds = 1.0;
-/// How often video memory is broken down by use. The breakdown walks every
-/// allocation the allocator holds.
-constexpr double kVideoBreakdownIntervalSeconds = 10.0;
+/// How often the allocator's detailed map is built, when anything asks for it.
+/// It walks every allocation the allocator holds.
+constexpr double kVideoMapIntervalSeconds = 10.0;
 
 ResourceTelemetry::Config telemetryConfig(bool frameProfile) {
     ResourceTelemetry::Config config;
@@ -39,8 +40,41 @@ ResourceMonitor::ResourceMonitor(bool frameProfile)
     if (const char* path = std::getenv("WOWEE_GPU_MEMORY_DUMP"); path && *path) {
         gpuMemoryDumpPath_ = path;
         LOG_WARNING("WOWEE_GPU_MEMORY_DUMP: the allocator's detailed map is written to ",
-                    gpuMemoryDumpPath_, " every ", kVideoBreakdownIntervalSeconds, " s");
+                    gpuMemoryDumpPath_, " every ", kVideoMapIntervalSeconds, " s");
     }
+    checkCounts_ = envFlagEnabled("WOWEE_GPU_MEMORY_CHECK", false);
+    if (checkCounts_) {
+        LOG_WARNING("WOWEE_GPU_MEMORY_CHECK: video memory counted by use is checked against the "
+                    "allocator's detailed map every ", kVideoMapIntervalSeconds,
+                    " s; each check stalls a frame for as long as the map takes");
+    }
+}
+
+void ResourceMonitor::checkCountsAgainstMap(const rendering::VkContext& vk,
+                                            const rendering::GpuMemoryByUse& counted) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto mapped = vk.gpuMemoryByUseFromMap();
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (!mapped) return;   // the map not parsing is said where it is parsed
+    // Loading threads allocate while the map is built, so a little drift
+    // between the two readings is the counts and the map disagreeing about
+    // when, not about what. More than that is an allocation the counts never
+    // saw, or one freed without being taken off.
+    constexpr uint64_t kSlackBytes = 64ull << 20;
+    bool agree = true;
+    for (size_t i = 0; i < rendering::kGpuMemoryUseCount; ++i) {
+        const auto use = static_cast<rendering::GpuMemoryUse>(i);
+        const uint64_t a = counted.deviceLocal(use), b = mapped->deviceLocal(use);
+        if ((a > b ? a - b : b - a) <= kSlackBytes) continue;
+        agree = false;
+        LOG_WARNING("Video memory check: ", rendering::gpuMemoryUseName(use), " counted ",
+                    a >> 20, " MB, the allocator's map says ", b >> 20,
+                    " MB - an allocation made or freed past gpu_allocations.hpp");
+    }
+    LOG_WARNING("Video memory check: ", counted.allocations, " allocations counted, ",
+                mapped->allocations, " in the map", agree ? ", every use agrees" : "",
+                " (the map took ", ms, " ms)");
 }
 
 void ResourceMonitor::frameFinished(std::optional<float> frameSeconds,
@@ -70,30 +104,31 @@ void ResourceMonitor::sampleVideoMemory(const rendering::Renderer& renderer, dou
     const auto heap = vk->deviceLocalHeap();
     if (!heap) return;
 
-    if (!lastVideoBreakdownAt_ || now - *lastVideoBreakdownAt_ >= kVideoBreakdownIntervalSeconds) {
-        lastVideoBreakdownAt_ = now;
-        const auto started = std::chrono::steady_clock::now();
-        if (const auto byUse = vk->gpuMemoryByUse()) {
-            videoMemoryParts_.clear();
-            for (size_t i = 0; i < rendering::kGpuMemoryUseCount; ++i) {
-                const auto use = static_cast<rendering::GpuMemoryUse>(i);
-                videoMemoryParts_.push_back({rendering::gpuMemoryUseName(use), byUse->deviceLocal(use)});
-            }
-            const double ms =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-            // On the main thread, inside a frame: long enough to be seen as a
-            // stall, it is said as one.
-            if (ms > 20.0) {
-                LOG_WARNING("Video memory broken down over ", byUse->allocations,
-                            " allocations in ", ms, " ms, inside one frame");
-            } else {
-                LOG_DEBUG("Video memory broken down over ", byUse->allocations, " allocations in ", ms, " ms");
-            }
+    // Counted as allocations are made and freed, so read every sample.
+    const auto byUse = vk->gpuMemoryByUse();
+    if (!byUse && !warnedUncounted_) {
+        warnedUncounted_ = true;
+        LOG_WARNING("Video memory: the allocator's use is not being counted; the breakdown by use "
+                    "is left out of the resource line");
+    }
+    std::vector<ResourceSample::Count> parts;
+    if (byUse) {
+        for (size_t i = 0; i < rendering::kGpuMemoryUseCount; ++i) {
+            const auto use = static_cast<rendering::GpuMemoryUse>(i);
+            parts.push_back({rendering::gpuMemoryUseName(use), byUse->deviceLocal(use)});
         }
+    }
+
+    // The detailed map walks every allocation - 150-300 ms in a city - so it
+    // is built only when asked for: to be written out, or to check the counts.
+    if ((checkCounts_ || !gpuMemoryDumpPath_.empty()) &&
+        (!lastMapAt_ || now - *lastMapAt_ >= kVideoMapIntervalSeconds)) {
+        lastMapAt_ = now;
+        if (checkCounts_ && byUse) checkCountsAgainstMap(*vk, *byUse);
         if (!gpuMemoryDumpPath_.empty()) (void)vk->writeGpuMemoryMap(gpuMemoryDumpPath_);
     }
     out.videoMemory = ResourceSample::VideoMemory{
-        .budgetBytes = heap->budgetBytes, .usageBytes = heap->usageBytes, .parts = videoMemoryParts_};
+        .budgetBytes = heap->budgetBytes, .usageBytes = heap->usageBytes, .parts = std::move(parts)};
 
     // The texture cache counts its own, every second: which forms the
     // textures in video memory take, and what is waiting for its frames.

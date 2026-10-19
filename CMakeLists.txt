@@ -1001,6 +1001,7 @@ set(WOWEE_SOURCES
     src/rendering/vk_context.cpp
     src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
+    src/rendering/gpu_allocations.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp
@@ -2812,6 +2813,7 @@ add_executable(wowee_editor
     src/rendering/vk_context.cpp
     src/rendering/pipeline_cache_file.cpp
     src/rendering/gpu_memory.cpp
+    src/rendering/gpu_allocations.cpp
     src/rendering/frame_targets.cpp
     src/rendering/texture_cache.cpp
     src/rendering/texture_upload.cpp

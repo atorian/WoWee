@@ -6,6 +6,7 @@
 
 #include <fstream>
 #include "rendering/vk_utils.hpp"
+#include "rendering/gpu_allocations.hpp"
 #include "core/env_flag.hpp"
 #include "rendering/pipeline_cache_file.hpp"
 #include "rendering/host_image_copy.hpp"
@@ -268,6 +269,7 @@ void VkContext::shutdown() {
     // and it also means a genuine leak still shows up rather than hiding in the
     // noise. Players never take this path.
     if (allocator) {
+        endCountingGpuMemory(allocator);
         if (validationActive_) {
             // What the allocator still holds, before it is torn down. Anything
             // counted here is a vmaCreateBuffer/Image whose owner never called
@@ -1178,6 +1180,7 @@ bool VkContext::createAllocator() {
         LOG_ERROR("Failed to create VMA allocator");
         return false;
     }
+    beginCountingGpuMemory(allocator);
 
     LOG_INFO("VMA allocator created");
     if (const auto heap = deviceLocalHeap()) {
@@ -1227,6 +1230,11 @@ std::optional<GpuHeapReading> VkContext::deviceLocalHeap() const {
 }
 
 std::optional<GpuMemoryByUse> VkContext::gpuMemoryByUse() const {
+    if (!allocator) return std::nullopt;
+    return countedGpuMemory(allocator);
+}
+
+std::optional<GpuMemoryByUse> VkContext::gpuMemoryByUseFromMap() const {
     if (!allocator) return std::nullopt;
     const VkPhysicalDeviceMemoryProperties* props = nullptr;
     vmaGetMemoryProperties(allocator, &props);
@@ -1976,7 +1984,7 @@ bool VkContext::createDepthBuffer() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr);
+    if (VkResult r = gpuCreateImage(allocator, &imgInfo, &allocInfo, &depthImage, &depthAllocation, nullptr);
         r != VK_SUCCESS) {
         depthImage = VK_NULL_HANDLE;
         depthAllocation = VK_NULL_HANDLE;
@@ -2004,7 +2012,7 @@ bool VkContext::createDepthBuffer() {
 
 void VkContext::destroyDepthBuffer() {
     if (depthImageView) { vkDestroyImageView(device, depthImageView, nullptr); depthImageView = VK_NULL_HANDLE; }
-    if (depthImage) { vmaDestroyImage(allocator, depthImage, depthAllocation); depthImage = VK_NULL_HANDLE; depthAllocation = VK_NULL_HANDLE; }
+    if (depthImage) { gpuDestroyImage(allocator, depthImage, depthAllocation); depthImage = VK_NULL_HANDLE; depthAllocation = VK_NULL_HANDLE; }
 }
 
 bool VkContext::createMsaaColorImage() {
@@ -2044,11 +2052,11 @@ bool VkContext::createMsaaColorImage() {
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
 
-    if (vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr) != VK_SUCCESS) {
+    if (gpuCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr) != VK_SUCCESS) {
         // Retry without TRANSIENT (some drivers reject it at high sample counts)
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         allocInfo.preferredFlags = 0;
-        if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr);
+        if (VkResult r = gpuCreateImage(allocator, &imgInfo, &allocInfo, &msaaColorImage_, &msaaColorAllocation_, nullptr);
             r != VK_SUCCESS) {
             msaaColorImage_ = VK_NULL_HANDLE;
             msaaColorAllocation_ = VK_NULL_HANDLE;
@@ -2077,7 +2085,7 @@ bool VkContext::createMsaaColorImage() {
 
 void VkContext::destroyMsaaColorImage() {
     if (msaaColorView_) { vkDestroyImageView(device, msaaColorView_, nullptr); msaaColorView_ = VK_NULL_HANDLE; }
-    if (msaaColorImage_) { vmaDestroyImage(allocator, msaaColorImage_, msaaColorAllocation_); msaaColorImage_ = VK_NULL_HANDLE; msaaColorAllocation_ = VK_NULL_HANDLE; }
+    if (msaaColorImage_) { gpuDestroyImage(allocator, msaaColorImage_, msaaColorAllocation_); msaaColorImage_ = VK_NULL_HANDLE; msaaColorAllocation_ = VK_NULL_HANDLE; }
 }
 
 bool VkContext::createDepthResolveImage() {
@@ -2098,7 +2106,7 @@ bool VkContext::createDepthResolveImage() {
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    if (VkResult r = vmaCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr);
+    if (VkResult r = gpuCreateImage(allocator, &imgInfo, &allocInfo, &depthResolveImage, &depthResolveAllocation, nullptr);
         r != VK_SUCCESS) {
         depthResolveImage = VK_NULL_HANDLE;
         depthResolveAllocation = VK_NULL_HANDLE;
@@ -2129,7 +2137,7 @@ void VkContext::destroyDepthResolveImage() {
         depthResolveImageView = VK_NULL_HANDLE;
     }
     if (depthResolveImage) {
-        vmaDestroyImage(allocator, depthResolveImage, depthResolveAllocation);
+        gpuDestroyImage(allocator, depthResolveImage, depthResolveAllocation);
         depthResolveImage = VK_NULL_HANDLE;
         depthResolveAllocation = VK_NULL_HANDLE;
     }

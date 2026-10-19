@@ -539,7 +539,7 @@ bool TerrainRenderer::createChunkParamsUBO(TerrainChunkGPU& gpuChunk) {
     // Check the return value - a null UBO handle would leave the GPU reading
     // from an invalid descriptor, crashing the driver under memory pressure
     // rather than losing one chunk.
-    if (vmaCreateBuffer(vkCtx->getAllocator(), &bufCI, &allocCI,
+    if (gpuCreateBuffer(vkCtx->getAllocator(), &bufCI, &allocCI,
                         &gpuChunk.paramsUBO, &gpuChunk.paramsAlloc, &mapInfo) != VK_SUCCESS) {
         return false;
     }

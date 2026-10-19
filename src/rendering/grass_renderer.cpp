@@ -57,7 +57,7 @@ bool createGpuBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFla
     bci.usage = usage;
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    return vmaCreateBuffer(allocator, &bci, &aci, &outBuffer, &outAlloc, nullptr) == VK_SUCCESS;
+    return gpuCreateBuffer(allocator, &bci, &aci, &outBuffer, &outAlloc, nullptr) == VK_SUCCESS;
 }
 
 bool createMappedBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags usage,
@@ -69,7 +69,7 @@ bool createMappedBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsage
     aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo ai{};
-    if (vmaCreateBuffer(allocator, &bci, &aci, &outBuffer, &outAlloc, &ai) != VK_SUCCESS) {
+    if (gpuCreateBuffer(allocator, &bci, &aci, &outBuffer, &outAlloc, &ai) != VK_SUCCESS) {
         return false;
     }
     outMapped = ai.pMappedData;

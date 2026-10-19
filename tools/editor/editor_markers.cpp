@@ -30,7 +30,7 @@ void EditorMarkers::shutdown() {
 
 void EditorMarkers::clear() {
     if (vertexBuffer_) {
-        vmaDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
+        rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), vertexBuffer_, vertexAlloc_);
         vertexBuffer_ = VK_NULL_HANDLE;
         vertexCount_ = 0;
     }
@@ -98,7 +98,7 @@ void EditorMarkers::update(const std::vector<PlacedObject>& objects) {
     allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
     VmaAllocationInfo mapInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
+    if (rendering::gpuCreateBuffer(vkCtx_->getAllocator(), &bufInfo, &allocInfo,
             &vertexBuffer_, &vertexAlloc_, &mapInfo) != VK_SUCCESS) {
         LOG_ERROR("Failed to create marker vertex buffer");
         return;

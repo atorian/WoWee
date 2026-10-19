@@ -190,6 +190,13 @@ CHECKS = [
     # The renderer library is what draws a scene without the client
     # (tools/scene_render); one include of the game or the sound and it is
     # the client again, with nothing but a distant link to say so.
+    # Video memory by use is counted as allocations are made and freed, so
+    # the resource line need not walk the allocator's map - a 150-300 ms
+    # stall every ten seconds in a city. A buffer or image made or freed
+    # straight through VMA is missing from the counts, silently.
+    ("gpu_allocation_check.py",
+     r"^(\d+) calls to VMA past gpu_allocations\.hpp", 0,
+     "buffers and images allocated or freed past the video memory counts"),
     ("render_dependency_check.py",
      r"^(\d+) includes of the client from the renderer library", 0,
      "client includes in the renderer library"),

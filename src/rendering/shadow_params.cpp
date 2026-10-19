@@ -22,7 +22,7 @@ bool createShadowParamsSet(VkDevice device, VmaAllocator allocator,
     allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
     allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo allocInfo{};
-    if (vmaCreateBuffer(allocator, &bufCI, &allocCI, &out.ubo, &out.alloc, &allocInfo) !=
+    if (gpuCreateBuffer(allocator, &bufCI, &allocCI, &out.ubo, &out.alloc, &allocInfo) !=
         VK_SUCCESS) {
         LOG_ERROR(owner, ": failed to create shadow params UBO");
         return false;

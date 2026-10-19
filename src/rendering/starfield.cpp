@@ -265,7 +265,7 @@ void StarField::createStarBuffers() {
 
 void StarField::destroyStarBuffers() {
     if (vkCtx && vertexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(vkCtx->getAllocator(), vertexBuffer, vertexAlloc);
+        gpuDestroyBuffer(vkCtx->getAllocator(), vertexBuffer, vertexAlloc);
         vertexBuffer = VK_NULL_HANDLE;
         vertexAlloc  = VK_NULL_HANDLE;
     }

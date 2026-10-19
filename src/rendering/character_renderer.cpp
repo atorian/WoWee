@@ -564,7 +564,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                             &materialRingBuffer_[i], &materialRingAlloc_[i], &allocInfo);
             materialRingMapped_[i] = allocInfo.pMappedData;
         }
@@ -765,13 +765,13 @@ void CharacterRenderer::destroyModelGPU(M2ModelGPU& gpuModel, bool defer) {
 
     if (!defer) {
         // Safe after vkDeviceWaitIdle (shutdown / clear paths)
-        if (vb) vmaDestroyBuffer(alloc, vb, vbAlloc);
-        if (ib) vmaDestroyBuffer(alloc, ib, ibAlloc);
+        if (vb) gpuDestroyBuffer(alloc, vb, vbAlloc);
+        if (ib) gpuDestroyBuffer(alloc, ib, ibAlloc);
     } else if (vb || ib) {
         // Streaming path: in-flight command buffers may still reference these
         vkCtx_->deferAfterAllFrameFences([alloc, vb, vbAlloc, ib, ibAlloc]() {
-            if (vb) vmaDestroyBuffer(alloc, vb, vbAlloc);
-            if (ib) vmaDestroyBuffer(alloc, ib, ibAlloc);
+            if (vb) gpuDestroyBuffer(alloc, vb, vbAlloc);
+            if (ib) gpuDestroyBuffer(alloc, ib, ibAlloc);
         });
     }
 }
@@ -2539,7 +2539,7 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
+            if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
                             &instance.boneBuffer[frameIndex], &instance.boneAlloc[frameIndex], &allocInfo) != VK_SUCCESS) {
                 instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
                 instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
@@ -2564,7 +2564,7 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
                 LOG_ERROR("CharacterRenderer::prepareRender: bone descriptor alloc failed (instance=",
                           id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
                 if (instance.boneBuffer[frameIndex]) {
-                    vmaDestroyBuffer(vkCtx_->getAllocator(),
+                    gpuDestroyBuffer(vkCtx_->getAllocator(),
                                      instance.boneBuffer[frameIndex], instance.boneAlloc[frameIndex]);
                     instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
                     instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
@@ -3412,7 +3412,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
                 aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 VmaAllocationInfo ai{};
-                if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
+                if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
                     &inst.boneBuffer[frameIndex], &inst.boneAlloc[frameIndex], &ai) != VK_SUCCESS) {
                     inst.boneBuffer[frameIndex] = VK_NULL_HANDLE;
                     inst.boneAlloc[frameIndex] = VK_NULL_HANDLE;
@@ -3437,7 +3437,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                     LOG_ERROR("CharacterRenderer[shadow]: bone descriptor allocation failed (instance=",
                               inst.id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
                     if (inst.boneBuffer[frameIndex]) {
-                        vmaDestroyBuffer(vkCtx_->getAllocator(),
+                        gpuDestroyBuffer(vkCtx_->getAllocator(),
                                          inst.boneBuffer[frameIndex], inst.boneAlloc[frameIndex]);
                         inst.boneBuffer[frameIndex] = VK_NULL_HANDLE;
                         inst.boneAlloc[frameIndex] = VK_NULL_HANDLE;

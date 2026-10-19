@@ -2299,7 +2299,7 @@ bool M2Renderer::createShadowInstanceBuffers() {
         aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VmaAllocationInfo allocInfo{};
-        if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &shadowInstanceBuffer_[i],
+        if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &shadowInstanceBuffer_[i],
                             &shadowInstanceAlloc_[i], &allocInfo) != VK_SUCCESS ||
             !allocInfo.pMappedData) {
             LOG_ERROR("M2Renderer: could not allocate the shadow casters' buffer (",

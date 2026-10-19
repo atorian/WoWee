@@ -125,7 +125,7 @@ bool VolumetricFog::createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags u
     imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo allocCI{};
     allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    if (vmaCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &v.image, &v.alloc, nullptr) != VK_SUCCESS) {
+    if (gpuCreateImage(ctx_->getAllocator(), &imgCI, &allocCI, &v.image, &v.alloc, nullptr) != VK_SUCCESS) {
         return false;
     }
 
@@ -279,7 +279,7 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
         allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(ctx_->getAllocator(), &bufCI, &allocCI, &paramsUBO_[i],
+        if (gpuCreateBuffer(ctx_->getAllocator(), &bufCI, &allocCI, &paramsUBO_[i],
                             &paramsAlloc_[i], &mapInfo) != VK_SUCCESS) {
             LOG_ERROR("VolumetricFog: failed to create parameter buffer ", i);
             return false;

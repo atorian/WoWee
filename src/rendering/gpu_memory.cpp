@@ -32,17 +32,26 @@ constexpr uint64_t kRayTracingUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STO
                                       VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
 
 GpuMemoryUse useOf(std::string_view type, uint64_t usage) {
-    if (type.rfind("IMAGE", 0) == 0) {
-        return (usage & kImageWrittenUsage) != 0 ? GpuMemoryUse::RenderTargets : GpuMemoryUse::Textures;
-    }
-    if (type == "BUFFER") {
-        // Geometry first: a vertex buffer the ray tracer also builds from is
-        // still the model's geometry, and is counted once.
-        if ((usage & kGeometryUsage) != 0) return GpuMemoryUse::Geometry;
-        if ((usage & kRayTracingUsage) != 0) return GpuMemoryUse::RayTracing;
-    }
+    if (type.rfind("IMAGE", 0) == 0) return gpuMemoryUseOfImage(usage);
+    if (type == "BUFFER") return gpuMemoryUseOfBuffer(usage);
     return GpuMemoryUse::OtherBuffers;
 }
+
+} // namespace
+
+GpuMemoryUse gpuMemoryUseOfImage(uint64_t usage) {
+    return (usage & kImageWrittenUsage) != 0 ? GpuMemoryUse::RenderTargets : GpuMemoryUse::Textures;
+}
+
+GpuMemoryUse gpuMemoryUseOfBuffer(uint64_t usage) {
+    // Geometry first: a vertex buffer the ray tracer also builds from is
+    // still the model's geometry, and is counted once.
+    if ((usage & kGeometryUsage) != 0) return GpuMemoryUse::Geometry;
+    if ((usage & kRayTracingUsage) != 0) return GpuMemoryUse::RayTracing;
+    return GpuMemoryUse::OtherBuffers;
+}
+
+namespace {
 
 /// "Type 7" -> 7: how the detailed map names the memory type a pool or a
 /// block list belongs to.

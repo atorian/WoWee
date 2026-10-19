@@ -305,7 +305,7 @@ void CharacterPreview::createFBO() {
         imgCI.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo allocCI{};
         allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-        if (vmaCreateImage(vkCtx_->getAllocator(), &imgCI, &allocCI,
+        if (gpuCreateImage(vkCtx_->getAllocator(), &imgCI, &allocCI,
                 &dummyShadowImage_, &dummyShadowAlloc_, nullptr) != VK_SUCCESS) {
             LOG_ERROR("CharacterPreview: failed to create dummy shadow image");
             return;
@@ -393,7 +393,7 @@ void CharacterPreview::createFBO() {
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VmaAllocationInfo mapInfo{};
-        if (vmaCreateBuffer(allocator, &bufInfo, &allocInfo,
+        if (gpuCreateBuffer(allocator, &bufInfo, &allocInfo,
                 &previewUBO_[i], &previewUBOAlloc_[i], &mapInfo) != VK_SUCCESS) {
             LOG_ERROR("CharacterPreview: failed to create UBO ", i);
             return;

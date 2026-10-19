@@ -452,7 +452,7 @@ bool M2Renderer::createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize siz
     aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
         VmaAllocationInfo allocInfo{};
-        const VkResult result = vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &vb.buffer[f],
+        const VkResult result = gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &vb.buffer[f],
                                                 &vb.alloc[f], &allocInfo);
         if (result != VK_SUCCESS || !allocInfo.pMappedData) {
             LOG_ERROR("M2Renderer: could not create the ", what, " vertex buffer (", size,
@@ -468,7 +468,7 @@ bool M2Renderer::createFrameVertexBuffer(FrameVertexBuffer& vb, VkDeviceSize siz
 
 void M2Renderer::destroyFrameVertexBuffer(FrameVertexBuffer& vb) {
     for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; ++f) {
-        if (vb.buffer[f]) vmaDestroyBuffer(vkCtx_->getAllocator(), vb.buffer[f], vb.alloc[f]);
+        if (vb.buffer[f]) gpuDestroyBuffer(vkCtx_->getAllocator(), vb.buffer[f], vb.alloc[f]);
         vb.buffer[f] = VK_NULL_HANDLE;
         vb.alloc[f] = VK_NULL_HANDLE;
         vb.mapped[f] = nullptr;
@@ -628,7 +628,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
         VmaAllocationInfo allocInfo{};
-        vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+        gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                         &dummyBoneBuffer_, &dummyBoneAlloc_, &allocInfo);
         if (allocInfo.pMappedData) {
             memcpy(allocInfo.pMappedData, &identity, sizeof(identity));
@@ -663,7 +663,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                             &megaBoneBuffer_[i], &megaBoneAlloc_[i], &allocInfo);
             megaBoneMapped_[i] = allocInfo.pMappedData;
 
@@ -718,7 +718,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                             &instanceBuffer_[i], &instanceAlloc_[i], &allocInfo);
             instanceMapped_[i] = allocInfo.pMappedData;
 
@@ -862,7 +862,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
                 aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
                 aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 VmaAllocationInfo ai{};
-                vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+                gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                                 &cullUniformBuffer_[i], &cullUniformAlloc_[i], &ai);
                 cullUniformMapped_[i] = ai.pMappedData;
             }
@@ -875,7 +875,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
                 aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
                 aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 VmaAllocationInfo ai{};
-                vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+                gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                                 &cullInputBuffer_[i], &cullInputAlloc_[i], &ai);
                 cullInputMapped_[i] = ai.pMappedData;
             }
@@ -888,7 +888,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
                 aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
                 aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 VmaAllocationInfo ai{};
-                vmaCreateBuffer(ctx->getAllocator(), &bci, &aci,
+                gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
                                 &cullOutputBuffer_[i], &cullOutputAlloc_[i], &ai);
                 cullOutputMapped_[i] = ai.pMappedData;
             }
@@ -2372,7 +2372,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             VmaAllocationCreateInfo aci{};
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &bgpu.materialUBO, &bgpu.materialUBOAlloc, &matAllocInfo);
+            gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &bgpu.materialUBO, &bgpu.materialUBOAlloc, &matAllocInfo);
 
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
             writeBatchMaterial(gpuModel, bgpu);
