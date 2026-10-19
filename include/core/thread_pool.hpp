@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -62,21 +64,44 @@ public:
     }
 
     // Schedule fn on a worker thread. The returned future carries fn's result
-    // or any exception it threw (same semantics as std::async).
+    // or any exception it threw (same semantics as std::async). `label` names
+    // the kind of work in the pool's timings; a string literal.
     template <typename F>
-    auto submit(F&& fn) -> std::future<std::invoke_result_t<std::decay_t<F>>> {
+    auto submit(const char* label, F&& fn) -> std::future<std::invoke_result_t<std::decay_t<F>>> {
         using R = std::invoke_result_t<std::decay_t<F>>;
         auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(fn));
         std::future<R> fut = task->get_future();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.emplace([task]() { (*task)(); });
+            tasks_.push(Queued{[task]() { (*task)(); }, label, std::chrono::steady_clock::now()});
         }
         cv_.notify_one();
         return fut;
     }
+    template <typename F>
+    auto submit(F&& fn) -> std::future<std::invoke_result_t<std::decay_t<F>>> {
+        return submit("unlabelled", std::forward<F>(fn));
+    }
 
     [[nodiscard]] size_t threadCount() const { return workers_.size(); }
+
+    /// What one task cost: how long it sat in the queue before a worker took
+    /// it, and how long it ran.
+    struct TaskTiming {
+        const char* label = nullptr;
+        float queuedMs = 0.0f;
+        float runMs = 0.0f;
+    };
+    /// Record every task's timing from now on, for the frame profile; off,
+    /// tasks cost nothing extra.
+    void setTiming(bool on) { timing_.store(on, std::memory_order_relaxed); }
+    /// The timings of the tasks finished since the last call.
+    [[nodiscard]] std::vector<TaskTiming> takeTimings() {
+        std::lock_guard<std::mutex> lock(timingsMutex_);
+        std::vector<TaskTiming> out;
+        out.swap(timings_);
+        return out;
+    }
 
 private:
     static size_t defaultThreadCount() {
@@ -89,9 +114,15 @@ private:
         return count;
     }
 
+    struct Queued {
+        std::function<void()> fn;
+        const char* label = nullptr;
+        std::chrono::steady_clock::time_point submitted;
+    };
+
     void workerLoop() {
         for (;;) {
-            std::function<void()> task;
+            Queued task;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
@@ -99,15 +130,28 @@ private:
                 task = std::move(tasks_.front());
                 tasks_.pop();
             }
-            task();
+            if (!timing_.load(std::memory_order_relaxed)) {
+                task.fn();
+                continue;
+            }
+            const auto started = std::chrono::steady_clock::now();
+            task.fn();
+            const auto finished = std::chrono::steady_clock::now();
+            using Ms = std::chrono::duration<float, std::milli>;
+            std::lock_guard<std::mutex> lock(timingsMutex_);
+            timings_.push_back({task.label, Ms(started - task.submitted).count(),
+                                Ms(finished - started).count()});
         }
     }
 
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::queue<std::function<void()>> tasks_;
+    std::queue<Queued> tasks_;
     std::vector<std::thread> workers_;
     bool stop_ = false;
+    std::atomic<bool> timing_{false};
+    std::mutex timingsMutex_;
+    std::vector<TaskTiming> timings_;
 };
 
 } // namespace core

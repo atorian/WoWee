@@ -2154,6 +2154,7 @@ void CharacterRenderer::poseInstances(std::vector<std::reference_wrapper<Charact
     for (size_t t = 0; t + 1 < numThreads; t++) {
         size_t end = start + chunkSize + (t < remainder ? 1 : 0);
         animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+            "character bones: chunk",
             [processRange, start, end]() { processRange(start, end); }));
         start = end;
     }

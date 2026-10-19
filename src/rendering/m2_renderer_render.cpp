@@ -634,6 +634,7 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
                 for (size_t t = 0; t + 1 < numThreads; ++t) {
                     size_t end = start + chunkSize + (t < remainder ? 1 : 0);
                     scene_->animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
+                        "M2 animation: chunk",
                         [processRange, start, end]() { processRange(start, end); }));
                     start = end;
                 }
@@ -1315,6 +1316,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         const uint32_t begin = chunk * chunkSize;
         const uint32_t end = std::min(totalInstances, begin + chunkSize);
         visibilityFutures.push_back(core::ThreadPool::frameWorkers().submit(
+            "M2 visibility: chunk",
             [&, chunk, begin, end]() { classifyRange(chunk, begin, end); }));
     }
     const uint32_t lastChunk = chunkCount - 1;

@@ -303,6 +303,8 @@ private:
     /// The renderer's own parts of the frame (CpuStageTimes), under the
     /// renderer call each belongs to.
     void noteRendererStages();
+    /// The frame workers' task timings, by kind, into the frame profile.
+    void noteWorkerTimes();
     void reportStageTimes();
 
     /// WOWEE_FRAME_PROFILE. The breakdown below is reported at info, which the

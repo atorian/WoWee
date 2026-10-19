@@ -979,7 +979,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
             // they have walked off is not a candidate at their feet.
             const float feetRef = movement::floorArbitrationAnchor(
                 grounded, targetPos.z, lastGroundZ);
-            wmoFuture = core::ThreadPool::frameWorkers().submit(
+            wmoFuture = core::ThreadPool::frameWorkers().submit("camera: WMO floor",
                 [this, px, py, wmoProbeZ, feetRef]() -> FloorResult {
                     float nz = 1.0f;
                     auto h = wmoRenderer->getFloorHeight(px, py, wmoProbeZ, &nz, feetRef);
@@ -988,7 +988,7 @@ CameraController::FloorSample CameraController::sampleFloorUnderFeet(const glm::
         }
         if (m2Renderer && !externalFollow_) {
             m2Async = true;
-            m2Future = core::ThreadPool::frameWorkers().submit(
+            m2Future = core::ThreadPool::frameWorkers().submit("camera: M2 floor",
                 [this, px, py, wmoProbeZ]() -> FloorResult {
                     float nz = 1.0f;
                     auto h = m2Renderer->getFloorHeight(px, py, wmoProbeZ, &nz);

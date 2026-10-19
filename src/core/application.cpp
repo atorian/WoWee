@@ -1,6 +1,7 @@
 #include "core/application.hpp"
 #include <imgui_impl_vulkan.h>
 #include "core/screen_recording.hpp"
+#include "core/thread_pool.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "core/player_view.hpp"
 #include "core/spell_presentation.hpp"
@@ -1790,6 +1791,7 @@ void Application::frameFinished() {
             benchmarkFrameEnded(*frameSeconds);
         }
     }
+    noteWorkerTimes();
     {
         // The report is a hundred and more lines once every ten seconds, and
         // it lands in some frame's time. Said when it is long enough to be
@@ -5415,6 +5417,46 @@ void Application::noteStageTime(const char* stage, float milliseconds) {
 void Application::noteStage(std::string_view stage, float milliseconds) {
     frameBudget_.noteStage(stage, milliseconds);
     if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteStage(stage, milliseconds);
+}
+
+void Application::noteWorkerTimes() {
+    // What the frame workers did this frame, by kind of task: how long each
+    // kind ran in all, summed over the threads, and the longest any of its
+    // tasks waited for a thread. Against the main thread's own waits ("M2
+    // animation wait", "wait for workers") this says whether the frame waits
+    // on work that is long or on threads that are busy.
+    auto& pool = core::ThreadPool::frameWorkers();
+    const bool profiling = profilingStages();
+    pool.setTiming(profiling);
+    if (!profiling) return;
+    struct Kind {
+        float runMs = 0.0f;
+        float longestMs = 0.0f;
+        float worstQueueMs = 0.0f;
+    };
+    std::vector<std::pair<const char*, Kind>> kinds;
+    float busyMs = 0.0f;
+    for (const auto& t : pool.takeTimings()) {
+        auto it = std::find_if(kinds.begin(), kinds.end(),
+                               [&](const auto& k) { return k.first == t.label; });
+        if (it == kinds.end()) it = kinds.insert(kinds.end(), {t.label, Kind{}});
+        it->second.runMs += t.runMs;
+        it->second.longestMs = std::max(it->second.longestMs, t.runMs);
+        it->second.worstQueueMs = std::max(it->second.worstQueueMs, t.queuedMs);
+        busyMs += t.runMs;
+    }
+    noteStage("frame workers: busy, all threads", busyMs);
+    for (const auto& [label, k] : kinds) {
+        stageKey_ = "frame workers: busy, all threads/";
+        stageKey_ += label ? label : "?";
+        noteStage(stageKey_, k.runMs);
+        const size_t base = stageKey_.size();
+        stageKey_ += "/longest task";
+        noteStage(stageKey_, k.longestMs);
+        stageKey_.resize(base);
+        stageKey_ += "/waited for a thread, worst";
+        noteStage(stageKey_, k.worstQueueMs);
+    }
 }
 
 void Application::noteRendererStages() {

@@ -2415,7 +2415,7 @@ void Renderer::update(float deltaTime) {
         float m2DeltaTime = deltaTime;
         glm::mat4 m2View = camera->getViewMatrix();
         glm::mat4 m2Projection = camera->getProjectionMatrix();
-        m2AnimFuture = core::ThreadPool::frameWorkers().submit(
+        m2AnimFuture = core::ThreadPool::frameWorkers().submit("M2 animation",
             [this, m2DeltaTime, m2View, m2Projection]() {
                 m2Renderer->update(m2DeltaTime, m2View, m2Projection);
             });
@@ -3240,7 +3240,7 @@ void Renderer::renderWorld() {
         const bool drawTerrain = terrainRenderer && camera && terrainEnabled && !skipTerrain;
         const bool drawGrass = grassRenderer_ && !skipGrass;
         if (drawTerrain || drawGrass) {
-            terrainFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
+            terrainFuture = core::ThreadPool::frameWorkers().submit("record: terrain", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
                 setSecondaryViewportScissor(cmd);
@@ -3253,7 +3253,7 @@ void Renderer::renderWorld() {
         }
 
         if (wmoRenderer && camera && !skipWMO) {
-            wmoFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
+            wmoFuture = core::ThreadPool::frameWorkers().submit("record: WMO", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
@@ -3265,7 +3265,7 @@ void Renderer::renderWorld() {
         }
 
         if (m2Renderer && camera && !skipM2) {
-            m2Future = core::ThreadPool::frameWorkers().submit([&]() -> double {
+            m2Future = core::ThreadPool::frameWorkers().submit("record: M2", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_M2);
                 setSecondaryViewportScissor(cmd);
@@ -3350,7 +3350,7 @@ void Renderer::renderWorld() {
         // The faded ones go in a buffer of their own, queued after the M2s, or
         // after the water in its pass: drawn here they would hide the effects
         // inside them. Recorded by the same worker, one after the other.
-        charFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
+        charFuture = core::ThreadPool::frameWorkers().submit("record: characters", [&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_CHARS);
             setSecondaryViewportScissor(cmd);
@@ -3373,7 +3373,7 @@ void Renderer::renderWorld() {
         // Post-world systems are disjoint from terrain/WMO/M2/characters. Start
         // this after selection recording so OverlaySystem is never used from
         // two threads at once.
-        postFuture = core::ThreadPool::frameWorkers().submit([&]() -> double {
+        postFuture = core::ThreadPool::frameWorkers().submit("record: post", [&]() -> double {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
