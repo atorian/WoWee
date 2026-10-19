@@ -780,12 +780,11 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     removeRemotePlayerForm(guid);
     auto it = spawns_->playerInstances_.find(guid);
     if (it == spawns_->playerInstances_.end()) return;
-    // Player composites get a fresh model id per spawn (unlike displayId-keyed
-    // creature models, which stay cached), so free the model with the instance.
-    // The model goes after the instance, in the order asked.
-    const uint32_t compositeModelId = scene().characters().modelOf(it->second);
+    // Only the instance goes. Its model is the race and gender's body, shared
+    // by every player of that kind and kept in playerModelCache_ for the next
+    // one; what makes this player look like itself (skin, hair, face,
+    // equipment) lives on the instance.
     scene().characters().removeInstance(it->second);
-    if (compositeModelId != 0) scene().characters().unloadModelIfUnused(compositeModelId);
     spawns_->playerInstances_.erase(it);
     spawns_->onlinePlayerAppearance_.erase(guid);
     spawns_->pendingOnlinePlayerEquipment_.erase(guid);

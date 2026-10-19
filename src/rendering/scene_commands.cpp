@@ -52,12 +52,6 @@ void SceneCommands::Characters::removeInstance(uint32_t instanceId) {
     });
 }
 
-void SceneCommands::Characters::unloadModelIfUnused(uint32_t modelId) {
-    owner_.post([=](Renderer& r) {
-        if (auto* c = r.getCharacterRenderer()) c->unloadModelIfUnused(modelId);
-    });
-}
-
 void SceneCommands::Characters::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
     owner_.post([=](Renderer& r) {
         if (auto* c = r.getCharacterRenderer()) c->setInstancePosition(instanceId, position);

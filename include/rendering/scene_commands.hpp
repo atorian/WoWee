@@ -60,9 +60,6 @@ public:
         uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                                 const glm::vec3& rotation = glm::vec3(0.0f), float scale = 1.0f);
         void removeInstance(uint32_t instanceId);
-        /// Lets the model go once nothing shows it - after the removals
-        /// asked for before this one.
-        void unloadModelIfUnused(uint32_t modelId);
 
         void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
         void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
