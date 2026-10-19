@@ -1750,6 +1750,11 @@ wowee_add_test(test_sight_cache SOURCES test_sight_cache.cpp)
 # instance: they must match a rebuild after any of them.
 wowee_add_test(test_instance_index_set SOURCES test_instance_index_set.cpp)
 
+# ── test_chunked_vector ──────────────────────────────────────
+# The M2 renderer's instance list: growing it moves nothing already in it,
+# which is what made a tile's doodads cost 11-22 ms whenever the list doubled.
+wowee_add_test(test_chunked_vector SOURCES test_chunked_vector.cpp)
+
 # ── test_instance_random ─────────────────────────────────────
 # Each M2 instance's own random numbers: independent of the others, so
 # instances can be updated in parallel and still behave the same.

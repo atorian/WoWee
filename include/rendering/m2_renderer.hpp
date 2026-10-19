@@ -1,6 +1,7 @@
 #pragma once
 
 #include "collision/m2_shape.hpp"
+#include "rendering/chunked_vector.hpp"
 #include "rendering/texture_cache.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/instance_index_set.hpp"
@@ -1508,7 +1509,8 @@ private:
 
     void destroyInstanceBones(M2Instance& inst, bool defer = true);
     struct InstanceState {
-        std::vector<M2Instance> instances;
+        /// Chunked so that growing it moves no instance (chunked_vector.hpp).
+        ChunkedVector<M2Instance> instances;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
         std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
         std::unordered_map<uint32_t, size_t> instanceIndexById;

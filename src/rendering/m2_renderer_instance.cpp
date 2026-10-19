@@ -886,7 +886,7 @@ uint64_t M2Renderer::modelDataBytes() const {
 
 uint64_t M2Renderer::instanceBytes() const {
     using pipeline::vectorBytes;
-    uint64_t total = vectorBytes(scene_->instances);
+    uint64_t total = scene_->instances.storageBytes();
     for (const auto& inst : scene_->instances) {
         total += vectorBytes(inst.boneMatrices) + vectorBytes(inst.emitterAccumulators) +
                  vectorBytes(inst.emitterPools) + vectorBytes(inst.particles) +
