@@ -107,7 +107,8 @@ void M2Renderer::seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& ins
 
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
                                      const glm::vec3& rotation, float scale,
-                                     bool allowPositionDedup) {
+                                     bool allowPositionDedup, uint32_t reservedId) {
+    if (reservedId != 0) allowPositionDedup = false;
     // Reject NaN inputs at the boundary - std::round of NaN is implementation-
     // defined and a NaN instance position propagates into the GPU model matrix,
     // either tripping Vulkan validation or rendering at the world origin.
@@ -141,7 +142,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     }
 
     M2Instance instance;
-    instance.id = nextInstanceId++;
+    instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.random = InstanceRandom(instance.id);
     instance.modelId = modelId;
     instance.position = position;
@@ -205,7 +206,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
 }
 
 uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
-                                                const glm::vec3& position) {
+                                                const glm::vec3& position, uint32_t reservedId) {
     // Reject NaN inputs at the boundary. position feeds the dedup hash
     // (std::round of NaN is implementation-defined); the matrix goes
     // straight to the GPU UBO and would crash validation.
@@ -222,8 +223,9 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     }
     modelUnusedSince_.erase(modelId);
 
-    // Deduplicate: O(1) hash lookup
-    {
+    // Deduplicate: O(1) hash lookup. Not an instance with an id of its own
+    // (see createInstance).
+    if (reservedId == 0) {
         DedupKey dk{.modelId = modelId,
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
@@ -235,7 +237,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     }
 
     M2Instance instance;
-    instance.id = nextInstanceId++;
+    instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.random = InstanceRandom(instance.id);
     instance.modelId = modelId;
     instance.position = position;  // Used for frustum culling
@@ -277,7 +279,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     }
 
     // Register in dedup map
-    {
+    if (reservedId == 0) {
         DedupKey dk{.modelId = modelId,
                     .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),

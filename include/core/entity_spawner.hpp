@@ -23,7 +23,7 @@
 namespace wowee {
 
 // Forward declarations
-namespace rendering { class Renderer; }
+namespace rendering { class Renderer; class SceneCommands; }
 namespace pipeline { class AssetManager; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
 namespace game { class GameHandler; }
@@ -334,6 +334,10 @@ public:
     // Creature M2 sync loader (used by spawnPlayerCharacter in Application)
 
 private:
+    /// Where the spawner's changes to the scene go (rendering/scene_commands.hpp):
+    /// made at the start of the frame's Present. Only where renderer_ is set.
+    rendering::SceneCommands& scene();
+
     // Dependencies (non-owning)
     rendering::Renderer* renderer_;
     pipeline::AssetManager* assetManager_;

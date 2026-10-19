@@ -21,10 +21,12 @@ public:
     size_t setWmoDoodadAnimation(uint32_t wmoInstanceId, uint32_t animationId, bool loop) override;
 
     [[nodiscard]] bool wmoHasCollision(uint32_t wmoInstanceId) const override;
-    [[nodiscard]] std::optional<float> wmoFloorHeight(uint32_t wmoInstanceId, const glm::vec3& renderPos,
+    [[nodiscard]] std::optional<float> wmoFloorHeight(uint32_t wmoInstanceId, const glm::mat4& placement,
+                                                      const glm::vec3& renderPos,
                                                       float* outNormalZ) const override;
-    bool m2WorldBounds(uint32_t m2InstanceId, glm::vec3& outMin, glm::vec3& outMax) const override;
-    [[nodiscard]] std::optional<float> m2FloorHeight(uint32_t m2InstanceId,
+    bool m2WorldBounds(uint32_t m2InstanceId, const glm::mat4& placement, glm::vec3& outMin,
+                       glm::vec3& outMax) const override;
+    [[nodiscard]] std::optional<float> m2FloorHeight(uint32_t m2InstanceId, const glm::mat4& placement,
                                                      const glm::vec3& renderPos) const override;
 
 private:

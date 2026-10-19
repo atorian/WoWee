@@ -583,12 +583,21 @@ public:
     /// arrives later from a parent. Pass allowPositionDedup=false for a child
     /// instance created at a placeholder position - see the note in
     /// setInstanceTransform on why the placeholder key outlives the placement.
+    ///
+    /// `reservedId`, when not 0, is the id SceneCommands handed out for this
+    /// instance (reserveInstanceId). Such an instance is never folded into
+    /// another at the same spot: its caller already holds an id of its own,
+    /// and two holders of one instance would remove each other's.
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                             const glm::vec3& rotation = glm::vec3(0.0f),
                             float scale = 1.0f,
-                            bool allowPositionDedup = true);
+                            bool allowPositionDedup = true,
+                            uint32_t reservedId = 0);
     uint32_t createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
-                                       const glm::vec3& position);
+                                       const glm::vec3& position, uint32_t reservedId = 0);
+    /// An id no instance has, for one SceneCommands will create at the apply
+    /// point: the caller has it now, the instance from then on.
+    uint32_t reserveInstanceId() { return nextInstanceId++; }
 
     /// Animate, emit and cull for this frame's camera: its view (which
     /// billboard bones turn against) and projection.
@@ -721,6 +730,10 @@ public:
     void setInstanceAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true);
     /// Check if a model instance has a specific animation ID in its sequence table.
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
+    /// Whether a model has a sequence with this animation id.
+    [[nodiscard]] bool modelHasAnimation(uint32_t modelId, uint32_t animationId) const;
+    /// The model an instance shows; 0 for an instance there is not.
+    [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const;
     [[nodiscard]] float getInstanceAnimDuration(uint32_t instanceId) const;
     /// World-space visual bounding sphere of an instance (center + radius),
     /// used for cursor picking and selection circles. Returns false for an
@@ -733,15 +746,22 @@ public:
     /// from you. Boarding a generic M2 transport is decided on a radius around
     /// that origin, which is why standing beside an Undercity lift shaft
     /// attaches you to the car.
-    bool getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin, glm::vec3& outMax) const;
+    ///
+    /// `placement`, when given, is where the instance's owner has it this
+    /// frame - a transport moved since the scene's changes were last made -
+    /// rather than where the instance last stood.
+    bool getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin, glm::vec3& outMax,
+                                const glm::mat4* placement = nullptr) const;
 
     /// The floor one named instance offers under a point, ignoring every other.
     ///
     /// Asked of a lift car, this is "is its deck under your feet" - which a box
     /// around the car cannot answer, because an axis-aligned box covers the
     /// doorway and the ground just outside it.
+    /// `placement` as for getInstanceWorldBounds.
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
-                                                float glX, float glY, float glZ) const;
+                                                float glX, float glY, float glZ,
+                                                const glm::mat4* placement = nullptr) const;
 
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance

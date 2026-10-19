@@ -93,9 +93,15 @@ public:
 
     bool loadModel(const pipeline::M2Model& model, uint32_t id);
 
+    /// `reservedId`, when not 0, is the id SceneCommands handed out for this
+    /// instance (reserveInstanceId); otherwise a new one is taken.
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                            const glm::vec3& rotation = glm::vec3(0.0f),
-                           float scale = 1.0f);
+                           float scale = 1.0f, uint32_t reservedId = 0);
+    /// An id no instance has, for one SceneCommands will create at the apply
+    /// point: the caller has it now, the instance from then on.
+    uint32_t reserveInstanceId() { return nextInstanceId++; }
+    [[nodiscard]] bool hasModel(uint32_t modelId) const;
 
     // oneShotReturnAnim: animation to resume (looping) when a non-looping
     // animation finishes; 0 = Stand. Lets NPC one-shot emotes return to their
@@ -198,6 +204,8 @@ public:
     /// currently playing; nullptr if the model has none for that sequence.
     [[nodiscard]] const std::vector<uint32_t>* getFootstepEventTimes(uint32_t instanceId) const;
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
+    /// Whether a model has a sequence with this animation id.
+    [[nodiscard]] bool modelHasAnimation(uint32_t modelId, uint32_t animationId) const;
     bool getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const;
     bool getInstanceModelName(uint32_t instanceId, std::string& modelName) const;
     bool getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const;
@@ -231,6 +239,16 @@ public:
                       const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
                       const std::string& texturePath,
                       const glm::mat4& localTransform = glm::mat4(1.0f));
+
+    /// attachWeapon in its two halves, for SceneCommands: the model's - loading
+    /// the weapon and its skin, at once - and the instance's, at the apply
+    /// point. Each false, and logged, where attachWeapon would be.
+    bool prepareWeaponModel(const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
+                            const std::string& texturePath);
+    bool attachLoadedWeapon(uint32_t charInstanceId, uint32_t attachmentId, uint32_t weaponModelId,
+                            const glm::mat4& localTransform = glm::mat4(1.0f));
+    /// Whether a model has the attachment point - a bone to hang something on.
+    [[nodiscard]] bool hasAttachmentPoint(uint32_t modelId, uint32_t attachmentId) const;
 
     /** Detach a weapon from the given attachment point (drops its enchant effects too). */
     void detachWeapon(uint32_t charInstanceId, uint32_t attachmentId);
@@ -295,6 +313,10 @@ public:
      */
     bool attachWeaponEffect(uint32_t charInstanceId, uint32_t attachmentId, uint32_t visualSlot,
                             const pipeline::M2Model& effectModel, uint32_t effectModelId);
+
+    /// attachWeaponEffect's instance half, the effect model loaded already.
+    bool attachLoadedWeaponEffect(uint32_t charInstanceId, uint32_t attachmentId, uint32_t visualSlot,
+                                  uint32_t effectModelId);
 
     /** Remove all enchant visuals from the weapon at the given attachment point. */
     void detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId);

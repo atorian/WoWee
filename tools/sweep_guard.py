@@ -200,6 +200,14 @@ CHECKS = [
     ("render_dependency_check.py",
      r"^(\d+) includes of the client from the renderer library", 0,
      "client includes in the renderer library"),
+    # The scene changes only inside the frame's Present phase, through
+    # rendering::SceneCommands: a renderer drawing from a snapshot on its own
+    # thread needs it to change in one place. Some 200 calls from six phases
+    # of the frame changed it directly before; one more works fine until the
+    # scene is read on another thread.
+    ("scene_write_check.py",
+     r"^(\d+) direct changes to the scene from the client", 0,
+     "changes to the renderers' scene made past SceneCommands"),
     # The game says what happened and is handed what it asks; it does not
     # drive the client's presentation. Held where it stood when the check was
     # written, and lowered to zero (AGENTS.md, "Layers"): the CVar store moved

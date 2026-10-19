@@ -3,6 +3,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/game_handler.hpp"
@@ -46,7 +47,9 @@ void NPCInteractionCallbackHandler::setupCallbacks() {
             auto* cr = renderer_->getCharacterRenderer();
             if (cr) {
                 uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
-                if (instanceId != 0) cr->playAnimation(instanceId, rendering::anim::NPC_WELCOME, false);
+                if (instanceId != 0) {
+                    renderer_->scene().characters().playAnimation(instanceId, rendering::anim::NPC_WELCOME, false);
+                }
             }
         }
         if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {

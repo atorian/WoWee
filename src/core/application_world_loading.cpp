@@ -11,6 +11,7 @@
 #include "game/movement_handler.hpp"
 #include "game/transport_manager.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/character_renderer.hpp"
@@ -103,10 +104,11 @@ void spawnInstancePortalVisuals(uint32_t mapId,
         // Each entry keeps the scale appropriate to its authored doorway; the
         // Deeprun entries are intentionally larger because their original effect
         // was too subtle at station scale.
-        uint32_t instanceId = m2Renderer->createInstance(
+        auto& models = renderer->scene().models();
+        uint32_t instanceId = models.createInstance(
             kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), portal.scale);
         if (instanceId) {
-            m2Renderer->setSkipCollision(instanceId, true);
+            models.setSkipCollision(instanceId, true);
             LOG_INFO("Spawned instance portal visual map=", mapId,
                      " canonical=(", portal.canonicalPos.x, ", ",
                      portal.canonicalPos.y, ", ", portal.canonicalPos.z, ")");

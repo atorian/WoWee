@@ -23,6 +23,7 @@
 #include "core/coordinates.hpp"
 #include "core/input.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/lens_flare.hpp"
@@ -860,14 +861,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         if (auto* ac = services_.animationController) ac->setInCombat(gameHandler.isInCombat() &&
                               !gameHandler.isPlayerDead() &&
                               !gameHandler.isPlayerGhost());
-        if (auto* cr = renderer->getCharacterRenderer()) {
+        if (renderer->getCharacterRenderer()) {
             uint32_t charInstId = renderer->getCharacterInstanceId();
             if (charInstId != 0) {
                 const bool isGhost = gameHandler.isPlayerGhost();
                 if (!ghostOpacityStateKnown_ ||
                     ghostOpacityLastState_ != isGhost ||
                     ghostOpacityLastInstanceId_ != charInstId) {
-                    cr->setInstanceOpacity(charInstId, isGhost ? 0.5f : 1.0f);
+                    renderer->scene().characters().setInstanceOpacity(charInstId, isGhost ? 0.5f : 1.0f);
                     ghostOpacityStateKnown_ = true;
                     ghostOpacityLastState_ = isGhost;
                     ghostOpacityLastInstanceId_ = charInstId;

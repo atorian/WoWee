@@ -96,6 +96,11 @@ public:
     /// Interface: one of the client's own shortcuts was pressed. The press
     /// went nowhere else - see clientShortcutFor.
     virtual void clientShortcut(ClientShortcut shortcut) = 0;
+    /// Present, first: the changes asked of the scene since the last frame -
+    /// spawns, removals, transports moved, animations - made, so the player's
+    /// controls and everything after read this frame's world. The renderers'
+    /// instances change only inside Present (rendering::SceneCommands).
+    virtual void applySceneChanges() = 0;
     /// Present: the world handed to the renderer, after the player's controls
     /// have moved the camera.
     virtual void present(float deltaTime, const FramePlan& plan) = 0;

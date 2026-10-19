@@ -412,6 +412,21 @@ bool M2Renderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
     return false;
 }
 
+bool M2Renderer::modelHasAnimation(uint32_t modelId, uint32_t animationId) const {
+    const auto it = models.find(modelId);
+    if (it == models.end()) return false;
+    for (const auto& seq : it->second.sequences) {
+        if (seq.id == animationId) return true;
+    }
+    return false;
+}
+
+uint32_t M2Renderer::getInstanceModelId(uint32_t instanceId) const {
+    const auto idxIt = scene_->instanceIndexById.find(instanceId);
+    if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return 0;
+    return scene_->instances[idxIt->second].modelId;
+}
+
 float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end()) return 0.0f;
@@ -520,7 +535,12 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
                     .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
                     .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
                     .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
-        scene_->instanceDedupMap_.erase(dk);
+        // Only if it names this instance: one with an id of its own was never
+        // filed, and another may stand at the same spot.
+        auto dedupIt = scene_->instanceDedupMap_.find(dk);
+        if (dedupIt != scene_->instanceDedupMap_.end() && dedupIt->second == instanceId) {
+            scene_->instanceDedupMap_.erase(dedupIt);
+        }
     }
 
     destroyInstanceBones(inst, /*defer=*/true);
@@ -1005,11 +1025,17 @@ void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) con
 }
 
 bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
-                                        glm::vec3& outMax) const {
+                                        glm::vec3& outMax, const glm::mat4* placement) const {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return false;
     const auto& inst = scene_->instances[idxIt->second];
     if (!inst.cachedModel) return false;
+    if (placement) {
+        glm::vec3 localMin, localMax;
+        collisionLocalBounds(*inst.cachedModel, localMin, localMax);
+        transformAABB(*placement, localMin, localMax, outMin, outMax);
+        return true;
+    }
     outMin = inst.worldBoundsMin;
     outMax = inst.worldBoundsMax;
     return true;
@@ -1017,7 +1043,7 @@ bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
 
 std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
                                                        float glX, float glY,
-                                                       float glZ) const {
+                                                       float glZ, const glm::mat4* placement) const {
     auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) {
         return std::nullopt;
@@ -1030,11 +1056,14 @@ std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
     if (!model.collision.valid()) return std::nullopt;
 
     // Same cast as getFloorHeight: world-down through the instance transform,
-    // so a car placed with any pitch still sees a ray along gravity.
+    // so a car placed with any pitch still sees a ray along gravity. Placed
+    // where its owner says it is now, when it says so.
+    const glm::mat4& modelMatrix = placement ? *placement : instance.modelMatrix;
+    const glm::mat4 invModelMatrix = placement ? glm::inverse(*placement) : instance.invModelMatrix;
     const glm::vec3 localRayOrigin = glm::vec3(
-        instance.invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
+        invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
     const glm::vec3 localRayEnd = glm::vec3(
-        instance.invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
+        invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
     const glm::vec3 localRayVector = localRayEnd - localRayOrigin;
     const float localRayLength = glm::length(localRayVector);
     if (localRayLength <= 1e-5f) return std::nullopt;
@@ -1058,7 +1087,7 @@ std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
                                                 verts[idx[ti * 3 + 2]]);
         if (tHit < 0.0f || tHit > localRayLength) continue;
         const glm::vec3 worldHit = glm::vec3(
-            instance.modelMatrix * glm::vec4(localRayOrigin + localRayDir * tHit, 1.0f));
+            modelMatrix * glm::vec4(localRayOrigin + localRayDir * tHit, 1.0f));
         // At or under the probe, and the highest such - the deck rather than
         // whatever structure the car carries beneath it.
         if (worldHit.z <= glZ && (!best || worldHit.z > *best)) best = worldHit.z;

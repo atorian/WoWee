@@ -1755,6 +1755,11 @@ wowee_add_test(test_instance_index_set SOURCES test_instance_index_set.cpp)
 # instances can be updated in parallel and still behave the same.
 wowee_add_test(test_instance_random SOURCES test_instance_random.cpp)
 
+# ── test_deferred_calls ──────────────────────────────────────
+# The scene's changes wait for the frame's apply point: made then, in the
+# order asked, those asked while applying included; a left world's dropped.
+wowee_add_test(test_deferred_calls SOURCES test_deferred_calls.cpp)
+
 # ── test_uniform_slot_pool ───────────────────────────────────
 # Materials' uniform buffers as slots of a few large buffers: live slots never
 # overlap, freed ones are reused before a block is made, offsets are aligned.

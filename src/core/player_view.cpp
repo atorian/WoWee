@@ -14,6 +14,7 @@
 #include "rendering/mount_dust.hpp"
 #include "rendering/movement_command.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/viewer_motion.hpp"
 
@@ -159,7 +160,7 @@ void PlayerView::beforeRendererUpdate(float deltaTime) {
     if (characterRenderer && characterInstanceId > 0) {
         if ((cameraController_->isThirdPerson() && !cameraController_->isFirstPersonView()) ||
             animationController_->isTaxiFlight()) {
-            characterRenderer->setInstanceVisible(characterInstanceId, true);
+            renderer_->scene().characters().setInstanceVisible(characterInstanceId, true);
         }
     }
 
@@ -186,7 +187,8 @@ void PlayerView::updateCharacterFacing(float deltaTime) {
     auto* cc = cameraController_.get();
     auto* anim = animationController_.get();
 
-    characterRenderer->setInstancePosition(characterInstanceId, characterPosition);
+    auto& characters = renderer_->scene().characters();
+    characters.setInstancePosition(characterInstanceId, characterPosition);
 
     // Movement-facing comes from camera controller and is decoupled from LMB orbit.
     const bool taxiFlight = anim->isTaxiFlight();
@@ -225,12 +227,12 @@ void PlayerView::updateCharacterFacing(float deltaTime) {
         }
     }
     renderer_->setCharacterYaw(characterYaw);
-    characterRenderer->setInstanceRotation(characterInstanceId,
-                                           glm::vec3(0.0f, 0.0f, glm::radians(characterYaw)));
+    characters.setInstanceRotation(characterInstanceId,
+                                   glm::vec3(0.0f, 0.0f, glm::radians(characterYaw)));
 
     while (torsoYawDeltaDeg > 180.0f) torsoYawDeltaDeg -= 360.0f;
     while (torsoYawDeltaDeg < -180.0f) torsoYawDeltaDeg += 360.0f;
-    characterRenderer->setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
+    characters.setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
 
     // Update animation based on movement state
     anim->updateMeleeTimers(deltaTime);

@@ -1020,6 +1020,7 @@ set(WOWEE_SOURCES
 
     # Rendering
     src/rendering/renderer.cpp
+    src/rendering/scene_commands.cpp
     src/rendering/amd_fsr3_runtime.cpp
     src/rendering/camera.cpp
     src/rendering/camera_controller.cpp

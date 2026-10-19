@@ -231,6 +231,7 @@ private:
     void drawInterface(float deltaTime, const FramePlan& plan) override;
     void keyForClient(const SDL_Event& event) override;
     void clientShortcut(ClientShortcut shortcut) override;
+    void applySceneChanges() override;
     void present(float deltaTime, const FramePlan& plan) override;
     [[nodiscard]] bool scenePending() const override;
     void render(const FramePlan& plan) override;

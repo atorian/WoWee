@@ -118,6 +118,8 @@ public:
     void clientShortcut(core::ClientShortcut shortcut) override {
         h_.clientShortcuts_.push_back(shortcut);
     }
+    /// No renderer, so no scene to change.
+    void applySceneChanges() override {}
     void present(float, const core::FramePlan&) override {}
     /// Nothing is built for the scene, so nothing is ever still being built.
     [[nodiscard]] bool scenePending() const override { return false; }

@@ -4,6 +4,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -367,7 +368,8 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                         return status();
                     }
                     if (result == rendering::WMORenderer::ModelLoadResult::InProgress) return status();
-                    if (!wmo->createInstance(modelId, prepared.position, prepared.rotation, 1.0f)) {
+                    if (!renderer_->scene().worldModels().createInstance(modelId, prepared.position,
+                                                                         prepared.rotation, 1.0f)) {
                         fail("Root WMO instance creation failed"); return status();
                     }
                     load.rootPlaced = true;
@@ -378,8 +380,9 @@ const WorldLoadStatus& WorldLoader::update(float /*deltaTime*/) {
                         LOG_WARNING("Instance doodad upload failed: ", d.model->name, "; doodad omitted");
                         continue;
                     }
-                    const auto id = m2->createInstanceWithMatrix(d.modelId, d.matrix, d.position);
-                    if (id) { m2->setSkipWallCollision(id, true); if (d.interior) m2->setInteriorLight(id, d.interior); }
+                    auto& models = renderer_->scene().models();
+                    const auto id = models.createInstanceWithMatrix(d.modelId, d.matrix, d.position);
+                    if (id) { models.setSkipWallCollision(id, true); if (d.interior) models.setInteriorLight(id, d.interior); }
                     else LOG_WARNING("Instance doodad instance creation failed: ", d.model->name, "; doodad omitted");
                 }
                 done = load.doodad == prepared.doodads.size();

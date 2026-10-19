@@ -10,6 +10,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "core/player_view.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
@@ -1059,7 +1060,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
 
     glm::vec3 renderPos = core::coords::canonicalToRender(
         glm::vec3(result.x, result.y, result.z));
-    uint32_t instanceId = wmoRenderer->createInstance(
+    uint32_t instanceId = scene().worldModels().createInstance(
         modelId, renderPos, glm::vec3(0.0f, 0.0f, result.orientation), result.scale);
     if (instanceId == 0) return;
 
@@ -1663,23 +1664,23 @@ void EntitySpawner::processPendingTransportDoodads() {
                 continue;
             }
             // Created at the origin and moved into place by the parent WMO's
-            // transform, so its position here is a placeholder and must not be
-            // deduplicated against - otherwise the second ship of a class is
-            // handed the first ship's sails rather than getting its own, and
-            // the thirteen barrels in a hold collapse into one barrel.
-            uint32_t m2InstanceId = m2Renderer->createInstance(
-                doodadModelId, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f,
-                /*allowPositionDedup=*/false);
+            // transform, so its position here is a placeholder. An instance
+            // made through the scene's changes is never deduplicated against,
+            // so the second ship of a class gets its own sails and the
+            // thirteen barrels in a hold stay thirteen.
+            auto& models = scene().models();
+            uint32_t m2InstanceId = models.createInstance(
+                doodadModelId, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f);
             if (m2InstanceId == 0) {
                 LOG_WARNING("Transport doodad got no instance: ", doodadTemplate.m2Path);
                 continue;
             }
-            m2Renderer->setSkipCollision(m2InstanceId, true);
+            models.setSkipCollision(m2InstanceId, true);
             // Ship WMO children use the dedicated transport animation states:
             // 162=ShipStart, 163=ShipMoving, 164=ShipStop. Leaving them on the
             // first sequence freezes the icebreaker paddle (its sequence 0 is
             // static) and can leave the Bravery's sail rig in its furled pose.
-            m2Renderer->setInstanceAnimation(m2InstanceId, rendering::anim::SHIP_MOVING, true);
+            models.setInstanceAnimation(m2InstanceId, rendering::anim::SHIP_MOVING, true);
             std::string doodadPathLower = doodadTemplate.m2Path;
             std::transform(doodadPathLower.begin(), doodadPathLower.end(), doodadPathLower.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1689,21 +1690,16 @@ void EntitySpawner::processPendingTransportDoodads() {
                 logMachinery = true;
             }
 
-            wmoRenderer->addDoodadToInstance(it->instanceId, m2InstanceId, doodadTemplate.localTransform);
+            scene().worldModels().addDoodadToInstance(it->instanceId, m2InstanceId,
+                                                      doodadTemplate.localTransform);
             if (logMachinery) {
-                // Report where it actually ended up. "Spawned" only ever meant the
-                // model parsed; it said nothing about whether the thing landed on
-                // the ship or at the world origin.
-                glm::vec3 where(0.0f);
-                float radius = 0.0f;
-                const bool haveBounds = m2Renderer->getInstanceBounds(m2InstanceId, where, radius);
+                // Which ship it is to ride and whether it can move with it.
+                // Where it lands is the WMO's transform, made with this at the
+                // scene's next apply point.
                 LOG_WARNING("Transport machinery spawned: ", doodadTemplate.m2Path,
                             " instance=", m2InstanceId,
                             " wmoInstance=", it->instanceId,
-                            " hasShipMoving=", m2Renderer->hasAnimation(m2InstanceId, rendering::anim::SHIP_MOVING),
-                            " bounds=", haveBounds,
-                            " worldPos=(", where.x, ",", where.y, ",", where.z, ")",
-                            " radius=", radius);
+                            " hasShipMoving=", models.hasAnimation(m2InstanceId, rendering::anim::SHIP_MOVING));
             }
             it->spawnedDoodads++;
         }
@@ -1716,7 +1712,7 @@ void EntitySpawner::processPendingTransportDoodads() {
                 glm::mat4 wmoTransform(1.0f);
                 wmoTransform = glm::translate(wmoTransform, renderPos);
                 wmoTransform = glm::rotate(wmoTransform, it->orientation, glm::vec3(0, 0, 1));
-                wmoRenderer->setInstanceTransform(it->instanceId, wmoTransform);
+                scene().worldModels().setInstanceTransform(it->instanceId, wmoTransform);
             }
             it = spawns_->pendingTransportDoodadBatches_.erase(it);
         } else {
@@ -1745,7 +1741,7 @@ void EntitySpawner::processPendingMount() {
     // Create mount instance at player position
     glm::vec3 mountPos = renderer_->getCharacterPosition();
     float yawRad = glm::radians(renderer_->getCharacterYaw());
-    uint32_t instanceId = charRenderer->createInstance(modelId, mountPos,
+    uint32_t instanceId = scene().characters().createInstance(modelId, mountPos,
         glm::vec3(0.0f, 0.0f, yawRad), 1.0f);
 
     if (instanceId == 0) {
@@ -1755,7 +1751,7 @@ void EntitySpawner::processPendingMount() {
 
     spawns_->mountInstanceId_ = instanceId;
     // Shadowform darkens the mount too.
-    charRenderer->addLookCompanion(renderer_->getCharacterInstanceId(), instanceId);
+    scene().characters().addLookCompanion(renderer_->getCharacterInstanceId(), instanceId);
 
     // Compute height offset - place player above mount's back.
     //
@@ -1813,14 +1809,14 @@ void EntitySpawner::processPendingMount() {
         using namespace rendering::anim;
         uint32_t taxiCandidates[] = {FLY_FORWARD, FLY_IDLE, FLY_RUN, FLY_SPELL, FLY_RISE, SPELL_KNEEL_LOOP, FLY_CUSTOM_SPELL_10, DEAD, RUN};
         for (uint32_t anim : taxiCandidates) {
-            if (charRenderer->hasAnimation(instanceId, anim)) {
+            if (scene().characters().hasAnimation(instanceId, anim)) {
                 startAnim = anim;
                 break;
             }
         }
         // If none found, startAnim stays 0 (Stand/hover) which is fine for flying creatures
     }
-    charRenderer->playAnimation(instanceId, startAnim, true);
+    scene().characters().playAnimation(instanceId, startAnim, true);
 
     LOG_INFO("processPendingMount: DONE displayId=", mountDisplayId, " model=", m2Path, " heightOffset=", heightOffset);
 }
@@ -2001,7 +1997,7 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
         removeRemotePlayerMount(guid);
         glm::vec3 pos(0.0f);
         cr->getInstancePosition(playerIt->second, pos);
-        uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
+        uint32_t mountInstance = scene().characters().createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
         if (mountInstance != 0) {
             const bool moving = gameHandler_ && [&] {
                 auto entity = gameHandler_->getEntityManager().getEntity(guid);
@@ -2013,12 +2009,12 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
                 ? (flying ? rendering::anim::FLY_FORWARD
                           : (walking ? rendering::anim::WALK : rendering::anim::RUN))
                 : (flying ? rendering::anim::FLY_IDLE : rendering::anim::STAND);
-            if (!cr->hasAnimation(mountInstance, mountAnim)) {
+            if (!scene().characters().hasAnimation(mountInstance, mountAnim)) {
                 mountAnim = moving ? rendering::anim::RUN : rendering::anim::STAND;
             }
-            cr->playAnimation(mountInstance, mountAnim, true);
-            cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
-            cr->addLookCompanion(playerIt->second, mountInstance);  // Shadowform darkens the mount too
+            scene().characters().playAnimation(mountInstance, mountAnim, true);
+            scene().characters().playAnimation(playerIt->second, rendering::anim::MOUNT, true);
+            scene().characters().addLookCompanion(playerIt->second, mountInstance);  // Shadowform darkens the mount too
             setRemotePlayerWeaponsSheathed(guid, true);  // no rider holds a weapon
             spawns_->remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
                                          .instanceId = mountInstance, .riderHeight = riderHeight};
@@ -2080,13 +2076,13 @@ void EntitySpawner::processPendingRemotePlayerForms() {
         const uint32_t shown = playerIt->second;
         glm::vec3 pos(0.0f);
         cr->getInstancePosition(shown, pos);
-        const uint32_t formInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
+        const uint32_t formInstance = scene().characters().createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
         if (formInstance == 0) {
             spawns_->pendingRemotePlayerForms_.erase(it);
             return;
         }
-        if (existing != spawns_->remotePlayerForms_.end()) cr->removeInstance(existing->second.formInstanceId);
-        cr->setInstanceVisible(character, false);
+        if (existing != spawns_->remotePlayerForms_.end()) scene().characters().removeInstance(existing->second.formInstanceId);
+        scene().characters().setInstanceVisible(character, false);
         removeRemotePlayerMount(guid);  // a form is never ridden; the server drops the mount too
 
         float yaw = 0.0f;
@@ -2101,14 +2097,14 @@ void EntitySpawner::processPendingRemotePlayerForms() {
                                         : swimming ? rendering::anim::SWIM : rendering::anim::RUN)
                               : (flying ? rendering::anim::FLY_IDLE
                                         : swimming ? rendering::anim::SWIM_IDLE : rendering::anim::STAND);
-                if (!cr->hasAnimation(formInstance, anim))
+                if (!scene().characters().hasAnimation(formInstance, anim))
                     anim = moving ? rendering::anim::RUN : rendering::anim::STAND;
                 // The frame sync sees the new model and takes its locomotion
                 // from here on.
             }
         }
-        cr->setInstanceRotation(formInstance, glm::vec3(0.0f, 0.0f, yaw));
-        cr->playAnimation(formInstance, anim, true);
+        scene().characters().setInstanceRotation(formInstance, glm::vec3(0.0f, 0.0f, yaw));
+        scene().characters().playAnimation(formInstance, anim, true);
 
         playerIt->second = formInstance;
         spawns_->remotePlayerForms_[guid] = {.displayId = displayId, .formInstanceId = formInstance,
@@ -2153,7 +2149,7 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     if (it == spawns_->creatureInstances_.end()) return;
 
     if (renderer_ && renderer_->getCharacterRenderer()) {
-        renderer_->getCharacterRenderer()->removeInstance(it->second);
+        scene().characters().removeInstance(it->second);
     }
 
     spawns_->creatureInstances_.erase(it);
@@ -2216,7 +2212,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
         }
     }
     if (goType == 0u || goType == 35u) {   // DOOR, TRAPDOOR
-        m2->setSkipCollision(instanceId, goState == 0);
+        scene().models().setSkipCollision(instanceId, goState == 0);
         // Said for the first few, because a door that never opens and a door
         // the server never tells us to open look identical from in front of
         // it. A lift door is meant to cycle at each level; if these lines
@@ -2244,7 +2240,9 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     // own plays its Stand, a door with only its opening holds it at the end.
     // ACTIVE used to play Open, which Dalaran's centre fountain lacks, so it
     // froze on the crystal instead of showing Tirion's statue.
-    const auto has = [&](uint32_t animationId) { return m2->hasAnimation(instanceId, animationId); };
+    const auto has = [&](uint32_t animationId) {
+        return scene().models().hasAnimation(instanceId, animationId);
+    };
     const auto to = static_cast<rendering::GoState>(goState);
     const rendering::GoAnimationPlan plan = it->second.goState
         ? rendering::goAnimationOnChange(static_cast<rendering::GoState>(*it->second.goState), to, has)
@@ -2267,7 +2265,7 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
         }
     }
     it->second.goState = goState;
-    if (!m2->playInstanceAnimation(instanceId, plan.now, plan.next)) {
+    if (!scene().models().playInstanceAnimation(instanceId, plan.now, plan.next)) {
         static std::unordered_set<uint32_t> saidMissing;
         if (saidMissing.insert(it->second.modelId).second) {
             LOG_WARNING("GameObject guid=0x", std::hex, guid, std::dec, " state ",
@@ -2318,13 +2316,9 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
 
     if (renderer_) {
         if (it->second.isWmo) {
-            if (auto* wmoRenderer = renderer_->getWMORenderer()) {
-                wmoRenderer->removeInstance(it->second.instanceId);
-            }
+            scene().worldModels().removeInstance(it->second.instanceId);
         } else {
-            if (auto* m2Renderer = renderer_->getM2Renderer()) {
-                m2Renderer->removeInstance(it->second.instanceId);
-            }
+            scene().models().removeInstance(it->second.instanceId);
         }
     }
 

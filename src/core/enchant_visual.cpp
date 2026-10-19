@@ -4,7 +4,6 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "rendering/character_renderer.hpp"
 
 #include <mutex>
 #include <string>
@@ -55,11 +54,11 @@ EnchantVisualModels resolveEnchantVisualModels(pipeline::AssetManager& assets, u
                                                effectsDbc.get(), sieL);
 }
 
-void attachEnchantVisuals(rendering::CharacterRenderer& renderer, pipeline::AssetManager& assets,
+void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, pipeline::AssetManager& assets,
                           uint32_t charInstanceId, uint32_t attachmentId, uint32_t enchantId,
                           const EnchantModelLoader& loadModel,
                           const std::function<uint32_t()>& allocateModelId) {
-    renderer.detachWeaponEffects(charInstanceId, attachmentId);
+    characters.detachWeaponEffects(charInstanceId, attachmentId);
     if (enchantId == 0) return;
 
     const EnchantVisualModels models = resolveEnchantVisualModels(assets, enchantId);
@@ -77,8 +76,8 @@ void attachEnchantVisuals(rendering::CharacterRenderer& renderer, pipeline::Asse
             continue;
         }
 
-        if (renderer.attachWeaponEffect(charInstanceId, attachmentId, visualSlot, model,
-                                        allocateModelId())) {
+        if (characters.attachWeaponEffect(charInstanceId, attachmentId, visualSlot, model,
+                                          allocateModelId())) {
             LOG_DEBUG("Enchant visual: ", path, " on attachment ", attachmentId,
                       " (enchant ", enchantId, ", visual slot ", visualSlot, ")");
         }

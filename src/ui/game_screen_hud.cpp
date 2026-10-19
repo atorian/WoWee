@@ -18,6 +18,7 @@
 #include "core/coordinates.hpp"
 #include "core/input.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -367,7 +368,7 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         for (uint16_t g : sorted) list += " " + std::to_string(g);
         LOG_INFO("Player geosets:", list);
     }
-    charRenderer->setActiveGeosets(instanceId, geosets);
+    renderer->scene().characters().setActiveGeosets(instanceId, geosets);
 }
 
 void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
@@ -451,7 +452,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     uint32_t instanceId = renderer->getCharacterInstanceId();
     rendering::TextureRef newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
     if (newTex && instanceId != 0) {
-        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);
+        renderer->scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);
     }
 
     // Cloak cape texture - separate from skin atlas, uses texture slot type-2 (Object Skin)
@@ -489,7 +490,8 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
                     for (const auto& capePath : pipeline::capeTextureCandidates(capeName, isFemale)) {
                         rendering::TextureRef capeTex = charRenderer->loadTexture(capePath);
                         if (!capeTex || capeTex == charRenderer->whiteTexture()) continue;
-                        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(cloakSlot), capeTex);
+                        renderer->scene().characters().setTextureSlotOverride(
+                            instanceId, static_cast<uint16_t>(cloakSlot), capeTex);
                         LOG_INFO("Cloak texture applied: ", capePath);
                         break;
                     }
@@ -497,7 +499,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
             }
         } else {
             // No cloak equipped - clear override so model's default (white) shows
-            charRenderer->clearTextureSlotOverride(instanceId, static_cast<uint16_t>(cloakSlot));
+            renderer->scene().characters().clearTextureSlotOverride(instanceId, static_cast<uint16_t>(cloakSlot));
         }
     }
 }

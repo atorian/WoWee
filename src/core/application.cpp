@@ -53,6 +53,7 @@
 #include "core/logger.hpp"
 #include "core/memory_monitor.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/loading_screen.hpp"
 #include "core/frame_observer.hpp"
 #include "rendering/loot_sparkles.hpp"
@@ -614,9 +615,9 @@ bool Application::initialize() {
                     if (batch.shader == 0 && batch.textureCount == 2) batch.textureCount = 1;
             }
             if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0101)) return false;
-            const auto fountain = renderer->getM2Renderer()->createInstance(
+            const auto fountain = renderer->scene().models().createInstance(
                 0xFFFF0101, glm::vec3(5818.0f, 405.0f, 650.0f));
-            renderer->getM2Renderer()->restartInstanceAnimation(fountain);
+            renderer->scene().models().restartInstanceAnimation(fountain);
             renderer->getCamera()->setPosition(glm::vec3(5780.0f, 405.0f, 663.0f));
             renderer->getCamera()->setRotation(0.0f, 3.0f);
             renderer->getM2Renderer()->update(0.0f, renderer->getCamera()->getViewMatrix(),
@@ -637,14 +638,14 @@ bool Application::initialize() {
                     return false;
             }
             if (!renderer->getWMORenderer()->loadModel(city, 0xFFFF0201)) return false;
-            renderer->getWMORenderer()->createInstance(0xFFFF0201, glm::vec3(5818.0f, 405.0f, 650.0f));
+            renderer->scene().worldModels().createInstance(0xFFFF0201, glm::vec3(5818.0f, 405.0f, 650.0f));
             const std::string lampPath = "World/Expansion02/Doodads/Dalaran/Dalaran_Lamppost01.m2";
             auto lamp = pipeline::M2Loader::load(assetManager->readFile(lampPath));
             lamp.name = lampPath;
             if (!pipeline::M2Loader::loadSkin(assetManager->readFile(pipeline::skinPathForM2(lampPath)), lamp))
                 return false;
             if (!renderer->getM2Renderer()->loadModel(lamp, 0xFFFF0202)) return false;
-            renderer->getM2Renderer()->createInstance(0xFFFF0202, glm::vec3(5779.0f, 292.0f, 655.0f));
+            renderer->scene().models().createInstance(0xFFFF0202, glm::vec3(5779.0f, 292.0f, 655.0f));
             renderer->getCharacterPosition() = glm::vec3(5775.0f, 291.0f, 650.0f);
             renderer->getCamera()->setPosition(glm::vec3(5775.0f, 288.0f, 660.0f));
             renderer->getCamera()->setRotation(90.0f, 0.0f);
@@ -686,7 +687,7 @@ bool Application::initialize() {
                     }
                 }
                 if (!renderer->getWMORenderer()->loadModel(wmo, 0xFFFF0301)) return false;
-                renderer->getWMORenderer()->createInstance(0xFFFF0301, origin);
+                renderer->scene().worldModels().createInstance(0xFFFF0301, origin);
                 boundMin = wmo.boundingBoxMin;
                 boundMax = wmo.boundingBoxMax;
                 LOG_INFO("Model probe: ", path, " groups=", wmo.nGroups, " materials=", wmo.materials.size());
@@ -704,7 +705,7 @@ bool Application::initialize() {
                 if (core::envFlagEnabled("WOWEE_PROBE_CHARACTER", false)) {
                     auto* characters = renderer->getCharacterRenderer();
                     if (!characters->loadModel(model, 0xFFFF0301)) return false;
-                    const uint32_t instance = characters->createInstance(0xFFFF0301, origin);
+                    const uint32_t instance = renderer->scene().characters().createInstance(0xFFFF0301, origin);
                     // WOWEE_PROBE_ANIM=<animation id> plays that one instead
                     // of the first sequence: a mount walks (4) or runs (5).
                     if (const char* anim = std::getenv("WOWEE_PROBE_ANIM"); anim && *anim) {
@@ -713,7 +714,7 @@ bool Application::initialize() {
                             LOG_ERROR("Model probe: ", path, " has no animation ", animId);
                             return false;
                         }
-                        characters->playAnimation(instance, animId, true);
+                        renderer->scene().characters().playAnimation(instance, animId, true);
                     }
                     // WOWEE_PROBE_WEAPON=<ItemDisplayInfo id> puts that weapon
                     // in the right hand (a character model is the one to
@@ -740,7 +741,7 @@ bool Application::initialize() {
                         }
                         const std::string weaponTexture = art.textureName.empty() ? std::string()
                             : "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
-                        if (!characters->attachWeapon(instance, kRightHand, weaponModel, 0xFFFF0302,
+                        if (!renderer->scene().characters().attachWeapon(instance, kRightHand, weaponModel, 0xFFFF0302,
                                                       weaponTexture)) {
                             LOG_ERROR("Model probe: ", path, " cannot hold weapon display ", displayId);
                             return false;
@@ -750,7 +751,7 @@ bool Application::initialize() {
                             enchant = static_cast<uint32_t>(std::stoul(e));
                         uint32_t nextEffectModel = 0xFFFF0310;
                         attachEnchantVisuals(
-                            *characters, *assetManager, instance, kRightHand, enchant,
+                            renderer->scene().characters(), *assetManager, instance, kRightHand, enchant,
                             [&](const std::string& p, pipeline::M2Model& m) {
                                 return pipeline::loadM2WithSkin(*assetManager, p, m);
                             },
@@ -759,7 +760,7 @@ bool Application::initialize() {
                     }
                 } else {
                     if (!renderer->getM2Renderer()->loadModel(model, 0xFFFF0301)) return false;
-                    renderer->getM2Renderer()->createInstance(0xFFFF0301, origin);
+                    renderer->scene().models().createInstance(0xFFFF0301, origin);
                 }
                 // From the vertices: the header's box is not always filled in,
                 // and a doodad is often modelled well away from its origin.
@@ -3429,7 +3430,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // actually was.
 
             if (posIt == _creatureRenderPosCache.end()) {
-                charRenderer->setInstancePosition(instanceId, renderPos);
+                renderer->scene().characters().setInstancePosition(instanceId, renderPos);
                 _creatureRenderPosCache[guid] = renderPos;
             } else {
                 const glm::vec3 prevPos = posIt->second;
@@ -3459,12 +3460,12 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 const bool isMovingNow =
                     !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
                 if (deadOrCorpse || largeCorrection) {
-                    charRenderer->setInstancePosition(instanceId, renderPos);
+                    renderer->scene().characters().setInstancePosition(instanceId, renderPos);
                 } else if (planarDistSq > kMoveThreshSq || dz > 0.08f) {
                     // Entity::updateMovement already evaluates the server spline for
                     // this frame. Copy the evaluated position directly; animation
                     // transitions remain driven below.
-                    charRenderer->setInstancePosition(instanceId, renderPos);
+                    renderer->scene().characters().setInstancePosition(instanceId, renderPos);
                 }
                 posIt->second = renderPos;
 
@@ -3517,12 +3518,12 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                                 }
                             }
                         }
-                        charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
+                        renderer->scene().characters().playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
                 }
             }
             float renderYaw = entity->getOrientation() + glm::radians(90.0f);
-            charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
+            renderer->scene().characters().setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
         }
     }
     {
@@ -3631,21 +3632,21 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 // height guessed from the model's tallest vertex put riders
                 // in the air over handlebars and on the ground beside a long
                 // serpent.
-                charRenderer->setInstancePosition(remoteMount->instanceId, renderPos);
-                charRenderer->setInstanceRotation(remoteMount->instanceId,
+                renderer->scene().characters().setInstancePosition(remoteMount->instanceId, renderPos);
+                renderer->scene().characters().setInstanceRotation(remoteMount->instanceId,
                                                   glm::vec3(0.0f, 0.0f, renderYaw));
                 glm::mat4 seat(1.0f);
                 if (charRenderer->getAttachmentTransform(remoteMount->instanceId,
                                                          EntitySpawner::kMountSeatAttachment, seat)) {
-                    charRenderer->setInstancePosition(
+                    renderer->scene().characters().setInstancePosition(
                         instanceId, glm::vec3(seat[3]) + glm::vec3(0.0f, 0.0f, EntitySpawner::kMountSeatLift));
                 } else {
                     // A model without a saddle point, reported when it loaded.
-                    charRenderer->setInstancePosition(
+                    renderer->scene().characters().setInstancePosition(
                         instanceId, renderPos + glm::vec3(0.0f, 0.0f, remoteMount->riderHeight));
                 }
             } else {
-                charRenderer->setInstancePosition(instanceId, renderPos);
+                renderer->scene().characters().setInstancePosition(instanceId, renderPos);
             }
             bool posChanging = false;
             if (previousRenderPos) {
@@ -3699,9 +3700,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
             // reports plays its animation faster too, so strides keep to the
             // ground covered and a jump lands where it lands.
             const float playbackRate = reported ? reported->playbackRate() : 1.0f;
-            charRenderer->setInstanceAnimationSpeed(instanceId, playbackRate);
+            renderer->scene().characters().setInstanceAnimationSpeed(instanceId, playbackRate);
             if (remoteMount) {
-                charRenderer->setInstanceAnimationSpeed(remoteMount->instanceId, playbackRate);
+                renderer->scene().characters().setInstanceAnimationSpeed(remoteMount->instanceId, playbackRate);
             }
 
             if (!dead && remoteMount) {
@@ -3720,7 +3721,7 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     mountAnim = travelling ? rendering::anim::RUN : rendering::anim::STAND;
                 }
                 if (mountAnim != loco.playedMountAnim) {
-                    charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
+                    renderer->scene().characters().playAnimation(remoteMount->instanceId, mountAnim, true);
                     loco.playedMountAnim = mountAnim;
                 }
                 // Server emotes and state updates can arrive after the mount
@@ -3728,14 +3729,14 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 // mount field is authoritative, so the pose is repaired
                 // whatever replaced it.
                 if (!haveAnimState || curAnimId != rendering::anim::MOUNT) {
-                    charRenderer->playAnimation(instanceId, rendering::anim::MOUNT, true);
+                    renderer->scene().characters().playAnimation(instanceId, rendering::anim::MOUNT, true);
                 }
                 loco.playedCharacterAnim = rendering::anim::MOUNT;
             } else if (!dead && isFlyingNow) {
                 const uint32_t flyAnim = travelling ? rendering::anim::FLY_FORWARD
                                                     : rendering::anim::FLY_IDLE;
                 if (flyAnim != loco.playedCharacterAnim) {
-                    charRenderer->playAnimation(instanceId, flyAnim, true);
+                    renderer->scene().characters().playAnimation(instanceId, flyAnim, true);
                     loco.playedCharacterAnim = flyAnim;
                 }
             } else if (!dead) {
@@ -3756,13 +3757,13 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 in.currentAnimDuration = curAnimDuration;
                 const rendering::AnimOutput out = loco.fsm.resolve(in, loco.caps);
                 if (out.valid && out.animId != loco.playedCharacterAnim) {
-                    charRenderer->playAnimation(instanceId, out.animId, out.loop);
+                    renderer->scene().characters().playAnimation(instanceId, out.animId, out.loop);
                     loco.playedCharacterAnim = out.animId;
                 }
             }
 
             // Orientation sync
-            charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
+            renderer->scene().characters().setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
         }
     }
     {
@@ -4333,6 +4334,14 @@ bool Application::scenePending() const {
     return entitySpawner_ && entitySpawner_->hasWorkPending();
 }
 
+void Application::applySceneChanges() {
+    if (!renderer) return;
+    const auto start = std::chrono::steady_clock::now();
+    renderer->applySceneCommands();
+    noteStage("scene changes", std::chrono::duration<float, std::milli>(
+                                   std::chrono::steady_clock::now() - start).count());
+}
+
 void Application::present(float deltaTime, const FramePlan& plan) {
     // WOWEE_MODEL_PROBE has no world, so nothing else moves its model: its
     // animation plays and its particles fly here, WOWEE_PROBE_SECONDS (6 by
@@ -4391,7 +4400,7 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                 }
                 if (floor) feet.z = *floor + 0.03f;
                 renderer->getCharacterPosition() = feet;
-                renderer->getCharacterRenderer()->setInstancePosition(renderer->getCharacterInstanceId(), feet);
+                renderer->scene().characters().setInstancePosition(renderer->getCharacterInstanceId(), feet);
                 renderer->getCamera()->setPosition(feet + glm::vec3(-4.0f, 0.0f, 6.0f));
                 renderer->getCamera()->setRotation(0.0f, -55.0f);
             }
@@ -4403,7 +4412,7 @@ void Application::present(float deltaTime, const FramePlan& plan) {
                         1676.0f, -4315.0f, 75.0f, nullptr, 61.0f).value_or(61.0f);
                     const glm::vec3 feet(1676.0f, -4315.0f, floorZ + 0.03f);
                     renderer->getCharacterPosition() = feet;
-                    renderer->getCharacterRenderer()->setInstancePosition(
+                    renderer->scene().characters().setInstancePosition(
                         renderer->getCharacterInstanceId(), feet);
                     renderer->getCamera()->setPosition(feet + glm::vec3(-12.0f, 0.0f, 5.0f));
                     renderer->getCamera()->setRotation(0.0f, -12.0f);
@@ -5756,7 +5765,7 @@ void Application::spawnPlayerCharacter() {
             spawnPos.z = *terrainH + 0.1f;
         }
     }
-    uint32_t instanceId = charRenderer->createInstance(1, spawnPos,
+    uint32_t instanceId = renderer->scene().characters().createInstance(1, spawnPos,
         glm::vec3(0.0f), 1.0f);  // Scale 1.0 = normal WoW character size
 
     if (instanceId > 0) {
@@ -5780,14 +5789,14 @@ void Application::spawnPlayerCharacter() {
 	        auto activeGeosets = appearanceComposer_
 	            ? appearanceComposer_->buildDefaultPlayerGeosets(raceId, sexId, hairStyleId, facialId)
 	            : std::unordered_set<uint16_t>{};
-	        charRenderer->setActiveGeosets(instanceId, activeGeosets);
+	        renderer->scene().characters().setActiveGeosets(instanceId, activeGeosets);
 	        // The player's type 8 slot is filled from CharSections by
 	        // resolvePlayerTextures above, so the head-detail batch has art to
 	        // draw and is worth drawing. Nothing else is set up for it.
-	        charRenderer->setDrawSkinExtra(instanceId, true);
+	        renderer->scene().characters().setDrawSkinExtra(instanceId, true);
 
         // Play idle animation
-        charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        renderer->scene().characters().playAnimation(instanceId, rendering::anim::STAND, true);
         LOG_INFO("Spawned player character at (",
                 static_cast<int>(spawnPos.x), ", ",
                 static_cast<int>(spawnPos.y), ", ",
@@ -5855,7 +5864,7 @@ void Application::refreshPlayerCharacterModel() {
         if (oldInst > 0) {
             playerView_->setCharacterFollow(0);
             if (auto* ac = getAnimationController()) ac->clearMount();
-            renderer->getCharacterRenderer()->removeInstance(oldInst);
+            renderer->scene().characters().removeInstance(oldInst);
         }
     }
     playerModel = {};
@@ -5894,14 +5903,14 @@ void Application::setPressedGameObject(uint64_t guid) {
     if (!m2) return;
     // Cleared first, always: a press that moves from one object to another has
     // to take the light off the first, and the release clears with guid 0.
-    m2->clearInstanceHighlights();
+    renderer->scene().models().clearInstanceHighlights();
     if (guid == 0 || !entitySpawner_ || !entitySpawner_->hasMap()) return;
     const auto& objects = entitySpawner_->getGameObjectInstances();
     auto it = objects.find(guid);
     // A building drawn as a WMO has no M2 instance to light; it keeps the
     // cursor and the name, which is what it had before.
     if (it == objects.end() || it->second.isWmo) return;
-    m2->setInstanceHighlight(it->second.instanceId, 1.0f);
+    renderer->scene().models().setInstanceHighlight(it->second.instanceId, 1.0f);
 }
 
 bool Application::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const {
@@ -6170,7 +6179,7 @@ void Application::setupTestTransport() {
     glm::vec3 startCanonical = harborPath[0];
     glm::vec3 startRender = core::coords::canonicalToRender(startCanonical);
 
-    uint32_t wmoInstanceId = wmoRenderer->createInstance(wmoModelId, startRender,
+    uint32_t wmoInstanceId = renderer->scene().worldModels().createInstance(wmoModelId, startRender,
                                                           glm::vec3(0.0f, 0.0f, 0.0f), 1.0f);
 
     if (wmoInstanceId == 0) {

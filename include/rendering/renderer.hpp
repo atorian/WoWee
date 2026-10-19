@@ -65,6 +65,7 @@ class MountDust;
 class LevelUpEffect;
 class ChargeEffect;
 class CharacterRenderer;
+class SceneCommands;
 class CharacterEmitters;
 class WMORenderer;
 class M2Renderer;
@@ -214,6 +215,11 @@ public:
     uint32_t precipitationCount() const;
     /// The wind as everything that moves in it reads it.
     const WindState& windState() const { return wind_.state(); }
+    /// The one way the client changes the scene (scene_commands.hpp).
+    SceneCommands& scene() { return *scene_; }
+    /// Makes the changes asked of scene() now: at the start of the frame's
+    /// Present, and first thing in update().
+    void applySceneCommands();
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
@@ -448,6 +454,7 @@ private:
     std::unique_ptr<CorpseBones> corpseBones_;
     std::unique_ptr<ChargeEffect> chargeEffect;
     std::unique_ptr<CharacterRenderer> characterRenderer;
+    std::unique_ptr<SceneCommands> scene_;
     /// The frame's point lights, gathered before anything draws and read by every
     /// renderer's draws (local_lights.hpp).
     std::vector<LocalLight> frameLocalLights_;

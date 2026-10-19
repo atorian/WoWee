@@ -1996,8 +1996,13 @@ void CharacterRenderer::calculateBindPose(M2ModelGPU& gpuModel) {
     }
 }
 
+bool CharacterRenderer::hasModel(uint32_t modelId) const {
+    return models.find(modelId) != models.end();
+}
+
 uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& position,
-                                           const glm::vec3& rotation, float scale) {
+                                           const glm::vec3& rotation, float scale,
+                                           uint32_t reservedId) {
     auto modelIt = models.find(modelId);
     if (modelIt == models.end()) {
         core::Logger::getInstance().error("Cannot create instance: model ", modelId, " not loaded");
@@ -2005,7 +2010,7 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     }
 
     CharacterInstance instance;
-    instance.id = nextInstanceId++;
+    instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.modelId = modelId;
     instance.position = position;
     instance.rotation = rotation;
@@ -3992,8 +3997,11 @@ bool CharacterRenderer::hasAnimation(uint32_t instanceId, uint32_t animationId) 
     if (it == scene_->instances.end()) {
         return false;
     }
+    return modelHasAnimation(it->second.modelId, animationId);
+}
 
-    auto modelIt = models.find(it->second.modelId);
+bool CharacterRenderer::modelHasAnimation(uint32_t modelId, uint32_t animationId) const {
+    auto modelIt = models.find(modelId);
     if (modelIt == models.end()) {
         return false;
     }
@@ -4104,21 +4112,22 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
         core::Logger::getInstance().warning("attachWeapon: character instance ", charInstanceId, " not found");
         return false;
     }
-    auto& charInstance = charIt->second;
-    auto charModelIt = models.find(charInstance.modelId);
-    if (charModelIt == models.end()) return false;
-
-    // Find bone index for this attachment point
-    uint16_t boneIndex = 0;
-    glm::vec3 offset(0.0f);
-    if (!findAttachmentBone(charInstance.modelId, attachmentId, boneIndex, offset)) {
+    if (!hasAttachmentPoint(charIt->second.modelId, attachmentId)) {
         core::Logger::getInstance().warning("attachWeapon: no bone found for attachment ", attachmentId);
         return false;
     }
+    if (!prepareWeaponModel(weaponModel, weaponModelId, texturePath)) return false;
+    return attachLoadedWeapon(charInstanceId, attachmentId, weaponModelId, localTransform);
+}
 
-    // Remove existing weapon at this attachment point
-    detachWeapon(charInstanceId, attachmentId);
+bool CharacterRenderer::hasAttachmentPoint(uint32_t modelId, uint32_t attachmentId) const {
+    uint16_t boneIndex = 0;
+    glm::vec3 offset(0.0f);
+    return findAttachmentBone(modelId, attachmentId, boneIndex, offset);
+}
 
+bool CharacterRenderer::prepareWeaponModel(const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
+                                           const std::string& texturePath) {
     // Load weapon model into renderer
     if (models.find(weaponModelId) == models.end()) {
         if (!loadModel(weaponModel, weaponModelId)) {
@@ -4154,6 +4163,31 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
             }
         }
     }
+    return true;
+}
+
+bool CharacterRenderer::attachLoadedWeapon(uint32_t charInstanceId, uint32_t attachmentId,
+                                           uint32_t weaponModelId, const glm::mat4& localTransform) {
+    auto charIt = scene_->instances.find(charInstanceId);
+    if (charIt == scene_->instances.end()) {
+        core::Logger::getInstance().warning("attachWeapon: character instance ", charInstanceId,
+                                            " is gone; weapon model ", weaponModelId, " not attached");
+        return false;
+    }
+    uint16_t boneIndex = 0;
+    glm::vec3 offset(0.0f);
+    if (!findAttachmentBone(charIt->second.modelId, attachmentId, boneIndex, offset)) {
+        core::Logger::getInstance().warning("attachWeapon: no bone found for attachment ", attachmentId);
+        return false;
+    }
+    if (models.find(weaponModelId) == models.end()) {
+        core::Logger::getInstance().warning("attachWeapon: weapon model ", weaponModelId,
+                                            " is not loaded; nothing attached at ", attachmentId);
+        return false;
+    }
+
+    // Remove existing weapon at this attachment point
+    detachWeapon(charInstanceId, attachmentId);
 
     // Create weapon instance
     uint32_t weaponInstanceId = createInstance(weaponModelId, glm::vec3(0.0f));
@@ -4174,7 +4208,7 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     wa.boneIndex = boneIndex;
     wa.offset = offset;
     wa.localTransform = localTransform;
-    charInstance.weaponAttachments.push_back(wa);
+    scene_->instances.at(charInstanceId).weaponAttachments.push_back(wa);
 
     core::Logger::getInstance().debug("Attached weapon model ", weaponModelId,
         " to instance ", charInstanceId, " at attachment ", attachmentId,
@@ -4366,6 +4400,18 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
                                            uint32_t visualSlot,
                                            const pipeline::M2Model& effectModel,
                                            uint32_t effectModelId) {
+    if (models.find(effectModelId) == models.end()) {
+        if (!loadModel(effectModel, effectModelId)) {
+            core::Logger::getInstance().warning("attachWeaponEffect: failed to load effect model ",
+                                                effectModelId);
+            return false;
+        }
+    }
+    return attachLoadedWeaponEffect(charInstanceId, attachmentId, visualSlot, effectModelId);
+}
+
+bool CharacterRenderer::attachLoadedWeaponEffect(uint32_t charInstanceId, uint32_t attachmentId,
+                                                 uint32_t visualSlot, uint32_t effectModelId) {
     auto charIt = scene_->instances.find(charInstanceId);
     if (charIt == scene_->instances.end()) return false;
 
@@ -4375,13 +4421,10 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
                                  return wa.attachmentId == attachmentId;
                              });
     if (waIt == attachments.end()) return false;  // no weapon to hang the effect on
-
     if (models.find(effectModelId) == models.end()) {
-        if (!loadModel(effectModel, effectModelId)) {
-            core::Logger::getInstance().warning("attachWeaponEffect: failed to load effect model ",
-                                                effectModelId);
-            return false;
-        }
+        core::Logger::getInstance().warning("attachWeaponEffect: effect model ", effectModelId,
+                                            " is not loaded; nothing hung at ", attachmentId);
+        return false;
     }
 
     // The ItemVisuals slot names the attachment point on the weapon model itself.

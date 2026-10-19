@@ -169,7 +169,11 @@ public:
      */
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                            const glm::vec3& rotation = glm::vec3(0.0f),
-                           float scale = 1.0f);
+                           float scale = 1.0f, uint32_t reservedId = 0);
+    /// An id no instance has, for one SceneCommands will create at the apply
+    /// point (createInstance's reservedId): the caller has it now, the
+    /// instance from then on.
+    uint32_t reserveInstanceId() { return nextInstanceId++; }
 
     /**
      * Update the world position of an existing instance (e.g., for transports)
@@ -227,6 +231,8 @@ public:
     /// can tell when the set has grown and re-apply. A doodad lacking the
     /// sequence is left as it is.
     size_t setInstanceDoodadAnimation(uint32_t instanceId, uint32_t animationId, bool loop);
+    /// How many child doodads an instance has (addDoodadToInstance).
+    [[nodiscard]] size_t instanceDoodadCount(uint32_t instanceId) const;
     const std::vector<DoodadTemplate>* getDoodadTemplates(uint32_t modelId) const;
 
     /**
@@ -407,10 +413,13 @@ public:
                                             std::numeric_limits<float>::quiet_NaN(),
                                         bool* outFacesUp = nullptr) const;
 
-    /** Query floor collision from one moving WMO instance. */
+    /** Query floor collision from one moving WMO instance. `placement`, when
+     *  given, is where its owner has it this frame - a transport moved since
+     *  the scene's changes were last made - rather than where it last stood. */
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
                                                 float glX, float glY, float glZ,
-                                                float* outNormalZ = nullptr) const;
+                                                float* outNormalZ = nullptr,
+                                                const glm::mat4* placement = nullptr) const;
 
     /** Dump diagnostic info about WMO groups overlapping a position */
     void debugDumpGroupsAtPosition(float glX, float glY, float glZ) const;

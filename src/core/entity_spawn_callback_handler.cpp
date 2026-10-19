@@ -3,6 +3,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -112,14 +113,13 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         auto it = goInstances.find(guid);
         if (it == goInstances.end()) return;
         auto& info = it->second;
-        if (!info.isWmo) {
-            if (auto* m2r = renderer_ ? renderer_->getM2Renderer() : nullptr) {
-                // Play the custom animation as a one-shot if model supports it
-                if (m2r->hasAnimation(info.instanceId, animId))
-                    m2r->setInstanceAnimation(info.instanceId, animId, false);
-                else
-                    m2r->setInstanceAnimationFrozen(info.instanceId, false);
-            }
+        if (!info.isWmo && renderer_) {
+            auto& models = renderer_->scene().models();
+            // Play the custom animation as a one-shot if model supports it
+            if (models.hasAnimation(info.instanceId, animId))
+                models.setInstanceAnimation(info.instanceId, animId, false);
+            else
+                models.setInstanceAnimationFrozen(info.instanceId, false);
         }
     });
 
@@ -151,7 +151,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         const uint32_t targetAnim = walking ? rendering::anim::WALK : rendering::anim::RUN;
         // Only restart when the selected locomotion animation changed.
         if (!gotState || (curAnimId != rendering::anim::DEATH && curAnimId != targetAnim)) {
-            cr->playAnimation(instanceId, targetAnim, /*loop=*/true);
+            renderer_->scene().characters().playAnimation(instanceId, targetAnim, /*loop=*/true);
         }
         entitySpawner_.getCreatureWasMoving()[guid] = true;
     });
@@ -167,18 +167,14 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         auto& info = it->second;
         if (!renderer_) return;
         if (info.isWmo) {
-            if (auto* wr = renderer_->getWMORenderer()) {
-                glm::mat4 transform(1.0f);
-                transform = glm::translate(transform, renderPos);
-                transform = glm::rotate(transform, orientation, glm::vec3(0, 0, 1));
-                wr->setInstanceTransform(info.instanceId, transform);
-            }
+            glm::mat4 transform(1.0f);
+            transform = glm::translate(transform, renderPos);
+            transform = glm::rotate(transform, orientation, glm::vec3(0, 0, 1));
+            renderer_->scene().worldModels().setInstanceTransform(info.instanceId, transform);
         } else {
-            if (auto* mr = renderer_->getM2Renderer()) {
-                glm::mat4 transform(1.0f);
-                transform = glm::translate(transform, renderPos);
-                mr->setInstanceTransform(info.instanceId, transform);
-            }
+            glm::mat4 transform(1.0f);
+            transform = glm::translate(transform, renderPos);
+            renderer_->scene().models().setInstanceTransform(info.instanceId, transform);
         }
     });
 }

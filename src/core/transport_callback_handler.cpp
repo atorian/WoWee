@@ -6,6 +6,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/camera_controller.hpp"
@@ -38,7 +39,7 @@ void TransportCallbackHandler::setupCallbacks() {
         if (mountDisplayId == 0) {
             // Dismount is instant (no loading needed)
             if (renderer_.getCharacterRenderer() && entitySpawner_.getMountInstanceId() != 0) {
-                renderer_.getCharacterRenderer()->removeInstance(entitySpawner_.getMountInstanceId());
+                renderer_.scene().characters().removeInstance(entitySpawner_.getMountInstanceId());
                 entitySpawner_.clearMountState();
             }
             entitySpawner_.setMountDisplayId(0);

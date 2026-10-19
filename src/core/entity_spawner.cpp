@@ -10,6 +10,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/character_renderer.hpp"
@@ -49,6 +50,10 @@ namespace core {
 // copy had been taught about.
 //
 // One definition, so the next correction cannot land in only half the client.
+
+rendering::SceneCommands& EntitySpawner::scene() {
+    return renderer_->scene();
+}
 
 // --- Constructor / Destructor ---
 
@@ -144,7 +149,7 @@ void EntitySpawner::syncCreatureStealthVisuals() {
         if (!inserted && it->second == stealthed) continue;
 
         it->second = stealthed;
-        characterRenderer->setInstanceOpacity(
+        scene().characters().setInstanceOpacity(
             instanceId, stealthed ? kDetectedStealthOpacity : 1.0f);
     }
 }
@@ -161,9 +166,7 @@ bool EntitySpawner::hasWorkPending() const {
 void EntitySpawner::clearMountState() {
     if (!spawns_) return;
     if (spawns_->mountInstanceId_ != 0 && renderer_) {
-        if (auto* charRenderer = renderer_->getCharacterRenderer()) {
-            charRenderer->removeInstance(spawns_->mountInstanceId_);
-        }
+        scene().characters().removeInstance(spawns_->mountInstanceId_);
     }
     spawns_->mountInstanceId_ = 0;
     spawns_->mountModelId_ = 0;
@@ -198,14 +201,15 @@ void EntitySpawner::removeRemotePlayerForm(uint64_t guid) {
         // The body goes back where the form was, facing the same way.
         if (cr) {
             glm::vec3 pos(0.0f);
+            auto& characters = scene().characters();
             if (cr->getInstancePosition(form.formInstanceId, pos))
-                cr->setInstancePosition(form.characterInstanceId, pos);
-            cr->setInstanceVisible(form.characterInstanceId, true);
-            cr->playAnimation(form.characterInstanceId, rendering::anim::STAND, true);
+                characters.setInstancePosition(form.characterInstanceId, pos);
+            characters.setInstanceVisible(form.characterInstanceId, true);
+            characters.playAnimation(form.characterInstanceId, rendering::anim::STAND, true);
         }
         playerIt->second = form.characterInstanceId;
     }
-    if (cr && form.formInstanceId != 0) cr->removeInstance(form.formInstanceId);
+    if (cr && form.formInstanceId != 0) scene().characters().removeInstance(form.formInstanceId);
     // The movement state was the form's; the body's animation is chosen afresh.
     spawns_->creatureWasMoving_.erase(guid);
     spawns_->creatureWasFlying_.erase(guid);
@@ -217,12 +221,11 @@ void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
     auto it = spawns_->remotePlayerMounts_.find(guid);
     if (it == spawns_->remotePlayerMounts_.end()) return;
     if (renderer_) {
-        if (auto* cr = renderer_->getCharacterRenderer()) {
-            if (it->second.instanceId != 0) cr->removeInstance(it->second.instanceId);
-            auto playerIt = spawns_->playerInstances_.find(guid);
-            if (playerIt != spawns_->playerInstances_.end()) {
-                cr->playAnimation(playerIt->second, rendering::anim::STAND, true);
-            }
+        auto& characters = scene().characters();
+        if (it->second.instanceId != 0) characters.removeInstance(it->second.instanceId);
+        auto playerIt = spawns_->playerInstances_.find(guid);
+        if (playerIt != spawns_->playerInstances_.end()) {
+            characters.playAnimation(playerIt->second, rendering::anim::STAND, true);
         }
     }
     spawns_->remotePlayerMounts_.erase(it);
@@ -445,7 +448,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         const std::string attachmentKey = m2Path + '|' + texturePath;
         auto [cachedId, inserted] = assets_.attachmentModelIds_.try_emplace(attachmentKey, 0);
         if (inserted) cachedId->second = assets_.nextWeaponModelId_++;
-        return charRenderer->attachWeapon(instanceId, attachmentId,
+        return scene().characters().attachWeapon(instanceId, attachmentId,
             weaponModel, cachedId->second, texturePath);
     };
 
@@ -490,7 +493,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
     }
 
     // Force off-hand clear in NPC path to avoid incorrect shields/placeholder hilts.
-    charRenderer->detachWeapon(instanceId, 2);
+    scene().characters().detachWeapon(instanceId, 2);
     // Success if main-hand attached when there was at least one candidate.
     return hadWeaponCandidate && attachedMain;
 }
@@ -1234,7 +1237,7 @@ void EntitySpawner::playCreatureSpawnPose(uint64_t guid, uint32_t instanceId) {
 // Spawn in the correct pose. If the server marked this creature dead before
 // the queued spawn was processed, start directly in death animation.
 if (spawns_->deadCreatureGuids_.count(guid)) {
-    charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
+    scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
 } else {
     // Check if this NPC has a persistent emote state (e.g. working, eating, dancing)
     uint32_t npcEmote = 0;
@@ -1253,19 +1256,19 @@ if (spawns_->deadCreatureGuids_.count(guid)) {
             npcEmoteAnim = activeIt->second;
         }
     }
-    if (npcEmoteAnim != 0 && charRenderer->hasAnimation(instanceId, npcEmoteAnim)) {
+    if (npcEmoteAnim != 0 && scene().characters().hasAnimation(instanceId, npcEmoteAnim)) {
         spawns_->creatureActiveEmotes_[guid] = npcEmoteAnim;
-        charRenderer->playAnimation(instanceId, npcEmoteAnim, true);
-    } else if (charRenderer->hasAnimation(instanceId, rendering::anim::BIRTH)) {
+        scene().characters().playAnimation(instanceId, npcEmoteAnim, true);
+    } else if (scene().characters().hasAnimation(instanceId, rendering::anim::BIRTH)) {
         // Play birth animation (one-shot) - will return to STAND after
-        charRenderer->playAnimation(instanceId, rendering::anim::BIRTH, false);
-    } else if (charRenderer->hasAnimation(instanceId, rendering::anim::SPAWN)) {
-        charRenderer->playAnimation(instanceId, rendering::anim::SPAWN, false);
+        scene().characters().playAnimation(instanceId, rendering::anim::BIRTH, false);
+    } else if (scene().characters().hasAnimation(instanceId, rendering::anim::SPAWN)) {
+        scene().characters().playAnimation(instanceId, rendering::anim::SPAWN, false);
     } else {
-        charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        scene().characters().playAnimation(instanceId, rendering::anim::STAND, true);
     }
 }
-charRenderer->startFadeIn(instanceId, 0.5f);
+scene().characters().startFadeIn(instanceId, 0.5f);
 }
 
 // Choose one mesh per clothing group for a character-style NPC.
@@ -1598,7 +1601,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         }
 
         if (!normalizedGeosets.empty()) {
-            charRenderer->setActiveGeosets(instanceId, normalizedGeosets);
+            scene().characters().setActiveGeosets(instanceId, normalizedGeosets);
         }
 
         // Apply cape texture override so the cloak mesh shows the actual cape
@@ -1606,11 +1609,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         if (hasRenderableCape && !capeTexturePath.empty()) {
             rendering::TextureRef capeTex = charRenderer->loadTexture(capeTexturePath);
             if (capeTex && capeTex != charRenderer->whiteTexture()) {
-                charRenderer->setGroupTextureOverride(instanceId, 15, capeTex);
+                scene().characters().setGroupTextureOverride(instanceId, 15, capeTex);
                 if (const auto* md2 = charRenderer->getModelData(modelId)) {
                     for (size_t ti = 0; ti < md2->textures.size(); ti++) {
                         if (md2->textures[ti].type == 2) {
-                            charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), capeTex);
+                            scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), capeTex);
                         }
                     }
                 }
@@ -1647,7 +1650,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         if (hairTex && hairTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 6) {
-                                    charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), hairTex);
+                                    scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), hairTex);
                                 }
                             }
                         }
@@ -1680,7 +1683,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         if (extraTex && extraTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 8) {
-                                    charRenderer->setTextureSlotOverride(
+                                    scene().characters().setTextureSlotOverride(
                                         instanceId, static_cast<uint16_t>(ti), extraTex);
                                     ++extraSlots;
                                 }
@@ -1732,7 +1735,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                                 for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                     uint32_t tt = md->textures[ti].type;
                                     if (tt == 1 || tt == 11) {
-                                        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), skinTex);
+                                        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), skinTex);
                                     }
                                 }
                             }
@@ -2173,7 +2176,6 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
         spawns_->creaturePermanentFailureGuids_.insert(guid);
         return;
     }
-    auto* charRenderer = renderer_->getCharacterRenderer();
 
     // The model must already be in the cache: callers spawn only once the async load
     // has published it. Reading and parsing the M2 here instead would put file I/O on
@@ -2271,7 +2273,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     float renderYaw = orientation + glm::radians(90.0f);
 
     // Create instance (apply server-provided scale from OBJECT_FIELD_SCALE_X)
-    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos,
+    uint32_t instanceId = scene().characters().createInstance(modelId, renderPos,
         glm::vec3(0.0f, 0.0f, renderYaw), scale);
 
     if (instanceId == 0) {

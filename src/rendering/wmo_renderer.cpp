@@ -733,7 +733,7 @@ void WMORenderer::cleanupUnusedModels() {
 }
 
 uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position,
-                                     const glm::vec3& rotation, float scale) {
+                                     const glm::vec3& rotation, float scale, uint32_t reservedId) {
     // Check if model is loaded
     if (loadedModels.find(modelId) == loadedModels.end()) {
         core::Logger::getInstance().error("Cannot create instance of unloaded WMO model ", modelId);
@@ -741,7 +741,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     }
 
     WMOInstance instance;
-    instance.id = nextInstanceId++;
+    instance.id = reservedId != 0 ? reservedId : nextInstanceId++;
     instance.modelId = modelId;
     instance.position = position;
     instance.rotation = rotation;
@@ -915,6 +915,12 @@ size_t WMORenderer::setInstanceDoodadAnimation(uint32_t instanceId, uint32_t ani
         m2Renderer_->setInstanceAnimation(doodad.m2InstanceId, animationId, loop);
     }
     return it->doodads.size();
+}
+
+size_t WMORenderer::instanceDoodadCount(uint32_t instanceId) const {
+    auto it = std::find_if(scene_->instances.begin(), scene_->instances.end(),
+                           [instanceId](const WMOInstance& inst) { return inst.id == instanceId; });
+    return it == scene_->instances.end() ? 0 : it->doodads.size();
 }
 
 const std::vector<WMORenderer::DoodadTemplate>* WMORenderer::getDoodadTemplates(uint32_t modelId) const {
@@ -3063,7 +3069,8 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
 
 std::optional<float> WMORenderer::getInstanceFloorHeight(uint32_t instanceId,
                                                          float glX, float glY, float glZ,
-                                                         float* outNormalZ) const {
+                                                         float* outNormalZ,
+                                                         const glm::mat4* placement) const {
     const auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) {
         return std::nullopt;
@@ -3074,20 +3081,25 @@ std::optional<float> WMORenderer::getInstanceFloorHeight(uint32_t instanceId,
     if (modelIt == loadedModels.end()) return std::nullopt;
     const auto& model = modelIt->second;
 
-    if (!withinWorldBounds(instance, glX, glY, glZ, 2.0f, 4.0f)) {
+    // Where its owner has it this frame, when it says; the world bounds kept
+    // with the instance are where it last stood, so they cannot cut the
+    // search short then - the groups' own boxes below still do.
+    const glm::mat4& modelMatrix = placement ? *placement : instance.modelMatrix;
+    const glm::mat4 invModelMatrix = placement ? glm::inverse(*placement) : instance.invModelMatrix;
+    if (!placement && !withinWorldBounds(instance, glX, glY, glZ, 2.0f, 4.0f)) {
         return std::nullopt;
     }
 
     const glm::vec3 worldOrigin(glX, glY, glZ + 500.0f);
     const glm::vec3 worldDir(0.0f, 0.0f, -1.0f);
-    const glm::vec3 localOrigin(instance.invModelMatrix * glm::vec4(worldOrigin, 1.0f));
+    const glm::vec3 localOrigin(invModelMatrix * glm::vec4(worldOrigin, 1.0f));
     const glm::vec3 localDir = glm::normalize(
-        glm::vec3(instance.invModelMatrix * glm::vec4(worldDir, 0.0f)));
+        glm::vec3(invModelMatrix * glm::vec4(worldDir, 0.0f)));
 
     std::optional<float> bestFloor;
     float bestNormalZ = 1.0f;
     for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-        if (gi < instance.worldGroupBounds.size()) {
+        if (!placement && gi < instance.worldGroupBounds.size()) {
             const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
             if (glX < gMin.x || glX > gMax.x ||
                 glY < gMin.y || glY > gMax.y || glZ - 4.0f > gMax.z) {
@@ -3117,14 +3129,14 @@ std::optional<float> WMORenderer::getInstanceFloorHeight(uint32_t instanceId,
             if (t <= 0.0f) continue;
 
             const glm::vec3 hitLocal = localOrigin + localDir * t;
-            const glm::vec3 hitWorld(instance.modelMatrix * glm::vec4(hitLocal, 1.0f));
+            const glm::vec3 hitWorld(modelMatrix * glm::vec4(hitLocal, 1.0f));
             if (hitWorld.z > glZ || (bestFloor && hitWorld.z <= *bestFloor)) continue;
 
             bestFloor = hitWorld.z;
             glm::vec3 localNormal = group.triNormals[triStart / 3];
             if (localNormal.z < 0.0f) localNormal = -localNormal;
             const glm::vec3 worldNormal = glm::normalize(
-                glm::vec3(instance.modelMatrix * glm::vec4(localNormal, 0.0f)));
+                glm::vec3(modelMatrix * glm::vec4(localNormal, 0.0f)));
             bestNormalZ = std::abs(worldNormal.z);
         }
     }

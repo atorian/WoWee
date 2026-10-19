@@ -8,6 +8,7 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/animation_ids.hpp"
@@ -145,7 +146,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         auto* cr = renderer_.getCharacterRenderer();
         uint32_t instId = renderer_.getCharacterInstanceId();
         if (!cr || instId == 0) return;
-        cr->setInstanceVisible(instId, !entered);
+        renderer_.scene().characters().setInstanceVisible(instId, !entered);
     });
 
     // A thunderstorm rolling in: a low rumble through the camera, as hard as
@@ -221,7 +222,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (instanceId != 0) {
-            renderer_.getCharacterRenderer()->playAnimation(instanceId, rendering::anim::DEATH, false);
+            renderer_.scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
         }
     });
 
@@ -232,12 +233,12 @@ void AnimationCallbackHandler::setupCallbacks() {
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (instanceId != 0) {
-            auto* cr = renderer_.getCharacterRenderer();
+            auto& characters = renderer_.scene().characters();
             // Play RISE one-shot (auto-returns to STAND when finished), fall back to STAND
-            if (cr->hasAnimation(instanceId, rendering::anim::RISE))
-                cr->playAnimation(instanceId, rendering::anim::RISE, false);
+            if (characters.hasAnimation(instanceId, rendering::anim::RISE))
+                characters.playAnimation(instanceId, rendering::anim::RISE, false);
             else
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
+                characters.playAnimation(instanceId, rendering::anim::STAND, true);
         }
     });
 
@@ -249,18 +250,18 @@ void AnimationCallbackHandler::setupCallbacks() {
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (instanceId != 0) {
-            auto* cr = renderer_.getCharacterRenderer();
+            auto& characters = renderer_.scene().characters();
             const auto attackAnims =
                 rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
             bool played = false;
             for (uint32_t anim : attackAnims) {
-                if (cr->hasAnimation(instanceId, anim)) {
-                    cr->playAnimation(instanceId, anim, false);
+                if (characters.hasAnimation(instanceId, anim)) {
+                    characters.playAnimation(instanceId, anim, false);
                     played = true;
                     break;
                 }
             }
-            if (!played) cr->playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
+            if (!played) characters.playAnimation(instanceId, rendering::anim::ATTACK_UNARMED, false);
         }
     });
 
@@ -286,7 +287,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             auto* ac = playerView_.getAnimationController();
             if (ac) {
                 uint32_t charInstId = renderer_.getCharacterInstanceId();
-                if (charInstId && cr->hasAnimation(charInstId, animId))
+                if (charInstId && renderer_.scene().characters().hasAnimation(charInstId, animId))
                     ac->triggerHitReaction(animId);
             }
             return;
@@ -295,8 +296,8 @@ void AnimationCallbackHandler::setupCallbacks() {
         // For NPCs/other players: direct playAnimation
         uint32_t instanceId = entitySpawner_.getCreatureInstanceId(victimGuid);
         if (instanceId == 0) instanceId = entitySpawner_.getPlayerInstanceId(victimGuid);
-        if (instanceId != 0 && cr->hasAnimation(instanceId, animId))
-            cr->playAnimation(instanceId, animId, false);
+        if (instanceId != 0 && renderer_.scene().characters().hasAnimation(instanceId, animId))
+            renderer_.scene().characters().playAnimation(instanceId, animId, false);
     });
 
     // Stun state callback - enters/exits STUNNED animation on local player
@@ -331,7 +332,7 @@ void AnimationCallbackHandler::setupCallbacks() {
         // Don't override Death animation
         uint32_t curAnim = 0; float curT = 0.0f, curDur = 0.0f;
         if (cr->getAnimationState(instanceId, curAnim, curT, curDur) && curAnim == rendering::anim::DEATH) return;
-        cr->playAnimation(instanceId, animId, /*loop=*/true);
+        renderer_.scene().characters().playAnimation(instanceId, animId, /*loop=*/true);
     });
 
     // Unit move-flags callback - updates swimming and walking state from every MSG_MOVE_* packet.
@@ -390,37 +391,37 @@ void AnimationCallbackHandler::setupCallbacks() {
                 auto retained = activeEmotes.find(guid);
                 uint32_t resumeAnim = rendering::anim::STAND;
                 if (retained != activeEmotes.end() &&
-                    cr->hasAnimation(emoteInstanceId, retained->second)) {
+                    renderer_.scene().characters().hasAnimation(emoteInstanceId, retained->second)) {
                     resumeAnim = retained->second;
                 }
-                cr->playAnimation(emoteInstanceId, resumeAnim, true);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, resumeAnim, true);
             } else if (isState) {
                 // A state emote loops the animation its Emotes.dbc row names -
                 // STATE_DANCE is 69, the dance itself. 3.3.5 has no separate
                 // looping variants to look for.
                 activeEmotes[guid] = emoteAnim;
-                cr->playAnimation(emoteInstanceId, emoteAnim, true);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, emoteAnim, true);
             } else {
                 // One-shot: play once, then resume the retained state loop (or Stand).
                 auto retained = activeEmotes.find(guid);
                 uint32_t resumeAnim = 0;
                 if (retained != activeEmotes.end() &&
-                    cr->hasAnimation(emoteInstanceId, retained->second)) {
+                    renderer_.scene().characters().hasAnimation(emoteInstanceId, retained->second)) {
                     resumeAnim = retained->second;
                 }
-                cr->playAnimation(emoteInstanceId, emoteAnim, false, resumeAnim);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, emoteAnim, false, resumeAnim);
             }
             return;
         }
         emoteInstanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (emoteInstanceId != 0) {
             if (emoteAnim == 0) {
-                cr->playAnimation(emoteInstanceId, rendering::anim::STAND, true);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, rendering::anim::STAND, true);
             } else if (isState) {
                 // Looped, as the NPC branch above does.
-                cr->playAnimation(emoteInstanceId, emoteAnim, true);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, emoteAnim, true);
             } else {
-                cr->playAnimation(emoteInstanceId, emoteAnim, false);
+                renderer_.scene().characters().playAnimation(emoteInstanceId, emoteAnim, false);
             }
         }
     }));
@@ -468,7 +469,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             // Helper: pick first animation the model supports from a list
             auto pickFirst = [&](std::initializer_list<uint32_t> ids) -> uint32_t {
                 for (uint32_t id : ids)
-                    if (cr->hasAnimation(instanceId, id)) return id;
+                    if (renderer_.scene().characters().hasAnimation(instanceId, id)) return id;
                 return 0;
             };
 
@@ -576,7 +577,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 if (auto* ac = playerView_.getAnimationController()) {
                     ac->startSpellCast(useStart, useLoop ? useLoop : rendering::anim::STAND, true, useEnd);
                 }
-            } else if (isFishing && cr->hasAnimation(instanceId, rendering::anim::FISHING_LOOP)) {
+            } else if (isFishing && renderer_.scene().characters().hasAnimation(instanceId, rendering::anim::FISHING_LOOP)) {
                 // Fishing is a one-shot pole cast followed by the channel idle. If the
                 // player had weapons sheathed, move the equipped pole into their hand
                 // before starting so the cast animation actually swings it.
@@ -588,12 +589,12 @@ void AnimationCallbackHandler::setupCallbacks() {
                     appearanceComposer_.showFishingPole(true);
                     auto* ac = playerView_.getAnimationController();
                     if (ac) {
-                        uint32_t castAnim = cr->hasAnimation(instanceId, rendering::anim::FISHING_CAST)
+                        uint32_t castAnim = renderer_.scene().characters().hasAnimation(instanceId, rendering::anim::FISHING_CAST)
                             ? rendering::anim::FISHING_CAST : 0;
                         ac->startSpellCast(castAnim, rendering::anim::FISHING_LOOP, true, 0);
                     }
                 } else {
-                    cr->playAnimation(instanceId, rendering::anim::FISHING_LOOP, true);
+                    renderer_.scene().characters().playAnimation(instanceId, rendering::anim::FISHING_LOOP, true);
                 }
             } else {
             // Precast wind-up (one-shot, non-channels only)
@@ -683,7 +684,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                 auto* ac = playerView_.getAnimationController();
                 if (ac) ac->startSpellCast(precastAnim, castAnim, true, finalizeAnim);
             } else {
-                cr->playAnimation(instanceId, castAnim, true);
+                renderer_.scene().characters().playAnimation(instanceId, castAnim, true);
             }
             } // end !isFishing
         } else {
@@ -697,7 +698,7 @@ void AnimationCallbackHandler::setupCallbacks() {
                     ac->stopSpellCast();
                 }
             } else if (isChannel) {
-                cr->playAnimation(instanceId, rendering::anim::STAND, true);
+                renderer_.scene().characters().playAnimation(instanceId, rendering::anim::STAND, true);
             }
         }
     }));
@@ -709,7 +710,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             if (!cr) return;
             uint32_t charInstId = renderer_.getCharacterInstanceId();
             if (charInstId == 0) return;
-            cr->setInstanceOpacity(charInstId, e.isGhost ? 0.5f : 1.0f);
+            renderer_.scene().characters().setInstanceOpacity(charInstId, e.isGhost ? 0.5f : 1.0f);
         }));
 
     // Stand state animation callback - route through AnimationController state machine
@@ -740,7 +741,7 @@ void AnimationCallbackHandler::setupCallbacks() {
             if (!cr) return;
             uint32_t charInstId = renderer_.getCharacterInstanceId();
             if (charInstId == 0) return;
-            cr->playAnimation(charInstId, rendering::anim::DEATH, false);
+            renderer_.scene().characters().playAnimation(charInstId, rendering::anim::DEATH, false);
             return;
         }
 

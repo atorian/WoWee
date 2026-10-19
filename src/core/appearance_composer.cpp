@@ -11,6 +11,7 @@
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/animation_controller.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -264,7 +265,7 @@ void AppearanceComposer::applyEnchantVisuals(uint32_t charInstanceId, int equipS
     const uint64_t itemGuid = inventory.getEquipSlotGuid(equipSlotIndex);
     const uint32_t enchantId = itemGuid != 0 ? inventory.shownEnchantId(itemGuid) : 0;
     attachEnchantVisuals(
-        *charRenderer, *assetManager_, charInstanceId, attachmentId, enchantId,
+        renderer_->scene().characters(), *assetManager_, charInstanceId, attachmentId, enchantId,
         [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
         [this] { return entitySpawner_->allocateWeaponModelId(); });
 }
@@ -285,7 +286,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     if (!charRenderer || charInstanceId == 0 || !assetManager_ || !gameHandler_) return;
 
     // Only the helm point. Detaching 0 as well would drop the shield.
-    charRenderer->detachWeapon(charInstanceId, kAttachHelm);
+    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachHelm);
 
     // Hiding the helm is a display choice, not an unequip: the item stays on,
     // the model comes off, and the hair comes back.
@@ -321,7 +322,7 @@ void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
     }
 
     const uint32_t helmModelId = entitySpawner_ ? entitySpawner_->allocateWeaponModelId() : 0;
-    const bool attached = charRenderer->attachWeapon(charInstanceId, kAttachHelm, helmModel,
+    const bool attached = renderer_->scene().characters().attachWeapon(charInstanceId, kAttachHelm, helmModel,
                                                      helmModelId, helm.texturePath);
     if (attached) {
         LOG_INFO("Equipped helm: ", helmPath, " tex: ", helm.texturePath);
@@ -335,8 +336,8 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
     const uint32_t charInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
     if (!charRenderer || charInstanceId == 0 || !assetManager_ || !gameHandler_) return;
 
-    charRenderer->detachWeapon(charInstanceId, kAttachShoulderRight);
-    charRenderer->detachWeapon(charInstanceId, kAttachShoulderLeft);
+    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachShoulderRight);
+    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachShoulderLeft);
 
     const auto& slot = inventory.getEquipSlot(game::EquipSlot::SHOULDERS);
     if (slot.empty()) return;
@@ -360,7 +361,7 @@ void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
         if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
         if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
         const uint32_t modelId = entitySpawner_ ? entitySpawner_->allocateWeaponModelId() : 0;
-        if (charRenderer->attachWeapon(charInstanceId, attachmentId, model, modelId,
+        if (renderer_->scene().characters().attachWeapon(charInstanceId, attachmentId, model, modelId,
                                        side.texturePath)) {
             LOG_INFO("Equipped shoulder ", attachmentId, ": ", side.baseModelPath,
                      " tex: ", side.texturePath);
@@ -399,7 +400,6 @@ void AppearanceComposer::loadEquippedWeapons() {
         return;
     if (!gameHandler_) return;
 
-    auto* charRenderer = renderer_->getCharacterRenderer();
     uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
 
@@ -431,7 +431,7 @@ void AppearanceComposer::loadEquippedWeapons() {
     // Equipment reloads and Z toggles can move models between these points.
     // Clear both held and sheathed locations so old copies never remain behind.
     for (uint32_t attachmentId : kWeaponAttachmentPoints) {
-        charRenderer->detachWeapon(charInstanceId, attachmentId);
+        renderer_->scene().characters().detachWeapon(charInstanceId, attachmentId);
     }
 
     bool rightHandFilled = false;
@@ -441,7 +441,7 @@ void AppearanceComposer::loadEquippedWeapons() {
 
         // If slot is empty or has no displayInfoId, detach any existing weapon
         if (equipSlot.empty() || equipSlot.item.displayInfoId == 0) {
-            charRenderer->detachWeapon(charInstanceId, ws.attachmentId);
+            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
             continue;
         }
 
@@ -453,7 +453,7 @@ void AppearanceComposer::loadEquippedWeapons() {
         int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
         if (recIdx < 0) {
             LOG_WARNING("loadEquippedWeapons: displayInfoId ", displayInfoId, " not found in DBC");
-            charRenderer->detachWeapon(charInstanceId, ws.attachmentId);
+            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
             continue;
         }
 
@@ -466,7 +466,7 @@ void AppearanceComposer::loadEquippedWeapons() {
 
         if (art.modelFile.empty()) {
             LOG_WARNING("loadEquippedWeapons: empty model name for displayInfoId ", displayInfoId);
-            charRenderer->detachWeapon(charInstanceId, ws.attachmentId);
+            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
             continue;
         }
 
@@ -479,7 +479,7 @@ void AppearanceComposer::loadEquippedWeapons() {
             m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
             if (!loadWeaponM2(m2Path, weaponModel)) {
                 LOG_WARNING("loadEquippedWeapons: failed to load ", modelFile);
-                charRenderer->detachWeapon(charInstanceId, ws.attachmentId);
+                renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
                 continue;
             }
         }
@@ -496,7 +496,7 @@ void AppearanceComposer::loadEquippedWeapons() {
         uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
         const glm::mat4 localTransform = weaponLocalTransform(
             weaponsSheathed_, equipSlot.item.inventoryType);
-        bool ok = charRenderer->attachWeapon(charInstanceId, attachmentId,
+        bool ok = renderer_->scene().characters().attachWeapon(charInstanceId, attachmentId,
                                               weaponModel, weaponModelId, texturePath,
                                               localTransform);
         if (ok) {
@@ -543,7 +543,7 @@ void AppearanceComposer::loadEquippedWeapons() {
                     const glm::mat4 localTransform = weaponsSheathed_
                         ? weaponLocalTransform(true, game::InvType::TWO_HAND)
                         : glm::mat4(1.0f);
-                    bool ok = charRenderer->attachWeapon(charInstanceId, rangedAttachment,
+                    bool ok = renderer_->scene().characters().attachWeapon(charInstanceId, rangedAttachment,
                                                           weaponModel, weaponModelId, texturePath,
                                                           localTransform);
                     if (ok) {
@@ -571,7 +571,6 @@ void AppearanceComposer::showMiningPick(bool show) {
         return;
     }
 
-    auto* charRenderer = renderer_->getCharacterRenderer();
     const uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
 
@@ -611,9 +610,9 @@ void AppearanceComposer::showMiningPick(bool show) {
         texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
     }
 
-    charRenderer->detachWeapon(charInstanceId, kAttachRightHand);
+    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachRightHand);
     const uint32_t modelId = entitySpawner_->allocateWeaponModelId();
-    if (charRenderer->attachWeapon(charInstanceId, kAttachRightHand, pickModel,
+    if (renderer_->scene().characters().attachWeapon(charInstanceId, kAttachRightHand, pickModel,
                                    modelId, texturePath)) {
         showingMiningPick_ = true;
         miningPickInstanceId_ = charInstanceId;
@@ -691,12 +690,11 @@ void AppearanceComposer::showFishingPole(bool show) {
         texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
     }
 
-    auto* charRenderer = renderer_->getCharacterRenderer();
     const uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
-    charRenderer->detachWeapon(charInstanceId, kAttachRightHand);
+    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachRightHand);
     const uint32_t modelId = entitySpawner_->allocateWeaponModelId();
-    if (charRenderer->attachWeapon(charInstanceId, kAttachRightHand, poleModel,
+    if (renderer_->scene().characters().attachWeapon(charInstanceId, kAttachRightHand, poleModel,
                                    modelId, texturePath)) {
         showingFishingPole_ = true;
         showingRanged_ = false;
@@ -714,7 +712,6 @@ void AppearanceComposer::showRangedWeapon(bool show) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !gameHandler_ || !assetManager_ || !assetManager_->isInitialized())
         return;
 
-    auto* charRenderer = renderer_->getCharacterRenderer();
     uint32_t charInstanceId = renderer_->getCharacterInstanceId();
     if (charInstanceId == 0) return;
 
@@ -767,9 +764,9 @@ void AppearanceComposer::showRangedWeapon(bool show) {
     }
 
     // Detach current right-hand weapon and attach ranged weapon
-    charRenderer->detachWeapon(charInstanceId, 1);
+    renderer_->scene().characters().detachWeapon(charInstanceId, 1);
     uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
-    bool ok = charRenderer->attachWeapon(charInstanceId, 1, weaponModel, weaponModelId, texturePath);
+    bool ok = renderer_->scene().characters().attachWeapon(charInstanceId, 1, weaponModel, weaponModelId, texturePath);
     if (ok) {
         showingRanged_ = true;
         if (playerView_->getAnimationController())

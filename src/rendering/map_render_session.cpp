@@ -1,5 +1,6 @@
 #include "rendering/map_render_session.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/character_renderer.hpp"
@@ -55,6 +56,9 @@ MapRenderSession::MapRenderSession(Renderer& renderer, core::JobGroup::Token tok
 }
 
 MapRenderSession::~MapRenderSession() {
+    // Changes asked for this map's scene and not yet made are for a world
+    // that is going; made after it, they would land in the next one.
+    impl_->renderer.scene().discard();
     stopStreaming();
     if (impl_->terrain) impl_->renderer.releaseTerrainSession(impl_->terrain->manager.get());
     impl_->renderer.setMapJobToken({});

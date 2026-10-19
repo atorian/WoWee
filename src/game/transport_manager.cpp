@@ -520,7 +520,9 @@ std::optional<bool> TransportManager::isPointOverM2Footprint(
         return std::nullopt;
     }
     glm::vec3 boundsMin, boundsMax;
-    if (!scene_->m2WorldBounds(it->second.wmoInstanceId, boundsMin, boundsMax)) {
+    // Where the car is now: the drawn one takes this pose at the start of
+    // the frame's Present, after this is asked.
+    if (!scene_->m2WorldBounds(it->second.wmoInstanceId, it->second.transform, boundsMin, boundsMax)) {
         return std::nullopt;
     }
     // The bounds are the renderer's, so the point has to be too.
@@ -541,7 +543,7 @@ std::optional<bool> TransportManager::isPointOverM2Footprint(
     // door there is nothing below but shaft, so the ray finds nothing and the
     // board is refused; on the deck it lands within a step and it is allowed.
     const auto deck = scene_->m2FloorHeight(
-        it->second.wmoInstanceId,
+        it->second.wmoInstanceId, it->second.transform,
         glm::vec3(render.x, render.y, render.z + rendering::movement::kMaxStepUp));
     if (!deck) return false;
     const float delta = render.z - *deck;
@@ -560,7 +562,7 @@ std::optional<float> TransportManager::getTransportDeckFloorHeight(
     const glm::vec3 renderPosition = core::coords::canonicalToRender(canonicalPosition);
     float normalZ = 0.0f;
     const auto floor = scene_->wmoFloorHeight(
-        it->second.wmoInstanceId,
+        it->second.wmoInstanceId, it->second.transform,
         glm::vec3(renderPosition.x, renderPosition.y, renderPosition.z + 0.35f),
         &normalZ);
     if (!floor || normalZ < 0.55f) return std::nullopt;

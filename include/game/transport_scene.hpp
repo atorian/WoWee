@@ -30,11 +30,18 @@ public:
 
     /// Whether the hull's collision has been built yet.
     [[nodiscard]] virtual bool wmoHasCollision(uint32_t wmoInstanceId) const = 0;
+    /// The hull's geometry asked where the transport is now, `placement` -
+    /// its transform as this frame has it. The drawn hull takes a pose set
+    /// above at the start of the frame's Present; a floor asked of it before
+    /// then would be the last frame's.
     [[nodiscard]] virtual std::optional<float> wmoFloorHeight(uint32_t wmoInstanceId,
+                                                              const glm::mat4& placement,
                                                               const glm::vec3& renderPos,
                                                               float* outNormalZ) const = 0;
-    virtual bool m2WorldBounds(uint32_t m2InstanceId, glm::vec3& outMin, glm::vec3& outMax) const = 0;
+    virtual bool m2WorldBounds(uint32_t m2InstanceId, const glm::mat4& placement,
+                               glm::vec3& outMin, glm::vec3& outMax) const = 0;
     [[nodiscard]] virtual std::optional<float> m2FloorHeight(uint32_t m2InstanceId,
+                                                             const glm::mat4& placement,
                                                              const glm::vec3& renderPos) const = 0;
 };
 

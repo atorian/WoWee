@@ -36,6 +36,7 @@
 #include "rendering/charge_effect.hpp"
 #include "rendering/levelup_effect.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/wmo_night_glow.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -103,8 +104,12 @@ namespace rendering {
 
 
 
-Renderer::Renderer() = default;
+Renderer::Renderer() : scene_(std::make_unique<SceneCommands>(*this)) {}
 Renderer::~Renderer() = default;
+
+void Renderer::applySceneCommands() {
+    scene_->apply();
+}
 
 bool Renderer::createPerFrameResources() {
     VkDevice device = vkCtx->getDevice();
@@ -2263,6 +2268,12 @@ void Renderer::update(float deltaTime) {
         if (vkCtx) vkCtx->cpuStages().add("rendererUpdate", name, ms);
         phaseStart = now;
     };
+
+    // The last apply point of the frame: what Present asked since its start -
+    // the player's own model posed after the camera - is made now. From here
+    // to the end of the frame the instances are only read (scene_commands.hpp).
+    applySceneCommands();
+    endPhase("scene commands");
 
     if (wmoRenderer) wmoRenderer->resetQueryStats();
     if (m2Renderer) m2Renderer->resetQueryStats();

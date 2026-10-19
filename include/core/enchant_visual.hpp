@@ -9,6 +9,8 @@
 // once. Before, only the composer asked it, and nobody else's weapon ever
 // glowed.
 
+#include "rendering/scene_commands.hpp"
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -19,7 +21,6 @@ namespace pipeline {
 class AssetManager;
 struct M2Model;
 }
-namespace rendering { class CharacterRenderer; }
 
 namespace core {
 
@@ -40,8 +41,9 @@ using EnchantModelLoader = std::function<bool(const std::string& path, pipeline:
 /// Hang `enchantId`'s models on the weapon at `attachmentId` of the character
 /// instance, in place of whatever enchant was shown there. Enchant 0 takes it
 /// away. A model that does not load is reported once per path and the weapon
-/// is drawn without it. `allocateModelId` names a fresh renderer model.
-void attachEnchantVisuals(rendering::CharacterRenderer& renderer, pipeline::AssetManager& assets,
+/// is drawn without it. `allocateModelId` names a fresh renderer model. The
+/// effects go on at the scene's next apply point, after the weapon.
+void attachEnchantVisuals(rendering::SceneCommands::Characters& characters, pipeline::AssetManager& assets,
                           uint32_t charInstanceId, uint32_t attachmentId, uint32_t enchantId,
                           const EnchantModelLoader& loadModel,
                           const std::function<uint32_t()>& allocateModelId);

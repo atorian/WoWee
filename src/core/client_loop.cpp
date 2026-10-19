@@ -364,6 +364,9 @@ void ClientLoop::updateInterface(float deltaTime, const FramePlan& plan) {
 }
 
 void ClientLoop::syncPresentation(float deltaTime, const FramePlan& plan) {
+    // Everything the frame asked of the scene first: the controls below stand
+    // on this frame's transports and walk into this frame's spawns.
+    services_.frontEnd.applySceneChanges();
     // The player's controls move the camera whether or not anything draws it:
     // a client that draws nothing still walks, and still tells the server.
     if (plan.world || plan.loading) services_.playerView.updateControls(deltaTime);

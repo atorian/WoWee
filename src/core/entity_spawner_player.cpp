@@ -11,6 +11,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/character_renderer.hpp"
@@ -144,7 +145,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // Create instance at server position
     glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
     float renderYaw = orientation + glm::radians(90.0f);
-    uint32_t instanceId = charRenderer->createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 1.0f);
+    uint32_t instanceId = scene().characters().createInstance(modelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 1.0f);
     if (instanceId == 0) return;
 
     const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
@@ -187,13 +188,13 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
 
     const PlayerTextureSlots& slots = assets_.playerTextureSlotsByModelId_[modelId];
     if (slots.skin >= 0 && compositeTex) {
-        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.skin), compositeTex);
+        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.skin), compositeTex);
     }
     if (slots.hair >= 0 && hairTex) {
-        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.hair), hairTex);
+        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.hair), hairTex);
     }
     if (slots.skinExtra >= 0 && skinExtraTex) {
-        charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.skinExtra), skinExtraTex);
+        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(slots.skinExtra), skinExtraTex);
     }
 
     // Geosets: body + selected hair/facial hair. Do not enable every group-0
@@ -206,12 +207,12 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // This one is drawn before equipment is known and wants the no-cloak panel;
     // the shared set leaves group 15 alone so the equipment pass can decide.
     activeGeosets.insert(kGeosetNoCape);
-    charRenderer->setActiveGeosets(instanceId, activeGeosets);
+    scene().characters().setActiveGeosets(instanceId, activeGeosets);
 
     if (spawns_->deadCreatureGuids_.count(guid)) {
-        charRenderer->playAnimation(instanceId, rendering::anim::DEATH, false);
+        scene().characters().playAnimation(instanceId, rendering::anim::DEATH, false);
     } else {
-        charRenderer->playAnimation(instanceId, rendering::anim::STAND, true);
+        scene().characters().playAnimation(instanceId, rendering::anim::STAND, true);
     }
     spawns_->playerInstances_[guid] = instanceId;
 
@@ -490,14 +491,14 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         geosets.insert(1);    // Bald scalp cap (group 0)
     }
 
-    charRenderer->setActiveGeosets(st.instanceId, geosets);
+    scene().characters().setActiveGeosets(st.instanceId, geosets);
 
     // --- Helmet model attachment ---
     // HEAD slot is index 0 in the 19-element equipment array.
     // Helmet M2s are race/gender-specific (e.g. Helm_Plate_B_01_HuM.m2 for Human Male).
     if (displayInfoIds[0] != 0) {
         // Only the helm point - detaching 0 as well would drop the shield.
-        charRenderer->detachWeapon(st.instanceId, kAttachHelm);
+        scene().characters().detachWeapon(st.instanceId, kAttachHelm);
 
         const core::HelmVisual helm = core::resolveHelmVisual(
             *assetManager_, displayInfoIds[0], st.raceId, st.genderId);
@@ -516,7 +517,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
             if (helmModel.isValid()) {
                 const uint32_t helmModelId = assets_.nextWeaponModelId_++;
                 // Attachment point 0 (head bone), fallback to 11 (explicit head).
-                const bool attached = charRenderer->attachWeapon(
+                const bool attached = scene().characters().attachWeapon(
                     st.instanceId, kAttachHelm, helmModel, helmModelId, helm.texturePath);
                 if (attached) {
                     LOG_DEBUG("Attached player helmet: ", helmPath, " tex: ", helm.texturePath);
@@ -525,13 +526,13 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         }
     } else {
         // No helmet equipped - detach any existing helmet model
-        charRenderer->detachWeapon(st.instanceId, kAttachHelm);
+        scene().characters().detachWeapon(st.instanceId, kAttachHelm);
     }
 
     // --- Shoulder model attachment ---
     // SHOULDERS slot is index 2 in the 19-element equipment array.
-    charRenderer->detachWeapon(st.instanceId, kAttachShoulderRight);
-    charRenderer->detachWeapon(st.instanceId, kAttachShoulderLeft);
+    scene().characters().detachWeapon(st.instanceId, kAttachShoulderRight);
+    scene().characters().detachWeapon(st.instanceId, kAttachShoulderLeft);
     if (displayInfoIds[2] != 0) {
         const ShoulderVisual shoulders =
             resolveShoulderVisual(*assetManager_, displayInfoIds[2], st.raceId, st.genderId);
@@ -540,7 +541,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
             pipeline::M2Model model;
             if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
             if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
-            if (charRenderer->attachWeapon(st.instanceId, attachmentId, model,
+            if (scene().characters().attachWeapon(st.instanceId, attachmentId, model,
                                            assets_.nextWeaponModelId_++, side.texturePath)) {
                 LOG_DEBUG("Attached shoulder ", attachmentId, ": ", side.baseModelPath,
                           " tex: ", side.texturePath);
@@ -604,11 +605,11 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
                     }
 
                     if (capeTexture) {
-                        charRenderer->setGroupTextureOverride(st.instanceId, 15, capeTexture);
+                        scene().characters().setGroupTextureOverride(st.instanceId, 15, capeTexture);
                         if (const auto* md = charRenderer->getModelData(st.modelId)) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 2) {
-                                    charRenderer->setTextureSlotOverride(
+                                    scene().characters().setTextureSlotOverride(
                                         st.instanceId, static_cast<uint16_t>(ti), capeTexture);
                                 }
                             }
@@ -631,14 +632,14 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
 
     rendering::TextureRef newTex = charRenderer->compositeWithRegions(st.bodySkinPath, st.underwearPaths, regionLayers);
     if (newTex) {
-        charRenderer->setTextureSlotOverride(st.instanceId, static_cast<uint16_t>(slots.skin), newTex);
+        scene().characters().setTextureSlotOverride(st.instanceId, static_cast<uint16_t>(slots.skin), newTex);
     }
 
     // --- Weapon model attachment ---
     // The main and off hand (slots 15 and 16 of the 19), in the hands - or,
     // on a mount, on the back, whatever their sheath state says. Every point
     // a weapon can be on is cleared first, so one that moved leaves no copy.
-    for (const uint32_t point : kWeaponAttachmentPoints) charRenderer->detachWeapon(st.instanceId, point);
+    for (const uint32_t point : kWeaponAttachmentPoints) scene().characters().detachWeapon(st.instanceId, point);
     const bool sheathed = spawns_->remotePlayerMounts_.count(guid) != 0;
     st.weaponsSheathed = sheathed;
     static constexpr std::pair<int, game::EquipSlot> weaponSlots[] = {
@@ -694,13 +695,13 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         const uint32_t point = sheathed ? riderWeaponAttachment(equipSlot, inventoryType)
                                         : weaponAttachment(false, equipSlot, inventoryType);
         uint32_t weaponModelId = assets_.nextWeaponModelId_++;
-        if (!charRenderer->attachWeapon(st.instanceId, point, weaponModel, weaponModelId, texturePath)) {
+        if (!scene().characters().attachWeapon(st.instanceId, point, weaponModel, weaponModelId, texturePath)) {
             continue;  // attachWeapon says why
         }
         st.weapons[hand] = {.attached = true, .inventoryType = inventoryType};
         // The enchant it shows, the way the player's own weapons get theirs.
         attachEnchantVisuals(
-            *charRenderer, *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
+            scene().characters(), *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
             [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
             [this] { return assets_.nextWeaponModelId_++; });
     }
@@ -721,7 +722,7 @@ void EntitySpawner::setRemotePlayerWeaponsSheathed(uint64_t guid, bool sheathed)
             return onBack ? riderWeaponAttachment(kHands[hand], inventoryType)
                           : weaponAttachment(false, kHands[hand], inventoryType);
         };
-        charRenderer->moveWeapon(st.instanceId, placed(st.weaponsSheathed), placed(sheathed),
+        scene().characters().moveWeapon(st.instanceId, placed(st.weaponsSheathed), placed(sheathed),
                                  glm::mat4(1.0f));
     }
     st.weaponsSheathed = sheathed;
@@ -779,12 +780,12 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     removeRemotePlayerForm(guid);
     auto it = spawns_->playerInstances_.find(guid);
     if (it == spawns_->playerInstances_.end()) return;
-    auto* charRenderer = renderer_->getCharacterRenderer();
     // Player composites get a fresh model id per spawn (unlike displayId-keyed
     // creature models, which stay cached), so free the model with the instance.
-    const uint32_t compositeModelId = charRenderer->getInstanceModelId(it->second);
-    charRenderer->removeInstance(it->second);
-    if (compositeModelId != 0) charRenderer->unloadModelIfUnused(compositeModelId);
+    // The model goes after the instance, in the order asked.
+    const uint32_t compositeModelId = scene().characters().modelOf(it->second);
+    scene().characters().removeInstance(it->second);
+    if (compositeModelId != 0) scene().characters().unloadModelIfUnused(compositeModelId);
     spawns_->playerInstances_.erase(it);
     spawns_->onlinePlayerAppearance_.erase(guid);
     spawns_->pendingOnlinePlayerEquipment_.erase(guid);
@@ -878,15 +879,12 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // pointing at a dead handle - every later server CREATE for that GUID then
         // took the position-update path below and the object stayed invisible for
         // the rest of the session. Treat a dead handle as "not spawned".
+        // One created earlier this frame is alive too, though not made yet.
         bool instanceAlive = false;
         if (renderer_) {
-            if (goIt->second.isWmo) {
-                auto* wr = renderer_->getWMORenderer();
-                instanceAlive = wr && wr->hasInstance(goIt->second.instanceId);
-            } else {
-                auto* mr = renderer_->getM2Renderer();
-                instanceAlive = mr && mr->hasInstance(goIt->second.instanceId);
-            }
+            instanceAlive = goIt->second.isWmo
+                ? scene().worldModels().hasInstance(goIt->second.instanceId)
+                : scene().models().hasInstance(goIt->second.instanceId);
         }
         if (!instanceAlive) {
             LOG_WARNING("GO render instance vanished - respawning: guid=0x", std::hex, guid, std::dec,
@@ -918,19 +916,13 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         LOG_DEBUG("GameObject position update: displayId=", displayId, " guid=0x", std::hex, guid, std::dec,
                  " pos=(", x, ", ", y, ", ", z, ")");
         if (renderer_) {
+            glm::mat4 transform(1.0f);
+            transform = glm::translate(transform, renderPos);
             if (info.isWmo) {
-                if (auto* wr = renderer_->getWMORenderer()) {
-                    glm::mat4 transform(1.0f);
-                    transform = glm::translate(transform, renderPos);
-                    transform = glm::rotate(transform, orientation, glm::vec3(0, 0, 1));
-                    wr->setInstanceTransform(info.instanceId, transform);
-                }
+                transform = glm::rotate(transform, orientation, glm::vec3(0, 0, 1));
+                scene().worldModels().setInstanceTransform(info.instanceId, transform);
             } else {
-                if (auto* mr = renderer_->getM2Renderer()) {
-                    glm::mat4 transform(1.0f);
-                    transform = glm::translate(transform, renderPos);
-                    mr->setInstanceTransform(info.instanceId, transform);
-                }
+                scene().models().setInstanceTransform(info.instanceId, transform);
             }
         }
         return;
@@ -1030,7 +1022,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         }
 
         if (loadedAsWmo) {
-            uint32_t instanceId = wmoRenderer->createInstance(modelId, renderPos,
+            uint32_t instanceId = scene().worldModels().createInstance(modelId, renderPos,
                 glm::vec3(0.0f, 0.0f, renderYawWmo), scale);
             if (instanceId == 0) {
                 LOG_WARNING("Failed to create gameobject WMO instance for guid 0x", std::hex, guid, std::dec);
@@ -1164,7 +1156,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             assets_.gameObjectDisplayIdModelCache_[displayId] = modelId;
         }
 
-        uint32_t instanceId = m2Renderer->createInstance(modelId, renderPos,
+        uint32_t instanceId = scene().models().createInstance(modelId, renderPos,
             glm::vec3(0.0f, 0.0f, renderYawM2go), scale);
         if (instanceId == 0) {
             LOG_WARNING("Failed to create gameobject instance for guid 0x", std::hex, guid, std::dec);
@@ -1175,7 +1167,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // adaptive doodad render distance, which drops to ~200 units in a city and
         // was hiding mailboxes/chests well inside the range the server still
         // considers them visible.
-        m2Renderer->setInstanceIsGameObject(instanceId, true);
+        scene().models().setInstanceIsGameObject(instanceId, true);
 
         // Deeprun Tram cars: riding never used real mesh collision to begin with (Z is
         // fully code-locked to the transport's simulated position while boarded, not
@@ -1185,7 +1177,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // for movement purposes, matching how the boarding logic already treats it (a
         // proximity/footprint check, not a physical block).
         if (displayId == 3831u) {
-            m2Renderer->setSkipCollision(instanceId, true);
+            scene().models().setSkipCollision(instanceId, true);
         }
 
         spawns_->gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};
