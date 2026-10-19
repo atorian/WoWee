@@ -121,7 +121,8 @@ collision/  -> pipeline/                                   (wowee_collision: not
 - **core/** is the client: it owns everything, subscribes to the game's events
   and turns them into pictures and sound (`SpellPresentation`, `PlayerView`,
   the `*CallbackHandler`s), and implements the game's query interfaces over
-  the renderer (`RendererTransportScene`, `RendererMovementCollision`).
+  the renderer and the collision world (`RendererTransportScene`,
+  `WorldMovementCollision`).
 
 ### Testing graphics without the client
 
