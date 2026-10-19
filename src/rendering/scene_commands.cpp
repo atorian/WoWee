@@ -88,6 +88,12 @@ void SceneCommands::Characters::setInstanceOpacity(uint32_t instanceId, float op
     });
 }
 
+void SceneCommands::Characters::setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha) {
+    owner_.post([=](Renderer& r) {
+        if (auto* c = r.getCharacterRenderer()) c->setInstanceStateLook(instanceId, tint, alpha);
+    });
+}
+
 void SceneCommands::Characters::startFadeIn(uint32_t instanceId, float durationSeconds) {
     owner_.post([=](Renderer& r) {
         if (auto* c = r.getCharacterRenderer()) c->startFadeIn(instanceId, durationSeconds);
@@ -104,6 +110,13 @@ void SceneCommands::Characters::playAnimation(uint32_t instanceId, uint32_t anim
 void SceneCommands::Characters::setInstanceAnimationSpeed(uint32_t instanceId, float speed) {
     owner_.post([=](Renderer& r) {
         if (auto* c = r.getCharacterRenderer()) c->setInstanceAnimationSpeed(instanceId, speed);
+    });
+}
+
+void SceneCommands::Characters::setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim,
+                                                 uint32_t rightArmAnim) {
+    owner_.post([=](Renderer& r) {
+        if (auto* c = r.getCharacterRenderer()) c->setArmAnimations(instanceId, leftArmAnim, rightArmAnim);
     });
 }
 
@@ -263,9 +276,21 @@ void SceneCommands::Models::removeInstance(uint32_t instanceId) {
     });
 }
 
+void SceneCommands::Models::setInstancePosition(uint32_t instanceId, const glm::vec3& position) {
+    owner_.post([=](Renderer& r) {
+        if (auto* m = r.getM2Renderer()) m->setInstancePosition(instanceId, position);
+    });
+}
+
 void SceneCommands::Models::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
     owner_.post([=](Renderer& r) {
         if (auto* m = r.getM2Renderer()) m->setInstanceTransform(instanceId, transform);
+    });
+}
+
+void SceneCommands::Models::setInstanceFade(uint32_t instanceId, float alpha) {
+    owner_.post([=](Renderer& r) {
+        if (auto* m = r.getM2Renderer()) m->setInstanceFade(instanceId, alpha);
     });
 }
 
@@ -342,6 +367,18 @@ bool SceneCommands::Models::hasAnimation(uint32_t instanceId, uint32_t animation
     const M2Renderer* m2 = owner_.renderer_.getM2Renderer();
     const uint32_t model = modelOf(instanceId);
     return m2 && model != 0 && m2->modelHasAnimation(model, animationId);
+}
+
+float SceneCommands::Models::animationDuration(uint32_t instanceId, uint32_t animationId) const {
+    const M2Renderer* m2 = owner_.renderer_.getM2Renderer();
+    const uint32_t model = modelOf(instanceId);
+    return m2 && model != 0 ? m2->modelAnimationDuration(model, animationId) : 0.0f;
+}
+
+void SceneCommands::Models::finishInstance(uint32_t instanceId) {
+    owner_.post([=](Renderer& r) {
+        if (auto* m = r.getM2Renderer()) m->finishInstance(instanceId);
+    });
 }
 
 bool SceneCommands::Models::hasInstance(uint32_t instanceId) const {

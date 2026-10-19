@@ -1,6 +1,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/character_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -216,39 +217,38 @@ void SpellVisualSystem::playKitEffect(uint32_t kitId, size_t effectIndex, KitKin
                     " has no unit to hang on (instance ", at.unitInstanceId, "); not shown");
         return;
     }
-    // Created where it belongs and then given the whole matrix; a child
-    // instance takes no part in placement dedup.
-    const uint32_t instanceId = m2Renderer_->createInstance(modelId, glm::vec3(transform[3]),
-                                                            glm::vec3(0.0f), 1.0f,
-                                                            /*allowPositionDedup=*/false);
+    // Created where it belongs and then given the whole matrix; an instance
+    // made through the scene's changes takes no part in placement dedup.
+    auto& models = renderer_->scene().models();
+    const uint32_t instanceId = models.createInstance(modelId, glm::vec3(transform[3]),
+                                                      glm::vec3(0.0f), 1.0f);
     if (instanceId == 0) {
         LOG_WARNING("SpellVisual: could not place kit effect ", effect.modelPath);
         return;
     }
-    m2Renderer_->setInstanceTransform(instanceId, transform);
+    models.setInstanceTransform(instanceId, transform);
 
     // As the client plays a kit's model: a precast loops for the cast; a
     // one-shot plays its Stand once, then its Decay if it has one, and stops
-    // on its last frame, then finishes (WoW.exe, render spec 6b).
+    // on its last frame, then finishes (WoW.exe, render spec 6b). How long
+    // each lasts is the model's, read before the instance is made.
     float lifetime = 0.0f;
-    const float standSeconds = m2Renderer_->hasAnimation(instanceId, 0)
-        ? m2Renderer_->getInstanceAnimDuration(instanceId) / 1000.0f : 0.0f;
+    const float standSeconds = models.animationDuration(instanceId, 0) / 1000.0f;
     if (kind == KitKind::Precast) {
-        m2Renderer_->playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Loop});
+        models.playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Loop});
         lifetime = castTimeMs > 0 ? static_cast<float>(castTimeMs) / 1000.0f
                                   : std::max(standSeconds, kOneShotFallbackSeconds);
     } else {
         constexpr uint32_t kDecay = 159;
-        const bool hasDecay = m2Renderer_->hasAnimation(instanceId, kDecay);
+        const bool hasDecay = models.hasAnimation(instanceId, kDecay);
         float decaySeconds = 0.0f;
         if (hasDecay) {
-            m2Renderer_->playInstanceAnimation(instanceId, {.animationId = kDecay});
-            decaySeconds = m2Renderer_->getInstanceAnimDuration(instanceId) / 1000.0f;
-            m2Renderer_->playInstanceAnimation(
+            decaySeconds = models.animationDuration(instanceId, kDecay) / 1000.0f;
+            models.playInstanceAnimation(
                 instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Next},
                 M2AnimationPlay{.animationId = kDecay, .end = M2AnimationPlay::End::Hold});
         } else {
-            m2Renderer_->playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Hold});
+            models.playInstanceAnimation(instanceId, {.animationId = 0, .end = M2AnimationPlay::End::Hold});
         }
         lifetime = standSeconds + decaySeconds;
         // A model whose Stand is a single frame - a burst of particles on a
@@ -324,7 +324,7 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
     rotation.z = std::atan2(delta.y, delta.x);
     rotation.y = -std::atan2(delta.z, std::max(horizontal, 0.001f));
 
-    const uint32_t instanceId = characterRenderer->createInstance(modelId, start, rotation, 1.0f);
+    const uint32_t instanceId = renderer_->scene().characters().createInstance(modelId, start, rotation, 1.0f);
     if (instanceId == 0) return;
     physicalProjectiles_.push_back({.instanceId = instanceId, .start = start, .end = end, .rotation = rotation, .elapsed = 0.0f,
                                     .duration = std::max(duration, 0.05f), .spin = spin});
@@ -363,12 +363,12 @@ void SpellVisualSystem::update(float deltaTime) {
             } else if (transform != it->lastTransform) {
                 // Only when the attachment moved: a move refiles the instance
                 // in the culling grids.
-                m2Renderer_->setInstanceTransform(it->instanceId, transform);
+                renderer_->scene().models().setInstanceTransform(it->instanceId, transform);
                 it->lastTransform = transform;
             }
         }
         if (done) {
-            m2Renderer_->finishInstance(it->instanceId);
+            renderer_->scene().models().finishInstance(it->instanceId);
             it = activeEffects_.erase(it);
         } else {
             ++it;
@@ -377,18 +377,19 @@ void SpellVisualSystem::update(float deltaTime) {
 
     CharacterRenderer* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (charRenderer) {
+        auto& characters = renderer_->scene().characters();
         for (auto it = physicalProjectiles_.begin(); it != physicalProjectiles_.end(); ) {
             it->elapsed += deltaTime;
             const float t = std::min(it->elapsed / it->duration, 1.0f);
-            charRenderer->setInstancePosition(
+            characters.setInstancePosition(
                 it->instanceId, glm::mix(it->start, it->end, t));
             if (it->spin) {
                 glm::vec3 rotation = it->rotation;
                 rotation.x += t * glm::two_pi<float>() * 2.0f;
-                charRenderer->setInstanceRotation(it->instanceId, rotation);
+                characters.setInstanceRotation(it->instanceId, rotation);
             }
             if (t >= 1.0f) {
-                charRenderer->removeInstance(it->instanceId);
+                characters.removeInstance(it->instanceId);
                 it = physicalProjectiles_.erase(it);
             } else {
                 ++it;
@@ -398,12 +399,12 @@ void SpellVisualSystem::update(float deltaTime) {
 }
 
 void SpellVisualSystem::cancelAllPrecastVisuals() {
-    if (!m2Renderer_) return;
+    if (!m2Renderer_ || !renderer_) return;
     // Ended as the client ends an effect: the mesh goes, the particles it has
     // made fly out.
     std::erase_if(activeEffects_, [&](const ActiveEffect& effect) {
         if (!effect.isPrecast) return false;
-        m2Renderer_->finishInstance(effect.instanceId);
+        renderer_->scene().models().finishInstance(effect.instanceId);
         return true;
     });
     std::erase_if(deferredPlays_, [](const DeferredPlay& play) { return play.kind == KitKind::Precast; });
@@ -412,14 +413,12 @@ void SpellVisualSystem::cancelAllPrecastVisuals() {
 void SpellVisualSystem::reset() {
     // Clear lingering spell visual instances from the previous map/combat session.
     // Without this, old effects could remain visible after teleport or map change.
-    for (auto& effect : activeEffects_) {
-        if (m2Renderer_) m2Renderer_->removeInstance(effect.instanceId);
+    if (renderer_) {
+        for (auto& effect : activeEffects_) renderer_->scene().models().removeInstance(effect.instanceId);
+        for (const auto& projectile : physicalProjectiles_)
+            renderer_->scene().characters().removeInstance(projectile.instanceId);
     }
     activeEffects_.clear();
-    if (renderer_ && renderer_->getCharacterRenderer()) {
-        for (const auto& projectile : physicalProjectiles_)
-            renderer_->getCharacterRenderer()->removeInstance(projectile.instanceId);
-    }
     physicalProjectiles_.clear();
     deferredPlays_.clear();
     resetStateVisuals();

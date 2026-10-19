@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/scene_commands.hpp"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -36,17 +38,18 @@ public:
     /// Try to load M2 spell models (Charge_Caster.m2, etc.)
     void tryLoadM2Models(M2Renderer* m2Renderer, pipeline::AssetManager* assets);
 
-    /// Start the trail (call once when charge begins)
-    void start(const glm::vec3& position, const glm::vec3& direction);
+    /// Start the trail (call once when charge begins). The caster model's
+    /// instance comes and goes through `models`, as the scene's changes do.
+    void start(const glm::vec3& position, const glm::vec3& direction, SceneCommands::Models& models);
 
     /// Feed current position each frame while charging
-    void emit(const glm::vec3& position, const glm::vec3& direction);
+    void emit(const glm::vec3& position, const glm::vec3& direction, SceneCommands::Models& models);
 
     /// Stop adding trail points (existing ribbon fades out)
-    void stop();
+    void stop(SceneCommands::Models& models);
 
 
-    void update(float deltaTime);
+    void update(float deltaTime, SceneCommands::Models& models);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     [[nodiscard]] bool isActive() const { return emitting_ || !trail_.empty() || !dustPuffs_.empty(); }

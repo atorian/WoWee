@@ -23,6 +23,15 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCANNED = ("src/core", "src/ui", "src/game", "src/addons")
+# What the renderer library keeps for the client's presentation and the client
+# drives - the player's animation, spell visuals, corpse dressing, effects -
+# changes the scene the same way.
+PRESENTATION = (
+    "src/rendering/animation_controller.cpp", "src/rendering/spell_visual_system.cpp",
+    "src/rendering/spell_visual_state.cpp", "src/rendering/loot_sparkles.cpp",
+    "src/rendering/corpse_bones.cpp", "src/rendering/levelup_effect.cpp",
+    "src/rendering/charge_effect.cpp",
+)
 
 # The instance methods of CharacterRenderer, M2Renderer and WMORenderer that
 # change the scene, as SceneCommands offers them.
@@ -39,6 +48,7 @@ METHODS = (
     "clearInstanceHighlights", "setSkipCollision", "setSkipWallCollision", "setInteriorLight",
     "setInstanceIsGameObject", "addDoodadToInstance", "setInstanceIsTransport",
     "setInstanceHidden", "setInstanceDoodadAnimation",
+    "setArmAnimations", "setInstanceStateLook", "setInstanceFade", "finishInstance",
 )
 CALL = re.compile(r"->\s*(" + "|".join(METHODS) + r")\s*\(")
 LINE_COMMENT = re.compile(r"//.*$")
@@ -53,13 +63,16 @@ def calls_in(path: pathlib.Path) -> list[tuple[int, str]]:
 def main() -> int:
     found = []
     scanned = 0
-    for top in SCANNED:
-        for path in sorted((ROOT / top).rglob("*")):
-            if path.suffix not in (".cpp", ".hpp", ".h", ".cc", ".inl"):
-                continue
-            scanned += 1
-            for number, line in calls_in(path):
-                found.append(f"{path.relative_to(ROOT).as_posix()}:{number}: {line}")
+    paths = [path for top in SCANNED for path in sorted((ROOT / top).rglob("*"))
+             if path.suffix in (".cpp", ".hpp", ".h", ".cc", ".inl")]
+    paths += [ROOT / name for name in PRESENTATION]
+    for path in paths:
+        if not path.exists():
+            print(f"{path.relative_to(ROOT).as_posix()} is listed and missing")
+            return 1
+        scanned += 1
+        for number, line in calls_in(path):
+            found.append(f"{path.relative_to(ROOT).as_posix()}:{number}: {line}")
     # The facade makes these calls itself; seeing them there is what shows
     # the matcher still recognises one.
     facade = ROOT / "src" / "rendering" / "scene_commands.cpp"

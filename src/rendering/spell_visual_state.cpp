@@ -12,6 +12,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/character_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
@@ -152,7 +153,7 @@ void SpellVisualSystem::syncStateVisuals(const std::vector<UnitStateVisuals>& un
             // Drawn again - a respawn, a new model. The old body is gone or
             // going; the new one starts from its own look.
             removeStateEffects(state);
-            if (charRenderer) charRenderer->setInstanceStateLook(state.instanceId, glm::vec3(1.0f), 1.0f);
+            if (charRenderer) renderer_->scene().characters().setInstanceStateLook(state.instanceId, glm::vec3(1.0f), 1.0f);
             state = UnitState{};
             state.instanceId = unit.instanceId;
         }
@@ -176,7 +177,7 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
             continue;
         }
         // As the client ends it: the mesh goes at once, its particles fly out.
-        if (it->instanceId != 0 && m2Renderer_) m2Renderer_->finishInstance(it->instanceId);
+        if (it->instanceId != 0 && renderer_) renderer_->scene().models().finishInstance(it->instanceId);
         it = state.effects.erase(it);
     }
     glm::vec3 tint(1.0f);
@@ -201,17 +202,18 @@ void SpellVisualSystem::setUnitStateKits(UnitState& state, std::vector<uint32_t>
 }
 
 void SpellVisualSystem::removeStateEffects(UnitState& state) {
-    if (m2Renderer_) {
+    if (m2Renderer_ && renderer_) {
         for (const auto& effect : state.effects) {
-            if (effect.instanceId != 0) m2Renderer_->finishInstance(effect.instanceId);
+            if (effect.instanceId != 0) renderer_->scene().models().finishInstance(effect.instanceId);
         }
     }
     state.effects.clear();
 }
 
 void SpellVisualSystem::updateStateVisuals(float deltaTime) {
-    if (unitStates_.empty() || !m2Renderer_) return;
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (unitStates_.empty() || !m2Renderer_ || !renderer_) return;
+    auto* charRenderer = renderer_->getCharacterRenderer();
+    auto& models = renderer_->scene().models();
     const float step = deltaTime / kStateLookFadeSeconds;
 
     for (auto it = unitStates_.begin(); it != unitStates_.end(); ) {
@@ -237,17 +239,17 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
                 if (spellVisualFailedModels_.count(effect.modelId)) continue;
                 if (!ensureModel(kitEffect.modelPath, effect.modelId)) continue;  // still loading
                 // Created where it belongs and then given the whole matrix;
-                // a child instance takes no part in placement dedup.
-                effect.instanceId = m2Renderer_->createInstance(effect.modelId, glm::vec3(transform[3]),
-                                                                glm::vec3(0.0f), 1.0f,
-                                                                /*allowPositionDedup=*/false);
+                // an instance made through the scene's changes takes no part
+                // in placement dedup.
+                effect.instanceId = models.createInstance(effect.modelId, glm::vec3(transform[3]),
+                                                          glm::vec3(0.0f), 1.0f);
                 if (effect.instanceId == 0) {
                     LOG_WARNING("SpellVisual: aura effect '", kitEffect.modelPath, "' (visual ",
                                 effect.visualId, ") could not be placed on its unit; not drawn");
                     spellVisualFailedModels_.insert(effect.modelId);
                     continue;
                 }
-                m2Renderer_->setInstanceTransform(effect.instanceId, transform);
+                models.setInstanceTransform(effect.instanceId, transform);
                 effect.lastTransform = transform;
                 // As the client plays an aura's model (render spec 6b): its
                 // Stand once, then its Hold over and over for as long as the
@@ -257,16 +259,16 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
                 // Stand, it appeared again and again.
                 constexpr uint32_t kHold = 158;
                 using End = M2AnimationPlay::End;
-                if (!kitIt->second.loopStand && m2Renderer_->hasAnimation(effect.instanceId, kHold)) {
-                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Next},
-                                                       M2AnimationPlay{.animationId = kHold, .end = End::Loop});
+                if (!kitIt->second.loopStand && models.hasAnimation(effect.instanceId, kHold)) {
+                    models.playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Next},
+                                                 M2AnimationPlay{.animationId = kHold, .end = End::Loop});
                 } else {
-                    m2Renderer_->playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Loop});
+                    models.playInstanceAnimation(effect.instanceId, {.animationId = 0, .end = End::Loop});
                 }
             } else if (transform != effect.lastTransform) {
                 // Only when the attachment moved: a move refiles the instance
                 // in the culling grids.
-                m2Renderer_->setInstanceTransform(effect.instanceId, transform);
+                models.setInstanceTransform(effect.instanceId, transform);
                 effect.lastTransform = transform;
             }
             // The effect is as see-through as the body it hangs on (WoW.exe
@@ -275,7 +277,7 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
             float unitAlpha = 1.0f;
             if (charRenderer) charRenderer->getInstanceDrawnOpacity(state.instanceId, unitAlpha);
             if (unitAlpha != effect.lastAlpha) {
-                m2Renderer_->setInstanceFade(effect.instanceId, unitAlpha);
+                models.setInstanceFade(effect.instanceId, unitAlpha);
                 effect.lastAlpha = unitAlpha;
             }
         }
@@ -285,7 +287,7 @@ void SpellVisualSystem::updateStateVisuals(float deltaTime) {
                                    stepTowards(state.tint.g, state.targetTint.g, step),
                                    stepTowards(state.tint.b, state.targetTint.b, step));
             state.alpha = stepTowards(state.alpha, state.targetAlpha, step);
-            if (charRenderer) charRenderer->setInstanceStateLook(state.instanceId, state.tint, state.alpha);
+            if (charRenderer) renderer_->scene().characters().setInstanceStateLook(state.instanceId, state.tint, state.alpha);
         }
 
         // Nothing left on it and its own look back: forget the unit.
@@ -302,7 +304,7 @@ void SpellVisualSystem::resetStateVisuals() {
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     for (auto& [guid, state] : unitStates_) {
         removeStateEffects(state);
-        if (charRenderer) charRenderer->setInstanceStateLook(state.instanceId, glm::vec3(1.0f), 1.0f);
+        if (charRenderer) renderer_->scene().characters().setInstanceStateLook(state.instanceId, glm::vec3(1.0f), 1.0f);
     }
     unitStates_.clear();
 }

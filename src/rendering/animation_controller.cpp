@@ -7,6 +7,7 @@
 #include "rendering/animation/mount_fsm.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
@@ -88,7 +89,7 @@ void AnimationController::playEmote(const std::string& emoteName) {
     {
         auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         uint32_t ci = renderer_ ? renderer_->getCharacterInstanceId() : 0;
-        const bool has = (cr && ci > 0) ? cr->hasAnimation(ci, animId) : false;
+        const bool has = (cr && ci > 0) ? renderer_->scene().characters().hasAnimation(ci, animId) : false;
         LOG_WARNING("Emote '", emoteName, "' -> animation ", animId,
                     (loop ? " (looping)" : " (one shot)"),
                     " model has it: ", (has ? "yes" : "NO"));
@@ -101,7 +102,7 @@ void AnimationController::playEmote(const std::string& emoteName) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
     if (characterRenderer && characterInstanceId > 0) {
-        characterRenderer->playAnimation(characterInstanceId, animId, loop);
+        renderer_->scene().characters().playAnimation(characterInstanceId, animId, loop);
         lastPlayerAnimRequest_ = animId;
         lastPlayerAnimLoopRequest_ = loop;
     }
@@ -125,16 +126,16 @@ void AnimationController::playWeaponSheathAnimation(SheathSpot mainHand, SheathS
     const SheathSpot body = mainHand != SheathSpot::NONE ? mainHand : offHand;
     if (body == SheathSpot::NONE) return;
     uint32_t animId = reach(body);
-    if (!characterRenderer->hasAnimation(characterInstanceId, animId)) {
+    if (!renderer_->scene().characters().hasAnimation(characterInstanceId, animId)) {
         animId = body == SheathSpot::HIP ? anim::SHEATHE : anim::HIP_SHEATHE;
-        if (!characterRenderer->hasAnimation(characterInstanceId, animId)) return;
+        if (!renderer_->scene().characters().hasAnimation(characterInstanceId, animId)) return;
     }
 
     // ActivityFSM owns the one-shot until completion so locomotion/combat does
     // not replace the reach animation on the next frame.
     characterAnimator_.playEmote(animId, false);
-    characterRenderer->playAnimation(characterInstanceId, animId, false);
-    characterRenderer->setArmAnimations(characterInstanceId, reach(offHand), reach(mainHand));
+    renderer_->scene().characters().playAnimation(characterInstanceId, animId, false);
+    renderer_->scene().characters().setArmAnimations(characterInstanceId, reach(offHand), reach(mainHand));
     lastPlayerAnimRequest_ = animId;
     lastPlayerAnimLoopRequest_ = false;
 }
@@ -296,7 +297,7 @@ void AnimationController::triggerSpecialAttack(uint32_t /*spellId*/) {
         characterAnimator_.cancelEmote();
     }
 
-    auto has = [&](uint32_t id) { return characterRenderer->hasAnimation(characterInstanceId, id); };
+    auto has = [&](uint32_t id) { return renderer_->scene().characters().hasAnimation(characterInstanceId, id); };
 
     // Choose special attack animation based on equipped weapon type
     uint32_t specAnim = 0;
@@ -363,7 +364,7 @@ void AnimationController::triggerRangedShot() {
     if (rangedShootTimer_ > 0.0f) return;
     if (characterAnimator_.getActivity().isEmoteActive()) characterAnimator_.cancelEmote();
 
-    auto has = [&](uint32_t id) { return characterRenderer->hasAnimation(characterInstanceId, id); };
+    auto has = [&](uint32_t id) { return renderer_->scene().characters().hasAnimation(characterInstanceId, id); };
 
     // Resolve ranged attack animation based on weapon type
     uint32_t shootAnim = 0;
@@ -427,7 +428,7 @@ uint32_t AnimationController::resolveMeleeAnimId() {
     }
 
     // When dual-wielding, bypass cache to alternate main/off-hand animations
-    if (!weaponLoadout_.hasOffHand && meleeAnimId_ != 0 && characterRenderer->hasAnimation(characterInstanceId, meleeAnimId_)) {
+    if (!weaponLoadout_.hasOffHand && meleeAnimId_ != 0 && renderer_->scene().characters().hasAnimation(characterInstanceId, meleeAnimId_)) {
         return meleeAnimId_;
     }
 
@@ -483,7 +484,7 @@ uint32_t AnimationController::resolveMeleeAnimId() {
         chain = anim::meleeAnimChain(MeleeChain::OneHand);
     }
     for (uint32_t id : chain) {
-        if (characterRenderer->hasAnimation(characterInstanceId, id)) {
+        if (renderer_->scene().characters().hasAnimation(characterInstanceId, id)) {
             meleeAnimId_ = id;
             meleeAnimDurationMs_ = findDuration(id);
             return meleeAnimId_;
@@ -552,7 +553,7 @@ void AnimationController::triggerLevelUpEffect(const glm::vec3& position) {
         }
     }
 
-    levelUpEffect->trigger(position);
+    levelUpEffect->trigger(position, renderer_->scene().models());
 }
 
 void AnimationController::startChargeEffect(const glm::vec3& position, const glm::vec3& direction) {
@@ -569,18 +570,18 @@ void AnimationController::startChargeEffect(const glm::vec3& position, const glm
         }
     }
 
-    chargeEffect->start(position, direction);
+    chargeEffect->start(position, direction, renderer_->scene().models());
 }
 
 void AnimationController::emitChargeEffect(const glm::vec3& position, const glm::vec3& direction) {
     if (auto* chargeEffect = renderer_->getChargeEffect()) {
-        chargeEffect->emit(position, direction);
+        chargeEffect->emit(position, direction, renderer_->scene().models());
     }
 }
 
 void AnimationController::stopChargeEffect() {
     if (auto* chargeEffect = renderer_->getChargeEffect()) {
-        chargeEffect->stop();
+        chargeEffect->stop(renderer_->scene().models());
     }
 }
 
@@ -618,7 +619,7 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
 
     auto findFirst = [&](std::initializer_list<uint32_t> candidates) -> uint32_t {
         for (uint32_t id : candidates) {
-            if (characterRenderer && characterRenderer->hasAnimation(mountInstId, id)) {
+            if (characterRenderer && renderer_->scene().characters().hasAnimation(mountInstId, id)) {
                 return id;
             }
         }
@@ -892,8 +893,8 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
     // Position mount model
     if (mountInstanceId_ > 0) {
         const glm::vec3& characterPosition = renderer_->getCharacterPosition();
-        characterRenderer->setInstancePosition(mountInstanceId_, characterPosition);
-        characterRenderer->setInstanceRotation(mountInstanceId_, glm::vec3(mountPitch_, mountRoll, mountYawRad));
+        renderer_->scene().characters().setInstancePosition(mountInstanceId_, characterPosition);
+        renderer_->scene().characters().setInstanceRotation(mountInstanceId_, glm::vec3(mountPitch_, mountRoll, mountYawRad));
     }
 
     // Use mount's attachment point for proper bone-driven rider positioning.
@@ -916,17 +917,17 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
             glm::vec3 targetRiderPos = glm::vec3(mountSeatTransform[3]) + glm::vec3(0.0f, 0.0f, 0.02f);
             mountSeatSmoothingInit_ = false;
             smoothedMountSeatPos_ = targetRiderPos;
-            characterRenderer->setInstancePosition(characterInstanceId, targetRiderPos);
+            renderer_->scene().characters().setInstancePosition(characterInstanceId, targetRiderPos);
         } else {
             mountSeatSmoothingInit_ = false;
             const glm::vec3& characterPosition = renderer_->getCharacterPosition();
             glm::vec3 playerPos = characterPosition + glm::vec3(0.0f, 0.0f, mountHeightOffset_ + 0.10f);
-            characterRenderer->setInstancePosition(characterInstanceId, playerPos);
+            renderer_->scene().characters().setInstancePosition(characterInstanceId, playerPos);
         }
 
         float riderPitch = mountPitch_ * 0.35f;
         float riderRoll = mountRoll * 0.35f;
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, mountYawRad));
+        renderer_->scene().characters().setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, mountYawRad));
         return;
     }
 
@@ -985,12 +986,12 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
             smoothedMountSeatPos_ = glm::mix(smoothedMountSeatPos_, targetRiderPos, alpha);
         }
 
-        characterRenderer->setInstancePosition(characterInstanceId, smoothedMountSeatPos_);
+        renderer_->scene().characters().setInstancePosition(characterInstanceId, smoothedMountSeatPos_);
 
         float yawRad = glm::radians(characterYaw);
         float riderPitch = mountPitch_ * 0.35f;
         float riderRoll = mountRoll * 0.35f;
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, yawRad));
+        renderer_->scene().characters().setInstanceRotation(characterInstanceId, glm::vec3(riderPitch, riderRoll, yawRad));
     } else {
         mountSeatSmoothingInit_ = false;
         float yawRad = glm::radians(characterYaw);
@@ -1001,8 +1002,8 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
         glm::vec3 localOffset(0.0f, 0.0f, mountHeightOffset_ + mountBob);
         glm::vec3 worldOffset = glm::vec3(mountRotation * glm::vec4(localOffset, 0.0f));
         glm::vec3 playerPos = characterPosition + worldOffset;
-        characterRenderer->setInstancePosition(characterInstanceId, playerPos);
-        characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(mountPitch_, mountRoll, yawRad));
+        renderer_->scene().characters().setInstancePosition(characterInstanceId, playerPos);
+        renderer_->scene().characters().setInstanceRotation(characterInstanceId, glm::vec3(mountPitch_, mountRoll, yawRad));
     }
 }
 
@@ -1042,7 +1043,7 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
 
     // Apply mount animation if changed
     if (mountOut.mountAnimChanged && mountInstanceId_ > 0 && characterRenderer) {
-        characterRenderer->playAnimation(mountInstanceId_, mountOut.mountAnimId, mountOut.mountAnimLoop);
+        renderer_->scene().characters().playAnimation(mountInstanceId_, mountOut.mountAnimId, mountOut.mountAnimLoop);
     }
 
     // The rider sits in Mount, in the air as on the ground: 3.3.5 has no
@@ -1054,7 +1055,7 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
     float currentAnimTimeMs = 0.0f, currentAnimDurationMs = 0.0f;
     bool haveState = characterRenderer->getAnimationState(characterInstanceId, currentAnimId, currentAnimTimeMs, currentAnimDurationMs);
     if (!haveState || currentAnimId != riderAnim) {
-        characterRenderer->playAnimation(characterInstanceId, riderAnim, true);
+        renderer_->scene().characters().playAnimation(characterInstanceId, riderAnim, true);
         lastPlayerAnimRequest_ = riderAnim;
         lastPlayerAnimLoopRequest_ = true;
     }
@@ -1182,7 +1183,7 @@ void AnimationController::updateCharacterAnimation() {
     }
 
     if (shouldPlay) {
-        characterRenderer->playAnimation(characterInstanceId, animId, loop);
+        renderer_->scene().characters().playAnimation(characterInstanceId, animId, loop);
         lastPlayerAnimRequest_ = animId;
         lastPlayerAnimLoopRequest_ = loop;
     }

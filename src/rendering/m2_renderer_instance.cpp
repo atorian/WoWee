@@ -421,22 +421,19 @@ bool M2Renderer::modelHasAnimation(uint32_t modelId, uint32_t animationId) const
     return false;
 }
 
+float M2Renderer::modelAnimationDuration(uint32_t modelId, uint32_t animationId) const {
+    const auto it = models.find(modelId);
+    if (it == models.end()) return 0.0f;
+    for (const auto& seq : it->second.sequences) {
+        if (seq.id == animationId) return static_cast<float>(seq.duration);
+    }
+    return 0.0f;
+}
+
 uint32_t M2Renderer::getInstanceModelId(uint32_t instanceId) const {
     const auto idxIt = scene_->instanceIndexById.find(instanceId);
     if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size()) return 0;
     return scene_->instances[idxIt->second].modelId;
-}
-
-float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
-    auto idxIt = scene_->instanceIndexById.find(instanceId);
-    if (idxIt == scene_->instanceIndexById.end()) return 0.0f;
-    const auto& inst = scene_->instances[idxIt->second];
-    if (!inst.cachedModel) return 0.0f;
-    const auto& seqs = inst.cachedModel->sequences;
-    if (seqs.empty()) return 0.0f;
-    int seqIdx = inst.currentSequenceIndex;
-    if (seqIdx < 0 || seqIdx >= static_cast<int>(seqs.size())) seqIdx = 0;
-    return seqs[seqIdx].duration; // in milliseconds
 }
 
 bool M2Renderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const {

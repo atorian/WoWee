@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/scene_commands.hpp"
+
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <unordered_map>
@@ -23,7 +25,8 @@ public:
 
     /// Once a frame with every lootable corpse there is now. Starts the
     /// sparkle on new ones, keeps each on its body, and stops it on the rest.
-    void update(M2Renderer* m2, pipeline::AssetManager* assets,
+    /// The model loads in `m2`; the sparkles come and go through `models`.
+    void update(M2Renderer* m2, SceneCommands::Models& models, pipeline::AssetManager* assets,
                 const std::vector<Corpse>& corpses);
 
 private:

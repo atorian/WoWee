@@ -296,7 +296,8 @@ void ChargeEffect::tryLoadM2Models(M2Renderer* m2Renderer, pipeline::AssetManage
     }
 }
 
-void ChargeEffect::start(const glm::vec3& position, const glm::vec3& direction) {
+void ChargeEffect::start(const glm::vec3& position, const glm::vec3& direction,
+                         SceneCommands::Models& models) {
     emitting_ = true;
     dustAccum_ = 0.0f;
     trail_.clear();
@@ -305,20 +306,20 @@ void ChargeEffect::start(const glm::vec3& position, const glm::vec3& direction) 
 
     // Spawn M2 caster effect
     if (casterModelLoaded_ && m2Renderer_) {
-        activeCasterInstanceId_ = m2Renderer_->createInstance(
-            CASTER_MODEL_ID, position, glm::vec3(0.0f), 1.0f);
+        activeCasterInstanceId_ = models.createInstance(CASTER_MODEL_ID, position, glm::vec3(0.0f), 1.0f);
     }
 
     // Seed the first trail point
-    emit(position, direction);
+    emit(position, direction, models);
 }
 
-void ChargeEffect::emit(const glm::vec3& position, const glm::vec3& direction) {
+void ChargeEffect::emit(const glm::vec3& position, const glm::vec3& direction,
+                        SceneCommands::Models& models) {
     if (!emitting_) return;
 
     // Move M2 caster with player
     if (activeCasterInstanceId_ != 0 && m2Renderer_) {
-        m2Renderer_->setInstancePosition(activeCasterInstanceId_, position);
+        models.setInstancePosition(activeCasterInstanceId_, position);
     }
 
     // Only add a new trail point if we've moved enough
@@ -366,15 +367,15 @@ void ChargeEffect::emit(const glm::vec3& position, const glm::vec3& direction) {
     }
 }
 
-void ChargeEffect::stop() {
+void ChargeEffect::stop(SceneCommands::Models& models) {
     emitting_ = false;
 
     if (activeCasterInstanceId_ != 0 && m2Renderer_) {
-        m2Renderer_->removeInstance(activeCasterInstanceId_);
+        models.removeInstance(activeCasterInstanceId_);
         activeCasterInstanceId_ = 0;
     }
 }
-void ChargeEffect::update(float deltaTime) {
+void ChargeEffect::update(float deltaTime, SceneCommands::Models& models) {
     // Age trail points and remove expired ones
     for (auto& tp : trail_) {
         tp.age += deltaTime;
@@ -402,7 +403,7 @@ void ChargeEffect::update(float deltaTime) {
     for (auto it = activeImpacts_.begin(); it != activeImpacts_.end(); ) {
         it->elapsed += deltaTime;
         if (it->elapsed >= M2_EFFECT_DURATION) {
-            if (m2Renderer_) m2Renderer_->removeInstance(it->instanceId);
+            if (m2Renderer_) models.removeInstance(it->instanceId);
             it = activeImpacts_.erase(it);
         } else {
             ++it;

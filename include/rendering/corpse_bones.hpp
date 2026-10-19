@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/scene_commands.hpp"
+
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <string>
@@ -27,8 +29,10 @@ public:
     };
 
     /// Once a frame with every set of bones in view now. Lays new ones down,
-    /// and picks up the ones that have gone.
-    void update(M2Renderer* m2, pipeline::AssetManager* assets, const std::vector<Bones>& bones);
+    /// and picks up the ones that have gone. The skeletons load in `m2`; the
+    /// bones come and go through `models`.
+    void update(M2Renderer* m2, SceneCommands::Models& models, pipeline::AssetManager* assets,
+                const std::vector<Bones>& bones);
 
 private:
     /// Clear of the level-up effect (999900) and the loot sparkle (999901).

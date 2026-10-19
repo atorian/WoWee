@@ -2409,12 +2409,14 @@ void Renderer::update(float deltaTime) {
 
     }
     // Update level-up effect
+    // Their expired instances go at the next apply point, with the scene's
+    // other changes.
     if (levelUpEffect) {
-        levelUpEffect->update(deltaTime);
+        levelUpEffect->update(deltaTime, scene_->models());
     }
     // Update charge effect
     if (chargeEffect) {
-        chargeEffect->update(deltaTime);
+        chargeEffect->update(deltaTime, scene_->models());
     }
     endPhase("sky/effects");
 

@@ -5949,7 +5949,7 @@ void Application::updateLootSparkles() {
         glm::vec3 position;
         if (getRenderPositionForGuid(guid, position)) corpses.emplace_back(guid, position);
     }
-    sparkles->update(renderer->getM2Renderer(), assetManager.get(), corpses);
+    sparkles->update(renderer->getM2Renderer(), renderer->scene().models(), assetManager.get(), corpses);
 }
 
 void Application::updateCorpseBones() {
@@ -5974,7 +5974,7 @@ void Application::updateCorpseBones() {
                              entity->getOrientation() + glm::radians(90.0f)});
         }
     }
-    corpseBones->update(renderer->getM2Renderer(), assetManager.get(), bones);
+    corpseBones->update(renderer->getM2Renderer(), renderer->scene().models(), assetManager.get(), bones);
 }
 
 void Application::updateQuestMarkers() {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/scene_commands.hpp"
+
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <vector>
@@ -25,11 +27,12 @@ public:
                    const std::vector<uint8_t>& m2FileData,
                    const std::vector<uint8_t>& skinFileData);
 
-    /// Trigger the level-up effect at a world position (render coords)
-    void trigger(const glm::vec3& position);
+    /// Trigger the level-up effect at a world position (render coords): its
+    /// instance is asked of `models`, and made at the scene's apply point.
+    void trigger(const glm::vec3& position, SceneCommands::Models& models);
 
     /// Remove expired effect instances
-    void update(float deltaTime);
+    void update(float deltaTime, SceneCommands::Models& models);
 
     [[nodiscard]] bool isModelLoaded() const { return modelLoaded_; }
 

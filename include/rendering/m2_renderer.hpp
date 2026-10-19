@@ -732,9 +732,11 @@ public:
     [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     /// Whether a model has a sequence with this animation id.
     [[nodiscard]] bool modelHasAnimation(uint32_t modelId, uint32_t animationId) const;
+    /// How long, in ms, the model's first sequence with this animation id
+    /// lasts; 0 for one it does not have.
+    [[nodiscard]] float modelAnimationDuration(uint32_t modelId, uint32_t animationId) const;
     /// The model an instance shows; 0 for an instance there is not.
     [[nodiscard]] uint32_t getInstanceModelId(uint32_t instanceId) const;
-    [[nodiscard]] float getInstanceAnimDuration(uint32_t instanceId) const;
     /// World-space visual bounding sphere of an instance (center + radius),
     /// used for cursor picking and selection circles. Returns false for an
     /// unknown instance or a degenerate (zero-radius) model.

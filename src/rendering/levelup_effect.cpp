@@ -41,11 +41,10 @@ bool LevelUpEffect::loadModel(M2Renderer* m2Renderer,
     return true;
 }
 
-void LevelUpEffect::trigger(const glm::vec3& position) {
+void LevelUpEffect::trigger(const glm::vec3& position, SceneCommands::Models& models) {
     if (!modelLoaded_ || !m2Renderer_) return;
 
-    uint32_t instanceId = m2Renderer_->createInstance(MODEL_ID, position,
-                                                       glm::vec3(0.0f), 1.0f);
+    uint32_t instanceId = models.createInstance(MODEL_ID, position, glm::vec3(0.0f), 1.0f);
     if (instanceId == 0) {
         LOG_WARNING("LevelUpEffect: failed to create instance");
         return;
@@ -54,13 +53,13 @@ void LevelUpEffect::trigger(const glm::vec3& position) {
     activeEffects_.push_back({.instanceId = instanceId, .elapsed = 0.0f});
 }
 
-void LevelUpEffect::update(float deltaTime) {
+void LevelUpEffect::update(float deltaTime, SceneCommands::Models& models) {
     if (activeEffects_.empty() || !m2Renderer_) return;
 
     for (auto it = activeEffects_.begin(); it != activeEffects_.end(); ) {
         it->elapsed += deltaTime;
         if (it->elapsed >= EFFECT_DURATION) {
-            m2Renderer_->removeInstance(it->instanceId);
+            models.removeInstance(it->instanceId);
             it = activeEffects_.erase(it);
         } else {
             ++it;

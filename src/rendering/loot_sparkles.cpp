@@ -42,7 +42,7 @@ bool LootSparkles::ensureModel(M2Renderer* m2, pipeline::AssetManager* assets) {
     return true;
 }
 
-void LootSparkles::update(M2Renderer* m2, pipeline::AssetManager* assets,
+void LootSparkles::update(M2Renderer* m2, SceneCommands::Models& models, pipeline::AssetManager* assets,
                           const std::vector<Corpse>& corpses) {
     if (m2 != m2_) {
         // A different renderer holds none of the instances kept here.
@@ -58,18 +58,18 @@ void LootSparkles::update(M2Renderer* m2, pipeline::AssetManager* assets,
     for (const auto& [guid, position] : corpses) {
         lootable.insert(guid);
         auto it = instances_.find(guid);
-        if (it != instances_.end() && m2->hasInstance(it->second)) {
+        if (it != instances_.end() && models.hasInstance(it->second)) {
             // Kept on the body: a corpse can still be settling into place.
-            m2->setInstancePosition(it->second, position);
+            models.setInstancePosition(it->second, position);
             continue;
         }
-        const uint32_t id = m2->createInstance(MODEL_ID, position, glm::vec3(0.0f), 1.0f);
+        const uint32_t id = models.createInstance(MODEL_ID, position, glm::vec3(0.0f), 1.0f);
         if (id != 0) instances_[guid] = id;
     }
 
     for (auto it = instances_.begin(); it != instances_.end();) {
         if (lootable.count(it->first) == 0) {
-            m2->removeInstance(it->second);
+            models.removeInstance(it->second);
             it = instances_.erase(it);
         } else {
             ++it;

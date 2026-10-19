@@ -69,10 +69,13 @@ public:
         void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
         void setInstanceVisible(uint32_t instanceId, bool visible);
         void setInstanceOpacity(uint32_t instanceId, float opacity);
+        /// The look a state puts on the unit (CharacterRenderer::setInstanceStateLook).
+        void setInstanceStateLook(uint32_t instanceId, const glm::vec3& tint, float alpha);
         void startFadeIn(uint32_t instanceId, float durationSeconds);
         void playAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true,
                            uint32_t oneShotReturnAnim = 0);
         void setInstanceAnimationSpeed(uint32_t instanceId, float speed);
+        void setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim);
 
         /// False, and logged, when the character's model has no such point
         /// or the weapon's model does not load; the weapon is loaded now and
@@ -121,7 +124,9 @@ public:
                                           const glm::vec3& position);
         void removeInstance(uint32_t instanceId);
 
+        void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
         void setInstanceTransform(uint32_t instanceId, const glm::mat4& transform);
+        void setInstanceFade(uint32_t instanceId, float alpha);
         void setInstanceAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true);
         void setInstanceAnimationFrozen(uint32_t instanceId, bool frozen);
         void restartInstanceAnimation(uint32_t instanceId);
@@ -137,8 +142,14 @@ public:
 
         [[nodiscard]] uint32_t modelOf(uint32_t instanceId) const;
         [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
+        /// How long, in ms, the animation lasts on the instance's model; 0
+        /// for one it does not have. What an animation asked for here will
+        /// take, before it is made.
+        [[nodiscard]] float animationDuration(uint32_t instanceId, uint32_t animationId) const;
         /// Whether the instance exists, or is queued to.
         [[nodiscard]] bool hasInstance(uint32_t instanceId) const;
+        /// Ends an effect as the client does (M2Renderer::finishInstance).
+        void finishInstance(uint32_t instanceId);
 
     private:
         friend class SceneCommands;
