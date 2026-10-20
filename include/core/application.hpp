@@ -499,7 +499,7 @@ private:
     /// The process's memory, threads and caches over time: the HUD's graphs
     /// and the resource log line. Built when the loop starts.
     std::unique_ptr<ResourceMonitor> resourceMonitor_;
-    std::unique_ptr<rendering::WorldMap> worldMap_;
+    std::shared_ptr<rendering::WorldMap> worldMap_;
     bool spellVisualsAttached_ = false;
 
     // Callback handlers (extracted from setupUICallbacks)

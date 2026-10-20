@@ -373,12 +373,17 @@ void WorldMapFacade::shutdown() {
     impl_->initialized = false;
 }
 
-void WorldMapFacade::compositePass(VkCommandBuffer cmd) {
-    impl_->compositor.flushStaleTextures();
-    impl_->compositor.compositePass(cmd,
-                                     impl_->data.zones(),
-                                     impl_->exploration.exploredOverlays(),
-                                     impl_->exploration.hasServerMask());
+OffscreenComposite::Request WorldMapFacade::extractComposite() {
+    auto frame = impl_->compositor.extract(impl_->data.zones(),
+        impl_->exploration.exploredOverlays(), impl_->exploration.hasServerMask());
+    if (!frame) return {};
+    auto owner = std::static_pointer_cast<WorldMapFacade>(shared_from_this());
+    auto lease = impl_->vkCtx->holdSnapshotResources();
+    return [owner = std::move(owner), frame = std::move(frame), lease = std::move(lease)]
+           (VkCommandBuffer cmd, uint32_t) {
+        lease->usedByFrame(owner->impl_->vkCtx->frameNumber());
+        owner->impl_->compositor.record(cmd, *frame);
+    };
 }
 
 void WorldMapFacade::render(const glm::vec3& playerRenderPos,

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <atomic>
 
 struct ImGuiContext;
 
@@ -32,6 +33,7 @@ namespace rendering {
 class AuxSwapchain;
 class Renderer;
 class VkContext;
+class InterfaceRecorder;
 namespace world_map { class WorldMapFacade; }
 }  // namespace rendering
 namespace pipeline { class AssetManager; }
@@ -85,9 +87,9 @@ public:
     /// a second, since a map has no use for more.
     void buildFrame(bool inWorld, const glm::vec3& playerRenderPos, float playerYawDeg,
                     uint32_t playerZoneId);
+    std::function<void(VkCommandBuffer, uint32_t)> extractFrame();
 
 private:
-    void record(VkCommandBuffer cmd);
     void drawQuestPanel(float x, float width, float height, uint64_t now);
     void saveGeometry() const;
     void chooseGeometry(SDL_Window* gameWindow, int& x, int& y, int& w, int& h) const;
@@ -96,8 +98,10 @@ private:
     SDL_WindowID gameWindowId_ = 0;
     rendering::Renderer* renderer_ = nullptr;
     rendering::VkContext* ctx_ = nullptr;
-    std::unique_ptr<rendering::AuxSwapchain> swapchain_;
-    std::unique_ptr<rendering::world_map::WorldMapFacade> map_;
+    std::shared_ptr<rendering::AuxSwapchain> swapchain_;
+    std::shared_ptr<rendering::InterfaceRecorder> recorder_;
+    std::shared_ptr<std::atomic<bool>> frameWindowOpen_;
+    std::shared_ptr<rendering::world_map::WorldMapFacade> map_;
     ImGuiContext* imgui_ = nullptr;
 
     bool frameReady_ = false;

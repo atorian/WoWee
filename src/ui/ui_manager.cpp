@@ -1,3 +1,4 @@
+#include "rendering/imgui_texture.hpp"
 #include "ui/ui_manager.hpp"
 #include <cstring>
 #include "pipeline/asset_manager.hpp"
@@ -370,6 +371,7 @@ void UIManager::shutdown() {
             vkCtx->waitIdle();
         }
 
+        rendering::releaseImGuiFrameTextures();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();

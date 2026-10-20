@@ -1066,6 +1066,7 @@ set(WOWEE_SOURCES
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
+    src/rendering/interface_frame.cpp
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
     src/rendering/m2_renderer.cpp
@@ -2223,6 +2224,10 @@ if(WOWEE_BUILD_TESTS)
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
     if(Python3_FOUND)
+        add_test(NAME scene_interface_frame
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_interface_frame.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/interface-frame)
+        set_tests_properties(scene_interface_frame PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME scene_sharp_stars
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_sharp_stars.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/sharp-stars/scene)
@@ -2921,6 +2926,7 @@ add_executable(wowee_editor
     src/rendering/wmo_renderer.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
+    src/rendering/interface_frame.cpp
     src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
     src/rendering/frustum.cpp
@@ -2945,6 +2951,7 @@ target_include_directories(wowee_editor SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src
 )
 target_link_libraries(wowee_editor PRIVATE
+    wowee_collision
     SDL3::SDL3
     Vulkan::Vulkan
     Threads::Threads

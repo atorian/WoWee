@@ -10,6 +10,8 @@
 #include <deque>
 #include <list>
 #include <algorithm>
+#include "core/job_group.hpp"
+#include <array>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -51,13 +53,26 @@ public:
     void setAssetManager(pipeline::AssetManager* am) { assetManager = am; }
     void setMapName(const std::string& name);
 
-    /// Off-screen composite pass - call BEFORE the main render pass begins.
-    void compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos);
-
-    /// Display quad - call INSIDE the main render pass.
-    void render(VkCommandBuffer cmd, const Camera& playerCamera,
-                const glm::vec3& centerWorldPos, int screenWidth, int screenHeight,
-                float playerOrientation = 0.0f, bool hasPlayerOrientation = false);
+    struct Display {
+        glm::vec4 rect;
+        glm::vec2 playerUV;
+        float rotation = 0, arrowRotation = 0, zoomRadius = 0;
+        int32_t squareShape = 0;
+        float opacity = 1;
+    };
+    struct Tiles {
+        std::array<std::shared_ptr<VkTexture>, 9> images;
+        std::array<std::string, 9> hashes;
+        std::shared_ptr<const std::unordered_map<std::string, std::string>> lookup;
+        std::string map;
+        int x = 0, y = 0;
+        uint64_t revision = 0;
+    };
+    struct Frame { std::shared_ptr<const Tiles> tiles; Display display; bool enabled = false; };
+    Frame extract(const Camera& camera, const glm::vec3& centre, int width, int height,
+                  float playerOrientation, bool hasPlayerOrientation);
+    void recordComposite(VkCommandBuffer cmd, const Frame& frame);
+    void record(VkCommandBuffer cmd, const Frame& frame);
 
     void setEnabled(bool enabled) { this->enabled = enabled; }
     [[nodiscard]] bool isEnabled() const { return enabled; }
@@ -100,14 +115,11 @@ public:
     [[nodiscard]] float screenRectW() const { return rectW_; }
     [[nodiscard]] float screenRectH() const { return rectH_; }
 
-    // Public accessors for WorldMap
-    VkTexture* getOrLoadTileTexture(int tileX, int tileY);
-    void ensureTRSParsed() { if (!trsParsed) parseTRS(); }
     [[nodiscard]] const std::string& getMapName() const { return mapName; }
 
 private:
-    void parseTRS();
-    void updateTileDescriptors(uint32_t frameIdx, int centerTileX, int centerTileY);
+    void prepareTiles(int x, int y);
+    void updateTileDescriptors(uint32_t frameIdx, const Tiles& tiles);
 
     VkContext* vkCtx = nullptr;
     /// Null until something says otherwise - see setTargetPass.
@@ -117,8 +129,13 @@ private:
     std::string mapName = "Azeroth";
 
     // TRS lookup: "Azeroth\map32_49" → "e7f0dea73ee6baca78231aaf4b7e772a"
-    std::unordered_map<std::string, std::string> trsLookup;
-    bool trsParsed = false;
+    std::shared_ptr<const std::unordered_map<std::string, std::string>> trsLookup;
+    core::JobGroup tileJobs_;
+    core::JobGroup::Future<Tiles> pendingTiles_;
+    std::shared_ptr<const Tiles> readyTiles_;
+    std::string requestedMap_;
+    int requestedX_ = -1, requestedY_ = -1;
+    uint64_t tileRevision_ = 0, compositeRevision_ = 0;
 
     // Tile texture cache: hash → VkTexture, the least recently drawn let go
     // when more than MAX_TILE_CACHE tiles are loaded. The nine around the
@@ -127,7 +144,7 @@ private:
     // A null texture marks a tile that failed to load.
     static constexpr size_t MAX_TILE_CACHE = 128;
     struct CachedTile {
-        std::unique_ptr<VkTexture> texture;
+        std::shared_ptr<VkTexture> texture;
         std::list<std::string>::iterator lru;  // tileLru_.end() for a failed tile
     };
     std::unordered_map<std::string, CachedTile> tileTextureCache;
@@ -167,16 +184,7 @@ private:
     bool  haveRect_ = false;
     float rectX_ = 0.0f, rectY_ = 0.0f, rectW_ = 0.0f, rectH_ = 0.0f;
 
-    // Throttling
-    float updateIntervalSec = 0.25f;
-    float updateDistance = 6.0f;
-    std::chrono::steady_clock::time_point lastUpdateTime{};
-    glm::vec3 lastUpdatePos{0.0f};
     bool hasCachedFrame = false;
-
-    // Tile tracking
-    int lastCenterTileX = -1;
-    int lastCenterTileY = -1;
 
     // No arrow texture: the player arrow is a triangle the display shader
     // draws from push.arrowRotation. A MinimapArrow.blp was loaded here once

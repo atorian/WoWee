@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <memory>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -28,9 +29,7 @@ public:
     CharacterPreview();
     ~CharacterPreview() override;
 
-    void compositeOffscreen(VkCommandBuffer cmd, uint32_t frameIndex) override {
-        if (isModelLoaded()) compositePass(cmd, frameIndex);
-    }
+    Request extractComposite() override;
 
     /// Build the offscreen view. The size is the render target's, in pixels,
     /// and it is worth choosing: this is a full character pass every frame,
@@ -69,7 +68,6 @@ public:
     bool applyEquipment(const std::vector<game::EquipmentItem>& equipment);
 
     void update(float deltaTime);
-    void render();
     void rotate(float yawDelta);
     void zoom(float wheelDelta);
     void resetView();
@@ -89,14 +87,11 @@ public:
     /// colour inside that frame.
     void setTransparentBackground(bool transparent);
 
-    // Off-screen composite pass - call from Renderer::beginFrame() before main render pass
-    void compositePass(VkCommandBuffer cmd, uint32_t frameIndex);
-
     // Mark that the preview needs compositing this frame (call from UI each frame)
     void requestComposite() { compositeRequested_ = true; }
 
     // Returns the ImGui texture handle. Returns VK_NULL_HANDLE until the first
-    // compositePass has run (image is in UNDEFINED layout before that).
+    // composite request has been recorded (image is in UNDEFINED layout before that).
     [[nodiscard]] VkDescriptorSet getTextureId() const { return compositeRendered_ ? imguiTextureId_ : VK_NULL_HANDLE; }
     [[nodiscard]] int getWidth() const { return fboWidth_; }
     [[nodiscard]] int getHeight() const { return fboHeight_; }
@@ -175,7 +170,7 @@ private:
     uint32_t instanceId_ = 0;
     bool modelLoaded_ = false;
     bool compositeRequested_ = false;
-    bool compositeRendered_ = false;  // True after first successful compositePass
+    std::atomic<bool> compositeRendered_{false};
     float modelYaw_ = 90.0f;
 
     // Character-creation portrait rig. The full-body distance is recomputed for

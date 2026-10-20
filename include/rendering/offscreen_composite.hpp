@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <vulkan/vulkan.h>
 
 namespace wowee {
@@ -10,11 +12,13 @@ namespace rendering {
 /// the world - a character preview, the world map - for the interface to show.
 /// Registered with the renderer by whoever owns it, and unregistered before
 /// it goes away.
-class OffscreenComposite {
+class OffscreenComposite : public std::enable_shared_from_this<OffscreenComposite> {
 public:
+    using Request = std::function<void(VkCommandBuffer, uint32_t)>;
     virtual ~OffscreenComposite() = default;
-    /// Record its pass into the frame's command buffer, outside any render pass.
-    virtual void compositeOffscreen(VkCommandBuffer cmd, uint32_t frameIndex) = 0;
+    /// Producer-side extraction. The request owns its values and resource
+    /// lifetime; executing it may not read the live interface or scene.
+    virtual Request extractComposite() = 0;
 };
 
 } // namespace rendering

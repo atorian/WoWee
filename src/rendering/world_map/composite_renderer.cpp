@@ -375,13 +375,9 @@ void CompositeRenderer::detachZoneTextures() {
     zoneTextureSlots_.clear();
 }
 
-void CompositeRenderer::flushStaleTextures() {
-    // No-op: texture cleanup is now handled by deferAfterAllFrameFences
-    // in detachZoneTextures. Kept for API compatibility.
-}
-
 void CompositeRenderer::requestComposite(int zoneIdx) {
     pendingCompositeIdx_ = zoneIdx;
+    prepared_.reset();
 }
 
 bool CompositeRenderer::hasAnyTile(int zoneIdx) const {
@@ -394,24 +390,45 @@ bool CompositeRenderer::hasAnyTile(int zoneIdx) const {
     return false;
 }
 
-void CompositeRenderer::compositePass(VkCommandBuffer cmd,
-                                       const std::vector<Zone>& zones,
-                                       const std::unordered_set<int>& exploredOverlays,
-                                       bool hasServerMask) {
-    if (!initialized || pendingCompositeIdx_ < 0 || !compositeTarget) return;
+struct CompositeRenderer::Frame {
+    Zone zone;
+    ZoneTextureSlots slots;
+    std::unordered_set<int> explored;
+    bool hasServerMask = false;
+    int zoneIdx = -1;
+    uint64_t revision = 0;
+};
+
+std::shared_ptr<const CompositeRenderer::Frame> CompositeRenderer::extract(
+        const std::vector<Zone>& zones, const std::unordered_set<int>& exploredOverlays,
+        bool hasServerMask) {
+    if (!initialized || pendingCompositeIdx_ < 0 || !compositeTarget) return {};
+    if (prepared_) return prepared_;
     if (pendingCompositeIdx_ >= static_cast<int>(zones.size())) {
+        LOG_WARNING("World map composite requested invalid zone ", pendingCompositeIdx_,
+                    "; previous map remains displayed");
         pendingCompositeIdx_ = -1;
-        return;
+        return {};
     }
-
-    int zoneIdx = pendingCompositeIdx_;
-    pendingCompositeIdx_ = -1;
-
-    if (compositedIdx_ == zoneIdx) return;
     ensureTextureSlots(zones.size(), zones);
+    auto frame = std::make_shared<Frame>();
+    frame->zoneIdx = pendingCompositeIdx_;
+    frame->zone = zones[frame->zoneIdx];
+    frame->slots = zoneTextureSlots_[frame->zoneIdx];
+    frame->explored = exploredOverlays;
+    frame->hasServerMask = hasServerMask;
+    frame->revision = ++requestRevision_;
+    prepared_ = frame;
+    return frame;
+}
 
-    const auto& zone = zones[zoneIdx];
-    const auto& slots = zoneTextureSlots_[zoneIdx];
+void CompositeRenderer::record(VkCommandBuffer cmd, const Frame& frame) {
+    if (!compositeTarget || frame.revision == recordedRevision_) return;
+    const auto& zone = frame.zone;
+    const auto& slots = frame.slots;
+    const auto& exploredOverlays = frame.explored;
+    const bool hasServerMask = frame.hasServerMask;
+    const auto zoneIdx = frame.zoneIdx;
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDevice device = vkCtx->getDevice();
 
@@ -563,8 +580,9 @@ void CompositeRenderer::compositePass(VkCommandBuffer cmd,
     }
 
     compositeTarget->endPass(cmd);
-    compositedIdx_ = zoneIdx;
-    everComposited_ = true;
+    compositedIdx_.store(zoneIdx, std::memory_order_release);
+    everComposited_.store(true, std::memory_order_release);
+    recordedRevision_ = frame.revision;
 }
 
 } // namespace world_map

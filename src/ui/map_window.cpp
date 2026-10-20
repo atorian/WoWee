@@ -15,6 +15,7 @@
 #include "ui/interface_fonts.hpp"
 #include "ui/ui_manager.hpp"
 #include "rendering/imgui_texture.hpp"
+#include "rendering/interface_frame.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -135,8 +136,15 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
     renderer_ = renderer;
     ctx_ = ctx;
 
-    swapchain_ = std::make_unique<rendering::AuxSwapchain>();
+    swapchain_ = std::make_shared<rendering::AuxSwapchain>();
+    recorder_ = std::make_shared<rendering::InterfaceRecorder>();
+    frameWindowOpen_ = std::make_shared<std::atomic<bool>>(true);
     if (!swapchain_->create(ctx, window_)) {
+        close();
+        return false;
+    }
+    if (!recorder_->initialize(*ctx, swapchain_->renderPass())) {
+        LOG_ERROR("Map window interface pipeline initialization failed");
         close();
         return false;
     }
@@ -197,7 +205,7 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
 
     // A map of its own, so this one and the in-game one can show different
     // places. Its textures are made under this window's context.
-    map_ = std::make_unique<rendering::world_map::WorldMapFacade>();
+    map_ = std::make_shared<rendering::world_map::WorldMapFacade>();
     withContext([&] {
         if (!map_->initialize(ctx, assets)) {
             LOG_WARNING("Map window: the map did not initialise");
@@ -205,7 +213,6 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
         map_->setPersistent(true);
     });
 
-    renderer_->setAfterInterfaceRecorder([this](VkCommandBuffer cmd) { record(cmd); });
     lastPlayerZone_ = 0;
     browsing_ = false;
     LOG_WARNING("Map window opened at ", x, ",", y, " ", w, "x", h);
@@ -215,7 +222,8 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
 void MapWindow::close() {
     if (!window_) return;
     saveGeometry();
-    if (renderer_) renderer_->setAfterInterfaceRecorder({});
+    if (renderer_) renderer_->drainFrames();
+    if (frameWindowOpen_) frameWindowOpen_->store(false, std::memory_order_release);
 
     // Nothing of this window's may still be in flight: its pipelines, its
     // textures and its swapchain images are about to go.
@@ -225,18 +233,19 @@ void MapWindow::close() {
         ImGuiContext* previous = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(imgui_);
         // The map first, under the context its textures were made in.
-        if (map_) map_->shutdown();
+        map_.reset();
+        rendering::releaseImGuiFrameTextures();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext(imgui_);
         ImGui::SetCurrentContext(previous == imgui_ ? nullptr : previous);
         imgui_ = nullptr;
-    } else if (map_) {
-        map_->shutdown();
     }
     map_.reset();
     if (swapchain_) swapchain_->destroy();
     swapchain_.reset();
+    recorder_.reset();
+    frameWindowOpen_.reset();
 
     SDL_DestroyWindow(window_);
     window_ = nullptr;
@@ -478,19 +487,21 @@ void MapWindow::drawQuestPanel(float x, float width, float height, uint64_t now)
     ImGui::PopStyleColor();
 }
 
-void MapWindow::record(VkCommandBuffer cmd) {
-    if (!frameReady_ || !swapchain_ || !map_) return;
+std::function<void(VkCommandBuffer, uint32_t)> MapWindow::extractFrame() {
+    if (!frameReady_ || !swapchain_ || !map_) return {};
     frameReady_ = false;
-    // Not ready for another frame on its display: this one is skipped, and
-    // the game goes on without waiting for it.
-    if (!swapchain_->acquire()) return;
-
-    // Outside any render pass, before the pass that draws what it composites.
-    map_->compositePass(cmd);
-    swapchain_->record(cmd, kBackground, [this](VkCommandBuffer c) {
-        ContextScope scope(imgui_);
-        rendering::recordImGuiDrawData(*ctx_, c);
-    });
+    ContextScope scope(imgui_);
+    auto interface = rendering::extractImGuiFrame(*ctx_);
+    auto composite = map_->extractComposite();
+    return [swapchain = swapchain_, recorder = recorder_, open = frameWindowOpen_,
+            interface = std::move(interface), composite = std::move(composite), ctx = ctx_]
+           (VkCommandBuffer cmd, uint32_t slot) {
+        if (!open->load(std::memory_order_acquire) || !swapchain->acquire()) return;
+        if (composite) composite(cmd, slot);
+        swapchain->record(cmd, kBackground, [&](VkCommandBuffer c) {
+            if (interface) recorder->record(*ctx, c, swapchain->renderPass(), slot, *interface);
+        });
+    };
 }
 
 }  // namespace ui

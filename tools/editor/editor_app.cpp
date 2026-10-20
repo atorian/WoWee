@@ -1,3 +1,4 @@
+#include "rendering/interface_frame.hpp"
 #include "editor_app.hpp"
 #include "adt_writer.hpp"
 #include "zone_manifest.hpp"
@@ -73,6 +74,11 @@ bool EditorApp::initialize(const std::string& dataPath) {
 }
 
 void EditorApp::run() {
+    rendering::InterfaceRecorder interfaceRecorder;
+    if (!interfaceRecorder.initialize(*window_->getVkContext(), window_->getVkContext()->getImGuiRenderPass())) {
+        LOG_ERROR("Editor interface pipeline initialization failed");
+        return;
+    }
     auto lastTime = std::chrono::steady_clock::now();
 
     while (!window_->shouldClose()) {
@@ -230,6 +236,7 @@ void EditorApp::run() {
         }
 
         ImGui::Render();
+        auto interface = rendering::extractImGuiFrame(*vkCtx);
 
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -261,7 +268,7 @@ void EditorApp::run() {
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         viewport_.render(cmd);
-        rendering::recordImGuiDrawData(*vkCtx, cmd);
+        if (interface) interfaceRecorder.record(*vkCtx, cmd, vkCtx->getImGuiRenderPass(), vkCtx->getCurrentFrame(), *interface);
 
         vkCmdEndRenderPass(cmd);
         vkCtx->endFrame(cmd, imageIndex);
@@ -2093,6 +2100,7 @@ void EditorApp::initImGui() {
 
 void EditorApp::shutdownImGui() {
     if (!imguiInitialized_) return;
+    rendering::releaseImGuiFrameTextures();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

@@ -223,7 +223,7 @@ bool LoadingScreen::loadImage(const std::string& path) {
     }
 
     // Register with ImGui as a texture
-    bgDescriptorSet = ImGui_ImplVulkan_AddTexture(bgSampler, bgImageView,
+    bgDescriptorSet = wowee::rendering::addImGuiTexture(bgSampler, bgImageView,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     return true;

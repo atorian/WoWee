@@ -70,7 +70,7 @@ private:
     std::function<void()> onCancel;
 
     // 3D model preview
-    std::unique_ptr<rendering::CharacterPreview> preview_;
+    std::shared_ptr<rendering::CharacterPreview> preview_;
     pipeline::AssetManager* assetManager_ = nullptr;
     int prevRaceIndex_ = -1;
     int prevGenderIndex_ = -1;

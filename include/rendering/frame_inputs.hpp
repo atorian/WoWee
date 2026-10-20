@@ -15,16 +15,20 @@
 #include <optional>
 #include <memory>
 #include <vector>
+#include <functional>
 
 namespace wowee::rendering {
 
 /// Values extracted at the end of Present. Owns its camera, sampled light,
 /// weather and local lights; no references into the next game's frame.
-/// Geometry draw lists and interface draw data are extracted in later stages.
+/// World draw lists, interfaces and auxiliary targets are owned by this frame.
 struct FrameScene;
+struct InterfaceFrame;
 
 struct FrameInputs {
     std::shared_ptr<const FrameScene> scene;
+    std::shared_ptr<const InterfaceFrame> interface;
+    std::function<void(VkCommandBuffer, uint32_t)> auxiliaryInterface;
     Camera camera;
     glm::mat4 shadowMatrix{0.0f};
     glm::vec3 shadowCenter{0.0f};

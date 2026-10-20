@@ -33,7 +33,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
     if (!self) return;
 
     if (!preview_) {
-        preview_ = std::make_unique<rendering::CharacterPreview>();
+        preview_ = std::make_shared<rendering::CharacterPreview>();
         // Small: this is drawn into a circle a few dozen pixels across, and the
         // cost of the pass scales with the target.
         initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
@@ -42,7 +42,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
             preview_.reset();
             return;
         }
-        renderer->registerComposite(preview_.get());
+        renderer->registerComposite(preview_);
         registered_ = true;
     }
 
@@ -110,7 +110,6 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
     }
 
     preview_->update(deltaTime);
-    preview_->render();
     preview_->requestComposite();
 }
 
@@ -122,14 +121,14 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
     if (!assets || !renderer) return false;
 
     if (!preview_) {
-        preview_ = std::make_unique<rendering::CharacterPreview>();
+        preview_ = std::make_shared<rendering::CharacterPreview>();
         initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
         if (!initialized_) {
             LOG_WARNING("UnitPortrait: could not build the offscreen view");
             preview_.reset();
             return false;
         }
-        renderer->registerComposite(preview_.get());
+        renderer->registerComposite(preview_);
         registered_ = true;
     }
 
@@ -177,7 +176,6 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
     }
 
     preview_->update(deltaTime);
-    preview_->render();
     preview_->requestComposite();
     return preview_->isModelLoaded();
 }
@@ -190,14 +188,14 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
     if (!assets || !renderer || m2Path.empty()) return false;
 
     if (!preview_) {
-        preview_ = std::make_unique<rendering::CharacterPreview>();
+        preview_ = std::make_shared<rendering::CharacterPreview>();
         initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
         if (!initialized_) {
             LOG_WARNING("UnitPortrait: could not build the offscreen view");
             preview_.reset();
             return false;
         }
-        renderer->registerComposite(preview_.get());
+        renderer->registerComposite(preview_);
         registered_ = true;
     }
 
@@ -224,7 +222,6 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
     }
 
     preview_->update(deltaTime);
-    preview_->render();
     preview_->requestComposite();
     return preview_->isModelLoaded();
 }

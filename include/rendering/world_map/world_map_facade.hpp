@@ -29,13 +29,10 @@ public:
     WorldMapFacade();
     ~WorldMapFacade() override;
 
-    void compositeOffscreen(VkCommandBuffer cmd, uint32_t /*frameIndex*/) override { compositePass(cmd); }
+    Request extractComposite() override;
 
     bool initialize(VkContext* ctx, pipeline::AssetManager* am);
     void shutdown();
-
-    /// Off-screen composite pass - call BEFORE the main render pass begins.
-    void compositePass(VkCommandBuffer cmd);
 
     /// ImGui overlay - call INSIDE the main render pass (during ImGui frame).
     void render(const glm::vec3& playerRenderPos,

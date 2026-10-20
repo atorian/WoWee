@@ -3352,6 +3352,14 @@ if(_ipo_supported AND WOWEE_ENABLE_LTO)
 endif()
 
 # ── wowee_loading_test_client ────────────────────────────────
+option(WOWEE_BUILD_RENDER_CLIENT_PROBE "Build native interface/render lifecycle GPU probe" OFF)
+if(WOWEE_BUILD_RENDER_CLIENT_PROBE AND NOT ANDROID)
+    add_executable(render_client_probe render_client_probe.cpp)
+    target_link_libraries(render_client_probe PRIVATE wowee_client_objects)
+    wowee_test_link_glm(render_client_probe)
+    wowee_apply_client_flags(render_client_probe)
+endif()
+
 # The native loading fixture: the client's own objects with a main of its own
 # that watches the frames (loading_frame_probe.cpp). Built with the client in
 # every build, so a client change compiles once and both programs link; the

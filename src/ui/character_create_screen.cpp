@@ -177,10 +177,10 @@ void CharacterCreateScreen::reset() {
 void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
     assetManager_ = am;
     if (!preview_) {
-        preview_ = std::make_unique<rendering::CharacterPreview>();
+        preview_ = std::make_shared<rendering::CharacterPreview>();
         if (preview_->initialize(am)) {
             auto* renderer = core::Application::getInstance().getRenderer();
-            if (renderer) renderer->registerComposite(preview_.get());
+            if (renderer) renderer->registerComposite(preview_);
         }
     }
     if (preview_) preview_->resetView();
@@ -410,7 +410,6 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     // Render the preview to FBO before the ImGui frame
     if (preview_) {
         updatePreviewIfNeeded();
-        preview_->render();
         preview_->requestComposite();
     }
     const bool hasPreview = (preview_ && preview_->getTextureId() != nullptr &&

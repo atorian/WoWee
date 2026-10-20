@@ -113,6 +113,7 @@
 #include <nlohmann/json.hpp>
 #include <glm/glm.hpp>
 #include "stb_image_write.h"
+#include "interface_fixture.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -764,6 +765,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     int frame = 0;
     SceneCapture capture(renderer, frame, frames - 1);
+    std::unique_ptr<InterfaceFixture> interfaceFixture;
+    if (scene.value("interface", false)) {
+        const auto extent = renderer.getVkContext()->getSwapchainExtent();
+        interfaceFixture = std::make_unique<InterfaceFixture>(*renderer.getVkContext(), extent.width, extent.height);
+    }
     FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
@@ -783,7 +789,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
         if (scene.value("discardFirstExtraction", false) && frame == 0) (void)renderer.extractFrameInputs();
-        const auto inputs = renderer.extractFrameInputs();
+        auto inputs = renderer.extractFrameInputs();
+        if (interfaceFixture) {
+            interfaceFixture->build();
+            inputs.interface = interfaceFixture->extract();
+            if (frame == scene.value("mutateAtFrame", frames - 1)) {
+                if (scene.value("mutateInterfaceAfterExtract", false)) {
+                    interfaceFixture->build(true);
+                    (void)interfaceFixture->extract(); // grow and replace the live atlas page
+                }
+                if (scene.value("destroyInterfaceAfterExtract", false)) interfaceFixture.reset();
+            }
+        }
         if (scene.value("removeSceneAfterExtract", false) &&
             frame == scene.value("mutateAtFrame", frames - 1)) {
             for (const auto& placement : placements) {

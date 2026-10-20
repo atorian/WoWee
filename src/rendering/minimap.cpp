@@ -26,16 +26,7 @@ struct MinimapTilePush {
     glm::vec2 gridOffset;  // 8 bytes
 };
 
-// Push constant for display vertex + fragment shaders
-struct MinimapDisplayPush {
-    glm::vec4 rect;         // x, y, w, h in 0..1 screen space
-    glm::vec2 playerUV;
-    float rotation;
-    float arrowRotation;
-    float zoomRadius;
-    int32_t squareShape;
-    float opacity;
-};  // 44 bytes
+using MinimapDisplayPush = Minimap::Display;
 
 Minimap::Minimap() = default;
 
@@ -244,6 +235,9 @@ bool Minimap::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*
 }
 
 void Minimap::shutdown() {
+    tileJobs_.cancel();
+    tileJobs_.wait();
+    pendingTiles_ = {};
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
     VmaAllocator alloc = vkCtx->getAllocator();
@@ -259,9 +253,7 @@ void Minimap::shutdown() {
 
     destroy(alloc, quadVB, quadVBAlloc);
 
-    for (auto& [hash, cached] : tileTextureCache) {
-        if (cached.texture) cached.texture->destroy(device, alloc);
-    }
+    readyTiles_.reset();
     tileTextureCache.clear();
     tileLru_.clear();
 
@@ -297,115 +289,102 @@ void Minimap::recreatePipelines() {
 void Minimap::setMapName(const std::string& name) {
     if (mapName != name) {
         mapName = name;
-        hasCachedFrame = false;
-        lastCenterTileX = -1;
-        lastCenterTileY = -1;
+        requestedMap_.clear();
     }
 }
 
-// --------------------------------------------------------
-// TRS parsing
-// --------------------------------------------------------
-
-void Minimap::parseTRS() {
-    if (trsParsed || !assetManager) return;
-    trsParsed = true;
-
-    auto data = assetManager->readFile("Textures\\Minimap\\md5translate.trs");
-    if (data.empty()) {
-        LOG_WARNING("Failed to load md5translate.trs");
-        return;
+// A bounded background request reads/decodes the lookup and tile files and
+// uploads new images using its own submit lane. The producer only polls ready
+// results; recording never reads archives or waits for uploads.
+void Minimap::prepareTiles(int x, int y) {
+    if (pendingTiles_.valid() && pendingTiles_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool current = pendingTiles_.current();
+        auto tiles = pendingTiles_.get();
+        if (current && tiles.map == mapName && tiles.x == x && tiles.y == y) {
+            trsLookup = tiles.lookup;
+            for (size_t i = 0; i < tiles.images.size(); ++i) {
+                const auto& image = tiles.images[i];
+                const auto& key = tiles.hashes[i];
+                if (key.empty()) continue;
+                auto found = tileTextureCache.find(key);
+                if (found != tileTextureCache.end()) {
+                    if (found->second.texture) tileLru_.splice(tileLru_.begin(), tileLru_, found->second.lru);
+                } else if (image) {
+                    tileLru_.push_front(key); tileTextureCache.emplace(key, CachedTile{image, tileLru_.begin()});
+                } else tileTextureCache.emplace(key, CachedTile{nullptr, tileLru_.end()});
+            }
+            while (tileLru_.size() > MAX_TILE_CACHE) {
+                tileTextureCache.erase(tileLru_.back());
+                tileLru_.pop_back();
+            }
+            tiles.revision = ++tileRevision_;
+            readyTiles_ = std::make_shared<Tiles>(std::move(tiles));
+        }
     }
-
-    std::string content(reinterpret_cast<const char*>(data.data()), data.size());
-    std::istringstream stream(content);
-    std::string line;
-    int count = 0;
-
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line.substr(0, 4) == "dir:") continue;
-
-        auto tabPos = line.find('\t');
-        if (tabPos == std::string::npos) continue;
-
-        std::string key = line.substr(0, tabPos);
-        std::string hashFile = line.substr(tabPos + 1);
-
-        if (key.size() > 4 && key.substr(key.size() - 4) == ".blp")
-            key = key.substr(0, key.size() - 4);
-        if (hashFile.size() > 4 && hashFile.substr(hashFile.size() - 4) == ".blp")
-            hashFile = hashFile.substr(0, hashFile.size() - 4);
-
-        trsLookup[key] = hashFile;
-        count++;
-    }
-
-    LOG_INFO("Parsed md5translate.trs: ", count, " entries");
+    if (pendingTiles_.valid() || !assetManager ||
+        (requestedMap_ == mapName && requestedX_ == x && requestedY_ == y)) return;
+    requestedMap_ = mapName; requestedX_ = x; requestedY_ = y;
+    auto* assets = assetManager;
+    auto* ctx = vkCtx;
+    const auto map = mapName;
+    const auto lookup = trsLookup;
+    std::unordered_map<std::string, std::shared_ptr<VkTexture>> existing;
+    for (const auto& [hash, entry] : tileTextureCache) existing.emplace(hash, entry.texture);
+    pendingTiles_ = tileJobs_.submit([assets, ctx, map, x, y, lookup, existing = std::move(existing)](const core::JobGroup::Token& token) {
+        Tiles result;
+        result.map = map; result.x = x; result.y = y; result.lookup = lookup;
+        if (!token.current()) return result;
+        if (!result.lookup) {
+            auto parsed = std::make_shared<std::unordered_map<std::string, std::string>>();
+            auto data = assets->readFile("Textures\\Minimap\\md5translate.trs");
+            if (data.empty()) LOG_WARNING("Minimap lookup md5translate.trs is unavailable; tiles show no data");
+            std::istringstream stream(std::string(reinterpret_cast<const char*>(data.data()), data.size()));
+            std::string line;
+            while (std::getline(stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const auto tab = line.find('\t');
+                if (tab == std::string::npos) continue;
+                auto key = line.substr(0, tab), hash = line.substr(tab + 1);
+                if (key.ends_with(".blp")) key.resize(key.size() - 4);
+                if (hash.ends_with(".blp")) hash.resize(hash.size() - 4);
+                (*parsed)[std::move(key)] = std::move(hash);
+            }
+            result.lookup = std::move(parsed);
+        }
+        int slot = 0;
+        for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc, ++slot) {
+            if (!token.current()) return result;
+            const auto key = map + "\\map" + std::to_string(x + dr) + "_" + std::to_string(y + dc);
+            const auto found = result.lookup->find(key);
+            if (found == result.lookup->end()) continue;
+            result.hashes[slot] = found->second;
+            if (auto cached = existing.find(found->second); cached != existing.end()) {
+                result.images[slot] = cached->second;
+                continue;
+            }
+            const auto path = "Textures\\Minimap\\" + found->second + ".blp";
+            const auto image = assets->loadTexture(path);
+            if (!image.isValid()) {
+                LOG_WARNING("Minimap tile ", key, " (", path, ") failed to load; shown as no data");
+                continue;
+            }
+            auto texture = std::shared_ptr<VkTexture>(new VkTexture, [ctx](VkTexture* tex) {
+                ctx->deferAfterAllFrameFences([tex] { delete tex; });
+            });
+            if (!texture->upload(*ctx, image.data.data(), image.width, image.height,
+                                 VK_FORMAT_R8G8B8A8_UNORM, false) ||
+                !texture->createSampler(ctx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+                                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1)) {
+                LOG_ERROR("Minimap tile ", path, " GPU upload failed; shown as no data");
+                continue;
+            }
+            result.images[slot] = std::move(texture);
+        }
+        return result;
+    });
 }
 
-// --------------------------------------------------------
-// Tile texture loading
-// --------------------------------------------------------
-
-VkTexture* Minimap::getOrLoadTileTexture(int tileX, int tileY) {
-    if (!trsParsed) parseTRS();
-
-    std::string key = mapName + "\\map" + std::to_string(tileX) + "_" + std::to_string(tileY);
-
-    auto trsIt = trsLookup.find(key);
-    if (trsIt == trsLookup.end())
-        return noDataTexture.get();
-
-    const std::string& hash = trsIt->second;
-
-    auto cacheIt = tileTextureCache.find(hash);
-    if (cacheIt != tileTextureCache.end()) {
-        CachedTile& cached = cacheIt->second;
-        if (!cached.texture) return noDataTexture.get();
-        tileLru_.splice(tileLru_.begin(), tileLru_, cached.lru);
-        return cached.texture.get();
-    }
-
-    // Load from MPQ
-    std::string blpPath = "Textures\\Minimap\\" + hash + ".blp";
-    auto blpImage = assetManager->loadTexture(blpPath);
-    if (!blpImage.isValid()) {
-        LOG_WARNING("Minimap: tile ", key, " (", blpPath, ") could not be loaded - drawn as no data");
-        tileTextureCache[hash] = CachedTile{nullptr, tileLru_.end()};  // Mark as failed
-        return noDataTexture.get();
-    }
-
-    auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx, blpImage.data.data(), blpImage.width, blpImage.height,
-                VK_FORMAT_R8G8B8A8_UNORM, false);
-    tex->createSampler(vkCtx->getDevice(), VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
-
-    VkTexture* ptr = tex.get();
-    tileLru_.push_front(hash);
-    tileTextureCache[hash] = CachedTile{std::move(tex), tileLru_.begin()};
-
-    // Let the least recently drawn tiles go to bound GPU memory. The frames in
-    // flight may still sample one through a descriptor written before, so it
-    // is destroyed after their fences, not here.
-    while (tileLru_.size() > MAX_TILE_CACHE) {
-        auto evicted = tileTextureCache.find(tileLru_.back());
-        tileLru_.pop_back();
-        if (evicted == tileTextureCache.end()) continue;
-        std::shared_ptr<VkTexture> retiring = std::move(evicted->second.texture);
-        tileTextureCache.erase(evicted);
-        vkCtx->deferAfterAllFrameFences([retiring]() mutable { retiring.reset(); });
-    }
-
-    return ptr;
-}
-
-// --------------------------------------------------------
-// Update tile descriptor sets for composite pass
-// --------------------------------------------------------
-
-void Minimap::updateTileDescriptors(uint32_t frameIdx, int centerTileX, int centerTileY) {
+void Minimap::updateTileDescriptors(uint32_t frameIdx, const Tiles& tiles) {
     constexpr int kTileCount = 9; // 3x3 grid
     VkDevice device = vkCtx->getDevice();
     std::array<VkDescriptorImageInfo, kTileCount> imgInfos{};
@@ -414,12 +393,8 @@ void Minimap::updateTileDescriptors(uint32_t frameIdx, int centerTileX, int cent
 
     for (int dr = -1; dr <= 1; dr++) {
         for (int dc = -1; dc <= 1; dc++) {
-            int tx = centerTileX + dr;
-            int ty = centerTileY + dc;
-
-            VkTexture* tileTex = getOrLoadTileTexture(tx, ty);
-            if (!tileTex || !tileTex->isValid())
-                tileTex = noDataTexture.get();
+            VkTexture* tileTex = tiles.images[slot].get();
+            if (!tileTex || !tileTex->isValid()) tileTex = noDataTexture.get();
 
             imgInfos[slot] = tileTex->descriptorInfo();
 
@@ -441,33 +416,11 @@ void Minimap::updateTileDescriptors(uint32_t frameIdx, int centerTileX, int cent
 // Off-screen composite pass (call BEFORE main render pass)
 // --------------------------------------------------------
 
-void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos) {
-    if (!enabled || !assetManager || !compositeTarget || !compositeTarget->isValid()) return;
-
-    if (!trsParsed) parseTRS();
-
-    // Check if composite needs refresh
-    const auto now = std::chrono::steady_clock::now();
-    bool needsRefresh = !hasCachedFrame;
-    if (!needsRefresh) {
-        float mdx = centerWorldPos.x - lastUpdatePos.x;
-        float mdy = centerWorldPos.y - lastUpdatePos.y;
-        float movedSq = mdx * mdx + mdy * mdy;
-        float elapsed = std::chrono::duration<float>(now - lastUpdateTime).count();
-        needsRefresh = (movedSq >= updateDistance * updateDistance) || (elapsed >= updateIntervalSec);
-    }
-
-    // Also refresh if player crossed a tile boundary
-    auto [curTileX, curTileY] = core::coords::worldToTile(centerWorldPos.x, centerWorldPos.y);
-    if (curTileX != lastCenterTileX || curTileY != lastCenterTileY)
-        needsRefresh = true;
-
-    if (!needsRefresh) return;
-
-    uint32_t frameIdx = vkCtx->getCurrentFrame();
-
-    // Update tile descriptor sets
-    updateTileDescriptors(frameIdx, curTileX, curTileY);
+void Minimap::recordComposite(VkCommandBuffer cmd, const Frame& frame) {
+    if (!frame.enabled || !frame.tiles || !compositeTarget ||
+        frame.tiles->revision == compositeRevision_) return;
+    const uint32_t frameIdx = vkCtx->getCurrentFrame();
+    updateTileDescriptors(frameIdx, *frame.tiles);
 
     // Begin off-screen render pass
     VkClearColorValue clearColor = {{ 0.05f, 0.08f, 0.12f, 1.0f }};
@@ -499,11 +452,7 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
 
     compositeTarget->endPass(cmd);
 
-    // Update tracking
-    lastCenterTileX = curTileX;
-    lastCenterTileY = curTileY;
-    lastUpdateTime = now;
-    lastUpdatePos = centerWorldPos;
+    compositeRevision_ = frame.tiles->revision;
     hasCachedFrame = true;
 }
 
@@ -511,20 +460,15 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
 // Display quad (call INSIDE main render pass)
 // --------------------------------------------------------
 
-void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
-                     const glm::vec3& centerWorldPos,
-                     int screenWidth, int screenHeight,
-                     float playerOrientation, bool hasPlayerOrientation) {
-    if (!enabled || !hasCachedFrame || !displayPipeline) return;
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, displayPipeline);
-
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            displayPipelineLayout, 0, 1,
-                            &displayDescSet, 0, nullptr);
-
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB, &offset);
+Minimap::Frame Minimap::extract(const Camera& playerCamera, const glm::vec3& centerWorldPos,
+                                  int screenWidth, int screenHeight,
+                                  float playerOrientation, bool hasPlayerOrientation) {
+    Frame frame;
+    if (!enabled || !vkCtx || screenWidth <= 0 || screenHeight <= 0) return frame;
+    auto [centreX, centreY] = core::coords::worldToTile(centerWorldPos.x, centerWorldPos.y);
+    prepareTiles(centreX, centreY);
+    frame.tiles = readyTiles_;
+    frame.enabled = frame.tiles != nullptr;
 
     // Top-right corner, unless something asked for a particular rect - which
     // is what happens when FrameXML owns the minimap and the map has to sit
@@ -545,7 +489,8 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
 
     // Compute player's UV in the composite texture
     constexpr float TILE_SIZE = core::coords::TILE_SIZE;
-    auto [tileX, tileY] = core::coords::worldToTile(centerWorldPos.x, centerWorldPos.y);
+    const int tileX = frame.tiles ? frame.tiles->x : centreX;
+    const int tileY = frame.tiles ? frame.tiles->y : centreY;
 
     float fracNS = 32.0f - static_cast<float>(tileX) - centerWorldPos.y / TILE_SIZE;
     float fracEW = 32.0f - static_cast<float>(tileY) - centerWorldPos.x / TILE_SIZE;
@@ -606,10 +551,20 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
     push.squareShape = squareShape ? 1 : 0;
     push.opacity = opacity_;
 
+    frame.display = push;
+    return frame;
+}
+
+void Minimap::record(VkCommandBuffer cmd, const Frame& frame) {
+    if (!frame.enabled || !hasCachedFrame || !displayPipeline) return;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, displayPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            displayPipelineLayout, 0, 1, &displayDescSet, 0, nullptr);
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB, &offset);
     vkCmdPushConstants(cmd, displayPipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(push), &push);
-
+                       0, sizeof(frame.display), &frame.display);
     vkCmdDraw(cmd, 6, 1, 0, 0);
 }
 

@@ -3,6 +3,7 @@
 
 #include "rendering/view_distance.hpp"
 #include "rendering/frame_inputs.hpp"
+#include "rendering/interface_frame.hpp"
 
 #include <chrono>
 #include "core/job_group.hpp"
@@ -108,18 +109,10 @@ public:
     void beginFrame(const FrameInputs& inputs);
     void endFrame();
 
-    /// Recorded after the interface is drawn and before the frame is submitted,
-    /// into the frame's own command buffer. A second window draws here - see
-    /// AuxSwapchain - so the frame's one fence covers it. Empty clears it.
-    void setAfterInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
-        afterInterface_ = std::move(recorder);
-    }
-    /// Records the interface over the finished picture, inside the overlay
-    /// pass at the end of the frame. The client's draws its ImGui frame; with
-    /// none set there is no interface, as in an offline scene.
-    void setInterfaceRecorder(std::function<void(VkCommandBuffer)> recorder) {
-        interface_ = std::move(recorder);
-    }
+    /// Structural changes (closing a secondary window, tearing down a session)
+    /// wait for queued recording, without making ordinary frames synchronous.
+    void setFrameDrain(std::function<void()> drain) { frameDrain_ = std::move(drain); }
+    void drainFrames() { if (frameDrain_) frameDrain_(); }
 
     void renderWorld();
 
@@ -308,8 +301,8 @@ private:
     /// renderer and terrain manager that places things in it.
     std::unique_ptr<collision::CollisionWorld> collision_;
 
-    std::function<void(VkCommandBuffer)> afterInterface_;
-    std::function<void(VkCommandBuffer)> interface_;
+    std::function<void()> frameDrain_;
+    InterfaceRecorder interfaceRecorder_;
 
     // True when water is drawn in the scene continuation pass rather than in
     // the scene pass itself (see renderWorld).
@@ -556,7 +549,7 @@ public:
     /// Images the interface shows, drawn ahead of the world each frame - see
     /// OffscreenComposite. Registered by their owners, who unregister them
     /// before they go.
-    void registerComposite(OffscreenComposite* composite);
+    void registerComposite(const std::shared_ptr<OffscreenComposite>& composite);
     void unregisterComposite(OffscreenComposite* composite);
 
     /// Held on. Turning shadows off loses the device within a second - see
@@ -752,7 +745,7 @@ private:
     VkFramebuffer activeFramebuffer_ = VK_NULL_HANDLE;
     VkExtent2D activeRenderExtent_ = {.width = 0, .height = 0};
 
-    std::vector<OffscreenComposite*> offscreenComposites_;
+    std::vector<std::weak_ptr<OffscreenComposite>> offscreenComposites_;
 
     bool terrainEnabled = true;
     bool terrainLoaded = false;

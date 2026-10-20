@@ -401,7 +401,7 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
     // Keep the 3D preview in sync with the selected character.
     if (assetManager_ && assetManager_->isInitialized()) {
         if (!preview_) {
-            preview_ = std::make_unique<rendering::CharacterPreview>();
+            preview_ = std::make_shared<rendering::CharacterPreview>();
         }
         if (!previewInitialized_) {
             previewInitialized_ = preview_->initialize(assetManager_);
@@ -410,7 +410,7 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
                 preview_.reset();
             } else {
                 auto* renderer = core::Application::getInstance().getRenderer();
-                if (renderer) renderer->registerComposite(preview_.get());
+                if (renderer) renderer->registerComposite(preview_);
             }
         }
         if (preview_) {
@@ -443,7 +443,6 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
 
             // Drive preview animation and request composite for next beginFrame.
             preview_->update(ImGui::GetIO().DeltaTime);
-            preview_->render();
             preview_->requestComposite();
         }
     }

@@ -16,6 +16,8 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/offscreen_composite.hpp"
+#include "rendering/minimap.hpp"
 
 namespace wowee::rendering {
 
@@ -38,6 +40,8 @@ struct FrameScene {
     std::shared_ptr<const M2Renderer::Frame> models, skyModels;
     std::shared_ptr<const WMORenderer::Frame> buildings;
     std::shared_ptr<const CharacterRenderer::Frame> characters;
+    std::vector<OffscreenComposite::Request> composites;
+    Minimap::Frame minimap;
 };
 
 } // namespace wowee::rendering

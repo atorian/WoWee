@@ -178,7 +178,7 @@ bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int hei
     assetManager_ = am;
     // If already initialized with valid resources, reuse them.
     // This avoids destroying GPU resources that may still be referenced by
-    // an in-flight command buffer (compositePass recorded earlier this frame).
+    // an in-flight command buffer (composite request recorded earlier this frame).
     if (renderTarget_ && renderTarget_->isValid() && charRenderer_ && camera_) {
         // Mark model as not loaded - loadCharacter() will handle instance cleanup
         modelLoaded_ = false;
@@ -234,10 +234,6 @@ bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int hei
 }
 
 void CharacterPreview::shutdown() {
-    // Unregister from renderer before destroying resources
-    auto* appRenderer = core::Application::getInstance().getRenderer();
-    if (appRenderer) appRenderer->unregisterComposite(this);
-
     if (charRenderer_) {
         charRenderer_->shutdown();
         charRenderer_.reset();
@@ -265,7 +261,7 @@ void CharacterPreview::createFBO() {
 
     // 1b. Transition the color image from UNDEFINED to SHADER_READ_ONLY_OPTIMAL
     // so that ImGui::Image doesn't sample an image in UNDEFINED layout before
-    // the first compositePass runs.
+    // the first composite request runs.
     {
         VkCommandBuffer cmd = vkCtx_->beginSingleTimeCommands();
         VkImageMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -480,7 +476,7 @@ void CharacterPreview::createFBO() {
     }
 
     // 5. Register the color attachment as an ImGui texture
-    imguiTextureId_ = ImGui_ImplVulkan_AddTexture(
+    imguiTextureId_ = wowee::rendering::addImGuiTexture(
         renderTarget_->getSampler(),
         renderTarget_->getColorImageView(),
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -509,7 +505,9 @@ void CharacterPreview::destroyFBO() {
 
     if (renderTarget_) {
         auto target = std::shared_ptr<VkRenderTarget>(std::move(renderTarget_));
-        retired.add([target]() {});
+        const auto device = vkCtx_->getDevice();
+        const auto allocator = vkCtx_->getAllocator();
+        retired.add([target, device, allocator] { target->destroy(device, allocator); });
     }
 }
 
@@ -523,7 +521,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     // Remove existing instance.
     // removeInstance retires bones after all frame fences, including commands
-    // recorded by compositePass earlier in this frame.
+    // recorded by composite request earlier in this frame.
     if (instanceId_ > 0) {
         charRenderer_->removeInstance(instanceId_);
         instanceId_ = 0;
@@ -1406,31 +1404,22 @@ void CharacterPreview::update(float deltaTime) {
     }
 }
 
-void CharacterPreview::render() {
-    // No-op - actual rendering happens in compositePass() called from Renderer::beginFrame()
-}
-
-void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
-    // Only composite when a UI screen actually requested it this frame
-    if (!compositeRequested_) return;
+OffscreenComposite::Request CharacterPreview::extractComposite() {
+    if (!compositeRequested_) return {};
     compositeRequested_ = false;
-
-    if (!charRenderer_ || !camera_ || !modelLoaded_ || !renderTarget_ || !renderTarget_->isValid()) {
-        return;
-    }
-
-    uint32_t fi = frameIndex % MAX_FRAMES;
-
+    if (!charRenderer_ || !camera_ || !modelLoaded_ || !renderTarget_ || !renderTarget_->isValid()) return {};
+    const Camera camera = *camera_;
+    auto characters = charRenderer_->extract(camera, {});
     // Update per-frame UBO with preview camera matrices and studio lighting
     GPUPerFrameData ubo{};
-    ubo.view = camera_->getViewMatrix();
-    ubo.projection = camera_->getProjectionMatrix();
+    ubo.view = camera.getViewMatrix();
+    ubo.projection = camera.getProjectionMatrix();
     ubo.lightSpaceMatrix = glm::mat4(1.0f);
     // Studio lighting: key light from upper-right-front
     ubo.lightDir = glm::vec4(glm::normalize(glm::vec3(0.5f, -0.7f, 0.5f)), 0.0f);
     ubo.lightColor = glm::vec4(1.0f, 0.95f, 0.9f, 0.0f);
     ubo.ambientColor = glm::vec4(0.35f, 0.35f, 0.4f, 0.0f);
-    ubo.viewPos = glm::vec4(camera_->getPosition(), 0.0f);
+    ubo.viewPos = glm::vec4(camera.getPosition(), 0.0f);
     // No fog in preview
     ubo.fogColor = glm::vec4(0.05f, 0.05f, 0.1f, 0.0f);
     ubo.fogParams = glm::vec4(9999.0f, 10000.0f, 0.0f, 0.0f);
@@ -1439,29 +1428,23 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     // drivers, so keep the portrait on studio lighting only.
     ubo.shadowParams = glm::vec4(0.0f);
 
-    std::memcpy(previewUBOMapped_[fi], &ubo, sizeof(GPUPerFrameData));
 
-    // Begin off-screen render pass
-    // Nothing at all behind a portrait, so the frame art around it shows
-    // through; the studio backdrop everywhere else.
-    VkClearColorValue clearColor = transparentBackground_
-        ? VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}
-        : VkClearColorValue{{0.05f, 0.05f, 0.1f, 1.0f}};
-    renderTarget_->beginPass(cmd, clearColor);
-
-    // Preview rendering bypasses Renderer::renderWorld(), so it must run the
-    // same resource-preparation hook itself after server appearance data has
-    // produced bone matrices. This preserves lazy data loading while keeping
-    // GPU allocation outside CharacterRenderer::render().
-    charRenderer_->useFrame(charRenderer_->extract(*camera_, {}));
-    charRenderer_->prepareRender(fi);
-
-    // Render the character model
-    charRenderer_->render(cmd, previewPerFrameSet_[fi], *camera_);
-
-    renderTarget_->endPass(cmd);
-
-    compositeRendered_ = true;
+    const VkClearColorValue clear = transparentBackground_
+        ? VkClearColorValue{{0, 0, 0, 0}} : VkClearColorValue{{0.05f, 0.05f, 0.1f, 1}};
+    auto owner = std::static_pointer_cast<CharacterPreview>(shared_from_this());
+    auto lease = vkCtx_->holdSnapshotResources();
+    return [owner = std::move(owner), camera, characters = std::move(characters), ubo, clear, lease = std::move(lease)]
+           (VkCommandBuffer cmd, uint32_t slot) {
+        lease->usedByFrame(owner->vkCtx_->frameNumber());
+        const uint32_t fi = slot % MAX_FRAMES;
+        std::memcpy(owner->previewUBOMapped_[fi], &ubo, sizeof(ubo));
+        owner->charRenderer_->useFrame(characters);
+        owner->charRenderer_->prepareRender(fi);
+        owner->renderTarget_->beginPass(cmd, clear);
+        owner->charRenderer_->render(cmd, owner->previewPerFrameSet_[fi], camera);
+        owner->renderTarget_->endPass(cmd);
+        owner->compositeRendered_.store(true, std::memory_order_release);
+    };
 }
 
 void CharacterPreview::rotate(float yawDelta) {

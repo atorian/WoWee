@@ -179,6 +179,9 @@ public:
     /// lock that belongs to the pool, so every pool keeps its owner and only
     /// its uses are serialized.
     VkResult allocateDescriptorSets(const VkDescriptorSetAllocateInfo& info, VkDescriptorSet* sets);
+    [[nodiscard]] std::unique_lock<std::mutex> lockDescriptorPool(VkDescriptorPool pool) {
+        return std::unique_lock<std::mutex>(descriptorPoolLock(pool));
+    }
     void freeDescriptorSets(VkDescriptorPool pool, uint32_t count, const VkDescriptorSet* sets);
     void resetDescriptorPool(VkDescriptorPool pool);
 

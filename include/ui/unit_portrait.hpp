@@ -113,7 +113,7 @@ public:
     void shutdown(rendering::Renderer* renderer);
 
 private:
-    std::unique_ptr<rendering::CharacterPreview> preview_;
+    std::shared_ptr<rendering::CharacterPreview> preview_;
     bool initialized_ = false;
     Framing framing_ = Framing::Face;
     int targetWidth_ = 640;

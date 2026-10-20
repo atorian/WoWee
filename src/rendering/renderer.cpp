@@ -1086,13 +1086,20 @@ bool Renderer::initialize(RenderSurface* surface) {
     renderGraph_->registerResource("scene_depth");
     renderGraph_->registerResource("final_image");
 
+    if (!interfaceRecorder_.initialize(*vkCtx, vkCtx->getOverlayRenderPass())) {
+        LOG_ERROR("Renderer interface pipeline initialization failed");
+        return false;
+    }
     LOG_INFO("Renderer initialized");
     return true;
 }
 
 void Renderer::shutdown() {
+    frameInputs_.interface.reset();
+    frameInputs_.auxiliaryInterface = {};
     frameInputs_.scene.reset();
     endFrameCapture();
+    interfaceRecorder_.shutdown();
 
     destroySecondaryCommandResources();
 
@@ -1243,15 +1250,18 @@ void Renderer::shutdown() {
     LOG_INFO("Renderer shutdown");
 }
 
-void Renderer::registerComposite(OffscreenComposite* composite) {
-    if (composite && std::find(offscreenComposites_.begin(), offscreenComposites_.end(), composite) ==
-                         offscreenComposites_.end()) {
-        offscreenComposites_.push_back(composite);
-    }
+void Renderer::registerComposite(const std::shared_ptr<OffscreenComposite>& composite) {
+    if (!composite) return;
+    const bool registered = std::any_of(offscreenComposites_.begin(), offscreenComposites_.end(),
+        [&](const auto& weak) { return weak.lock() == composite; });
+    if (!registered) offscreenComposites_.push_back(composite);
 }
 
 void Renderer::unregisterComposite(OffscreenComposite* composite) {
-    std::erase(offscreenComposites_, composite);
+    std::erase_if(offscreenComposites_, [&](const auto& weak) {
+        const auto owner = weak.lock();
+        return !owner || owner.get() == composite;
+    });
 }
 
 void Renderer::setWaterRefractionEnabled(bool /*enabled*/) {
@@ -1512,6 +1522,11 @@ FrameInputs Renderer::extractFrameInputs() {
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
             ShelterMap::kHalfExtent * 1.415f);
     }
+    if (minimap && in.minimapEnabled) {
+        const auto centre = in.viewer.thirdPerson ? in.characterPosition : in.camera.getPosition();
+        scene->minimap = minimap->extract(in.camera, centre, in.windowWidth, in.windowHeight,
+                                          glm::radians(in.characterYaw), true);
+    }
     if (skyboxModelRenderer_) {
         skyboxModelRenderer_->setSuppressBakedStars(in.sharpStars);
         scene->skyModels = skyboxModelRenderer_->extract(in.camera, in.localLights, in.time, glm::mat4(0.0f), 1.0f);
@@ -1525,6 +1540,13 @@ FrameInputs Renderer::extractFrameInputs() {
     }
     if (mountDust) scene->dust = mountDust->extract();
     if (swimEffects) scene->swim = swimEffects->extract();
+    std::erase_if(offscreenComposites_, [](const auto& weak) { return weak.expired(); });
+    for (const auto& weak : offscreenComposites_) {
+        if (auto owner = weak.lock()) {
+            auto request = owner->extractComposite();
+            if (request) scene->composites.push_back(std::move(request));
+        }
+    }
     if (lightning) scene->lightning = lightning->extract();
     if (chargeEffect) scene->charge = chargeEffect->extract();
     if (precipitation_) scene->precipitation = precipitation_->extract();
@@ -1974,7 +1996,8 @@ void Renderer::endFrame() {
 
         // The interface's pipelines are built against the overlay pass, so it
         // always records inline here rather than into a scene-pass secondary.
-        if (interface_) interface_(currentCmd);
+        if (frameInputs_.interface) interfaceRecorder_.record(*vkCtx, currentCmd,
+            vkCtx->getOverlayRenderPass(), vkCtx->getCurrentFrame(), *frameInputs_.interface);
         vkCmdEndRenderPass(currentCmd);
     } else {
         LOG_ERROR("Overlay render pass missing - UI not drawn this frame");
@@ -1982,7 +2005,8 @@ void Renderer::endFrame() {
 
     // Water now renders in the main pass (renderWorld), no separate 1x pass needed.
 
-    if (afterInterface_) afterInterface_(currentCmd);
+    if (frameInputs_.auxiliaryInterface)
+        frameInputs_.auxiliaryInterface(currentCmd, vkCtx->getCurrentFrame());
 
     // Last, so the recording holds everything the player sees - and then the
     // recording dot, which it does not.
@@ -4090,16 +4114,7 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
 
 /// The minimap disc, over whatever has been drawn so far.
 void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
-    if (minimap && frameInputs_.minimapEnabled && frameCamera() && surface_) {
-        const glm::vec3 minimapCenter =
-            frameInputs_.viewer.thirdPerson ? frameInputs_.characterPosition : frameCamera()->getPosition();
-        // Render-space character yaw faces north at 180 degrees; the
-        // minimap shader arrow faces north at 0. Match the mirrored
-        // minimap texture by flipping the visual arrow vertically.
-        minimap->render(cmd, *frameCamera(), minimapCenter,
-                        frameInputs_.windowWidth, frameInputs_.windowHeight,
-                        glm::radians(frameInputs_.characterYaw), true);
-    }
+    if (minimap && frameInputs_.scene) minimap->record(cmd, frameInputs_.scene->minimap);
 }
 
 bool Renderer::fadedCharactersAfterWater() const {
@@ -5571,11 +5586,7 @@ void Renderer::buildFrameGraph() {
     // Minimap composites (no dependencies - standalone off-screen render target)
     renderGraph_->addPass("minimap_composite", {}, {},
         [this](VkCommandBuffer cmd) {
-            if (minimap && frameInputs_.minimapEnabled && frameCamera()) {
-                const glm::vec3 minimapCenter =
-                    frameInputs_.viewer.thirdPerson ? frameInputs_.characterPosition : frameCamera()->getPosition();
-                minimap->compositePass(cmd, minimapCenter);
-            }
+            if (minimap && frameInputs_.scene) minimap->recordComposite(cmd, frameInputs_.scene->minimap);
         });
 
     // What the interface shows from images of its own: the world map, the
@@ -5583,7 +5594,7 @@ void Renderer::buildFrameGraph() {
     renderGraph_->addPass("offscreen_composites", {}, {},
         [this](VkCommandBuffer cmd) {
             const uint32_t frame = vkCtx->getCurrentFrame();
-            for (auto* composite : offscreenComposites_) composite->compositeOffscreen(cmd, frame);
+            for (const auto& request : frameInputs_.scene->composites) request(cmd, frame);
         });
 
     // The far ground's bake: new tiles' atlases readied and their chunks

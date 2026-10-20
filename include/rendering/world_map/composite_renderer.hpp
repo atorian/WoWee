@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_set>
+#include <atomic>
 
 namespace wowee {
 namespace rendering {
@@ -54,28 +55,22 @@ public:
     /// Load exploration overlay textures for a zone.
     void loadOverlayTextures(int zoneIdx, std::vector<Zone>& zones);
 
-    /// Request a composite for the given zone (deferred to compositePass).
+    /// Request a composite for the given zone (extracted into the next frame).
     void requestComposite(int zoneIdx);
 
-    /// Execute the off-screen composite pass.
-    void compositePass(VkCommandBuffer cmd,
-                       const std::vector<Zone>& zones,
-                       const std::unordered_set<int>& exploredOverlays,
-                       bool hasServerMask);
+    struct Frame;
+    std::shared_ptr<const Frame> extract(const std::vector<Zone>& zones,
+                                        const std::unordered_set<int>& exploredOverlays,
+                                        bool hasServerMask);
+    void record(VkCommandBuffer cmd, const Frame& frame);
 
     /// Descriptor set for ImGui display of the composite.
     [[nodiscard]] VkDescriptorSet displayDescriptorSet() const { return imguiDisplaySet; }
-
-    /// Destroy all loaded zone textures (on map change).
 
     /// Detach zone textures for deferred GPU destruction.
     /// Clears CPU tracking immediately but moves GPU texture objects to a stale
     /// list so they can be freed later when no in-flight frames reference them.
     void detachZoneTextures();
-
-    /// Free any GPU textures previously moved to the stale list by detachZoneTextures.
-    /// Calls vkDeviceWaitIdle internally to ensure no in-flight work references them.
-    void flushStaleTextures();
 
     /// Index of the zone currently composited (-1 if none).
     [[nodiscard]] int compositedIdx() const { return compositedIdx_; }
@@ -88,7 +83,7 @@ public:
     [[nodiscard]] bool everComposited() const { return everComposited_; }
 
     /// Reset composited index to force re-composite.
-    void invalidateComposite() { compositedIdx_ = -1; }
+    void invalidateComposite() { prepared_.reset(); compositedIdx_ = -1; }
 
     /// Check whether a zone has any loaded tile textures.
     [[nodiscard]] bool hasAnyTile(int zoneIdx) const;
@@ -142,9 +137,11 @@ private:
     // Texture storage (owns all VkTexture objects for zone tiles)
     std::vector<std::unique_ptr<VkTexture>> zoneTextures;
 
-    int compositedIdx_ = -1;
-    bool everComposited_ = false;
+    std::atomic<int> compositedIdx_{-1};
+    std::atomic<bool> everComposited_{false};
     int pendingCompositeIdx_ = -1;
+    std::shared_ptr<const Frame> prepared_;
+    uint64_t requestRevision_ = 0, recordedRevision_ = 0;
 
     // Per-zone tile texture pointers (indexed by zone, then by tile slot)
     // Stored separately since Zone struct is now Vulkan-free

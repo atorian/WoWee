@@ -4,11 +4,11 @@
 vkQueueSubmit, vkQueuePresentKHR, vkQueueWaitIdle and vkDeviceWaitIdle all need
 the queue externally synchronized: two threads calling them at once on one
 queue is undefined, and on these drivers it loses the device. The graphics
-queue is shared by the frame, every upload and ImGui's own texture uploads,
+queue is shared by the frame and every upload,
 and the frame is moving to a thread of its own. So every one of them goes
 through VkContext, which takes the queue lock (lockQueues, waitIdle), and
-ImGui's draw data is recorded through rendering::recordImGuiDrawData, which
-makes the backend's hidden texture uploads under that lock first.
+ImGui's draw data is extracted before recording; its Vulkan backend must never
+record a live context or issue hidden texture uploads from a recording path.
 
     tools/queue_use_check.py
 
@@ -25,7 +25,6 @@ QUEUE_CALL = re.compile(r"\b(vkQueueSubmit2?|vkQueuePresentKHR|vkQueueWaitIdle|v
 IMGUI_RECORD = re.compile(r"\bImGui_ImplVulkan_RenderDrawData\s*\(")
 # Where each may be called.
 QUEUE_HOME = "src/rendering/vk_context.cpp"
-IMGUI_HOME = "src/rendering/imgui_texture.cpp"
 LINE_COMMENT = re.compile(r"//.*$")
 
 
@@ -45,7 +44,7 @@ def main() -> int:
                         inside += 1
                     else:
                         found.append(f"{rel}:{number}: {line.strip()}")
-                if IMGUI_RECORD.search(code) and rel != IMGUI_HOME:
+                if IMGUI_RECORD.search(code):
                     found.append(f"{rel}:{number}: {line.strip()}")
     print(f"{len(found)} uses of the GPU queues past VkContext")
     print(f"{inside} inside VkContext itself")

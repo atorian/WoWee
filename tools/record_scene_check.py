@@ -4,8 +4,8 @@
 Colour, depth, particles, water, grass, sky, weather and overlays must consume
 extracted draw data. GPU preparation may update frame slots and acceleration
 structures, but must not walk live instances, streaming lists or simulations.
-UI composites remain the separate 5г boundary. sweep_guard holds the count at
-zero; the list of checked definitions also makes missing coverage visible.
+Interface composites consume extracted data too. sweep_guard holds the count
+at zero; the list of checked definitions makes missing coverage visible.
 """
 import pathlib
 import re
@@ -18,7 +18,8 @@ FILES = tuple("src/rendering/" + name + ".cpp" for name in (
     "terrain_bake", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
     "starfield", "lens_flare", "precipitation", "ocean_waves", "water_wake", "mount_dust",
     "swim_effects", "lightning", "charge_effect", "quest_marker_renderer", "footprint_renderer",
-    "overlay_system", "volumetric_fog", "rt_scene", "renderer"))
+    "overlay_system", "volumetric_fog", "rt_scene", "renderer", "minimap",
+    "interface_frame", "character_preview", "world_map/composite_renderer"))
 DEFINITION = re.compile(r"^\w[\w:<>,\s\*&]*\b(\w+)::(\w+)\s*\(", re.M)
 LIVE = {
     "M2Renderer": r"scene_|models|frameLights_|cachedCamPos_|skyTimeOfDayHours_",
@@ -45,6 +46,10 @@ LIVE = {
     "OverlaySystem": r"selCircleVisible_|selCirclePos_|selCircleRadius_|selCircleColor_|world",
     "RtScene": r"sourceMeshes_|sourceInstances_|changes_|extractChanges",
     "Renderer": r"collision_|liquidScene_",
+    "Minimap": r"assetManager|mapName|trsLookup|readyTiles_|tileTextureCache|viewRadius|rotateWithCamera|haveRect_|opacity_",
+    "InterfaceRecorder": r"ImGui|ImGui_ImplVulkan_RenderDrawData",
+    "CharacterPreview": r"camera|modelLoaded_|compositeRequested_",
+    "CompositeRenderer": r"assetManager|zoneTextureSlots_|pendingCompositeIdx_|prepared_",
 }
 EXTRA = {"prepareRender", "dispatchCullCompute", "dispatchCull", "cullShadowCasters"}
 PRODUCER_CALL = re.compile(r"->(?:extract\w*|gather\w*|syncRtScene|updateInView)\s*\(")
@@ -80,9 +85,6 @@ def main() -> int:
             cls, method = match.groups()
             if cls not in LIVE or not (method.startswith(("record", "render")) or method in EXTRA or
                                        cls == "RtScene" and method in ("update", "applyChanges")):
-                continue
-            # UI composites are extracted in 5г; this guard covers world passes.
-            if cls == "Renderer" and method in ("renderUI", "renderMinimapOverlay"):
                 continue
             qualified = f"{cls}::{method}"
             live = re.compile(r"(?<![.\w])(?:" + LIVE[cls] + r")\b")

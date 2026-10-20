@@ -148,7 +148,7 @@ private:
 
     // Preview (3D character portrait)
     pipeline::AssetManager* assetManager_ = nullptr;
-    std::unique_ptr<rendering::CharacterPreview> preview_;
+    std::shared_ptr<rendering::CharacterPreview> preview_;
     bool previewInitialized_ = false;
     uint64_t previewGuid_ = 0;
     uint32_t previewAppearanceBytes_ = 0;

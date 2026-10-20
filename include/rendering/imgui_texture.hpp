@@ -12,6 +12,7 @@ namespace wowee {
 namespace rendering {
 
 class VkContext;
+struct InterfaceFrame;
 
 /// A texture together with the descriptor set that lets ImGui draw it.
 ///
@@ -19,14 +20,10 @@ class VkContext;
 /// view and sampler, so it stops being valid the moment the texture goes.
 /// Holding them apart is what made three copies of the loading code all have
 /// to remember to destroy the texture on each of their failure paths.
-/// Hand a descriptor set back to ImGui's Vulkan backend, if it is still there.
-///
-/// ImGui_ImplVulkan_RemoveTexture reads the backend's data unconditionally, so
-/// calling it after ImGui_ImplVulkan_Shutdown dereferences what that just
-/// freed. Several things hold these sets until their own destructors run, and
-/// those run in an order no single call site controls, so the check belongs
-/// here rather than in an ordering that has to be got right everywhere.
+/// Retire its descriptor through VkContext, independently of ImGui contexts.
+/// CPU snapshots and submitted frames retain it until both have completed.
 void removeImGuiTexture(VkDescriptorSet& descriptorSet);
+VkDescriptorSet addImGuiTexture(VkSampler sampler, VkImageView view, VkImageLayout layout);
 
 struct ImGuiTexture {
     std::unique_ptr<VkTexture> texture;
@@ -61,14 +58,11 @@ ImGuiTexture makeImGuiTexture(VkContext& ctx, const pipeline::BLPImage& image);
 ImGuiTexture loadImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
                               const std::string& path);
 
-/// Records ImGui's current draw data into `cmd`.
-///
-/// The backend uploads the textures the frame changed - the font atlas as it
-/// grows - from inside RenderDrawData, with its own submit and a wait for the
-/// queue to go idle: a queue use in the middle of recording, past the queue
-/// lock. They are made here first, under the lock, so the recording that
-/// follows submits nothing.
-void recordImGuiDrawData(VkContext& ctx, VkCommandBuffer cmd);
+/// Producer only, after ImGui::Render. Upload font changes and resolve every
+/// texture indirection before copying the frame; retained pages survive atlas
+/// growth and context destruction. Recording never enters an ImGui context.
+std::shared_ptr<const InterfaceFrame> extractImGuiFrame(VkContext& ctx);
+void releaseImGuiFrameTextures();
 
 }  // namespace rendering
 }  // namespace wowee

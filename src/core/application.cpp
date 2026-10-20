@@ -418,10 +418,6 @@ bool Application::initialize() {
         LOG_FATAL("Failed to initialize UI manager");
         return false;
     }
-    // The interface is ImGui's frame, drawn over the picture at its end.
-    renderer->setInterfaceRecorder([this](VkCommandBuffer cmd) {
-        rendering::recordImGuiDrawData(*renderer->getVkContext(), cmd);
-    });
 
     // The saved anti-aliasing setting, applied here rather than from the game
     // screen's update.
@@ -3935,10 +3931,10 @@ void Application::onWorldRenderersReady() {
         spellVisualsAttached_ = true;
     }
     if (!worldMap_ && assetManager) {
-        auto map = std::make_unique<rendering::WorldMap>();
+        auto map = std::make_shared<rendering::WorldMap>();
         if (map->initialize(renderer->getVkContext(), assetManager.get())) {
             worldMap_ = std::move(map);
-            renderer->registerComposite(worldMap_.get());
+            renderer->registerComposite(worldMap_);
         } else {
             LOG_ERROR("Failed to initialize world map");
         }
@@ -4425,6 +4421,8 @@ void Application::present(float deltaTime, const FramePlan& plan) {
         renderer->setWorldInView(plan.view == FrameView::World);
         if (!renderInputs_) renderInputs_ = std::make_unique<rendering::FrameInputs>();
         *renderInputs_ = renderer->extractFrameInputs();
+        if (canDrawInterface()) renderInputs_->interface = rendering::extractImGuiFrame(*renderer->getVkContext());
+        if (mapWindow_) renderInputs_->auxiliaryInterface = mapWindow_->extractFrame();
     }
 
 }
