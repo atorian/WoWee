@@ -152,6 +152,7 @@ private:
     void applyCameraControlSettings();
     /// Say in the chat why a recording stopped by itself, if one did.
     void reportRecordingFailure();
+    void reportScreenshotResults();
     /// Where the recording in progress, or the last one, is being written.
     std::string recordingPath_;
 

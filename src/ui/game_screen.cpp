@@ -669,6 +669,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
     reportRecordingFailure();
+    reportScreenshotResults();
     laps.lap("windows and commands");
 
     // ---- New UI elements ----

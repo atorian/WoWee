@@ -773,6 +773,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
+        (void)renderer.takeFrameResults();
         for (const auto& placement : placements) {
             if (placement.shownAtFrame != frame) continue;
             if (placement.wmo) {

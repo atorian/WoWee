@@ -79,6 +79,7 @@ public:
     /// How much of the sky the camera's surroundings leave it, 0-1 (the sky
     /// view factor); 1 until a probe has been read.
     [[nodiscard]] float skyView() const { return skyView_; }
+    [[nodiscard]] uint64_t answerFrame() const { return answerFrame_; }
 
     /// The depth image the precipitation samples, in SHADER_READ_ONLY_OPTIMAL
     /// for the vertex and fragment stages; depth 1 (open everywhere) until
@@ -102,6 +103,7 @@ private:
         AllocatedBuffer buffer{};  ///< vec4: exposure, sky view, written
         VkDescriptorSet set = VK_NULL_HANDLE;
         bool pending = false;
+        uint64_t frame = 0;
     };
     std::array<Probe, MAX_FRAMES_IN_FLIGHT> probes_{};
     VkDescriptorSetLayout probeSetLayout_ = VK_NULL_HANDLE;
@@ -117,6 +119,7 @@ private:
     uint64_t drawnWorld_ = 0;
     float exposure_ = 0.0f;
     float skyView_ = 1.0f;
+    uint64_t answerFrame_ = 0;
 };
 
 }  // namespace rendering

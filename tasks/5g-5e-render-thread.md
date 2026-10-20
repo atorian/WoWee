@@ -39,7 +39,7 @@ camera_controller.cpp diagnostic is excluded.
   sweep_guard, dev build and an ordinary launch with the full existing profile.
   Record performance as measured; enabling a thread alone does not prove a gain.
 
-Status: 5г implemented and validated; 5д and 5е remain.
+Status: 5г and 5д implemented and validated; 5е remains.
 
 5г validation (2026-10-20): dev wowee, scene_render and wowee_editor build.
 Sixteen GPU checks passed (owned interface/font pages, world snapshots, RT modes,
@@ -87,3 +87,5 @@ before accepting the test.
   setup boundaries, not every Transitions phase. Stop/drain before application
   shutdown destroys UI or world objects. WOWEE_RENDER_THREAD=0 still uses the
   identical extraction/results protocol and bounded worker API in inline mode.
+
+5д validation (2026-10-20): dev wowee, scene_render and render_client_probe built. All 16 selected tests passed, including frame_results, world/RT/AA/weather snapshots and sweep_guard. The native client probe confirmed numbered results, producer-only capture callbacks, screenshot frame content and deferred completion; no VUIDs and zero surviving VMA allocations.

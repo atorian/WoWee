@@ -1759,6 +1759,20 @@ void Application::requestClose() {
 }
 
 float Application::beginFrame() {
+    if (renderer) for (const auto& result : renderer->takeFrameResults()) {
+        for (const auto& part : result.cpu) noteStage(part.group + "/" + part.name, part.milliseconds);
+        if (result.gpuTimingSerial && result.gpuTimingSerial != gpuTimingsSeen_) {
+            gpuTimingsSeen_ = result.gpuTimingSerial;
+            std::vector<std::pair<const char*, double>> passes;
+            for (const auto& [label, ms] : result.gpu) passes.emplace_back(label.c_str(), ms);
+            frameBudget_.noteGpuFrame(passes);
+            if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteGpuFrame(passes);
+        }
+        if (const char* path = std::getenv("WOWEE_SCREENSHOT"); path && *path)
+            for (const auto& [completed, saved] : result.screenshots)
+                if (completed == path) running = false;
+    }
+    if (screenRecording_) screenRecording_->update();
     return FramePacer::toSeconds(pacer_.tickNs());
 }
 
@@ -1775,15 +1789,6 @@ void Application::frameFinished() {
     if (lastFrameEnd_) frameSeconds = std::chrono::duration<float>(now - *lastFrameEnd_).count();
     lastFrameEnd_ = now;
 
-    // The GPU's breakdown of each frame read back, once.
-    if (renderer && renderer->getVkContext()) {
-        const auto* vk = renderer->getVkContext();
-        if (vk->gpuTimingsSerial() != gpuTimingsSeen_) {
-            gpuTimingsSeen_ = vk->gpuTimingsSerial();
-            frameBudget_.noteGpuFrame(vk->gpuTimings());
-            if (benchmark_ && benchmark_->recording()) benchmark_->budget().noteGpuFrame(vk->gpuTimings());
-        }
-    }
     if (frameSeconds) {
         frameBudget_.frameFinished(*frameSeconds * 1000.0f);
         if (benchmark_) {
@@ -5357,7 +5362,6 @@ void Application::renderFrame(const FramePlan& plan) {
     // The offline fixtures draw through the real world path.
     const bool drawWorld = view == FrameView::World || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
         std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
-    screenRecording_->update();
     if (!renderInputs_) throw std::logic_error("Render requires frame inputs extracted in Present");
     runRenderStage("beginFrame", [&] { renderer->beginFrame(*renderInputs_); });
 
@@ -5384,8 +5388,7 @@ void Application::renderFrame(const FramePlan& plan) {
         // what it measured last frame, and hides a window outright for its
         // first frame or two while it fits itself.
         if (++screenshotFrames_ == kScreenshotFrame) {
-            renderer->captureScreenshot(shot);
-            running = false;
+            if (!renderer->captureScreenshot(shot)) running = false;
         }
     }
 
@@ -5466,7 +5469,7 @@ void Application::noteWorkerTimes() {
 
 void Application::noteRendererStages() {
     if (!renderer || !renderer->getVkContext()) return;
-    auto& parts = renderer->getVkContext()->cpuStages();
+    auto& parts = renderer->getVkContext()->gameCpuStages();
     for (const auto& part : parts.entries()) {
         stageKey_.assign(part.group);
         stageKey_ += '/';

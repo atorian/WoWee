@@ -1098,6 +1098,7 @@ void Renderer::shutdown() {
     frameInputs_.interface.reset();
     frameInputs_.auxiliaryInterface = {};
     frameInputs_.scene.reset();
+    flushFrameCapture();
     endFrameCapture();
     interfaceRecorder_.shutdown();
 
@@ -1396,13 +1397,16 @@ void Renderer::applyMsaaChange() {
 
 FrameInputs Renderer::extractFrameInputs() {
     std::optional<CpuStage> extractStage;
-    if (vkCtx) extractStage.emplace(vkCtx->cpuStages(), "Present", "extract scene");
+    if (vkCtx) extractStage.emplace(vkCtx->gameCpuStages(), "Present", "extract scene");
     if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && updateSkyboxLayers()) {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
         skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
     }
     updateGrassPopulation();
     FrameInputs in;
+    in.worldEpoch = worldEpoch_;
+    in.capture = extractCaptureRequest();
+    in.screenshots.swap(screenshotRequests_);
     if (overlaySystem_) in.selection = overlaySystem_->extractSelection(*collision_);
     if (camera) in.camera = *camera;
     in.camera.clearJitter();
@@ -1571,8 +1575,14 @@ FrameInputs Renderer::extractFrameInputs() {
 
 void Renderer::beginFrame(const FrameInputs& inputs) {
     frameInputs_ = inputs;
+    recordingResult_ = FrameResults();
+    recordingResult_.recording = ++recordingSequence_;
+    recordingResult_.gameFrame = inputs.scene ? inputs.scene->sequence : 0;
+    recordingGpuFrame_ = vkCtx ? vkCtx->frameNumber() : 0;
+    worldDrawnThisFrame_ = false;
     renderCamera_ = inputs.camera;
     ZoneScopedN("Renderer::beginFrame");
+    if (vkCtx) vkCtx->cpuStages().clear();
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
     if (inputs.scene && inputs.scene->resources) inputs.scene->resources->usedByFrame(vkCtx->frameNumber());
@@ -1589,8 +1599,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // The renderer's frame starts here unless update() already began it;
     // its parts are read after endFrame.
     CpuStageTimes& stages = vkCtx->cpuStages();
-    if (!stagesOpenedByUpdate_) stages.clear();
-    stagesOpenedByUpdate_ = false;
 
     // The ablation's clock. Top of one frame to the top of the next is the
     // frame's whole wall time, which is the number a pass has to move to be
@@ -1923,7 +1931,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
 
 void Renderer::endFrame() {
     ZoneScopedN("Renderer::endFrame");
-    if (!vkCtx || currentCmd == VK_NULL_HANDLE) return;
+    if (!vkCtx || currentCmd == VK_NULL_HANDLE) { publishFrameResults(); return; }
 
     logViewDistanceDiag();
 
@@ -2015,175 +2023,11 @@ void Renderer::endFrame() {
     // Submit and present
     vkCtx->endFrame(currentCmd, currentImageIndex);
     currentCmd = VK_NULL_HANDLE;
+    publishFrameResults();
 }
 
 void Renderer::setCharacterFollow(uint32_t instanceId) {
     characterInstanceId = instanceId;
-}
-
-bool Renderer::beginFrameCapture(FrameSink* sink, uint32_t width, uint32_t height) {
-    if (!vkCtx || !sink || frameSink_) return false;
-    auto capture = std::make_unique<ScreenCapture>();
-    if (!capture->initialize(vkCtx, width, height)) {
-        capture->shutdown();
-        return false;
-    }
-    screenCapture_ = std::move(capture);
-    frameSink_ = sink;
-    return true;
-}
-
-void Renderer::flushFrameCapture() {
-    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
-    if (vkCtx->waitForSubmittedFrames("flush frame capture") != VK_SUCCESS) return;
-    ScreenCapture::Ready ready[2] = {screenCapture_->collect(0), screenCapture_->collect(1)};
-    if (ready[0].valid && ready[1].valid && ready[1].pts < ready[0].pts) std::swap(ready[0], ready[1]);
-    ScreenCapture* capture = screenCapture_.get();
-    for (const auto& r : ready) {
-        if (!r.valid) continue;
-        const uint32_t buffer = r.buffer;
-        frameSink_->submit({.bgra = r.bgra, .stride = r.stride, .pts = r.pts,
-                            .release = [capture, buffer] { capture->release(buffer); }});
-    }
-}
-
-void Renderer::endFrameCapture() {
-    frameSink_ = nullptr;
-    if (screenCapture_) {
-        screenCapture_->shutdown();
-        screenCapture_.reset();
-    }
-}
-
-void Renderer::collectRecordedFrame() {
-    if (!frameSink_ || !screenCapture_ || !vkCtx) return;
-    const ScreenCapture::Ready ready = screenCapture_->collect(vkCtx->getCurrentFrame());
-    if (ready.valid) {
-        ScreenCapture* capture = screenCapture_.get();
-        const uint32_t buffer = ready.buffer;
-        frameSink_->submit({.bgra = ready.bgra, .stride = ready.stride, .pts = ready.pts,
-                            .release = [capture, buffer] { capture->release(buffer); }});
-    }
-}
-
-void Renderer::recordScreenCapture() {
-    if (!frameSink_ || !screenCapture_ || currentCmd == VK_NULL_HANDLE) return;
-    const auto& images = vkCtx->getSwapchainImages();
-    const VkExtent2D extent = vkCtx->getSwapchainExtent();
-    int64_t pts = 0;
-    if (currentImageIndex < images.size() && frameSink_->frameDue(&pts)) {
-        if (!screenCapture_->record(currentCmd, vkCtx->getCurrentFrame(), images[currentImageIndex],
-                                    extent, pts)) {
-            frameSink_->frameDropped();
-        }
-        frameSink_->frameTaken(pts);
-    }
-    const auto& overlayFbs = vkCtx->getOverlayFramebuffers();
-    if (vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && currentImageIndex < overlayFbs.size()) {
-        screenCapture_->drawIndicator(currentCmd, overlayFbs[currentImageIndex], extent,
-                                      static_cast<float>(frameSink_->elapsedSeconds()));
-    }
-}
-
-bool Renderer::captureScreenshot(const std::string& outputPath) {
-    if (!vkCtx) return false;
-
-    VmaAllocator alloc  = vkCtx->getAllocator();
-    VkExtent2D extent   = vkCtx->getSwapchainExtent();
-    const auto& images  = vkCtx->getSwapchainImages();
-
-    if (images.empty() || currentImageIndex >= images.size()) return false;
-
-    VkImage srcImage = images[currentImageIndex];
-    uint32_t w = extent.width;
-    uint32_t h = extent.height;
-    VkDeviceSize bufSize = static_cast<VkDeviceSize>(w) * h * 4;
-
-    // Only submitted frames can still write the image we read back.
-    if (vkCtx->waitForSubmittedFrames("capture screenshot") != VK_SUCCESS) return false;
-
-    // Create staging buffer
-    VkBufferCreateInfo bufInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufInfo.size  = bufSize;
-    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-    VmaAllocationCreateInfo allocCI{};
-    allocCI.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-
-    VkBuffer stagingBuf = VK_NULL_HANDLE;
-    VmaAllocation stagingAlloc = VK_NULL_HANDLE;
-    if (gpuCreateBuffer(alloc, &bufInfo, &allocCI, &stagingBuf, &stagingAlloc, nullptr) != VK_SUCCESS) {
-        LOG_WARNING("Screenshot: failed to create staging buffer");
-        return false;
-    }
-
-    // Record copy commands
-    VkCommandBuffer cmd = vkCtx->beginSingleTimeCommands();
-
-    // Transition swapchain image: PRESENT_SRC → TRANSFER_SRC
-    VkImageMemoryBarrier2 toTransfer{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    toTransfer.srcStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    toTransfer.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    toTransfer.srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT;
-    toTransfer.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
-    toTransfer.oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    toTransfer.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toTransfer.image               = srcImage;
-    toTransfer.subresourceRange    = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-    VkDependencyInfo toTransferDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    toTransferDep.dependencyFlags = 0;
-    toTransferDep.imageMemoryBarrierCount = 1;
-    toTransferDep.pImageMemoryBarriers = &toTransfer;
-    cmdPipelineBarrier2(cmd, toTransferDep);
-
-    // Copy image to buffer
-    VkBufferImageCopy region{};
-    region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
-    region.imageExtent      = {.width = w, .height = h, .depth = 1};
-    vkCmdCopyImageToBuffer(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           stagingBuf, 1, &region);
-
-    // Transition back: TRANSFER_SRC → PRESENT_SRC
-    VkImageMemoryBarrier2 toPresent = toTransfer;
-    toPresent.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    toPresent.dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    toPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toPresent.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-    toPresent.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toPresent.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    VkDependencyInfo toPresentDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    toPresentDep.imageMemoryBarrierCount = 1;
-    toPresentDep.pImageMemoryBarriers = &toPresent;
-    cmdPipelineBarrier2(cmd, toPresentDep);
-
-    vkCtx->endSingleTimeCommands(cmd);
-
-    // Map and convert BGRA → RGBA
-    void* mapped = nullptr;
-    vmaMapMemory(alloc, stagingAlloc, &mapped);
-    auto* pixels = static_cast<uint8_t*>(mapped);
-    for (uint32_t i = 0; i < w * h; ++i) {
-        std::swap(pixels[i * 4 + 0], pixels[i * 4 + 2]); // B ↔ R
-    }
-
-    // Ensure output directory exists
-    std::filesystem::path outPath(outputPath);
-    if (outPath.has_parent_path())
-        std::filesystem::create_directories(outPath.parent_path());
-
-    int ok = stbi_write_png(outputPath.c_str(),
-                            static_cast<int>(w), static_cast<int>(h),
-                            4, pixels, static_cast<int>(w * 4));
-
-    vmaUnmapMemory(alloc, stagingAlloc);
-    gpuDestroyBuffer(alloc, stagingBuf, stagingAlloc);
-
-    if (ok) {
-        LOG_INFO("Screenshot saved: ", outputPath);
-    } else {
-        LOG_WARNING("Screenshot: stbi_write_png failed for ", outputPath);
-    }
-    return ok != 0;
 }
 
 bool Renderer::updateSkyboxLayers() {
@@ -2321,9 +2165,8 @@ void Renderer::updateGlares(float deltaTime) {
         };
         // Each body's own hours and the cloud in front of it; then how much of
         // its disc the world leaves in view, as the GPU last counted it.
-        const SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
         const auto seenOf = [&](SkyBodies::Body body) {
-            return bodies ? bodies->measuredVisibility(body) : 0.0f;
+            return body == SkyBodies::Body::Sun ? publishedSun_ : publishedMoon_;
         };
         const sc::SkyDisc sun = sc::sunDisc(day);
         sunSky = shared * sc::lookup(sc::kSunGlareHours, day) *
@@ -2429,8 +2272,7 @@ void Renderer::update(float deltaTime) {
     // The renderer's frame starts here when it is updated before it draws;
     // its parts, these included, are read after endFrame.
     if (vkCtx) {
-        vkCtx->cpuStages().clear();
-        stagesOpenedByUpdate_ = true;
+        vkCtx->gameCpuStages().clear();
     }
     auto updateStart = std::chrono::steady_clock::now();
     globalTime += deltaTime;
@@ -2452,7 +2294,7 @@ void Renderer::update(float deltaTime) {
         const auto now = std::chrono::steady_clock::now();
         const float ms = std::chrono::duration<float, std::milli>(now - phaseStart).count();
         if (phaseCount < phases.size()) phases[phaseCount++] = {name, ms};
-        if (vkCtx) vkCtx->cpuStages().add("rendererUpdate", name, ms);
+        if (vkCtx) vkCtx->gameCpuStages().add("rendererUpdate", name, ms);
         phaseStart = now;
     };
 
@@ -2824,7 +2666,7 @@ void Renderer::updateWind(float deltaTime) {
     inputs.weatherIntensity = weather_.target().intensity;
     inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
     inputs.fixedWind = weatherControls_.wind ? weatherControls_.wind : environment_.wind;
-    CpuStageTimes* stages = vkCtx ? &vkCtx->cpuStages() : nullptr;
+    CpuStageTimes* stages = vkCtx ? &vkCtx->gameCpuStages() : nullptr;
     {
         std::optional<CpuStage> stage;
         if (stages) stage.emplace(*stages, "rendererUpdate/weather and wind", "wind field");
@@ -5359,11 +5201,11 @@ void Renderer::setWeatherDetail(float scale) {
 }
 
 float Renderer::skyExposure() const {
-    return shelter_ ? shelter_->exposure() : 1.0f;
+    return publishedExposure_;
 }
 
 float Renderer::skyView() const {
-    return shelter_ ? shelter_->skyView() : 1.0f;
+    return publishedSkyView_;
 }
 
 uint32_t Renderer::precipitationCount() const {

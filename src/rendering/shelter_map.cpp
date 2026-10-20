@@ -304,6 +304,7 @@ void ShelterMap::probe(VkCommandBuffer cmd, uint32_t frameSlot, const glm::vec3&
     dep.pBufferMemoryBarriers = &host;
     cmdPipelineBarrier2(cmd, dep);
     p.pending = true;
+    p.frame = ctx_->frameNumber();
 }
 
 void ShelterMap::collect(uint32_t frameSlot) {
@@ -317,6 +318,7 @@ void ShelterMap::collect(uint32_t frameSlot) {
     if (result.written < 0.5f) return;
     exposure_ = std::clamp(result.exposure, 0.0f, 1.0f);
     skyView_ = std::clamp(result.skyView, 0.0f, 1.0f);
+    answerFrame_ = p.frame;
 }
 
 }  // namespace rendering

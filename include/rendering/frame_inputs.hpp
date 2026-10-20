@@ -24,8 +24,20 @@ namespace wowee::rendering {
 /// World draw lists, interfaces and auxiliary targets are owned by this frame.
 struct FrameScene;
 struct InterfaceFrame;
+class ScreenCapture;
+
+struct FrameCaptureRequest {
+    std::shared_ptr<ScreenCapture> pool;
+    uint64_t generation = 0;
+    uint32_t width = 0, height = 0;
+    std::optional<int64_t> pts;
+    double elapsed = 0;
+};
 
 struct FrameInputs {
+    uint64_t worldEpoch = 0;
+    FrameCaptureRequest capture;
+    std::vector<std::string> screenshots;
     std::shared_ptr<const FrameScene> scene;
     std::shared_ptr<const InterfaceFrame> interface;
     std::function<void(VkCommandBuffer, uint32_t)> auxiliaryInterface;

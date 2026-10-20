@@ -213,8 +213,8 @@ void ResourceMonitor::sampleMemory(const rendering::Renderer& renderer) {
         const auto tiles = terrain->tileMemory();
         memoryParts_.push_back({"terrain tiles", tiles.terrainBytes});
     }
-    if (const auto* rt = renderer.getRtScene()) {
-        memoryParts_.push_back({"ray tracing sources", rt->stats().sourceBytes});
+    if (renderer.getRtScene()) {
+        memoryParts_.push_back({"ray tracing sources", renderer.renderStatistics().rtSourceBytes});
     }
     if (const auto* vk = renderer.getVkContext()) {
         if (const auto byUse = vk->gpuMemoryByUse()) {

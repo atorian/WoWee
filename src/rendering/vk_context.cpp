@@ -1743,6 +1743,7 @@ void VkContext::readGpuTimings(uint32_t slot) {
         gpuTimings_.emplace_back(gpuMarkLabels_[slot][i], ms);
     }
     ++gpuTimingsSerial_;
+    gpuTimingsFrame_ = frames[slot].frameNumber;
 }
 
 const char* VkContext::gpuTimingCaveat() const {

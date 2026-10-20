@@ -1640,7 +1640,7 @@ void TerrainManager::processReadyTiles() {
             "finalize: water", "finalize: ambient and commit", "finalize: done",
         };
         static_assert(std::size(kStageNames) == std::tuple_size_v<decltype(phaseMs)>);
-        auto& stages = vkCtx->cpuStages();
+        auto& stages = vkCtx->gameCpuStages();
         for (size_t p = 0; p < phaseMs.size(); ++p) {
             if (phaseMs[p] > 0.0f) stages.add("rendererUpdate/terrain", kStageNames[p], phaseMs[p]);
         }
@@ -1693,7 +1693,7 @@ void TerrainManager::processPendingUnloads() {
     }
 
     if (unloaded > 0 && terrainRenderer && terrainRenderer->getVkContext()) {
-        auto& stages = terrainRenderer->getVkContext()->cpuStages();
+        auto& stages = terrainRenderer->getVkContext()->gameCpuStages();
         stages.add("rendererUpdate/terrain", "unload",
                    std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - budgetStart).count());
         static constexpr const char* kPartNames[] = {

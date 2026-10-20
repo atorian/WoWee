@@ -263,6 +263,7 @@ public:
     /// every frame's timings once - to average them - takes them when this
     /// moves.
     [[nodiscard]] uint64_t gpuTimingsSerial() const { return gpuTimingsSerial_; }
+    [[nodiscard]] uint64_t gpuTimingsFrame() const { return gpuTimingsFrame_; }
     /// The marks recorded so far into the frame being recorded.
     [[nodiscard]] uint32_t gpuMarksRecorded() const { return gpuMarkCount_[currentFrame]; }
     /// A mark label named at run time - a frame graph pass's - kept for the
@@ -287,6 +288,8 @@ public:
     /// endFrame put their waits in it.
     [[nodiscard]] CpuStageTimes& cpuStages() { return cpuStages_; }
     [[nodiscard]] const CpuStageTimes& cpuStages() const { return cpuStages_; }
+    /// Producer-side preparation, independent of command recording.
+    [[nodiscard]] CpuStageTimes& gameCpuStages() { return gameCpuStages_; }
     [[nodiscard]] bool hasDedicatedTransferQueue() const { return hasDedicatedTransfer_; }
     [[nodiscard]] VmaAllocator getAllocator() const { return allocator; }
 
@@ -528,6 +531,7 @@ private:
     bool gpuMarksPending_[MAX_FRAMES_IN_FLIGHT]{};
     std::vector<std::pair<const char*, double>> gpuTimings_;
     uint64_t gpuTimingsSerial_ = 0;
+    uint64_t gpuTimingsFrame_ = 0;
     /// The driver resolves timestamps per render pass (MoltenVK).
     bool timestampsPerRenderPass_ = false;
     std::set<std::string, std::less<>> gpuLabels_;
@@ -547,6 +551,7 @@ private:
     void createTracyGpuContext();
     void destroyTracyGpuContext();
     CpuStageTimes cpuStages_;
+    CpuStageTimes gameCpuStages_;
     uint32_t presentQueueFamily = 0;
 
     // Dedicated transfer queue (second queue from same graphics family)

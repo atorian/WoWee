@@ -34,6 +34,7 @@ public:
         uint32_t stride = 0;
         int64_t pts = 0;
         uint32_t buffer = 0;   ///< give back through release()
+        uint64_t frame = 0;
         bool valid = false;
     };
 
@@ -43,7 +44,7 @@ public:
     ScreenCapture& operator=(const ScreenCapture&) = delete;
 
     /// Frames come out width x height, BGRA.
-    [[nodiscard]] bool initialize(VkContext* ctx, uint32_t width, uint32_t height);
+    [[nodiscard]] bool initialize(VkContext* ctx, uint32_t width, uint32_t height, bool indicator = true);
     /// Waits for the device: buffers may still be the target of a copy.
     void shutdown();
 
@@ -89,6 +90,7 @@ private:
     struct Pending {
         int buffer = -1;
         int64_t pts = 0;
+        uint64_t frame = 0;
     };
     Pending pending_[MAX_FRAMES];
 

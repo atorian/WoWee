@@ -1,5 +1,7 @@
 # Lessons
 
+- 2026-10-20 — The user called out excessive time during stages 5г–5е. Late edits to shared headers repeatedly invalidated the client build, and editor compatibility checks delayed the requested client stages. Batch required header/API changes before one build, keep unrelated compatibility work outside the critical path, and report the completed stage plus the actual blocker early. A broad verification plan does not justify repeatedly rebuilding unchanged code or spending long stretches on speculative design.
+
 - 2026-10-20 — The sky HUD reported stars OFF from a retired StarField flag while frame snapshots enabled point stars. After moving render controls into snapshots, remove unused control fields and make diagnostics read the same owner as the setting. Label a rendering-mode setting separately from whether an effect is visible at the current hour.
 
 - 2026-10-20 — Correcting the Sharp stars HUD did not establish that the sky's baked star layer was replaced: suppression reached the world M2 renderer and only its opaque pass, while sky models used a separate renderer and blended pass. Follow an effect through every owning renderer and blend pass, and compare enabled/disabled frame captures before claiming its intended visual result.

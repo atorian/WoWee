@@ -80,6 +80,7 @@ public:
     [[nodiscard]] float measuredVisibility(Body body) const {
         return measured_[static_cast<int>(body)];
     }
+    [[nodiscard]] uint64_t visibilityFrame(Body body) const { return measuredFrames_[static_cast<int>(body)]; }
     /// Read this slot's answers from its last frame and reset its queries.
     /// Outside any render pass, after the slot's fence has been waited on.
     void beginFrameQueries(VkCommandBuffer cmd, uint32_t frame);
@@ -128,6 +129,8 @@ private:
     /// One occlusion query per body per frame slot: index frame * 2 + body.
     VkQueryPool queryPool_ = VK_NULL_HANDLE;
     bool queryIssued_[MAX_FRAMES_IN_FLIGHT][2] = {};
+    uint64_t queryFrames_[MAX_FRAMES_IN_FLIGHT][2] = {};
+    uint64_t measuredFrames_[2] = {};
     /// The samples the disc's on-screen box holds, when it was asked.
     float queryExpectedSamples_[MAX_FRAMES_IN_FLIGHT][2] = {};
     float measured_[2] = {};

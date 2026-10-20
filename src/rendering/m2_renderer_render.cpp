@@ -937,6 +937,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     collectCullOutput(frameIndex);
     submittedCullIds_[frameIndex] = recording_->cullIds;
     submittedCullScenes_[frameIndex] = recording_->sceneIdentity;
+    submittedCullFrames_[frameIndex] = vkCtx_->frameNumber();
 
     // --- Upload per-instance cull data (SSBO, binding 1) ---
     // The per-instance radius math used to be recomputed here every frame; it's
@@ -1526,7 +1527,27 @@ void M2Renderer::collectCullOutput(uint32_t frame) {
     if (!visibility) return;
     std::lock_guard<std::mutex> lock(cullResultMutex_);
     for (size_t k = 0; k < submittedCullIds_[frame].size(); ++k)
-        collectedCull_.push_back({submittedCullIds_[frame][k], visibility[k] != 0, submittedCullScenes_[frame]});
+        collectedCull_.push_back({submittedCullIds_[frame][k], visibility[k] != 0, submittedCullScenes_[frame], submittedCullFrames_[frame]});
+}
+
+std::vector<CullAnswer> M2Renderer::takeCullAnswers() {
+    std::lock_guard lock(cullResultMutex_);
+    std::vector<CullAnswer> result;
+    result.swap(collectedCull_);
+    return result;
+}
+
+void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
+    ++cullVerdictSerial_;
+    for (const auto& result : answers) {
+        if (result.sceneIdentity != scene_->identity) continue;
+        const auto found = scene_->instanceIndexById.find(result.id);
+        if (found == scene_->instanceIndexById.end()) continue;
+        auto& inst = scene_->instances[found->second];
+        inst.cullVerdictSerial = cullVerdictSerial_;
+        inst.lastCullVisible = result.visible ? 1 : 0;
+        inst.hizPrevCulledFrames = result.visible ? 0 : std::min(inst.hizPrevCulledFrames + 1u, 3u);
+    }
 }
 
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
@@ -1539,20 +1560,6 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     frame->skipDetail = skipGroundDetail_;
     frame->sceneIdentity = scene_->identity;
     frame->solarMatrix = shadowMatrix;
-    {
-        std::lock_guard<std::mutex> lock(cullResultMutex_);
-        ++cullVerdictSerial_;
-        for (const auto& result : collectedCull_) {
-            if (result.sceneIdentity != scene_->identity) continue;
-            const auto found = scene_->instanceIndexById.find(result.id);
-            if (found == scene_->instanceIndexById.end()) continue;
-            auto& inst = scene_->instances[found->second];
-            inst.cullVerdictSerial = cullVerdictSerial_;
-            inst.lastCullVisible = result.visible ? 1 : 0;
-            inst.hizPrevCulledFrames = result.visible ? 0 : std::min(inst.hizPrevCulledFrames + 1u, 3u);
-        }
-        collectedCull_.clear();
-    }
     frameLights_ = &lights;
     extractBones(*frame);
     extractCull(camera, *frame);

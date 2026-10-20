@@ -21,6 +21,9 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <thread>
+#include <filesystem>
+#include <stb_image.h>
 
 using namespace wowee;
 namespace {
@@ -30,11 +33,12 @@ void require(bool okay, const char* message) {
 class Capture final : public rendering::FrameSink {
 public:
     explicit Capture(VkExtent2D extent) : extent_(extent) {}
-    bool frameDue(int64_t* pts) const override { *pts = 0; return !taken_; }
-    void frameTaken(int64_t) override { taken_ = true; }
-    void frameDropped() override { throw std::runtime_error("Probe frame capture dropped"); }
+    bool frameDue(int64_t* pts) const override { onProducer(); *pts = 0; return !taken_; }
+    void frameTaken(int64_t) override { onProducer(); taken_ = true; }
+    void frameDropped() override { onProducer(); throw std::runtime_error("Probe frame capture dropped"); }
     double elapsedSeconds() const override { return 0; }
     void submit(Frame frame) override {
+        onProducer();
         pixels.resize(static_cast<size_t>(extent_.width) * extent_.height * 4);
         for (uint32_t y = 0; y < extent_.height; ++y)
             std::memcpy(pixels.data() + static_cast<size_t>(y) * extent_.width * 4,
@@ -43,6 +47,8 @@ public:
     }
     std::vector<uint8_t> pixels;
 private:
+    void onProducer() const { require(std::this_thread::get_id() == owner_, "Capture callback ran outside producer"); }
+    std::thread::id owner_ = std::this_thread::get_id();
     VkExtent2D extent_;
     bool taken_ = false;
 };
@@ -55,7 +61,9 @@ std::vector<uint8_t> capture(rendering::Renderer& renderer, const rendering::Fra
     const auto extent = renderer.getVkContext()->getSwapchainExtent();
     Capture result(extent);
     require(renderer.beginFrameCapture(&result, extent.width, extent.height), "Probe capture did not start");
-    record(renderer, frame);
+    auto captured = frame;
+    captured.capture = renderer.extractCaptureRequest();
+    record(renderer, captured);
     renderer.flushFrameCapture();
     renderer.endFrameCapture();
     require(!result.pixels.empty(), "Probe capture returned no pixels");
@@ -185,6 +193,53 @@ void minimapTest(core::Application& app) {
     renderer.setWorldInView(false);
     std::puts("PASS: asynchronous minimap tiles and frozen display/map controls");
 }
+void resultsTest(core::Application& app) {
+    auto& renderer = *app.getRenderer();
+    (void)renderer.takeFrameResults();
+    const auto extent = renderer.getVkContext()->getSwapchainExtent();
+    Capture sink(extent);
+    require(renderer.beginFrameCapture(&sink, extent.width, extent.height), "Boundary capture failed to start");
+    uint64_t previous = 0;
+    for (int i = 0; i < 3; ++i) {
+        const auto frame = renderer.extractFrameInputs();
+        record(renderer, frame);
+        require(sink.pixels.empty(), "Recording called the capture sink before the producer boundary");
+    }
+    const auto results = renderer.takeFrameResults();
+    require(!sink.pixels.empty(), "Producer boundary did not deliver the completed GPU readback");
+    for (const auto& result : results) {
+        require(result.recording > previous, "Recording results lost their order");
+        require(result.submittedFrame != 0, "Recorded GPU frame has no submission number");
+        previous = result.recording;
+    }
+    require(renderer.takeFrameResults().empty(), "Recording result was delivered twice");
+    renderer.flushFrameCapture();
+    renderer.endFrameCapture();
+    std::puts("PASS: numbered results and producer-only capture callbacks");
+}
+void screenshotTest(core::Application& app) {
+    auto& renderer = *app.getRenderer();
+    const auto path = std::filesystem::current_path().parent_path() / "scratch" / "render-thread" / "boundary-shot.png";
+    std::filesystem::remove(path);
+    require(renderer.captureScreenshot(path.string()), "Screenshot request was refused");
+    auto red = [] { ImGui::GetForegroundDrawList()->AddRectFilled({16, 16}, {140, 140}, IM_COL32(255, 0, 0, 255)); };
+    auto green = [] { ImGui::GetForegroundDrawList()->AddRectFilled({16, 16}, {140, 140}, IM_COL32(0, 255, 0, 255)); };
+    record(renderer, extract(renderer, red));
+    record(renderer, extract(renderer, green));
+    record(renderer, extract(renderer, green));
+    require(!std::filesystem::exists(path), "Recording performed screenshot I/O before the producer boundary");
+    (void)renderer.takeFrameResults();
+    int w = 0, h = 0, channels = 0;
+    auto* pixels = stbi_load(path.string().c_str(), &w, &h, &channels, 4);
+    require(pixels && w > 32 && h > 32, "Completed screenshot is not a readable PNG");
+    const auto* pixel = pixels + (32 * w + 32) * 4;
+    const bool correct = pixel[0] > 220 && pixel[1] < 30;
+    stbi_image_free(pixels);
+    require(correct, "Screenshot captured a later frame or swapped its colour channels");
+    const auto completed = renderer.takeScreenshotResults();
+    require(completed.size() == 1 && completed.front().second, "Screenshot completion was not reported once");
+    std::puts("PASS: screenshot copies its requested frame before present and saves on the producer boundary");
+}
 }
 int main() {
     try {
@@ -200,6 +255,8 @@ int main() {
         mapTest(app);
         minimapTest(app);
         mapWindowTest(app);
+        resultsTest(app);
+        screenshotTest(app);
         renderer.getVkContext()->waitForSubmittedFrames("finish native interface probe");
         std::puts("PASS: native interface snapshot lifecycle");
         return 0;

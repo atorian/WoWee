@@ -483,7 +483,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
             current = next; since = now;
         }
         ~LoadParts() { to(nullptr); }
-    } loadParts{vkCtx_->cpuStages()};
+    } loadParts{vkCtx_->gameCpuStages()};
 
     // Batch all GPU uploads (textures, VBs, IBs) into a single command buffer
     // submission with one fence wait, instead of one per upload.

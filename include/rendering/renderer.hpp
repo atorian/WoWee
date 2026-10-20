@@ -4,6 +4,7 @@
 #include "rendering/view_distance.hpp"
 #include "rendering/frame_inputs.hpp"
 #include "rendering/interface_frame.hpp"
+#include "rendering/frame_results.hpp"
 
 #include <chrono>
 #include "core/job_group.hpp"
@@ -108,6 +109,9 @@ public:
     [[nodiscard]] FrameInputs extractFrameInputs();
     void beginFrame(const FrameInputs& inputs);
     void endFrame();
+    /// Producer boundary: apply numbered answers and deliver capture callbacks.
+    std::vector<FrameResults> takeFrameResults();
+    [[nodiscard]] const RenderStatistics& renderStatistics() const { return publishedStatistics_; }
 
     /// Structural changes (closing a secondary window, tearing down a session)
     /// wait for queued recording, without making ordinary frames synchronous.
@@ -180,7 +184,7 @@ public:
     Camera* getCamera() { return camera.get(); }
     TerrainRenderer* getTerrainRenderer() const { return terrainRenderer.get(); }
     TerrainManager* getTerrainManager() const { return terrainManager; }
-    void setMapJobToken(core::JobGroup::Token token) { mapJobToken_ = std::move(token); }
+    void setMapJobToken(core::JobGroup::Token token);
     std::unique_ptr<TerrainManager> takeTerrainSession();
     void releaseTerrainSession(TerrainManager* session);
     WaterRenderer* getWaterRenderer() const { return waterRenderer.get(); }
@@ -259,6 +263,8 @@ public:
 
     // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
+    std::vector<std::pair<std::string, bool>> takeScreenshotResults();
+    FrameCaptureRequest extractCaptureRequest();
 
     /// Read every frame back, interface included, at width x height, and
     /// hand the frames to sink as it asks for them - see FrameSink. False when
@@ -288,10 +294,10 @@ public:
 
     // CPU timing stats (milliseconds, last frame).
     double getLastUpdateMs() const { return lastUpdateMs; }
-    double getLastRenderMs() const { return lastRenderMs; }
-    double getLastTerrainRenderMs() const { return lastTerrainRenderMs; }
-    double getLastWMORenderMs() const { return lastWMORenderMs; }
-    double getLastM2RenderMs() const { return lastM2RenderMs; }
+    double getLastRenderMs() const { return publishedStatistics_.renderMs; }
+    double getLastTerrainRenderMs() const { return publishedStatistics_.terrainMs; }
+    double getLastWMORenderMs() const { return publishedStatistics_.wmoMs; }
+    double getLastM2RenderMs() const { return publishedStatistics_.m2Ms; }
     LightingManager* getLightingManager() { return lightingManager.get(); }
 
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
@@ -303,6 +309,15 @@ private:
 
     std::function<void()> frameDrain_;
     InterfaceRecorder interfaceRecorder_;
+    FrameResultMailbox results_;
+    FrameResults recordingResult_;
+    RenderStatistics publishedStatistics_;
+    uint64_t worldEpoch_ = 1, recordingSequence_ = 0, recordingGpuFrame_ = 0;
+    std::vector<std::pair<uint64_t, uint64_t>> submittedWorlds_;
+    float publishedExposure_ = 1, publishedSkyView_ = 1;
+    float publishedSun_ = 0, publishedMoon_ = 0;
+    void publishFrameResults();
+    uint64_t epochForGpuFrame(uint64_t frame) const;
 
     // True when water is drawn in the scene continuation pass rather than in
     // the scene pass itself (see renderWorld).
@@ -801,8 +816,22 @@ private:
     float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.
-    std::unique_ptr<ScreenCapture> screenCapture_;
+    std::shared_ptr<ScreenCapture> screenCapture_;
     FrameSink* frameSink_ = nullptr;
+    uint64_t captureGeneration_ = 0;
+    uint32_t captureWidth_ = 0, captureHeight_ = 0;
+    std::vector<std::string> screenshotRequests_;
+    std::vector<std::pair<std::string, bool>> screenshotResults_;
+    struct PendingScreenshot {
+        std::shared_ptr<ScreenCapture> pool;
+        uint32_t slot = 0, width = 0, height = 0;
+        std::string path;
+    };
+    std::vector<PendingScreenshot> pendingScreenshots_;
+    void queueCapturedImage(const std::shared_ptr<ScreenCapture>& pool, uint32_t slot,
+                            uint32_t width, uint32_t height, uint64_t generation,
+                            const std::string& screenshot = {});
+    void collectScreenshots(uint32_t slot);
     void collectRecordedFrame();
     void recordScreenCapture();
 
@@ -881,7 +910,6 @@ private:
     double lastUpdateMs = 0.0;
     /// update() cleared the CPU stage times for this frame, so beginFrame
     /// keeps what it recorded.
-    bool stagesOpenedByUpdate_ = false;
     double lastRenderMs = 0.0;
     double lastTerrainRenderMs = 0.0;
     double lastWMORenderMs = 0.0;

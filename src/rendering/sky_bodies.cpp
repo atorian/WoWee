@@ -278,6 +278,7 @@ void SkyBodies::beginFrameQueries(VkCommandBuffer cmd, uint32_t frame) {
         const float expected = queryExpectedSamples_[frame][body];
         measured_[body] =
             expected > 0.0f ? std::min(1.0f, static_cast<float>(samples) / expected) : 0.0f;
+        measuredFrames_[body] = queryFrames_[frame][body];
     }
     vkCmdResetQueryPool(cmd, queryPool_, frame * 2, 2);
 }
@@ -291,6 +292,7 @@ void SkyBodies::queryDiscVisibility(VkCommandBuffer cmd, VkDescriptorSet perFram
     if (!queryPool_ || !occlusionPipeline_ || !sprite.set || frame >= MAX_FRAMES_IN_FLIGHT) return;
     if (!sky_celestial::discAboveHorizon(disc)) {
         measured_[b] = 0.0f;
+        measuredFrames_[b] = vkCtx_->frameNumber();
         return;
     }
 
@@ -304,6 +306,7 @@ void SkyBodies::queryDiscVisibility(VkCommandBuffer cmd, VkDescriptorSet perFram
         const glm::vec4 clip = toClip * glm::vec4(corner, 0.0f, 1.0f);
         if (clip.w <= 0.0f) {  // behind the eye: nothing on screen to ask about
             measured_[b] = 0.0f;
+            measuredFrames_[b] = vkCtx_->frameNumber();
             return;
         }
         const glm::vec2 ndc = glm::vec2(clip) / clip.w;
@@ -316,6 +319,7 @@ void SkyBodies::queryDiscVisibility(VkCommandBuffer cmd, VkDescriptorSet perFram
                          std::max(0.0f, hi.y - lo.y) * 0.5f * static_cast<float>(extent.height);
     if (pixels <= 1.0f) {  // the client answers zero for a box of a pixel or less
         measured_[b] = 0.0f;
+        measuredFrames_[b] = vkCtx_->frameNumber();
         return;
     }
 
@@ -329,6 +333,7 @@ void SkyBodies::queryDiscVisibility(VkCommandBuffer cmd, VkDescriptorSet perFram
     bindAndDraw(cmd, occlusionPipeline_, perFrameSet, sprite.set, push);
     vkCmdEndQuery(cmd, queryPool_, query);
     queryIssued_[frame][b] = true;
+    queryFrames_[frame][b] = vkCtx_->frameNumber();
     queryExpectedSamples_[frame][b] =
         pixels * static_cast<float>(static_cast<int>(vkCtx_->getMsaaSamples()));
 }

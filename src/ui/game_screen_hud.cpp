@@ -1866,9 +1866,16 @@ void GameScreen::takeScreenshot() {
         game::MessageChatData sysMsg;
         sysMsg.type = game::ChatType::SYSTEM;
         sysMsg.language = game::ChatLanguage::UNIVERSAL;
-        sysMsg.message = "Screenshot saved: " + path;
+        sysMsg.message = "Screenshot requested: " + path;
         services_.gameHandler->addLocalChatMessage(sysMsg);
     }
+}
+
+void GameScreen::reportScreenshotResults() {
+    if (!services_.renderer || !services_.gameHandler) return;
+    for (const auto& [path, saved] : services_.renderer->takeScreenshotResults())
+        services_.gameHandler->addSystemChatMessage(
+            std::string(saved ? "Screenshot saved: " : "Screenshot failed: ") + path);
 }
 
 }} // namespace wowee::ui

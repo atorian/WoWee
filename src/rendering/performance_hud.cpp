@@ -277,8 +277,8 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Separator();
 
             int totalChunks = terrainRenderer->getChunkCount();
-            int rendered = terrainRenderer->getRenderedChunkCount();
-            int culled = terrainRenderer->getCulledChunkCount();
+            int rendered = renderer->renderStatistics().terrainDrawn;
+            int culled = renderer->renderStatistics().terrainCulled;
             int triangles = terrainRenderer->getTriangleCount();
 
             ImGui::Text("Chunks: %d", totalChunks);
@@ -445,7 +445,7 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Text("Models: %u", wmoRenderer->getModelCount());
             ImGui::Text("Instances: %u", wmoRenderer->getInstanceCount());
             ImGui::Text("Triangles: %u", wmoRenderer->getTotalTriangleCount());
-            ImGui::Text("Draw Calls: %u", wmoRenderer->getDrawCallCount());
+            ImGui::Text("Draw Calls: %u", renderer->renderStatistics().wmoDraws);
             ImGui::Text("Dist Culled: %u groups", wmoRenderer->getDistanceCulledGroups());
             if (wmoRenderer->isOcclusionCullingEnabled()) {
                 ImGui::Text("Occl Culled: %u groups", wmoRenderer->getOcclusionCulledGroups());

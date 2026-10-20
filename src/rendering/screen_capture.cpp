@@ -15,7 +15,7 @@ ScreenCapture::~ScreenCapture() {
     shutdown();
 }
 
-bool ScreenCapture::initialize(VkContext* ctx, uint32_t width, uint32_t height) {
+bool ScreenCapture::initialize(VkContext* ctx, uint32_t width, uint32_t height, bool indicator) {
     if (!ctx || width == 0 || height == 0) return false;
     ctx_ = ctx;
     width_ = width;
@@ -81,7 +81,7 @@ bool ScreenCapture::initialize(VkContext* ctx, uint32_t width, uint32_t height) 
         return false;
     }
 
-    return createIndicatorPipeline();
+    return !indicator || createIndicatorPipeline();
 }
 
 bool ScreenCapture::createIndicatorPipeline() {
@@ -208,7 +208,7 @@ bool ScreenCapture::record(VkCommandBuffer cmd, uint32_t frameSlot, VkImage swap
     dep.pBufferMemoryBarriers = &toHost;
     cmdPipelineBarrier2(cmd, dep);
 
-    pending_[frameSlot] = Pending{.buffer = static_cast<int>(index), .pts = pts};
+    pending_[frameSlot] = Pending{.buffer = static_cast<int>(index), .pts = pts, .frame = ctx_->frameNumber()};
     return true;
 }
 
@@ -221,6 +221,7 @@ ScreenCapture::Ready ScreenCapture::collect(uint32_t frameSlot) {
     ready.stride = width_ * 4;
     ready.pts = pending_[frameSlot].pts;
     ready.buffer = index;
+    ready.frame = pending_[frameSlot].frame;
     ready.valid = true;
     pending_[frameSlot] = Pending{};
     return ready;

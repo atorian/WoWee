@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/frame_results.hpp"
 
 #include "collision/m2_shape.hpp"
 #include "rendering/chunked_vector.hpp"
@@ -800,6 +801,8 @@ public:
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
+    std::vector<CullAnswer> takeCullAnswers();
+    void acceptCullAnswers(const std::vector<CullAnswer>& answers);
     /// CPU memory the models keep after upload - bones and their animation
     /// tracks, emitters, collision - and the instances with what each holds.
     [[nodiscard]] uint64_t modelDataBytes() const;
@@ -1640,11 +1643,11 @@ public:
     };
 private:
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
-    struct CullResult { uint32_t id; bool visible; uint64_t sceneIdentity; };
     std::mutex cullResultMutex_;
-    std::vector<CullResult> collectedCull_;
+    std::vector<CullAnswer> collectedCull_;
     std::vector<uint32_t> submittedCullIds_[2];
     uint64_t submittedCullScenes_[2]{};
+    uint64_t submittedCullFrames_[2]{};
 
 };
 

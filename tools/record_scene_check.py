@@ -18,7 +18,7 @@ FILES = tuple("src/rendering/" + name + ".cpp" for name in (
     "terrain_bake", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
     "starfield", "lens_flare", "precipitation", "ocean_waves", "water_wake", "mount_dust",
     "swim_effects", "lightning", "charge_effect", "quest_marker_renderer", "footprint_renderer",
-    "overlay_system", "volumetric_fog", "rt_scene", "renderer", "minimap",
+    "overlay_system", "volumetric_fog", "rt_scene", "renderer", "renderer_results", "minimap",
     "interface_frame", "character_preview", "world_map/composite_renderer"))
 DEFINITION = re.compile(r"^\w[\w:<>,\s\*&]*\b(\w+)::(\w+)\s*\(", re.M)
 LIVE = {
@@ -45,7 +45,7 @@ LIVE = {
     "FootprintRenderer": r"prints_",
     "OverlaySystem": r"selCircleVisible_|selCirclePos_|selCircleRadius_|selCircleColor_|world",
     "RtScene": r"sourceMeshes_|sourceInstances_|changes_|extractChanges",
-    "Renderer": r"collision_|liquidScene_",
+    "Renderer": r"collision_|liquidScene_|frameSink_|screenshotRequests_|worldEpoch_",
     "Minimap": r"assetManager|mapName|trsLookup|readyTiles_|tileTextureCache|viewRadius|rotateWithCamera|haveRect_|opacity_",
     "InterfaceRecorder": r"ImGui|ImGui_ImplVulkan_RenderDrawData",
     "CharacterPreview": r"camera|modelLoaded_|compositeRequested_",
