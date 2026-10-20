@@ -1308,10 +1308,10 @@ void Renderer::applyMsaaChange() {
 
     // Set new MSAA and recreate swapchain (render pass, depth, MSAA image, framebuffers)
     vkCtx->setMsaaSamples(samples);
-    if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) {
+    if (!vkCtx->recreateSwapchain(frameInputs_.drawableWidth, frameInputs_.drawableHeight)) {
         LOG_ERROR("MSAA change failed - reverting to 1x");
         vkCtx->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
-        (void)vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight());
+        (void)vkCtx->recreateSwapchain(frameInputs_.drawableWidth, frameInputs_.drawableHeight);
     }
 
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
@@ -1443,6 +1443,8 @@ FrameInputs Renderer::extractFrameInputs() {
     in.sharpStars = sharpStars_;
     in.minimapEnabled = minimap && minimap->isEnabled();
     if (surface_) {
+        in.drawableWidth = surface_->getDrawableWidth();
+        in.drawableHeight = surface_->getDrawableHeight();
         in.windowWidth = surface_->getWidth();
         in.windowHeight = surface_->getHeight();
     }
@@ -1585,6 +1587,10 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     if (vkCtx) vkCtx->cpuStages().clear();
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
+    if (!inputs.drawableWidth || !inputs.drawableHeight) return;
+    const auto publishedExtent = vkCtx->getSwapchainExtent();
+    if (inputs.drawableWidth != publishedExtent.width || inputs.drawableHeight != publishedExtent.height)
+        vkCtx->markSwapchainDirty(); // also catches a resize arriving during recreation
     if (inputs.scene && inputs.scene->resources) inputs.scene->resources->usedByFrame(vkCtx->frameNumber());
     if (inputs.scene) {
         if (characterRenderer) characterRenderer->useFrame(inputs.scene->characters);
@@ -1696,12 +1702,12 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         // Skip recreation while window is minimized (0×0 extent is a Vulkan spec violation)
         // Pixels, like the extent below: a window with a surface behind it is
         // never rebuilt from the size the desktop places it at.
-        if (surface_->getDrawableWidth() == 0 || surface_->getDrawableHeight() == 0) return;
+        if (inputs.drawableWidth == 0 || inputs.drawableHeight == 0) return;
         // A swapchain or a frame target that could not be made skips the
         // frame: the context has said why, and tries again next frame. The
         // rebuilds below would size themselves from a swapchain that is not
         // there, and recording against it is what crashed the driver.
-        if (!vkCtx->recreateSwapchain(surface_->getDrawableWidth(), surface_->getDrawableHeight())) return;
+        if (!vkCtx->recreateSwapchain(frameInputs_.drawableWidth, frameInputs_.drawableHeight)) return;
         // Rebuild water resources that reference swapchain extent/views
         if (waterRenderer) {
             waterRenderer->recreatePipelines();
@@ -1912,7 +1918,8 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // The pass's start - clearing its colour and depth, every sample of them
     // under MSAA - ends here. Without this mark it was read as part of the
     // first pass drawn in it, terrain.
-    vkCtx->gpuMark(currentCmd, "scene pass begin");
+    if (parallelRecordingEnabled_) recordSecondaryMark(0, "scene pass begin");
+    else vkCtx->gpuMark(currentCmd, "scene pass begin");
 
     if (!parallelRecordingEnabled_) {
         // Fallback: set dynamic viewport and scissor on primary (inline mode)
@@ -1930,8 +1937,22 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
 }
 
 void Renderer::endFrame() {
+    const auto recordingStart = std::chrono::steady_clock::now();
     ZoneScopedN("Renderer::endFrame");
-    if (!vkCtx || currentCmd == VK_NULL_HANDLE) { publishFrameResults(); return; }
+    const auto releaseInputs = [this] {
+        // Recording is complete. Keep GPU lifetimes through retirement rather
+        // than retaining an extra completed CPU snapshot beside the two slots.
+        frameInputs_.scene.reset();
+        frameInputs_.interface.reset();
+        frameInputs_.auxiliaryInterface = {};
+        frameInputs_.capture = FrameCaptureRequest();
+        frameInputs_.screenshots.clear();
+        if (characterRenderer) characterRenderer->useFrame({});
+        if (wmoRenderer) wmoRenderer->useFrame({});
+        if (m2Renderer) m2Renderer->useFrame({});
+        if (skyboxModelRenderer_) skyboxModelRenderer_->useFrame({});
+    };
+    if (!vkCtx || currentCmd == VK_NULL_HANDLE) { publishFrameResults(); releaseInputs(); return; }
 
     logViewDistanceDiag();
 
@@ -1942,7 +1963,6 @@ void Renderer::endFrame() {
     CpuStageTimes& stages = vkCtx->cpuStages();
     if (postProcessPipeline_) {
         CpuStage stage(stages, "endFrame", "post-process");
-        GpuPass pass(*vkCtx, currentCmd, "post-process");
         postProcessPipeline_->executePostProcessing(
             currentCmd, currentImageIndex, frameCamera(), frameInputs_.deltaTime);
     }
@@ -1953,6 +1973,7 @@ void Renderer::endFrame() {
     // the water. The overlay pass is single-sampled and colour-only, which is
     // also why the UI costs the same here whatever MSAA the scene uses.
     vkCmdEndRenderPass(currentCmd);
+    vkCtx->gpuMark(currentCmd, "post-process");
 
     // Only when water could not be moved out of the scene pass (MSAA). Otherwise
     // renderWorld already took the copy at the one point in the frame where the
@@ -2023,7 +2044,10 @@ void Renderer::endFrame() {
     // Submit and present
     vkCtx->endFrame(currentCmd, currentImageIndex);
     currentCmd = VK_NULL_HANDLE;
+    vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();
+    releaseInputs();
 }
 
 void Renderer::setCharacterFollow(uint32_t instanceId) {
@@ -2539,6 +2563,7 @@ void Renderer::runDeferredWorldInitStep(float deltaTime) {
         if (deferredWorldInitCooldown_ > 0.0f) return;
     }
 
+    if (deferredWorldInitStage_ == 0) drainFrames();
     switch (deferredWorldInitStage_) {
         case 0:
             if (questMarkerRenderer && !questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, cachedAssetManager))
@@ -3523,18 +3548,12 @@ void Renderer::renderWorld() {
             queue(secondaryCmds_[SEC_CHARS_FADED][frameIdx], "faded characters");
         queue(secondaryCmds_[SEC_POST][frameIdx], "water/effects");
 
-        // One at a time, with a mark after each.
-        //
-        // Batched, the whole world was a single gap in the timeline and its
-        // 43 of 48 milliseconds could not be attributed to a pass. The
-        // secondaries execute in this order either way; issuing them
-        // separately costs six calls on the CPU and nothing on the GPU, and
-        // buys the breakdown that says which pass to look at. The marks are
-        // written from the primary buffer, so the threads that recorded the
-        // secondaries never touch the shared mark counter.
+        // Allocate marks on the owner in execution order. Each mark is
+        // recorded in its own inherited secondary: primary timestamp/debug
+        // commands are forbidden inside a secondary-only subpass.
         for (uint32_t i = 0; i < numCmds; ++i) {
-            GpuPass pass(*vkCtx, currentCmd, validLabels[i]);
             vkCmdExecuteCommands(currentCmd, 1, &validCmds[i]);
+            recordSecondaryMark(i + 1, validLabels[i]);
         }
         // The world, as one mark.
         //
@@ -3545,7 +3564,7 @@ void Renderer::renderWorld() {
         // whole scene, was being read as the cost of post-processing. 46 of a
         // 50ms frame landed under a label that did not earn it.
         // ...and the whole of it, for the one-line answer.
-        if (vkCtx) vkCtx->gpuMark(currentCmd, "world total");
+        recordSecondaryMark(NUM_DRAW_SECONDARIES + 1, "world total");
 
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
@@ -4054,6 +4073,7 @@ void Renderer::setActiveMapName(const std::string& name) {
 }
 
 bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName) {
+    drainFrames();
     if (!assetManager) {
         LOG_ERROR("Asset manager is null");
         return false;
@@ -4634,8 +4654,8 @@ bool Renderer::createSecondaryCommandResources() {
         }
     }
 
-    const uint32_t mainSecondaries[] = { SEC_SKY, SEC_SELECTION, SEC_IMGUI };
-    for (uint32_t idx : mainSecondaries) {
+    for (uint32_t idx = 0; idx < NUM_SECONDARIES; ++idx) {
+        if (idx < NUM_DRAW_SECONDARIES && idx != SEC_SKY && idx != SEC_SELECTION && idx != SEC_IMGUI) continue;
         allocInfo.commandPool = mainSecondaryCmdPool_;
         for (uint32_t f = 0; f < MAX_FRAMES; ++f) {
             if (vkAllocateCommandBuffers(device, &allocInfo, &secondaryCmds_[idx][f]) != VK_SUCCESS) {
@@ -4673,6 +4693,15 @@ void Renderer::destroySecondaryCommandResources() {
             cmd = VK_NULL_HANDLE;
 
     parallelRecordingEnabled_ = false;
+}
+
+void Renderer::recordSecondaryMark(uint32_t index, const char* label) {
+    auto cmd = beginSecondary(NUM_DRAW_SECONDARIES + index);
+    // Query allocation stays on the recording owner and follows execution order.
+    // These buffers contain no draws and inherit the same pass as the workers.
+    vkCtx->gpuMark(cmd, label);
+    vkEndCommandBuffer(cmd);
+    vkCmdExecuteCommands(currentCmd, 1, &cmd);
 }
 
 VkCommandBuffer Renderer::beginSecondary(uint32_t secondaryIndex) {
@@ -5229,7 +5258,8 @@ void Renderer::updateWeather(float deltaTime) {
         frame.water = &liquidScene_;
         frame.now = globalTime;
         frame.openSky = skyView();
-        frame.viewport = activeRenderExtent_.width > 0 ? activeRenderExtent_ : vkCtx->getSwapchainExtent();
+        frame.viewport = {publishedStatistics_.width, publishedStatistics_.height};
+        if (!frame.viewport.width && surface_) frame.viewport = {static_cast<uint32_t>(std::max(0, surface_->getDrawableWidth())), static_cast<uint32_t>(std::max(0, surface_->getDrawableHeight()))};
         precipitation_->setSplashesEnabled(weatherControls_.splashes);
         precipitation_->update(frame);
     }

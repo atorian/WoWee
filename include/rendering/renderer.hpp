@@ -725,7 +725,8 @@ private:
     // Faded characters (worker 2, after SEC_CHARS), queued after SEC_M2 so the
     // effects inside them show through; unused when they go after the water.
     static constexpr uint32_t SEC_CHARS_FADED = 8;
-    static constexpr uint32_t NUM_SECONDARIES = 9;
+    static constexpr uint32_t NUM_DRAW_SECONDARIES = 9;
+    static constexpr uint32_t NUM_SECONDARIES = NUM_DRAW_SECONDARIES * 2 + 2;
     /// Faded characters are drawn in the after-water pass, after the blended
     /// M2s and particles there, rather than in the scene pass after SEC_M2.
     [[nodiscard]] bool fadedCharactersAfterWater() const;
@@ -753,6 +754,7 @@ private:
     bool createSecondaryCommandResources();
     void destroySecondaryCommandResources();
     VkCommandBuffer beginSecondary(uint32_t secondaryIndex);
+    void recordSecondaryMark(uint32_t index, const char* label);
     void setSecondaryViewportScissor(VkCommandBuffer cmd);
 
     // Cached render pass state for secondary buffer inheritance

@@ -121,6 +121,7 @@ bool MapWindow::open(SDL_Window* gameWindow, rendering::Renderer* renderer,
                      const UIManager* ui) {
     if (window_) return true;
     if (!renderer || !ctx || !assets) return false;
+    renderer->drainFrames();
 
     int x = 0, y = 0, w = 0, h = 0;
     chooseGeometry(gameWindow, x, y, w, h);
@@ -493,10 +494,12 @@ std::function<void(VkCommandBuffer, uint32_t)> MapWindow::extractFrame() {
     ContextScope scope(imgui_);
     auto interface = rendering::extractImGuiFrame(*ctx_);
     auto composite = map_->extractComposite();
-    return [swapchain = swapchain_, recorder = recorder_, open = frameWindowOpen_,
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(window_, &width, &height);
+    return [width, height, swapchain = swapchain_, recorder = recorder_, open = frameWindowOpen_,
             interface = std::move(interface), composite = std::move(composite), ctx = ctx_]
            (VkCommandBuffer cmd, uint32_t slot) {
-        if (!open->load(std::memory_order_acquire) || !swapchain->acquire()) return;
+        if (!open->load(std::memory_order_acquire) || !swapchain->acquire(width, height)) return;
         if (composite) composite(cmd, slot);
         swapchain->record(cmd, kBackground, [&](VkCommandBuffer c) {
             if (interface) recorder->record(*ctx, c, swapchain->renderPass(), slot, *interface);

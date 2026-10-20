@@ -178,6 +178,7 @@ void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
     assetManager_ = am;
     if (!preview_) {
         preview_ = std::make_shared<rendering::CharacterPreview>();
+        if (auto* renderer = core::Application::getInstance().getRenderer()) renderer->drainFrames();
         if (preview_->initialize(am)) {
             auto* renderer = core::Application::getInstance().getRenderer();
             if (renderer) renderer->registerComposite(preview_);

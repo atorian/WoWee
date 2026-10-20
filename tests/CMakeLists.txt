@@ -3432,3 +3432,5 @@ while(_wowee_test_libraries)
         endif()
     endforeach()
 endwhile()
+
+wowee_add_test(test_frame_worker SOURCES test_frame_worker.cpp)

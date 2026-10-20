@@ -1629,6 +1629,9 @@ bool Application::initialize() {
 }
 
 void Application::run() {
+    renderWorker_ = std::make_unique<FrameWorker>(core::envFlagEnabled("WOWEE_RENDER_THREAD", true));
+    renderer->setFrameDrain([this] { renderWorker_->drain(); });
+    LOG_WARNING("Render worker: ", core::envFlagEnabled("WOWEE_RENDER_THREAD", true) ? "threaded" : "inline", ", capacity=2");
     ZoneScopedN("Application::run");
     LOG_INFO("Starting main loop");
 
@@ -1702,6 +1705,7 @@ void Application::run() {
     }
 
     LOG_INFO("Main loop ended");
+    renderWorker_->drain();
     loop_->loopEnded();
 }
 
@@ -1759,8 +1763,16 @@ void Application::requestClose() {
 }
 
 float Application::beginFrame() {
+    if (renderWorker_) renderWorker_->check();
     if (renderer) for (const auto& result : renderer->takeFrameResults()) {
-        for (const auto& part : result.cpu) noteStage(part.group + "/" + part.name, part.milliseconds);
+        float recordingMs = 0.0f;
+        for (const auto& part : result.cpu) {
+            if (part.group == "Render") {
+                recordingMs += part.milliseconds;
+                noteStage("render thread/" + part.name, part.milliseconds);
+            } else noteStage("render thread/" + part.group + "/" + part.name, part.milliseconds);
+        }
+        if (recordingMs > 0.0f) noteStage("render thread", recordingMs);
         if (result.gpuTimingSerial && result.gpuTimingSerial != gpuTimingsSeen_) {
             gpuTimingsSeen_ = result.gpuTimingSerial;
             std::vector<std::pair<const char*, double>> passes;
@@ -2118,6 +2130,7 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
         // window is gone rather than after.
         if (event.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
             if (window && window->getVkContext()) {
+                if (renderer) renderer->drainFrames();
                 window->getVkContext()->releaseSurface();
             }
         } else if (event.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
@@ -2126,6 +2139,7 @@ void Application::pump(float deltaTime, const FramePlan& plan, InterfaceInput& f
                 // is not the window size on a high density display.
                 int w = 0, h = 0;
                 SDL_GetWindowSizeInPixels(window->getSDLWindow(), &w, &h);
+                if (renderer) renderer->drainFrames();
                 if (!window->getVkContext()->restoreSurface(
                         window->getSDLWindow(), w, h)) {
                     LOG_ERROR("Resuming without a surface; the client cannot draw");
@@ -2341,6 +2355,13 @@ void Application::updateMapWindow(const FramePlan& plan) {
 void Application::shutdown() {
     ScopedPhase shuttingDown(currentPhase_, Phase::Transitions);
     LOG_DEBUG("Shutting down application...");
+    renderPermit_.reset();
+    renderInputs_.reset();
+    if (renderWorker_) {
+        renderWorker_->stop();
+        renderer->setFrameDrain({});
+        renderWorker_.reset();
+    }
     // Close visibly before saved variables or worker lifetime fences can delay cleanup.
     if (window && window->getSDLWindow()) SDL_HideWindow(window->getSDLWindow());
     // What watched the frames goes first, then the interface hears the
@@ -4424,6 +4445,12 @@ void Application::present(float deltaTime, const FramePlan& plan) {
     }
     if (renderer) {
         renderer->setWorldInView(plan.view == FrameView::World);
+        if (renderWorker_) {
+            const auto waiting = std::chrono::steady_clock::now();
+            renderPermit_.emplace(renderWorker_->reserve());
+            noteStage("Present/render queue wait", std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - waiting).count());
+        }
         if (!renderInputs_) renderInputs_ = std::make_unique<rendering::FrameInputs>();
         *renderInputs_ = renderer->extractFrameInputs();
         if (canDrawInterface()) renderInputs_->interface = rendering::extractImGuiFrame(*renderer->getVkContext());
@@ -5345,32 +5372,32 @@ void Application::render(const FramePlan& plan) {
 void Application::renderFrame(const FramePlan& plan) {
     const FrameView view = plan.view;
     if (!renderer) return;
-    if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) return;
-    // Mirrors the IN_GAME update stages: a frame that blocks long enough to trip the
-    // watchdog needs to say which phase did it.
-    auto runRenderStage = [this](const char* stageName, auto&& fn) {
-        auto stageStart = std::chrono::steady_clock::now();
-        fn();
-        float stageMs = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - stageStart).count();
-        noteStageTime(stageName, stageMs);
-        if (stageMs > 50.0f) {
-            LOG_WARNING("SLOW render stage '", stageName, "': ", stageMs, "ms");
-        }
-    };
-
-    // The offline fixtures draw through the real world path.
+    if (window && window->getVkContext() && window->getVkContext()->isSurfaceLost()) {
+        renderPermit_.reset();
+        renderInputs_.reset();
+        noteRendererStages();
+        return;
+    }
     const bool drawWorld = view == FrameView::World || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
         std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
     if (!renderInputs_) throw std::logic_error("Render requires frame inputs extracted in Present");
-    runRenderStage("beginFrame", [&] { renderer->beginFrame(*renderInputs_); });
-
-    if (drawWorld) {
-        runRenderStage("renderWorld", [&] { renderer->renderWorld(); });
-    }
-
-    runRenderStage("endFrame", [&] { renderer->endFrame(); });
-    // What beginFrame, renderWorld and endFrame were made of.
+    auto frame = std::shared_ptr<const rendering::FrameInputs>(std::move(renderInputs_));
+    auto record = [target = renderer.get(), frame = std::move(frame), drawWorld] {
+        auto timed = [&](const char* name, auto&& fn) {
+            const auto start = std::chrono::steady_clock::now();
+            fn();
+            target->getVkContext()->cpuStages().add("Render", name,
+                std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
+        };
+        timed("beginFrame", [&] { target->beginFrame(*frame); });
+        if (drawWorld) timed("renderWorld", [&] { target->renderWorld(); });
+        target->endFrame();
+    };
+    if (renderWorker_) {
+        if (!renderPermit_) throw std::logic_error("Render frame was not reserved before extraction");
+        renderWorker_->submit(std::move(*renderPermit_), std::move(record));
+        renderPermit_.reset();
+    } else record();
     noteRendererStages();
 
     // A picture of the client, written once and then done with.

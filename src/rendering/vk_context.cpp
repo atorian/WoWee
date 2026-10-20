@@ -1477,6 +1477,7 @@ bool VkContext::createSwapchain(int width, int height) {
     swapchain = vkbSwap.swapchain;
     swapchainFormat = vkbSwap.image_format;
     swapchainExtent = vkbSwap.extent;
+    publishedExtent_.store((uint64_t(swapchainExtent.width) << 32) | swapchainExtent.height, std::memory_order_release);
     swapchainImages = vkbSwap.get_images().value();
     swapchainImageViews = vkbSwap.get_image_views().value();
 
@@ -2089,6 +2090,7 @@ void VkContext::setMsaaSamples(VkSampleCountFlagBits samples) {
     VkSampleCountFlagBits maxSamples = getMaxUsableSampleCount();
     if (samples > maxSamples) samples = maxSamples;
     msaaSamples_ = samples;
+    publishedMsaa_.store(samples, std::memory_order_release);
     swapchainDirty = true;
 }
 
@@ -2980,6 +2982,7 @@ bool VkContext::recreateSwapchain(int width, int height) {
     swapchain = vkbSwap.swapchain;
     swapchainFormat = vkbSwap.image_format;
     swapchainExtent = vkbSwap.extent;
+    publishedExtent_.store((uint64_t(swapchainExtent.width) << 32) | swapchainExtent.height, std::memory_order_release);
     swapchainImages = vkbSwap.get_images().value();
     swapchainImageViews = vkbSwap.get_image_views().value();
 

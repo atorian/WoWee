@@ -240,6 +240,89 @@ void screenshotTest(core::Application& app) {
     require(completed.size() == 1 && completed.front().second, "Screenshot completion was not reported once");
     std::puts("PASS: screenshot copies its requested frame before present and saves on the producer boundary");
 }
+void workerTest(core::Application& app) {
+    auto& renderer = *app.getRenderer();
+    renderer.setWorldInView(true);
+    const auto producer = std::this_thread::get_id();
+    std::vector<uint8_t> reference;
+    for (const bool threaded : {false, true}) {
+        core::FrameWorker worker(threaded);
+        renderer.setFrameDrain([&] { worker.drain(); });
+        const auto extent = renderer.getVkContext()->getSwapchainExtent();
+        Capture sink(extent);
+        require(renderer.beginFrameCapture(&sink, extent.width, extent.height), "Worker capture failed");
+        for (int i = 0; i < 6; ++i) {
+            auto permit = worker.reserve();
+            auto frame = std::make_shared<rendering::FrameInputs>(extract(renderer, [] {
+                ImGui::GetForegroundDrawList()->AddRectFilled({16,16}, {140,140}, IM_COL32(23,179,47,255));
+            }));
+            worker.submit(std::move(permit), [&, frame] {
+                require((std::this_thread::get_id() != producer) == threaded, "Wrong recording owner");
+                record(renderer, *frame);
+            });
+            // Build/mutate the next UI on its producer while recording is in flight.
+            // The snapshot above must remain valid and keep its own font pages.
+            renderer.setViewDistance(1000.0f + float(i));
+            (void)renderer.takeFrameResults();
+        }
+        worker.drain();
+        renderer.flushFrameCapture();
+        renderer.endFrameCapture();
+        renderer.setFrameDrain({});
+        require(!sink.pixels.empty(), "Worker produced no readback");
+        // The owned UI covers this region irrespective of sky history/jitter.
+        std::vector<uint8_t> sample;
+        for (uint32_t y = 24; y < 120; ++y)
+            sample.insert(sample.end(), sink.pixels.begin() + (y * extent.width + 24) * 4,
+                          sink.pixels.begin() + (y * extent.width + 120) * 4);
+        if (!threaded) reference = std::move(sample);
+        else require(sample == reference, "Inline/threaded owned interface images differ");
+    }
+    renderer.setWorldInView(false);
+    std::puts("PASS: real GPU recording on its worker, concurrent extraction, inline/threaded UI equality");
+}
+
+void resizeWorkerTest(core::Application& app) {
+    auto& renderer = *app.getRenderer();
+    auto& window = *app.getWindow();
+    auto* ctx = renderer.getVkContext();
+    int width = 0, height = 0;
+    SDL_GetWindowSize(window.getSDLWindow(), &width, &height);
+    core::FrameWorker worker(true);
+    auto before = std::make_shared<rendering::FrameInputs>(renderer.extractFrameInputs());
+    std::promise<void> entered, resume;
+    auto gate = resume.get_future();
+    worker.submit(worker.reserve(), [&, before] { entered.set_value(); gate.wait(); record(renderer, *before); });
+    entered.get_future().wait();
+    SDL_SetWindowSize(window.getSDLWindow(), width + 64, height + 32);
+    SDL_SyncWindow(window.getSDLWindow());
+    window.setSize(width + 64, height + 32);
+    ctx->markSwapchainDirty();
+    auto after = std::make_shared<rendering::FrameInputs>(renderer.extractFrameInputs());
+    worker.submit(worker.reserve(), [&, after] { record(renderer, *after); });
+    resume.set_value();
+    worker.drain();
+    require(ctx->getSwapchainExtent().width == after->drawableWidth &&
+            ctx->getSwapchainExtent().height == after->drawableHeight,
+            "Worker did not consume the producer's resized drawable extent");
+    // A minimized snapshot makes no Vulkan frame and must leave the queue free.
+    auto minimized = *after;
+    minimized.drawableWidth = minimized.drawableHeight = 0;
+    const auto submitted = ctx->frameNumber();
+    worker.submit(worker.reserve(), [&, minimized] { record(renderer, minimized); });
+    worker.drain();
+    require(ctx->frameNumber() == submitted, "Minimized frame tried to submit an image");
+    SDL_SetWindowSize(window.getSDLWindow(), width, height);
+    SDL_SyncWindow(window.getSDLWindow());
+    window.setSize(width, height);
+    auto restored = std::make_shared<rendering::FrameInputs>(renderer.extractFrameInputs());
+    worker.submit(worker.reserve(), [&, restored] { record(renderer, *restored); });
+    worker.drain();
+    require(ctx->getSwapchainExtent().width == restored->drawableWidth, "Restored window stayed at old extent");
+    (void)renderer.takeFrameResults();
+    std::puts("PASS: resize during queued recording, minimized submission skipped, window restored");
+}
+
 }
 int main() {
     try {
@@ -257,6 +340,8 @@ int main() {
         mapWindowTest(app);
         resultsTest(app);
         screenshotTest(app);
+        workerTest(app);
+        resizeWorkerTest(app);
         renderer.getVkContext()->waitForSubmittedFrames("finish native interface probe");
         std::puts("PASS: native interface snapshot lifecycle");
         return 0;

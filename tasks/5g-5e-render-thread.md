@@ -39,7 +39,7 @@ camera_controller.cpp diagnostic is excluded.
   sweep_guard, dev build and an ordinary launch with the full existing profile.
   Record performance as measured; enabling a thread alone does not prove a gain.
 
-Status: 5г and 5д implemented and validated; 5е remains.
+Status: 5г, 5д and 5е implemented and validated.
 
 5г validation (2026-10-20): dev wowee, scene_render and wowee_editor build.
 Sixteen GPU checks passed (owned interface/font pages, world snapshots, RT modes,
@@ -89,3 +89,29 @@ before accepting the test.
   identical extraction/results protocol and bounded worker API in inline mode.
 
 5д validation (2026-10-20): dev wowee, scene_render and render_client_probe built. All 16 selected tests passed, including frame_results, world/RT/AA/weather snapshots and sweep_guard. The native client probe confirmed numbered results, producer-only capture callbacks, screenshot frame content and deferred completion; no VUIDs and zero surviving VMA allocations.
+
+5е implementation and validation (2026-10-20):
+
+- FrameWorker reserves at most two outstanding frames before extraction, uses
+  condition-variable backpressure and a dedicated recording owner, delivers
+  recording failures to the producer, and drains/joins before scene/UI teardown.
+  WOWEE_RENDER_THREAD=0 executes the identical owned requests inline.
+- Drawable extents cross in inputs; main/auxiliary recreation consumes those
+  values. Vsync/dirty flags and published extents/MSAA are synchronized. Actual
+  scene initialization, preview creation, map closure and surface loss drain
+  accepted recording without serializing ordinary frames.
+- GPU marks in secondary-only passes use inherited marker buffers allocated in
+  execution order on the owner. Post-processing is marked after its pass closes.
+  HUD GPU diagnostics cross through FrameResults; completed scene/UI owners are
+  released when recording finishes. Profiles separate render-thread work and
+  producer queue waits, including the benchmark's budget.
+- Dev wowee, scene_render and render_client_probe built. All 17 selected tests
+  passed, including frame_worker, frame_results and sweep_guard. Scene fixtures
+  can run GPU recording on a dedicated owner via WOWEE_RENDER_THREAD=1.
+- Strict native probe passed concurrent extraction/recording, exact owned UI
+  image equality in inline/threaded modes, resize with two accepted frames,
+  minimized submission skip, window restoration, captures and shutdown.
+- Application::run completed a real lamppost/RT screenshot and clean shutdown
+  in both modes through run.ps1. No unexpected Vulkan validation errors or
+  surviving VMA allocations. These short runs do not replace stage 5ж's long
+  sessions/crowd/flight A/B measurement; no FPS gain is claimed here.

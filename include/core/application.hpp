@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/window.hpp"
+#include "core/frame_worker.hpp"
 #include <chrono>
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
@@ -382,6 +383,8 @@ private:
     std::unique_ptr<Window> window;
     std::unique_ptr<rendering::Renderer> renderer;
     std::unique_ptr<rendering::FrameInputs> renderInputs_;
+    std::unique_ptr<FrameWorker> renderWorker_;
+    std::optional<FrameWorker::Permit> renderPermit_;
     std::unique_ptr<ui::UIManager> uiManager;
     std::unique_ptr<ui::MapWindow> mapWindow_;
     /// A failed open is not retried every frame; switching the setting off

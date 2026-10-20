@@ -5,6 +5,8 @@
 #include "rendering/shelter_map.hpp"
 #include "rendering/sky_bodies.hpp"
 #include "rendering/rt_scene.hpp"
+#include "rendering/post_process_pipeline.hpp"
+#include "rendering/water_renderer.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
 #include <stb_image_write.h>
@@ -56,6 +58,10 @@ void Renderer::publishFrameResults() {
         const auto sun = SkyBodies::Body::Sun, moon = SkyBodies::Body::Moon;
         result.sun = {bodies->visibilityFrame(sun), epochForGpuFrame(bodies->visibilityFrame(sun)), bodies->measuredVisibility(sun)};
         result.moon = {bodies->visibilityFrame(moon), epochForGpuFrame(bodies->visibilityFrame(moon)), bodies->measuredVisibility(moon)};
+        const auto& sunDraw = bodies->lastDiscDraw(sun);
+        const auto& moonDraw = bodies->lastDiscDraw(moon);
+        result.statistics.sunDisc = sunDraw.drawn ? "drawn" : sunDraw.skipped;
+        result.statistics.moonDisc = moonDraw.drawn ? "drawn" : moonDraw.skipped;
     }
     if (worldDrawnThisFrame_) {
         result.statistics.renderMs = lastRenderMs;
@@ -83,6 +89,17 @@ void Renderer::publishFrameResults() {
         result.statistics.rtTriangles = stats.triangles;
         result.statistics.rtGpuBytes = stats.gpuBytes;
         result.statistics.rtSourceBytes = stats.sourceBytes;
+    }
+    if (waterRenderer) result.statistics.waterDrawn = waterRenderer->getDrawnSurfaceCount();
+    if (postProcessPipeline_) {
+        auto& stats = result.statistics;
+        stats.framegenActive = postProcessPipeline_->isAmdFsr3FramegenRuntimeActive();
+        stats.framegenReady = postProcessPipeline_->isAmdFsr3FramegenRuntimeReady();
+        stats.framegenPath = postProcessPipeline_->getAmdFsr3FramegenRuntimePath();
+        stats.framegenError = postProcessPipeline_->getAmdFsr3FramegenRuntimeError();
+        stats.framegenDispatches = postProcessPipeline_->getAmdFsr3FramegenDispatchCount();
+        stats.upscaleDispatches = postProcessPipeline_->getAmdFsr3UpscaleDispatchCount();
+        stats.framegenFallbacks = postProcessPipeline_->getAmdFsr3FallbackCount();
     }
     if (!result.submittedFrame) {
         if (frameInputs_.capture.pts) result.captureDrops.push_back(frameInputs_.capture.generation);

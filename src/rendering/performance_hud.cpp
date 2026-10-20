@@ -242,20 +242,20 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "FSR 3 Upscale: ON");
             ImGui::Text("  JitterSign=%.2f", renderer->getPostProcessPipeline()->getFSR2JitterSign());
             const bool fgEnabled = renderer->getPostProcessPipeline()->isAmdFsr3FramegenEnabled();
-            const bool fgReady = renderer->getPostProcessPipeline()->isAmdFsr3FramegenRuntimeReady();
-            const bool fgActive = renderer->getPostProcessPipeline()->isAmdFsr3FramegenRuntimeActive();
+            const bool fgReady = renderer->renderStatistics().framegenReady;
+            const bool fgActive = renderer->renderStatistics().framegenActive;
             const char* fgStatus = "Disabled";
             if (fgEnabled) {
                 fgStatus = fgActive ? "Active" : (fgReady ? "Ready (waiting/fallback)" : "Unavailable");
             }
-            ImGui::Text("  FSR3 FG: %s (%s)", fgStatus, renderer->getPostProcessPipeline()->getAmdFsr3FramegenRuntimePath());
-            const std::string& fgErr = renderer->getPostProcessPipeline()->getAmdFsr3FramegenRuntimeError();
+            ImGui::Text("  FSR3 FG: %s (%s)", fgStatus, renderer->renderStatistics().framegenPath.c_str());
+            const std::string& fgErr = renderer->renderStatistics().framegenError;
             if (!fgErr.empty()) {
                 ImGui::TextWrapped("  FG Last Error: %s", fgErr.c_str());
             }
-            ImGui::Text("  FG Dispatches: %zu", renderer->getPostProcessPipeline()->getAmdFsr3FramegenDispatchCount());
-            ImGui::Text("  Upscale Dispatches: %zu", renderer->getPostProcessPipeline()->getAmdFsr3UpscaleDispatchCount());
-            ImGui::Text("  FG Fallbacks: %zu", renderer->getPostProcessPipeline()->getAmdFsr3FallbackCount());
+            ImGui::Text("  FG Dispatches: %zu", renderer->renderStatistics().framegenDispatches);
+            ImGui::Text("  Upscale Dispatches: %zu", renderer->renderStatistics().upscaleDispatches);
+            ImGui::Text("  FG Fallbacks: %zu", renderer->renderStatistics().framegenFallbacks);
         }
         if (renderer->getPostProcessPipeline()->isFXAAEnabled()) {
             if (renderer->getPostProcessPipeline()->isFSR2Enabled()) {
@@ -322,7 +322,7 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Separator();
 
             ImGui::Text("Surfaces: %d (%d drawn)", static_cast<int>(liquid.surfaceCount()),
-                        waterRenderer->getDrawnSurfaceCount());
+                        renderer->renderStatistics().waterDrawn);
             ImGui::Text("Bodies: %d", static_cast<int>(liquid.bodies().size()));
             ImGui::Text("Enabled: %s", waterRenderer->isEnabled() ? "YES" : "NO");
 
@@ -345,14 +345,8 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
             ImGui::Text("Auto: %s", skybox->isTimeProgressionEnabled() ? "YES" : "NO");
 
             // The sun's and the moon's discs: drawn, or why not.
-            if (auto* bodies = renderer->getSkyBodies()) {
-                const auto line = [&](const char* name, SkyBodies::Body body) {
-                    const auto& draw = bodies->lastDiscDraw(body);
-                    ImGui::Text("%s: %s", name, draw.drawn ? "drawn" : draw.skipped);
-                };
-                line("Sun", SkyBodies::Body::Sun);
-                line("Moon", SkyBodies::Body::Moon);
-            }
+            ImGui::Text("Sun: %s", renderer->renderStatistics().sunDisc.c_str());
+            ImGui::Text("Moon: %s", renderer->renderStatistics().moonDisc.c_str());
 
             // The setting selects point stars or the sky model's texture;
             // it does not switch off the night sky's stars.

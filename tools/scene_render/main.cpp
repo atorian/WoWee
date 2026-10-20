@@ -85,6 +85,7 @@
 // this tool read.
 
 #include "core/coordinates.hpp"
+#include "core/frame_worker.hpp"
 #include "core/frame_budget.hpp"
 #include "rendering/minimap.hpp"
 #include "core/logger.hpp"
@@ -771,6 +772,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         interfaceFixture = std::make_unique<InterfaceFixture>(*renderer.getVkContext(), extent.width, extent.height);
     }
     FrameTimer timer(timing, std::min(10, frames / 3));
+    const char* workerMode = std::getenv("WOWEE_RENDER_THREAD");
+    core::FrameWorker recordingWorker(workerMode && std::string_view(workerMode) != "0");
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
         (void)renderer.takeFrameResults();
@@ -843,13 +846,19 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 post->setIntoxication(0.8f);
             }
         }
-        timer.call("beginFrame", [&] { renderer.beginFrame(inputs); });
-        if (renderer.getCamera()->getJitter() != glm::vec2(0.0f)) {
-            LOG_ERROR("scene_render: recording modified the live camera's jitter");
-            throw std::runtime_error("Recording changed the game camera");
-        }
-        timer.call("renderWorld", [&] { renderer.renderWorld(); });
-        timer.call("endFrame", [&] { renderer.endFrame(); });
+        // Keep fixture timing/mutation points exact while moving GPU recording
+        // to the same owner used by the client. The native client probe tests
+        // overlapping extraction and recording with the bounded queue.
+        recordingWorker.submit(recordingWorker.reserve(), [&, inputs = std::move(inputs)] {
+            timer.call("beginFrame", [&] { renderer.beginFrame(inputs); });
+            if (renderer.getCamera()->getJitter() != glm::vec2(0.0f)) {
+                LOG_ERROR("scene_render: recording modified the live camera's jitter");
+                throw std::runtime_error("Recording changed the game camera");
+            }
+            timer.call("renderWorld", [&] { renderer.renderWorld(); });
+            timer.call("endFrame", [&] { renderer.endFrame(); });
+        });
+        recordingWorker.drain();
         timer.frameDone(frame, std::chrono::duration<float, std::milli>(
                                    std::chrono::steady_clock::now() - start).count(),
                         *renderer.getVkContext());

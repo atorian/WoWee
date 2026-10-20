@@ -37,6 +37,9 @@ bool AuxSwapchain::create(VkContext* ctx, SDL_Window* window) {
         return false;
     }
 
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(window_, &width, &height);
+    drawableWidth_ = width; drawableHeight_ = height;
     syncGeneration_ = ctx_->syncResetGeneration();
     if (!rebuild()) {
         destroy();
@@ -103,8 +106,7 @@ void AuxSwapchain::destroySemaphores() {
 }
 
 bool AuxSwapchain::rebuild() {
-    int w = 0, h = 0;
-    SDL_GetWindowSizeInPixels(window_, &w, &h);
+    const auto w = drawableWidth_, h = drawableHeight_;
     // Minimised, or mid-resize to nothing. Tried again once it has an area.
     if (w <= 0 || h <= 0) {
         dirty_ = true;
@@ -213,16 +215,17 @@ bool AuxSwapchain::rebuild() {
     // Remade with the images: the device is idle, so none is in use, and a
     // rebuild can change how many images there are.
     createSemaphores();
-    dirty_ = false;
     acquired_ = false;
     return true;
 }
 
-bool AuxSwapchain::acquire() {
+bool AuxSwapchain::acquire(uint32_t width, uint32_t height) {
+    if (width != drawableWidth_ || height != drawableHeight_) dirty_ = true;
+    drawableWidth_ = width; drawableHeight_ = height;
     acquired_ = false;
     if (!ctx_ || surface_ == VK_NULL_HANDLE || ctx_->isDeviceLost()) return false;
-    if (dirty_ || swapchain_ == VK_NULL_HANDLE) {
-        if (!rebuild()) return false;
+    if (dirty_.exchange(false) || swapchain_ == VK_NULL_HANDLE) {
+        if (!rebuild()) { dirty_ = true; return false; }
     }
     // A failed submit remade every semaphore the main window owns, because it
     // left some signalled; the same is true of these.

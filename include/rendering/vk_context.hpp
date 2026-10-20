@@ -322,7 +322,7 @@ public:
 
     [[nodiscard]] VkSwapchainKHR getSwapchain() const { return swapchain; }
     [[nodiscard]] VkFormat getSwapchainFormat() const { return swapchainFormat; }
-    [[nodiscard]] VkExtent2D getSwapchainExtent() const { return swapchainExtent; }
+    [[nodiscard]] VkExtent2D getSwapchainExtent() const { const auto packed = publishedExtent_.load(std::memory_order_acquire); return {uint32_t(packed >> 32), uint32_t(packed)}; }
     [[nodiscard]] const std::vector<VkImageView>& getSwapchainImageViews() const { return swapchainImageViews; }
     [[nodiscard]] const std::vector<VkImage>& getSwapchainImages() const { return swapchainImages; }
     [[nodiscard]] uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchainImages.size()); }
@@ -357,7 +357,7 @@ public:
     [[nodiscard]] bool isDeviceLost() const { return deviceLost_; }
 
     // MSAA
-    [[nodiscard]] VkSampleCountFlagBits getMsaaSamples() const { return msaaSamples_; }
+    [[nodiscard]] VkSampleCountFlagBits getMsaaSamples() const { return publishedMsaa_.load(std::memory_order_acquire); }
     void setMsaaSamples(VkSampleCountFlagBits samples);
     [[nodiscard]] VkSampleCountFlagBits getMaxUsableSampleCount() const;
     [[nodiscard]] VkImage getDepthImage() const { return depthImage; }
@@ -571,7 +571,8 @@ private:
     std::atomic<bool> swapchainDirty{false};
     std::atomic<bool> surfaceLost_{false};
     std::atomic<bool> deviceLost_{false};
-    bool vsync_ = true;
+    std::atomic<bool> vsync_{true};
+    std::atomic<uint64_t> publishedExtent_{0};
     /// The vsync state the present-mode line last reported, so a rebuild
     /// that changes nothing says nothing. -1 until the first swapchain.
     int loggedPresentVsync_ = -1;
@@ -746,6 +747,7 @@ private:
 
     // MSAA resources
     VkSampleCountFlagBits msaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
+    std::atomic<VkSampleCountFlagBits> publishedMsaa_{VK_SAMPLE_COUNT_1_BIT};
     VkImage msaaColorImage_ = VK_NULL_HANDLE;
     VkImageView msaaColorView_ = VK_NULL_HANDLE;
     VmaAllocation msaaColorAllocation_ = VK_NULL_HANDLE;

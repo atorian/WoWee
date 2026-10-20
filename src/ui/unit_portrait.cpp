@@ -33,6 +33,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
     if (!self) return;
 
     if (!preview_) {
+        renderer->drainFrames();
         preview_ = std::make_shared<rendering::CharacterPreview>();
         // Small: this is drawn into a circle a few dozen pixels across, and the
         // cost of the pass scales with the target.
@@ -121,6 +122,7 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
     if (!assets || !renderer) return false;
 
     if (!preview_) {
+        renderer->drainFrames();
         preview_ = std::make_shared<rendering::CharacterPreview>();
         initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
         if (!initialized_) {
@@ -188,6 +190,7 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
     if (!assets || !renderer || m2Path.empty()) return false;
 
     if (!preview_) {
+        renderer->drainFrames();
         preview_ = std::make_shared<rendering::CharacterPreview>();
         initialized_ = preview_->initialize(assets, targetWidth_, targetHeight_);
         if (!initialized_) {

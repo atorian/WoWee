@@ -17,6 +17,7 @@
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL.h>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -44,7 +45,7 @@ public:
     /// Take an image if one is ready now. False when none is, when the window
     /// has no area to draw (minimised), or when the swapchain could not be
     /// rebuilt - in every case this frame simply does not draw the window.
-    bool acquire();
+    bool acquire(uint32_t width, uint32_t height);
 
     /// Draw into the image acquire() took and queue it to be presented with
     /// the frame. The render pass is begun cleared to `clear`, with the
@@ -85,7 +86,8 @@ private:
 
     uint32_t imageIndex_ = 0;
     bool acquired_ = false;
-    bool dirty_ = false;
+    std::atomic<bool> dirty_{false};
+    uint32_t drawableWidth_ = 0, drawableHeight_ = 0;
     bool loggedAcquireFailure_ = false;
     uint64_t syncGeneration_ = 0;
 };

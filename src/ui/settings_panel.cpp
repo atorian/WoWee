@@ -594,13 +594,13 @@ void SettingsPanel::renderSettingsWindow(ChatPanel& chatPanel,
                                             "framegen headers.");
                     } else {
                         const char* runtimeStatus =
-                            post->isAmdFsr3FramegenRuntimeActive()  ? "Active"
-                            : post->isAmdFsr3FramegenRuntimeReady() ? "Ready"
+                            renderer->renderStatistics().framegenActive  ? "Active"
+                            : renderer->renderStatistics().framegenReady ? "Ready"
                                                                     : "Unavailable";
                         ImGui::TextDisabled("Frame generation runtime: %s (%s)",
-                            runtimeStatus, post->getAmdFsr3FramegenRuntimePath());
-                        const std::string& runtimeErr = post->getAmdFsr3FramegenRuntimeError();
-                        if (!post->isAmdFsr3FramegenRuntimeReady() && !runtimeErr.empty()) {
+                            runtimeStatus, renderer->renderStatistics().framegenPath.c_str());
+                        const std::string& runtimeErr = renderer->renderStatistics().framegenError;
+                        if (!renderer->renderStatistics().framegenReady && !runtimeErr.empty()) {
                             ImGui::TextDisabled("Reason: %s", runtimeErr.c_str());
                         }
                     }

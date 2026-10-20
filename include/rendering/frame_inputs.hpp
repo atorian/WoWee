@@ -77,6 +77,7 @@ struct FrameInputs {
     bool sharpStars = true;
     bool minimapEnabled = false;
     uint32_t windowWidth = 0, windowHeight = 0;
+    uint32_t drawableWidth = 0, drawableHeight = 0;
     int rtMode = 0;
     float rtDistance = kDefaultRtDistance;
     int fogQuality = 0;

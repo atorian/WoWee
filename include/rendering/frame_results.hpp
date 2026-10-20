@@ -41,6 +41,11 @@ struct RenderStatistics {
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;
     uint32_t width = 0, height = 0;
+    uint32_t waterDrawn = 0;
+    std::string sunDisc = "pending", moonDisc = "pending";
+    bool framegenActive = false, framegenReady = false;
+    std::string framegenPath, framegenError;
+    size_t framegenDispatches = 0, upscaleDispatches = 0, framegenFallbacks = 0;
 };
 
 /// Written by recording, consumed once at the next game-frame boundary.

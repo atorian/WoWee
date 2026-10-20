@@ -51,11 +51,13 @@ struct MapRenderSession::Impl {
 
 MapRenderSession::MapRenderSession(Renderer& renderer, core::JobGroup::Token token)
     : impl_(std::make_unique<Impl>(renderer)) {
+    renderer.drainFrames();
     renderer.setMapJobToken(std::move(token));
     attach();
 }
 
 MapRenderSession::~MapRenderSession() {
+    impl_->renderer.drainFrames();
     // Changes asked for this map's scene and not yet made are for a world
     // that is going; made after it, they would land in the next one.
     impl_->renderer.scene().discard();
