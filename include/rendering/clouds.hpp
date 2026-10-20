@@ -40,7 +40,7 @@ public:
      * @param perFrameSet Per-frame descriptor set (set 0, camera UBO)
      * @param params      Sky parameters with DBC colors and sun direction
      */
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params);
+    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params, float windOffset);
 
     /**
      * Update cloud animation (wind drift).

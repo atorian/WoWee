@@ -327,8 +327,8 @@ void QuestMarkerRenderer::clear() {
     markers_.clear();
 }
 
-void QuestMarkerRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (markers_.empty() || pipeline_ == VK_NULL_HANDLE || quadVB_ == VK_NULL_HANDLE) return;
+QuestMarkerRenderer::Frame QuestMarkerRenderer::extract(const Camera& camera, float timeSeconds) const {
+    Frame frame;
 
     // WoW-style quest marker tuning parameters
     constexpr float BASE_SIZE = 0.65f;          // Base world-space size
@@ -341,9 +341,6 @@ void QuestMarkerRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     constexpr float CULL_DIST = MAX_DIST + FADE_RANGE;
     constexpr float CULL_DIST_SQ = CULL_DIST * CULL_DIST;
 
-    // Get time for bob animation
-    float timeSeconds = SDL_GetTicks() / 1000.0f;
-
     glm::mat4 view = camera.getViewMatrix();
     glm::vec3 cameraPos = camera.getPosition();
 
@@ -355,17 +352,6 @@ void QuestMarkerRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     glm::vec3 cameraRight = glm::vec3(view[0][0], view[1][0], view[2][0]);
     glm::vec3 cameraUp = glm::vec3(view[0][1], view[1][1], view[2][1]);
     const glm::vec3 cameraForward = glm::cross(cameraRight, cameraUp);
-
-    // Bind pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-
-    // Bind per-frame descriptor set (set 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-        0, 1, &perFrameSet, 0, nullptr);
-
-    // Bind quad vertex buffer
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB_, &offset);
 
     for (const auto& [guid, marker] : markers_) {
         if (marker.type < 0 || marker.type > 2) continue;
@@ -416,22 +402,27 @@ void QuestMarkerRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         model[1] = glm::vec4(cameraUp * size, 0.0f);
         model[2] = glm::vec4(cameraForward, 0.0f);
 
-        // Bind material descriptor set (set 1) for this marker's texture
-        if (marker.type < 0 || marker.type >= 3 || !texDescSets_[marker.type]) continue;
+        frame.push_back({model, fadeAlpha, marker.grayscale, marker.type});
+    }
+    return frame;
+}
+
+void QuestMarkerRenderer::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
+    if (input.empty() || !pipeline_ || !quadVB_) return;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB_, &offset);
+    for (const auto& draw : input) {
+        if (!texDescSets_[draw.texture]) continue;
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-            1, 1, &texDescSets_[marker.type], 0, nullptr);
-
-        // Push constants: model matrix + alpha + grayscale tint
+                                1, 1, &texDescSets_[draw.texture], 0, nullptr);
         QuestMarkerPushConstants push{};
-        push.model = model;
-        push.alpha = fadeAlpha;
-        push.grayscale = marker.grayscale;
-
-        vkCmdPushConstants(cmd, pipelineLayout_,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(push), &push);
-
-        // Draw the quad (6 vertices, 2 triangles)
+        push.model = draw.model;
+        push.alpha = draw.alpha;
+        push.grayscale = draw.grayscale;
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
         vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 }

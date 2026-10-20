@@ -316,20 +316,27 @@ glm::vec4 OceanWaves::seaState() const {
     return {std::sqrt(sea_.heightVariance()), sea_.ride(), sea_.meanSquareSlope(), 0.0f};
 }
 
-void OceanWaves::record(VkCommandBuffer cmd) {
+OceanWaves::Frame OceanWaves::extract() {
+    extractedSeconds_ += pendingSeconds_;
+    Frame frame{sea_.toward(), sea_.speed(), sea_.slopeScale(), sea_.time(), sea_.ride(), extractedSeconds_};
+    pendingSeconds_ = 0;
+    return frame;
+}
+
+void OceanWaves::record(VkCommandBuffer cmd, const Frame& frame) {
     ZoneScopedN("OceanWaves::record");
     if (!passesReady_ || cmd == VK_NULL_HANDLE) return;
 
     OceanPushGPU push{};
-    push.toward = sea_.toward();
-    push.speed = sea_.speed();
-    push.slopeScale = sea_.slopeScale();
-    push.deltaTime = static_cast<float>(pendingSeconds_);
-    push.time = sea_.time();
-    push.ride = sea_.ride();
+    push.toward = frame.toward;
+    push.speed = frame.speed;
+    push.slopeScale = frame.slopeScale;
+    push.deltaTime = static_cast<float>(std::max(0.0, frame.elapsed - recordedSeconds_));
+    recordedSeconds_ = frame.elapsed;
+    push.time = frame.time;
+    push.ride = frame.ride;
     push.restart = restartPending_ ? 1 : 0;
     push.vertical = 0;
-    pendingSeconds_ = 0.0;
     restartPending_ = false;
 
     // The last frame's water read the surface this overwrites, and its

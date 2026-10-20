@@ -218,7 +218,6 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
             }
         }
     }
-    instance.bonesDirty[0] = instance.bonesDirty[1] = true;
 }
 
 // Firelight guttering for lamps, torches and braziers.

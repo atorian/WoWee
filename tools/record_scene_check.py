@@ -1,38 +1,53 @@
 #!/usr/bin/env python3
-"""Count reads of the scene from the renderers' recording.
+"""Count world recording paths that read mutable producer-side scene state.
 
-A pass is two steps: a cull, which reads the scene - the instances the game
-moves, animates and removes - and copies what the pass needs of each one it
-keeps into a list; and the recording, which turns that list into commands and
-reads nothing else. A renderer recording on its own thread, from a snapshot,
-can only ever read the list: the game thread is changing the scene meanwhile.
-So no recording function may reach the scene, and the count of places that do
-is held at zero.
-
-The recording functions are the M2, WMO and character renderers' `record*`
-members (M2Renderer::recordView, recordTransparentPass, recordShadowCasters,
-recordM2Particles, recordM2Ribbons; WMORenderer::recordView;
-CharacterRenderer::recordCharacters, recordShadowCasters). A reach is any use
-of `scene_`, the renderer's instance state.
-
-    tools/record_scene_check.py
-
-Prints "<N> reads of the scene while recording", the functions it found,
-then each read.
+Colour, depth, particles, water, grass, sky, weather and overlays must consume
+extracted draw data. GPU preparation may update frame slots and acceleration
+structures, but must not walk live instances, streaming lists or simulations.
+UI composites remain the separate 5г boundary. sweep_guard holds the count at
+zero; the list of checked definitions also makes missing coverage visible.
 """
 import pathlib
 import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FILES = (
-    "src/rendering/m2_renderer.cpp", "src/rendering/m2_renderer_render.cpp",
-    "src/rendering/m2_renderer_particles.cpp", "src/rendering/m2_renderer_instance.cpp",
-    "src/rendering/m2_renderer_posed_emitters.cpp", "src/rendering/wmo_renderer.cpp",
-    "src/rendering/character_renderer.cpp",
-)
-DEFINITION = re.compile(
-    r"^\w[\w:<>,\s\*&]*\b(M2Renderer|WMORenderer|CharacterRenderer)::(record\w*)\s*\(", re.M)
+FILES = tuple("src/rendering/" + name + ".cpp" for name in (
+    "m2_renderer", "m2_renderer_render", "m2_renderer_particles", "m2_renderer_instance",
+    "m2_renderer_posed_emitters", "wmo_renderer", "character_renderer", "terrain_renderer",
+    "terrain_bake", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
+    "starfield", "lens_flare", "precipitation", "ocean_waves", "water_wake", "mount_dust",
+    "swim_effects", "lightning", "charge_effect", "quest_marker_renderer", "footprint_renderer",
+    "overlay_system", "volumetric_fog", "rt_scene", "renderer"))
+DEFINITION = re.compile(r"^\w[\w:<>,\s\*&]*\b(\w+)::(\w+)\s*\(", re.M)
+LIVE = {
+    "M2Renderer": r"scene_|models|frameLights_|cachedCamPos_|skyTimeOfDayHours_",
+    "WMORenderer": r"scene_|loadedModels|frameLights_",
+    "CharacterRenderer": r"scene_|models|frameLights_|normalMappingEnabled_|normalMapStrength_",
+    "TerrainRenderer": r"chunks|chunkAt_|geometryPages_|shadowTiles_|bakeQueue_",
+    "TerrainBake": r"atlases_",
+    "WaterRenderer": r"drawn_|gameUBO_|inView_|renderingEnabled",
+    "GrassRenderer": r"population_|profiles_|cullDistance_",
+    "SkySystem": r"proceduralStarsEnabled_|debugSkyMode_",
+    "Clouds": r"windOffset_|density_|enabled_",
+    "StarField": r"twinkleTime|renderingEnabled",
+    "Skybox": r"renderingEnabled|timeOfDay",
+    "LensFlare": r"enabled|intensityMultiplier",
+    "Precipitation": r"frame_|layers_|water_|time_|tint_|drawnCount_",
+    "OceanWaves": r"sea_|cascades_|pendingSeconds_",
+    "WaterWake": r"cornerTexel_|pendingShift_|pendingSteps_|stillPending_|moverCount_|place_|shape_|head_",
+    "MountDust": r"particles",
+    "SwimEffects": r"rippleVertexData|bubbleVertexData|insectVertexData",
+    "Lightning": r"enabled|bolts|flash",
+    "ChargeEffect": r"trail_|dustPuffs_",
+    "QuestMarkerRenderer": r"markers_",
+    "FootprintRenderer": r"prints_",
+    "OverlaySystem": r"selCircleVisible_|selCirclePos_|selCircleRadius_|selCircleColor_|world",
+    "RtScene": r"sourceMeshes_|sourceInstances_|changes_|extractChanges",
+    "Renderer": r"collision_|liquidScene_",
+}
+EXTRA = {"prepareRender", "dispatchCullCompute", "dispatchCull", "cullShadowCasters"}
+PRODUCER_CALL = re.compile(r"->(?:extract\w*|gather\w*|syncRtScene|updateInView)\s*\(")
 SCENE = re.compile(r"\bscene_\b")
 LINE_COMMENT = re.compile(r"//.*$")
 
@@ -62,18 +77,28 @@ def main() -> int:
             return 1
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in DEFINITION.finditer(text):
-            qualified = f"{match.group(1)}::{match.group(2)}"
+            cls, method = match.groups()
+            if cls not in LIVE or not (method.startswith(("record", "render")) or method in EXTRA or
+                                       cls == "RtScene" and method in ("update", "applyChanges")):
+                continue
+            # UI composites are extracted in 5г; this guard covers world passes.
+            if cls == "Renderer" and method in ("renderUI", "renderMinimapOverlay"):
+                continue
+            qualified = f"{cls}::{method}"
+            live = re.compile(r"(?<![.\w])(?:" + LIVE[cls] + r")\b")
             functions.append(qualified)
             offset, body = body_of(text, match.end())
             first_line = text.count("\n", 0, offset) + 1
             for number, line in enumerate(body.splitlines(), first_line):
-                if SCENE.search(LINE_COMMENT.sub("", line)):
+                code = LINE_COMMENT.sub("", line)
+                if live.search(code) or cls == "Renderer" and (PRODUCER_CALL.search(code) or
+                        re.search(r"\b(?:extractFrameInputs|computeLightSpaceMatrix)\s*\(", code)):
                     found.append(f"{name}:{number}: {qualified}: {line.strip()}")
     print(f"{len(found)} reads of the scene while recording")
     print(f"{len(functions)} recording functions: {', '.join(functions)}")
     for entry in found:
         print(f"  {entry}")
-    return 0
+    return 1 if found else 0
 
 
 if __name__ == "__main__":

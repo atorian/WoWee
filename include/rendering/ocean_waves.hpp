@@ -61,7 +61,13 @@ public:
 
     /// Build this frame's surface. Outside any render pass, before the water
     /// is drawn.
-    void record(VkCommandBuffer cmd);
+    struct Frame {
+        glm::vec2 toward{1.0f, 0.0f};
+        float speed = 0, slopeScale = 0, time = 0, ride = 0;
+        double elapsed = 0;
+    };
+    Frame extract();
+    void record(VkCommandBuffer cmd, const Frame& frame);
 
     /// The surface, all its layers and mips, for a sampler2DArray, and the
     /// repeating, filtering sampler to read it with.
@@ -95,6 +101,7 @@ private:
     VkContext* ctx_ = nullptr;
     OceanSea sea_;
     std::array<glm::vec4, kOceanCascadeCount> cascades_{};
+    double extractedSeconds_ = 0, recordedSeconds_ = 0;
     double pendingSeconds_ = 0.0;   // the sea's time the GPU has not stepped yet
     bool restartPending_ = true;    // the GPU's spectrum has not been set yet
 

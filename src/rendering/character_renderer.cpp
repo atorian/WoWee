@@ -30,7 +30,6 @@
 #include "rendering/animation/animation_ids.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/bone_slots.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -628,6 +627,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 }
 
 void CharacterRenderer::shutdown() {
+    recording_ = std::make_shared<Frame>();
     if (!vkCtx_) return;
 
     LOG_INFO("CharacterRenderer::shutdown instances=", scene_->instances.size(),
@@ -642,11 +642,6 @@ void CharacterRenderer::shutdown() {
     // Clean up GPU resources for models
     for (auto& pair : models) {
         destroyModelGPU(pair.second, /*defer=*/true);
-    }
-
-    // Clean up instance bone buffers
-    for (auto& pair : scene_->instances) {
-        destroyInstanceBones(pair.second, /*defer=*/true);
     }
 
     failedTextureRetryAt_.clear();
@@ -692,6 +687,15 @@ void CharacterRenderer::shutdown() {
         boneDescPool_ = VK_NULL_HANDLE;
     }
     retired.destroy(materialSetLayout_);
+    for (auto& slots : poseSlots_) {
+        for (auto& slot : slots) if (slot.buffer) {
+            AllocatedBuffer buffer{};
+            buffer.buffer = slot.buffer;
+            buffer.allocation = slot.allocation;
+            retired.buffer(buffer);
+        }
+        slots.clear();
+    }
     retired.destroy(boneSetLayout_);
 
     // Shadow resources
@@ -735,7 +739,6 @@ void CharacterRenderer::clear() {
 }
 
 void CharacterRenderer::clearInstances() {
-    for (auto& [id, instance] : scene_->instances) destroyInstanceBones(instance, true);
     *scene_ = InstanceState{};
 }
 
@@ -750,36 +753,15 @@ void CharacterRenderer::createFallbackTextures() {
                                      false, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 }
 
-void CharacterRenderer::destroyModelGPU(M2ModelGPU& gpuModel, bool defer) {
+void CharacterRenderer::destroyModelGPU(std::shared_ptr<M2ModelGPU> model, bool defer) {
     if (!vkCtx_) return;
-    VmaAllocator alloc = vkCtx_->getAllocator();
-
-    // Snapshot raw handles and null the model fields immediately
-    ::VkBuffer vb = gpuModel.vertexBuffer;
-    VmaAllocation vbAlloc = gpuModel.vertexAlloc;
-    ::VkBuffer ib = gpuModel.indexBuffer;
-    VmaAllocation ibAlloc = gpuModel.indexAlloc;
-    gpuModel.vertexBuffer = VK_NULL_HANDLE;
-    gpuModel.vertexAlloc = VK_NULL_HANDLE;
-    gpuModel.indexBuffer = VK_NULL_HANDLE;
-    gpuModel.indexAlloc = VK_NULL_HANDLE;
-
-    if (!defer) {
-        // Safe after vkDeviceWaitIdle (shutdown / clear paths)
-        if (vb) gpuDestroyBuffer(alloc, vb, vbAlloc);
-        if (ib) gpuDestroyBuffer(alloc, ib, ibAlloc);
-    } else if (vb || ib) {
-        // Streaming path: in-flight command buffers may still reference these
-        vkCtx_->deferAfterAllFrameFences([alloc, vb, vbAlloc, ib, ibAlloc]() {
-            if (vb) gpuDestroyBuffer(alloc, vb, vbAlloc);
-            if (ib) gpuDestroyBuffer(alloc, ib, ibAlloc);
-        });
-    }
-}
-
-void CharacterRenderer::destroyInstanceBones(CharacterInstance& inst, bool defer) {
-    if (!vkCtx_) return;
-    releaseInstanceBones(*vkCtx_, boneDescPool_, boneDescPoolGeneration_, inst, defer);
+    const VmaAllocator alloc = vkCtx_->getAllocator();
+    auto release = [model = std::move(model), alloc] {
+        if (model->vertexBuffer) gpuDestroyBuffer(alloc, model->vertexBuffer, model->vertexAlloc);
+        if (model->indexBuffer) gpuDestroyBuffer(alloc, model->indexBuffer, model->indexAlloc);
+    };
+    if (defer) vkCtx_->deferAfterAllFrameFences(std::move(release));
+    else release();
 }
 
 size_t CharacterRenderer::pendingNormalMapJobs() const {
@@ -810,7 +792,7 @@ void CharacterRenderer::requestNormalMaps() {
         auto model = models.find(instance.modelId);
         if (model == models.end()) continue;
         const float distance = glm::distance(instance.position, lastCameraPos_);
-        for (const TextureRef& texture : model->second.textureIds) consider(texture, distance);
+        for (const TextureRef& texture : model->second->textureIds) consider(texture, distance);
         for (const auto& [slot, texture] : instance.dress->textureSlotOverrides) consider(texture, distance);
         for (const auto& [group, texture] : instance.dress->groupTextureOverrides) consider(texture, distance);
     }
@@ -1725,7 +1707,11 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
         return;
     }
 
-    auto& gpuModel = it->second;
+    if (it->second.use_count() > 1) {
+        it->second = std::make_shared<M2ModelGPU>(*it->second);
+        for (auto& [id, inst] : scene_->instances) if (inst.modelId == modelId) inst.cachedModel = it->second.get();
+    }
+    auto& gpuModel = (*it->second);
     if (textureSlot >= gpuModel.textureIds.size()) {
         core::Logger::getInstance().warning("setModelTexture: slot ", textureSlot, " out of range (", gpuModel.textureIds.size(), " textures)");
         return;
@@ -1855,7 +1841,7 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         });
 
 
-    models[id] = std::move(gpuModel);
+    models[id] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
 
     core::Logger::getInstance().debug("Loaded M2 model ", id, " (", model.vertices.size(),
                        " verts, ", model.bones.size(), " bones, ", model.sequences.size(),
@@ -2017,7 +2003,7 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.scale = scale;
 
     // Initialize bone matrices to identity
-    auto& gpuRef = modelIt->second;
+    auto& gpuRef = (*modelIt->second);
     instance.boneMatrices.resize(std::max(static_cast<size_t>(1), gpuRef.data.bones.size()), glm::mat4(1.0f));
     instance.cachedModel = &gpuRef;
 
@@ -2035,7 +2021,7 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     }
 
     auto& instance = it->second;
-    auto& model = models[instance.modelId].data;
+    auto& model = models[instance.modelId]->data;
     instance.oneShotReturnAnim = loop ? 0 : oneShotReturnAnim;
 
     // Find animation sequence index by ID
@@ -2348,7 +2334,7 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
     auto it = scene_->instances.find(instanceId);
     if (it == scene_->instances.end()) return;
     auto& instance = it->second;
-    const auto& model = models[instance.modelId].data;
+    const auto& model = models[instance.modelId]->data;
     const auto& sequences = model.sequences;
     const uint32_t anims[2] = {leftArmAnim, rightArmAnim};
     for (int arm = 0; arm < 2; arm++) {
@@ -2384,7 +2370,6 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
 
     size_t numBones = model.bones.size();
     instance.boneMatrices.resize(numBones);
-    ++instance.bonesVersion;
 
     const auto& gsd = model.globalSequenceDurations;
 
@@ -2531,15 +2516,17 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 // --- Rendering ---
 
 void CharacterRenderer::prepareRender(uint32_t frameIndex) {
-    if (scene_->instances.empty() || !scenePipes_.opaque) return;
+    if (!scenePipes_.opaque) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
-    // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
-    for (auto& [id, instance] : scene_->instances) {
-        int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
-        if (numBones <= 0) continue;
-
-        if (!instance.boneBuffer[frameIndex]) {
+    auto& slots = poseSlots_[frameIndex];
+    if (slots.size() < recording_->poses.size()) slots.resize(recording_->poses.size());
+    for (size_t index = 0; index < recording_->poses.size(); ++index) {
+        const auto& pose = recording_->poses[index];
+        auto& slot = slots[index];
+        const uint32_t id = static_cast<uint32_t>(index);
+        if (slot.failed) continue;
+        if (!slot.buffer) {
             VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bci.size = MAX_BONES * sizeof(glm::mat4);
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -2548,18 +2535,21 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
             if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                            &instance.boneBuffer[frameIndex], &instance.boneAlloc[frameIndex], &allocInfo) != VK_SUCCESS) {
-                instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
-                instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
-                instance.boneMapped[frameIndex] = nullptr;
+                            &slot.buffer, &slot.allocation, &allocInfo) != VK_SUCCESS) {
+                slot.buffer = VK_NULL_HANDLE;
+                slot.allocation = VK_NULL_HANDLE;
+                slot.mapped = nullptr;
+                slot.failed = true;
+                LOG_ERROR("CharacterRenderer: pose buffer allocation failed (pose=", id,
+                          ", frame=", frameIndex, "); character is omitted");
                 continue;
             }
-            instance.boneMapped[frameIndex] = allocInfo.pMappedData;
+            slot.mapped = allocInfo.pMappedData;
 
             // Initialize all bone slots to identity so out-of-range indices
             // produce correct (neutral) transforms instead of GPU garbage
-            if (instance.boneMapped[frameIndex]) {
-                auto* dst = static_cast<glm::mat4*>(instance.boneMapped[frameIndex]);
+            if (slot.mapped) {
+                auto* dst = static_cast<glm::mat4*>(slot.mapped);
                 for (int j = 0; j < MAX_BONES; j++) dst[j] = glm::mat4(1.0f);
             }
 
@@ -2567,64 +2557,75 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             ai.descriptorPool = boneDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &boneSetLayout_;
-            VkResult dsRes = vkCtx_->allocateDescriptorSets(ai, &instance.boneSet[frameIndex]);
+            VkResult dsRes = vkCtx_->allocateDescriptorSets(ai, &slot.set);
             if (dsRes != VK_SUCCESS) {
-                LOG_ERROR("CharacterRenderer::prepareRender: bone descriptor alloc failed (instance=",
+                slot.failed = true;
+                LOG_ERROR("CharacterRenderer::prepareRender: bone descriptor alloc failed; character is omitted (pose=",
                           id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
-                if (instance.boneBuffer[frameIndex]) {
+                if (slot.buffer) {
                     gpuDestroyBuffer(vkCtx_->getAllocator(),
-                                     instance.boneBuffer[frameIndex], instance.boneAlloc[frameIndex]);
-                    instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
-                    instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
-                    instance.boneMapped[frameIndex] = nullptr;
+                                     slot.buffer, slot.allocation);
+                    slot.buffer = VK_NULL_HANDLE;
+                    slot.allocation = VK_NULL_HANDLE;
+                    slot.mapped = nullptr;
                 }
                 continue;
             }
 
-            if (instance.boneSet[frameIndex]) {
+            if (slot.set) {
                 VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = instance.boneBuffer[frameIndex];
+                bufInfo.buffer = slot.buffer;
                 bufInfo.offset = 0;
                 bufInfo.range = bci.size;
                 VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = instance.boneSet[frameIndex];
+                write.dstSet = slot.set;
                 write.dstBinding = 0;
                 write.descriptorCount = 1;
                 write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 write.pBufferInfo = &bufInfo;
                 vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
             }
-            instance.uploadedBonesVersion[frameIndex] = UINT32_MAX;
         }
 
-        // The pose into this slot's buffer, once. Every pass after this binds
-        // it: the view, the faded part after the water and the shadow maps
-        // used to copy it again each, two or three times a frame.
-        if (instance.boneMapped[frameIndex] &&
-            instance.uploadedBonesVersion[frameIndex] != instance.bonesVersion) {
-            memcpy(instance.boneMapped[frameIndex], instance.boneMatrices.data(),
-                   static_cast<size_t>(numBones) * sizeof(glm::mat4));
-            instance.uploadedBonesVersion[frameIndex] = instance.bonesVersion;
+        if (slot.mapped) {
+            auto* dst = static_cast<glm::mat4*>(slot.mapped);
+            std::memcpy(dst, pose.data(), pose.size() * sizeof(glm::mat4));
+            // A slot can draw a different skeleton next frame. Bones outside
+            // its pose must remain neutral, rather than keeping the last unit.
+            std::fill(dst + pose.size(), dst + MAX_BONES, glm::mat4(1.0f));
+            vmaFlushAllocation(vkCtx_->getAllocator(), slot.allocation, 0, VK_WHOLE_SIZE);
         }
     }
 }
 
-void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                               Part part) {
-    // Faded instances asked for on their own are drawn in fadedPass_ when
-    // there is one, and in the scene pass after the blended world when not.
-    const PipelineSet& pipes =
-        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
-    if (scene_->instances.empty() || !pipes.opaque) {
-        return;
+void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&, Part part) {
+    recordCharacters(cmd, perFrameSet, part, recording_->drawLists[static_cast<size_t>(part)]);
+}
+
+std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera,
+        const std::vector<LocalLight>& lights) {
+    auto frame = std::make_shared<Frame>();
+    frame->normalMapping = normalMappingEnabled_;
+    frame->normalStrength = normalMapStrength_;
+    frameLights_ = &lights;
+    for (const auto& [id, inst] : scene_->instances) {
+        if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->vertexBuffer) continue;
+        const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
+        frame->poseById.emplace(id, pose);
+        const size_t count = std::min(inst.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
+        frame->poses.emplace_back(inst.boneMatrices.begin(), inst.boneMatrices.begin() + count);
+        if (count == 0) frame->poses.back().emplace_back(1.0f);
+        frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst),
+            .model = models.at(inst.modelId), .dress = inst.dress, .pose = pose, .id = inst.id, .modelId = inst.modelId});
     }
-    std::vector<DrawCharacter>& list = drawLists_[static_cast<size_t>(part)];
-    cullCharacters(camera, part, list);
-    recordCharacters(cmd, perFrameSet, part, list);
+    cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
+    for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
+    frameLights_ = nullptr;
+    return frame;
 }
 
 void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
-                                       std::vector<DrawCharacter>& list) const {
+                                       std::vector<DrawCharacter>& list, const Frame& frame) const {
     list.clear();
     const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
     const float renderRadiusSq = renderRadius * renderRadius;
@@ -2636,7 +2637,6 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
     // Extract frustum planes for per-instance visibility testing
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
-    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
 
     for (const auto& pair : scene_->instances) {
         const auto& instance = pair.second;
@@ -2658,7 +2658,7 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
             float cullRadius = kDefaultCharacterCullRadius;
             auto mIt = models.find(instance.modelId);
             if (mIt != models.end()) {
-                float modelR = mIt->second.data.boundRadius;
+                float modelR = mIt->second->data.boundRadius;
                 if (modelR > 0.01f)
                     cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
             }
@@ -2684,19 +2684,14 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
         const bool fadedInstance = drawOpacity < 0.999f;
         if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
 
-        // Its bones were put in this slot's buffer by prepareRender, before
-        // recording; an instance with bones and no buffer is not drawn.
-        const bool hasBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES) > 0;
-        if (hasBones && (!instance.boneBuffer[frameIndex] || !instance.boneSet[frameIndex])) continue;
-
         // Set model matrix (use override for weapon instances)
         const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
                                                                       : getModelMatrix(instance);
         list.push_back(DrawCharacter{
             .modelMatrix = modelMatrix,
-            .model = &gpuModel,
+            .model = models.at(instance.modelId),
             .dress = instance.dress,
-            .boneSet = hasBones ? instance.boneSet[frameIndex] : VK_NULL_HANDLE,
+            .pose = frame.poseById.at(instance.id),
             .interiorLight = instance.interiorLight,
             // The lights nearest the unit's origin, as the client picks them
             // for any model.
@@ -2848,10 +2843,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                            0, sizeof(push), &push);
 
         // Bind bone descriptor set (set 2), filled by prepareRender.
-        if (instance.boneSet) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelineLayout_, 2, 1, &instance.boneSet, 0, nullptr);
-        }
+        const VkDescriptorSet boneSet = poseSlots_[frameIndex][instance.pose].set;
+        if (!boneSet) continue;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
 
         // Bind vertex and index buffers
         VkDeviceSize offset = 0;
@@ -3176,7 +3171,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // that inside is a dark wedge where the client draws nothing.
                 matData.twoSided = (materialFlags & 0x04) ? 1 : 0;
                 matData.specularIntensity = 0.5f;
-                matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
+                matData.enableNormalMap = (useAdvancedMaterials && recording_->normalMapping) ? 1 : 0;
                 // Character textures are layered/mirrored atlases, not coherent
                 // height fields. Parallax offsets cross face seams and reveal
                 // underlying armor through tabards, so keep POM out of the
@@ -3184,7 +3179,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
                 // scale and sample count stay zero: nothing reads them.
                 matData.enablePOM = 0;
                 matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
-                matData.normalMapStrength = normalMapStrength_;
+                matData.normalMapStrength = recording_->normalStrength;
                 matData.hairMaterial = hairMaterial ? 1 : 0;
 
                 // The base humanoid mesh samples a mirrored character atlas,
@@ -3413,7 +3408,7 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
 void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                                      const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (scene_->instances.empty() || models.empty()) return;
+    if (recording_->depth.empty()) return;
     if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
@@ -3426,44 +3421,12 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
     }
     if (resetDescriptors) shadowTexSetCache_.clear();
 
-    cullShadowCasters(shadowCenter, shadowRadius, shadowList_);
-    recordShadowCasters(cmd, lightSpaceMatrix, shadowList_);
-}
-
-void CharacterRenderer::cullShadowCasters(const glm::vec3& shadowCenter, float shadowRadius,
-                                          std::vector<DrawCharacter>& list) const {
-    list.clear();
-    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    const float shadowRadiusSq = shadowRadius * shadowRadius;
-    for (const auto& pair : scene_->instances) {
-        const auto& inst = pair.second;
-        if (!isShown(inst)) continue;
-        if (!inst.cachedModel) continue;
-        const M2ModelGPU& gpuModel = *inst.cachedModel;
-        if (!gpuModel.vertexBuffer) continue;
-        // Only what has bones posed into this slot's buffer casts.
-        if (!inst.boneSet[frameIndex]) continue;
-
-        const glm::mat4 modelMat = inst.hasOverrideModelMatrix
-            ? inst.overrideModelMatrix
-            : getModelMatrix(inst);
-
-        // Distance cull against the shadow's reach, from where the model is
-        // drawn. A weapon's own position is never set - it hangs off its
-        // wielder's bone through its matrix - so it was culled from the
-        // world's origin and cast nothing anywhere else.
-        glm::vec3 diff = glm::vec3(modelMat[3]) - shadowCenter;
-        if (glm::dot(diff, diff) > shadowRadiusSq) continue;
-
-        list.push_back(DrawCharacter{
-            .modelMatrix = modelMat,
-            .model = &gpuModel,
-            .dress = inst.dress,
-            .boneSet = inst.boneSet[frameIndex],
-            .id = inst.id,
-            .modelId = inst.modelId,
-        });
+    std::vector<DrawCharacter> list;
+    for (const auto& draw : recording_->depth) {
+        const glm::vec3 diff = glm::vec3(draw.modelMatrix[3]) - shadowCenter;
+        if (glm::dot(diff, diff) <= shadowRadius * shadowRadius) list.push_back(draw);
     }
+    recordShadowCasters(cmd, lightSpaceMatrix, list);
 }
 
 void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
@@ -3489,7 +3452,9 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
         // from a set the GPU no longer considered bound, which GPU-assisted
         // validation reports as indexing a descriptor array of length zero,
         // thousands of times a session.
-        VkDescriptorSet sets[2] = {shadowParams_.set, inst.boneSet};
+        const VkDescriptorSet boneSet = poseSlots_[frameIndex][inst.pose].set;
+        if (!boneSet) continue;
+        VkDescriptorSet sets[2] = {shadowParams_.set, boneSet};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 2, sets, 0, nullptr);
         currentTexSet = shadowParams_.set;
@@ -3604,8 +3569,8 @@ void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<Loca
     for (const auto& [id, inst] : scene_->instances) {
         if (!isShown(inst)) continue;
         const auto mit = models.find(inst.modelId);
-        if (mit == models.end() || mit->second.data.lights.empty()) continue;
-        const pipeline::M2Model& model = mit->second.data;
+        if (mit == models.end() || mit->second->data.lights.empty()) continue;
+        const pipeline::M2Model& model = mit->second->data;
         const glm::mat4 modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                                   : getModelMatrix(inst);
         const glm::vec3 origin(modelMatrix[3]);
@@ -3750,13 +3715,13 @@ void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawR
 const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const {
     auto it = models.find(modelId);
     if (it == models.end()) return nullptr;
-    return &it->second.data;
+    return &it->second->data;
 }
 
 std::optional<CharacterRenderer::ModelShape> CharacterRenderer::getModelShape(uint32_t modelId) const {
     auto it = models.find(modelId);
     if (it == models.end()) return std::nullopt;
-    const M2ModelGPU& m = it->second;
+    const M2ModelGPU& m = (*it->second);
     return ModelShape{.vertexCount = m.vertexCount,
                       .boundMin = m.visualBoundMin,
                       .boundMax = m.visualBoundMax};
@@ -3945,7 +3910,6 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
 
     // Defer bone buffer destruction - in-flight command buffers may still
     // reference these descriptor sets.
-    destroyInstanceBones(it->second, /*defer=*/true);
 
     scene_->instances.erase(it);
 }
@@ -3963,7 +3927,7 @@ bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animati
         return false;
     }
 
-    const auto& sequences = modelIt->second.data.sequences;
+    const auto& sequences = modelIt->second->data.sequences;
     if (instance.currentSequenceIndex < 0 || instance.currentSequenceIndex >= static_cast<int>(sequences.size())) {
         return false;
     }
@@ -3986,7 +3950,7 @@ const std::vector<uint32_t>* CharacterRenderer::getFootstepEventTimes(uint32_t i
         return nullptr;
     }
 
-    const auto& eventTimes = modelIt->second.data.footstepEventTimes;
+    const auto& eventTimes = modelIt->second->data.footstepEventTimes;
     if (instance.currentSequenceIndex < 0 ||
         instance.currentSequenceIndex >= static_cast<int>(eventTimes.size()) ||
         eventTimes[instance.currentSequenceIndex].empty()) {
@@ -4009,7 +3973,7 @@ bool CharacterRenderer::modelHasAnimation(uint32_t modelId, uint32_t animationId
         return false;
     }
 
-    const auto& sequences = modelIt->second.data.sequences;
+    const auto& sequences = modelIt->second->data.sequences;
     for (const auto& seq : sequences) {
         if (seq.id == animationId) {
             return true;
@@ -4030,7 +3994,7 @@ bool CharacterRenderer::getAnimationSequences(uint32_t instanceId, std::vector<p
         return false;
     }
 
-    out = modelIt->second.data.sequences;
+    out = modelIt->second->data.sequences;
     return !out.empty();
 }
 
@@ -4043,7 +4007,7 @@ bool CharacterRenderer::getInstanceModelName(uint32_t instanceId, std::string& m
     if (modelIt == models.end()) {
         return false;
     }
-    modelName = modelIt->second.data.name;
+    modelName = modelIt->second->data.name;
     return !modelName.empty();
 }
 
@@ -4051,7 +4015,7 @@ bool CharacterRenderer::findAttachmentBone(uint32_t modelId, uint32_t attachment
                                           uint16_t& outBoneIndex, glm::vec3& outOffset) const {
     auto modelIt = models.find(modelId);
     if (modelIt == models.end()) return false;
-    const auto& model = modelIt->second.data;
+    const auto& model = modelIt->second->data;
 
     outBoneIndex = 0;
     outOffset = glm::vec3(0.0f);
@@ -4151,7 +4115,7 @@ bool CharacterRenderer::prepareWeaponModel(const pipeline::M2Model& weaponModel,
             bool appliedReplaceableSlot = false;
             auto modelIt = models.find(weaponModelId);
             if (modelIt != models.end()) {
-                const auto& textures = modelIt->second.data.textures;
+                const auto& textures = modelIt->second->data.textures;
                 for (uint32_t slot = 0; slot < textures.size(); ++slot) {
                     const uint32_t type = textures[slot].type;
                     if (type == 2 || type == 3 || type == 4) {
@@ -4226,11 +4190,11 @@ bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCen
     if (mIt == models.end()) return false;
 
     const auto& inst = it->second;
-    const auto& model = mIt->second.data;
+    const auto& model = mIt->second->data;
 
-    glm::vec3 boundsMin = mIt->second.visualBoundMin;
-    glm::vec3 boundsMax = mIt->second.visualBoundMax;
-    float radius = mIt->second.visualBoundRadius;
+    glm::vec3 boundsMin = mIt->second->visualBoundMin;
+    glm::vec3 boundsMax = mIt->second->visualBoundMax;
+    float radius = mIt->second->visualBoundRadius;
     if (radius <= 0.001f) {
         boundsMin = model.boundMin;
         boundsMax = model.boundMax;
@@ -4258,7 +4222,7 @@ bool CharacterRenderer::getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t ke
     auto mIt = models.find(it->second.modelId);
     if (mIt == models.end()) return false;
 
-    for (const auto& bone : mIt->second.data.bones) {
+    for (const auto& bone : mIt->second->data.bones) {
         if (bone.keyBoneId != keyBoneId) continue;
         outZ = bone.pivot.z * std::max(0.001f, it->second.scale);
         return true;
@@ -4275,8 +4239,8 @@ bool CharacterRenderer::getInstanceHeight(uint32_t instanceId, float& outHeight)
     // The tight bind-pose bounds, which is where the top of the head is. The
     // M2 header's own box describes collision on a good many models and can
     // come out shorter than the thing it encloses, so it is the fallback.
-    float top = mIt->second.visualBoundMax.z;
-    if (top <= 0.001f) top = mIt->second.data.boundMax.z;
+    float top = mIt->second->visualBoundMax.z;
+    if (top <= 0.001f) top = mIt->second->data.boundMax.z;
     if (top <= 0.001f) return false;
 
     outHeight = top * std::max(0.001f, it->second.scale);
@@ -4290,7 +4254,7 @@ bool CharacterRenderer::getInstanceFootZ(uint32_t instanceId, float& outFootZ) c
     if (mIt == models.end()) return false;
 
     const auto& inst = it->second;
-    const auto& model = mIt->second.data;
+    const auto& model = mIt->second->data;
     float scale = std::max(0.001f, inst.scale);
     outFootZ = inst.position.z + model.boundMin.z * scale;
     return true;
@@ -4381,7 +4345,7 @@ bool CharacterRenderer::moveWeapon(uint32_t charInstanceId, uint32_t fromAttachm
 CharacterRenderer::ModelMemory CharacterRenderer::modelMemory() const {
     ModelMemory out;
     for (const auto& [id, gpu] : models) {
-        const auto& d = gpu.data;
+        const auto& d = gpu->data;
         out.totalBytes += sizeof(M2ModelGPU) + pipeline::heapBytes(d);
         out.geometryBytes += pipeline::vectorBytes(d.vertices) + pipeline::vectorBytes(d.indices);
         for (const auto& bone : d.bones) out.boneTrackBytes += pipeline::heapBytes(bone);
@@ -4515,7 +4479,7 @@ void CharacterRenderer::dumpAnimations(uint32_t instanceId) const {
         core::Logger::getInstance().info("dumpAnimations: model not found for instance ", instanceId);
         return;
     }
-    const auto& model = modelIt->second.data;
+    const auto& model = modelIt->second->data;
 
     core::Logger::getInstance().info("=== Animation dump for ", model.name, " ===");
     core::Logger::getInstance().info("Total animations: ", model.sequences.size());

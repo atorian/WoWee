@@ -51,7 +51,9 @@ public:
 
 
     void update(float deltaTime, SceneCommands::Models& models);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    struct Frame { std::vector<float> ribbon, dust; };
+    Frame extract() const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
 
     [[nodiscard]] bool isActive() const { return emitting_ || !trail_.empty() || !dustPuffs_.empty(); }
 
@@ -76,7 +78,6 @@ private:
     VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
     PerFrameBuffer ribbonDynamicVB_;
-    std::vector<float> ribbonVerts_;  // pos(3) + alpha(1) + heat(1) + height(1) = 6 floats per vert
 
     // --- Dust puffs (small point sprites at feet) ---
     struct DustPuff {
@@ -95,7 +96,6 @@ private:
     VkPipeline dustPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout dustPipelineLayout_ = VK_NULL_HANDLE;
     PerFrameBuffer dustDynamicVB_;
-    std::vector<float> dustVerts_;
 
     bool emitting_ = false;
     glm::vec3 lastEmitPos_{0.0f};

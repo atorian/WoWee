@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <span>
 
 #include <glm/glm.hpp>
 #include <vk_mem_alloc.h>
@@ -69,6 +70,21 @@ public:
         std::vector<uint32_t> indices;
         std::vector<float> surfaces;
     };
+    struct Change {
+        enum class Kind { AddMesh, RemoveMesh, AddInstance, MoveInstance, RemoveInstance };
+        Kind kind;
+        uint32_t id;
+        MeshId mesh = kInvalid;
+        glm::mat4 transform{1.0f};
+        std::shared_ptr<const MeshSource> source;
+        uint64_t serial = 0;
+    };
+    using Changes = std::vector<Change>;
+    /// Producer-side handoff. Subsequent edits belong to the next frame.
+    Changes extractChanges();
+    /// Consumer-side: apply a frame's ordered changes, even with RT disabled.
+    void applyChanges(std::span<const Change> changes);
+
     /// Returns kInvalid for a mesh with no usable triangle.
     MeshId addMesh(MeshSource source);
     void removeMesh(MeshId mesh);
@@ -105,6 +121,24 @@ public:
     [[nodiscard]] Stats stats() const;
 
 private:
+    struct Instance {
+        bool live = false;
+        MeshId mesh = kInvalid;
+        glm::mat4 objectToWorld{1.0f};
+    };
+
+    void applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source);
+    void applyRemoveMesh(MeshId id);
+    void applyAddInstance(InstanceId id, MeshId mesh, const glm::mat4& transform);
+    void applyMoveInstance(InstanceId id, const glm::mat4& transform);
+    void applyRemoveInstance(InstanceId id);
+    // Producer owns identity allocation; consumer owns GPU and acceleration data.
+    void post(Change change);
+    Changes changes_;
+    uint64_t nextChangeSerial_ = 1;
+    std::atomic<uint64_t> appliedChangeSerial_{0};
+    std::vector<bool> sourceMeshes_;
+    std::vector<Instance> sourceInstances_;
     struct Mesh {
         bool live = false;
         uint32_t triOffset = RtRangeAllocator::kFailed;
@@ -114,7 +148,7 @@ private:
         RtAabb bounds;
         bool uploaded = false;
         bool queued = false;
-        MeshSource source;
+        std::shared_ptr<const MeshSource> source;
         // Built from the source for one upload; cleared once copied.
         std::vector<RtTriangle> tris;
         std::vector<RtBvhNode> nodes;
@@ -123,11 +157,6 @@ private:
         VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
         VkDeviceAddress blasAddress = 0;
         bool hasTranslucent = false;
-    };
-    struct Instance {
-        bool live = false;
-        MeshId mesh = kInvalid;
-        glm::mat4 objectToWorld{1.0f};
     };
     /// What a trace shader reads per mesh (std430).
     struct MeshGPU {

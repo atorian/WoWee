@@ -810,47 +810,50 @@ void WaterRenderer::destroyAllDrawn() {
 // Rendering
 // ==============================================================
 
-void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                            const Camera& camera, float /*time*/, bool use1x, uint32_t frameIndex) {
-    VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
-    if (!renderingEnabled || drawn_.empty() || !pipeline) {
-        if (renderDiagCounter_++ % 300 == 0 && !drawn_.empty()) {
-            LOG_WARNING("Water: render skipped - enabled=", renderingEnabled,
-                        " surfaces=", drawn_.size(),
-                        " pipeline=", (pipeline ? "ok" : "null"),
-                        " use1x=", use1x);
-        }
-        return;
+WaterRenderer::DrawList WaterRenderer::extract(const Camera& camera) {
+    DrawList list;
+    list.water = gameUBO_;
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    if (renderingEnabled) for (const auto& s : drawn_) {
+        if (!s.vertexBuffer || !s.indexCount || !s.materialSet) continue;
+        const Bounds bounds = boundsOf(s);
+        if (!frustum.intersectsAABB(bounds.min, bounds.max)) continue;
+        const bool wmo = s.wmoId != 0, canal = wmo || s.liquidType == 5;
+        list.surfaces.push_back({s.vertexBuffer, s.indexBuffer, s.materialSet, static_cast<uint32_t>(s.indexCount),
+            wmo ? 0.0f : (s.basicType == 1 ? 0.35f : 0.08f),
+            canal ? 0.35f : (s.basicType == 1 ? 0.20f : 0.30f),
+            canal ? 1.00f : (s.basicType == 1 ? 1.20f : 1.40f), static_cast<float>(s.basicType),
+            std::max(glm::length(s.stepX), glm::length(s.stepY)), s.shelter == LiquidShelter::Open ? 1.0f : 0.0f});
     }
-    // None of it in view (updateInView): nothing to draw, and none of the
-    // sea's to work out for it.
-    if (!inView_) return;
-
-    // Into this frame's slot - safe now, the frame has waited for the GPU to
-    // finish with it: the sea as it stands, the sea bed as it was last drawn
-    // (this frame, if it was drawn in it), and the wake.
-    for (int c = 0; c < kOceanCascadeCount; ++c) frameUBO_.oceanCascades[c] = ocean_.cascades()[c];
-    frameUBO_.oceanSea = ocean_.seaState();
+    list.inView = !list.surfaces.empty();
+    if (list.inView) {
+        list.ocean = ocean_.extract();
+        list.wake = wake_.extract();
+    }
+    for (int c = 0; c < kOceanCascadeCount; ++c) list.water.oceanCascades[c] = ocean_.cascades()[c];
+    list.water.oceanSea = ocean_.seaState();
     const auto& kept = ocean_.sea().keptTable();
-    std::copy(kept.begin(), kept.end(), frameUBO_.oceanKept);
+    std::copy(kept.begin(), kept.end(), list.water.oceanKept);
+    return list;
+}
+
+void WaterRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                               const Camera& camera, const DrawList& list, bool use1x, uint32_t frameIndex) {
+    VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
+    if (!list.inView || !pipeline) return;
+    // Reflection and sea-bed data belong to recording; wake/sea inputs were
+    // copied before the next game frame can advance their simulation.
+    const glm::mat4 reflection = frameUBO_.reflViewProj;
+    frameUBO_ = list.water;
+    frameUBO_.reflViewProj = reflection;
     const OverheadFrame& bed = seaBed_->frame();
     frameUBO_.seaBedMatrix = bed.viewProjection();
     frameUBO_.seaBed = glm::vec4(bed.ceiling, bed.range, seaBed_->isDrawn() ? 1.0f : 0.0f, 0.0f);
-    frameUBO_.wakeArea = wake_.area();
+    frameUBO_.wakeArea = wake_.area(list.wake);
     uploadFrameUBO();
-    uint32_t fi = frameIndex % SCENE_HISTORY_FRAMES;
-    VkDescriptorSet activeSceneSet = sceneHistory[fi].sceneSet;
-    if (!activeSceneSet) {
-        if (renderDiagCounter_++ % 300 == 0) {
-            LOG_WARNING("Water: render skipped - sceneSet is null, surfaces=", drawn_.size());
-        }
-        return;
-    }
-
-    // Frustum culling setup
-    Frustum frustum;
-    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
-
+    const VkDescriptorSet activeSceneSet = sceneHistory[frameIndex % SCENE_HISTORY_FRAMES].sceneSet;
+    if (!activeSceneSet) return;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
@@ -858,28 +861,13 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              2, 1, &activeSceneSet, 0, nullptr);
 
-    for (const auto& surface : drawn_) {
-        if (surface.vertexBuffer == VK_NULL_HANDLE || surface.indexCount == 0) continue;
-        if (!surface.materialSet) continue;
-
-        const Bounds bounds = boundsOf(surface);
-        if (!frustum.intersectsAABB(bounds.min, bounds.max)) continue;
-
-        bool isWmoWater = (surface.wmoId != 0);
-        bool canalProfile = isWmoWater || (surface.liquidType == 5);
-        const uint8_t basicType = surface.basicType;
-        // WMO water gets no wave displacement - prevents visible slosh at
-        // geometry edges (bridges, docks) where water is far below the surface.
-        float waveAmp = isWmoWater ? 0.0f : (basicType == 1 ? 0.35f : 0.08f);
-        float waveFreq = canalProfile ? 0.35f : (basicType == 1 ? 0.20f : 0.30f);
-        float waveSpeed = canalProfile ? 1.00f : (basicType == 1 ? 1.20f : 1.40f);
-
+    for (const auto& surface : list.surfaces) {
         WaterPushConstants push{};
         push.model = glm::mat4(1.0f);
-        push.waveAmp = waveAmp;
-        push.waveFreq = waveFreq;
-        push.waveSpeed = waveSpeed;
-        push.liquidBasicType = static_cast<float>(basicType);
+        push.waveAmp = surface.waveAmp;
+        push.waveFreq = surface.waveFreq;
+        push.waveSpeed = surface.waveSpeed;
+        push.liquidBasicType = surface.basicType;
         push.screenSize = glm::vec2(static_cast<float>(renderExtent_.width),
                                     static_cast<float>(renderExtent_.height));
         // Asked of the camera rather than written out in the shader, which is
@@ -887,11 +875,11 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // against a near plane of 0.05 while the camera's is 0.5.
         push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
         push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
-        push.meshStep = std::max(glm::length(surface.stepX), glm::length(surface.stepY));
+        push.meshStep = surface.meshStep;
         // A building's water outdoors takes the wind as the sea does; where
         // it meets its quays, piers and walls the sea bed's map has no depth
         // under it and its waves lie down there. Indoors it lies still.
-        push.exposed = surface.shelter == LiquidShelter::Open ? 1.0f : 0.0f;
+        push.exposed = surface.exposed;
 
         vkCmdPushConstants(cmd, pipelineLayout, pushStages_,
                             0, sizeof(WaterPushConstants), &push);
@@ -1304,13 +1292,7 @@ void WaterRenderer::createReflectionResources() {
     subpass.pColorAttachments = &colorRef;
     subpass.pDepthStencilAttachment = &depthRef;
 
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.srcAccessMask = 0;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    const auto dep = sceneAttachmentDependency();
 
     std::array<VkAttachmentDescription, 2> attachments = {colorAttach, depthAttach};
     VkRenderPassCreateInfo rpCI{};
@@ -1578,9 +1560,9 @@ void WaterRenderer::updateWake(float deltaTime, const glm::vec2& pos,
         // Must cover the point's own spread, or froth is clipped mid-patch.
         constexpr float kMaxPatchRadius = 1.45f;
         cullRadius = std::max(cullRadius, glm::length(p.pos - centre) + kMaxPatchRadius);
-        frameUBO_.wakePoints[i] = glm::vec4(p.pos.x, p.pos.y, age01, p.strength);
+        gameUBO_.wakePoints[i] = glm::vec4(p.pos.x, p.pos.y, age01, p.strength);
     }
-    frameUBO_.wakeBounds = glm::vec4(centre.x, centre.y, cullRadius, static_cast<float>(count));
+    gameUBO_.wakeBounds = glm::vec4(centre.x, centre.y, cullRadius, static_cast<float>(count));
     // Uploaded when the frame is recorded, not here: this runs before the frame
     // has waited for its slot, and the slot it would name is still being read
     // by the frame the GPU is drawing.

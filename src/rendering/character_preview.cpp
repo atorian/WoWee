@@ -1453,6 +1453,7 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     // same resource-preparation hook itself after server appearance data has
     // produced bone matrices. This preserves lazy data loading while keeping
     // GPU allocation outside CharacterRenderer::render().
+    charRenderer_->useFrame(charRenderer_->extract(*camera_, {}));
     charRenderer_->prepareRender(fi);
 
     // Render the character model

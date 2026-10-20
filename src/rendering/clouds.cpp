@@ -124,8 +124,8 @@ void Clouds::shutdown() {
 // Render
 // ---------------------------------------------------------------------------
 
-void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params) {
-    if (!enabled_ || pipeline_ == VK_NULL_HANDLE) {
+void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params, float windOffset) {
+    if (pipeline_ == VK_NULL_HANDLE) {
         return;
     }
 
@@ -142,8 +142,8 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     push.sunlitColor     = glm::vec4(params.cloudSunlitColor, 1.0f);
     push.fillColor       = glm::vec4(params.cloudFillColor, 1.0f);
     push.baseColor       = glm::vec4(params.cloudBaseColor, 1.0f);
-    push.lightDirDensity = glm::vec4(lightDir, density_);
-    push.windAndWeather  = glm::vec4(windOffset_, sky_celestial::stormWeight(params.weatherIntensity),
+    push.lightDirDensity = glm::vec4(lightDir, params.cloudDensity);
+    push.windAndWeather  = glm::vec4(windOffset, sky_celestial::stormWeight(params.weatherIntensity),
                                      0.0f, 0.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);

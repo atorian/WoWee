@@ -69,7 +69,9 @@ public:
     void update(const PrecipitationFrame& frame);
     /// `frameSlot` is the frame in flight, whose copy of the water grid it
     /// reads.
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t frameSlot);
+    struct Frame;
+    Frame extract() const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t frameSlot, const Frame& input);
 
     /// The Weather Detail setting: how much of the weather to draw, a quality
     /// knob and not a forecast - it thins every storm without making it a
@@ -143,6 +145,16 @@ private:
     bool splashes_ = true;
     uint32_t drawnCount_ = 0;
     bool firstDrawSaid_ = false;
+public:
+    struct Frame {
+        std::array<Layer, kLayers> layers;
+        WaterGrid water;
+        glm::vec3 camera{0}, tint{1};
+        VkExtent2D viewport{};
+        double time = 0;
+        uint32_t drawn = 0;
+    };
+
 };
 
 }  // namespace rendering

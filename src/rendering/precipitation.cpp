@@ -248,14 +248,18 @@ void Precipitation::lookAtWater(const PrecipitationFrame& frame) {
     }
 }
 
-void Precipitation::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t frameSlot) {
+Precipitation::Frame Precipitation::extract() const {
+    return {layers_, water_, frame_.camera, tint_, frame_.viewport, time_, drawnCount_};
+}
+
+void Precipitation::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uint32_t frameSlot, const Frame& input) {
     ZoneScopedN("Precipitation::render");
-    if (pipeline_ == VK_NULL_HANDLE || drawnCount_ == 0 || !shelter_ || frameSlot >= sets_.size()) return;
-    std::memcpy(waterBuffers_[frameSlot].info.pMappedData, &water_, sizeof(water_));
+    if (pipeline_ == VK_NULL_HANDLE || input.drawn == 0 || !shelter_ || frameSlot >= sets_.size()) return;
+    std::memcpy(waterBuffers_[frameSlot].info.pMappedData, &input.water, sizeof(input.water));
     if (!firstDrawSaid_) {
         firstDrawSaid_ = true;
-        LOG_INFO("Precipitation: first drawn, ", drawnCount_, " drops in a ", frame_.viewport.width, "x",
-                 frame_.viewport.height, " view");
+        LOG_INFO("Precipitation: first drawn, ", input.drawn, " drops in a ", input.viewport.width, "x",
+                 input.viewport.height, " view");
     }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     const VkDescriptorSet sets[2] = {perFrameSet, sets_[frameSlot]};
@@ -265,15 +269,15 @@ void Precipitation::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, uin
     PrecipitationPush push{};
     push.shelter = glm::vec4(map.centre, map.halfExtent, map.ceiling);
     push.shelterRange = glm::vec4(map.range, shelter_->isDrawn() ? 1.0f : 0.0f, 0.0f, 0.0f);
-    push.screen = glm::vec4(static_cast<float>(frame_.viewport.width), static_cast<float>(frame_.viewport.height),
+    push.screen = glm::vec4(static_cast<float>(input.viewport.width), static_cast<float>(input.viewport.height),
                             0.0f, 0.0f);
-    for (const Layer& layer : layers_) {
+    for (const Layer& layer : input.layers) {
         if (layer.count == 0) continue;
-        push.cameraBox = glm::vec4(frame_.camera, layer.boxWidth);
+        push.cameraBox = glm::vec4(input.camera, layer.boxWidth);
         push.driftHeight = glm::vec4(glm::vec3(layer.drift), layer.boxHeight);
         push.velocity = glm::vec4(layer.velocity, layer.streakSeconds);
-        push.shape = glm::vec4(static_cast<float>(layer.kind), layer.size, layer.alpha, static_cast<float>(time_));
-        push.tint = glm::vec4(tint_, static_cast<float>(layer.seed));
+        push.shape = glm::vec4(static_cast<float>(layer.kind), layer.size, layer.alpha, static_cast<float>(input.time));
+        push.tint = glm::vec4(input.tint, static_cast<float>(layer.seed));
         push.screen.z = layer.below;
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
         vkCmdDraw(cmd, layer.count * 6u, 1, 0, 0);

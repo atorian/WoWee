@@ -21,6 +21,8 @@ def main() -> int:
     parser.add_argument("--fsr2", action="store_true")
     parser.add_argument("--msaa", type=int, default=1)
     parser.add_argument("--weather", choices=("clear", "rain"), default="clear")
+    parser.add_argument("--scene-mutations", action="store_true")
+    parser.add_argument("--object", choices=("m2", "wmo", "character", "terrain", "water"), default="m2")
     args = parser.parse_args()
     binary = args.binary.resolve()
     scratch = args.scratch.resolve()
@@ -36,6 +38,20 @@ def main() -> int:
         "weather": args.weather, "weatherIntensity": 1 if args.weather == "rain" else 0,
         "wind": {"direction": 225, "speed": 4},
     }
+    if args.scene_mutations:
+        scene["discardFirstExtraction"] = True
+        scene["selection"] = True
+        if args.object == "wmo":
+            scene["models"] = [{"path": r"World\wmo\transports\transport_ship\transportship.wmo"}]
+        elif args.object == "character":
+            scene["models"] = []
+            scene["characters"] = [{"path": r"Creature\Wolf\Wolf.m2", "velocity": [0, 0.25, 0]}]
+            scene["camera"] = {"offset": [-7, -5, 3], "lookAt": [0, 0, 1]}
+        elif args.object in ("terrain", "water"):
+            scene["models"] = []
+            scene["groundPlane"] = {"size": 60, "height": -2}
+            scene["waterPlane"] = args.object == "water"
+            scene["camera"] = {"offset": [-25, -25, 18], "lookAt": [0, 0, 0]}
     env = os.environ.copy()
     env["WOWEE_CONFIG_ROOT"] = str(scratch / "config")
     env["WOWEE_RESOURCE_ROOT"] = str(binary.parent)
@@ -43,7 +59,8 @@ def main() -> int:
     env["WOWEE_LOG_LEVEL"] = "info"
     env.pop("WOWEE_RT_FORCE_SOFTWARE", None)
     for label, mutate in (("baseline", False), ("mutated", True), ("next-frame", True)):
-        scene["mutateAfterExtract"] = mutate
+        scene["mutateAfterExtract"] = mutate and not args.scene_mutations
+        scene["removeSceneAfterExtract"] = mutate and args.scene_mutations
         scene["mutateAtFrame"] = scene["frames"] - (2 if label == "next-frame" else 1)
         source = scratch / f"{label}.json"
         source.write_text(json.dumps(scene), encoding="utf-8")
@@ -74,7 +91,7 @@ def main() -> int:
     if (scratch / "baseline.png").read_bytes() == (scratch / "next-frame.png").read_bytes():
         print("FAIL: the next extracted frame ignored source changes; see", scratch)
         return 1
-    print("PASS: extracted camera, light, weather, settings and RT survive source mutation")
+    print("PASS: extracted", args.object if args.scene_mutations else "frame inputs", "survive source mutation; next extraction changes pixels")
     return 0
 
 

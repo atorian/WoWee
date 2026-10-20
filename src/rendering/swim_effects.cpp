@@ -631,8 +631,11 @@ void SwimEffects::update(const Camera& camera, const ViewerMotion& viewer,
     }
 }
 
-void SwimEffects::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (rippleVertexData.empty() && bubbleVertexData.empty() && insectVertexData.empty()) return;
+void SwimEffects::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
+    const auto& ripples = input.ripples;
+    const auto& bubbles = input.bubbles;
+    const auto& insects = input.insects;
+    if (ripples.empty() && bubbles.empty() && insects.empty()) return;
 
     // Each kind writes and binds this frame's copy of its buffer.
     const uint32_t frame = vkCtx->getCurrentFrame();
@@ -651,9 +654,9 @@ void SwimEffects::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     };
 
     // Ripples (splash droplets above the water surface), bubbles, insects.
-    draw(rippleVertexData, rippleDynamicVB, ripplePipeline, ripplePipelineLayout);
-    draw(bubbleVertexData, bubbleDynamicVB, bubblePipeline, bubblePipelineLayout);
-    draw(insectVertexData, insectDynamicVB, insectPipeline, insectPipelineLayout);
+    draw(ripples, rippleDynamicVB, ripplePipeline, ripplePipelineLayout);
+    draw(bubbles, bubbleDynamicVB, bubblePipeline, bubblePipelineLayout);
+    draw(insects, insectDynamicVB, insectPipeline, insectPipelineLayout);
 }
 
 } // namespace rendering

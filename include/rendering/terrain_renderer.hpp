@@ -41,6 +41,15 @@ class RtScene;
 /**
  * GPU-side terrain chunk data (Vulkan)
  */
+struct TerrainSurfacePush {
+    /// x: how steep the textures' relief is drawn, 0 for flat ground.
+    glm::vec4 relief{0.0f};
+    /// x: where the colour and relief come from (TerrainSurfaceSource);
+    /// y, z: the band the bake takes over across, in yards from the camera;
+    /// w: the chunk's cell in its tile's atlas, x + 16 y.
+    glm::vec4 baked{0.0f};
+};
+
 struct TerrainChunkGPU {
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -117,7 +126,7 @@ struct TerrainChunkGPU {
 
     /// Its cell of its tile's bake atlas holds it (TerrainBake): from now on
     /// it may be drawn far from the bake. Until then, from its layers.
-    bool baked = false;
+    std::shared_ptr<std::atomic<bool>> bakeComplete = std::make_shared<std::atomic<bool>>(false);
     /// The up-component of its steepest normal, 1 flat: how much nearer than
     /// flat ground its steepest slope reads its layers finely
     /// (terrainSurfaceSourceFor).
@@ -218,12 +227,48 @@ public:
      * @param perFrameSet Per-frame descriptor set (set 0)
      * @param camera Camera for frustum culling
      */
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    struct GeometryDraw {
+        VkBuffer vertices = VK_NULL_HANDLE, indices = VK_NULL_HANDLE;
+        uint32_t firstIndex = 0, count = 0;
+        int32_t baseVertex = 0;
+    };
+    struct ChunkDraw {
+        VkDescriptorSet material = VK_NULL_HANDLE;
+        GeometryDraw geometry;
+        std::array<TerrainChunkGPU::LodRange, 5> ranges{};
+        TerrainSurfacePush surface;
+        LocalLightSet lights = kNoLocalLights;
+    };
+    struct DepthDraw {
+        GeometryDraw geometry;
+        glm::vec3 centre{0.0f};
+        float radius = 0.0f;
+    };
+    struct BakeDraw {
+        GeometryDraw geometry;
+        VkDescriptorSet material = VK_NULL_HANDLE;
+        int tileX = 0, tileY = 0, chunkX = 0, chunkY = 0;
+        TerrainBake::Atlas* atlas = nullptr;
+        std::shared_ptr<std::atomic<bool>> complete;
+    };
+    struct DrawList {
+        std::vector<ChunkDraw> view;
+        std::vector<DepthDraw> depth;
+        std::vector<BakeDraw> bake;
+        std::vector<std::shared_ptr<TerrainBake::Atlas>> atlases;
+        bool wireframe = false;
+        int culled = 0, baked = 0, crossfade = 0;
+        float furthestSq = 0;
+    };
+    DrawList extract(const Camera& camera, const std::vector<LocalLight>& lights);
+    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list);
+    void recordDepth(VkCommandBuffer cmd, const glm::mat4& matrix, const glm::vec3& centre,
+                     float radius, const DrawList& list);
 
     /// Outside any rendering scope, before the frame's terrain is drawn: the
     /// atlases made since the last frame readied, and the chunks waiting for
     /// their bake drawn into them, a budget a frame (TerrainBake).
-    void recordBake(VkCommandBuffer cmd);
+    void recordBake(VkCommandBuffer cmd, const DrawList& list);
     /// Chunks the last render() drew from their bake alone, and across the
     /// band from both it and their layers.
     [[nodiscard]] int getBakedDrawnChunkCount() const { return bakedDrawnChunks_; }
@@ -236,16 +281,6 @@ public:
      * @param shadowRenderPass  Depth-only render pass used for the shadow map.
      */
     bool initializeShadow(VkRenderPass shadowRenderPass);
-
-    /**
-     * Render terrain into the shadow depth map.
-     * @param cmd               Command buffer (inside shadow render pass).
-     * @param lightSpaceMatrix  Orthographic light-space transform.
-     * @param shadowCenter      World-space centre of shadow coverage.
-     * @param shadowRadius      Cull radius around shadowCenter.
-     */
-    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter, float shadowRadius);
 
     [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
@@ -262,7 +297,7 @@ public:
 
     void setWireframe(bool enabled) { wireframe = enabled; }
     /// The frame's point lights, which every chunk picks its nearest from.
-    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
+
     void setFrustumCulling(bool enabled) { frustumCullingEnabled = enabled; }
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
     [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
@@ -292,7 +327,9 @@ public:
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
 
 private:
-    const std::vector<LocalLight>* frameLights_ = nullptr;
+
+    GeometryDraw geometryOf(const TerrainChunkGPU& chunk) const;
+    static void bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw);
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
     /// The tileset texture from the shared cache, loading it if it is not
     /// there; white when it cannot be had.
@@ -414,9 +451,9 @@ private:
     /// The sphere round all of a tile's chunks.
     void boundTile(ShadowTile& tile) const;
     /// This frame's level for each chunk in `chunks`, -1 where it is not drawn.
-    std::vector<int8_t> frameLevels_;
+
     /// The visible chunks of this frame, in `chunks` order, with their levels.
-    std::vector<uint32_t> frameDrawn_;
+
     uint32_t lodViewportHeight_ = 0;
     uint64_t renderedTriangles_ = 0;
     int renderedChunks = 0;
@@ -447,7 +484,7 @@ private:
     void releaseEmptyGeometryPages();
     void destroyGeometryPages();
     /// Binds the page's buffers.
-    static void bindGeometryPage(VkCommandBuffer cmd, const TerrainGeometryPage& page);
+
 };
 
 } // namespace rendering

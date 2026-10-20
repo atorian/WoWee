@@ -99,14 +99,27 @@ void SkySystem::update(float deltaTime) {
     if (clouds_)    clouds_->update(deltaTime);
 }
 
-void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                        const Camera& camera, const SkyParams& params) {
+SkySystem::Frame SkySystem::extract() const {
+    Frame frame;
+    frame.sky = skybox_ && skybox_->isEnabled();
+    frame.clouds = clouds_ && clouds_->isEnabled();
+    frame.proceduralStars = proceduralStarsEnabled_;
+    frame.debugSky = debugSkyMode_;
+    frame.flare = lensFlare_ && lensFlare_->isEnabled();
+    if (clouds_) frame.cloudOffset = clouds_->getWindOffset();
+    if (starField_) frame.twinkleTime = starField_->animationTime();
+    if (lensFlare_) frame.flareIntensity = lensFlare_->getIntensity();
+    return frame;
+}
+
+void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                        const Camera& camera, const SkyParams& params, const Frame& frame) {
     if (!initialized_) {
         return;
     }
 
     // --- Skybox (authoritative sky gradient, DBC-driven colors) ---
-    if (skybox_) {
+    if (skybox_ && frame.sky) {
         skybox_->render(cmd, perFrameSet, params);
     }
 
@@ -119,9 +132,9 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // are drawn in that layer's place. So the original-skybox path continues
     // here rather than returning, and skyboxHasStars stops meaning "do not".
     bool renderProceduralStars = false;
-    if (debugSkyMode_) {
+    if (frame.debugSky) {
         renderProceduralStars = true;
-    } else if (proceduralStarsEnabled_) {
+    } else if (frame.proceduralStars) {
         renderProceduralStars = true;
     } else if (!params.useOriginalSkybox) {
         renderProceduralStars = !params.skyboxHasStars;
@@ -129,16 +142,14 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     celestialSkipped_ = params.useOriginalSkybox && !renderProceduralStars;
     if (celestialSkipped_) {
-        if (starField_) starField_->setEnabled(false);
         return;
     }
 
     if (starField_) {
-        starField_->setEnabled(renderProceduralStars);
         if (renderProceduralStars) {
             const float cloudDensity = params.cloudDensity;
             const float fogDensity   = params.fogDensity;
-            starField_->render(cmd, perFrameSet, params.timeOfDay, cloudDensity, fogDensity);
+            starField_->render(cmd, perFrameSet, params.timeOfDay, cloudDensity, fogDensity, frame.twinkleTime);
         }
     }
 
@@ -154,18 +165,17 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
-    if (clouds_) {
+    if (clouds_ && frame.clouds) {
         // The cover LightParams gives, already blended toward the storm row by
         // the weather as the client blends it. A fixed 0.4 per unit of weather
         // was added on top, a second storm over the first.
-        clouds_->setDensity(params.cloudDensity);
-        clouds_->render(cmd, perFrameSet, params);
+        clouds_->render(cmd, perFrameSet, params, frame.cloudOffset);
     }
 
     // --- Lens flare: around the disc, as much of it as the glare shows ---
-    if (lensFlare_) {
+    if (lensFlare_ && frame.flare) {
         lensFlare_->render(cmd, camera, params.sunDisc.direction * 800.0f, params.sunColor,
-                           params.sunGlareVisibility);
+                           params.sunGlareVisibility, frame.flareIntensity);
     }
 }
 

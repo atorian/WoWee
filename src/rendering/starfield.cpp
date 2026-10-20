@@ -141,8 +141,8 @@ void StarField::shutdown() {
 }
 
 void StarField::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                       float timeOfDay, float cloudDensity, float fogDensity) {
-    if (!renderingEnabled || pipeline == VK_NULL_HANDLE || vertexBuffer == VK_NULL_HANDLE
+                       float timeOfDay, float cloudDensity, float fogDensity, float animationTime) {
+    if (pipeline == VK_NULL_HANDLE || vertexBuffer == VK_NULL_HANDLE
         || stars.empty()) {
         return;
     }
@@ -164,7 +164,7 @@ void StarField::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     };
     // The vertex shader sizes each point by angle rather than by a pixel count,
     // so it needs the height it is drawing into.
-    StarPushConstants push{.time = twinkleTime, .intensity = intensity,
+    StarPushConstants push{.time = animationTime, .intensity = intensity,
         .viewportHeight = static_cast<float>(vkCtx->getSwapchainExtent().height)};
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

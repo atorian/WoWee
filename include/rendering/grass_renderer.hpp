@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -49,16 +50,23 @@ public:
     ///
     /// `rangeCenter` is the point the draw distance is measured from - the
     /// player, matching the generation window. Never the camera: it orbits.
+    struct Frame {
+        std::shared_ptr<const std::vector<GrassBladeGPU>> blades;
+        std::shared_ptr<const std::vector<GrassProfileGPU>> profiles;
+        float distance = kCullDistance;
+    };
+    Frame extract() const { return {population_, profiles_, cullDistance_}; }
     void dispatchCull(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera,
-                      const glm::vec3& rangeCenter);
+                      const glm::vec3& rangeCenter, const Frame& input);
 
     /// Record the indirect draw. Must run inside the render pass.
-    void render(VkCommandBuffer cmd, uint32_t frameIndex, VkDescriptorSet perFrameSet);
+    void record(VkCommandBuffer cmd, uint32_t frameIndex, VkDescriptorSet perFrameSet, const Frame& input);
 
     /// Replace the live population. Blades carry world positions, so this is
     /// the whole of what the renderer knows about where grass is.
     ///
-    /// Stages into a buffer allocated once at its full capacity: the set of
+    /// Copies CPU inputs; dispatchCull uploads the extracted population into a
+    /// buffer allocated once at its full capacity. The set of
     /// blades changes every time the player leaves the generated window, and
     /// reallocating a device-local buffer on that cadence would mean either
     /// stalling the queue or deferring destruction on every rebuild.
@@ -115,6 +123,10 @@ private:
     VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;
     uint32_t bladeCount_ = 0;
     float cullDistance_ = kCullDistance;
+    std::shared_ptr<const std::vector<GrassBladeGPU>> population_;
+    std::shared_ptr<const std::vector<GrassProfileGPU>> profiles_;
+    std::shared_ptr<const std::vector<GrassBladeGPU>> uploadedPopulation_;
+    std::shared_ptr<const std::vector<GrassProfileGPU>> uploadedProfiles_;
     bool cullReported_ = false;
     uint32_t framesSincePopulated_ = 0;
     bool drawReported_ = false;

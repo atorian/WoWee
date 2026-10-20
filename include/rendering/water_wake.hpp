@@ -71,13 +71,21 @@ public:
     /// unseen leaves no wake.
     void rest(double deltaSeconds);
     /// Its steps for this frame. Outside any render pass, before the water.
-    void record(VkCommandBuffer cmd);
+    struct Frame {
+        std::array<glm::vec4, kMaxMovers> place{}, shape{}, head{};
+        glm::ivec2 corner{0};
+        int movers = 0;
+        uint64_t steps = 0, stillVersion = 0;
+        bool placed = false;
+    };
+    Frame extract();
+    void record(VkCommandBuffer cmd, const Frame& input);
 
     [[nodiscard]] VkImageView surfaceView() const { return surface_.imageView; }
     [[nodiscard]] VkSampler surfaceSampler() const { return sampler_; }
     /// For the water's shaders: xy = the world position of the field's corner,
     /// z = 1 / its side in yards, w = 1 once it has run.
-    [[nodiscard]] glm::vec4 area() const;
+    [[nodiscard]] glm::vec4 area(const Frame& input) const;
 
 private:
     bool createPasses();
@@ -106,9 +114,12 @@ private:
     // since the last record, how many steps, and the bodies' places.
     glm::ivec2 cornerTexel_{0};
     bool placed_ = false;
-    glm::ivec2 pendingShift_{0};
     double pendingSeconds_ = 0.0;
     int pendingSteps_ = 0;
+    uint64_t extractedSteps_ = 0, recordedSteps_ = 0;
+    uint64_t extractedStillVersion_ = 0, recordedStillVersion_ = 0;
+    glm::ivec2 recordedCorner_{0};
+    bool recordedPlacement_ = false;
     bool ran_ = false;
     /// How long the water has been out of view, and whether the next record
     /// lays the field still first.

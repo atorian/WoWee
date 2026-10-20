@@ -402,6 +402,40 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
     return gpuBuffer;
 }
 
+bool recordBufferUpload(VkContext& ctx, VkCommandBuffer cmd, ::VkBuffer target,
+                        const void* data, VkDeviceSize size) {
+    if (!cmd || !target || size == 0) return false;
+    auto staging = createBuffer(ctx.getAllocator(), size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                 VMA_MEMORY_USAGE_CPU_TO_GPU);
+    if (!staging.buffer || !staging.info.pMappedData) {
+        destroyBuffer(ctx.getAllocator(), staging);
+        return false;
+    }
+    std::memcpy(staging.info.pMappedData, data, static_cast<size_t>(size));
+    vmaFlushAllocation(ctx.getAllocator(), staging.allocation, 0, size);
+    VkBufferMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = target;
+    barrier.size = size;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &barrier;
+    cmdPipelineBarrier2(cmd, dep);
+    const VkBufferCopy copy{0, 0, size};
+    vkCmdCopyBuffer(cmd, staging.buffer, target, 1, &copy);
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+    cmdPipelineBarrier2(cmd, dep);
+    ctx.deferAfterAllFrameFences([alloc = ctx.getAllocator(), staging]() mutable { destroyBuffer(alloc, staging); });
+    return true;
+}
+
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
                       VkBuffer target, VkDeviceSize targetOffset) {
     if (target == VK_NULL_HANDLE || size == 0) return false;

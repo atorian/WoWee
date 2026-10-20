@@ -84,7 +84,22 @@ public:
         return index < water1xFramebuffers.size() ? water1xFramebuffers[index] : VK_NULL_HANDLE;
     }
 
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera, float time, bool use1x = false, uint32_t frameIndex = 0);
+    struct SurfaceDraw {
+        ::VkBuffer vertexBuffer = VK_NULL_HANDLE, indexBuffer = VK_NULL_HANDLE;
+        VkDescriptorSet materialSet = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+        float waveAmp = 0, waveFreq = 0, waveSpeed = 0, basicType = 0, meshStep = 0, exposed = 0;
+    };
+    struct DrawList {
+        std::vector<SurfaceDraw> surfaces;
+        WaterFrameUBOData water{};
+        OceanWaves::Frame ocean;
+        WaterWake::Frame wake;
+        bool inView = false;
+    };
+    DrawList extract(const Camera& camera);
+    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                    const DrawList& list, bool use1x = false, uint32_t frameIndex = 0);
     void captureSceneHistory(VkCommandBuffer cmd,
                              VkImage srcColorImage,
                              VkImage srcDepthImage,
@@ -147,9 +162,9 @@ public:
     /// Build this frame's sea surface (OceanWaves::record) and step the
     /// wake (WaterWake::record): outside any render pass, before the water
     /// is drawn.
-    void recordWaves(VkCommandBuffer cmd) {
-        ocean_.record(cmd);
-        wake_.record(cmd);
+    void recordWaves(VkCommandBuffer cmd, const DrawList& list) {
+        ocean_.record(cmd, list.ocean);
+        wake_.record(cmd, list.wake);
     }
 
     /// Surfaces with geometry on the GPU.
@@ -261,7 +276,6 @@ private:
     PerFrameSceneHistory sceneHistory[SCENE_HISTORY_FRAMES];
     VkExtent2D sceneHistoryExtent = {.width = 0, .height = 0};
     bool sceneHistoryReady = false;
-    mutable uint32_t renderDiagCounter_ = 0;
 
     // Planar reflection resources
     static constexpr uint32_t REFLECTION_WIDTH = 512;
@@ -288,6 +302,7 @@ private:
         float strength = 0.0f;
     };
     std::vector<WakePoint> wakePoints_;
+    WaterFrameUBOData gameUBO_{};
     WaterFrameUBOData frameUBO_{};
     glm::vec2 lastWakeEmitPos_{0.0f};
     bool hasWakeEmitPos_ = false;

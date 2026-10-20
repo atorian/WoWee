@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/overlay_system.hpp"
+
 #include "rendering/camera.hpp"
 #include "rendering/frame_settings.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -10,6 +12,7 @@
 #include "rendering/world_environment.hpp"
 
 #include <optional>
+#include <memory>
 #include <vector>
 
 namespace wowee::rendering {
@@ -17,8 +20,14 @@ namespace wowee::rendering {
 /// Values extracted at the end of Present. Owns its camera, sampled light,
 /// weather and local lights; no references into the next game's frame.
 /// Geometry draw lists and interface draw data are extracted in later stages.
+struct FrameScene;
+
 struct FrameInputs {
+    std::shared_ptr<const FrameScene> scene;
     Camera camera;
+    glm::mat4 shadowMatrix{0.0f};
+    glm::vec3 shadowCenter{0.0f};
+    OverlaySystem::Selection selection;
     glm::vec3 characterPosition{0.0f};
     glm::vec4 playerPos{0.0f};
     glm::vec4 playerWake{0.0f};

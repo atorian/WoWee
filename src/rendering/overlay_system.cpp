@@ -140,13 +140,9 @@ void OverlaySystem::initSelectionCircle() {
     }
 }
 
-void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
-                                           VkCommandBuffer cmd,
-                                           const collision::CollisionWorld& world) {
-    if (!selCircleVisible_) return;
-    initSelectionCircle();
-    if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE) return;
-
+OverlaySystem::Selection OverlaySystem::extractSelection(const collision::CollisionWorld& world) {
+    Selection selection;
+    if (!selCircleVisible_) return selection;
     // Keep circle anchored near target foot Z. The floor queries are collision
     // raycasts; reuse the last result while the target stands still, refreshing
     // every 30 frames in case geometry streams in around it.
@@ -180,9 +176,19 @@ void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4
     glm::mat4 model = glm::translate(glm::mat4(1.0f), raisedPos);
     model = glm::scale(model, glm::vec3(selCircleRadius_));
 
-    glm::mat4 mvp = projection * view * model;
-    glm::vec4 color4(selCircleColor_, 1.0f);
+    selection.model = model;
+    selection.color = glm::vec4(selCircleColor_, 1.0f);
+    selection.visible = true;
+    return selection;
+}
 
+void OverlaySystem::recordSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
+                                          VkCommandBuffer cmd, const Selection& selection) {
+    if (!selection.visible) return;
+    initSelectionCircle();
+    if (!selCirclePipeline_ || !cmd) return;
+    const glm::mat4 mvp = projection * view * selection.model;
+    const glm::vec4 color4 = selection.color;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selCirclePipeline_);
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &selCircleVertBuf_, &offset);

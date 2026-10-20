@@ -121,7 +121,7 @@ void Skybox::shutdown() {
 }
 
 void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyParams& params) {
-    if (pipeline == VK_NULL_HANDLE || !renderingEnabled) {
+    if (pipeline == VK_NULL_HANDLE) {
         return;
     }
 

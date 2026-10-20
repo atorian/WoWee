@@ -180,6 +180,7 @@ int main(int argc, char** argv) {
         };
         bool depthInitialized = false;
         const auto recordFrame = [&]() {
+            scene.applyChanges(scene.extractChanges());
             lighting.prepare(sceneExtent);
             uint32_t presentImage = 0;
             VkCommandBuffer cmd = ctx.beginFrame(presentImage);

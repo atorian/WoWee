@@ -372,6 +372,8 @@ private:
     RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
     FrameInputs frameInputs_;
+    uint64_t extractedSceneSequence_ = 0;
+    uint64_t recordedSceneSequence_ = 0;
     Camera renderCamera_;
     [[nodiscard]] const Camera* frameCamera() const { return &renderCamera_; }
     int requestedRtMode_ = 0;
@@ -609,7 +611,7 @@ private:
     bool msaaChangePending_ = false;
     void renderShadowPass();
     void renderShadowMap(bool contact);
-    glm::mat4 computeLightSpaceMatrix();
+    glm::mat4 computeLightSpaceMatrix(const FrameInputs& inputs, glm::vec3& centre);
 
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;

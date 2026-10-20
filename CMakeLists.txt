@@ -2223,6 +2223,18 @@ if(WOWEE_BUILD_TESTS)
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
     if(Python3_FOUND)
+        foreach(object m2 wmo character terrain water)
+            add_test(NAME scene_frame_scene_${object}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                        $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-scene-${object}
+                        --scene-mutations --object ${object})
+            set_tests_properties(scene_frame_scene_${object} PROPERTIES SKIP_RETURN_CODE 77)
+        endforeach()
+        add_test(NAME scene_frame_scene_water_msaa
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-scene-water-msaa
+                    --scene-mutations --object water --msaa 2 --fxaa)
+        set_tests_properties(scene_frame_scene_water_msaa PROPERTIES SKIP_RETURN_CODE 77)
         foreach(mode 1 2 3)
             add_test(NAME scene_frame_inputs_rt${mode}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py

@@ -227,8 +227,8 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 }
 
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
-                       const glm::vec3& sunColor, float glareVisibility) {
-    if (!enabled || pipeline == VK_NULL_HANDLE) {
+                       const glm::vec3& sunColor, float glareVisibility, float intensity) {
+    if (pipeline == VK_NULL_HANDLE) {
         return;
     }
 
@@ -277,7 +277,7 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
         glm::vec2 position = sunScreen + sunToCenter * element.position;
 
         // Apply visibility, intensity, and atmospheric attenuation
-        float brightness = element.brightness * visibility * intensityMultiplier * atmosphericFactor;
+        float brightness = element.brightness * visibility * intensity * atmosphericFactor;
 
         // The sun's light through the element's coating. A fixed amber was
         // mixed in as the sun got low instead, the same in every zone; the

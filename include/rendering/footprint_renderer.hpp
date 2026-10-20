@@ -47,7 +47,10 @@ public:
     void clear();
     void spawn(const std::string& modelName, const glm::vec3& basePosition,
                float yawRadians, bool leftFoot, FootprintFallback fallback);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    struct Draw { glm::mat4 model{1}; float alpha = 0; uint8_t texture = 0; };
+    using Frame = std::vector<Draw>;
+    Frame extract(const Camera& camera) const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
 
 private:
     struct Profile {

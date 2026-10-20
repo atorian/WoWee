@@ -89,7 +89,6 @@ bool MountDust::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     }
 
     particles.reserve(MAX_DUST_PARTICLES);
-    vertexData.reserve(MAX_DUST_PARTICLES * 5);
 
     LOG_INFO("Mount dust effects initialized");
     return true;
@@ -191,11 +190,10 @@ void MountDust::update(float deltaTime) {
     }
 }
 
-void MountDust::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (particles.empty() || pipeline == VK_NULL_HANDLE) return;
-
+std::vector<float> MountDust::extract() const {
+    std::vector<float> vertexData;
+    vertexData.reserve(particles.size() * 5);
     // Build vertex data
-    vertexData.clear();
     for (const auto& p : particles) {
         vertexData.push_back(p.position.x);
         vertexData.push_back(p.position.y);
@@ -204,6 +202,11 @@ void MountDust::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
         vertexData.push_back(p.alpha);
     }
 
+    return vertexData;
+}
+
+void MountDust::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const std::vector<float>& vertexData) {
+    if (vertexData.empty() || !pipeline) return;
     // Upload to this frame's copy of the mapped buffer
     const uint32_t frame = vkCtx->getCurrentFrame();
     VkDeviceSize uploadSize = vertexData.size() * sizeof(float);
@@ -224,7 +227,7 @@ void MountDust::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
 
     // Draw particles as points
-    vkCmdDraw(cmd, static_cast<uint32_t>(particles.size()), 1, 0, 0);
+    vkCmdDraw(cmd, static_cast<uint32_t>(vertexData.size() / 5), 1, 0, 0);
 }
 
 } // namespace rendering

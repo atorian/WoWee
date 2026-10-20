@@ -60,7 +60,7 @@ public:
      *        weather factors - and showed where the client's glare does not.
      */
     void render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
-                const glm::vec3& sunColor, float glareVisibility);
+                const glm::vec3& sunColor, float glareVisibility, float intensity);
 
     /**
      * @brief Enable or disable lens flare rendering

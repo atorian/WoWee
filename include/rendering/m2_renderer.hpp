@@ -29,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -429,11 +430,6 @@ struct M2Instance {
 
     // Frame-skip optimization (update distant animations less frequently)
     uint8_t frameSkipCounter = 0;
-    bool bonesDirty[2] = {false, false};  // Per-frame-index: set when bones recomputed, cleared after upload
-    // Mega-bone slot this instance's bones were last uploaded to, per frame
-    // index (0 = never uploaded; valid slots start at 1). Lets prepareRender
-    // skip the memcpy when the bones are unchanged and still at the same slot.
-    uint32_t megaBoneUploadedSlot[2] = {0, 0};
 
     // Per-instance bone SSBO (double-buffered) - legacy; see mega bone SSBO in M2Renderer
     ::VkBuffer boneBuffer[2] = {};
@@ -581,6 +577,10 @@ public:
      * Render all visible instances (Vulkan)
      */
     /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
+    struct Frame;
+    std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
+                                         const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f);
+    void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(uint32_t frameIndex, const Camera& camera);
     /** Dispatch GPU frustum culling compute shader on primary cmd before render pass. */
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
@@ -609,9 +609,7 @@ public:
     void gatherLocalLights(const glm::vec3& cameraPos, std::vector<LocalLight>& out) const;
     /// The frame's point lights, which every draw picks its nearest from.
     /// Owned by the Renderer, filled before anything draws.
-    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
     /// Time captured with the view, for effects made while preparing its draws.
-    void setFrameTime(float seconds) { frameTime_ = seconds; }
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -791,6 +789,7 @@ public:
     /// Ask again for textures that failed to load, and show the batches that
     /// were hidden waiting for them. A failed MPQ read is often transient.
     void retryPendingBatchTextures();
+    bool makeModelWritable(uint32_t modelId);
     struct PendingBatchTexture { uint32_t modelId; size_t batchIndex; };
     std::vector<PendingBatchTexture> pendingBatchTextures_;
 
@@ -1147,17 +1146,9 @@ private:
     // as the depth buffer the HiZ pyramid was built from.
     glm::mat4 prevVP_{1.0f};
 
-    // Instance IDs, in dispatch order, for the cull results a frame slot holds.
-    //
-    // The visibility SSBO is read back one full slot cycle after it is written:
-    // dispatchCullCompute() records a dispatch into this frame's command buffer,
-    // and render() reads the mapped output of the dispatch recorded on the SAME
-    // slot ~2 frames earlier.  Array indices are not stable across that gap -
-    // createInstance() appends and removeInstance() swap-removes, so slot i can
-    // easily describe a different object by the time it is read.  Recording the
-    // IDs lets render() match each result back to the instance it was computed
-    // for.  cullSubmittedIds_ is the dispatch just recorded (results not ready);
-    // cullReadableIds_ is the previous one, matching the mapped data now.
+    // The recording side retains submitted instance IDs and scene identities.
+    // After a slot's fence, collectCullOutput publishes completed verdicts;
+    // extraction applies them by identity, never by a volatile array index.
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     // 9 floats each, for every trail in view. One riding phoenix lays 660
@@ -1186,7 +1177,7 @@ private:
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
     FrameVertexBuffer glowVB_;
 
-    std::unordered_map<uint32_t, M2ModelGPU> models;
+    std::unordered_map<uint32_t, std::shared_ptr<M2ModelGPU>> models;
     // Grace period for model cleanup: track when a model first became instanceless.
     // Models are only evicted after 60 seconds with no instances.
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> modelUnusedSince_;
@@ -1322,7 +1313,7 @@ private:
     struct DrawInstance {
         glm::mat4 modelMatrix{1.0f};
         /// Valid for the frame: models are unloaded only between frames.
-        const M2ModelGPU* model = nullptr;
+        std::shared_ptr<const M2ModelGPU> model;
         InteriorLightGPU interiorLight;
         /// The point lights nearest its origin (local_lights.hpp).
         LocalLightSet localLights = kNoLocalLights;
@@ -1340,7 +1331,6 @@ private:
         bool afloat = false;
     };
     /// What the view's cull kept this frame, one per visible instance.
-    std::vector<DrawInstance> drawInstances_;
 
     // Persistent render buffers (avoid per-frame allocation/deallocation)
     struct VisibleEntry {
@@ -1350,33 +1340,32 @@ private:
         float distSq;
         float effectiveMaxDistSq;
     };
-    std::vector<VisibleEntry> sortedVisible_;  // Reused each frame
-    std::vector<VisibleEntry> transparentVisible_; // Only models needing pass 2
     struct GlowSprite {
         glm::vec3 worldPos;
         glm::vec4 color;
         float size;
     };
-    std::vector<GlowSprite> glowSprites_;  // Reused each frame
-    float frameTime_ = 0.0f;
 
     /// The view's half of render(): folds the GPU's cull verdicts into the
     /// instances, keeps what the camera sees, copies it into drawInstances_,
     /// sorts the two lists and makes the glow sprites. Reads the scene and
     /// writes only the verdicts into it.
-    void cullView(const Camera& camera);
+    void cullView(const Camera& camera, Frame& frame);
+    void extractBones(Frame& frame);
+    void extractCull(const Camera& camera, Frame& frame);
+    void collectCullOutput(uint32_t frame);
     /// The opaque pass, from the lists cullView made; reads no instance.
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// The glow sprites the opaque pass would draw of one instance at this
     /// level of detail and distance fade.
     void appendGlowSprites(const M2Instance& instance, const M2ModelGPU& model, uint16_t lod,
                            float fadeAlpha, const glm::vec3& camPos,
-                           std::vector<GlowSprite>& out) const;
+                           std::vector<GlowSprite>& out, float time) const;
     /// Why the opaque pass leaves a batch out at this level of detail, or
     /// null when it draws it. `onlyBatchModel` is the WOWEE_M2_ONLY_BATCH
     /// diagnostic naming this model.
     [[nodiscard]] const char* opaqueBatchSkip(const M2ModelGPU& model, size_t batchIndex, uint16_t lod,
-                                              bool onlyBatchModel) const;
+                                              bool onlyBatchModel, bool suppressStars) const;
 
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
@@ -1402,8 +1391,9 @@ private:
     /// the sun's cull, so neither the contact map's filter nor the recording
     /// reads an instance.
     struct ShadowDraw {
+        uint32_t modelId = 0;
         glm::mat4 modelMatrix{1.0f};
-        const M2ModelGPU* model = nullptr;
+        std::shared_ptr<const M2ModelGPU> model;
         glm::vec3 position{0.0f};
         float scale = 1.0f;
     };
@@ -1421,16 +1411,14 @@ private:
     VkDescriptorSet shadowTexSet(VkTexture* tex);
     /// Set by the sun's pass once it has culled into shadowCasters_, and
     /// consumed by the contact pass that follows it in the same frame.
-    bool solarCastersFresh_ = false;
 
     // Ribbon draw-call list (reused each frame)
     struct RibbonDrawCall {
         VkDescriptorSet texSet;
-        VkPipeline      pipeline;
+        bool            additive;
         uint32_t        firstVertex;
         uint32_t        vertexCount;
     };
-    std::vector<RibbonDrawCall> ribbonDraws_;
 
     // Particle group structures (reused each frame)
     struct ParticleGroupKey {
@@ -1477,19 +1465,18 @@ private:
     /// and draw from vertex zero, so with more than one group on screen they
     /// all drew whichever group was copied last.
     struct ParticleRun {
-        ParticleGroup* group = nullptr;
+        ParticleGroup group{};
         uint32_t first = 0;
         uint32_t count = 0;
     };
-    std::vector<ParticleRun> particleRuns_;
     /// The particles in view, written into this frame's buffer as runs.
     /// Reads the scene; returns how many particles went in.
-    size_t gatherM2Particles();
+    size_t gatherM2Particles(Frame& frame);
     /// The runs gatherM2Particles wrote; reads no instance.
     void recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// The ribbon trails, written into this frame's buffer with a draw each.
     /// Reads the scene; returns how many vertices went in.
-    size_t gatherM2Ribbons();
+    size_t gatherM2Ribbons(Frame& frame);
     /// The draws gatherM2Ribbons made; reads no instance.
     void recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// Quads the particle buffer holds: a whole frame's, a particle that is
@@ -1586,7 +1573,7 @@ private:
     VkDescriptorSet allocateBoneSet();
 
     // Helper to destroy model GPU resources
-    void destroyModelGPU(M2ModelGPU& model);
+    void destroyModelGPU(std::shared_ptr<M2ModelGPU> model);
     // Helper to destroy instance bone buffers.
     // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
     // in-flight command buffers are not invalidated (use for streaming unload).
@@ -1598,7 +1585,9 @@ private:
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
     void destroyInstanceBones(M2Instance& inst, bool defer = true);
+    inline static std::atomic<uint64_t> nextSceneIdentity_{1};
     struct InstanceState {
+        uint64_t identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
         /// Chunked so that growing it moves no instance (chunked_vector.hpp).
         ChunkedVector<M2Instance> instances;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
@@ -1611,8 +1600,6 @@ private:
         std::vector<uint32_t> shadowRefiledIds;
         bool shadowRefiledOverflow = false;
         std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
-        std::vector<uint32_t> cullSubmittedIds_[2];
-        std::vector<uint32_t> cullReadableIds_[2];
         InstanceIndexSet animatedInstanceIndices_;     // hasAnimation && !disableAnimation
         InstanceIndexSet particleOnlyInstanceIndices_; // !hasAnimation && hasParticleEmitters
         InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
@@ -1622,6 +1609,34 @@ private:
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;
+
+public:
+    struct Frame {
+        std::vector<DrawInstance> drawInstances_;
+        std::vector<VisibleEntry> sortedVisible_, transparentVisible_;
+        std::vector<GlowSprite> glowSprites_;
+        std::vector<RibbonDrawCall> ribbonDraws_;
+        std::vector<ParticleRun> particleRuns_;
+        std::vector<float> ribbonVertices;
+        std::vector<M2ParticleQuad> particleVertices;
+        std::vector<glm::mat4> bones;
+        std::vector<CullInstanceGPU> cullInput;
+        std::vector<uint32_t> cullIds;
+        std::vector<ShadowDraw> depth, solarDepth;
+        glm::mat4 solarMatrix{0.0f}, overheadMatrix{0.0f};
+        float maxPossibleDistSq = 0, time = 0;
+        uint64_t sceneIdentity = 0;
+        glm::vec3 cameraPosition{0};
+        float skyHour = 12;
+        bool suppressStars = false, skipDetail = false;
+    };
+private:
+    std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
+    struct CullResult { uint32_t id; bool visible; uint64_t sceneIdentity; };
+    std::mutex cullResultMutex_;
+    std::vector<CullResult> collectedCull_;
+    std::vector<uint32_t> submittedCullIds_[2];
+    uint64_t submittedCullScenes_[2]{};
 
 };
 

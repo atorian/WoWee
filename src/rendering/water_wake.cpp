@@ -316,7 +316,6 @@ void WaterWake::advance(double deltaSeconds, glm::vec2 nearby, const std::vector
         cornerTexel_ = corner;
         placed_ = true;
     } else if (corner != cornerTexel_) {
-        pendingShift_ += corner - cornerTexel_;
         cornerTexel_ = corner;
     }
 
@@ -363,30 +362,44 @@ void WaterWake::advance(double deltaSeconds, glm::vec2 nearby, const std::vector
     lastSeen_ = std::move(seen);
 }
 
-glm::vec4 WaterWake::area() const {
-    const glm::vec2 corner = glm::vec2(cornerTexel_) * kTexelYards;
+glm::vec4 WaterWake::area(const Frame& input) const {
+    const glm::vec2 corner = glm::vec2(input.corner) * kTexelYards;
     return {corner, 1.0f / (static_cast<float>(kSize) * kTexelYards), ran_ ? 1.0f : 0.0f};
 }
 
-void WaterWake::record(VkCommandBuffer cmd) {
+WaterWake::Frame WaterWake::extract() {
+    extractedSteps_ += static_cast<uint64_t>(pendingSteps_);
+    if (stillPending_) ++extractedStillVersion_;
+    Frame input{place_, shape_, head_, cornerTexel_, moverCount_, extractedSteps_, extractedStillVersion_, placed_};
+    pendingSteps_ = 0;
+    stillPending_ = false;
+    return input;
+}
+
+void WaterWake::record(VkCommandBuffer cmd, const Frame& input) {
     ZoneScopedN("WaterWake::record");
-    if (!ready_ || cmd == VK_NULL_HANDLE || !placed_) return;
+    if (!ready_ || cmd == VK_NULL_HANDLE || !input.placed) return;
     const uint32_t frame = ctx_->getCurrentFrame() % kFrames;
 
+    const int steps = static_cast<int>(std::min<uint64_t>(input.steps - recordedSteps_, kMostStepsPerFrame));
+    recordedSteps_ = input.steps;
+    const glm::ivec2 shift = recordedPlacement_ ? input.corner - recordedCorner_ : glm::ivec2(0);
+    recordedCorner_ = input.corner;
+    recordedPlacement_ = true;
     MoversGPU movers{};
-    for (int i = 0; i < moverCount_; ++i) {
-        movers.place[i] = place_[i];
-        movers.shape[i] = shape_[i];
-        movers.head[i] = head_[i];
+    for (int i = 0; i < input.movers; ++i) {
+        movers.place[i] = input.place[i];
+        movers.shape[i] = input.shape[i];
+        movers.head[i] = input.head[i];
     }
-    movers.count = glm::ivec4(moverCount_, 0, 0, 0);
+    movers.count = glm::ivec4(input.movers, 0, 0, 0);
     std::memcpy(moverMapped_[frame], &movers, sizeof(movers));
 
     WakePushGPU push{};
     // Where the field's texel (0, 0) corner falls in the sea bed's map.
     const OverheadFrame& bed = seaBed_->frame();
     const glm::vec2 bedCorner = bed.centre - glm::vec2(bed.halfExtent);
-    const glm::vec2 corner = glm::vec2(cornerTexel_) * kTexelYards;
+    const glm::vec2 corner = glm::vec2(input.corner) * kTexelYards;
     const float bedSpan = 2.0f * bed.halfExtent;
     push.bedArea = glm::vec4((corner - bedCorner) / bedSpan, kTexelYards / bedSpan, seaBed_->isDrawn() ? 1.0f : 0.0f);
     push.shoreRange = glm::vec2(bed.range, 0.0f);
@@ -394,11 +407,11 @@ void WaterWake::record(VkCommandBuffer cmd) {
 
     // The last frame's water read the surface, and its passes the rest.
     // Back after the waves would have died away: still water to go on from.
-    if (stillPending_) {
+    if (input.stillVersion != recordedStillVersion_) {
+        recordedStillVersion_ = input.stillVersion;
         clearToStill(cmd, {&surface_, &state_, &spectrum_}, VK_IMAGE_LAYOUT_GENERAL,
                      kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                      VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
-        stillPending_ = false;
     }
     computeBarrier(cmd, kWaterStages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
@@ -427,25 +440,23 @@ void WaterWake::record(VkCommandBuffer cmd) {
 
     // The field moved with the camera: what it holds, put back where it was
     // in the world; what comes in at the far edge is still water.
-    if (pendingShift_ != glm::ivec2(0)) {
-        push.shift = pendingShift_;
+    if (shift != glm::ivec2(0)) {
+        push.shift = shift;
         pass(kShiftOut);
         pass(kShiftIn);
-        pendingShift_ = glm::ivec2(0);
         push.shift = glm::ivec2(0);
     }
-    for (int s = 0; s < pendingSteps_; ++s) {
-        push.along = static_cast<float>(s + 1) / static_cast<float>(pendingSteps_);
+    for (int s = 0; s < steps; ++s) {
+        push.along = static_cast<float>(s + 1) / static_cast<float>(steps);
         pass(kLoad);
         fft();
         pass(kDerive);
         fft();
         pass(kStep);
     }
-    if (pendingSteps_ > 0) ran_ = true;
+    if (steps > 0) ran_ = true;
     // The foam the frame's steps have left, over the time they covered.
-    push.stepSeconds = static_cast<float>(pendingSteps_) * glsl::kWakeStepSeconds;
-    pendingSteps_ = 0;
+    push.stepSeconds = static_cast<float>(steps) * glsl::kWakeStepSeconds;
     pass(kSurface);
     computeBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, kWaterStages,
                    VK_ACCESS_2_SHADER_READ_BIT);

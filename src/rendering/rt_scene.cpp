@@ -171,6 +171,13 @@ void RtScene::shutdown() {
 
     for (auto& m : meshes_) destroyMeshGpu(m);
     meshes_.clear();
+    changes_.clear();
+    sourceMeshes_.clear();
+    sourceInstances_.clear();
+    freeMeshes_.clear();
+    freeInstances_.clear();
+    nextChangeSerial_ = 1;
+    appliedChangeSerial_.store(0);
     instances_.clear();
     for (auto& fr : frames_) {
         destroyBuffer(alloc, fr.instances);
@@ -201,41 +208,92 @@ void RtScene::destroyMeshGpu(Mesh& m) {
 // ---------------------------------------------------------------------------
 // Registration
 
-RtScene::MeshId RtScene::addMesh(MeshSource source) {
-    if (!ctx_ || source.indices.size() < 3 || source.surfaces.empty()) return kInvalid;
-    const size_t triCount = source.indices.size() / 3;
-    if (source.surfaces.size() != 1 && source.surfaces.size() != triCount) return kInvalid;
-    RtAabb bounds;
-    for (uint32_t idx : source.indices) {
-        if (idx >= source.positions.size()) return kInvalid;
-        bounds.grow(source.positions[idx]);
-    }
+void RtScene::post(Change change) {
+    change.serial = nextChangeSerial_++;
+    changes_.push_back(std::move(change));
+}
 
+RtScene::Changes RtScene::extractChanges() {
+    const uint64_t applied = appliedChangeSerial_.load(std::memory_order_acquire);
+    std::erase_if(changes_, [applied](const Change& change) { return change.serial <= applied; });
+    return changes_;
+}
+
+void RtScene::applyChanges(std::span<const Change> changes) {
+    uint64_t applied = appliedChangeSerial_.load(std::memory_order_relaxed);
+    for (const auto& c : changes) {
+        if (c.serial <= applied) continue;
+        switch (c.kind) {
+        case Change::Kind::AddMesh: applyAddMesh(c.id, c.source); break;
+        case Change::Kind::RemoveMesh: applyRemoveMesh(c.id); break;
+        case Change::Kind::AddInstance: applyAddInstance(c.id, c.mesh, c.transform); break;
+        case Change::Kind::MoveInstance: applyMoveInstance(c.id, c.transform); break;
+        case Change::Kind::RemoveInstance: applyRemoveInstance(c.id); break;
+        }
+        applied = c.serial;
+    }
+    appliedChangeSerial_.store(applied, std::memory_order_release);
+}
+
+RtScene::MeshId RtScene::addMesh(MeshSource source) {
+    if (source.indices.size() < 3 || source.surfaces.empty()) return kInvalid;
+    const size_t triangles = source.indices.size() / 3;
+    if (source.surfaces.size() != 1 && source.surfaces.size() != triangles) return kInvalid;
+    for (uint32_t index : source.indices) if (index >= source.positions.size()) return kInvalid;
     MeshId id;
-    if (!freeMeshes_.empty()) {
-        id = freeMeshes_.back();
-        freeMeshes_.pop_back();
-    } else {
-        id = static_cast<MeshId>(meshes_.size());
-        meshes_.emplace_back();
-    }
-    Mesh& m = meshes_[id];
-    m = Mesh{};
-    m.live = true;
-    m.triCount = static_cast<uint32_t>(triCount);
-    m.bounds = bounds;
-    m.source = std::move(source);
-    ++liveMeshes_;
-    liveTriangles_ += m.triCount;
-    if (active_) {
-        m.queued = true;
-        pendingMeshes_.push_back(id);
-    }
+    if (freeMeshes_.empty()) { id = static_cast<MeshId>(sourceMeshes_.size()); sourceMeshes_.push_back(true); }
+    else { id = freeMeshes_.back(); freeMeshes_.pop_back(); sourceMeshes_[id] = true; }
+    post({.kind = Change::Kind::AddMesh, .id = id,
+                       .source = std::make_shared<const MeshSource>(std::move(source))});
     return id;
 }
 
+void RtScene::removeMesh(MeshId id) {
+    if (id >= sourceMeshes_.size() || !sourceMeshes_[id]) return;
+    sourceMeshes_[id] = false;
+    post({.kind = Change::Kind::RemoveMesh, .id = id});
+    freeMeshes_.push_back(id);
+}
+
+RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& transform) {
+    if (mesh >= sourceMeshes_.size() || !sourceMeshes_[mesh]) return kInvalid;
+    InstanceId id;
+    if (freeInstances_.empty()) { id = static_cast<InstanceId>(sourceInstances_.size()); sourceInstances_.emplace_back(); }
+    else { id = freeInstances_.back(); freeInstances_.pop_back(); }
+    sourceInstances_[id] = Instance{true, mesh, transform};
+    post({.kind = Change::Kind::AddInstance, .id = id, .mesh = mesh, .transform = transform});
+    return id;
+}
+
+void RtScene::setInstanceTransform(InstanceId id, const glm::mat4& transform) {
+    if (id >= sourceInstances_.size() || !sourceInstances_[id].live ||
+        sourceInstances_[id].objectToWorld == transform) return;
+    sourceInstances_[id].objectToWorld = transform;
+    post({.kind = Change::Kind::MoveInstance, .id = id, .transform = transform});
+}
+
+void RtScene::removeInstance(InstanceId id) {
+    if (id >= sourceInstances_.size() || !sourceInstances_[id].live) return;
+    sourceInstances_[id] = Instance{};
+    post({.kind = Change::Kind::RemoveInstance, .id = id});
+    freeInstances_.push_back(id);
+}
+
+void RtScene::applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source) {
+    if (meshes_.size() <= id) meshes_.resize(static_cast<size_t>(id) + 1);
+    Mesh& m = meshes_[id];
+    m = Mesh{};
+    m.live = true;
+    m.triCount = static_cast<uint32_t>(source->indices.size() / 3);
+    for (uint32_t index : source->indices) m.bounds.grow(source->positions[index]);
+    m.source = std::move(source);
+    ++liveMeshes_;
+    liveTriangles_ += m.triCount;
+    if (active_) { m.queued = true; pendingMeshes_.push_back(id); }
+}
+
 void RtScene::buildMesh(Mesh& m) {
-    const MeshSource& src = m.source;
+    const MeshSource& src = *m.source;
     m.tris.resize(m.triCount);
     m.hasTranslucent = false;
     for (uint32_t t = 0; t < m.triCount; ++t) {
@@ -312,7 +370,7 @@ void RtScene::releaseGpu() {
     ++descriptorGeneration_;
 }
 
-void RtScene::removeMesh(MeshId id) {
+void RtScene::applyRemoveMesh(MeshId id) {
     if (id >= meshes_.size() || !meshes_[id].live) return;
     Mesh& m = meshes_[id];
     m.live = false;
@@ -344,37 +402,25 @@ void RtScene::removeMesh(MeshId id) {
         if (epoch == gpuEpoch_ && triOffset != RtRangeAllocator::kFailed) triPool_.alloc.release(triOffset, triCount);
         if (epoch == gpuEpoch_ && nodeOffset != RtRangeAllocator::kFailed)
             nodePool_.alloc.release(nodeOffset, nodeCount);
-        freeMeshes_.push_back(id);
     });
 }
 
-RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& objectToWorld) {
-    if (mesh >= meshes_.size() || !meshes_[mesh].live) return kInvalid;
-    InstanceId id;
-    if (!freeInstances_.empty()) {
-        id = freeInstances_.back();
-        freeInstances_.pop_back();
-    } else {
-        id = static_cast<InstanceId>(instances_.size());
-        instances_.emplace_back();
-    }
-    instances_[id] = Instance{true, mesh, objectToWorld};
+void RtScene::applyAddInstance(InstanceId id, MeshId mesh, const glm::mat4& transform) {
+    if (instances_.size() <= id) instances_.resize(static_cast<size_t>(id) + 1);
+    instances_[id] = Instance{true, mesh, transform};
     ++liveInstances_;
     ++sceneVersion_;
-    return id;
 }
 
-void RtScene::setInstanceTransform(InstanceId id, const glm::mat4& objectToWorld) {
+void RtScene::applyMoveInstance(InstanceId id, const glm::mat4& transform) {
     if (id >= instances_.size() || !instances_[id].live) return;
-    if (instances_[id].objectToWorld == objectToWorld) return;
-    instances_[id].objectToWorld = objectToWorld;
+    instances_[id].objectToWorld = transform;
     ++sceneVersion_;
 }
 
-void RtScene::removeInstance(InstanceId id) {
+void RtScene::applyRemoveInstance(InstanceId id) {
     if (id >= instances_.size() || !instances_[id].live) return;
     instances_[id] = Instance{};
-    freeInstances_.push_back(id);
     --liveInstances_;
     ++sceneVersion_;
 }
@@ -930,9 +976,10 @@ RtScene::Stats RtScene::stats() const {
     s.gpuBytes = sz(triPool_.buffer) + sz(nodePool_.buffer) + sz(meshTable_);
     for (const auto& m : meshes_) {
         s.gpuBytes += sz(m.blasBuffer);
-        s.sourceBytes += pipeline::vectorBytes(m.source.positions) +
-                         pipeline::vectorBytes(m.source.indices) +
-                         pipeline::vectorBytes(m.source.surfaces) +
+        if (!m.source) continue;
+        s.sourceBytes += pipeline::vectorBytes(m.source->positions) +
+                         pipeline::vectorBytes(m.source->indices) +
+                         pipeline::vectorBytes(m.source->surfaces) +
                          pipeline::vectorBytes(m.tris) + pipeline::vectorBytes(m.nodes);
     }
     s.sourceBytes += pipeline::vectorBytes(meshes_);

@@ -27,6 +27,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <atomic>
+#include <span>
+#include <vector>
 #include <unordered_map>
 
 namespace wowee {
@@ -90,7 +93,7 @@ public:
         AllocatedImage relief;
         VkImageView colorTarget = VK_NULL_HANDLE;   ///< mip 0, drawn into
         VkImageView reliefTarget = VK_NULL_HANDLE;
-        bool ready = false;        ///< cleared and in the layout the ground samples
+        std::atomic<bool> ready{false};        ///< cleared and in the layout the ground samples
     };
 
     TerrainBake() = default;
@@ -117,7 +120,8 @@ public:
 
     /// Every atlas made since the last call cleared and turned to the layout
     /// the ground samples, before any chunk names it in a draw.
-    void prepareNewAtlases(VkCommandBuffer cmd);
+    std::vector<std::shared_ptr<Atlas>> extractNewAtlases() const;
+    void prepareNewAtlases(VkCommandBuffer cmd, std::span<const std::shared_ptr<Atlas>> atlases);
 
     /// Drawing a tile's chunks into its atlas: begin, a cell and its draws per
     /// chunk, end - which makes the mips and leaves the atlas for sampling.
@@ -138,7 +142,7 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
     uint32_t mipLevels_ = 1;
-    std::unordered_map<uint64_t, std::unique_ptr<Atlas>> atlases_;
+    std::unordered_map<uint64_t, std::shared_ptr<Atlas>> atlases_;
     bool atlasFailureSaid_ = false;
 };
 

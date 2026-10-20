@@ -52,7 +52,10 @@ public:
      * @param perFrameSet Per-frame descriptor set (set 0, contains camera UBO)
      * @param camera Camera for billboard calculation (CPU-side view matrix)
      */
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    struct Draw { glm::mat4 model{1}; float alpha = 0, grayscale = 0; int texture = 0; };
+    using Frame = std::vector<Draw>;
+    Frame extract(const Camera& camera, float timeSeconds) const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
 
 private:
     struct Marker {

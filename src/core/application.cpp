@@ -2471,6 +2471,7 @@ void Application::shutdown() {
     movementCollision_.reset();
     LOG_DEBUG("Shutting down renderer...");
     if (renderer) {
+        renderInputs_.reset();
         renderer->shutdown();
     }
     LOG_DEBUG("Renderer shutdown complete, resetting...");

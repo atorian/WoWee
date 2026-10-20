@@ -423,16 +423,21 @@ void Lightning::generateBoltSegments(const glm::vec3& start, const glm::vec3& en
     segments.push_back(end);
 }
 
-void Lightning::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!enabled) {
-        return;
-    }
-
-    renderBolts(cmd, perFrameSet);
-    renderFlash(cmd);
+Lightning::Frame Lightning::extract() const {
+    Frame frame;
+    if (!enabled) return frame;
+    for (const auto& bolt : bolts) if (bolt.active && !bolt.segments.empty())
+        frame.bolts.push_back({bolt.segments, bolt.brightness});
+    if (flash.active) frame.flash = flash.intensity;
+    return frame;
 }
 
-void Lightning::renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+void Lightning::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
+    recordBolts(cmd, perFrameSet, input);
+    recordFlash(cmd, input.flash);
+}
+
+void Lightning::recordBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
     if (boltPipeline == VK_NULL_HANDLE || !boltDynamicVB.valid()) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boltPipeline);
@@ -451,11 +456,10 @@ void Lightning::renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     // execute, so one stretch rewritten per bolt drew the last bolt every time.
     const uint32_t capacity = static_cast<uint32_t>(boltDynamicVB.size() / sizeof(glm::vec3));
     uint32_t used = 0;
-    for (const auto& bolt : bolts) {
-        if (!bolt.active || bolt.segments.empty()) continue;
-        const uint32_t count = std::min(static_cast<uint32_t>(bolt.segments.size()), capacity - used);
+    for (const auto& bolt : input.bolts) {
+        const uint32_t count = std::min(static_cast<uint32_t>(bolt.vertices.size()), capacity - used);
         if (count < 2) break;
-        std::memcpy(mapped + used, bolt.segments.data(), count * sizeof(glm::vec3));
+        std::memcpy(mapped + used, bolt.vertices.data(), count * sizeof(glm::vec3));
 
         vkCmdPushConstants(cmd, boltPipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -465,8 +469,8 @@ void Lightning::renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     }
 }
 
-void Lightning::renderFlash(VkCommandBuffer cmd) {
-    if (!flash.active || flash.intensity <= 0.01f || flashPipeline == VK_NULL_HANDLE) {
+void Lightning::recordFlash(VkCommandBuffer cmd, float intensity) {
+    if (intensity <= 0.01f || flashPipeline == VK_NULL_HANDLE) {
         return;
     }
 
@@ -475,7 +479,7 @@ void Lightning::renderFlash(VkCommandBuffer cmd) {
     // Push flash intensity
     vkCmdPushConstants(cmd, flashPipelineLayout,
         VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(float), &flash.intensity);
+        0, sizeof(float), &intensity);
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &flashQuadVB, &offset);

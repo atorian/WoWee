@@ -19,6 +19,25 @@ namespace rendering {
 
 class VkContext;
 
+// Main colour/depth and reflection passes share pipelines, so their subpass
+// dependencies must agree as well as their attachment formats.
+inline VkSubpassDependency sceneAttachmentDependency() {
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    return dependency;
+}
+
+
 struct AllocatedBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation allocation = VK_NULL_HANDLE;
@@ -221,6 +240,11 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
 /// the target is untouched. `targetOffset` is where in the target, in bytes.
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
     VkBuffer target, VkDeviceSize targetOffset = 0);
+
+/// Stage a copy into the frame command buffer, retaining staging until that
+/// frame completes. No queue submission or CPU wait during recording.
+bool recordBufferUpload(VkContext& ctx, VkCommandBuffer cmd, ::VkBuffer target,
+                        const void* data, VkDeviceSize size);
 
 // Environment variable utility functions
 inline size_t envSizeMBOrDefault(const char* name, size_t defMb) {

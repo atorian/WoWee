@@ -1023,41 +1023,78 @@ void WMORenderer::rebuildIndexById() {
 }
 
 void WMORenderer::prepareRender() {
-    // Update material UBOs if settings changed (mapped memory writes - main thread only)
-    if (materialSettingsDirty_) {
-        materialSettingsDirty_ = false;
-        int maxSamples = pomSamplesFor(pomQuality_);
-        for (auto& [modelId, model] : loadedModels) {
-            for (auto& group : model.groups) {
-                for (auto& mb : group.mergedBatches) {
-                    if (!mb.materialSlot) continue;
-                    {
-                        auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
-                        ubo->enableNormalMap = normalMappingEnabled_ ? 1 : 0;
-                        ubo->enablePOM = pomEnabled_ ? 1 : 0;
-                        ubo->pomScale = 0.012f;
-                        ubo->pomMaxSamples = maxSamples;
-                        ubo->heightMapVariance = mb.heightMapVariance;
-                        ubo->normalMapStrength = normalMapStrength_;
-                    }
-                }
-            }
+    if (recording_->materialVersion == appliedMaterialVersion_) return;
+    appliedMaterialVersion_ = recording_->materialVersion;
+    // These material slots are shared by frame slots. A settings change is
+    // infrequent and must wait for every earlier draw before overwriting them.
+    vkCtx_->waitIdle();
+    for (const auto& entry : recording_->depth.drawn()) for (const auto& kept : entry.groups)
+        for (const auto& mb : kept.gpu->mergedBatches) {
+            if (!mb.materialSlot) continue;
+            auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
+            ubo->enableNormalMap = recording_->normalMap;
+            ubo->enablePOM = recording_->pom;
+            ubo->pomScale = 0.012f;
+            ubo->pomMaxSamples = recording_->samples;
+            ubo->heightMapVariance = mb.heightMapVariance;
+            ubo->normalMapStrength = recording_->normalStrength;
         }
+}
+
+WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
+                                               const WMOInstance& instance, uint32_t index) const {
+    GroupDraw out;
+    if (!group.drawData) {
+        auto data = std::make_shared<GroupDrawData>();
+        data->vertexBuffer = group.vertexBuffer;
+        data->indexBuffer = group.indexBuffer;
+        data->boundingBoxMin = group.boundingBoxMin;
+        data->boundingBoxMax = group.boundingBoxMax;
+        data->groupFlags = group.groupFlags;
+        data->isLOD = group.isLOD;
+        data->mergedBatches = group.mergedBatches;
+        group.drawData = std::move(data);
     }
+    out.gpu = group.drawData;
+    if (index < instance.worldGroupBounds.size()) {
+        out.worldMin = instance.worldGroupBounds[index].first;
+        out.worldMax = instance.worldGroupBounds[index].second;
+    } else {
+        const glm::vec3 centre = glm::vec3(instance.modelMatrix * glm::vec4(
+            (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f));
+        const float radius = 0.5f * glm::length(group.boundingBoxMax - group.boundingBoxMin) * instance.scale;
+        out.worldMin = centre - glm::vec3(radius);
+        out.worldMax = centre + glm::vec3(radius);
+    }
+    if (frameLights_) out.lights = pickLocalLights(*frameLights_, (out.worldMin + out.worldMax) * 0.5f,
+                                                 glm::length(out.worldMax - out.worldMin) * 0.5f);
+    return out;
+}
+
+std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
+        const glm::vec3& viewer, const std::vector<LocalLight>& lights, bool reflection) {
+    auto frame = std::make_shared<Frame>();
+    frameLights_ = &lights;
+    cullView(camera, viewer, frame->view);
+    if (reflection) cullView(camera, camera.getPosition(), frame->reflection);
+    extractDepth(frame->depth);
+    frameLights_ = nullptr;
+    frame->wireframe = wireframeMode;
+    if (std::exchange(materialSettingsDirty_, false)) ++extractedMaterialVersion_;
+    frame->materialVersion = extractedMaterialVersion_;
+    frame->normalMap = normalMappingEnabled_ ? 1 : 0;
+    frame->pom = pomEnabled_ ? 1 : 0;
+    frame->samples = pomSamplesFor(pomQuality_);
+    frame->normalStrength = normalMapStrength_;
+    return frame;
 }
 
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                         const glm::vec3* viewerPos, Pass pass) {
-    DrawList& list = passLists_[static_cast<size_t>(pass)];
-    // Portal culling seeds from both the camera and the character. Either one
-    // alone has a way to be wrong - a third-person camera can end up inside a
-    // wall or a broom cupboard, and a character can sit in a loose interior AABB
-    // while visually outside - and being wrong here does not mean drawing a
-    // little too much, it means the building vanishes. Seeding from both is a
-    // superset of either, so it can only ever add groups.
-    cullView(camera, viewerPos ? *viewerPos : camera.getPosition(), list);
+                         const glm::vec3*, Pass pass) {
     if (!opaquePipeline_) return;
-    recordView(cmd, perFrameSet, camera.getPosition(), list);
+    const uint32_t draws = recordView(cmd, perFrameSet, camera.getPosition(),
+        pass == Pass::Reflection ? recording_->reflection : recording_->view);
+    if (pass == Pass::View) viewDrawCallCount_ = draws;
 }
 
 void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const {
@@ -1082,7 +1119,6 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
         DrawEntry& entry = list.add();
         entry.modelMatrix = instance.modelMatrix;
         entry.scale = instance.scale;
-        entry.model = &model;
 
         // Portal-based visibility, into the pass's own scratch set.
         bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
@@ -1183,18 +1219,19 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
                 }
             }
 
-            entry.groups.push_back(static_cast<uint32_t>(gi));
+            entry.groups.push_back(extractGroup(model.groups[gi], instance, static_cast<uint32_t>(gi)));
         }
         if (entry.groups.empty()) list.dropLast();
     }
 }
 
-void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                             DrawList& list) const {
-    if (list.used == 0) return;
+uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
+                             const DrawList& list) const {
+    if (list.used == 0) return 0;
+    uint32_t drawCalls = 0;
 
     // Select pipeline based on wireframe mode
-    VkPipeline activePipeline = (wireframeMode && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
+    VkPipeline activePipeline = (recording_->wireframe && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
     // Bind per-frame descriptor set (set 0)
@@ -1205,7 +1242,6 @@ void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
     int currentPipelineKind = 0;
 
     for (const DrawEntry& entry : list.drawn()) {
-        const ModelData& model = *entry.model;
 
         // Push model matrix. The cloth half is written per batch below; this
         // sets the instance's matrix and clears the cloth for everything that
@@ -1221,8 +1257,8 @@ void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
         static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
 
         // Render visible groups
-        for (uint32_t gi : entry.groups) {
-            const auto& group = model.groups[gi];
+        for (const auto& kept : entry.groups) {
+            const auto& group = *kept.gpu;
 
             // Only skip antiportal geometry
             if (group.groupFlags & 0x4000000) continue;
@@ -1243,18 +1279,8 @@ void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            // The lights nearest the group's bounding sphere
-            // (local_lights.hpp).
-            if (frameLights_ && !frameLights_->empty()) {
-                const glm::vec3 center = glm::vec3(entry.modelMatrix * glm::vec4(
-                    (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f));
-                const float radius = 0.5f * glm::length(group.boundingBoxMax - group.boundingBoxMin) *
-                                     entry.scale;
-                const LocalLightSet groupLights = pickLocalLights(*frameLights_, center, radius);
-                vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                   offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet),
-                                   &groupLights);
-            }
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                               offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet), &kept.lights);
 
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
@@ -1297,11 +1323,12 @@ void WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, c
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
                     vkCmdDrawIndexed(cmd, dr.indexCount, 1, dr.firstIndex, 0, 0);
-                    list.drawCalls++;
+                    ++drawCalls;
                 }
             }
         }
     }
+    return drawCalls;
 }
 
 bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
@@ -1378,18 +1405,12 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void WMORenderer::cullShadow(const glm::vec3& shadowCenter, float cullRadius, DrawList& list) const {
+void WMORenderer::extractDepth(DrawList& list) const {
     list.clear();
-    const float cullRadiusSq = cullRadius * cullRadius;
     for (const WMOInstance& instance : scene_->instances) {
         // Not in the world, so not between the sun and anything in it - a
         // ship whose route is on the other map darkened the sea it had left.
         if (instance.hidden) continue;
-        // Distance cull using world bounding box - WMO origins can be far from
-        // their geometry, so point-based culling misses large buildings.
-        glm::vec3 closest = glm::clamp(shadowCenter, instance.worldBoundsMin, instance.worldBoundsMax);
-        glm::vec3 diff = closest - shadowCenter;
-        if (glm::dot(diff, diff) > cullRadiusSq) continue;
         auto modelIt = loadedModels.find(instance.modelId);
         if (modelIt == loadedModels.end()) continue;
         const ModelData& model = modelIt->second;
@@ -1397,7 +1418,6 @@ void WMORenderer::cullShadow(const glm::vec3& shadowCenter, float cullRadius, Dr
         DrawEntry& entry = list.add();
         entry.modelMatrix = instance.modelMatrix;
         entry.scale = instance.scale;
-        entry.model = &model;
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             const auto& group = model.groups[gi];
             if (group.vertexBuffer == VK_NULL_HANDLE || group.indexBuffer == VK_NULL_HANDLE) continue;
@@ -1408,14 +1428,7 @@ void WMORenderer::cullShadow(const glm::vec3& shadowCenter, float cullRadius, Dr
             // Skip LOD groups in shadow pass (they overlap real geometry)
             if (group.isLOD) continue;
 
-            // Per-group AABB cull against shadow frustum
-            if (gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-                glm::vec3 gClosest = glm::clamp(shadowCenter, gMin, gMax);
-                glm::vec3 gDiff = gClosest - shadowCenter;
-                if (glm::dot(gDiff, gDiff) > cullRadiusSq) continue;
-            }
-            entry.groups.push_back(static_cast<uint32_t>(gi));
+            entry.groups.push_back(extractGroup(group, instance, static_cast<uint32_t>(gi)));
         }
         if (entry.groups.empty()) list.dropLast();
     }
@@ -1439,15 +1452,15 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     // WMO shadow cull uses the ortho half-extent (shadow map coverage) rather than
     // the proximity radius so that distant buildings whose shadows reach the player
     // are still rendered into the shadow map.
-    cullShadow(shadowCenter, std::max(shadowRadius, 180.0f), shadowList_);
+    const auto& shadowList_ = recording_->depth;
     if (shadowList_.used == 0) return;
+    const float radius = std::max(shadowRadius, 180.0f);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
         0, 1, &shadowParams_.set, 0, nullptr);
 
     for (const DrawEntry& entry : shadowList_.drawn()) {
-        const ModelData& model = *entry.model;
 
         // A building does not sway, so the sway slot stays zero.
         ShadowPush push{.lightSpaceModel = lightSpaceMatrix * entry.modelMatrix};
@@ -1456,8 +1469,10 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
                            0, sizeof(ShadowPush), &push);
         bool cutoutBound = false;
 
-        for (uint32_t gi : entry.groups) {
-            const auto& group = model.groups[gi];
+        for (const auto& kept : entry.groups) {
+            const glm::vec3 nearest = glm::clamp(shadowCenter, kept.worldMin, kept.worldMax);
+            if (glm::dot(nearest - shadowCenter, nearest - shadowCenter) > radius * radius) continue;
+            const auto& group = *kept.gpu;
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &group.vertexBuffer, &offset);
             vkCmdBindIndexBuffer(cmd, group.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -1617,6 +1632,7 @@ void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texInde
 
 void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                             GroupResources::MergedBatch& mb) {
+    group.drawData.reset();
     // The baseline probe reproduces the lighting from before a portal-interior
     // group could be sunlit at all: every batch of one baked, and unshadowed.
     const bool portalInterior = (group.groupFlags & 0x2000) != 0;
@@ -2357,7 +2373,7 @@ void WMORenderer::releaseRtModel(uint32_t modelId) {
 }
 
 void WMORenderer::syncRtScene() {
-    if (!rtScene_ || !rtScene_->isActive()) return;
+    if (!rtScene_) return;
     const uint64_t gen = ++rtSyncGeneration_;
     for (const auto& inst : scene_->instances) {
         if (inst.hidden) continue;

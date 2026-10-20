@@ -31,7 +31,8 @@ public:
     void spawnDust(const glm::vec3& position, const glm::vec3& velocity, bool isMoving);
 
     void update(float deltaTime);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    std::vector<float> extract() const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const std::vector<float>& vertices);
 
 private:
     struct Particle {
@@ -54,7 +55,7 @@ private:
     // Particle vertex data, rewritten every frame
     PerFrameBuffer dynamicVB;
 
-    std::vector<float> vertexData;
+
     float spawnAccum = 0.0f;
 };
 

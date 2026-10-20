@@ -331,17 +331,11 @@ void FootprintRenderer::clear() {
     prints_.clear();
 }
 
-void FootprintRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (prints_.empty() || !pipeline_ || !quadVB_) return;
+FootprintRenderer::Frame FootprintRenderer::extract(const Camera& camera) const {
+    Frame frame;
     const glm::vec3 cameraPos = camera.getPosition();
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                            0, 1, &perFrameSet, 0, nullptr);
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB_, &offset);
 
     for (const Print& print : prints_) {
         const glm::vec3 delta = cameraPos - print.position;
@@ -362,13 +356,24 @@ void FootprintRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // the model's +X forward direction and mirror across local X.
         model = glm::rotate(model, print.yaw - 1.57079632679f, glm::vec3(0.0f, 0.0f, 1.0f));
         model = glm::scale(model, glm::vec3(print.signedWidth, print.length, 1.0f));
+        frame.push_back({model, alpha, print.textureIndex});
+    }
+    return frame;
+}
+
+void FootprintRenderer::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
+    if (input.empty() || !pipeline_ || !quadVB_) return;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB_, &offset);
+    for (const auto& draw : input) {
         FootprintPushConstants push;
-        push.model = model;
-        push.tint.a = alpha;
+        push.model = draw.model;
+        push.tint.a = draw.alpha;
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                                1, 1, &textureSets_[print.textureIndex], 0, nullptr);
-        vkCmdPushConstants(cmd, pipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                1, 1, &textureSets_[draw.texture], 0, nullptr);
+        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
         vkCmdDraw(cmd, 6, 1, 0, 0);
     }

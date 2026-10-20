@@ -119,6 +119,9 @@ public:
     /// it, once, where the slot's copy is older than the pose. Main thread,
     /// after the slot's fence and before any pass draws a character - the
     /// shadow maps included - so every pass only binds.
+    struct Frame;
+    std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights);
+    void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(uint32_t frameIndex);
     /// Which instances a render call draws. A faded one - an aura's
     /// translucent body, a ghost, a fade-in - writes depth, so whatever is
@@ -375,7 +378,6 @@ public:
     /// view, and those within 33 yards (local_lights.hpp).
     void gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const;
     /// The frame's point lights, which every unit picks its nearest from.
-    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
 
 private:
     const std::vector<LocalLight>* frameLights_ = nullptr;
@@ -466,7 +468,6 @@ private:
         std::vector<glm::mat4> boneMatrices;  // Current bone transforms
         /// Moved on whenever boneMatrices are written, so each frame slot's
         /// bone buffer is filled when its copy is older, and only then.
-        uint32_t bonesVersion = 0;
 
         /// See CharacterDress; replaced, never changed in place.
         std::shared_ptr<const CharacterDress> dress = std::make_shared<const CharacterDress>();
@@ -521,13 +522,6 @@ private:
         bool posedThisFrame = false;
         const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
-        // Per-instance bone SSBO (double-buffered per frame)
-        VkBuffer boneBuffer[2] = {};
-        VmaAllocation boneAlloc[2] = {};
-        void* boneMapped[2] = {};
-        VkDescriptorSet boneSet[2] = {};
-        /// The bonesVersion each slot's buffer holds; none to begin with.
-        uint32_t uploadedBonesVersion[2] = {UINT32_MAX, UINT32_MAX};
     };
 
     /// Replaces the instance's dress with a changed copy of it.
@@ -544,10 +538,10 @@ private:
     struct DrawCharacter {
         glm::mat4 modelMatrix{1.0f};
         /// Valid for the frame: models are unloaded only between frames.
-        const M2ModelGPU* model = nullptr;
+        std::shared_ptr<const M2ModelGPU> model;
         std::shared_ptr<const CharacterDress> dress;
         /// This frame slot's bones; null for an instance without any.
-        VkDescriptorSet boneSet = VK_NULL_HANDLE;
+        uint32_t pose = 0;
         InteriorLightGPU interiorLight;
         LocalLightSet localLights = kNoLocalLights;
         glm::vec3 stateTint{1.0f};
@@ -563,16 +557,14 @@ private:
     };
     /// Each colour part's list (All, Solid, Faded): the solid part records on
     /// a frame worker and the faded one on the main thread after the water.
-    std::vector<DrawCharacter> drawLists_[3];
+
     /// The depth-only passes', one at a time on the main thread.
-    std::vector<DrawCharacter> shadowList_;
+
     /// The instances this part draws, in the camera's view.
-    void cullCharacters(const Camera& camera, Part part, std::vector<DrawCharacter>& list) const;
+    void cullCharacters(const Camera& camera, Part part, std::vector<DrawCharacter>& list, const Frame& frame) const;
     void recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
                           const std::vector<DrawCharacter>& list);
     /// The shown instances with bones within the shadow's reach.
-    void cullShadowCasters(const glm::vec3& shadowCenter, float shadowRadius,
-                           std::vector<DrawCharacter>& list) const;
     void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                              const std::vector<DrawCharacter>& list);
 
@@ -591,8 +583,7 @@ private:
     [[nodiscard]] const CharacterInstance& drawnAs(const CharacterInstance& instance) const;
     /// Drawn at all: neither it nor, for an attachment, its body is hidden.
     [[nodiscard]] bool isShown(const CharacterInstance& instance) const;
-    void destroyModelGPU(M2ModelGPU& gpuModel, bool defer = false);
-    void destroyInstanceBones(CharacterInstance& inst, bool defer = false);
+    void destroyModelGPU(std::shared_ptr<M2ModelGPU> gpuModel, bool defer = false);
 
     // Attachment point lookup helper - shared by attachWeapon() and getAttachmentTransform()
     bool findAttachmentBone(uint32_t modelId, uint32_t attachmentId,
@@ -695,8 +686,6 @@ private:
     std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>
         materialDescriptorCache_[2];
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
-    std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
-        std::make_shared<std::atomic<uint64_t>>(0);
     uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
 
     // Material UBO ring buffer - pre-allocated per frame slot, sub-allocated each draw
@@ -715,7 +704,7 @@ private:
     TextureRef whiteTexture_;
     TextureRef flatNormalTexture_;
 
-    std::unordered_map<uint32_t, M2ModelGPU> models;
+    std::unordered_map<uint32_t, std::shared_ptr<M2ModelGPU>> models;
 
     uint32_t nextInstanceId = 1;
     uint64_t nextModelLoadSerial_ = 1;
@@ -788,6 +777,26 @@ private:
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;
+
+public:
+    struct Frame {
+        bool normalMapping = false;
+        float normalStrength = 1;
+        std::vector<DrawCharacter> drawLists[3];
+        std::vector<DrawCharacter> depth;
+        std::vector<std::vector<glm::mat4>> poses;
+        std::unordered_map<uint32_t, uint32_t> poseById;
+    };
+private:
+    std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
+    struct PoseSlot {
+        bool failed = false;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+    };
+    std::vector<PoseSlot> poseSlots_[2];
 
 };
 

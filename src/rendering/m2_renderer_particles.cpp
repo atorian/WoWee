@@ -471,14 +471,12 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
 // Ribbon rendering
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (gatherM2Ribbons() == 0) return;
     recordM2Ribbons(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Ribbons() {
+size_t M2Renderer::gatherM2Ribbons(Frame& frame) {
+    auto& ribbonDraws_ = frame.ribbonDraws_;
     ribbonDraws_.clear();
-    const ::VkBuffer ribbonBuffer = frameBuffer(ribbonVB_);
-    if (!blended().ribbon || !blended().ribbonAdditive || !ribbonBuffer) return 0;
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
     static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
     if (kNoRibbons) return 0;
@@ -487,7 +485,7 @@ size_t M2Renderer::gatherM2Ribbons() {
     // when they were born (updateRibbons). The strip used to be widened here
     // across the line of sight from a spine of single points, which turned
     // every trail flat to the camera: none of them could twist.
-    float* dst     = static_cast<float*>(frameMapped(ribbonVB_));
+    auto& vertices = frame.ribbonVertices;
     size_t written = 0;
 
     auto& draws = ribbonDraws_;
@@ -507,7 +505,7 @@ size_t M2Renderer::gatherM2Ribbons() {
 
             // Select blend pipeline based on material blend mode
             const bool additive = ri < gpu.ribbonBlendModes.size() && gpu.ribbonBlendModes[ri] >= 3;
-            VkPipeline pipe = additive ? blended().ribbonAdditive : blended().ribbon;
+
 
             // Descriptor set for texture
             VkDescriptorSet texSet = (ri < gpu.ribbonTexSets.size())
@@ -532,7 +530,8 @@ size_t M2Renderer::gatherM2Ribbons() {
             // trail, not the vertex alpha.
             const float lifetime = std::max(em.edgeLifetime, 0.25f);
             const auto put = [&](const glm::vec3& p, const M2Instance::RibbonEdge& e, float u, float v) {
-                float* vd = dst + written * 9;
+                vertices.resize((written + 1) * 9);
+                float* vd = vertices.data() + written * 9;
                 vd[0] = p.x; vd[1] = p.y; vd[2] = p.z;
                 vd[3] = e.color.r; vd[4] = e.color.g; vd[5] = e.color.b;
                 vd[6] = e.alpha;
@@ -559,7 +558,7 @@ size_t M2Renderer::gatherM2Ribbons() {
 
             uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
             if (vertCount >= 4) {
-                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
+                draws.push_back({.texSet = texSet, .additive = additive, .firstVertex = firstVert, .vertexCount = vertCount});
             } else {
                 // Rollback if too few verts
                 written = firstVert;
@@ -602,10 +601,15 @@ size_t M2Renderer::gatherM2Ribbons() {
     }
 
     if (draws.empty()) return 0;
+    vertices.resize(written * 9);
     return written;
 }
 
 void M2Renderer::recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    const auto& ribbonDraws_ = recording_->ribbonDraws_;
+    if (!frameBuffer(ribbonVB_) || !blended().ribbon || !blended().ribbonAdditive) return;
+    if (!recording_->ribbonVertices.empty())
+        std::memcpy(frameMapped(ribbonVB_), recording_->ribbonVertices.data(), recording_->ribbonVertices.size() * sizeof(float));
     if (ribbonDraws_.empty()) return;
     const ::VkBuffer ribbonBuffer = frameBuffer(ribbonVB_);
     const auto& draws = ribbonDraws_;
@@ -624,11 +628,12 @@ void M2Renderer::recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
     VkPipeline lastPipe = VK_NULL_HANDLE;
     for (const auto& dc : draws) {
-        if (dc.pipeline != lastPipe) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dc.pipeline);
+        const VkPipeline pipe = dc.additive ? blended().ribbonAdditive : blended().ribbon;
+        if (pipe != lastPipe) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     ribbonPipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
-            lastPipe = dc.pipeline;
+            lastPipe = pipe;
         }
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 ribbonPipelineLayout_, 1, 1, &dc.texSet, 0, nullptr);
@@ -639,14 +644,12 @@ void M2Renderer::recordM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 }
 
 void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (gatherM2Particles() == 0) return;
     recordM2Particles(cmd, perFrameSet);
 }
 
-size_t M2Renderer::gatherM2Particles() {
+size_t M2Renderer::gatherM2Particles(Frame& frame) {
+    auto& particleRuns_ = frame.particleRuns_;
     particleRuns_.clear();
-    const ::VkBuffer particleBuffer = frameBuffer(m2ParticleVB_);
-    if (!particleBuffer) return 0;
     // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
     // tells a particle artifact apart from a skinned-geometry one.
     static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
@@ -661,7 +664,7 @@ size_t M2Renderer::gatherM2Particles() {
 
     // Written straight into the mapped buffer rather than accumulated into a
     // vector per group and copied in afterwards; see ParticleRun.
-    auto* const vbBase = static_cast<M2ParticleQuad*>(frameMapped(m2ParticleVB_));
+    auto& vertices = frame.particleVertices;
     uint32_t vbWritten = 0;
     ParticleGroup* runGroup = nullptr;
 
@@ -828,7 +831,7 @@ size_t M2Renderer::gatherM2Particles() {
             // are adjacent, so this closes a run about once per emitter.
             if (cachedGroup != runGroup) {
                 runGroup = cachedGroup;
-                particleRuns_.push_back({.group = cachedGroup, .first = vbWritten, .count = 0});
+                particleRuns_.push_back({.group = *cachedGroup, .first = vbWritten, .count = 0});
             }
             highestParticleZ = std::max(highestParticleZ, position.z);
             widestParticle = std::max(widestParticle, std::max(halfSize.x, halfSize.y));
@@ -855,7 +858,7 @@ size_t M2Renderer::gatherM2Particles() {
                 quad.lit = cachedLit ? 1u : 0u;
                 quad.light = inst.interiorLight;
                 quad.localLights = instLights;
-                vbBase[vbWritten] = quad;
+                vertices.push_back(quad);
                 ++vbWritten;
                 ++particleRuns_.back().count;
             }
@@ -926,6 +929,11 @@ size_t M2Renderer::gatherM2Particles() {
 }
 
 void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    const auto& particleRuns_ = recording_->particleRuns_;
+    if (!frameBuffer(m2ParticleVB_)) return;
+    if (!recording_->particleVertices.empty())
+        std::memcpy(frameMapped(m2ParticleVB_), recording_->particleVertices.data(),
+                    recording_->particleVertices.size() * sizeof(M2ParticleQuad));
     if (particleRuns_.empty()) return;
     const ::VkBuffer particleBuffer = frameBuffer(m2ParticleVB_);
 
@@ -939,8 +947,8 @@ void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
     VkPipeline currentPipeline = VK_NULL_HANDLE;
 
     for (auto& run : particleRuns_) {
-        if (run.count == 0 || !run.group) continue;
-        ParticleGroup& group = *run.group;
+        if (run.count == 0) continue;
+        const ParticleGroup& group = run.group;
 
         const M2BlendPipeline blendPipe = m2BlendPipeline(group.blendType);
         VkPipeline desiredPipeline = blended().particle[static_cast<size_t>(blendPipe)];

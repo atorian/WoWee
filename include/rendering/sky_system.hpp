@@ -106,8 +106,14 @@ public:
      * @param camera      Camera for legacy sub-renderers (lens flare, etc.)
      * @param params      Sky parameters from lighting system
      */
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                const Camera& camera, const SkyParams& params);
+    struct Frame {
+        bool sky = true, clouds = true, proceduralStars = false, debugSky = false;
+        bool flare = false;
+        float cloudOffset = 0, twinkleTime = 0, flareIntensity = 1;
+    };
+    Frame extract() const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                const Camera& camera, const SkyParams& params, const Frame& frame);
 
     /**
      * Enable/disable procedural stars (DEBUG/FALLBACK)

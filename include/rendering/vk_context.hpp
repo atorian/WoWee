@@ -191,6 +191,9 @@ public:
     /// The number of the frame being built: the next one to be submitted.
     [[nodiscard]] uint64_t frameNumber() const { return frameNumber_.load(std::memory_order_acquire); }
 
+    /// Called at extraction, before the scene can release resources.
+    std::shared_ptr<SnapshotLease> holdSnapshotResources() { return retire_.holdSnapshot(); }
+
     // Accessors
     [[nodiscard]] VkInstance getInstance() const { return instance; }
     [[nodiscard]] VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }

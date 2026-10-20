@@ -100,6 +100,9 @@
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/render_surface.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
+#include "rendering/terrain_renderer.hpp"
+#include "pipeline/terrain_mesh.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -261,6 +264,7 @@ struct Bounds {
 struct Placement {
     bool wmo = false;
     uint32_t instanceId = 0;
+    uint32_t modelId = 0;
     int shownAtFrame = -1;  ///< -1: left as placed
 };
 
@@ -315,7 +319,7 @@ bool placeModel(const json& entry, const glm::vec3& origin, pipeline::AssetManag
     const glm::vec3 rotation = glm::radians(vec3(entry.value("rotation", json())));
     const float scale = entry.value("scale", 1.0f);
     const bool hidden = entry.value("hidden", false);
-    Placement placement{.shownAtFrame = entry.value("shownAtFrame", -1)};
+    Placement placement{.modelId = modelId, .shownAtFrame = entry.value("shownAtFrame", -1)};
     glm::vec3 lo(0.0f), hi(0.0f);
     const std::string lower = lowered(path);
     placement.wmo = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".wmo") == 0;
@@ -577,6 +581,45 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         movingCharacters.push_back(placed);
     }
 
+    // Optional ground/liquid primitives for isolated scenes without streaming.
+    if (scene.contains("groundPlane")) {
+        auto mesh = std::make_unique<pipeline::TerrainMesh>();
+        mesh->validChunkCount = 1;
+        auto& chunk = mesh->chunks[0];
+        const float size = scene["groundPlane"].value("size", 60.0f);
+        const float height = origin.z + scene["groundPlane"].value("height", -2.0f);
+        chunk.worldX = origin.x; chunk.worldY = origin.y; chunk.worldZ = height;
+        chunk.chunkX = chunk.chunkY = 0;
+        for (const auto& corner : std::array<glm::vec2, 4>{{{-1,-1}, {1,-1}, {1,1}, {-1,1}}}) {
+            pipeline::TerrainVertex vertex;
+            vertex.position[0] = origin.x + corner.x * size * 0.5f;
+            vertex.position[1] = origin.y + corner.y * size * 0.5f;
+            vertex.position[2] = height;
+            vertex.normal[2] = 1.0f;
+            vertex.texCoord[0] = vertex.layerUV[0] = (corner.x + 1) * 0.5f;
+            vertex.texCoord[1] = vertex.layerUV[1] = (corner.y + 1) * 0.5f;
+            chunk.vertices.push_back(vertex);
+        }
+        chunk.indices = {0,1,2, 0,2,3};
+        chunk.normalGrid.resize(pipeline::ChunkMesh::kNormalGridSize * pipeline::ChunkMesh::kNormalGridSize * 4);
+        for (size_t i = 0; i < chunk.normalGrid.size(); i += 4) {
+            chunk.normalGrid[i] = chunk.normalGrid[i + 1] = 128;
+            chunk.normalGrid[i + 2] = chunk.normalGrid[i + 3] = 255;
+        }
+        if (!renderer.getTerrainRenderer()->loadTerrain(*mesh, {}, 0, 0)) return 1;
+    }
+    if (scene.value("waterPlane", false)) {
+        pipeline::WMOLiquid liquid;
+        liquid.xTiles = liquid.yTiles = 8;
+        liquid.xVerts = liquid.yVerts = 9;
+        liquid.basePosition = origin + glm::vec3(-16.0f, -16.0f, -1.0f);
+        liquid.liquidType = 1;
+        liquid.heights.assign(81, liquid.basePosition.z);
+        liquid.flags.assign(64, 0);
+        if (!renderer.liquidScene().addWmoLiquid(liquid, glm::mat4(1.0f), 1, rendering::LiquidShelter::Open)) return 1;
+    }
+    if (scene.value("selection", false)) renderer.setSelectionCircle(origin, 2.0f, {0, 1, 0});
+
     // The camera: placed, aimed, or backed off to see the first model.
     auto* camera = renderer.getCamera();
     camera->setFov(scene.value("fov", 60.0f));
@@ -735,7 +778,25 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
         }
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
+        if (scene.value("discardFirstExtraction", false) && frame == 0) (void)renderer.extractFrameInputs();
         const auto inputs = renderer.extractFrameInputs();
+        if (scene.value("removeSceneAfterExtract", false) &&
+            frame == scene.value("mutateAtFrame", frames - 1)) {
+            for (const auto& placement : placements) {
+                if (placement.wmo) renderer.scene().worldModels().removeInstance(placement.instanceId);
+                else renderer.scene().models().removeInstance(placement.instanceId);
+            }
+            for (const auto& c : movingCharacters) renderer.scene().characters().removeInstance(c.instance);
+            renderer.applySceneCommands();
+            for (const auto& placement : placements) {
+                if (placement.wmo) renderer.getWMORenderer()->unloadModel(placement.modelId);
+                else renderer.getM2Renderer()->unloadModel(placement.modelId);
+            }
+            renderer.getCharacterRenderer()->clear();
+            renderer.getTerrainRenderer()->removeTile(0, 0);
+            renderer.liquidScene().clear();
+            renderer.clearSelectionCircle();
+        }
         if (scene.value("mutateAfterExtract", false) &&
             frame == scene.value("mutateAtFrame", frames - 1)) {
             // Regression: the next game frame must not change a frame that

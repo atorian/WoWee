@@ -167,7 +167,7 @@ bool GrassRenderer::setPopulation(const pipeline::GrassBladeSample* blades, size
     const bool complete = count <= kMaxBlades;
     count = std::min<size_t>(count, kMaxBlades);
     if (count == 0) {
-        bladeCount_ = 0;
+        population_ = std::make_shared<const std::vector<GrassBladeGPU>>();
         return complete;
     }
 
@@ -185,14 +185,7 @@ bool GrassRenderer::setPopulation(const pipeline::GrassBladeSample* blades, size
         packed[i].groundHighlight = glm::vec4(b.groundHighlight, b.submerged ? -fade : fade);
     }
 
-    // Staged through uploadIntoBuffer, which keeps the staging buffer alive
-    // until the frame that copies from it is done - see its header for the
-    // patchy field that came of destroying it any earlier.
-    const VkDeviceSize bytes = sizeof(GrassBladeGPU) * count;
-    if (!uploadIntoBuffer(*vkCtx_, packed.data(), bytes, sourceBuffer_)) return false;
-
-    bladeCount_ = static_cast<uint32_t>(count);
-    framesSincePopulated_ = 0;
+    population_ = std::make_shared<const std::vector<GrassBladeGPU>>(std::move(packed));
     return complete;
 }
 
@@ -430,7 +423,25 @@ bool GrassRenderer::buildDrawPipeline() {
 }
 
 void GrassRenderer::dispatchCull(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera,
-                                 const glm::vec3& rangeCenter) {
+                                 const glm::vec3& rangeCenter, const Frame& input) {
+    if (input.blades != uploadedPopulation_) {
+        uploadedPopulation_ = input.blades;
+        bladeCount_ = 0;
+        if (input.blades && !input.blades->empty()) {
+            if (recordBufferUpload(*vkCtx_, cmd, sourceBuffer_, input.blades->data(), input.blades->size() * sizeof(GrassBladeGPU)))
+                bladeCount_ = static_cast<uint32_t>(input.blades->size());
+            else LOG_ERROR("Grass population upload failed - this field is not drawn");
+        }
+        framesSincePopulated_ = 0;
+    }
+    if (input.profiles != uploadedProfiles_) {
+        uploadedProfiles_ = input.profiles;
+        if (input.profiles && !input.profiles->empty() &&
+            !recordBufferUpload(*vkCtx_, cmd, profileBuffer_, input.profiles->data(), input.profiles->size() * sizeof(GrassProfileGPU))) {
+            LOG_ERROR("Grass profile upload failed - this field is not drawn");
+            bladeCount_ = 0;
+        }
+    }
     if (!isReady() || frameIndex >= kFrames || bladeCount_ == 0) return;
 
     // WOWEE_GRASS_DEBUG=1: every couple of seconds, read back how many blades
@@ -497,7 +508,7 @@ void GrassRenderer::dispatchCull(VkCommandBuffer cmd, uint32_t frameIndex, const
         }
         // Frustum from the camera; range from the player the window is built
         // around. Two different centres on purpose - see the shader comment.
-        uniforms.cameraPos = glm::vec4(rangeCenter, cullDistance_ * cullDistance_);
+        uniforms.cameraPos = glm::vec4(rangeCenter, input.distance * input.distance);
         // Read once, the way every rendering diagnostic flag is.
         static const bool noFrustum = envFlagEnabled("WOWEE_GRASS_NOCULL");
         static const bool noDistance = envFlagEnabled("WOWEE_GRASS_NODIST");
@@ -568,8 +579,8 @@ bool GrassRenderer::setProfiles(const std::vector<pipeline::GrassProfile>& profi
         packed[i].headColorB = glm::vec4(profiles[i].headColorB, 0.0f);
     }
 
-    const VkDeviceSize bytes = sizeof(GrassProfileGPU) * count;
-    return uploadIntoBuffer(*vkCtx_, packed.data(), bytes, profileBuffer_);
+    profiles_ = std::make_shared<const std::vector<GrassProfileGPU>>(std::move(packed));
+    return true;
 }
 
 void GrassRenderer::recreatePipelines() {
@@ -623,8 +634,8 @@ void GrassRenderer::reportCullResult() {
     destroyBuffer(vkCtx_->getAllocator(), readback);
 }
 
-void GrassRenderer::render(VkCommandBuffer cmd, uint32_t frameIndex,
-                           VkDescriptorSet perFrameSet) {
+void GrassRenderer::record(VkCommandBuffer cmd, uint32_t frameIndex,
+                           VkDescriptorSet perFrameSet, const Frame& input) {
     if (!isReady() || frameIndex >= kFrames || bladeCount_ == 0) return;
 
     if (!drawReported_) {
@@ -638,7 +649,7 @@ void GrassRenderer::render(VkCommandBuffer cmd, uint32_t frameIndex,
                             &perFrameSet, 0, nullptr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 1, 1,
                             &drawSet_[frameIndex], 0, nullptr);
-    const float fade[2] = {cullDistance_ * kFadeStartFraction, cullDistance_};
+    const float fade[2] = {input.distance * kFadeStartFraction, input.distance};
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(fade), fade);
     vkCmdBindIndexBuffer(cmd, indexBuffer_, 0, VK_INDEX_TYPE_UINT16);
     // One command, and its instance count came from the GPU.

@@ -34,12 +34,13 @@ public:
      * @param fogDensity   Optional fog density from lighting (reduces star visibility)
      */
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,
-                float cloudDensity = 0.0f, float fogDensity = 0.0f);
+                float cloudDensity, float fogDensity, float animationTime);
 
     /**
      * Update star twinkle animation
      */
     void update(float deltaTime);
+    float animationTime() const { return twinkleTime; }
 
     /**
      * Enable/disable star rendering

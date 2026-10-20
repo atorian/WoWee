@@ -684,12 +684,6 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             }
         }
 
-        // Fresh buffers hold no bone data - invalidate any per-instance upload
-        // tracking so prepareRender() re-uploads everything (defensive: instances
-        // are normally empty when this runs, but re-init must not skip uploads).
-        for (auto& inst : scene_->instances) {
-            inst.megaBoneUploadedSlot[0] = inst.megaBoneUploadedSlot[1] = 0;
-        }
     }
 
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
@@ -1041,6 +1035,7 @@ void M2Renderer::invalidateCullOutput(uint32_t frameIndex) {
 
 void M2Renderer::shutdown() {
     LOG_INFO("Shutting down M2 renderer...");
+    recording_ = std::make_shared<Frame>();
     if (!vkCtx_) return;
 
     vkCtx_->waitIdle();
@@ -1048,8 +1043,8 @@ void M2Renderer::shutdown() {
     VmaAllocator alloc = vkCtx_->getAllocator();
 
     // Delete model GPU resources
-    for (auto& [id, model] : models) {
-        destroyModelGPU(model);
+    for (auto& [id, modelResource] : models) {
+        destroyModelGPU(modelResource);
     }
     models.clear();
     pinnedModelIds_.clear();
@@ -1155,13 +1150,11 @@ void M2Renderer::shutdown() {
     initialized_ = false;
 }
 
-void M2Renderer::destroyModelGPU(M2ModelGPU& model) {
+void M2Renderer::destroyModelGPU(std::shared_ptr<M2ModelGPU> retired) {
     if (!vkCtx_) return;
-    releaseRtModel(model);
+    releaseRtModel(*retired);
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
-    auto retired = std::make_shared<M2ModelGPU>(std::move(model));
-    model = {};
     VkContext* ctx = vkCtx_;
     const VmaAllocator alloc = vkCtx_->getAllocator();
     const VkDescriptorPool pool = materialDescPool_;
@@ -1275,6 +1268,47 @@ void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
     vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
 }
 
+bool M2Renderer::makeModelWritable(uint32_t modelId) {
+    auto& current = models.at(modelId);
+    if (current.use_count() == 1) return true;
+    auto next = std::make_shared<M2ModelGPU>(*current);
+    // A previous snapshot owns the old description and its material bindings.
+    // Only changed models are copied; ordinary frames retain the same resource.
+    for (auto& batch : next->batches) {
+        batch.materialSet = VK_NULL_HANDLE;
+        batch.materialSlot = {};
+    }
+    bool ready = true;
+    for (auto& batch : next->batches) {
+        batch.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
+        batch.materialSet = allocateMaterialSet();
+        if (!batch.materialSlot || !batch.materialSet) { ready = false; break; }
+        writeBatchMaterial(*next, batch);
+        writeBatchDescriptors(batch);
+    }
+    const auto retireMaterials = [ctx = vkCtx_, pool = materialDescPool_, slots = materialSlots_](std::shared_ptr<M2ModelGPU> model) {
+        ctx->deferAfterAllFrameFences([ctx, pool, slots, model = std::move(model)] {
+            for (const auto& batch : model->batches) {
+                if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
+                if (slots) slots->free(batch.materialSlot);
+            }
+        });
+    };
+    if (!ready) {
+        retireMaterials(std::move(next));
+        LOG_ERROR("M2 model ", modelId, " material version allocation failed - keeping its previous materials");
+        return false;
+    }
+    retireMaterials(current);
+    current = std::move(next);
+    for (auto& inst : scene_->instances) if (inst.modelId == modelId) {
+        inst.cachedModel = current.get();
+        inst.recomputeCachedCullFactors();
+        fileInCullGrid(inst);
+    }
+    return true;
+}
+
 void M2Renderer::retryPendingBatchTextures() {
     // loadTexture itself decides when a failed key is worth reading again;
     // asking before then is a map lookup and returns the white fallback.
@@ -1282,8 +1316,8 @@ void M2Renderer::retryPendingBatchTextures() {
         const PendingBatchTexture pending = pendingBatchTextures_[i];
         auto it = models.find(pending.modelId);
         M2ModelGPU::BatchGPU* batch =
-            (it != models.end() && pending.batchIndex < it->second.batches.size())
-                ? &it->second.batches[pending.batchIndex] : nullptr;
+            (it != models.end() && pending.batchIndex < it->second->batches.size())
+                ? &it->second->batches[pending.batchIndex] : nullptr;
         if (!batch || batch->pendingTextureKey.empty()) {
             pendingBatchTextures_[i] = pendingBatchTextures_.back();
             pendingBatchTextures_.pop_back();
@@ -1294,9 +1328,9 @@ void M2Renderer::retryPendingBatchTextures() {
             ++i;
             continue;
         }
-        // The batch has been hidden since it loaded, so nothing in flight
-        // refers to its descriptor set or material buffer.
-        M2ModelGPU& model = it->second;
+        if (!makeModelWritable(pending.modelId)) { ++i; continue; }
+        batch = &it->second->batches[pending.batchIndex];
+        M2ModelGPU& model = (*it->second);
         batch->texture = tex.get();
         applyBatchTextureProps(*batch, tex.info());
         model.textureRefs.push_back(std::move(tex));
@@ -1341,24 +1375,26 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
 }
 
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
+    if (const auto existing = models.find(modelId); existing != models.end() && existing->second->isSpellEffect) return;
+    if (models.contains(modelId) && !makeModelWritable(modelId)) return;
     auto it = models.find(modelId);
     if (it != models.end()) {
-        it->second.isSpellEffect = true;
+        it->second->isSpellEffect = true;
         // An effect collides with nothing: none of its instances is solid,
         // and those placed later are given no shape to be.
-        if (it->second.collision && collision_) {
+        if (it->second->collision && collision_) {
             for (const auto& inst : scene_->instances) {
                 if (inst.modelId == modelId) collision_->removeM2(inst.id);
             }
         }
-        it->second.collision.reset();
-        for (auto& batch : it->second.batches) writeBatchMaterial(it->second, batch);
+        it->second->collision.reset();
+        for (auto& batch : it->second->batches) writeBatchMaterial((*it->second), batch);
         // Spell effects MUST have bone animation for ribbons/particles to work.
         // The classifier may have set disableAnimation=true based on name tokens
         // (e.g. "chest" in HolySmite_Low_Chest.m2) - override that for spell effects.
-        if (it->second.disableAnimation && it->second.hasAnimation) {
-            it->second.disableAnimation = false;
-            LOG_INFO("SpellEffect: re-enabled animation for '", it->second.name, "'");
+        if (it->second->disableAnimation && it->second->hasAnimation) {
+            it->second->disableAnimation = false;
+            LOG_INFO("SpellEffect: re-enabled animation for '", it->second->name, "'");
         }
     }
 }
@@ -1368,7 +1404,7 @@ void M2Renderer::censusInstance(const M2Instance& instance) {
     if (!kCensus) return;
     auto it = models.find(instance.modelId);
     if (it == models.end()) return;
-    const M2ModelGPU& gpu = it->second;
+    const M2ModelGPU& gpu = (*it->second);
     static std::set<std::string> said;
     if (!said.insert(gpu.name).second) return;
     const float authored = gpu.boundMax.z - gpu.boundMin.z;
@@ -2334,10 +2370,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // has. The rebuild walked every instance in the world on the next update,
     // for every model that loaded: 26-53 ms each time something new came into
     // view in Dalaran.
-    models[modelId] = std::move(gpuModel);
+    models[modelId] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
 
-    LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId].vertexCount, " vertices, ",
-              models[modelId].indexCount / 3, " triangles, ", models[modelId].batches.size(), " batches)");
+    LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId]->vertexCount, " vertices, ",
+              models[modelId]->indexCount / 3, " triangles, ", models[modelId]->batches.size(), " batches)");
 
     retryPendingBatchTextures();
 
@@ -2414,7 +2450,7 @@ void M2Renderer::releaseRtModel(M2ModelGPU& gpuModel) {
 }
 
 void M2Renderer::syncRtScene() {
-    if (!rtScene_ || !rtScene_->isActive()) return;
+    if (!rtScene_) return;
     const uint64_t gen = ++rtSyncGeneration_;
     auto track = [&](uint32_t id, uint32_t mesh) {
         if (id >= rtSeen_.size()) {
@@ -2426,7 +2462,7 @@ void M2Renderer::syncRtScene() {
     };
     for (auto& inst : scene_->instances) {
         auto it = models.find(inst.modelId);
-        const uint32_t mesh = it != models.end() ? it->second.rtMesh : RtScene::kInvalid;
+        const uint32_t mesh = it != models.end() ? it->second->rtMesh : RtScene::kInvalid;
         const bool wanted = mesh != RtScene::kInvalid && inst.fade >= 1.0f && !inst.hidden;
         // Still ours, not claimed by another instance this pass (a copied
         // M2Instance carries its original's id), and placing the same mesh.

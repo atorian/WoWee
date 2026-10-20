@@ -220,7 +220,7 @@ CHECKS = [
     # plan, when the M2 and WMO recordings stopped reading the scene.
     ("record_scene_check.py",
      r"^(\d+) reads of the scene while recording", 0,
-     "reads of the renderers' scene from their recording functions"),
+     "mutable world scene or simulations read during recording"),
     ("frame_inputs_check.py",
      r"^(\d+) live frame input reads while recording", 0,
      "mutable game-side camera, lighting or weather read during frame recording"),

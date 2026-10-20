@@ -26,9 +26,15 @@ public:
     // Selection circle
     void setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color);
     void clearSelectionCircle();
-    /// Drawn on the ground under the target, as `world` has it.
-    void renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
-                               VkCommandBuffer cmd, const collision::CollisionWorld& world);
+    struct Selection {
+        glm::mat4 model{1.0f};
+        glm::vec4 color{1.0f};
+        bool visible = false;
+    };
+    /// Queries the floor while extracting, before the world can change.
+    Selection extractSelection(const collision::CollisionWorld& world);
+    void recordSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
+                               VkCommandBuffer cmd, const Selection& selection);
 
     // Fullscreen color overlay (underwater tint, etc.)
     void renderOverlay(const glm::vec4& color, VkCommandBuffer cmd);

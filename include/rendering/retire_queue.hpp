@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
+#include <memory>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -27,26 +29,72 @@ namespace wowee::rendering {
 /// Releases are filed from any thread; they run on the thread that reports a
 /// completed frame (or flushes), outside the lock, so a release may file
 /// another.
+struct SnapshotUse {
+    std::atomic<bool> open{true};
+    std::atomic<uint64_t> lastFrame{0};
+};
+
+/// Kept by a CPU snapshot until it can no longer be recorded. GPU completion
+/// alone cannot release resources an unrecorded snapshot still names.
+class SnapshotLease {
+public:
+    explicit SnapshotLease(std::shared_ptr<SnapshotUse> use) : use_(std::move(use)) {}
+    ~SnapshotLease() { use_->open.store(false, std::memory_order_release); }
+    SnapshotLease(const SnapshotLease&) = delete;
+    SnapshotLease& operator=(const SnapshotLease&) = delete;
+    void usedByFrame(uint64_t frame) const {
+        uint64_t previous = use_->lastFrame.load(std::memory_order_relaxed);
+        while (previous < frame && !use_->lastFrame.compare_exchange_weak(previous, frame,
+                std::memory_order_release, std::memory_order_relaxed)) {}
+    }
+private:
+    std::shared_ptr<SnapshotUse> use_;
+};
+
 class RetireQueue {
 public:
-    /// Run `release` once frame `lastUse` has completed.
+    std::shared_ptr<SnapshotLease> holdSnapshot() {
+        auto use = std::make_shared<SnapshotUse>();
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshots_.emplace_back(use);
+        return std::make_shared<SnapshotLease>(std::move(use));
+    }
+
+    /// Run `release` once frame `lastUse` and older CPU snapshots have completed.
     void retireAfter(uint64_t lastUse, std::function<void()> release) {
         std::lock_guard<std::mutex> lock(mutex_);
-        entries_.emplace_back(lastUse, std::move(release));
+        Entry entry{lastUse, std::move(release), {}};
+        auto keep = snapshots_.begin();
+        for (auto& weak : snapshots_) {
+            if (auto use = weak.lock()) {
+                if (use->open.load(std::memory_order_acquire)) {
+                    entry.snapshots.push_back(use);
+                    *keep++ = weak;
+                }
+            }
+        }
+        snapshots_.erase(keep, snapshots_.end());
+        entries_.push_back(std::move(entry));
     }
 
     /// Runs, in the order they were filed, the releases whose last frame is
     /// at or before `completedFrame`. Returns how many ran.
-    size_t runCompleted(uint64_t completedFrame) {
+    size_t runCompleted(uint64_t completedFrame, bool deviceIdle = false) {
         std::vector<std::function<void()>> due;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto keep = entries_.begin();
             for (auto& entry : entries_) {
-                if (entry.first <= completedFrame) {
-                    due.push_back(std::move(entry.second));
+                bool ready = entry.lastUse <= completedFrame;
+                for (const auto& use : entry.snapshots) {
+                    ready = ready && !use->open.load(std::memory_order_acquire) &&
+                            use->lastFrame.load(std::memory_order_acquire) <= completedFrame;
+                }
+                if (deviceIdle || ready) {
+                    due.push_back(std::move(entry.release));
                 } else {
-                    *keep++ = std::move(entry);
+                    if (&*keep != &entry) *keep = std::move(entry);
+                    ++keep;
                 }
             }
             entries_.erase(keep, entries_.end());
@@ -62,7 +110,7 @@ public:
     size_t runAll() {
         size_t ran = 0;
         for (;;) {
-            const size_t now = runCompleted(UINT64_MAX);
+            const size_t now = runCompleted(UINT64_MAX, true);
             if (now == 0) return ran;
             ran += now;
         }
@@ -75,7 +123,13 @@ public:
 
 private:
     mutable std::mutex mutex_;
-    std::vector<std::pair<uint64_t, std::function<void()>>> entries_;
+    struct Entry {
+        uint64_t lastUse;
+        std::function<void()> release;
+        std::vector<std::shared_ptr<SnapshotUse>> snapshots;
+    };
+    std::vector<Entry> entries_;
+    std::vector<std::weak_ptr<SnapshotUse>> snapshots_;
 };
 
 }  // namespace wowee::rendering

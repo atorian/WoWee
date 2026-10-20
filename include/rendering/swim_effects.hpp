@@ -52,7 +52,9 @@ public:
     /// characterPosition is where a third-person viewer's character stands.
     void update(const Camera& camera, const ViewerMotion& viewer, const glm::vec3& characterPosition,
                 const LiquidScene& water, float deltaTime);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    struct Frame { std::vector<float> ripples, bubbles, insects; };
+    Frame extract() const { return {rippleVertexData, bubbleVertexData, insectVertexData}; }
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
     void spawnFootSplash(const glm::vec3& footPos, float waterH);
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
 

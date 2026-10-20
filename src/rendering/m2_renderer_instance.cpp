@@ -248,7 +248,6 @@ void M2Renderer::setInstancesHidden(const std::vector<uint32_t>& instanceIds, bo
             // uploaded again wherever it lands.
             inst.lastCullVisible = 1;
             inst.hizPrevCulledFrames = 2;
-            inst.megaBoneUploadedSlot[0] = inst.megaBoneUploadedSlot[1] = 0;
             fileInIndexSets(idxIt->second);
         }
     }
@@ -402,7 +401,7 @@ bool M2Renderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
 bool M2Renderer::modelHasAnimation(uint32_t modelId, uint32_t animationId) const {
     const auto it = models.find(modelId);
     if (it == models.end()) return false;
-    for (const auto& seq : it->second.sequences) {
+    for (const auto& seq : it->second->sequences) {
         if (seq.id == animationId) return true;
     }
     return false;
@@ -411,7 +410,7 @@ bool M2Renderer::modelHasAnimation(uint32_t modelId, uint32_t animationId) const
 float M2Renderer::modelAnimationDuration(uint32_t modelId, uint32_t animationId) const {
     const auto it = models.find(modelId);
     if (it == models.end()) return 0.0f;
-    for (const auto& seq : it->second.sequences) {
+    for (const auto& seq : it->second->sequences) {
         if (seq.id == animationId) return static_cast<float>(seq.duration);
     }
     return 0.0f;
@@ -682,12 +681,13 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 }
 
 void M2Renderer::clear() {
+    scene_->identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
     ++instanceLayoutRevision_;
     if (vkCtx_) {
         // Their owners see them gone (hasPosedEmitters) and ask again.
         destroyPosedEmitterModels();
-        for (auto& [id, model] : models) {
-            destroyModelGPU(model);
+        for (auto& [id, modelResource] : models) {
+            destroyModelGPU(modelResource);
         }
         for (auto& inst : scene_->instances) {
             destroyInstanceBones(inst);
@@ -703,8 +703,6 @@ void M2Renderer::clear() {
     scene_->cullGrid_.clear();
     scene_->boneSeedInstanceByModel_.clear();
     scene_->instanceDedupMap_.clear();
-    for (auto& ids : scene_->cullSubmittedIds_) ids.clear();
-    for (auto& ids : scene_->cullReadableIds_) ids.clear();
     scene_->animatedInstanceIndices_.clear();
     scene_->particleOnlyInstanceIndices_.clear();
     scene_->particleInstanceIndices_.clear();
@@ -750,7 +748,8 @@ void M2Renderer::cleanupUnusedModels() {
     // immediately - this prevents thrashing when GO models are briefly
     // instance-free between despawn and respawn cycles.
     std::vector<uint32_t> toRemove;
-    for (const auto& [id, model] : models) {
+    for (const auto& [id, modelResource] : models) {
+        (void)modelResource;
         if (usedModelIds.find(id) != usedModelIds.end() ||
             pinnedModelIds_.find(id) != pinnedModelIds_.end()) {
             // Model still in use or pinned - clear any pending unused timestamp
@@ -865,7 +864,8 @@ uint64_t M2Renderer::modelDataBytes() const {
     using pipeline::vectorBytes;
     const auto track = [](const pipeline::M2AnimationTrack& t) { return heapBytes(t); };
     uint64_t total = 0;
-    for (const auto& [id, m] : models) {
+    for (const auto& [id, mResource] : models) {
+        auto& m = *mResource;
         total += sizeof(M2ModelGPU);
         total += vectorBytes(m.bones, [](const pipeline::M2Bone& b) { return heapBytes(b); });
         total += vectorBytes(m.sequences) + vectorBytes(m.globalSequenceDurations);

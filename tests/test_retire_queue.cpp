@@ -81,3 +81,28 @@ TEST_CASE("releases filed from several threads all run exactly once", "[retire]"
     queue.runCompleted(10);
     CHECK(released.load() == kThreads * kEach);
 }
+
+TEST_CASE("unrecorded snapshots retain resources past earlier GPU completions", "[retire]") {
+    RetireQueue queue;
+    auto snapshot = queue.holdSnapshot();
+    bool released = false;
+    queue.retireAfter(1, [&] { released = true; });
+    queue.runCompleted(3);
+    CHECK_FALSE(released);
+    snapshot->usedByFrame(5);
+    snapshot.reset();
+    queue.runCompleted(4);
+    CHECK_FALSE(released);
+    queue.runCompleted(5);
+    CHECK(released);
+}
+
+TEST_CASE("cancelled snapshots release without a fictitious GPU submission", "[retire]") {
+    RetireQueue queue;
+    auto snapshot = queue.holdSnapshot();
+    bool released = false;
+    queue.retireAfter(2, [&] { released = true; });
+    snapshot.reset();
+    queue.runCompleted(2);
+    CHECK(released);
+}

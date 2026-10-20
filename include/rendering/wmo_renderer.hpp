@@ -258,6 +258,10 @@ public:
      * @param camera Camera for frustum culling
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
+    struct Frame;
+    std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
+                                        const std::vector<LocalLight>& lights, bool reflection = false);
+    void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender();
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread
@@ -320,7 +324,7 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return passLists_[static_cast<size_t>(Pass::View)].drawCalls; }
+    uint32_t getDrawCallCount() const { return viewDrawCallCount_; }
     /// Draw calls the depth-only passes recorded this frame, from the frame's
     /// first one (the sun's) on.
     uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
@@ -352,7 +356,6 @@ public:
      */
     void setPortalCulling(bool enabled) { portalCulling = enabled; }
     /// The frame's point lights, which every group picks its nearest from.
-    void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
     bool isPortalCullingEnabled() const { return portalCulling; }
 
     /**
@@ -370,12 +373,12 @@ public:
     /**
      * Get number of groups culled by portals last frame
      */
-    uint32_t getPortalCulledGroups() const { return passLists_[static_cast<size_t>(Pass::View)].portalCulled; }
+    uint32_t getPortalCulledGroups() const { return recording_->view.portalCulled; }
 
     /**
      * Get number of groups culled by distance last frame
      */
-    uint32_t getDistanceCulledGroups() const { return passLists_[static_cast<size_t>(Pass::View)].distanceCulled; }
+    uint32_t getDistanceCulledGroups() const { return recording_->view.distanceCulled; }
 
     /**
      * Enable/disable GPU occlusion query culling (stubbed in Vulkan)
@@ -462,7 +465,9 @@ private:
     /**
      * WMO group GPU resources
      */
+    struct GroupDrawData;
     struct GroupResources {
+        mutable std::shared_ptr<const GroupDrawData> drawData;
         ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
         ::VkBuffer indexBuffer = VK_NULL_HANDLE;
@@ -548,6 +553,16 @@ private:
     /**
      * Loaded WMO model data
      */
+    /// Immutable GPU description, shared across every instance and frame until
+    /// a material binding changes. Collision meshes stay in GroupResources.
+    struct GroupDrawData {
+        ::VkBuffer vertexBuffer = VK_NULL_HANDLE, indexBuffer = VK_NULL_HANDLE;
+        glm::vec3 boundingBoxMin{0}, boundingBoxMax{0};
+        uint32_t groupFlags = 0;
+        bool isLOD = false;
+        std::vector<GroupResources::MergedBatch> mergedBatches;
+    };
+
     struct ModelData {
         uint32_t id;
         std::vector<GroupResources> groups;
@@ -829,6 +844,7 @@ private:
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
+    uint64_t extractedMaterialVersion_ = 0, appliedMaterialVersion_ = 0;
     bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
 
     // Rendering state
@@ -856,13 +872,17 @@ private:
 
     /// One instance as a pass draws it: what the recording needs, copied out
     /// of the scene by the cull, so the recording reads no instance.
+    struct GroupDraw {
+        std::shared_ptr<const GroupDrawData> gpu;
+        glm::vec3 worldMin{0}, worldMax{0};
+        LocalLightSet lights = kNoLocalLights;
+    };
     struct DrawEntry {
         glm::mat4 modelMatrix{1.0f};
         float scale = 1.0f;
         /// Valid for the frame: models are unloaded only between frames.
-        const ModelData* model = nullptr;
         /// The model's groups this pass draws.
-        std::vector<uint32_t> groups;
+        std::vector<GroupDraw> groups;
     };
 
     /// What one pass draws, rebuilt by its cull each time it runs. Entries
@@ -890,16 +910,17 @@ private:
         void dropLast() { --used; }
         [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
     };
-    DrawList passLists_[static_cast<size_t>(Pass::Count)];
+    uint32_t viewDrawCallCount_ = 0;
     /// The depth-only passes', one at a time on the main thread.
-    DrawList shadowList_;
+
 
     /// The instances the camera sees and their groups that are drawn.
     void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list) const;
-    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                    DrawList& list) const;
+    uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
+                    const DrawList& list) const;
     /// The instances, shown, and groups that reach a shadow map of this centre and reach.
-    void cullShadow(const glm::vec3& shadowCenter, float cullRadius, DrawList& list) const;
+    void extractDepth(DrawList& list) const;
+    GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;
 
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
@@ -908,6 +929,17 @@ private:
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;
+
+public:
+    struct Frame {
+        DrawList view, reflection, depth;
+        bool wireframe = false;
+        uint64_t materialVersion = 0;
+        int normalMap = 0, pom = 0, samples = 0;
+        float normalStrength = 1;
+    };
+private:
+    std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
 
 };
 

@@ -169,7 +169,7 @@ TerrainBake::Atlas* TerrainBake::atlas(int tileX, int tileY) {
     VkDevice device = ctx_->getDevice();
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    auto made = std::make_unique<Atlas>();
+    auto made = std::make_shared<Atlas>();
     made->color = createImage(device, ctx_->getAllocator(), kTerrainBakeAtlasSize, kTerrainBakeAtlasSize,
                               kAtlasFormat, usage, VK_SAMPLE_COUNT_1_BIT, mipLevels_);
     made->relief = createImage(device, ctx_->getAllocator(), kTerrainBakeAtlasSize, kTerrainBakeAtlasSize,
@@ -223,8 +223,14 @@ uint64_t TerrainBake::atlasBytes() const {
     return atlases_.size() * 2 * (first + first / 3);
 }
 
-void TerrainBake::prepareNewAtlases(VkCommandBuffer cmd) {
-    for (auto& [key, atlas] : atlases_) {
+std::vector<std::shared_ptr<TerrainBake::Atlas>> TerrainBake::extractNewAtlases() const {
+    std::vector<std::shared_ptr<Atlas>> result;
+    for (const auto& [key, atlas] : atlases_) if (!atlas->ready.load()) result.push_back(atlas);
+    return result;
+}
+
+void TerrainBake::prepareNewAtlases(VkCommandBuffer cmd, std::span<const std::shared_ptr<Atlas>> atlases) {
+    for (const auto& atlas : atlases) {
         if (atlas->ready) continue;
         const VkImage images[2] = {atlas->color.image, atlas->relief.image};
         std::array<VkImageMemoryBarrier2, 2> toClear{};

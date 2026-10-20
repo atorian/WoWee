@@ -173,8 +173,6 @@ bool ChargeEffect::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayo
         return false;
     }
 
-    ribbonVerts_.reserve(MAX_TRAIL_POINTS * 2 * 6);
-    dustVerts_.reserve(MAX_DUST * 5);
     dustPuffs_.reserve(MAX_DUST);
 
     return true;
@@ -397,16 +395,11 @@ void ChargeEffect::update(float deltaTime, SceneCommands::Models& models) {
     }
 }
 
-void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    VkDeviceSize offset = 0;
-    // This frame's copies of the vertex buffers: the frame before may still
-    // be drawing from the others.
-    const uint32_t frame = vkCtx_->getCurrentFrame();
-
-    // ---- Render ribbon trail as triangle strip ----
-    if (trail_.size() >= 2 && ribbonPipeline_ != VK_NULL_HANDLE) {
-        ribbonVerts_.clear();
-
+ChargeEffect::Frame ChargeEffect::extract() const {
+    Frame input;
+    auto& ribbonVerts_ = input.ribbon;
+    auto& dustVerts_ = input.dust;
+    if (trail_.size() >= 2) {
         int n = static_cast<int>(trail_.size());
         for (int i = 0; i < n; i++) {
             const auto& tp = trail_[i];
@@ -442,23 +435,7 @@ void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
             ribbonVerts_.push_back(1.0f);  // height = top
         }
 
-        // Upload to mapped buffer
-        VkDeviceSize uploadSize = ribbonVerts_.size() * sizeof(float);
-        if (uploadSize > 0 && ribbonDynamicVB_.valid()) {
-            std::memcpy(ribbonDynamicVB_.mapped(frame), ribbonVerts_.data(), uploadSize);
-        }
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ribbonPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ribbonPipelineLayout_,
-            0, 1, &perFrameSet, 0, nullptr);
-        VkBuffer ribbonVB = ribbonDynamicVB_.buffer(frame);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonVB, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(n * 2), 1, 0, 0);
     }
-
-    // ---- Render dust puffs ----
-    if (!dustPuffs_.empty() && dustPipeline_ != VK_NULL_HANDLE) {
-        dustVerts_.clear();
         for (const auto& d : dustPuffs_) {
             dustVerts_.push_back(d.position.x);
             dustVerts_.push_back(d.position.y);
@@ -467,19 +444,24 @@ void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
             dustVerts_.push_back(d.alpha);
         }
 
-        // Upload to mapped buffer
-        VkDeviceSize uploadSize = dustVerts_.size() * sizeof(float);
-        if (uploadSize > 0 && dustDynamicVB_.valid()) {
-            std::memcpy(dustDynamicVB_.mapped(frame), dustVerts_.data(), uploadSize);
-        }
+    return input;
+}
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dustPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dustPipelineLayout_,
-            0, 1, &perFrameSet, 0, nullptr);
-        VkBuffer dustVB = dustDynamicVB_.buffer(frame);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &dustVB, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(dustPuffs_.size()), 1, 0, 0);
-    }
+void ChargeEffect::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input) {
+    const uint32_t frame = vkCtx_->getCurrentFrame();
+    const VkDeviceSize offset = 0;
+    const auto draw = [&](const std::vector<float>& vertices, uint32_t stride, const PerFrameBuffer& vb,
+                          VkPipeline pipeline, VkPipelineLayout layout) {
+        if (vertices.empty() || !pipeline || !vb.valid()) return;
+        std::memcpy(vb.mapped(frame), vertices.data(), vertices.size() * sizeof(float));
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &perFrameSet, 0, nullptr);
+        const ::VkBuffer buffer = vb.buffer(frame);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
+        vkCmdDraw(cmd, static_cast<uint32_t>(vertices.size() / stride), 1, 0, 0);
+    };
+    draw(input.ribbon, 6, ribbonDynamicVB_, ribbonPipeline_, ribbonPipelineLayout_);
+    draw(input.dust, 5, dustDynamicVB_, dustPipeline_, dustPipelineLayout_);
 }
 
 } // namespace rendering

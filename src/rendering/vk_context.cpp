@@ -2091,21 +2091,6 @@ void VkContext::setMsaaSamples(VkSampleCountFlagBits samples) {
     swapchainDirty = true;
 }
 
-static VkSubpassDependency sceneAttachmentDependency() {
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    return dependency;
-}
 
 void VkContext::frameTargetFailed(const char* target, VkResult result) {
     if (auto line = frameTargets_.failed(target, result, swapchainExtent.width, swapchainExtent.height,
@@ -3077,7 +3062,7 @@ void VkContext::resetFrameSyncState() {
     // construction rather than because work finished. The pools they free from
     // are still alive at this point, which is the condition flushDeferredCleanup
     // is documented as needing.
-    flushDeferredCleanup();
+    retire_.runCompleted(frameNumber() - 1);
     // And every frame submitted has completed.
     completedFrame_ = frameNumber() - 1;
 

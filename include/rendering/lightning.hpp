@@ -40,7 +40,10 @@ public:
                             const VkPipelineShaderStageCreateInfo& fragStage);
 
     void update(float deltaTime, const Camera& camera);
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    struct BoltDraw { std::vector<glm::vec3> vertices; float brightness = 0; };
+    struct Frame { std::vector<BoltDraw> bolts; float flash = 0; };
+    Frame extract() const;
+    void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
 
     // Control
     void setEnabled(bool enabled);
@@ -78,8 +81,8 @@ private:
     void updateFlash(float deltaTime);
     void spawnRandomStrike(const glm::vec3& cameraPos);
 
-    void renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
-    void renderFlash(VkCommandBuffer cmd);
+    void recordBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Frame& input);
+    void recordFlash(VkCommandBuffer cmd, float intensity);
 
     bool enabled = true;
     float intensity = 0.5f;  // Strike frequency multiplier

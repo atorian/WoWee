@@ -38,14 +38,6 @@ struct TerrainParamsUBO {
 
 // The fragment stage's push constants, after the vertex stage's
 // GPUPushConstants. Matches `Surface` in terrain.frag.glsl.
-struct TerrainSurfacePush {
-    /// x: how steep the textures' relief is drawn, 0 for flat ground.
-    glm::vec4 relief{0.0f};
-    /// x: where the colour and relief come from (TerrainSurfaceSource);
-    /// y, z: the band the bake takes over across, in yards from the camera;
-    /// w: the chunk's cell in its tile's atlas, x + 16 y.
-    glm::vec4 baked{0.0f};
-};
 constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
 static_assert(kSurfacePushOffset + sizeof(TerrainSurfacePush) <= 128,
               "the terrain's push constants fit the space Vulkan guarantees");
@@ -708,12 +700,6 @@ void TerrainRenderer::destroyGeometryPages() {
     geometryPagesExhausted_ = false;
 }
 
-void TerrainRenderer::bindGeometryPage(VkCommandBuffer cmd, const TerrainGeometryPage& page) {
-    const VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &page.vertices.buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, page.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-}
-
 TerrainGeometryStats TerrainRenderer::geometryStats() const {
     TerrainGeometryStats stats;
     for (const auto& page : geometryPages_) {
@@ -974,208 +960,156 @@ uint64_t chunkMapKey(int gx, int gy) {
 
 }  // namespace
 
-void TerrainRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (chunks.empty() || !pipeline) {
-        static int emptyLog = 0;
-        if (++emptyLog <= 3)
-            LOG_WARNING("TerrainRenderer::render: chunks=", chunks.size(), " pipeline=", (pipeline != VK_NULL_HANDLE));
-        return;
+TerrainRenderer::GeometryDraw TerrainRenderer::geometryOf(const TerrainChunkGPU& chunk) const {
+    GeometryDraw out;
+    if (chunk.geometryPage >= 0) {
+        const auto& page = *geometryPages_[chunk.geometryPage];
+        out.vertices = page.vertices.buffer;
+        out.indices = page.indices.buffer;
+        out.firstIndex = chunk.firstIndex;
+        out.baseVertex = chunk.baseVertex;
+    } else {
+        out.vertices = chunk.vertexBuffer;
+        out.indices = chunk.indexBuffer;
     }
+    out.count = chunk.indexCount;
+    return out;
+}
 
-    // One-time diagnostic: log chunk nearest to camera
-    static bool loggedDiag = false;
-    if (!loggedDiag && !chunks.empty()) {
-        loggedDiag = true;
-        glm::vec3 cam = camera.getPosition();
-        // Find chunk nearest to camera
-        const TerrainChunkGPU* nearest = nullptr;
-        float nearestDist = std::numeric_limits<float>::max();
-        for (const auto& ch : chunks) {
-            float dx = ch.boundingSphereCenter.x - cam.x;
-            float dy = ch.boundingSphereCenter.y - cam.y;
-            float dz = ch.boundingSphereCenter.z - cam.z;
-            float d = dx*dx + dy*dy + dz*dz;
-            if (d < nearestDist) { nearestDist = d; nearest = &ch; }
+void TerrainRenderer::bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw) {
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &draw.vertices, &offset);
+    vkCmdBindIndexBuffer(cmd, draw.indices, 0, VK_INDEX_TYPE_UINT32);
+}
+
+TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights) {
+    DrawList list;
+    list.wireframe = wireframe;
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getViewProjectionMatrix());
+    const glm::vec3 camPos = camera.getPosition();
+    const uint32_t height = lodViewportHeight_ ? lodViewportHeight_ : vkCtx->getSwapchainExtent().height;
+    const float focalPixels = std::abs(camera.getProjectionMatrix()[1][1]) * static_cast<float>(height) * 0.5f;
+    const TerrainBakeBand band = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
+    std::vector<int8_t> levels(chunks.size(), -1);
+    std::vector<uint32_t> visible;
+    list.depth.reserve(chunks.size());
+    for (uint32_t i = 0; i < chunks.size(); ++i) {
+        const auto& ch = chunks[i];
+        if (!ch.isValid()) continue;
+        list.depth.push_back({geometryOf(ch), ch.boundingSphereCenter, ch.boundingSphereRadius});
+        if (!ch.materialSet) continue;
+        const glm::vec2 step = glm::vec2(ch.boundingSphereCenter - camPos);
+        const float distanceSq = glm::dot(step, step);
+        const float limit = maxViewDistance_ + ch.boundingSphereRadius;
+        if (distanceSq > limit * limit || (frustumCullingEnabled && !isChunkVisible(ch, frustum))) {
+            ++list.culled;
+            continue;
         }
-        if (nearest) {
-            float d2d = std::sqrt((nearest->boundingSphereCenter.x-cam.x)*(nearest->boundingSphereCenter.x-cam.x) +
-                                  (nearest->boundingSphereCenter.y-cam.y)*(nearest->boundingSphereCenter.y-cam.y));
-            LOG_INFO("Terrain diag: chunks=", chunks.size(),
-                     " cam=(", cam.x, ",", cam.y, ",", cam.z, ")",
-                     " nearest_center=(", nearest->boundingSphereCenter.x, ",", nearest->boundingSphereCenter.y, ",", nearest->boundingSphereCenter.z, ")",
-                     " dist2d=", d2d, " dist3d=", std::sqrt(nearestDist),
-                     " radius=", nearest->boundingSphereRadius,
-                     " matSet=", (nearest->materialSet != VK_NULL_HANDLE ? "ok" : "NULL"));
-        }
+        const float nearest = glm::length(ch.boundingSphereCenter - camPos) - ch.boundingSphereRadius;
+        levels[i] = static_cast<int8_t>(lodEnabled_ ? pipeline::terrainLodFor(ch.lodErrors, ch.offeredLods,
+                                                     nearest, focalPixels, kLodMaxErrorPixels) : 0);
+        visible.push_back(i);
+        list.furthestSq = std::max(list.furthestSq, distanceSq);
     }
+    list.view.reserve(visible.size());
+    for (const uint32_t i : visible) {
+        const auto& ch = chunks[i];
+        const size_t level = static_cast<size_t>(levels[i]);
+        ChunkDraw draw;
+        draw.material = ch.materialSet;
+        draw.geometry = geometryOf(ch);
+        draw.ranges[0] = ch.lods[level];
+        const int gx = ch.tileX * 16 + ch.chunkX, gy = ch.tileY * 16 + ch.chunkY;
+        const int nx[4] = {gx, gx, gx - 1, gx + 1};
+        const int ny[4] = {gy - 1, gy + 1, gy, gy};
+        for (size_t edge = 0; edge < 4; ++edge) {
+            const auto neighbour = chunkAt_.find(chunkMapKey(nx[edge], ny[edge]));
+            if (neighbour != chunkAt_.end() && levels[neighbour->second] >= 0 &&
+                levels[neighbour->second] != levels[i]) draw.ranges[edge + 1] = ch.skirts[level][edge];
+        }
+        const float distance = glm::length(ch.boundingSphereCenter - camPos);
+        const auto source = bakeEnabled_ && ch.bakeComplete->load()
+            ? terrainSurfaceSourceFor(band, distance - ch.boundingSphereRadius,
+                                      distance + ch.boundingSphereRadius, ch.steepestUpZ)
+            : TerrainSurfaceSource::Layers;
+        draw.surface.baked = glm::vec4(static_cast<float>(source), band.start, band.end,
+                                       source == TerrainSurfaceSource::Layers ? 0.0f : static_cast<float>(ch.chunkX + 16 * ch.chunkY));
+        draw.surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
+        draw.lights = lights.empty() ? kNoLocalLights : pickLocalLights(lights, ch.boundingSphereCenter,
+                                                                       ch.boundingSphereRadius);
+        if (source == TerrainSurfaceSource::Baked) ++list.baked;
+        if (source == TerrainSurfaceSource::Crossfade) ++list.crossfade;
+        list.view.push_back(std::move(draw));
+    }
+    if (bakeEnabled_) {
+        list.atlases = bake_.extractNewAtlases();
+        // A skipped frame keeps its jobs pending. Recording acknowledges them
+        // through a completion token, never by writing into the live chunk.
+        std::erase_if(bakeQueue_, [&](uint64_t key) {
+            const auto found = chunkAt_.find(key);
+            return found == chunkAt_.end() || chunks[found->second].bakeComplete->load();
+        });
+        const size_t take = std::min(bakeQueue_.size(), kBakeChunksPerFrame);
+        for (size_t i = 0; i < take; ++i) {
+            const auto& ch = chunks[chunkAt_.at(bakeQueue_[i])];
+            auto* atlas = bake_.atlas(ch.tileX, ch.tileY);
+            if (!atlas) continue; // atlas() reports the allocation failure.
+            list.bake.push_back({geometryOf(ch), ch.materialSet, ch.tileX, ch.tileY,
+                                 ch.chunkX, ch.chunkY, atlas, ch.bakeComplete});
+        }
+        std::sort(list.bake.begin(), list.bake.end(), [](const BakeDraw& a, const BakeDraw& b) {
+            return std::pair(a.tileX, a.tileY) < std::pair(b.tileX, b.tileY);
+        });
+    }
+    return list;
+}
 
-    VkPipeline activePipeline = (wireframe && wireframePipeline) ? wireframePipeline : pipeline;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
-
+void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
+    if (!pipeline || list.view.empty()) return;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      list.wireframe && wireframePipeline ? wireframePipeline : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                              0, 1, &perFrameSet, 0, nullptr);
-
     GPUPushConstants push{};
     push.model = glm::mat4(1.0f);
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                        0, sizeof(GPUPushConstants), &push);
-    LocalLightSet pushedLights = push.localLights;
-    TerrainSurfacePush surface{};
-    surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                       kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
-
-    Frustum frustum;
-    if (frustumCullingEnabled) {
-        glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
-        frustum.extractFromMatrix(viewProj);
-    }
-
-    glm::vec3 camPos = camera.getPosition();
-
-    renderedChunks = 0;
-    culledChunks = 0;
-    furthestDrawnSq_ = 0.0f;
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
     renderedTriangles_ = 0;
-
-    // Pixels per yard at unit distance: what a triangle's size on screen is
-    // judged against when a chunk's level is chosen.
-    const uint32_t viewportHeight = lodViewportHeight_ ? lodViewportHeight_ : vkCtx->getSwapchainExtent().height;
-    const float focalPixels =
-        std::abs(camera.getProjectionMatrix()[1][1]) * static_cast<float>(viewportHeight) * 0.5f;
-
-    // The geometry page bound now; a chunk in another page, or one with
-    // buffers of its own, binds anew. Chunks of a tile are listed together and
-    // a tile's go in one page, so this is a bind per page, not per chunk.
-    constexpr int32_t kNothingBound = -2;
-    int32_t boundPage = kNothingBound;
-
-    // Where the bake takes over from the layers, for this view.
-    const TerrainBakeBand bakeBand = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
-    bakedDrawnChunks_ = 0;
-    crossfadeDrawnChunks_ = 0;
-    // Layers until a chunk says otherwise; pushed again only when that changes.
-    float pushedSource = 0.0f;
-
-    // First every chunk's level, so each can see its neighbours'.
-    frameLevels_.assign(chunks.size(), -1);
-    frameDrawn_.clear();
-    for (uint32_t i = 0; i < chunks.size(); ++i) {
-        const auto& chunk = chunks[i];
-        if (!chunk.isValid() || !chunk.materialSet) continue;
-
-        float dx = chunk.boundingSphereCenter.x - camPos.x;
-        float dy = chunk.boundingSphereCenter.y - camPos.y;
-        float distSq = dx * dx + dy * dy;
-        // Keep any chunk intersecting the common range. The fragment shader
-        // clips at the exact limit; testing only the center removes foothills early.
-        const float chunkLimit = maxViewDistance_ + chunk.boundingSphereRadius;
-        if (distSq > chunkLimit * chunkLimit) {
-            culledChunks++;
-            continue;
-        }
-
-        if (frustumCullingEnabled && !isChunkVisible(chunk, frustum)) {
-            culledChunks++;
-            continue;
-        }
-
-        // The coarsest level the chunk offers whose error stays under a
-        // pixel, seen from the chunk's nearest point, height included: from
-        // Dalaran's height the ground below is further than it is across.
-        const float nearest =
-            glm::length(chunk.boundingSphereCenter - camPos) - chunk.boundingSphereRadius;
-        frameLevels_[i] = static_cast<int8_t>(
-            lodEnabled_ ? pipeline::terrainLodFor(chunk.lodErrors, chunk.offeredLods, nearest, focalPixels,
-                                                  kLodMaxErrorPixels)
-                        : 0);
-        frameDrawn_.push_back(i);
-        if (distSq > furthestDrawnSq_) furthestDrawnSq_ = distSq;
-    }
-
-    for (const uint32_t i : frameDrawn_) {
-        const auto& chunk = chunks[i];
-        const int level = frameLevels_[i];
-
+    ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
+    LocalLightSet pushedLights = push.localLights;
+    TerrainSurfacePush pushedSurface;
+    bool surfacePushed = false;
+    for (const auto& draw : list.view) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                 1, 1, &chunk.materialSet, 0, nullptr);
-
-        // From its layers, its bake, or both across the band: by where its
-        // points lie, nearest to farthest, once it has been baked.
-        const float centreDistance = glm::length(chunk.boundingSphereCenter - camPos);
-        const TerrainSurfaceSource source =
-            bakeEnabled_ && chunk.baked
-                ? terrainSurfaceSourceFor(bakeBand, centreDistance - chunk.boundingSphereRadius,
-                                          centreDistance + chunk.boundingSphereRadius,
-                                          chunk.steepestUpZ)
-                : TerrainSurfaceSource::Layers;
-        if (source != TerrainSurfaceSource::Layers || pushedSource != 0.0f) {
-            surface.baked = glm::vec4(static_cast<float>(source), bakeBand.start, bakeBand.end,
-                                      static_cast<float>(chunk.chunkX + 16 * chunk.chunkY));
-            pushedSource = surface.baked.x;
-            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               kSurfacePushOffset, sizeof(TerrainSurfacePush), &surface);
-        }
-        if (source == TerrainSurfaceSource::Baked) ++bakedDrawnChunks_;
-        if (source == TerrainSurfaceSource::Crossfade) ++crossfadeDrawnChunks_;
-
-        // The lights nearest the chunk (local_lights.hpp).
-        const LocalLightSet chunkLights = frameLights_ && !frameLights_->empty()
-            ? pickLocalLights(*frameLights_, chunk.boundingSphereCenter,
-                              chunk.boundingSphereRadius)
-            : kNoLocalLights;
-        if (chunkLights != pushedLights) {
-            pushedLights = chunkLights;
+                                1, 1, &draw.material, 0, nullptr);
+        if (draw.lights != pushedLights) {
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               offsetof(GPUPushConstants, localLights), sizeof(LocalLightSet), &pushedLights);
+                               offsetof(GPUPushConstants, localLights), sizeof(draw.lights), &draw.lights);
+            pushedLights = draw.lights;
         }
-
-        const bool inPage = chunk.geometryPage >= 0;
-        if (inPage) {
-            // Rebound after a chunk with buffers of its own, too: its buffers
-            // stay bound for whatever comes next, and a page's offsets drawn
-            // against one chunk's buffer - firstIndex 6,290,784 into 3,072
-            // bytes - is what once took the GPU down.
-            if (boundPage != chunk.geometryPage) {
-                bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
-                boundPage = chunk.geometryPage;
-            }
-        } else {
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
-            vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            boundPage = kNothingBound;
+        if (!surfacePushed || draw.surface.baked != pushedSurface.baked || draw.surface.relief != pushedSurface.relief) {
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                               kSurfacePushOffset, sizeof(draw.surface), &draw.surface);
+            pushedSurface = draw.surface;
+            surfacePushed = true;
         }
-        // A range of the chunk's own index list, wherever that lives.
-        const auto draw = [&](const TerrainChunkGPU::LodRange& range) {
-            if (range.count == 0) return;
-            if (inPage) {
-                vkCmdDrawIndexed(cmd, range.count, 1, chunk.firstIndex + range.first, chunk.baseVertex, 0);
-            } else {
-                vkCmdDrawIndexed(cmd, range.count, 1, range.first, 0, 0);
-            }
+        if (boundVertices != draw.geometry.vertices || boundIndices != draw.geometry.indices) {
+            bindDraw(cmd, draw.geometry);
+            boundVertices = draw.geometry.vertices;
+            boundIndices = draw.geometry.indices;
+        }
+        for (const auto& range : draw.ranges) {
+            if (!range.count) continue;
+            vkCmdDrawIndexed(cmd, range.count, 1, draw.geometry.firstIndex + range.first,
+                              draw.geometry.baseVertex, 0);
             renderedTriangles_ += range.count / 3;
-        };
-
-        draw(chunk.lods[static_cast<size_t>(level)]);
-        // A skirt only where the neighbour across the edge is drawn at
-        // another level: there the two edges are different lines. Between
-        // chunks at the same level they are one line, and a skirt hanging
-        // below it is ground shaded for nothing.
-        const int gx = chunk.tileX * 16 + chunk.chunkX;
-        const int gy = chunk.tileY * 16 + chunk.chunkY;
-        const int neighbourX[4] = {gx, gx, gx - 1, gx + 1};
-        const int neighbourY[4] = {gy - 1, gy + 1, gy, gy};
-        for (size_t edge = 0; edge < 4; ++edge) {
-            const auto found = chunkAt_.find(chunkMapKey(neighbourX[edge], neighbourY[edge]));
-            if (found == chunkAt_.end()) continue;
-            const int neighbourLevel = frameLevels_[found->second];
-            if (neighbourLevel < 0 || neighbourLevel == level) continue;
-            draw(chunk.skirts[static_cast<size_t>(level)][edge]);
         }
-        renderedChunks++;
     }
-
+    renderedChunks = static_cast<int>(list.view.size());
+    culledChunks = list.culled;
+    furthestDrawnSq_ = list.furthestSq;
+    bakedDrawnChunks_ = list.baked;
+    crossfadeDrawnChunks_ = list.crossfade;
 }
 
 void TerrainRenderer::boundTile(ShadowTile& tile) const {
@@ -1217,66 +1151,30 @@ void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
     bakeQueue_.push_back(chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY));
 }
 
-void TerrainRenderer::recordBake(VkCommandBuffer cmd) {
-    if (!bakeEnabled_ || cmd == VK_NULL_HANDLE) return;
-    // Every atlas a chunk already names, ready before this frame draws it.
-    bake_.prepareNewAtlases(cmd);
-    if (bakeQueue_.empty()) return;
-
-    // This frame's share, grouped by tile: one rendering scope and one set of
-    // mips an atlas.
-    const size_t take = std::min(bakeQueue_.size(), kBakeChunksPerFrame);
-    std::vector<uint32_t> due;
-    due.reserve(take);
-    for (size_t i = 0; i < take; ++i) {
-        const auto found = chunkAt_.find(bakeQueue_[i]);
-        if (found == chunkAt_.end()) continue;  // its tile went before its turn
-        if (!chunks[found->second].baked) due.push_back(found->second);
-    }
-    bakeQueue_.erase(bakeQueue_.begin(), bakeQueue_.begin() + static_cast<std::ptrdiff_t>(take));
-    std::sort(due.begin(), due.end(), [this](uint32_t a, uint32_t b) {
-        return std::pair(chunks[a].tileX, chunks[a].tileY) < std::pair(chunks[b].tileX, chunks[b].tileY);
-    });
-
-    constexpr int32_t kNothingBound = -2;
-    for (size_t g = 0; g < due.size();) {
-        const int tileX = chunks[due[g]].tileX;
-        const int tileY = chunks[due[g]].tileY;
-        size_t end = g;
-        while (end < due.size() && chunks[due[end]].tileX == tileX && chunks[due[end]].tileY == tileY) ++end;
-
-        TerrainBake::Atlas* atlas = bake_.atlas(tileX, tileY);
-        if (!atlas) {  // said by atlas(); the tile's chunks stay drawn from their layers
-            g = end;
-            continue;
-        }
-        bake_.beginTile(cmd, *atlas);
-        int32_t boundPage = kNothingBound;
-        for (size_t k = g; k < end; ++k) {
-            TerrainChunkGPU& chunk = chunks[due[k]];
-            bake_.cell(cmd, chunk.chunkX, chunk.chunkY);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bake_.pipelineLayout(), 0, 1,
-                                    &chunk.materialSet, 0, nullptr);
-            // The whole chunk, level 0: what the bake holds is the ground's
-            // colour wherever it is, not the shape of any level.
-            const auto& full = chunk.lods[0];
-            if (chunk.geometryPage >= 0) {
-                if (boundPage != chunk.geometryPage) {
-                    bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
-                    boundPage = chunk.geometryPage;
-                }
-                vkCmdDrawIndexed(cmd, full.count, 1, chunk.firstIndex + full.first, chunk.baseVertex, 0);
-            } else {
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
-                vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, full.count, 1, full.first, 0, 0);
-                boundPage = kNothingBound;
+void TerrainRenderer::recordBake(VkCommandBuffer cmd, const DrawList& list) {
+    if (!cmd) return;
+    bake_.prepareNewAtlases(cmd, list.atlases);
+    for (size_t begin = 0; begin < list.bake.size();) {
+        size_t end = begin + 1;
+        while (end < list.bake.size() && list.bake[end].atlas == list.bake[begin].atlas) ++end;
+        bool needed = false;
+        for (size_t i = begin; i < end; ++i) needed |= !list.bake[i].complete->load();
+        if (needed) {
+            bake_.beginTile(cmd, *list.bake[begin].atlas);
+            for (size_t i = begin; i < end; ++i) {
+                const auto& draw = list.bake[i];
+                if (draw.complete->load()) continue;
+                bake_.cell(cmd, draw.chunkX, draw.chunkY);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bake_.pipelineLayout(),
+                                        0, 1, &draw.material, 0, nullptr);
+                bindDraw(cmd, draw.geometry);
+                vkCmdDrawIndexed(cmd, draw.geometry.count, 1, draw.geometry.firstIndex,
+                                  draw.geometry.baseVertex, 0);
+                draw.complete->store(true);
             }
-            chunk.baked = true;
+            bake_.endTile(cmd, *list.bake[begin].atlas);
         }
-        bake_.endTile(cmd, *atlas);
-        g = end;
+        begin = end;
     }
 }
 
@@ -1339,39 +1237,15 @@ bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                                    const glm::vec3& shadowCenter, float shadowRadius) {
+void TerrainRenderer::recordDepth(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
+                                  const glm::vec3& shadowCenter, float shadowRadius, const DrawList& list) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (chunks.empty()) return;
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-        0, 1, &shadowParams_.set, 0, nullptr);
-
-    // Identity model matrix - terrain vertices are already in world space
-    // Terrain is already in world space, so the model matrix it used to push
-    // was the identity: the combined matrix is the light-space one.
+                            0, 1, &shadowParams_.set, 0, nullptr);
     ShadowPush push{.lightSpaceModel = lightSpaceMatrix};
-    vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(ShadowPush), &push);
-
-    // Bound per geometry page, as in the main pass.
-    constexpr int32_t kNothingBound = -2;
-    int32_t boundPage = kNothingBound;
-
-    // Culled against the map's own footprint, not a sphere round the player.
-    // The map is a box reaching hundreds of yards toward the sun, and a ridge
-    // that far off in that direction is exactly what shades the ground and the
-    // air round the player - the sphere left it out, so the sun lit the mist
-    // straight through it. A chunk is kept if its centre lands on the map
-    // across the light, at any depth along it; the orthographic scale of the
-    // matrix is what turns the chunk's radius into the same units.
-    //
-    // Bounded in depth as well. Beyond the player, on the side away from the
-    // sun, terrain shades nothing the camera is near - and left in, a low sun
-    // turned the footprint into a strip the length of the loaded world, and
-    // the shadow pass drew thousands of chunks a frame.
+    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
     const glm::vec4 centreLs = lightSpaceMatrix * glm::vec4(shadowCenter, 1.0f);
     const float scaleZ = glm::length(glm::vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2],
                                                lightSpaceMatrix[2][2]));
@@ -1389,38 +1263,15 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
         return ls.z <= centreLs.z + (shadowRadius + radius) * scaleZ;
     };
 
-    uint32_t shadowChunksDrawn = 0;
-    for (const ShadowTile& tile : shadowTiles_) {
-        if (!mayCast(tile.centre, tile.radius)) continue;
-        for (const uint32_t index : tile.chunks) {
-            const auto& chunk = chunks[index];
-            if (!chunk.isValid()) continue;
-            if (!mayCast(chunk.boundingSphereCenter, chunk.boundingSphereRadius)) continue;
-            ++shadowChunksDrawn;
-
-            if (chunk.geometryPage >= 0) {
-                if (boundPage != chunk.geometryPage) {
-                    bindGeometryPage(cmd, *geometryPages_[chunk.geometryPage]);
-                    boundPage = chunk.geometryPage;
-                }
-                vkCmdDrawIndexed(cmd, chunk.indexCount, 1, chunk.firstIndex, chunk.baseVertex, 0);
-            } else {
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &chunk.vertexBuffer, &offset);
-                vkCmdBindIndexBuffer(cmd, chunk.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
-                boundPage = kNothingBound;
-            }
+    ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
+    for (const auto& draw : list.depth) {
+        if (!mayCast(draw.centre, draw.radius)) continue;
+        if (boundVertices != draw.geometry.vertices || boundIndices != draw.geometry.indices) {
+            bindDraw(cmd, draw.geometry);
+            boundVertices = draw.geometry.vertices;
+            boundIndices = draw.geometry.indices;
         }
-    }
-    // How many chunks cast, said when it moves by a quarter: the count is the
-    // cost of this pass, and the cull that decides it is not obvious.
-    static uint32_t lastReported = 0;
-    if (shadowChunksDrawn > lastReported + lastReported / 4 + 16 ||
-        shadowChunksDrawn + lastReported / 4 + 16 < lastReported) {
-        LOG_WARNING("Terrain shadow pass: ", shadowChunksDrawn, " of ", chunks.size(),
-                    " chunks cast");
-        lastReported = shadowChunksDrawn;
+        vkCmdDrawIndexed(cmd, draw.geometry.count, 1, draw.geometry.firstIndex, draw.geometry.baseVertex, 0);
     }
 }
 

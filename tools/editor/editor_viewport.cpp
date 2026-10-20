@@ -726,13 +726,16 @@ void EditorViewport::render(VkCommandBuffer cmd) {
     uint32_t frame = vkCtx_->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets_[frame];
 
-    terrainRenderer_->render(cmd, perFrameSet, *camera_);
+    const auto terrain = terrainRenderer_->extract(*camera_, {});
+    terrainRenderer_->recordView(cmd, perFrameSet, terrain);
 
     if (m2Renderer_) {
+        m2Renderer_->useFrame(m2Renderer_->extract(*camera_, {}, 0.0f, glm::mat4(0.0f), 0.0f));
         m2Renderer_->prepareRender(frame, *camera_);
         m2Renderer_->render(cmd, perFrameSet, *camera_);
     }
     if (wmoRenderer_) {
+        wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
         wmoRenderer_->prepareRender();
         wmoRenderer_->render(cmd, perFrameSet, *camera_);
     }

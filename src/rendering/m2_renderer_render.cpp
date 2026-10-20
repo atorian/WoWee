@@ -74,7 +74,6 @@ void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId
             const auto& existing = scene_->instances[idxIt->second];
             if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
                 instance.boneMatrices = existing.boneMatrices;
-                instance.bonesDirty[0] = instance.bonesDirty[1] = true;
             } else {
                 scene_->boneSeedInstanceByModel_.erase(seedIt);  // stale entry
             }
@@ -123,7 +122,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
         LOG_WARNING("Cannot create instance: model ", modelId, " not loaded");
         return 0;
     }
-    const auto& mdlRef = modelIt->second;
+    const auto& mdlRef = (*modelIt->second);
     modelUnusedSince_.erase(modelId);
 
 
@@ -246,10 +245,10 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     instance.modelMatrix = modelMatrix;
     instance.invModelMatrix = glm::inverse(modelMatrix);
     glm::vec3 localMin, localMax;
-    collisionLocalBounds(models[modelId], localMin, localMax);
+    collisionLocalBounds(*models[modelId], localMin, localMax);
     transformAABB(instance.modelMatrix, localMin, localMax, instance.worldBoundsMin, instance.worldBoundsMax);
     // Cache model flags on instance to avoid per-frame hash lookups
-    const auto& mdl2 = models[modelId];
+    const auto& mdl2 = *models[modelId];
     instance.cachedHasAnimation = mdl2.hasAnimation;
     instance.cachedDisableAnimation = mdl2.disableAnimation;
     instance.cachedHasEmitters = mdl2.hasEmitters();
@@ -728,9 +727,8 @@ void M2Renderer::update(float deltaTime, const glm::mat4& view, const glm::mat4&
 // drawn by the particle or ribbon systems.
 static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
 
-void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
+void M2Renderer::extractBones(Frame& frame) {
     if (!initialized_ || scene_->instances.empty()) return;
-    (void)camera;  // reserved for future frustum-based culling
     reapFinishedInstances();
 
     // --- Mega bone SSBO: assign ranges and upload all animated instance bones ---
@@ -739,6 +737,7 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     // all 300 matrices instead of being truncated into a fixed stride and
     // reading into its neighbour's range.
     uint32_t nextOffset = 1;
+    frame.bones.emplace_back(1.0f);
     for (size_t idx : scene_->animatedInstanceIndices_) {
         if (idx >= scene_->instances.size()) continue;
         auto& instance = scene_->instances[idx];
@@ -802,29 +801,23 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
 
         instance.megaBoneOffset = nextOffset;
 
-        // Upload bone matrices to mega buffer - only when they were recomputed
-        // since the last upload into this frame's buffer, or the instance's
-        // slot moved (animated set changed). Most animated instances are
-        // distance/frustum/frame-skip culled and keep their previous bones, so
-        // skipping their memcpy avoids megabytes of redundant writes per frame.
-        if (megaBoneMapped_[frameIndex] &&
-            (instance.bonesDirty[frameIndex] ||
-             instance.megaBoneUploadedSlot[frameIndex] != instance.megaBoneOffset)) {
-            auto* dst = static_cast<glm::mat4*>(megaBoneMapped_[frameIndex]) + instance.megaBoneOffset;
-            memcpy(dst, instance.boneMatrices.data(), boneCount * sizeof(glm::mat4));
-            instance.bonesDirty[frameIndex] = false;
-            instance.megaBoneUploadedSlot[frameIndex] = instance.megaBoneOffset;
-        }
+        frame.bones.insert(frame.bones.end(), instance.boneMatrices.begin(), instance.boneMatrices.end());
 
         nextOffset += boneCount;
     }
 }
 
+void M2Renderer::prepareRender(uint32_t frameIndex, const Camera&) {
+    if (megaBoneMapped_[frameIndex] && !recording_->bones.empty())
+        std::memcpy(megaBoneMapped_[frameIndex], recording_->bones.data(), recording_->bones.size() * sizeof(glm::mat4));
+}
+
+
 // Dispatch GPU frustum culling compute shader into the primary frame command
 // buffer. render() consumes the completed output left in this frame slot from
 // its previous use; this dispatch produces results for the slot's next reuse.
-void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
-    if (!cullPipeline_ || scene_->instances.empty()) return;
+void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
+
 
     // --- Compute per-instance adaptive distances (same formula as old CPU cull) ---
     const float targetRenderDist = viewDistanceScale_ *
@@ -859,6 +852,32 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     const uint32_t numInstances =
         std::min(static_cast<uint32_t>(cullCandidates_.size()), MAX_CULL_INSTANCES);
 
+    frame.maxPossibleDistSq = maxPossibleDistSq;
+    frame.cullIds.reserve(numInstances);
+    frame.cullInput.reserve(numInstances);
+    for (uint32_t i = 0; i < numInstances; ++i) {
+        const auto& inst = scene_->instances[cullCandidates_[i]];
+        float distanceSq = rendering::m2InstanceMaxDistSq(maxRenderDistanceSq,
+            inst.cachedEffectiveMaxDistSqFactor, inst.isGameObject,
+            rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE, cappedViewDistance(),
+            inst.cachedIsGroundDetail, groundDetailMaxDistance_);
+        if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation)
+            distanceSq = std::min(distanceSq, rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE * rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE);
+        frame.cullIds.push_back(inst.id);
+        frame.cullInput.push_back({glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius), distanceSq,
+                                   (inst.cachedIsValid ? 1u : 0u) | (inst.cachedIsInvisibleTrap ? 4u : 0u) |
+                                   (inst.hizPrevCulledFrames < 2 && !inst.isGameObject ? 8u : 0u), {0.0f, 0.0f}});
+    }
+}
+
+void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera) {
+    if (!cullPipeline_ || recording_->cullInput.empty()) return;
+    const uint32_t numInstances = static_cast<uint32_t>(recording_->cullInput.size());
+    const float maxPossibleDistSq = recording_->maxPossibleDistSq;
+    const glm::mat4 vp = camera.getViewProjectionMatrix();
+    Frustum frustum;
+    frustum.extractFromMatrix(vp);
+    const glm::vec3 camPos = camera.getPosition();
     if (cullUniformMapped_[frameIndex]) {
         auto* ubo = static_cast<CullUniformsGPU*>(cullUniformMapped_[frameIndex]);
         for (int i = 0; i < 6; i++) {
@@ -915,65 +934,17 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         prevVP_ = vp;
     }
 
-    // Rotate this slot's ID log: the dispatch recorded below replaces the one
-    // whose results render() is about to consume, so the IDs it was built from
-    // become the readable set.  Done before the upload loop overwrites them, and
-    // after the early-out above, so "readable" always describes the last dispatch
-    // actually recorded on this slot.
-    if (frameIndex < 2) {
-        scene_->cullReadableIds_[frameIndex].swap(scene_->cullSubmittedIds_[frameIndex]);
-        scene_->cullSubmittedIds_[frameIndex].clear();
-        scene_->cullSubmittedIds_[frameIndex].reserve(numInstances);
-        for (uint32_t i = 0; i < numInstances; i++)
-            scene_->cullSubmittedIds_[frameIndex].push_back(scene_->instances[cullCandidates_[i]].id);
-    }
+    collectCullOutput(frameIndex);
+    submittedCullIds_[frameIndex] = recording_->cullIds;
+    submittedCullScenes_[frameIndex] = recording_->sceneIdentity;
 
     // --- Upload per-instance cull data (SSBO, binding 1) ---
     // The per-instance radius math used to be recomputed here every frame; it's
     // now precomputed once by recomputeCachedCullFactors() since it depends only
     // on static instance state (scale, bound radius, animation/ground flags).
-    if (cullInputMapped_[frameIndex]) {
-        auto* input = static_cast<CullInstanceGPU*>(cullInputMapped_[frameIndex]);
-        for (uint32_t i = 0; i < numInstances; i++) {
-            const auto& inst = scene_->instances[cullCandidates_[i]];
-            float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
-                maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
-                inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
-                cappedViewDistance(),
-                inst.cachedIsGroundDetail, groundDetailMaxDistance_);
-            if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
-                constexpr float kBirdMaxDistSq =
-                    rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
-                    rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE;
-                effectiveMaxDistSq = std::min(effectiveMaxDistSq, kBirdMaxDistSq);
-            }
+    if (cullInputMapped_[frameIndex] && numInstances)
+        std::memcpy(cullInputMapped_[frameIndex], recording_->cullInput.data(), numInstances * sizeof(CullInstanceGPU));
 
-            uint32_t flags = 0;
-            if (inst.cachedIsValid)          flags |= 1u;
-            if (inst.cachedIsInvisibleTrap)   flags |= 4u;
-            // Bit 3: previouslyVisible - the shader runs the HiZ occlusion test
-            // ONLY when this bit is set (an object with no depth in last frame's
-            // pyramid can't be tested reliably). Hysteresis: keep it set unless
-            // culled for 2+ consecutive frames, preventing single-frame false-cull
-            // flicker. The counter lives on the instance, so streaming churn can
-            // never pair it with a different object's history.
-            //
-            // Server game objects (mailboxes, chests, ...) opt out of HiZ entirely
-            // by never setting this bit: they are small gameplay props that sit
-            // flush against walls and doorframes, exactly where the coarse depth
-            // pyramid reports false occlusions. Such a false-cull would persist
-            // (the prop is then not rendered, so it never regains depth to clear
-            // itself) - the "mailbox went invisible in place" report. Frustum +
-            // distance culling still bound them; only the unreliable occlusion
-            // test is waived.
-            if (inst.hizPrevCulledFrames < 2 && !inst.isGameObject)
-                flags |= 8u;
-
-            input[i].sphere = glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius);
-            input[i].effectiveMaxDistSq = effectiveMaxDistSq;
-            input[i].flags = flags;
-        }
-    }
 
     // --- Dispatch compute shader ---
     const bool useHiZ = (cullHiZPipeline_ != VK_NULL_HANDLE)
@@ -1075,7 +1046,7 @@ bool m2BatchDiagNames(const M2ModelGPU& model) {
 }  // namespace
 
 const char* M2Renderer::opaqueBatchSkip(const M2ModelGPU& model, size_t batchIndex, uint16_t lod,
-                                        bool onlyBatchModel) const {
+                                        bool onlyBatchModel, bool suppressStars) const {
     // WOWEE_M2_ONLY_BATCH=<n> draws just that batch of the named model and
     // hides the rest.
     //
@@ -1099,20 +1070,20 @@ const char* M2Renderer::opaqueBatchSkip(const M2ModelGPU& model, size_t batchInd
     if (!model.isGroundDetail && batch.submeshLevel != lod) return "submeshLevel is not this LOD";
     if (batch.batchOpacity <= kM2BatchHiddenOpacity) return "opacity is zero";
     if (!skyBatchAllowed(skyMode_, batchIndex)) return "sky batch rule";
-    if (suppressBakedStars_ && batch.starLayer) return "baked star layer";
+    if (suppressStars && batch.starLayer) return "baked star layer";
     return nullptr;
 }
 
 void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& model, uint16_t lod,
                                    float fadeAlpha, const glm::vec3& camPos,
-                                   std::vector<GlowSprite>& out) const {
+                                   std::vector<GlowSprite>& out, float time) const {
     // The groups the opaque pass leaves out altogether.
     if (skipGroundDetail_ && model.isGroundDetail) return;
     if (!model.vertexBuffer || !model.indexBuffer) return;
     const bool onlyBatchModel = m2BatchDiagNames(model);
     for (size_t bi = 0; bi < model.batches.size(); bi++) {
         const auto& batch = model.batches[bi];
-        if (opaqueBatchSkip(model, bi, lod, onlyBatchModel)) continue;
+        if (opaqueBatchSkip(model, bi, lod, onlyBatchModel, suppressBakedStars_)) continue;
         if (!m2WantsGlowSprite(glowCardOf(model, batch))) continue;
 
         glm::vec3 worldPos;
@@ -1189,7 +1160,7 @@ void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& mod
         // looks slightly larger. Use the extracted frame's time, so preparing
         // the same view later cannot change its light.
         {
-            const float flicker = lampFlicker(inst.position, frameTime_, 0.82f, 0.12f, 0.06f);
+            const float flicker = lampFlicker(inst.position, time, 0.82f, 0.12f, 0.06f);
             gs.color.a *= flicker;
             gs.size *= 0.98f + 0.02f * flicker;
         }
@@ -1236,33 +1207,18 @@ void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
 
 }  // namespace
 
-void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
-    if (scene_->instances.empty() || !opaquePipeline_) {
-        return;
-    }
-
-    // Where this pass's three milliseconds go.
-    //
-    // Recording the M2 secondary is the largest single piece of CPU work in
-    // the frame - renderWorld waits on the slowest worker and this is always
-    // it - and the stage around it cannot see whether that is the cull or the
-    // recording itself.
-    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
-    const auto t0 = std::chrono::steady_clock::now();
-    cullView(camera);
-    const auto t1 = std::chrono::steady_clock::now();
+void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&) {
+    if (!opaquePipeline_) return;
     recordView(cmd, perFrameSet);
-    if (!m2Profile) return;
-    static auto lastSaid = std::chrono::steady_clock::now();
-    const auto t2 = std::chrono::steady_clock::now();
-    if (t2 - lastSaid <= std::chrono::seconds(10)) return;
-    lastSaid = t2;
-    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-    LOG_WARNING("  m2 record: cull ", ms(t0, t1), "ms, draws ", ms(t1, t2), "ms over ",
-                sortedVisible_.size(), " visible of ", scene_->instances.size(), " instances");
 }
 
-void M2Renderer::cullView(const Camera& camera) {
+
+void M2Renderer::cullView(const Camera& camera, Frame& frame) {
+    auto& drawInstances_ = frame.drawInstances_;
+    auto& sortedVisible_ = frame.sortedVisible_;
+    auto& transparentVisible_ = frame.transparentVisible_;
+    auto& glowSprites_ = frame.glowSprites_;
+
     // Debug: log once when we start rendering
     static bool loggedOnce = false;
     if (!loggedOnce) {
@@ -1296,76 +1252,10 @@ void M2Renderer::cullView(const Camera& camera) {
     glowSprites_.clear();
     drawInstances_.clear();
 
-    // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
-    // Use the cached value (set by dispatchCullCompute or fallback below).
-    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    const uint32_t verdictSerial = ++cullVerdictSerial_;
-    const uint32_t* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frameIndex]);
-    const bool gpuCullAvailable = (cullPipeline_ != VK_NULL_HANDLE && visibility != nullptr);
+    const bool gpuCullAvailable = cullPipeline_ != VK_NULL_HANDLE;
+    const uint32_t verdictSerial = cullVerdictSerial_;
 
-    // Scatter the GPU visibility results back onto the instances they were
-    // computed for.  The results belong to the dispatch recorded on this slot
-    // ~2 frames ago, so they are keyed by that dispatch's instance IDs, never by
-    // the current array index: createInstance() appends and removeInstance()
-    // swap-removes, so a respawned game object lands at the volatile tail of the
-    // array and would otherwise inherit the verdict of whatever transient object
-    // (spell visual, streamed doodad, creature) held that index two frames back
-    // - leaving it culled for as long as the churn continued.
-    //
-    // Instances with no entry in the readable set were created after that
-    // dispatch and keep their defaults: visible, and exempt from the HiZ test.
-    //
-    // hizPrevCulledFrames is a hysteresis counter rather than a binary flag: an
-    // object must be culled for 2 consecutive frames before it stops counting as
-    // "previously visible", which prevents the 1-frame-on / 1-frame-off
-    // oscillation that showed up as doodad flicker near moving characters.
-    if (gpuCullAvailable) {
-        const auto& ids = scene_->cullReadableIds_[frameIndex < 2 ? frameIndex : 0];
-        for (size_t k = 0; k < ids.size(); ++k) {
-            // Fast path: with no churn since that dispatch the ordering still
-            // matches, so skip the hash lookup.
-            M2Instance* inst = nullptr;
-            if (k < scene_->instances.size() && scene_->instances[k].id == ids[k]) {
-                inst = &scene_->instances[k];
-            } else {
-                auto idxIt = scene_->instanceIndexById.find(ids[k]);
-                if (idxIt == scene_->instanceIndexById.end() || idxIt->second >= scene_->instances.size())
-                    continue;  // instance was removed since the dispatch
-                inst = &scene_->instances[idxIt->second];
-            }
-            inst->cullVerdictSerial = verdictSerial;
-            if (visibility[k]) {
-                inst->lastCullVisible = 1;
-                inst->hizPrevCulledFrames = 0;
-            } else {
-                inst->lastCullVisible = 0;
-                inst->hizPrevCulledFrames =
-                    std::min<uint8_t>(inst->hizPrevCulledFrames + 1, 3);
-            }
-        }
-    } else {
-        // No GPU cull data - conservatively treat everything as visible.
-        for (auto& inst : scene_->instances) {
-            inst.lastCullVisible = 1;
-            inst.hizPrevCulledFrames = 0;
-        }
-    }
-
-    // If GPU culling was not dispatched, fallback: compute distances on CPU
-    float maxRenderDistanceSq;
-    if (!gpuCullAvailable) {
-        const float targetRenderDist = viewDistanceScale_ *
-            ((scene_->instances.size() > 2000) ? 300.0f
-             : (scene_->instances.size() > 1000) ? 500.0f
-                                         : 1000.0f);
-        const float shrinkRate = 0.005f;
-        const float growRate = 0.05f;
-        float blendRate = (targetRenderDist < smoothedRenderDist_) ? shrinkRate : growRate;
-        smoothedRenderDist_ = glm::mix(smoothedRenderDist_, targetRenderDist, blendRate);
-        maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
-    } else {
-        maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
-    }
+    const float maxRenderDistanceSq = smoothedRenderDist_ * smoothedRenderDist_;
 
     const glm::vec3 camPos = camera.getPosition();
 
@@ -1484,7 +1374,7 @@ void M2Renderer::cullView(const Camera& camera) {
             const uint32_t draw = static_cast<uint32_t>(out.draws.size());
             out.draws.push_back(DrawInstance{
                 .modelMatrix = instance.modelMatrix,
-                .model = instance.cachedModel,
+                .model = models.at(instance.modelId),
                 .interiorLight = instance.interiorLight,
                 .localLights = haveLights
                     ? pickLocalLights(*frameLights_, glm::vec3(instance.modelMatrix[3]), 0.0f)
@@ -1511,7 +1401,7 @@ void M2Renderer::cullView(const Camera& camera) {
                     if (posed) {
                         appendGlowSprites(instance, model, m2LodFor(model, distSq),
                                           m2DistanceFade(model, distSq, effectiveMaxDistSq), camPos,
-                                          out.glows);
+                                          out.glows, frame.time);
                     }
                 }
             }
@@ -1630,8 +1520,72 @@ void M2Renderer::cullView(const Camera& camera) {
     std::sort(transparentVisible_.begin(), transparentVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
 }
+void M2Renderer::collectCullOutput(uint32_t frame) {
+    const auto* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frame]);
+    if (!visibility) return;
+    std::lock_guard<std::mutex> lock(cullResultMutex_);
+    for (size_t k = 0; k < submittedCullIds_[frame].size(); ++k)
+        collectedCull_.push_back({submittedCullIds_[frame][k], visibility[k] != 0, submittedCullScenes_[frame]});
+}
+
+std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
+        const glm::mat4* overheadMatrix, float overheadRadius) {
+    auto frame = std::make_shared<Frame>();
+    frame->time = time;
+    frame->cameraPosition = camera.getPosition();
+    frame->skyHour = skyTimeOfDayHours_;
+    frame->suppressStars = suppressBakedStars_;
+    frame->skipDetail = skipGroundDetail_;
+    frame->sceneIdentity = scene_->identity;
+    frame->solarMatrix = shadowMatrix;
+    {
+        std::lock_guard<std::mutex> lock(cullResultMutex_);
+        ++cullVerdictSerial_;
+        for (const auto& result : collectedCull_) {
+            if (result.sceneIdentity != scene_->identity) continue;
+            const auto found = scene_->instanceIndexById.find(result.id);
+            if (found == scene_->instanceIndexById.end()) continue;
+            auto& inst = scene_->instances[found->second];
+            inst.cullVerdictSerial = cullVerdictSerial_;
+            inst.lastCullVisible = result.visible ? 1 : 0;
+            inst.hizPrevCulledFrames = result.visible ? 0 : std::min(inst.hizPrevCulledFrames + 1u, 3u);
+        }
+        collectedCull_.clear();
+    }
+    frameLights_ = &lights;
+    extractBones(*frame);
+    extractCull(camera, *frame);
+    cullView(camera, *frame);
+    gatherM2Particles(*frame);
+    gatherM2Ribbons(*frame);
+    if (shadowMatrix != glm::mat4(0.0f)) {
+        gatherReusedShadowCandidates(shadowMatrix, shadowRadius);
+        frame->solarDepth.reserve(shadowCandidates_.size());
+        for (uint32_t index : shadowCandidates_) {
+            const auto& inst = scene_->instances[index];
+            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
+            frame->solarDepth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+        }
+    }
+    if (overheadMatrix) {
+        frame->overheadMatrix = *overheadMatrix;
+        gatherShadowCandidates(*overheadMatrix, overheadRadius, shadowCandidates_);
+        frame->depth.reserve(shadowCandidates_.size());
+        for (uint32_t index : shadowCandidates_) {
+            const auto& inst = scene_->instances[index];
+            if (inst.hidden || inst.finishing || !inst.cachedModel || !inst.cachedIsValid || inst.cachedIsInvisibleTrap) continue;
+            frame->depth.push_back({inst.modelId, inst.modelMatrix, models.at(inst.modelId), inst.position, inst.scale});
+        }
+    }
+    frameLights_ = nullptr;
+    return frame;
+}
+
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    const auto& drawInstances_ = recording_->drawInstances_;
+    const auto& sortedVisible_ = recording_->sortedVisible_;
+
     lastDrawCallCount = 0;
     skyDiagDrawsOpaque_ = 0;
     skyDiagDrawsTransparent_ = 0;
@@ -1704,13 +1658,13 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 
             // The model the cull took from the first entry's instance, rather
             // than a models.find(groupModelId) per group.
-            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model;
+            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model.get();
             if (!groupModel) {
                 visStart = groupEnd;
                 continue;
             }
             const M2ModelGPU& model = *groupModel;
-            if (skipGroundDetail_ && model.isGroundDetail) {
+            if (recording_->skipDetail && model.isGroundDetail) {
                 visStart = groupEnd;
                 continue;
             }
@@ -1819,7 +1773,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
                 const bool diagThisModel = m2BatchDiagNames(model);
                 for (size_t bi = 0; bi < model.batches.size(); bi++) {
                     const auto& batch = model.batches[bi];
-                    const char* skipped = opaqueBatchSkip(model, bi, lod, diagThisModel);
+                    const char* skipped = opaqueBatchSkip(model, bi, lod, diagThisModel, recording_->suppressStars);
                     if (diagThisModel) {
                         static std::set<std::pair<const void*, size_t>> saidDraw;
                         if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
@@ -1895,7 +1849,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
                                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
                                 e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
                                     model.textureWeightTracks, batch.weightTrackIndex,
-                                    skyAnimationTimeMs(skyTimeOfDayHours_, duration), inst.globalSequenceTime,
+                                    skyAnimationTimeMs(recording_->skyHour, duration), inst.globalSequenceTime,
                                     model.globalSequenceDurations);
                             }
                             e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
@@ -1974,6 +1928,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 }
 
 void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    const auto& drawInstances_ = recording_->drawInstances_;
+    const auto& transparentVisible_ = recording_->transparentVisible_;
+    const auto& glowSprites_ = recording_->glowSprites_;
+
     if (!perFrameSet || instanceMapped_[vkCtx_->getCurrentFrame()] == nullptr) return;
     // =====================================================================
     // Pass 2: Transparent/additive batches - back-to-front per instance
@@ -2015,7 +1973,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         if (entry.modelId != currentModelId) {
             currentModelId = entry.modelId;
             currentModelValid = false;
-            currentModel = instance.model;
+            currentModel = instance.model.get();
             if (!currentModel) continue;
             if (!currentModel->hasTransparentBatches) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
@@ -2137,7 +2095,7 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
                 e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
                     model.textureWeightTracks, batch.weightTrackIndex,
-                    skyAnimationTimeMs(skyTimeOfDayHours_, duration), instance.globalSequenceTime,
+                    skyAnimationTimeMs(recording_->skyHour, duration), instance.globalSequenceTime,
                     model.globalSequenceDurations);
             }
             e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
@@ -2474,76 +2432,24 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
         return clip.z >= -margin && clip.z <= 1.0f + margin;
     };
 
-    // The contact map is a small box around the player inside the sun's own
-    // footprint, along the same rays, so its casters are a subset of the ones
-    // the sun's pass culled a moment ago. Walking every instance in the world
-    // a second time for it cost as much as the sun's whole cull - the walk is
-    // a cache miss per instance, and there are tens of thousands of them.
-    // Filtering in place keeps each bucket sorted by model, and the casters
-    // carry what the filter needs, so it reads no instance.
-    const bool fromSolarCasters = !sunMap && solarCastersFresh_;
-    solarCastersFresh_ = false;
-    if (fromSolarCasters) {
-        for (auto& bucket : shadowCasters_) {
-            std::erase_if(bucket, [&](const ShadowCaster& caster) {
-                const ShadowDraw& draw = shadowDraws_[caster.draw];
-                return !insideFootprint(draw.position, draw.scale, *draw.model);
-            });
-        }
-    } else {
-        shadowCasters_[0].clear();
-        shadowCasters_[1].clear();
-        shadowDraws_.clear();
-        auto castsHere = [&](const M2Instance& instance) {
-            if (!instance.cachedIsValid || instance.cachedIsInvisibleTrap ||
-                instance.finishing || instance.hidden) return false;
-            if (!instance.cachedModel) return false;
-            return insideFootprint(instance.position, instance.scale, *instance.cachedModel);
-        };
-        // The columns the light's box reaches, chosen by the light alone: a
-        // caster outside the camera's view still throws its shadow into it.
-        // This walked every instance resident, ninety thousand in Dalaran;
-        // the sun's map, which hardly moves, keeps its candidates while they
-        // hold.
-        if (reuseCull) {
-            gatherReusedShadowCandidates(lightSpaceMatrix, shadowRadius);
-        } else {
-            gatherShadowCandidates(lightSpaceMatrix, shadowRadius, shadowCandidates_);
-        }
-        for (const uint32_t i : shadowCandidates_) {
-            const auto& instance = scene_->instances[i];
-            if (!castsHere(instance)) continue;
-            const uint32_t draw = static_cast<uint32_t>(shadowDraws_.size());
-            shadowDraws_.push_back({.modelMatrix = instance.modelMatrix, .model = instance.cachedModel,
-                                    .position = instance.position, .scale = instance.scale});
-            shadowCasters_[instance.cachedModel->shadowWindFoliage ? 1 : 0].push_back(
-                {.modelId = instance.modelId, .draw = draw});
-        }
 
-        // WOWEE_M2_CULL_CHECK=1: count the casters across the whole world too.
-        // These must agree exactly: the columns are rejected only when no
-        // position in them could pass the same test.
-        static const bool cullCheck = core::envFlagEnabled("WOWEE_M2_CULL_CHECK", false);
-        if (cullCheck && sunMap) {
-            size_t whole = 0;
-            for (const auto& instance : scene_->instances) whole += castsHere(instance) ? 1 : 0;
-            const size_t kept = shadowCasters_[0].size() + shadowCasters_[1].size();
-            static std::chrono::steady_clock::time_point lastReport{};
-            const auto now = std::chrono::steady_clock::now();
-            if (now - lastReport > std::chrono::seconds(whole != kept ? 1 : 10)) {
-                lastReport = now;
-                LOG_WARNING("M2 shadow cull check: columns kept ", shadowCandidates_.size(), " of ",
-                            scene_->instances.size(), " to test; casters ", kept, " vs ", whole,
-                            " whole-world", whole != kept ? "  <-- DIFFERS" : "");
-            }
-        }
-        // Grouped by model for the draws. The sun's candidates come in that
-        // order already, and a check is cheaper than a sort.
-        for (auto& bucket : shadowCasters_) {
-            if (!std::is_sorted(bucket.begin(), bucket.end())) std::sort(bucket.begin(), bucket.end());
-        }
-        solarCastersFresh_ = sunMap;
+    (void)sunMap;
+    (void)reuseCull;
+    shadowDraws_.clear();
+    shadowCasters_[0].clear();
+    shadowCasters_[1].clear();
+    const auto& candidates = lightSpaceMatrix == recording_->overheadMatrix ? recording_->depth : recording_->solarDepth;
+    for (const auto& source : candidates) {
+        if (!insideFootprint(source.position, source.scale, *source.model)) continue;
+        const uint32_t draw = static_cast<uint32_t>(shadowDraws_.size());
+        shadowDraws_.push_back(source);
+        const auto& model = *source.model;
+        // A model's authored material participation is the same as before;
+        // recording filters its solid and foliage batches separately.
+        const uint32_t key = source.modelId;
+        shadowCasters_[model.shadowWindFoliage ? 1 : 0].push_back({key, draw});
     }
+    for (auto& bucket : shadowCasters_) if (!std::is_sorted(bucket.begin(), bucket.end())) std::sort(bucket.begin(), bucket.end());
 }
 
 void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
@@ -2573,7 +2479,7 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
             std::size_t groupEnd = g;
             while (groupEnd < casters.size() && casters[groupEnd].modelId == modelId) ++groupEnd;
 
-            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model;
+            const M2ModelGPU* groupModel = shadowDraws_[casters[g].draw].model.get();
             if (!groupModel) { g = groupEnd; continue; }
             const M2ModelGPU& model = *groupModel;
 
@@ -2612,7 +2518,7 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                     // model's own space here, where the main pass turns it
                     // on the GPU: the sway is applied before the model matrix.
                     const glm::vec3 origin(instance.modelMatrix[3]);
-                    const float fade = m2WindDistanceFade(glm::length(origin - cachedCamPos_));
+                    const float fade = m2WindDistanceFade(glm::length(origin - recording_->cameraPosition));
                     out.sway = glm::vec4(origin.x, origin.y, sway.refHeight, sway.amp * fade);
                     out.wind = shadowWindFor(wind, instance.modelMatrix).wind;
                 } else {
@@ -2681,7 +2587,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                               const glm::vec3& /*shadowCenter*/, float shadowRadius, bool resetDescriptors,
                               bool reuseCull) {
     if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (scene_->instances.empty() || models.empty()) return;
+    if (recording_->depth.empty() && recording_->solarDepth.empty()) return;
 
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
