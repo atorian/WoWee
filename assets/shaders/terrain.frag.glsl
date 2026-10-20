@@ -198,8 +198,9 @@ void main() {
     float diff = max(dot(norm, lightDir2), 0.0);
     vec3 diffuse = diff * lightColor.rgb * finalColor.rgb;
 
+    RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
     float shadow = 1.0;
-    if (shadowParams.x > 0.5) {
+    if (shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
         vec3 ldir = normalize(-lightDir.xyz);
         // Texture relief changes lighting, not the caster geometry. Offsetting
         // along its perturbed normal can push the lookup into the surface.
@@ -216,14 +217,13 @@ void main() {
         }
     }
 
-    RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
     ambient = rtAmbient(rt, ambientColor.rgb) * finalColor.rgb;
 
     // The units' map and the sun's, the darker of the two, as the client
     // takes the dynamic map and the ground's baked one. Ground has no
     // edge-on fade in the client; it darkens the whole lit colour.
-    shadow = min(shadow, localShadowAt(FragPos, receiverFace));
+    if (shadow > 0.0) shadow = min(shadow, localShadowAt(FragPos, receiverFace));
     vec3 result = (ambient + diffuse) * shadowLightFactor(shadow);
     result += localLightContribution(FragPos, norm, finalColor.rgb, vLocalLights);
 

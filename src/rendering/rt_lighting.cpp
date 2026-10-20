@@ -275,12 +275,12 @@ bool RtLighting::createImages(VkExtent2D e) {
     // record(). Transition and clear them now: deferring this to record() left
     // the first opaque draws with descriptors pointing at UNDEFINED images.
     ctx_->immediateSubmit([&](VkCommandBuffer cmd) {
-        auto init = [&](const Target& t) {
+        auto init = [&](const Target& t, bool visibility = false) {
             transitionImageLayout(cmd, t.img.image, VK_IMAGE_LAYOUT_UNDEFINED,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             VkClearColorValue neutral{};
-            neutral.float32[0] = neutral.float32[1] = 1.0f;
+            neutral.float32[0] = neutral.float32[1] = visibility ? 1.0f : 0.0f;
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 &neutral, 1, &range);
@@ -302,10 +302,14 @@ bool RtLighting::createImages(VkExtent2D e) {
             dep.pImageMemoryBarriers = &barrier;
             cmdPipelineBarrier2(cmd, dep);
         };
-        for (const Target* t : {&raw_, &rawGi_, &tmp_, &tmpGi_}) init(*t);
+        init(raw_, true);
+        init(tmp_, true);
+        init(rawGi_);
+        init(tmpGi_);
         for (const auto& slot : slots_) {
-            for (const Target* t : {&slot.gbuf, &slot.hist, &slot.histGi, &slot.out,
-                                    &slot.outGi, &slot.reflection}) init(*t);
+            init(slot.hist, true);
+            init(slot.out, true);
+            for (const Target* t : {&slot.gbuf, &slot.histGi, &slot.outGi, &slot.reflection}) init(*t);
         }
     });
     traceExtent_ = e;
@@ -479,7 +483,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     ctx_->gpuMark(cmd, RtScene::kGpuMarkLabel);
 
     // Last frame's slot holds history only if last frame traced into it.
-    const bool havePrev = havePrev_ && resultFrame_ != 0 && resultFrame_ + 1 == frameCounter_;
+    const bool havePrev = havePrev_ && resultMode_ == mode_ && resultFrame_ != 0 && resultFrame_ + 1 == frameCounter_;
 
     RtPassData d{};
     // Inverting projection * world-view in float loses the nearby pixel
@@ -498,7 +502,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
                          1.0f / traceExtent_.height);
     d.sceneExtent = glm::vec4(sceneExtent.width, sceneExtent.height, 1.0f / sceneExtent.width,
                               1.0f / sceneExtent.height);
-    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, 0.0f, 0.0f);
+    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, in.traceReflections ? 1.0f : 0.0f, 0.0f);
     std::memcpy(s.ubo.info.pMappedData, &d, sizeof(d));
 
     // The outputs of this slot were last read by the surfaces of the frame

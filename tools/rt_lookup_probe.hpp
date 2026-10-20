@@ -7,12 +7,14 @@
 // checks. A foreground mask is the silhouette in the previous frame. Queries
 // cover its shifted edge, uncovered background, a sloping receiver, and places
 // where no matching surface exists. Uses the actual rt_lighting.glsli lookup.
-inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
+inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = false,
+                         const char* shaderPath = "assets/shaders/rt_lookup_probe.comp.spv",
+                         const char* workload = "mixed") {
     using namespace wowee::rendering;
     constexpr uint32_t size = 64;
     struct Sample { glm::vec4 point, settings, normal{0.0f}; };
     struct Result { glm::vec4 ambientWeight, sunAo; };
-    const std::array samples{
+    std::vector<Sample> samples{
         Sample{{39, 30, 10, 0}, {0, 0, 3, 0}},   // shifted animated edge
         Sample{{35, 30, 20.45f, 0}, {.15f, 0, 3, 0}}, // newly revealed slope
         Sample{{32, 30, 20, 0}, {.15f, 0, 3, 0}}, // wider uncovered strip
@@ -25,17 +27,37 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
         Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {1, 0, 0, 0}}, // same distance, wrong plane
         Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}}, // matching lamp lid
         Sample{{30, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, -1, 0}}, // opposite side
+        Sample{{8.25f, 59.75f, 30, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}}, // fractional GI gradient
+        Sample{{12.75f, 59.25f, 30, 0}, {0, 0, 2, 0}, {0, 0, 1, 0}}, // fractional AO gradient
     };
+    samples.push_back(Sample{{36.25f, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}});
+    samples.push_back(Sample{{36.75f, 30, 20.7125f, 0}, {.15f, 0, 3, 0}, {0, 0, 1, 0}});
+    const size_t checkedSamples = samples.size();
+    if (benchmark) {
+        // A pixel-sized workload, mostly stable receivers, with silhouette
+        // and newly revealed queries mixed in. The actual production lookup
+        // is dispatched for each input; no copied implementation is timed.
+        samples.reserve(1024 * 1024);
+        while (samples.size() < 1024 * 1024) {
+            const size_t i = samples.size();
+            const float x = 4.25f + float(i % 54);
+            Sample query{{x, 58.25f, 30, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}};
+            if (std::strcmp(workload, "uncovered") == 0 ||
+                (std::strcmp(workload, "mixed") == 0 && i % 8 == 0))
+                query = samples[(i / 8) % 12];
+            samples.push_back(query);
+        }
+    }
     const VkDevice dev = ctx.getDevice();
     const auto alloc = ctx.getAllocator();
-    auto input = createBuffer(alloc, sizeof(samples), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    auto input = createBuffer(alloc, sizeof(Sample) * samples.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               VMA_MEMORY_USAGE_CPU_TO_GPU);
     auto output = createBuffer(alloc, sizeof(Result) * samples.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                VMA_MEMORY_USAGE_CPU_ONLY);
     const size_t imageBytes = size * size * sizeof(glm::vec4);
     auto upload = createBuffer(alloc, imageBytes * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VMA_MEMORY_USAGE_CPU_TO_GPU);
-    std::memcpy(input.info.pMappedData, samples.data(), sizeof(samples));
+    std::memcpy(input.info.pMappedData, samples.data(), sizeof(Sample) * samples.size());
     auto* texels = static_cast<glm::vec4*>(upload.info.pMappedData);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
@@ -45,6 +67,12 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
                 : glm::vec4(.75f, .65f, 0, 20.0f + .15f * (float(x) - 32.0f));
             texels[size * size + i] = foreground ? glm::vec4(.02f, .03f, .04f, 0)
                                                                : glm::vec4(.08f, .1f, .12f, 0);
+            if (y >= 55) {
+                // A continuous change of incoming light across one flat
+                // receiver must interpolate at fractional texel positions.
+                texels[i] = glm::vec4(.2f + .01f * x, .1f + .01f * x, 0, 30);
+                texels[size * size + i] = glm::vec4(.02f, .03f, .04f, 1) * (.1f + .01f * x);
+            }
         }
     }
     vmaFlushAllocation(alloc, input.allocation, 0, VK_WHOLE_SIZE);
@@ -54,7 +82,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     auto gi = createImage(dev, alloc, size, size, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
     VkSampler sampler = VK_NULL_HANDLE;
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+    sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
     sci.maxLod = 0;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(dev, &sci, nullptr, &sampler) != VK_SUCCESS) return 1;
@@ -76,7 +104,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     plci.pSetLayouts = &setLayout;
     if (vkCreatePipelineLayout(dev, &plci, nullptr, &layout) != VK_SUCCESS) return 1;
     wowee::rendering::VkShaderModule shader;
-    if (!shader.loadFromFile(dev, "assets/shaders/rt_lookup_probe.comp.spv")) return 1;
+    if (!shader.loadFromFile(dev, shaderPath)) return 1;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkComputePipelineCreateInfo pci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     pci.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -152,7 +180,7 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
-        vkCmdDispatch(cmd, uint32_t(samples.size()), 1, 1);
+        vkCmdDispatch(cmd, (uint32_t(samples.size()) + 63) / 64, 1, 1);
         VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -168,20 +196,70 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx) {
     const std::array names{"moving character edge", "revealed sloping background", "wide revealed strip",
                            "stable sloping background", "unrelated depth rejected", "RT off",
                            "AO-only mode", "sun-only mode", "outside image",
-                           "wrong plane rejected", "matching lamp lid", "opposite side rejected"};
+                           "wrong plane rejected", "matching lamp lid", "opposite side rejected",
+                           "fractional GI gradient", "fractional AO gradient",
+                           "foreground bilinear footprint", "background bilinear footprint"};
     int failures = 0;
-    for (size_t i = 0; i < samples.size(); ++i) {
+    for (size_t i = 0; i < checkedSamples; ++i) {
         const bool fallback = i == 4 || i == 5 || i == 8 || i == 9 || i == 11;
         glm::vec3 expectedAmbient = fallback || i == 7 ? glm::vec3(.3f, .35f, .4f)
             : i == 6 ? glm::vec3(.3f, .35f, .4f) * .4f
             : (i == 0 || i == 10) ? glm::vec3(.02f, .03f, .04f) : glm::vec3(.08f, .1f, .12f);
-        const bool ok = glm::length(glm::vec3(results[i].ambientWeight) - expectedAmbient) < .002f &&
+        if (i == 12) expectedAmbient = glm::vec3(.02f, .03f, .04f) * (.1f + .01f * samples[i].point.x);
+        if (i == 13) expectedAmbient = glm::vec3(.3f, .35f, .4f) * (.1f + .01f * samples[i].point.x);
+        if (i == 14) expectedAmbient = glm::vec3(.02f, .03f, .04f);
+        if (i == 15) expectedAmbient = glm::vec3(.08f, .1f, .12f);
+        // GI is a signed indirect correction to AO-attenuated ambient,
+        // not a replacement that silently drops the Full mode's AO.
+        if (!fallback && samples[i].settings.z == 3) {
+            const float ao = i == 12 ? .1825f : (i == 0 || i == 10 || i == 14) ? .4f : .65f;
+            expectedAmbient += glm::vec3(.3f, .35f, .4f) * ao;
+        }
+        const float expectedSun = i == 14 ? .25f : i == 15 ? .75f : i >= 12 ? .2f + .01f * samples[i].point.x
+            : (i == 0 || i >= 6 ? .25f : .75f);
+        const bool ok = glm::length(glm::vec3(results[i].ambientWeight) - expectedAmbient) < (i >= 12 ? 1e-5f : .002f) &&
             std::abs(results[i].ambientWeight.w - (fallback ? 0.0f : 1.0f)) < .002f &&
-            (fallback || std::abs(results[i].sunAo.x - (i == 0 || i >= 6 ? .25f : .75f)) < .002f);
+            (fallback || std::abs(results[i].sunAo.x - expectedSun) < (i >= 12 ? 1e-5f : .002f));
         std::printf("lookup %-30s weight=%.3f ambient=%.3f %.3f %.3f %s\n", names[i],
                     results[i].ambientWeight.w, results[i].ambientWeight.x, results[i].ambientWeight.y,
                     results[i].ambientWeight.z, ok ? "ok" : "FAIL");
         if (!ok) ++failures;
+    }
+    if (benchmark) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(ctx.getPhysicalDevice(), &properties);
+        VkQueryPool poolTimes = VK_NULL_HANDLE;
+        VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = 2;
+        if (vkCreateQueryPool(dev, &qci, nullptr, &poolTimes) != VK_SUCCESS) {
+            std::fprintf(stderr, "lookup benchmark: failed to create timestamp queries\n");
+            ++failures;
+        } else {
+            std::array<double, 9> milliseconds{};
+            for (size_t run = 0; run < milliseconds.size(); ++run) {
+                ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+                    vkCmdResetQueryPool(cmd, poolTimes, 0, 2);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
+                    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, poolTimes, 0);
+                    vkCmdDispatch(cmd, (uint32_t(samples.size()) + 63) / 64, 1, 1);
+                    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, poolTimes, 1);
+                });
+                uint64_t times[2]{};
+                if (vkGetQueryPoolResults(dev, poolTimes, 0, 2, sizeof(times), times, sizeof(uint64_t),
+                                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) {
+                    std::fprintf(stderr, "lookup benchmark: failed to read timestamps\n");
+                    ++failures;
+                    break;
+                }
+                milliseconds[run] = double(times[1] - times[0]) * properties.limits.timestampPeriod / 1e6;
+            }
+            std::sort(milliseconds.begin(), milliseconds.end());
+            std::printf("lookup benchmark: %zu receivers, %s, median %.3f ms, min %.3f ms, GPU %s\n",
+                        samples.size(), workload, milliseconds[4], milliseconds[0], properties.deviceName);
+            vkDestroyQueryPool(dev, poolTimes, nullptr);
+        }
     }
     destroy(dev, pipeline);
     destroy(dev, layout);

@@ -2,9 +2,9 @@
 #ifdef RT_HARDWARE
 #extension GL_EXT_ray_query : require
 #endif
-// One sample per trace pixel of each enabled term:
+// One sample per trace pixel, sharing the AO/GI hemisphere intersection:
 //   sun visibility - a ray toward a point on the sun's disc
-//   ambient occlusion - a short cosine-weighted ray
+//   ambient occlusion - the near part of the cosine-weighted ray
 //   one-bounce diffuse - a cosine-weighted ray, the hit lit by the sun (with
 //     its own shadow ray) and the sky; a miss sees the sky
 // Noisy by design; rt_temporal and rt_filter turn it into something usable.
@@ -30,9 +30,10 @@ void main() {
 
     vec4 g = texelFetch(uGbufCur, px, 0);
     float dist = rtGbufDist(g);
+    uint mode = uint(pass.params.x + 0.5);
     if (dist <= 0.0) {
         imageStore(uRaw, px, vec4(1.0, 1.0, 0.0, 0.0));
-        imageStore(uRawGi, px, vec4(pass.skyColor.rgb, 0.0));
+        if (mode >= RT_MODE_GI) imageStore(uRawGi, px, vec4(0.0));
         imageStore(uReflection, px, vec4(0.0));
         return;
     }
@@ -40,8 +41,6 @@ void main() {
     vec3 p = rtGbufWorld(g, px);
     vec3 origin = p + n * rtSurfaceOffset(dist);
     uint rng = rtSeed(uvec2(px), uint(pass.cameraPos.w));
-    uint mode = uint(pass.params.x + 0.5);
-
     float sun = 0.0;
     vec3 L = normalize(pass.sunDir.xyz);
     if (pass.sunColor.w > 0.5 && dot(n, L) > 0.0) {
@@ -50,31 +49,35 @@ void main() {
     }
 
     float ao = 1.0;
+    vec3 indirectDelta = vec3(0.0);
     if (mode >= RT_MODE_AO) {
-        vec3 ad = rtCosineHemisphere(n, rng);
+        // Both estimators sample the same cosine-weighted hemisphere. The
+        // closest hit out to the GI range also tells us whether anything
+        // intersects the shorter AO range: do not traverse the scene twice.
+        vec3 direction = rtCosineHemisphere(n, rng);
+        float range = mode >= RT_MODE_GI ? pass.params.z : pass.params.y;
         float t;
         vec3 hn;
         vec4 hs;
-        if (rtClosest(origin, ad, pass.params.y, rng, t, hn, hs)) ao = t / pass.params.y;
-    }
+        bool hit = rtClosest(origin, direction, range, rng, t, hn, hs);
+        if (hit) ao = clamp(t / pass.params.y, 0.0, 1.0);
 
-    vec3 gi = vec3(0.0);
-    if (mode >= RT_MODE_GI) {
-        vec3 gd = rtCosineHemisphere(n, rng);
-        float t;
-        vec3 hn;
-        vec4 hs;
-        if (rtClosest(origin, gd, pass.params.z, rng, t, hn, hs)) {
-            vec3 hp = origin + gd * t;
-            vec3 radiance = pass.skyColor.rgb;  // the sky the hit surface sees, unshadowed
-            float ndl = dot(hn, L);
-            if (pass.sunColor.w > 0.5 && ndl > 0.0 &&
-                !rtOccluded(hp + hn * rtSurfaceOffset(t), L, pass.params.w, rng)) {
-                radiance += pass.sunColor.rgb * ndl;
+        if (mode >= RT_MODE_GI) {
+            vec3 incoming = pass.skyColor.rgb;
+            if (hit) {
+                vec3 hp = origin + direction * t;
+                vec3 radiance = pass.skyColor.rgb;
+                float ndl = dot(hn, L);
+                if (pass.sunColor.w > 0.5 && ndl > 0.0 &&
+                    !rtOccluded(hp + hn * rtSurfaceOffset(t), L, pass.params.w, rng)) {
+                    radiance += pass.sunColor.rgb * ndl;
+                }
+                incoming = hs.rgb * radiance;
             }
-            gi = hs.rgb * radiance;
-        } else {
-            gi = pass.skyColor.rgb;
+            // Forward composition starts with sky * AO. Store the signed
+            // correction to that baseline, so AO is retained without
+            // occluding the traced one-bounce radiance a second time.
+            indirectDelta = incoming - pass.skyColor.rgb * ao;
         }
     }
 
@@ -82,7 +85,7 @@ void main() {
     // blur it across the window frame. Only nearby non-horizontal receivers need
     // this ray; distant geometry and the ground retain the cheap lighting pass.
     vec4 reflection = vec4(0.0);
-    if (dist < 120.0 && abs(n.z) < 0.9) {
+    if (pass.misc.z > 0.5 && dist < 120.0 && abs(n.z) < 0.9) {
         vec3 incident = normalize(p - pass.cameraPos.xyz);
         vec3 rd = reflect(incident, n);
         uint reflectionRng = rtSeed(uvec2(px), 0u);
@@ -102,5 +105,5 @@ void main() {
     }
     imageStore(uReflection, px, reflection);
     imageStore(uRaw, px, vec4(sun, ao, 0.0, 0.0));
-    imageStore(uRawGi, px, vec4(gi, 0.0));
+    if (mode >= RT_MODE_GI) imageStore(uRawGi, px, vec4(indirectDelta, 0.0));
 }

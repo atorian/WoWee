@@ -314,8 +314,11 @@ void main() {
     // the renderer's call (wmoReceivesExteriorShadows).
     const bool baked = light == LIGHT_VERTEX_COLOUR || light == LIGHT_BUILDING_AMBIENT;
     const bool sunReaches = receivesExteriorShadows != 0;
+    // RT reconstructs triangle normals from depth; authored smooth normals
+    // can reject this same receiver at a corner and expose unoccluded ambient.
+    RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
     float shadow = 1.0;
-    if (sunReaches && shadowParams.x > 0.5) {
+    if (sunReaches && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
         vec3 ldir = normalize(-lightDir.xyz);
         // Texture relief changes lighting, not the caster geometry. Offsetting
         // along its perturbed normal can push the lookup into the surface.
@@ -333,9 +336,8 @@ void main() {
             shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
         }
     }
-    RtLight rt = rtLightAt(FragPos, vertexNormal);
     shadow = rtShadow(rt, shadow);
-    float unitShadow = localShadowAt(FragPos, receiverFace);
+    float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
     if (baked) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
     shadow = min(shadow, unitShadow);
 

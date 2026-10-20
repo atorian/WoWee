@@ -2591,6 +2591,7 @@ wowee_add_test(test_swim_wall SOURCES test_swim_wall.cpp)
 add_executable(test_light_bands
     test_light_bands.cpp
     test_distance_fog.cpp
+    test_rt_light_composition.cpp
     ${TEST_COMMON_SOURCES})
 target_include_directories(test_light_bands PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_bands SYSTEM PRIVATE

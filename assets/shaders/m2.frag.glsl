@@ -283,13 +283,14 @@ void main() {
         vec3 sunColor = interiorDirect(vInteriorAmbient, vInteriorDirect, lightColor.rgb);
 
         float spec = 0.0;
+        RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
         float shadow = 1.0;
         if (!isFoliage) {
             vec3 halfDir = normalize(ldir + viewDir);
             spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
         }
 
-        if (!inside && shadowParams.x > 0.5) {
+        if (!inside && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
             // Texture relief changes lighting, not the caster geometry. Offsetting
             // along its perturbed normal can push the lookup into the surface.
             vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
@@ -319,7 +320,6 @@ void main() {
         // Sky-bounce ambient for foliage: upward-facing leaves catch more
         // ambient than the canopy underside, giving the crown depth instead
         // of a uniformly-lit blob.
-        RtLight rt = rtLightAt(FragPos, vertexNormal);
         if (!inside) shadow = rtShadow(rt, shadow);
         vec3 ambientTerm = rtAmbient(rt, interiorAmbient(vInteriorAmbient, ambientColor.rgb));
         if (isFoliage) {
@@ -329,7 +329,7 @@ void main() {
         // the buildings take them: a model is ground too - a dock, a bridge,
         // a rock. Indoors a model takes only these, kept below the player's
         // head as the room around it does.
-        float unitShadow = localShadowAt(FragPos, receiverFace);
+        float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
         if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
         shadow = min(shadow, unitShadow);
         // The whole lit colour darkened alike, as the client does; the

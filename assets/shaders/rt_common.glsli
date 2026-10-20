@@ -17,7 +17,8 @@ layout(set = 0, binding = 0) uniform RtPassData {
     vec4 extent;         // xy = trace size, zw = 1 / trace size
     vec4 sceneExtent;    // xy = scene depth size, zw = 1 / size
     vec4 misc;           // x = 1 when the acceleration structure holds anything,
-                         // y = 1 when last frame's slot holds history
+                         // y = 1 when last frame's slot holds history,
+                         // z = 1 only when a consumer requests mirror reflections
 } pass;
 
 const uint RT_MODE_SHADOWS = 1u;

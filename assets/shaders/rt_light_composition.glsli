@@ -1,0 +1,30 @@
+// RT lighting composition shared by GPU consumers and behavioral tests.
+struct RtLight {
+    float weight;
+    float sun;
+    float ao;
+    // Signed indirect-light correction to AO-attenuated zone ambient.
+    vec3 indirectDelta;
+};
+
+// A zero result already excludes all direct light. No mapped caster can
+// darken it further, including characters absent from the RT scene.
+float rtSunVisibility(RtLight r) {
+    return mix(1.0f, r.sun, r.weight);
+}
+
+// Characters are not in the acceleration structure and cast only into the
+// shadow map, so the two are combined rather than one replacing the other.
+float rtShadow(RtLight r, float shadowMap) {
+    return min(shadowMap, rtSunVisibility(r));
+}
+
+vec3 rtAmbient(RtLight r, vec3 flatAmbient) {
+    if (rtParams.x < 1.5f) return flatAmbient;
+    vec3 traced = flatAmbient * r.ao;
+    // The tracer subtracts its AO-attenuated sky baseline from incoming
+    // one-bounce radiance. Adding that correction preserves AO and GI
+    // without multiplying already occluded incoming light by AO again.
+    if (rtParams.x > 2.5f) traced += r.indirectDelta;
+    return mix(flatAmbient, traced, r.weight);
+}

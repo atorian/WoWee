@@ -13,6 +13,9 @@
 //     cmake -S . -B build -DWOWEE_BUILD_RT_PROBE=ON
 //     cmake --build build --target rt_probe
 //     cd build/bin && ./rt_probe            (exit status 0 = pass)
+//     ./rt_probe --lookup-only [shader.spv] [stable|mixed|uncovered]
+//     ./rt_probe --translated --sweep    (AO/GI and mode changes)
+//     ./rt_probe --reflections             (explicit mirror consumer)
 //     ./rt_probe --translated               (continent-coordinate precision)
 //
 // WOWEE_RT_FORCE_SOFTWARE=1 selects the compute tracer on hardware that has
@@ -62,6 +65,10 @@ RtScene::MeshSource box(const glm::vec3& lo, const glm::vec3& hi) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    const auto hasArgument = [&](const char* name) {
+        for (int i = 1; i < argc; ++i) if (std::strcmp(argv[i], name) == 0) return true;
+        return false;
+    };
     // World translation must not change reconstructed rays or lighting.
     const glm::vec3 camera = argc > 1 && std::strcmp(argv[1], "--translated") == 0
         ? glm::vec3(5800.0f, 600.0f, 650.0f) : glm::vec3(0.0f);
@@ -83,6 +90,21 @@ int main(int argc, char** argv) {
         if (!ctx.initialize(window)) {
             std::fprintf(stderr, "VkContext failed\n");
             return 2;
+        }
+        if (argc > 1 && std::strcmp(argv[1], "--lookup-only") == 0) {
+            if (argc > 3 && std::strcmp(argv[3], "stable") != 0 && std::strcmp(argv[3], "mixed") != 0 &&
+                std::strcmp(argv[3], "uncovered") != 0) {
+                std::fprintf(stderr, "lookup workload must be stable, mixed or uncovered\n");
+                return 2;
+            }
+            const int failures = checkRtLookup(ctx, true,
+                argc > 2 ? argv[2] : "assets/shaders/rt_lookup_probe.comp.spv", argc > 3 ? argv[3] : "mixed");
+            ctx.flushDeferredCleanup();
+            ctx.shutdown();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            std::printf("%s\n", failures == 0 ? "PASS" : "FAIL");
+            return failures == 0 ? 0 : 1;
         }
         RtScene scene;
         RtLighting lighting;
@@ -128,7 +150,6 @@ int main(int argc, char** argv) {
                                                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
         lighting.setMode(RtLighting::Mode::Full);
-        lighting.prepare(sceneExtent);
 
         RtLighting::FrameInputs in{};
         in.view = view;
@@ -139,6 +160,7 @@ int main(int argc, char** argv) {
         in.sunColor = glm::vec3(1.0f);
         in.skyColor = glm::vec3(0.3f, 0.35f, 0.4f);
         in.sunUp = true;
+        in.traceReflections = hasArgument("--reflections");
 
         auto depthLayout = [&](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
             VkImageMemoryBarrier2 b{};
@@ -156,16 +178,38 @@ int main(int argc, char** argv) {
             dep.pImageMemoryBarriers = &b;
             cmdPipelineBarrier2(cmd, dep);
         };
-        ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            depthLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            VkClearDepthStencilValue clear{wallDepth, 0};
-            VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-            vkCmdClearDepthStencilImage(cmd, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                        &clear, 1, &range);
-            depthLayout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        bool depthInitialized = false;
+        const auto recordFrame = [&]() {
+            lighting.prepare(sceneExtent);
+            uint32_t presentImage = 0;
+            VkCommandBuffer cmd = ctx.beginFrame(presentImage);
+            if (cmd == VK_NULL_HANDLE) {
+                std::fprintf(stderr, "rt_probe: could not begin a GPU frame\n");
+                return uint32_t(MAX_FRAMES_IN_FLIGHT);
+            }
+            const uint32_t slot = ctx.getCurrentFrame();
+            if (!depthInitialized) {
+                depthLayout(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                VkClearDepthStencilValue clear{wallDepth, 0};
+                VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                vkCmdClearDepthStencilImage(cmd, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            &clear, 1, &range);
+                depthLayout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                depthInitialized = true;
+            }
             lighting.record(cmd, depth.image, sceneExtent, false, in);
-        });
+            // Follow the real submission path: it resets GPU timestamp pools,
+            // rotates history slots and fences their writes before readback.
+            transitionImageLayout(cmd, ctx.getSwapchainImages()[presentImage],
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            ctx.endFrame(cmd, presentImage);
+            ctx.waitForSubmittedFrames("rt_probe trace");
+            return slot;
+        };
+        const uint32_t recordedSlot = recordFrame();
+        if (recordedSlot >= MAX_FRAMES_IN_FLIGHT) return 2;
 
         const VkExtent2D te = lighting.traceExtent();
         const VkDeviceSize bytes = VkDeviceSize(te.width) * te.height * 8;
@@ -177,18 +221,23 @@ int main(int argc, char** argv) {
                                           VMA_MEMORY_USAGE_CPU_ONLY);
         AllocatedBuffer reflection = createBuffer(ctx.getAllocator(), bytes,
                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-        ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.imageExtent = {te.width, te.height, 1};
-            vkCmdCopyImageToBuffer(cmd, lighting.lightImageWrittenBy(ctx.getCurrentFrame()),
-                                   VK_IMAGE_LAYOUT_GENERAL, light.buffer, 1, &region);
-            vkCmdCopyImageToBuffer(cmd, lighting.giImageWrittenBy(ctx.getCurrentFrame()),
-                                   VK_IMAGE_LAYOUT_GENERAL, gi.buffer, 1, &region);
-            vkCmdCopyImageToBuffer(cmd, lighting.reflectionImageWrittenBy(ctx.getCurrentFrame()),
-                                   VK_IMAGE_LAYOUT_GENERAL, reflection.buffer, 1, &region);
-        });
-        ctx.waitIdle();
+        const auto readOutputs = [&](uint32_t slot) {
+            ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+                VkBufferImageCopy region{};
+                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                region.imageExtent = {te.width, te.height, 1};
+                vkCmdCopyImageToBuffer(cmd, lighting.lightImageWrittenBy(slot),
+                                       VK_IMAGE_LAYOUT_GENERAL, light.buffer, 1, &region);
+                vkCmdCopyImageToBuffer(cmd, lighting.giImageWrittenBy(slot),
+                                       VK_IMAGE_LAYOUT_GENERAL, gi.buffer, 1, &region);
+                vkCmdCopyImageToBuffer(cmd, lighting.reflectionImageWrittenBy(slot),
+                                       VK_IMAGE_LAYOUT_GENERAL, reflection.buffer, 1, &region);
+            });
+
+            for (const auto* buffer : {&light, &gi, &reflection})
+                vmaInvalidateAllocation(ctx.getAllocator(), buffer->allocation, 0, VK_WHOLE_SIZE);
+        };
+        readOutputs(recordedSlot);
 
         const auto* lightTexels = static_cast<const uint16_t*>(light.info.pMappedData);
         const auto* giTexels = static_cast<const uint16_t*>(gi.info.pMappedData);
@@ -216,9 +265,14 @@ int main(int argc, char** argv) {
                                   texel(reflectionTexels, rx, ry, 1),
                                   texel(reflectionTexels, rx, ry, 2));
         std::printf("offscreen building reflection: %.3f %.3f %.3f\n", reflected.r, reflected.g, reflected.b);
-        expect("mirror reflects the red building behind the camera",
-               reflected.r > 0.2f && reflected.r > reflected.g * 4.0f &&
-               reflected.g > reflected.b && texel(reflectionTexels, rx, ry, 3) > 0.0f);
+        if (in.traceReflections) {
+            expect("mirror consumer receives the red building behind the camera",
+                   reflected.r > .2f && reflected.r > reflected.g * 4 &&
+                   reflected.g > reflected.b && texel(reflectionTexels, rx, ry, 3) > 0);
+        } else {
+            expect("no mirror consumer means no reflection is generated",
+                   glm::length(reflected) < .001f && texel(reflectionTexels, rx, ry, 3) == 0);
+        }
 
         // Rays toward the sun rise a quarter yard per yard: from the wall, the
         // box's front face (x = 16) is four yards back, so a wall point is
@@ -264,6 +318,56 @@ int main(int argc, char** argv) {
         expect("unoccluded receiving wall has no self-shadow speckles", acne == 0);
         expect("every value is finite", finite);
         expect("the shadow is a patch, not the frame", shadowed > 20 && shadowed < te.width * te.height / 3);
+
+        if (hasArgument("--sweep")) {
+            // A nearby opaque plane covers the receiver's hemisphere. AO
+            // attenuates ambient; the one-bounce light returns the plane's
+            // known albedo times sky radiance. Switching through lower modes
+            // must not reuse the previous mode's lighting history.
+            auto nearPlane = box({19.0f, -200, -200}, {19.1f, 200, 200});
+            nearPlane.surfaces[0] = packRtSurface(glm::vec3(.2f, .4f, .6f), 1.0f);
+            scene.addInstance(scene.addMesh(std::move(nearPlane)), sceneTransform);
+            in.sunUp = false;
+            in.traceReflections = false;
+            for (auto mode : {RtLighting::Mode::ShadowsAO, RtLighting::Mode::Full,
+                              RtLighting::Mode::Shadows, RtLighting::Mode::Full}) {
+                lighting.setMode(mode);
+                const uint32_t slot = recordFrame();
+                if (slot >= MAX_FRAMES_IN_FLIGHT) return 2;
+                readOutputs(slot);
+                glm::dvec3 incoming(0);
+                double aoMean = 0;
+                size_t count = 0;
+                for (uint32_t y = te.height / 4; y < te.height * 3 / 4; ++y) {
+                    for (uint32_t x = te.width / 4; x < te.width * 3 / 4; ++x) {
+                        const float ao = texel(lightTexels, x, y, 1);
+                        aoMean += ao;
+                        glm::vec3 value = in.skyColor;
+                        if (mode != RtLighting::Mode::Shadows) value *= ao;
+                        if (mode == RtLighting::Mode::Full) {
+                            value += glm::vec3(texel(giTexels, x, y, 0), texel(giTexels, x, y, 1),
+                                               texel(giTexels, x, y, 2));
+                        }
+                        incoming += glm::dvec3(value);
+                        ++count;
+                    }
+                }
+                aoMean /= double(count);
+                incoming /= double(count);
+                std::printf("mode %d: AO %.4f incoming %.4f %.4f %.4f\n", int(mode), aoMean,
+                            incoming.x, incoming.y, incoming.z);
+                if (mode == RtLighting::Mode::Shadows) {
+                    expect("shadows mode leaves ambient unoccluded", std::abs(aoMean - 1) < .001);
+                } else {
+                    expect("the nearby plane occludes ambient in AO and Full", aoMean > .1 && aoMean < .8);
+                }
+                if (mode == RtLighting::Mode::Full) {
+                    const glm::dvec3 expected = glm::dvec3(in.skyColor) * glm::dvec3(.2, .4, .6);
+                    expect("Full retains AO and one-bounce light without double occlusion",
+                           glm::length(incoming - expected) < .01);
+                }
+            }
+        }
 
         destroyBuffer(ctx.getAllocator(), light);
         destroyBuffer(ctx.getAllocator(), gi);

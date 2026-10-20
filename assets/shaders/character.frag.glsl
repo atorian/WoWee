@@ -347,8 +347,9 @@ void main() {
         vec3 halfDir = normalize(ldir + viewDir);
         float spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
 
+        RtLight rt = rtLightAt(FragPos, normalize(receiverFace));
         float shadow = 1.0;
-        if (!inside && shadowParams.x > 0.5) {
+        if (!inside && shadowParams.x > 0.5 && rtSunVisibility(rt) > 0.0) {
             // Texture relief changes lighting, not the caster geometry. Offsetting
             // along its perturbed normal can push the lookup into the surface.
             vec3 shadowNormal = dot(vertexNormal, ldir) >= 0.0 ? vertexNormal : -vertexNormal;
@@ -365,12 +366,11 @@ void main() {
                 shadow = mix(1.0, shadow, shadowMapEdgeFade(proj.xy * 2.0 - 1.0));
             }
         }
-        RtLight rt = rtLightAt(FragPos, vertexNormal);
         if (!inside) shadow = rtShadow(rt, shadow);
         // A unit takes the units' shadows too - its neighbours', a rider's on
         // the mount - as the client's models do. Indoors only those, kept
         // below the player's head.
-        float unitShadow = localShadowAt(FragPos, receiverFace);
+        float unitShadow = shadow > 0.0 ? localShadowAt(FragPos, receiverFace) : 1.0;
         if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
         shadow = min(shadow, unitShadow);
 

@@ -2226,15 +2226,17 @@ endif()
 
 # ---- Tool: rt_probe ----
 # The ray traced lighting pass run once against a scene with a known answer
-# on this machine's Vulkan device, without a realm to stand in. Built from the
-# client's own objects like framexml_run, for the same reason.
+# on this machine's Vulkan device, without a realm to stand in. Links only
+# the renderer, so checking its surface consumer does not rebuild the client.
 option(WOWEE_BUILD_RT_PROBE "Build the ray traced lighting probe (tools/rt_probe.cpp)" OFF)
 if(WOWEE_BUILD_RT_PROBE)
     add_executable(rt_probe
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_probe.cpp
         ${WOWEE_PLATFORM_SOURCES}
     )
-    target_link_libraries(rt_probe PRIVATE wowee_client_objects)
+    target_link_libraries(rt_probe PRIVATE wowee_render)
+    target_precompile_headers(rt_probe REUSE_FROM wowee_render)
+    wowee_apply_client_flags(rt_probe)
     # The objects are built for a link-time-optimised link in Release.
     if(_ipo_supported AND WOWEE_ENABLE_LTO)
         set_property(TARGET rt_probe PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
@@ -2246,6 +2248,7 @@ if(WOWEE_BUILD_RT_PROBE)
             COMMAND ${GLSLC} -fshader-stage=compute -O
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/rt_lookup_probe.comp.glsl -o ${RT_LOOKUP_SPV}
             DEPENDS tools/rt_lookup_probe.comp.glsl assets/shaders/rt_lighting.glsli
+                    assets/shaders/rt_light_composition.glsli
             VERBATIM)
         add_custom_target(rt_lookup_probe_shader DEPENDS ${RT_LOOKUP_SPV})
         add_dependencies(rt_probe rt_lookup_probe_shader)

@@ -30,12 +30,12 @@ void main() {
 
     vec4 g = texelFetch(uGbufCur, px, 0);
     vec4 c = texelFetch(uIn, px, 0);
-    vec4 cGi = texelFetch(uInGi, px, 0);
+    bool wantGi = pass.params.x >= float(RT_MODE_GI);
     float dist = rtGbufDist(g);
     vec3 n = rtGbufNormal(g);
     if (dist <= 0.0) {
         imageStore(uOut, px, vec4(c.rg, c.b, pc.last != 0 ? 0.0 : c.a));
-        imageStore(uOutGi, px, cGi);
+        if (wantGi) imageStore(uOutGi, px, texelFetch(uInGi, px, 0));
         return;
     }
 
@@ -58,12 +58,11 @@ void main() {
             float w = k * wz * wn;
             if (x != 0 || y != 0) w *= spread;
             sum += texelFetch(uIn, q, 0).rg * w;
-            sumGi += texelFetch(uInGi, q, 0).rgb * w;
+            if (wantGi) sumGi += texelFetch(uInGi, q, 0).rgb * w;
             wsum += w;
         }
     }
     sum /= wsum;
-    sumGi /= wsum;
     imageStore(uOut, px, vec4(sum, history, pc.last != 0 ? dist : 0.0));
-    imageStore(uOutGi, px, vec4(sumGi, 0.0));
+    if (wantGi) imageStore(uOutGi, px, vec4(sumGi / wsum, 0.0));
 }

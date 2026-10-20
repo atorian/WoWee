@@ -3,13 +3,14 @@
 #define RT_LOOKUP_PROBE
 vec4 rtParams;
 #include "../assets/shaders/rt_lighting.glsli"
-layout(local_size_x = 1) in;
+layout(local_size_x = 64) in;
 struct Sample { vec4 point; vec4 settings; vec4 normal; };
 layout(set = 0, binding = 0, std430) readonly buffer Inputs { Sample samples[]; };
 struct Result { vec4 ambientWeight; vec4 sunAo; };
 layout(set = 0, binding = 1, std430) writeonly buffer Outputs { Result results[]; };
 void main() {
     uint i = gl_GlobalInvocationID.x;
+    if (i >= samples.length()) return;
     Sample s = samples[i];
     rtParams = vec4(s.settings.z, 0.0, 0.0, 0.0);
     RtLight light = rtLightAtProjected(s.point.xy, s.point.z, s.settings.xy, s.normal.xyz);

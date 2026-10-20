@@ -13,7 +13,7 @@
 //     vec4 rtParams;     // x = mode (0 off, 1 sun, 2 +AO, 3 +bounce)
 
 layout(set = 0, binding = 3) uniform sampler2D uRtLight;  // r sun, g AO, a distance
-layout(set = 0, binding = 4) uniform sampler2D uRtGi;     // rgb incoming light
+layout(set = 0, binding = 4) uniform sampler2D uRtGi;     // rgb indirect correction
 
 layout(set = 0, binding = 6) uniform sampler2D uRtReflection;
 layout(set = 0, binding = 7) uniform sampler2D uRtGeometry;
@@ -25,12 +25,44 @@ vec3 rtReceiverNormal(vec2 e) {
     return normalize(n);
 }
 
-struct RtLight {
-    float weight;
-    float sun;
-    float ao;
-    vec3 gi;
-};
+#include "rt_light_composition.glsli"
+
+// Most receivers still occupy the same plane in the previous frame. Verify
+// the four texels of their bilinear footprint before filtering any light:
+// hardware filtering alone would mix foreground lighting into the background
+// at a silhouette. Only a complete, confident footprint takes this path.
+bool rtBilinearLight(vec2 f, float expected, vec2 distanceGradient,
+                     vec3 receiverNormal, out RtLight result) {
+    ivec2 size = textureSize(uRtLight, 0);
+    ivec2 base = ivec2(floor(f));
+    if (any(lessThan(base, ivec2(0))) || any(greaterThanEqual(base + 1, size))) return false;
+    vec2 fraction = fract(f);
+    vec2 sunAo = vec2(0.0);
+    bool checkNormal = dot(receiverNormal, receiverNormal) > 0.5;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ivec2 q = base + o;
+        float predicted = expected + dot(vec2(q) - f, distanceGradient);
+        vec4 light = texelFetch(uRtLight, q, 0);
+        // Stay well inside the recovery filter's depth tolerance. All four
+        // taps must describe this receiver, including on sloping surfaces.
+        float tolerance = 0.25 * (0.03 * predicted + 0.05);
+        if (predicted <= 0.0 || light.a <= 0.0 || abs(light.a - predicted) > tolerance) return false;
+        if (checkNormal) {
+            vec4 geometry = texelFetch(uRtGeometry, q, 0);
+            if (geometry.z <= 0.0 || dot(rtReceiverNormal(geometry.xy), receiverNormal) < 0.85) return false;
+        }
+        float w = (o.x == 1 ? fraction.x : 1.0 - fraction.x) *
+                  (o.y == 1 ? fraction.y : 1.0 - fraction.y);
+        sunAo += light.rg * w;
+    }
+    // The GI sampler is linear. Its entire footprint has just been checked,
+    // so one filtered read replaces the gather's per-tap GI reads safely.
+    vec3 gi = rtParams.x > 2.5
+        ? textureLod(uRtGi, (f + 0.5) / vec2(size), 0.0).rgb : vec3(0.0);
+    result = RtLight(1.0, sunAo.x, sunAo.y, gi);
+    return true;
+}
 
 // Test each tap before interpolating: a half-resolution texel at a silhouette
 // can belong to the foreground or the surface behind it. Predict the distance
@@ -79,7 +111,7 @@ RtLight rtGatherLight(vec2 f, float expected, vec2 distanceGradient, int radius,
     r.weight = smoothstep(0.1, 0.6, best);
     r.sun = sunAo.x / wsum;
     r.ao = sunAo.y / wsum;
-    r.gi = gi / wsum;
+    r.indirectDelta = gi / wsum;
     return r;
 }
 
@@ -87,6 +119,7 @@ RtLight rtLightAtProjected(vec2 f, float expected, vec2 distanceGradient,
                            vec3 receiverNormal) {
     RtLight r = RtLight(0.0, 1.0, 1.0, vec3(0.0));
     if (rtParams.x < 0.5) return r;
+    if (rtBilinearLight(f, expected, distanceGradient, receiverNormal, r)) return r;
     r = rtGatherLight(f, expected, distanceGradient, 1, receiverNormal);
     // The trace belongs to the previous frame. An animated edge or the strip
     // it just uncovered may have no receiver in the local 3x3 taps. Recover
@@ -163,15 +196,3 @@ vec4 rtReflectionAt(vec3 worldPos, vec3 normal) {
     return rtReflectionAtProjected(f, length(relativePos), normal);
 }
 #endif
-
-// Characters are not in the acceleration structure and cast only into the
-// shadow map, so the two are combined rather than one replacing the other.
-float rtShadow(RtLight r, float shadowMap) {
-    return min(shadowMap, mix(1.0, r.sun, r.weight));
-}
-
-vec3 rtAmbient(RtLight r, vec3 flatAmbient) {
-    if (rtParams.x < 1.5) return flatAmbient;
-    vec3 traced = rtParams.x > 2.5 ? r.gi : flatAmbient * r.ao;
-    return mix(flatAmbient, traced, r.weight);
-}

@@ -28,12 +28,13 @@ void main() {
 
     vec4 g = texelFetch(uGbufCur, px, 0);
     vec4 raw = texelFetch(uRaw, px, 0);
-    vec4 rawGi = texelFetch(uRawGi, px, 0);
+    bool wantGi = pass.params.x >= float(RT_MODE_GI);
+    vec4 rawGi = wantGi ? texelFetch(uRawGi, px, 0) : vec4(0.0);
     float dist = rtGbufDist(g);
     vec3 n = rtGbufNormal(g);
     if (dist <= 0.0) {
         imageStore(uHist, px, vec4(raw.rg, 1.0, 0.0));
-        imageStore(uHistGi, px, rawGi);
+        if (wantGi) imageStore(uHistGi, px, rawGi);
         return;
     }
 
@@ -62,7 +63,7 @@ void main() {
                 float bw = (o.x == 1 ? w.x : 1.0 - w.x) * (o.y == 1 ? w.y : 1.0 - w.y);
                 if (same && bw > 0.0) {
                     hist += texelFetch(uHistPrev, q, 0) * bw;
-                    histGi += texelFetch(uHistGiPrev, q, 0) * bw;
+                    if (wantGi) histGi += texelFetch(uHistGiPrev, q, 0) * bw;
                     wsum += bw;
                 }
             }
@@ -77,7 +78,6 @@ void main() {
     len = min(len + 1.0, MAX_HISTORY);
     float a = 1.0 / len;
     vec2 lightOut = mix(hist.rg, raw.rg, a);
-    vec3 giOut = mix(histGi.rgb, rawGi.rgb, a);
     imageStore(uHist, px, vec4(lightOut, len, 0.0));
-    imageStore(uHistGi, px, vec4(giOut, 0.0));
+    if (wantGi) imageStore(uHistGi, px, vec4(mix(histGi.rgb, rawGi.rgb, a), 0.0));
 }

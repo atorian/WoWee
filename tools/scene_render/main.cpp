@@ -63,6 +63,7 @@
 //     "fxaa": false,                      // FXAA, drawn through its own target
 //     "viewDistance": 1900.0,             // world geometry range, in yards
 //     "fogStrength": 0.4,                 // the settings panel's atmosphere:
+//     "rayTracedLighting": 3,             // RT mode: 0 off, 1 shadows, 2 +AO, 3 +GI
 //     "volumetricFog": 2,                 //   volumetric quality 0-3 and density,
 //     "volumetricDensity": 1.0,           //   and the sun's rays
 //     "sunShafts": true,
@@ -577,6 +578,9 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         if (scene.contains("fogStrength")) lighting->setFogStrength(scene["fogStrength"].get<float>());
         if (scene.contains("fogSkyBlend"))
             LOG_WARNING("scene_render: fogSkyBlend is obsolete; the zone's authored fog colour is used");
+    }
+    if (scene.contains("rayTracedLighting")) {
+        renderer.setRtLightingMode(scene["rayTracedLighting"].get<int>());
     }
     if (scene.contains("volumetricFog")) renderer.setVolumetricFogQuality(scene["volumetricFog"].get<int>());
     if (scene.contains("volumetricDensity")) {

@@ -20,8 +20,8 @@ class RtScene;
  * the forward renderer.
  *
  * There is no G-buffer to trace from, so the pass runs after the opaque
- * geometry, on the depth it left: rebuild normals from depth, trace one
- * sample per term per pixel at half resolution, accumulate over frames with
+ * geometry, on the depth it left: rebuild normals from depth, share one AO/GI hemisphere
+ * intersection per pixel at half resolution, accumulate over frames with
  * reprojection, and smooth with an edge-aware filter. The surface shaders
  * read the result in the *next* frame, reprojecting their own position into
  * the frame the result was traced in (rt_lighting.glsli). Where that misses -
@@ -51,7 +51,14 @@ public:
     bool initialize(VkContext* ctx, RtScene* scene);
     void shutdown();
 
-    void setMode(Mode mode) { mode_ = mode; }
+    void setMode(Mode mode) {
+        if (mode_ == mode) return;
+        mode_ = mode;
+        // A different mode changes which channels are written. Never blend
+        // stale GI history after returning from shadows-only or AO mode.
+        havePrev_ = false;
+        resultFrame_ = 0;
+    }
     [[nodiscard]] Mode mode() const { return mode_; }
     [[nodiscard]] bool active() const { return mode_ != Mode::Off && pipelinesOk_; }
 
@@ -83,6 +90,9 @@ public:
         glm::vec3 sunColor;
         glm::vec3 skyColor;    // what the flat ambient term stands for
         bool sunUp = true;
+        /// Opt in only when a material consumer will read mirror radiance.
+        /// The client currently has none; the reflection GPU probe does.
+        bool traceReflections = false;
     };
 
     /// Record the pass. Outside a render pass, after the opaque geometry.
