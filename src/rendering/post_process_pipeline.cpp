@@ -16,7 +16,9 @@
 namespace wowee {
 namespace rendering {
 
-PostProcessPipeline::PostProcessPipeline() = default;
+PostProcessPipeline::PostProcessPipeline() {
+    requested_.framegen = std::getenv("WOWEE_ENABLE_AMD_FSR3_FRAMEGEN_RUNTIME") != nullptr;
+}
 PostProcessPipeline::~PostProcessPipeline() { shutdown(); }
 
 void PostProcessPipeline::initialize(VkContext* ctx) {
@@ -195,7 +197,7 @@ bool PostProcessPipeline::sceneDepthIsMsaa() const {
     return true;
 }
 bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t imageIndex,
-                                                  Camera* camera, float deltaTime) {
+                                                  const Camera* camera, float deltaTime) {
     ZoneScopedN("PostProcess::execute");
     currentCmd_ = cmd;
     camera_ = camera;
@@ -318,7 +320,6 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         // Maintain frame bookkeeping
         fsr2_.prevViewProjection = camera_->getViewProjectionMatrix();
         fsr2_.prevJitter = camera_->getJitter();
-        camera_->clearJitter();
         if (fsr2_.useAmdBackend) {
             fsr2_.currentHistory = 1 - fsr2_.currentHistory;
         }
@@ -421,7 +422,47 @@ void PostProcessPipeline::destroyAllResources() {
 
 // ========================= Public API =========================
 
-void PostProcessPipeline::setFXAAEnabled(bool enabled) {
+// Settings setters run on the game side. Resource state changes only when
+// applyFrameSettings consumes the settings captured for a rendered frame.
+void PostProcessPipeline::setFXAAEnabled(bool on) { requested_.fxaa = on; }
+void PostProcessPipeline::setFSREnabled(bool on) {
+    requested_.fsr = on;
+    if (on) requested_.fsr2 = false;
+}
+void PostProcessPipeline::setFSR2Enabled(bool on) {
+    requested_.fsr2 = on;
+    if (on) requested_.fsr = false;
+}
+void PostProcessPipeline::setFSRQuality(float scale) { requested_.scale = glm::clamp(scale, .5f, 1.0f); }
+void PostProcessPipeline::setFSRSharpness(float sharpness) { requested_.sharpness = glm::clamp(sharpness, 0.0f, 2.0f); }
+void PostProcessPipeline::setFSR2DebugTuning(float jitter, float x, float y) {
+    requested_.jitterSign = glm::clamp(jitter, -2.0f, 2.0f);
+    requested_.motionScaleX = glm::clamp(x, -2.0f, 2.0f);
+    requested_.motionScaleY = glm::clamp(y, -2.0f, 2.0f);
+}
+void PostProcessPipeline::setAmdFsr3FramegenEnabled(bool on) { requested_.framegen = on; }
+
+MsaaChangeRequest PostProcessPipeline::applyFrameSettings(const FramePostProcessSettings& s) {
+    // A failed resource creation is reported and disabled by manageResources;
+    // the same unchanged request must not retry that failure every frame.
+    if (applied_ && *applied_ == s) return {};
+    const bool resize = !applied_ || applied_->scale != s.scale;
+    auto req = applyFSREnabled(s.fsr);
+    const auto temporalReq = applyFSR2Enabled(s.fsr2);
+    if (temporalReq.requested) req = temporalReq;
+    applyFXAAEnabled(s.fxaa);
+    if (resize) applyFSRQuality(s.scale);
+    applyFSRSharpness(s.sharpness);
+    applyFSR2DebugTuning(s.jitterSign, s.motionScaleX, s.motionScaleY);
+    applyAmdFsr3FramegenEnabled(s.framegen);
+    intoxication_ = s.intoxication;
+    applied_ = s;
+    return req;
+}
+
+
+
+void PostProcessPipeline::applyFXAAEnabled(bool enabled) {
     if (fxaa_.enabled == enabled) return;
     // Not refused under multisampling any more. It used to be, at info level,
     // so the switch in the panel turned on and nothing happened. Over an MSAA
@@ -434,7 +475,7 @@ void PostProcessPipeline::setFXAAEnabled(bool enabled) {
     }
 }
 
-MsaaChangeRequest PostProcessPipeline::setFSREnabled(bool enabled) {
+MsaaChangeRequest PostProcessPipeline::applyFSREnabled(bool enabled) {
     MsaaChangeRequest req;
     if (fsr_.enabled == enabled) return req;
     fsr_.enabled = enabled;
@@ -453,7 +494,7 @@ MsaaChangeRequest PostProcessPipeline::setFSREnabled(bool enabled) {
     return req;
 }
 
-void PostProcessPipeline::setFSRQuality(float scaleFactor) {
+void PostProcessPipeline::applyFSRQuality(float scaleFactor) {
     scaleFactor = glm::clamp(scaleFactor, 0.5f, 1.0f);
     fsr_.scaleFactor = scaleFactor;
     fsr2_.scaleFactor = scaleFactor;
@@ -467,24 +508,17 @@ void PostProcessPipeline::setFSRQuality(float scaleFactor) {
     }
 }
 
-void PostProcessPipeline::setFSRSharpness(float sharpness) {
+void PostProcessPipeline::applyFSRSharpness(float sharpness) {
     fsr_.sharpness = glm::clamp(sharpness, 0.0f, 2.0f);
     fsr2_.sharpness = glm::clamp(sharpness, 0.0f, 2.0f);
 }
 
-MsaaChangeRequest PostProcessPipeline::setFSR2Enabled(bool enabled, Camera* camera) {
+MsaaChangeRequest PostProcessPipeline::applyFSR2Enabled(bool enabled) {
     MsaaChangeRequest req;
     if (fsr2_.enabled == enabled) return req;
     fsr2_.enabled = enabled;
 
     if (enabled) {
-        static bool initFramegenToggleFromEnv = false;
-        if (!initFramegenToggleFromEnv) {
-            initFramegenToggleFromEnv = true;
-            if (std::getenv("WOWEE_ENABLE_AMD_FSR3_FRAMEGEN_RUNTIME") != nullptr) {
-                fsr2_.amdFsr3FramegenEnabled = true;
-            }
-        }
         // FSR2 replaces both FSR1 and MSAA
         if (fsr_.enabled) {
             fsr_.enabled = false;
@@ -506,18 +540,17 @@ MsaaChangeRequest PostProcessPipeline::setFSR2Enabled(bool enabled, Camera* came
         fsr2_.needsHistoryReset = true;
     } else {
         fsr2_.needsRecreate = true;
-        if (camera) camera->clearJitter();
     }
     return req;
 }
 
-void PostProcessPipeline::setFSR2DebugTuning(float jitterSign, float motionVecScaleX, float motionVecScaleY) {
+void PostProcessPipeline::applyFSR2DebugTuning(float jitterSign, float motionVecScaleX, float motionVecScaleY) {
     fsr2_.jitterSign = glm::clamp(jitterSign, -2.0f, 2.0f);
     fsr2_.motionVecScaleX = glm::clamp(motionVecScaleX, -2.0f, 2.0f);
     fsr2_.motionVecScaleY = glm::clamp(motionVecScaleY, -2.0f, 2.0f);
 }
 
-void PostProcessPipeline::setAmdFsr3FramegenEnabled(bool enabled) {
+void PostProcessPipeline::applyAmdFsr3FramegenEnabled(bool enabled) {
     if (fsr2_.amdFsr3FramegenEnabled == enabled) return;
     fsr2_.amdFsr3FramegenEnabled = enabled;
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN

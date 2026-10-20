@@ -3311,6 +3311,18 @@ target_link_libraries(test_character_session PRIVATE wowee_game_harness lua51)
 target_compile_definitions(test_character_session PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # ── The client, end to end ───────────────────────────────────
+option(WOWEE_BUILD_ENTITY_ASSET_RELOAD_TEST "Build the native GPU entity cache reload regression" OFF)
+if(WOWEE_BUILD_ENTITY_ASSET_RELOAD_TEST AND NOT ANDROID)
+    add_executable(entity_asset_reload_test entity_asset_reload_main.cpp)
+    target_link_libraries(entity_asset_reload_test PRIVATE wowee_client)
+    wowee_test_link_glm(entity_asset_reload_test)
+    wowee_apply_client_flags(entity_asset_reload_test)
+    add_test(NAME entity_asset_reload COMMAND entity_asset_reload_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(entity_asset_reload PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(entity_asset_reload_test)
+endif()
+
 # ClientHarness: the client's own frame and world transitions (ClientLoop) over
 # GameHarness's game, with a window that is a flag, input from a queue and no
 # renderer. It links the client's archive, wowee_client, so nothing of the

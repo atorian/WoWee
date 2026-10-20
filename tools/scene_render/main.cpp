@@ -94,6 +94,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/frame_sink.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -106,6 +107,7 @@
 #include <SDL3/SDL.h>
 #include <nlohmann/json.hpp>
 #include <glm/glm.hpp>
+#include "stb_image_write.h"
 
 #include <algorithm>
 #include <chrono>
@@ -114,6 +116,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -143,6 +146,70 @@ private:
     int width_;
     int height_;
     bool ready_ = false;
+};
+
+/// Read the kept frame before presentation, using the renderer's fenced
+/// readback. Reading a swapchain image after present has released it is invalid.
+class SceneCapture final : public rendering::FrameSink {
+public:
+    SceneCapture(rendering::Renderer& renderer, const int& frame, int firstFrame)
+        : renderer_(renderer), frame_(frame), firstFrame_(firstFrame) {
+        const auto extent = renderer.getVkContext()->getSwapchainExtent();
+        width_ = extent.width;
+        height_ = extent.height;
+        rgba_.resize(static_cast<size_t>(width_) * height_ * 4);
+        if (!renderer_.beginFrameCapture(this, width_, height_)) {
+            LOG_ERROR("scene_render: could not start the kept frame's GPU readback");
+            throw std::runtime_error("Scene frame readback failed");
+        }
+    }
+    ~SceneCapture() override { renderer_.endFrameCapture(); }
+
+    bool frameDue(int64_t* pts) const override {
+        *pts = frame_;
+        return frame_ >= firstFrame_ && frame_ > taken_;
+    }
+    void frameTaken(int64_t pts) override { taken_ = pts; }
+    void frameDropped() override {
+        LOG_ERROR("scene_render: kept frame readback dropped; no free GPU readback buffer");
+        dropped_ = true;
+    }
+    void submit(Frame input) override {
+        if (input.pts >= kept_) {
+            for (uint32_t y = 0; y < height_; ++y) {
+                const auto* src = input.bgra + static_cast<size_t>(y) * input.stride;
+                auto* dst = rgba_.data() + static_cast<size_t>(y) * width_ * 4;
+                for (uint32_t x = 0; x < width_; ++x) {
+                    dst[x * 4] = src[x * 4 + 2];
+                    dst[x * 4 + 1] = src[x * 4 + 1];
+                    dst[x * 4 + 2] = src[x * 4];
+                    dst[x * 4 + 3] = src[x * 4 + 3];
+                }
+            }
+            kept_ = input.pts;
+        }
+        input.release();
+    }
+    double elapsedSeconds() const override { return 0.0; }
+
+    bool write(const std::string& path) {
+        renderer_.flushFrameCapture();
+        if (dropped_ || kept_ != frame_ - 1) {
+            LOG_ERROR("scene_render: final frame ", frame_ - 1,
+                      " was not read back; latest frame is ", kept_);
+            return false;
+        }
+        return stbi_write_png(path.c_str(), width_, height_, 4, rgba_.data(), width_ * 4) != 0;
+    }
+
+private:
+    rendering::Renderer& renderer_;
+    const int& frame_;
+    int firstFrame_;
+    int64_t taken_ = -1, kept_ = -1;
+    uint32_t width_ = 0, height_ = 0;
+    bool dropped_ = false;
+    std::vector<uint8_t> rgba_;
 };
 
 glm::vec3 vec3(const json& j, const glm::vec3& fallback = glm::vec3(0.0f)) {
@@ -465,6 +532,10 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
            rendering::Renderer& renderer, bool timing) {
     const std::string map = scene.value("map", "Northrend");
     if (!renderer.initializeRenderers(&assets, map)) return 1;
+    // Isolated renderer fixtures can keep background streaming out of their
+    // clock: asset readiness must not change a frame-input isolation test.
+    if (!scene.value("streamWorld", true) && renderer.getTerrainManager())
+        renderer.getTerrainManager()->setStreamingEnabled(false);
     // The minimap is interface; a scene shows only the world unless asked.
     if (auto* minimap = renderer.getMinimap()) minimap->setEnabled(scene.value("minimap", false));
 
@@ -604,6 +675,9 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             return 1;
         }
     }
+    if (scene.contains("fsr2")) renderer.setFSR2Enabled(scene["fsr2"].get<bool>());
+    if (scene.contains("fsrScale") && renderer.getPostProcessPipeline())
+        renderer.getPostProcessPipeline()->setFSRQuality(scene["fsrScale"].get<float>());
 
     // Fixed steps, so the same scene draws the same frame. Terrain streams in
     // on its own threads, as long as it takes; with it on, it streams first,
@@ -628,7 +702,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         int lastLoaded = -1;
         for (; waited < 600 && settled < kSettledFrames; ++waited) {
             renderer.update(0.0f);
-            renderer.beginFrame();
+            renderer.beginFrame(renderer.extractFrameInputs());
             renderer.renderWorld();
             renderer.endFrame();
             const int loaded = terrain->getLoadedTileCount();
@@ -642,6 +716,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         }
     }
     int frame = 0;
+    SceneCapture capture(renderer, frame, frames - 1);
     FrameTimer timer(timing, std::min(10, frames / 3));
     auto drawFrame = [&]() {
         const auto start = std::chrono::steady_clock::now();
@@ -660,7 +735,36 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             renderer.getCharacterRenderer()->setInstancePosition(c.instance, c.position);
         }
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
-        timer.call("beginFrame", [&] { renderer.beginFrame(); });
+        const auto inputs = renderer.extractFrameInputs();
+        if (scene.value("mutateAfterExtract", false) &&
+            frame == scene.value("mutateAtFrame", frames - 1)) {
+            // Regression: the next game frame must not change a frame that
+            // was already extracted, including RT, shadows, sky and weather.
+            renderer.getCamera()->setPosition(eye + glm::vec3(800, 700, 200));
+            renderer.getCamera()->setRotation(170, -40);
+            renderer.getCharacterPosition() += glm::vec3(600, 500, 100);
+            auto next = environment;
+            next.ghost = !next.ghost;
+            renderer.setWorldEnvironment(next);
+            renderer.getLightingManager()->setTimeOfDay(2.0f / 24.0f);
+            renderer.setVolumetricFogDensity(0.0f);
+            renderer.setRtLightingMode(0);
+            renderer.setViewDistance(80.0f);
+            renderer.setShadowDistance(40.0f);
+            renderer.setWorldInView(false);
+            renderer.setSharpStars(false);
+            if (auto* post = renderer.getPostProcessPipeline()) {
+                post->setFXAAEnabled(!inputs.postProcess.fxaa);
+                post->setFSR2Enabled(!inputs.postProcess.fsr2);
+                post->setBrightness(0.3f);
+                post->setIntoxication(0.8f);
+            }
+        }
+        timer.call("beginFrame", [&] { renderer.beginFrame(inputs); });
+        if (renderer.getCamera()->getJitter() != glm::vec2(0.0f)) {
+            LOG_ERROR("scene_render: recording modified the live camera's jitter");
+            throw std::runtime_error("Recording changed the game camera");
+        }
         timer.call("renderWorld", [&] { renderer.renderWorld(); });
         timer.call("endFrame", [&] { renderer.endFrame(); });
         timer.frameDone(frame, std::chrono::duration<float, std::milli>(
@@ -694,7 +798,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 renderer.getM2Renderer()->getDrawCallCount());
     std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
                 renderer.getWMORenderer()->getShadowDrawCallCount());
-    if (!renderer.captureScreenshot(outPath)) {
+    if (!capture.write(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;
     }

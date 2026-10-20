@@ -221,6 +221,9 @@ CHECKS = [
     ("record_scene_check.py",
      r"^(\d+) reads of the scene while recording", 0,
      "reads of the renderers' scene from their recording functions"),
+    ("frame_inputs_check.py",
+     r"^(\d+) live frame input reads while recording", 0,
+     "mutable game-side camera, lighting or weather read during frame recording"),
     # The queues are externally synchronized and shared by the frame, the
     # uploads and ImGui; once the frame records on its own thread, a submit or
     # a wait-idle past VkContext's queue lock is a race with it. Held at zero

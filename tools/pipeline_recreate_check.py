@@ -42,7 +42,8 @@ def first_chain(src: str):
     if not m:
         return None
     body = re.sub(r"//[^\n]*", "", m.group(1))
-    return [f"{k}({re.sub(r'\s+', ' ', v).strip()})"
+    # Keep the regex outside an f-string expression for Python before 3.12.
+    return [k + "(" + re.sub(r"\s+", " ", v).strip() + ")"
             for k, v in re.findall(r"\.(set\w+)\(([^;]*?)\)\s*\n", body)]
 
 

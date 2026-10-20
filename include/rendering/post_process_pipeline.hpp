@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <optional>
+#include "rendering/frame_settings.hpp"
 
 #include <memory>
 #include <string>
@@ -21,8 +23,7 @@ class VkContext;
 class Camera;
 class AmdFsr3Runtime;
 
-/// Returned by setFSREnabled/setFSR2Enabled when they need the Renderer
-/// to schedule an MSAA sample-count change (§4.3).
+/// Returned when applying captured settings requires an MSAA sample-count change.
 struct MsaaChangeRequest {
     bool requested = false;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -43,6 +44,8 @@ public:
 
     /// Lazy-create / lazy-destroy FSR/FXAA/FSR2 resources between frames.
     void manageResources();
+    [[nodiscard]] const FramePostProcessSettings& requestedSettings() const { return requested_; }
+    MsaaChangeRequest applyFrameSettings(const FramePostProcessSettings& settings);
 
     /// Recreate post-process resources after swapchain resize.
     void handleSwapchainResize();
@@ -90,7 +93,7 @@ public:
     /// Execute all post-processing passes.  Returns true if an INLINE
     /// render pass was started (affects ImGui recording mode).
     bool executePostProcessing(VkCommandBuffer cmd, uint32_t imageIndex,
-                               Camera* camera, float deltaTime);
+                               const Camera* camera, float deltaTime);
 
     // --- MSAA interop (called from Renderer::applyMsaaChange) ---
 
@@ -108,27 +111,27 @@ public:
 
     // FXAA
     void setFXAAEnabled(bool enabled);
-    [[nodiscard]] bool isFXAAEnabled() const { return fxaa_.enabled; }
+    [[nodiscard]] bool isFXAAEnabled() const { return requested_.fxaa; }
 
     // FSR 1.0
-    MsaaChangeRequest setFSREnabled(bool enabled);
-    [[nodiscard]] bool isFSREnabled() const { return fsr_.enabled; }
+    void setFSREnabled(bool enabled);
+    [[nodiscard]] bool isFSREnabled() const { return requested_.fsr; }
     void setFSRQuality(float scaleFactor);
     void setFSRSharpness(float sharpness);
-    [[nodiscard]] float getFSRScaleFactor() const { return fsr_.scaleFactor; }
-    [[nodiscard]] float getFSRSharpness() const { return fsr_.sharpness; }
+    [[nodiscard]] float getFSRScaleFactor() const { return requested_.scale; }
+    [[nodiscard]] float getFSRSharpness() const { return requested_.sharpness; }
 
     // FSR 2.2
-    MsaaChangeRequest setFSR2Enabled(bool enabled, Camera* camera);
-    [[nodiscard]] bool isFSR2Enabled() const { return fsr2_.enabled; }
+    void setFSR2Enabled(bool enabled);
+    [[nodiscard]] bool isFSR2Enabled() const { return requested_.fsr2; }
     void setFSR2DebugTuning(float jitterSign, float motionVecScaleX, float motionVecScaleY);
 
     // FSR3 Framegen
     void setAmdFsr3FramegenEnabled(bool enabled);
-    [[nodiscard]] bool isAmdFsr3FramegenEnabled() const { return fsr2_.amdFsr3FramegenEnabled; }
-    [[nodiscard]] float getFSR2JitterSign() const { return fsr2_.jitterSign; }
-    [[nodiscard]] float getFSR2MotionVecScaleX() const { return fsr2_.motionVecScaleX; }
-    [[nodiscard]] float getFSR2MotionVecScaleY() const { return fsr2_.motionVecScaleY; }
+    [[nodiscard]] bool isAmdFsr3FramegenEnabled() const { return requested_.framegen; }
+    [[nodiscard]] float getFSR2JitterSign() const { return requested_.jitterSign; }
+    [[nodiscard]] float getFSR2MotionVecScaleX() const { return requested_.motionScaleX; }
+    [[nodiscard]] float getFSR2MotionVecScaleY() const { return requested_.motionScaleY; }
 #if WOWEE_HAS_AMD_FSR2
     bool isAmdFsr2SdkAvailable() const { return true; }
 #else
@@ -148,23 +151,30 @@ public:
     [[nodiscard]] size_t getAmdFsr3FallbackCount() const { return fsr2_.amdFsr3FallbackCount; }
 
     // Brightness (1.0 = default, <1 darkens, >1 brightens)
-    void setBrightness(float b) { brightness_ = b; }
-    [[nodiscard]] float getBrightness() const { return brightness_; }
-    void setIntoxication(float amount) { intoxication_ = glm::clamp(amount, 0.0f, 1.0f); }
-    [[nodiscard]] float getIntoxication() const { return intoxication_; }
+    void setBrightness(float b) { requested_.brightness = b; }
+    [[nodiscard]] float getBrightness() const { return requested_.brightness; }
+    void setIntoxication(float amount) { requested_.intoxication = glm::clamp(amount, 0.0f, 1.0f); }
+    [[nodiscard]] float getIntoxication() const { return requested_.intoxication; }
 
 private:
+    FramePostProcessSettings requested_;
+    std::optional<FramePostProcessSettings> applied_;
+    void applyFXAAEnabled(bool enabled);
+    MsaaChangeRequest applyFSREnabled(bool enabled);
+    MsaaChangeRequest applyFSR2Enabled(bool enabled);
+    void applyFSRQuality(float scale);
+    void applyFSRSharpness(float sharpness);
+    void applyFSR2DebugTuning(float jitter, float x, float y);
+    void applyAmdFsr3FramegenEnabled(bool enabled);
     VkContext* vkCtx_ = nullptr;
 
     std::function<void(VkCommandBuffer)> sceneClosedHook_;
     uint64_t sceneTargetGeneration_ = 0;
     // Per-frame state set during executePostProcessing
     VkCommandBuffer currentCmd_ = VK_NULL_HANDLE;
-    Camera* camera_ = nullptr;
+    const Camera* camera_ = nullptr;
     float lastDeltaTime_ = 0.0f;
 
-    // Brightness
-    float brightness_ = 1.0f;
     float intoxication_ = 0.0f;
 
     [[nodiscard]] bool needsFXAAPass() const { return fxaa_.enabled || intoxication_ > 0.001f; }

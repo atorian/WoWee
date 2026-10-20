@@ -1,5 +1,9 @@
 # Lessons
 
+- 2026-10-20 — Ships at Orgrimmar's zeppelin towers and swapped pumpkin/sign geometry were model-ID aliasing after realm patches mounted between maps. `rebuildLookups()` reset allocators inside AssetCaches while renderer models stayed resident. Keep resource identity allocation outside replaceable lookup caches for every model category. Verify with real asynchronous spawns before and after cache invalidation in reversed load order; a static scene and correct requested filenames do not exercise this boundary.
+
+- 2026-10-20 — A foreground fly-through with Vulkan validation looked to the user like a severe FPS regression. Announce diagnostic runs as unsuitable for FPS comparison, keep them short when validation reports errors, and restore the ordinary client promptly. Check the running process and its current log before attributing low FPS to the refactor or promising later plan stages will recover it; compare the same scene and settings without validation.
+
 - 2026-10-15 — Do not declare a frame refactor complete after selected tests alone: run `sweep_guard`, remove replaced APIs, and keep RAII subscription ownership consistent with existing subscribers. Native integration fixtures belong under `tests/` behind an explicit, default-off build option; an environment variable alone must not ship a new test scenario in the ordinary client.
 
 - 2026-10-15 — Frame boundaries must be enforced at every Lua entry, including loading, input and teardown. Execute Lua only in Interface through protected Lua calls; queue game notifications and SDL input. Freeze one frame plan before Input and apply state changes only in Transitions. Lifecycle violations abort debug/tests; release reports each operation/phase pair once and keeps the client alive.

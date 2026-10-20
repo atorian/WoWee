@@ -1186,11 +1186,10 @@ void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& mod
         // synchronised row of lamps reads as a rendering artifact, not
         // firelight. Two detuned sines keep any single lamp from looping
         // visibly. Alpha and size move together, since a brighter flame also
-        // looks slightly larger. Same clock and parameters as the local light
-        // in gatherLocalLights, so the sprite and the pool of light it casts
-        // rise and fall together.
+        // looks slightly larger. Use the extracted frame's time, so preparing
+        // the same view later cannot change its light.
         {
-            const float flicker = lampFlicker(inst.position, lampFlickerClockSeconds(), 0.82f, 0.12f, 0.06f);
+            const float flicker = lampFlicker(inst.position, frameTime_, 0.82f, 0.12f, 0.06f);
             gs.color.a *= flicker;
             gs.size *= 0.98f + 0.02f * flicker;
         }

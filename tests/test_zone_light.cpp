@@ -23,8 +23,6 @@
 #include "test_support.hpp"
 
 #include <bit>
-#include <chrono>
-#include <thread>
 #include <vector>
 
 using wowee::rendering::LightingManager;
@@ -115,14 +113,12 @@ LightingParams lightIn(const char* rootName, uint32_t zoneId, float hour,
     REQUIRE(assets.initialize(root.string()));
     REQUIRE(lighting.initialize(&assets));
 
-    // Long enough for the light's smoothing, which runs on real time, to
-    // settle on where the player stands.
+    // Long enough for the light's smoothing to settle where the player stands.
     const glm::vec3 pos = wowee::rendering::lightPositionToWorld(DBC_X, DBC_Y, 0.0f);
     for (int i = 0; i < 8; ++i) {
-        lighting.update(pos, 0, zoneId, hour, weatherIntensity);
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        lighting.update(0.25f, pos, 0, zoneId, hour, weatherIntensity);
     }
-    lighting.update(pos, 0, zoneId, hour, weatherIntensity);
+    lighting.update(0.25f, pos, 0, zoneId, hour, weatherIntensity);
     return lighting.getLightingParams();
 }
 

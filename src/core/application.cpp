@@ -598,7 +598,7 @@ bool Application::initialize() {
             if (!renderer->initializeRenderers(assetManager.get(), "Northrend")) return false;
             onWorldRenderersReady();
             renderer->getCamera()->setPosition(glm::vec3(5818.0f, 405.0f, 650.0f));
-            renderer->getLightingManager()->update(glm::vec3(5818.0f, 405.0f, 650.0f),
+            renderer->getLightingManager()->update(0.016f, glm::vec3(5818.0f, 405.0f, 650.0f),
                                                    571, 4395, 43200.0f);
         }
 
@@ -4420,6 +4420,12 @@ void Application::present(float deltaTime, const FramePlan& plan) {
             LOG_WARNING("SLOW update stage 'renderer->update': ", ruMs, "ms");
         }
     }
+    if (renderer) {
+        renderer->setWorldInView(plan.view == FrameView::World);
+        if (!renderInputs_) renderInputs_ = std::make_unique<rendering::FrameInputs>();
+        *renderInputs_ = renderer->extractFrameInputs();
+    }
+
 }
 
 bool Application::canDrawInterface() const {
@@ -5352,9 +5358,9 @@ void Application::renderFrame(const FramePlan& plan) {
     // The offline fixtures draw through the real world path.
     const bool drawWorld = view == FrameView::World || std::getenv("WOWEE_ENTITY_STREAM_PROBE") ||
         std::getenv("WOWEE_FOUNTAIN_PROBE") || std::getenv("WOWEE_MODEL_PROBE");
-    renderer->setWorldInView(view == FrameView::World);
     screenRecording_->update();
-    runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
+    if (!renderInputs_) throw std::logic_error("Render requires frame inputs extracted in Present");
+    runRenderStage("beginFrame", [&] { renderer->beginFrame(*renderInputs_); });
 
     if (drawWorld) {
         runRenderStage("renderWorld", [&] { renderer->renderWorld(); });

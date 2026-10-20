@@ -21,8 +21,6 @@
 #include "test_support.hpp"
 
 #include <bit>
-#include <chrono>
-#include <thread>
 #include <vector>
 
 using wowee::rendering::LightingManager;
@@ -120,13 +118,12 @@ glm::vec3 skyAt(const char* rootName, const glm::vec3& pos) {
     });
     REQUIRE(assets.initialize(root.string()));
     REQUIRE(lighting.initialize(&assets));
-    // Long enough for the light's smoothing, which runs on real time, to
+    // Long enough for the light's smoothing to
     // settle on where the point is.
     for (int i = 0; i < 10; ++i) {
-        lighting.update(pos, 0, 0, 12.0f, 0.0f);
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        lighting.update(0.25f, pos, 0, 0, 12.0f, 0.0f);
     }
-    lighting.update(pos, 0, 0, 12.0f, 0.0f);
+    lighting.update(0.25f, pos, 0, 0, 12.0f, 0.0f);
     return lighting.getLightingParams().skyTopColor;
 }
 

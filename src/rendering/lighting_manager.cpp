@@ -306,7 +306,7 @@ bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
     return true;
 }
 
-void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
+void LightingManager::update(float deltaTime, const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                               float gameTime,
                               float weatherIntensity, bool isUnderwater) {
     if (!initialized_) return;
@@ -345,16 +345,10 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // that has not been traced, so whether it is the camera's is not known.
     activeVolumes_ = findLightVolumes(playerPos, mapId);
 
-    // Smoothing by real time. This assumed sixty frames a second, so on a
-    // display running at a hundred and twenty every blend below ran twice as
-    // fast, and at thirty half as fast.
-    const auto now = std::chrono::steady_clock::now();
-    float deltaTime = 0.016f;
-    if (lastUpdate_.time_since_epoch().count() != 0) {
-        deltaTime = std::clamp(std::chrono::duration<float>(now - lastUpdate_).count(),
-                               0.0f, 0.25f);
-    }
-    lastUpdate_ = now;
+    // One frame clock for the light, weather and model animations. Reading
+    // wall time here made the same sequence of updates produce different
+    // sky colours depending on GPU waits and loading speed.
+    deltaTime = std::clamp(deltaTime, 0.0f, 0.25f);
     const float blendFactor = 1.0f - std::exp(-deltaTime * 5.0f);
 
     // Which sky models are overhead, and how much of each.

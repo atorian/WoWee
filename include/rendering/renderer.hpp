@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/view_distance.hpp"
+#include "rendering/frame_inputs.hpp"
 
 #include <chrono>
 #include "core/job_group.hpp"
@@ -101,7 +102,9 @@ public:
     bool initialize(RenderSurface* surface);
     void shutdown();
 
-    void beginFrame();
+    /// Capture after Present; beginFrame consumes only these frame values.
+    [[nodiscard]] FrameInputs extractFrameInputs();
+    void beginFrame(const FrameInputs& inputs);
     void endFrame();
 
     /// Recorded after the interface is drawn and before the frame is submitted,
@@ -368,6 +371,12 @@ private:
 
     RenderSurface* surface_ = nullptr;
     std::unique_ptr<Camera> camera;
+    FrameInputs frameInputs_;
+    Camera renderCamera_;
+    [[nodiscard]] const Camera* frameCamera() const { return &renderCamera_; }
+    int requestedRtMode_ = 0;
+    int requestedFogQuality_ = 0;
+    VkSampleCountFlagBits requestedMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
     /// The sun's glare, eased as WoW.exe eases it (sky_celestial::easeGlare):
     /// its hours, the cloud in front of the sun, a sky model over it, and how

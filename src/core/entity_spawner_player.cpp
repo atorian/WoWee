@@ -120,7 +120,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     // immutable model and finished appearance atlas before publishing readiness.
     if (!spawns_->preparedPlayerSpawn_ || !spawns_->preparedPlayerSpawn_->model) return;
     if (modelId == 0) {
-        modelId = assets_.nextPlayerModelId_++;
+        modelId = nextPlayerModelId_++;
         if (!charRenderer->loadModel(*spawns_->preparedPlayerSpawn_->model, modelId)) return;
         assets_.playerModelCache_[cacheKey] = modelId;
     }
@@ -515,7 +515,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
             }
 
             if (helmModel.isValid()) {
-                const uint32_t helmModelId = assets_.nextWeaponModelId_++;
+                const uint32_t helmModelId = nextWeaponModelId_++;
                 // Attachment point 0 (head bone), fallback to 11 (explicit head).
                 const bool attached = scene().characters().attachWeapon(
                     st.instanceId, kAttachHelm, helmModel, helmModelId, helm.texturePath);
@@ -542,7 +542,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
             if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
             if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
             if (scene().characters().attachWeapon(st.instanceId, attachmentId, model,
-                                           assets_.nextWeaponModelId_++, side.texturePath)) {
+                                           nextWeaponModelId_++, side.texturePath)) {
                 LOG_DEBUG("Attached shoulder ", attachmentId, ": ", side.baseModelPath,
                           " tex: ", side.texturePath);
             }
@@ -694,7 +694,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         const uint8_t inventoryType = inventoryTypes[slotIndex];
         const uint32_t point = sheathed ? riderWeaponAttachment(equipSlot, inventoryType)
                                         : weaponAttachment(false, equipSlot, inventoryType);
-        uint32_t weaponModelId = assets_.nextWeaponModelId_++;
+        uint32_t weaponModelId = nextWeaponModelId_++;
         if (!scene().characters().attachWeapon(st.instanceId, point, weaponModel, weaponModelId, texturePath)) {
             continue;  // attachWeapon says why
         }
@@ -703,7 +703,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
         attachEnchantVisuals(
             scene().characters(), *assetManager_, st.instanceId, point, equipment.enchantIds[slotIndex],
             [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
-            [this] { return assets_.nextWeaponModelId_++; });
+            [this] { return nextWeaponModelId_++; });
     }
 }
 
@@ -1004,7 +1004,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                 }
 
                 if (loadedGroups > 0 || wmoModel.nGroups == 0) {
-                    modelId = assets_.nextGameObjectWmoModelId_++;
+                    modelId = nextGameObjectWmoModelId_++;
                     if (wmoRenderer->loadModel(wmoModel, modelId)) {
                         assets_.gameObjectDisplayIdWmoCache_[displayId] = modelId;
                         loadedAsWmo = true;
@@ -1106,7 +1106,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             }
         }
         if (itCache == assets_.gameObjectDisplayIdModelCache_.end()) {
-            modelId = assets_.nextGameObjectModelId_++;
+            modelId = nextGameObjectModelId_++;
 
             auto m2Data = assetManager_->readFile(modelPath);
             if (m2Data.empty()) {

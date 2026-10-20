@@ -234,7 +234,7 @@ public:
     void setLocalPlayerGuid(uint64_t guid) { if (spawns_) spawns_->spawnedPlayerGuid_ = guid; }
 
     // Weapon model IDs (shared counter for creature weapons + equipment helm/weapon models)
-    uint32_t allocateWeaponModelId() { return assets_.nextWeaponModelId_++; }
+    uint32_t allocateWeaponModelId() { return nextWeaponModelId_++; }
 
     // Maximum weapon attachment operations per tick (used by Application update loop)
     static constexpr int MAX_WEAPON_ATTACHES_PER_TICK = 2;
@@ -744,25 +744,29 @@ private:
     mutable std::unordered_set<uint32_t> warnedMissingModelPathIds_;
     mutable int humanoidDisplayCanaryCount_ = 0;
     int npcHeadDetailCanaryCount_ = 0;
-    uint32_t nextCreatureModelId_ = 5000;
     uint32_t gryphonDisplayId_ = 0;
     uint32_t wyvernDisplayId_ = 0;
     std::unordered_set<uint32_t> nonRenderableCreatureDisplayIds_;
     std::unordered_map<uint32_t, uint32_t> playerModelCache_;
     std::unordered_map<uint32_t, PlayerTextureSlots> playerTextureSlotsByModelId_;
-    uint32_t nextPlayerModelId_ = 60000;
     std::unordered_map<uint32_t, std::shared_ptr<pipeline::M2Model>> preparedPlayerModels_;
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdModelCache_;
     std::unordered_set<uint32_t> gameObjectDisplayIdFailedCache_;
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdWmoCache_;
-    uint32_t nextGameObjectModelId_ = 20000;
-    uint32_t nextGameObjectWmoModelId_ = 40000;
     std::unordered_set<uint32_t> unloadableMountDisplayIds_;
     std::unordered_set<uint32_t> seatlessMountDisplayIds_;
     std::unordered_set<uint32_t> undrawableFormDisplayIds_;
-    uint32_t nextWeaponModelId_ = 0x40000000u;
     };
     AssetCaches assets_;
+
+    // Renderer model caches survive table/realm changes. Their identities
+    // must survive too: resetting an allocator with AssetCaches lets a new
+    // asset acquire the ID of another mesh still resident on the GPU.
+    uint32_t nextCreatureModelId_ = 5000;
+    uint32_t nextPlayerModelId_ = 60000;
+    uint32_t nextGameObjectModelId_ = 20000;
+    uint32_t nextGameObjectWmoModelId_ = 40000;
+    uint32_t nextWeaponModelId_ = 0x40000000u;
 
 public:
     /// Owned by MapScope. No clearing list: queues, GUID state and decoded

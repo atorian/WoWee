@@ -793,35 +793,35 @@ void Renderer::destroyPerFrameResources() {
 }
 
 void Renderer::updatePerFrameUBO() {
-    if (!camera) return;
+    if (!frameCamera()) return;
 
-    currentFrameData.view = camera->getViewMatrix();
-    currentFrameData.projection = camera->getProjectionMatrix();
-    currentFrameData.viewPos = glm::vec4(camera->getPosition(), 1.0f);
-    currentFrameData.fogParams.z = globalTime;
-    const WindGpu wind = wind_.gpu();
+    currentFrameData.view = frameCamera()->getViewMatrix();
+    currentFrameData.projection = frameCamera()->getProjectionMatrix();
+    currentFrameData.viewPos = glm::vec4(frameCamera()->getPosition(), 1.0f);
+    currentFrameData.fogParams.z = frameInputs_.time;
+    const WindGpu wind = frameInputs_.wind;
     currentFrameData.windDirLean = wind.dirLean;
     currentFrameData.windPhases = wind.phases;
     currentFrameData.windTravel = wind.travel;
 
     currentFrameData.fogSkyTop.w = 0.0f;
     currentFrameData.fogSkyMiddle.w = 0.0f; // actual sky image becomes valid in renderWorld
-    currentFrameData.fogSkyBand1.w = viewDistance_; // common horizontal geometry range
+    currentFrameData.fogSkyBand1.w = frameInputs_.viewDistance; // common horizontal geometry range
 
     // Lighting from LightingManager, with the weather's haze over it.
-    if (lightingManager) {
-        const auto& lp = *weatherLight();
+    if (frameInputs_.hasLighting) {
+        const auto& lp = frameInputs_.weatherLight;
         currentFrameData.lightDir = glm::vec4(
-            lp.directionalDir, wmoNightGlow(lightingManager->getTimeOfDayHours() / 24.0f));
+            lp.directionalDir, wmoNightGlow(frameInputs_.timeOfDay / 24.0f));
         // Looking into the sun dims the scene's light by up to a third, as the
         // client dims its direct and ambient colours (0x781783) - by the glare
         // the eye can see, so not behind a hill or after dark.
         float lookingAtSun = 0.0f;
-        if (camera) {
+        if (frameCamera()) {
             const glm::vec3 discDir =
-                sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
+                sky_celestial::sunDisc(frameInputs_.timeOfDay / 24.0f).direction;
             lookingAtSun = sky_celestial::lookingAtSunDimming(
-                glm::dot(glm::normalize(camera->getForward()), discDir), sunGlare_);
+                glm::dot(glm::normalize(frameCamera()->getForward()), discDir), frameInputs_.sunGlare);
         }
         currentFrameData.lightColor = glm::vec4(lp.diffuseColor * (1.0f - lookingAtSun), 1.0f);
         currentFrameData.ambientColor = glm::vec4(lp.ambientColor * (1.0f - lookingAtSun), 1.0f);
@@ -830,14 +830,14 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.fogParams.y = lp.fogEnd;
         currentFrameData.fogSkyTop = glm::vec4(lp.skyTopColor, 0.0f);
         currentFrameData.fogSkyMiddle = glm::vec4(lp.skyMiddleColor, 0.0f);
-        currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, viewDistance_);
+        currentFrameData.fogSkyBand1 = glm::vec4(lp.skyBand1Color, frameInputs_.viewDistance);
         currentFrameData.fogSkyBand2 = glm::vec4(lp.skyBand2Color, 0.0f);
         currentFrameData.skySmogColor = glm::vec4(lp.skySmogColor, 0.0f);
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
         {
             constexpr float MIN_SUBMERSION = 2.0f;
-            const auto eyeDepth = cameraWaterDepth();
+            const auto eyeDepth = frameInputs_.cameraWaterDepth;
             if (eyeDepth && *eyeDepth > MIN_SUBMERSION) {
                 float depth = *eyeDepth - MIN_SUBMERSION;
                 float blend = glm::clamp(1.0f - std::exp(-depth * 0.08f), 0.0f, 0.7f);
@@ -871,7 +871,7 @@ void Renderer::updatePerFrameUBO() {
                                           0.1f, 128.0f);
         projection[1][1] *= -1.0f;
         currentFrameData.contactSpaceMatrix = projection * glm::lookAt(
-            characterPosition - rays * 64.0f, characterPosition, up);
+            frameInputs_.characterPosition - rays * 64.0f, frameInputs_.characterPosition, up);
         static const bool contactEnabled = std::getenv("WOWEE_DISABLE_CONTACT_SHADOWS") == nullptr;
         currentFrameData.contactParams = glm::vec4(contactEnabled ? 1.0f : 0.0f,
                                                   1.0f / CONTACT_MAP_SIZE, 127.9f, 0.0f);
@@ -882,15 +882,15 @@ void Renderer::updatePerFrameUBO() {
     // y was a shadow strength that grew with the shadow distance - a third of
     // a shadow at 100 yards, all of it from 375. A shadow is whole at every
     // distance; how dark it is is the client's fixed 30% (shadow_shading.glsli).
-    currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, 0.0f,
+    currentFrameData.shadowParams = glm::vec4(frameInputs_.shadows ? 1.0f : 0.0f, 0.0f,
                                               1.0f / static_cast<float>(SHADOW_MAP_SIZE),
-                                              2.0f * shadowDistance_ / static_cast<float>(SHADOW_MAP_SIZE));
+                                              2.0f * frameInputs_.shadowDistance / static_cast<float>(SHADOW_MAP_SIZE));
 
     // Whether this frame builds the fog volume. Decided here, beside the
     // switch in the block the shaders read, and the frame graph dispatches by
     // the same flag - so no shader reads a volume its frame did not build.
     volumetricThisFrame_ = volumetricFog_ && volumetricFog_->isOn() &&
-                           volumetricFogDensity_ > 0.0f &&
+                           frameInputs_.fogDensity > 0.0f &&
                            !(passAblation_ && passAblation_->skip(AblationPass::VolumetricFog));
     currentFrameData.volumetricParams = volumetricThisFrame_ ? volumetricFog_->frameParams()
                                                              : glm::vec4(0.0f);
@@ -901,9 +901,7 @@ void Renderer::updatePerFrameUBO() {
     // no cap, and its buffer grows with it.
     std::optional<CpuStage> lightsStage(std::in_place, vkCtx->cpuStages(), "beginFrame/per-frame UBO",
                                         "local lights");
-    frameLocalLights_.clear();
-    if (m2Renderer) m2Renderer->gatherLocalLights(camera->getPosition(), frameLocalLights_);
-    if (characterRenderer) characterRenderer->gatherLocalLights(*camera, frameLocalLights_);
+    frameLocalLights_ = frameInputs_.localLights;
     uploadLocalLights(vkCtx->getCurrentFrame());
     lightsStage.reset();
     const uint32_t localLightCount = static_cast<uint32_t>(currentFrameData.localLightMeta.x);
@@ -923,43 +921,16 @@ void Renderer::updatePerFrameUBO() {
     // models in and around the view carry a lit light.
     {
         static double lastLightLog = 0.0;
-        if (localLightCount > 0 && (globalTime - lastLightLog) > 3.0) {
-            lastLightLog = globalTime;
+        if (localLightCount > 0 && (frameInputs_.time - lastLightLog) > 3.0) {
+            lastLightLog = frameInputs_.time;
             const glm::vec3& c0 = frameLocalLights_[0].color;
             LOG_INFO("localLights: count=", localLightCount,
                      " first rgb=(", c0.r, ",", c0.g, ",", c0.b, ")");
         }
     }
 
-    // Player motion, consumed by water ripples and by the foliage brush in
-    // m2.vert. Horizontal speed only: a fall shouldn't read as running.
-    {
-        const float dt = std::max(lastDeltaTime_, 0.0f);
-        if (!playerMotionTracked_) {
-            prevPlayerPos_ = characterPosition;
-            playerWakePos_ = characterPosition;
-            playerMotionTracked_ = true;
-        }
-        if (dt > 0.0f) {
-            const glm::vec2 step(characterPosition.x - prevPlayerPos_.x,
-                                 characterPosition.y - prevPlayerPos_.y);
-            // A teleport is not a sprint. Anything past a gallop is discarded
-            // rather than smoothed, or one map change flattens a whole field.
-            constexpr float MAX_TRACKED_SPEED = 30.0f;
-            const float rawSpeed = glm::length(step) / dt;
-            playerSpeed_ = (rawSpeed > MAX_TRACKED_SPEED) ? 0.0f
-                                                          : glm::mix(playerSpeed_, rawSpeed, 0.25f);
-
-            // Exponential chase, framerate independent.
-            constexpr float WAKE_TIME_CONSTANT = 0.30f;  // seconds of springback
-            const float k = 1.0f - std::exp(-dt / WAKE_TIME_CONSTANT);
-            playerWakePos_ += (characterPosition - playerWakePos_) * k;
-            if (rawSpeed > MAX_TRACKED_SPEED) playerWakePos_ = characterPosition;
-        }
-        prevPlayerPos_ = characterPosition;
-    }
-    currentFrameData.playerPos = glm::vec4(characterPosition, playerSpeed_);
-    currentFrameData.playerWake = glm::vec4(playerWakePos_, 0.0f);
+    currentFrameData.playerPos = frameInputs_.playerPos;
+    currentFrameData.playerWake = frameInputs_.playerWake;
 
     // Copy to current frame's mapped UBO
     uint32_t frame = vkCtx->getCurrentFrame();
@@ -982,6 +953,7 @@ void Renderer::setShadowQualityLevel(int level) {
 bool Renderer::initialize(RenderSurface* surface) {
     surface_ = surface;
     vkCtx = surface->getVkContext();
+    requestedMsaaSamples_ = vkCtx->getMsaaSamples();
     deferredWorldInitEnabled_ = core::envFlagEnabled("WOWEE_DEFER_WORLD_SYSTEMS", true);
     LOG_INFO("Initializing renderer (Vulkan)");
 
@@ -1297,7 +1269,8 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     // temporal upscaler and multisampling; everywhere else both run. The
     // saved choice is kept either way and re-asserted when the upscaler goes
     // off, by the settings panel.
-    if (postProcessPipeline_ && postProcessPipeline_->isFsr2BlockingMsaa() && samples > VK_SAMPLE_COUNT_1_BIT) {
+    if (postProcessPipeline_ && postProcessPipeline_->isFSR2Enabled() &&
+        !vkCtx->isDepthResolveSupported() && samples > VK_SAMPLE_COUNT_1_BIT) {
         LOG_WARNING("Multisampling left off: the temporal upscaler is on and this device "
                     "cannot resolve depth");
         return;
@@ -1307,11 +1280,7 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     VkSampleCountFlagBits maxSamples = vkCtx->getMaxUsableSampleCount();
     if (samples > maxSamples) samples = maxSamples;
 
-    if (samples == vkCtx->getMsaaSamples()) return;
-
-    // Defer to between frames - cannot destroy render pass/framebuffers mid-frame
-    pendingMsaaSamples_ = samples;
-    msaaChangePending_ = true;
+    requestedMsaaSamples_ = samples;
 }
 
 void Renderer::applyMsaaChange() {
@@ -1417,7 +1386,112 @@ void Renderer::applyMsaaChange() {
 
 }
 
-void Renderer::beginFrame() {
+FrameInputs Renderer::extractFrameInputs() {
+    if (std::getenv("WOWEE_SKY_BACKGROUND_PROBE") && updateSkyboxLayers()) {
+        skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
+        skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
+    }
+    updateGrassPopulation();
+    FrameInputs in;
+    if (camera) in.camera = *camera;
+    in.camera.clearJitter();
+    in.characterPosition = characterPosition;
+    in.characterYaw = characterYaw;
+    in.characterInstance = characterInstanceId;
+    in.environment = environment_;
+    in.viewer = viewerMotion_;
+    in.time = globalTime;
+    in.deltaTime = lastDeltaTime_;
+    in.hasLighting = lightingManager != nullptr;
+    if (lightingManager) {
+        in.lighting = lightingManager->getLightingParams();
+        in.weatherLight = *weatherLight();
+        in.timeOfDay = lightingManager->getTimeOfDayHours();
+    }
+    in.weather = weather_.mix();
+    in.wind = wind_.gpu();
+    in.windDirection = wind_.state().direction;
+    in.lensDrops = lensDrops_;
+    in.lensWind = lensWindOnScreen_;
+    in.sunGlare = sunGlare_;
+    in.sunGlareSky = sunGlareSky_;
+    in.moonGlare = moonGlare_;
+    in.viewDistance = viewDistance_;
+    in.shadowDistance = shadowDistance_;
+    in.shadows = shadowsEnabled;
+    in.worldInView = worldInView_;
+    in.terrainEnabled = terrainEnabled;
+    in.drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
+    in.hideProceduralSky = skyModelsHideProceduralSky();
+    in.sunShafts = sunShaftsEnabled_;
+    in.sharpStars = sharpStars_;
+    in.minimapEnabled = minimap && minimap->isEnabled();
+    if (surface_) {
+        in.windowWidth = surface_->getWidth();
+        in.windowHeight = surface_->getHeight();
+    }
+    in.rtMode = requestedRtMode_;
+    in.fogQuality = requestedFogQuality_;
+    in.msaaSamples = static_cast<uint32_t>(requestedMsaaSamples_);
+    if (postProcessPipeline_) in.postProcess = postProcessPipeline_->requestedSettings();
+    in.fogDensity = volumetricFogDensity_;
+    in.fogTargetExtinction = volumetricFogExtinction();
+    in.fogGround = characterPosition.z;
+    if (const auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y))
+        in.fogGround = std::min(in.fogGround, *h);
+    in.cameraWaterDepth = cameraWaterDepth();
+    if (camera) {
+        const auto eye = camera->getPosition();
+        in.reflectionWaterHeight = liquidScene_.dominantWaterHeight(eye);
+        in.waterHeight = liquidScene_.nearestHeightAt(eye.x, eye.y, eye.z, 400.0f);
+        in.waterIsWmo = liquidScene_.isWmoLiquidAt(eye.x, eye.y);
+        if (const auto type = liquidScene_.typeAt(eye.x, eye.y))
+            in.canal = *type == 5 || *type == 13 || *type == 17;
+        if (waterRenderer)
+            in.seaWaterHeight = waterRenderer->highestOpenWaterNear(glm::vec2(eye), SeaBedMap::kHalfExtent);
+        if (m2Renderer) m2Renderer->gatherLocalLights(eye, in.localLights);
+        if (characterRenderer) characterRenderer->gatherLocalLights(in.camera, in.localLights);
+    }
+    in.shelterRevision = wmoRenderer ? wmoRenderer->contentRevision() : 0;
+    in.shelterRevision = in.shelterRevision * 1000003u + (wmoRenderer ? wmoRenderer->getInstanceCount() : 0);
+    in.shelterRevision = in.shelterRevision * 1000003u + (m2Renderer ? m2Renderer->getInstanceCount() : 0);
+    in.shelterRevision = in.shelterRevision * 1000003u + (terrainRenderer ? terrainRenderer->getChunkCount() : 0);
+    // Player motion, consumed by water ripples and by the foliage brush in
+    // m2.vert. Horizontal speed only: a fall shouldn't read as running.
+    {
+        const float dt = std::max(lastDeltaTime_, 0.0f);
+        if (!playerMotionTracked_) {
+            prevPlayerPos_ = characterPosition;
+            playerWakePos_ = characterPosition;
+            playerMotionTracked_ = true;
+        }
+        if (dt > 0.0f) {
+            const glm::vec2 step(characterPosition.x - prevPlayerPos_.x,
+                                 characterPosition.y - prevPlayerPos_.y);
+            // A teleport is not a sprint. Anything past a gallop is discarded
+            // rather than smoothed, or one map change flattens a whole field.
+            constexpr float MAX_TRACKED_SPEED = 30.0f;
+            const float rawSpeed = glm::length(step) / dt;
+            playerSpeed_ = (rawSpeed > MAX_TRACKED_SPEED) ? 0.0f
+                                                          : glm::mix(playerSpeed_, rawSpeed, 0.25f);
+
+            // Exponential chase, framerate independent.
+            constexpr float WAKE_TIME_CONSTANT = 0.30f;  // seconds of springback
+            const float k = 1.0f - std::exp(-dt / WAKE_TIME_CONSTANT);
+            playerWakePos_ += (characterPosition - playerWakePos_) * k;
+            if (rawSpeed > MAX_TRACKED_SPEED) playerWakePos_ = characterPosition;
+        }
+        prevPlayerPos_ = characterPosition;
+    }
+    in.playerPos = glm::vec4(characterPosition, playerSpeed_);
+    in.playerWake = glm::vec4(playerWakePos_, 0.0f);
+
+    return in;
+}
+
+void Renderer::beginFrame(const FrameInputs& inputs) {
+    frameInputs_ = inputs;
+    renderCamera_ = inputs.camera;
     ZoneScopedN("Renderer::beginFrame");
     if (!vkCtx) return;
     if (vkCtx->isDeviceLost()) return;
@@ -1463,6 +1537,28 @@ void Renderer::beginFrame() {
     }
 
     worldDrawnThisFrame_ = false;
+
+    if (rtLighting_) rtLighting_->setMode(static_cast<RtLighting::Mode>(inputs.rtMode));
+    if (volumetricFog_)
+        volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(inputs.fogQuality));
+    pendingMsaaSamples_ = static_cast<VkSampleCountFlagBits>(inputs.msaaSamples);
+    if (postProcessPipeline_) {
+        const auto req = postProcessPipeline_->applyFrameSettings(inputs.postProcess);
+        if (req.requested) pendingMsaaSamples_ = req.samples;
+    }
+    if (inputs.postProcess.fsr ||
+        (inputs.postProcess.fsr2 && !vkCtx->isDepthResolveSupported()))
+        pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
+    msaaChangePending_ = pendingMsaaSamples_ != vkCtx->getMsaaSamples();
+    if (terrainRenderer) terrainRenderer->setViewDistance(inputs.viewDistance);
+    if (wmoRenderer) wmoRenderer->setViewDistance(inputs.viewDistance);
+    if (m2Renderer) {
+        m2Renderer->setFrameTime(inputs.time);
+        m2Renderer->setViewDistance(inputs.viewDistance);
+        m2Renderer->setSuppressBakedStars(inputs.sharpStars);
+    }
+    if (skyboxModelRenderer_) skyboxModelRenderer_->setFrameTime(inputs.time);
+    if (skySystem) skySystem->setProceduralStarsEnabled(inputs.sharpStars);
 
     // Settings applied between frames, the targets they size, and the upload
     // batches the GPU has finished with.
@@ -1566,7 +1662,7 @@ void Renderer::beginFrame() {
         writeFogVolumeBindings(vkCtx->getCurrentFrame());
 
         // FSR2 jitter pattern (§4.3 - delegates to PostProcessPipeline)
-        if (postProcessPipeline_ && camera) postProcessPipeline_->applyJitter(camera.get());
+        if (postProcessPipeline_ && frameCamera()) postProcessPipeline_->applyJitter(&renderCamera_);
     }
     // The characters' bones into this slot's buffers, once, now that its
     // fence is passed and before the shadow maps draw them: every pass after
@@ -1622,24 +1718,23 @@ void Renderer::beginFrame() {
     // directly into the normal frame command buffer. The old path submitted a
     // separate command buffer and synchronously waited on a fence every frame,
     // serializing CPU and GPU work solely to obtain same-frame cull results.
-    if (m2Renderer && camera && vkCtx) {
+    if (m2Renderer && frameCamera() && vkCtx) {
         CpuStage stage(stages, "beginFrame", "M2 cull");
         GpuPass pass(*vkCtx, currentCmd, "M2 cull");
         uint32_t frame = vkCtx->getCurrentFrame();
         m2Renderer->invalidateCullOutput(frame);
-        m2Renderer->dispatchCullCompute(currentCmd, frame, *camera);
+        m2Renderer->dispatchCullCompute(currentCmd, frame, *frameCamera());
     }
 
     // Grass culls here too, for the same reason: a dispatch has to be recorded
     // outside a render pass. Unlike the M2 path nothing reads the result back -
     // the count it produces is consumed by the indirect draw on the GPU.
-    if (grassRenderer_ && camera && vkCtx) {
+    if (grassRenderer_ && frameCamera() && vkCtx) {
         CpuStage stage(stages, "beginFrame", "grass");
         GpuPass pass(*vkCtx, currentCmd, "grass cull");
-        updateGrassPopulation();
         grassRenderer_->reportCullResult();
-        grassRenderer_->dispatchCull(currentCmd, vkCtx->getCurrentFrame(), *camera,
-                                     characterPosition);
+        grassRenderer_->dispatchCull(currentCmd, vkCtx->getCurrentFrame(), *frameCamera(),
+                                     frameInputs_.characterPosition);
     }
 
     // --- Off-screen pre-passes ---
@@ -1661,16 +1756,12 @@ void Renderer::beginFrame() {
     const bool skipSkyCapture = std::getenv("WOWEE_SKIP_SKY") ||
         std::getenv("WOWEE_SKIP_ALL_RENDER") ||
         (passAblation_ && passAblation_->skip(AblationPass::Sky));
-    if (skySystem && camera && (worldInView_ || skyProbe) && !skipSkyCapture) {
+    if (skySystem && frameCamera() && (frameInputs_.worldInView || skyProbe) && !skipSkyCapture) {
         CpuStage stage(stages, "beginFrame", "sky capture");
         GpuPass pass(*vkCtx, currentCmd, "sky capture");
-        if (skyProbe && updateSkyboxLayers()) {
-            skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
-            skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
-        }
-        const bool authored = skyboxModelRenderer_ && !skyLayers_.empty();
-        const float timeOfDay = lightingManager ? lightingManager->getTimeOfDayHours() : 12.0f;
-        renderSkyBackground(timeOfDay, authored, skyModelsHideProceduralSky());
+        const bool authored = frameInputs_.drawSkyModels;
+        const float timeOfDay = frameInputs_.hasLighting ? frameInputs_.timeOfDay : 12.0f;
+        renderSkyBackground(timeOfDay, authored, frameInputs_.hideProceduralSky);
         if (skyProbe) {
             static bool logged = false;
             if (!logged) {
@@ -1759,7 +1850,7 @@ void Renderer::endFrame() {
         CpuStage stage(stages, "endFrame", "post-process");
         GpuPass pass(*vkCtx, currentCmd, "post-process");
         postProcessPipeline_->executePostProcessing(
-            currentCmd, currentImageIndex, camera.get(), lastDeltaTime_);
+            currentCmd, currentImageIndex, frameCamera(), frameInputs_.deltaTime);
     }
 
     // The scene is complete: close its pass so the water refraction copy can run
@@ -2163,37 +2254,37 @@ void Renderer::updateGlares(float deltaTime) {
 void Renderer::drawGlares(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     namespace sc = sky_celestial;
     SkyBodies* bodies = skySystem ? skySystem->getBodies() : nullptr;
-    if (!bodies || !camera || !lightingManager) return;
-    const float day = lightingManager->getTimeOfDayHours() / 24.0f;
-    const glm::vec3 forward = glm::normalize(camera->getForward());
-    const glm::vec3& colour = lightingManager->getLightingParams().sunColor;
-    const float weather = sc::weatherFade(weatherStrength());
+    if (!bodies || !frameCamera() || !frameInputs_.hasLighting) return;
+    const float day = frameInputs_.timeOfDay / 24.0f;
+    const glm::vec3 forward = glm::normalize(frameCamera()->getForward());
+    const glm::vec3& colour = frameInputs_.lighting.sunColor;
+    const float weather = sc::weatherFade(frameInputs_.weather.strength());
     // First ask, of the finished depth, how much of each disc the world
     // hides; the answer comes back a frame slot later (updateGlares).
     const uint32_t frame = vkCtx->getCurrentFrame();
     for (const SkyBodies::Body body : {SkyBodies::Body::Sun, SkyBodies::Body::Moon}) {
         bodies->queryDiscVisibility(cmd, perFrameSet, body,
                                     body == SkyBodies::Body::Sun ? sc::sunDisc(day) : sc::moonDisc(day),
-                                    frame, camera->getViewMatrix(), camera->getProjectionMatrix(),
+                                    frame, frameCamera()->getViewMatrix(), frameCamera()->getProjectionMatrix(),
                                     activeRenderExtent_);
     }
-    if (sunGlare_ > 0.0f) {
+    if (frameInputs_.sunGlare > 0.0f) {
         const sc::SkyDisc sun = sc::sunDisc(day);
         const sc::GlareShape shape = sc::sunGlareShape(glm::dot(forward, sun.direction));
         bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Sun, sun.direction, shape.size,
-                            colour, shape.alpha * sunGlare_ * weather);
+                            colour, shape.alpha * frameInputs_.sunGlare * weather);
     }
-    if (moonGlare_ > 0.0f) {
+    if (frameInputs_.moonGlare > 0.0f) {
         const sc::SkyDisc moon = sc::moonDisc(day);
         const sc::GlareShape shape =
             sc::moonGlareShape(glm::dot(forward, moon.direction), moon.scale);
         bodies->renderGlare(cmd, perFrameSet, SkyBodies::Body::Moon, moon.direction, shape.size,
-                            colour, shape.alpha * moonGlare_ * weather);
+                            colour, shape.alpha * frameInputs_.moonGlare * weather);
     }
 }
 
 void Renderer::logSunDiagnostic(const SkyParams& params) {
-    if (!skySystem || !camera) return;
+    if (!skySystem || !frameCamera()) return;
     const SkyBodies* bodies = skySystem->getBodies();
     SkyBodies::DiscDraw sun =
         bodies ? bodies->lastDiscDraw(SkyBodies::Body::Sun) : SkyBodies::DiscDraw{};
@@ -2205,25 +2296,25 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
 
     const glm::vec3 sunDir = params.sunDisc.direction;
     const SunOnScreen screen =
-        sunScreenPosition(camera->getViewMatrix(), camera->getProjectionMatrix(), sunDir);
+        sunScreenPosition(frameCamera()->getViewMatrix(), frameCamera()->getProjectionMatrix(), sunDir);
     const bool inView = screen.inFront && screen.uv.x >= 0.0f && screen.uv.x <= 1.0f &&
                         screen.uv.y >= 0.0f && screen.uv.y <= 1.0f;
     const float fromView = glm::degrees(std::acos(
-        glm::clamp(glm::dot(glm::normalize(camera->getForward()), sunDir), -1.0f, 1.0f)));
+        glm::clamp(glm::dot(glm::normalize(frameCamera()->getForward()), sunDir), -1.0f, 1.0f)));
 
     const SunDiagState state{
         .drawn = sun.drawn,
         .skipped = sun.skipped,
         .inView = inView,
         .angleStep = static_cast<int>(fromView / 5.0f),
-        .occlusionStep = static_cast<int>(sunGlare_ * 4.0f + 0.5f),
+        .occlusionStep = static_cast<int>(frameInputs_.sunGlare * 4.0f + 0.5f),
         .hourStep = static_cast<int>(params.timeOfDay * 4.0f),
         .weather = params.weatherIntensity > 0.01f,
         .moonDrawn = moon.drawn,
     };
-    if (state == sunDiagLast_ || globalTime - sunDiagLoggedAt_ < 0.5) return;
+    if (state == sunDiagLast_ || frameInputs_.time - sunDiagLoggedAt_ < 0.5) return;
     sunDiagLast_ = state;
-    sunDiagLoggedAt_ = globalTime;
+    sunDiagLoggedAt_ = frameInputs_.time;
 
     const auto v3 = [](const glm::vec3& c) {
         char buf[48];
@@ -2236,10 +2327,10 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
              " inView=", inView, " uv=(", screen.uv.x, ",", screen.uv.y, ")",
              " fromView=", fromView,
              " colour=", v3(params.sunColor), " alpha=", sun.alpha,
-             " glare=", sunGlare_, " glareSky=", sunGlareSky_,
+             " glare=", frameInputs_.sunGlare, " glareSky=", frameInputs_.sunGlareSky,
              " moon=", moon.drawn ? "drawn" : moon.skipped,
              " moonElev=", glm::degrees(std::asin(glm::clamp(params.moonDisc.direction.z, -1.0f, 1.0f))),
-             " moonGlare=", moonGlare_, " clouds=", params.cloudDensity,
+             " moonGlare=", frameInputs_.moonGlare, " clouds=", params.cloudDensity,
              " weather=", params.weatherIntensity,
              " fog=", volumetricThisFrame_ ? fogExtinction_ : 0.0f,
              " msaa=", int(vkCtx ? vkCtx->getMsaaSamples() : 1));
@@ -2331,7 +2422,7 @@ void Renderer::update(float deltaTime) {
         const uint32_t resolvedZoneId = environment_.zoneId;
 
         endPhase("pre-lighting");
-        lightingManager->update(characterPosition, environment_.mapId, resolvedZoneId,
+        lightingManager->update(deltaTime, characterPosition, environment_.mapId, resolvedZoneId,
                                 environment_.gameTime, weatherStrength(), isUnderwater);
         hazeLightForWeather();
         endPhase("lighting");
@@ -2547,12 +2638,7 @@ PostProcessPipeline* Renderer::getPostProcessPipeline() const {
 }
 
 void Renderer::setFSREnabled(bool enabled) {
-    if (!postProcessPipeline_) return;
-    auto req = postProcessPipeline_->setFSREnabled(enabled);
-    if (req.requested) {
-        pendingMsaaSamples_ = req.samples;
-        msaaChangePending_ = true;
-    }
+    if (postProcessPipeline_) postProcessPipeline_->setFSREnabled(enabled);
 }
 void Renderer::setFSR2Enabled(bool enabled) {
     if (!postProcessPipeline_) return;
@@ -2567,17 +2653,7 @@ void Renderer::setFSR2Enabled(bool enabled) {
             return;
         }
     }
-    auto req = postProcessPipeline_->setFSR2Enabled(enabled, camera.get());
-    if (req.requested) {
-        pendingMsaaSamples_ = req.samples;
-        msaaChangePending_ = true;
-    }
-    // A pending multisampling change loaded before the upscaler only has to
-    // yield on a device that cannot resolve depth.
-    if (enabled && msaaChangePending_ && pendingMsaaSamples_ > VK_SAMPLE_COUNT_1_BIT &&
-        postProcessPipeline_->isFsr2BlockingMsaa()) {
-        pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
-    }
+    postProcessPipeline_->setFSR2Enabled(enabled);
 }
 void Renderer::setGrassEnabled(bool enabled) {
     if (enabled == grassEnabled_) return;
@@ -3144,15 +3220,15 @@ void Renderer::renderSkyBackground(float timeOfDay,
     // Render only the background, including authored sky layers and the air.
     skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
-        timeOfDay, environment_.gameTime, weatherStrength(),
-        lightingManager ? weatherLight() : nullptr,
+        timeOfDay, frameInputs_.environment.gameTime, frameInputs_.weather.strength(),
+        frameInputs_.hasLighting ? (&frameInputs_.weatherLight) : nullptr,
         useOriginalSkybox);
     params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
     params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
-    skySystem->render(currentCmd, skyPerFrameDescSets[slot], *camera, params);
+    skySystem->render(currentCmd, skyPerFrameDescSets[slot], *frameCamera(), params);
     if (drawSkyModels) {
-        skyboxModelRenderer_->prepareRender(slot, *camera);
-        skyboxModelRenderer_->render(currentCmd, skyPerFrameDescSets[slot], *camera);
+        skyboxModelRenderer_->prepareRender(slot, *frameCamera());
+        skyboxModelRenderer_->render(currentCmd, skyPerFrameDescSets[slot], *frameCamera());
     }
     skyBackground_->end(currentCmd, slot);
 }
@@ -3177,8 +3253,8 @@ void Renderer::renderWorld() {
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
     VkDescriptorSet perFrameSet = perFrameDescSets[frameIdx];
-    const glm::mat4& view = camera ? camera->getViewMatrix() : glm::mat4(1.0f);
-    const glm::mat4& projection = camera ? camera->getProjectionMatrix() : glm::mat4(1.0f);
+    const glm::mat4& view = frameCamera() ? frameCamera()->getViewMatrix() : glm::mat4(1.0f);
+    const glm::mat4& projection = frameCamera() ? frameCamera()->getProjectionMatrix() : glm::mat4(1.0f);
 
     // GPU crash diagnostic: skip individual renderers to isolate which one faults
     static const bool envSkipWMO = (std::getenv("WOWEE_SKIP_WMO") != nullptr);
@@ -3207,10 +3283,7 @@ void Renderer::renderWorld() {
     }
 
     // Get time of day for sky-related rendering
-    auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
-    float timeOfDay = lightingManager
-        ? lightingManager->getTimeOfDayHours()
-        : (skybox ? skybox->getTimeOfDay() : 12.0f);
+    const float timeOfDay = frameInputs_.timeOfDay;
     // Two questions, apart while the sky crossfades. The sky models are drawn
     // whenever any is up at all. The client's own stars, sun, moons and clouds
     // go only under a model that is fully up and does not ask for them, as in
@@ -3218,8 +3291,8 @@ void Renderer::renderWorld() {
     // under the auroras they are drawn and the models go over them. This was
     // a hand-over at half the summed weight, which took them away under every
     // sky model, auroras included, and at every border.
-    const bool drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
-    const bool useOriginalSkybox = skyModelsHideProceduralSky();
+    const bool drawSkyModels = frameInputs_.drawSkyModels;
+    const bool useOriginalSkybox = frameInputs_.hideProceduralSky;
 
 
     // ── Multithreaded secondary command buffer recording ──
@@ -3231,9 +3304,9 @@ void Renderer::renderWorld() {
         auto prepStart = std::chrono::steady_clock::now();
         if (wmoRenderer) wmoRenderer->prepareRender();
         auto prepWmoEnd = std::chrono::steady_clock::now();
-        if (m2Renderer && camera) m2Renderer->prepareRender(frameIdx, *camera);
-        if (drawSkyModels && camera)
-            skyboxModelRenderer_->prepareRender(frameIdx, *camera);
+        if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
+        if (drawSkyModels && frameCamera())
+            skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
         // The characters' bones went up in beginFrame, before the shadow maps.
         auto prepM2End = std::chrono::steady_clock::now();
         const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
@@ -3258,14 +3331,14 @@ void Renderer::renderWorld() {
         // took grass with it - which for a crash bisect is harmless and for an
         // ablation is the whole measurement, since the terrain phase would
         // then be reporting what terrain and grass cost together.
-        const bool drawTerrain = terrainRenderer && camera && terrainEnabled && !skipTerrain;
+        const bool drawTerrain = terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain;
         const bool drawGrass = grassRenderer_ && !skipGrass;
         if (drawTerrain || drawGrass) {
             terrainFuture = core::ThreadPool::frameWorkers().submit("record: terrain", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
                 setSecondaryViewportScissor(cmd);
-                if (drawTerrain) terrainRenderer->render(cmd, perFrameSet, *camera);
+                if (drawTerrain) terrainRenderer->render(cmd, perFrameSet, *frameCamera());
                 if (drawGrass) grassRenderer_->render(cmd, frameIdx, perFrameSet);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
@@ -3273,25 +3346,25 @@ void Renderer::renderWorld() {
             });
         }
 
-        if (wmoRenderer && camera && !skipWMO) {
+        if (wmoRenderer && frameCamera() && !skipWMO) {
             wmoFuture = core::ThreadPool::frameWorkers().submit("record: WMO", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *camera, &characterPosition);
+                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
             });
         }
 
-        if (m2Renderer && camera && !skipM2) {
+        if (m2Renderer && frameCamera() && !skipM2) {
             m2Future = core::ThreadPool::frameWorkers().submit("record: M2", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_M2);
                 setSecondaryViewportScissor(cmd);
                 const auto tBegin = std::chrono::steady_clock::now();
-                m2Renderer->render(cmd, perFrameSet, *camera);
+                m2Renderer->render(cmd, perFrameSet, *frameCamera());
                 const auto tModels = std::chrono::steady_clock::now();
                 // Blended things go after the water when it has a pass of its
                 // own; see M2Renderer::renderAfterWater.
@@ -3334,20 +3407,20 @@ void Renderer::renderWorld() {
         {
             VkCommandBuffer cmd = beginSecondary(SEC_SKY);
             setSecondaryViewportScissor(cmd);
-            if (skySystem && camera && !skipSky) {
+            if (skySystem && frameCamera() && !skipSky) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
-                    environment_.gameTime, weatherStrength(),
-                    lightingManager ? weatherLight() : nullptr,
+                    frameInputs_.environment.gameTime, frameInputs_.weather.strength(),
+                    frameInputs_.hasLighting ? (&frameInputs_.weatherLight) : nullptr,
                     useOriginalSkybox);
                 // As much as the glare shows, weather included, as the client
                 // puts its glare out (0x7f37c3).
                 skyParams.sunGlareVisibility =
-                    sunGlare_ * sky_celestial::weatherFade(weatherStrength());
-                skySystem->render(cmd, perFrameSet, *camera, skyParams);
+                    frameInputs_.sunGlare * sky_celestial::weatherFade(frameInputs_.weather.strength());
+                skySystem->render(cmd, perFrameSet, *frameCamera(), skyParams);
                 logSunDiagnostic(skyParams);
                 if (drawSkyModels) {
-                    skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
+                    skyboxModelRenderer_->render(cmd, perFrameSet, *frameCamera());
                 }
             }
             vkEndCommandBuffer(cmd);
@@ -3372,15 +3445,15 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_CHARS);
             setSecondaryViewportScissor(cmd);
-            if (characterRenderer && camera && !skipChars) {
-                characterRenderer->render(cmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
+            if (characterRenderer && frameCamera() && !skipChars) {
+                characterRenderer->render(cmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Solid);
             }
             vkEndCommandBuffer(cmd);
             if (!fadedCharactersAfterWater()) {
                 VkCommandBuffer faded = beginSecondary(SEC_CHARS_FADED);
                 setSecondaryViewportScissor(faded);
-                if (characterRenderer && camera && !skipChars) {
-                    characterRenderer->render(faded, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+                if (characterRenderer && frameCamera() && !skipChars) {
+                    characterRenderer->render(faded, perFrameSet, *frameCamera(), CharacterRenderer::Part::Faded);
                 }
                 vkEndCommandBuffer(faded);
             }
@@ -3395,21 +3468,21 @@ void Renderer::renderWorld() {
             auto t0 = std::chrono::steady_clock::now();
             VkCommandBuffer cmd = beginSecondary(SEC_POST);
             setSecondaryViewportScissor(cmd);
-            if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
+            if (waterRenderer && frameCamera() && !waterDrawsInContinuePass() && !waterAblated()) {
                 waterRenderer->setRenderExtent(activeRenderExtent_);
-                waterRenderer->render(cmd, perFrameSet, *camera, globalTime, false, frameIdx);
+                waterRenderer->render(cmd, perFrameSet, *frameCamera(), frameInputs_.time, false, frameIdx);
             }
-            if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+            if (precipitation_ && frameCamera() && !precipitationDrawsWithWater_) {
                 precipitation_->render(cmd, perFrameSet, frameIdx);
             }
-            if (lightning && camera && lightning->isEnabled()) lightning->render(cmd, perFrameSet);
-            if (swimEffects && camera && !swimEffectsDrawWithWater_) {
+            if (lightning && frameCamera() && lightning->isEnabled()) lightning->render(cmd, perFrameSet);
+            if (swimEffects && frameCamera() && !swimEffectsDrawWithWater_) {
                 swimEffects->render(cmd, perFrameSet);
             }
-            if (mountDust && camera) mountDust->render(cmd, perFrameSet);
-            if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
-            if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
-            if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
+            if (mountDust && frameCamera()) mountDust->render(cmd, perFrameSet);
+            if (chargeEffect && frameCamera()) chargeEffect->render(cmd, perFrameSet);
+            if (footprintRenderer && frameCamera()) footprintRenderer->render(cmd, perFrameSet, *frameCamera());
+            if (questMarkerRenderer && frameCamera()) questMarkerRenderer->render(cmd, perFrameSet, *frameCamera());
             drawGlares(cmd, perFrameSet);
 
             renderUnderwaterOverlay(cmd);
@@ -3513,11 +3586,11 @@ void Renderer::renderWorld() {
         if (drawTerrain || drawGrass)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
         queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
-        if (wmoRenderer && camera && !skipWMO)
+        if (wmoRenderer && frameCamera() && !skipWMO)
             queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
         queue(secondaryCmds_[SEC_CHARS][frameIdx], "characters");
-        if (m2Renderer && camera && !skipM2)
+        if (m2Renderer && frameCamera() && !skipM2)
             queue(secondaryCmds_[SEC_M2][frameIdx], "m2");
         if (!fadedCharactersAfterWater())
             queue(secondaryCmds_[SEC_CHARS_FADED][frameIdx], "faded characters");
@@ -3550,11 +3623,11 @@ void Renderer::renderWorld() {
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
 
-        if (terrainRenderer && camera && terrainEnabled && !skipTerrain) {
+        if (terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "terrain");
-                terrainRenderer->render(currentCmd, perFrameSet, *camera);
+                terrainRenderer->render(currentCmd, perFrameSet, *frameCamera());
             }
             lastTerrainRenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - terrainStart).count();
@@ -3568,29 +3641,29 @@ void Renderer::renderWorld() {
         }
 
         // Sky after the ground, for the reason given on the parallel path.
-        if (skySystem && camera && !skipSky) {
+        if (skySystem && frameCamera() && !skipSky) {
             GpuPass pass(*vkCtx, currentCmd, "sky");
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
-                environment_.gameTime, weatherStrength(),
-                lightingManager ? weatherLight() : nullptr,
+                frameInputs_.environment.gameTime, frameInputs_.weather.strength(),
+                frameInputs_.hasLighting ? (&frameInputs_.weatherLight) : nullptr,
                 useOriginalSkybox);
             skyParams.sunGlareVisibility =
-                sunGlare_ * sky_celestial::weatherFade(weatherStrength());
-            skySystem->render(currentCmd, perFrameSet, *camera, skyParams);
+                frameInputs_.sunGlare * sky_celestial::weatherFade(frameInputs_.weather.strength());
+            skySystem->render(currentCmd, perFrameSet, *frameCamera(), skyParams);
             logSunDiagnostic(skyParams);
             if (drawSkyModels) {
-                skyboxModelRenderer_->prepareRender(frameIdx, *camera);
-                skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);
+                skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
+                skyboxModelRenderer_->render(currentCmd, perFrameSet, *frameCamera());
             }
         }
 
-        if (wmoRenderer && camera && !skipWMO) {
+        if (wmoRenderer && frameCamera() && !skipWMO) {
             wmoRenderer->prepareRender();
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *camera, &characterPosition);
+                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition);
             }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wmoStart).count();
@@ -3600,17 +3673,17 @@ void Renderer::renderWorld() {
             overlaySystem_->renderSelectionCircle(view, projection, currentCmd, *collision_);
         }
 
-        if (characterRenderer && camera && !skipChars) {
+        if (characterRenderer && frameCamera() && !skipChars) {
             GpuPass pass(*vkCtx, currentCmd, "characters");
-            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Solid);
+            characterRenderer->render(currentCmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Solid);
         }
 
-        if (m2Renderer && camera && !skipM2) {
-            m2Renderer->prepareRender(frameIdx, *camera);
+        if (m2Renderer && frameCamera() && !skipM2) {
+            m2Renderer->prepareRender(frameIdx, *frameCamera());
             auto m2Start = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "m2");
-                m2Renderer->render(currentCmd, perFrameSet, *camera);
+                m2Renderer->render(currentCmd, perFrameSet, *frameCamera());
                 if (!m2Renderer->drawsBlendedAfterWater()) {
                     m2Renderer->renderM2Particles(currentCmd, perFrameSet);
                     m2Renderer->renderM2Ribbons(currentCmd, perFrameSet);
@@ -3622,27 +3695,27 @@ void Renderer::renderWorld() {
 
         // Faded characters over the blended world, unless they go after the
         // water with it.
-        if (characterRenderer && camera && !skipChars && !fadedCharactersAfterWater()) {
+        if (characterRenderer && frameCamera() && !skipChars && !fadedCharactersAfterWater()) {
             GpuPass pass(*vkCtx, currentCmd, "faded characters");
-            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+            characterRenderer->render(currentCmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Faded);
         }
 
-        if (waterRenderer && camera && !waterDrawsInContinuePass() && !waterAblated()) {
+        if (waterRenderer && frameCamera() && !waterDrawsInContinuePass() && !waterAblated()) {
             GpuPass pass(*vkCtx, currentCmd, "water");
             waterRenderer->setRenderExtent(activeRenderExtent_);
-            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, false, frameIdx);
+            waterRenderer->render(currentCmd, perFrameSet, *frameCamera(), frameInputs_.time, false, frameIdx);
         }
-        if (precipitation_ && camera && !precipitationDrawsWithWater_) {
+        if (precipitation_ && frameCamera() && !precipitationDrawsWithWater_) {
             precipitation_->render(currentCmd, perFrameSet, frameIdx);
         }
-        if (lightning && camera && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
-        if (swimEffects && camera && !swimEffectsDrawWithWater_) {
+        if (lightning && frameCamera() && lightning->isEnabled()) lightning->render(currentCmd, perFrameSet);
+        if (swimEffects && frameCamera() && !swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
         }
-        if (mountDust && camera) mountDust->render(currentCmd, perFrameSet);
-        if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
-        if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
-        if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
+        if (mountDust && frameCamera()) mountDust->render(currentCmd, perFrameSet);
+        if (chargeEffect && frameCamera()) chargeEffect->render(currentCmd, perFrameSet);
+        if (footprintRenderer && frameCamera()) footprintRenderer->render(currentCmd, perFrameSet, *frameCamera());
+        if (questMarkerRenderer && frameCamera()) questMarkerRenderer->render(currentCmd, perFrameSet, *frameCamera());
         drawGlares(currentCmd, perFrameSet);
         // The same one-line total the parallel path reports, so a profile taken
         // either way can be compared against the other.
@@ -3661,7 +3734,7 @@ void Renderer::renderWorld() {
     // that copy from the finished frame instead fed the water its own output:
     // a moving object left one sharp copy per frame (a train of ghosts) and the
     // brightness applied to the water compounded through the loop and pumped.
-    if (waterDrawsInContinuePass() && camera) {
+    if (waterDrawsInContinuePass() && frameCamera()) {
         vkCmdEndRenderPass(currentCmd);
 
         VkImage sceneColor = VK_NULL_HANDLE;
@@ -3730,7 +3803,7 @@ void Renderer::renderWorld() {
 
         waterRenderer->setRenderExtent(waterExtent);
         if (!waterAblated()) {
-            waterRenderer->render(currentCmd, perFrameSet, *camera, globalTime, msaaOn, frameIdx);
+            waterRenderer->render(currentCmd, perFrameSet, *frameCamera(), frameInputs_.time, msaaOn, frameIdx);
         }
 
         // What is blended goes over the water, not under it. Drawn in the scene
@@ -3742,14 +3815,14 @@ void Renderer::renderWorld() {
         // fire rises from the feet through the body; with the body drawn
         // first, its depth hid every part of the fire inside or behind it.
         if (characterRenderer && !skipChars && fadedCharactersAfterWater()) {
-            characterRenderer->render(currentCmd, perFrameSet, *camera, CharacterRenderer::Part::Faded);
+            characterRenderer->render(currentCmd, perFrameSet, *frameCamera(), CharacterRenderer::Part::Faded);
         }
 
         // Spray belongs on top of the surface it is thrown off. Recorded in the
         // scene pass it went under the water instead, which the sheet then hid -
         // barely at the shore where alpha sits near its floor, completely in the
         // deeper water you swim in.
-        if (swimEffects && camera && swimEffectsDrawWithWater_) {
+        if (swimEffects && frameCamera() && swimEffectsDrawWithWater_) {
             swimEffects->render(currentCmd, perFrameSet);
         }
         // Rain over the water, ringing on it, not hidden under its sheet.
@@ -3839,17 +3912,15 @@ void Renderer::renderUnderwaterOverlay(VkCommandBuffer cmd) {
     // client happened to be recording with decided which of the two the
     // player got, and on the fallback path crossing the surface showed a
     // bare line with no water either side of it.
-if (overlaySystem_ && camera) {
-        glm::vec3 camPos = camera->getPosition();
+if (overlaySystem_ && frameCamera()) {
+        glm::vec3 camPos = frameCamera()->getPosition();
         // The default vertical reach of this query is 15 units, meant to
         // stop water on a cliff above being mistaken for water the camera
         // is in. For the underwater tint that cap is the wrong end of the
         // problem: past 15 units down the query found nothing, the
         // overlay stopped, and the scene snapped bright at a fixed depth.
         // Deep ocean is far deeper than that, so reach much further here.
-        constexpr float kUnderwaterReach = 400.0f;
-        auto waterH = liquidScene_.nearestHeightAt(
-            camPos.x, camPos.y, camPos.z, kUnderwaterReach);
+        const auto waterH = frameInputs_.waterHeight;
         // How far the eye is under the surface. The tint used to wait
         // until 1.5 units down and then apply to the whole screen at
         // once, so crossing the surface was a step: no tint, no tint,
@@ -3861,9 +3932,9 @@ if (overlaySystem_ && camera) {
         // above the surface while the rest is under. It was a flat 0.55, which
         // is a number rather than a measurement - too wide here, and wrong the
         // moment the field of view or the near plane changes.
-        const float fovY = glm::radians(camera->getFovDegrees());
+        const float fovY = glm::radians(frameCamera()->getFovDegrees());
         const float kCrossingBand =
-            std::max(0.05f, camera->getNearPlane() * std::tan(fovY * 0.5f));
+            std::max(0.05f, frameCamera()->getNearPlane() * std::tan(fovY * 0.5f));
         const float eyeDepth = waterH ? (*waterH - camPos.z) : -1.0f;
 
         // Says what it decided, so a screenshot of this can be read rather than
@@ -3871,11 +3942,11 @@ if (overlaySystem_ && camera) {
         // while the eye is anywhere near the surface.
         {
             static double lastLog = 0.0;
-            if (waterH && std::abs(eyeDepth) < 3.0f && (globalTime - lastLog) > 2.0) {
-                lastLog = globalTime;
+            if (waterH && std::abs(eyeDepth) < 3.0f && (frameInputs_.time - lastLog) > 2.0) {
+                lastLog = frameInputs_.time;
                 LOG_INFO("underwater: camZ=", camPos.z, " waterZ=", *waterH,
                          " eyeDepth=", eyeDepth, " band=", kCrossingBand,
-                         " wmoWater=", liquidScene_.isWmoLiquidAt(camPos.x, camPos.y) ? 1 : 0,
+                         " wmoWater=", frameInputs_.waterIsWmo ? 1 : 0,
                          " drawing=", (eyeDepth > 0.0f) ? 1 : 0);
             }
         }
@@ -3895,10 +3966,8 @@ if (overlaySystem_ && camera) {
         // whose ray enters the world above the surface comes out untouched -
         // so the band above the surface costs nothing where there is no water.
         if (waterH && eyeDepth > -kCrossingBand
-                   && !liquidScene_.isWmoLiquidAt(camPos.x, camPos.y)) {
-            bool canal = false;
-            if (auto lt = liquidScene_.typeAt(camPos.x, camPos.y))
-                canal = (*lt == 5 || *lt == 13 || *lt == 17);
+                   && !frameInputs_.waterIsWmo) {
+            const bool canal = frameInputs_.canal;
             // Until the eye passes the surface the view is darkened by
             // looking through the water plane itself, which is strong -
             // its alpha runs up towards 0.9 with depth. Once the eye is
@@ -3923,27 +3992,27 @@ if (overlaySystem_ && camera) {
             const bool crossing = eyeDepth < kCrossingBand;
             overlaySystem_->renderWaterline(
                 tint,
-                glm::inverse(camera->getViewProjectionMatrix()),
+                glm::inverse(frameCamera()->getViewProjectionMatrix()),
                 *waterH,
                 // Softness and ripple in world units now: how thick the seam is
                 // in yards of water, which does not change with where the
                 // camera is looking.
                 0.030f,   // meniscus half-thickness
                 0.004f,   // ripple on the surface height
-                globalTime, crossing, cmd);
+                frameInputs_.time, crossing, cmd);
         }
     }
 }
 
 void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
     // Ghost mode desaturation: cold blue-grey overlay when dead/ghost
-    if (environment_.ghost && overlaySystem_) {
+    if (frameInputs_.environment.ghost && overlaySystem_) {
         overlaySystem_->renderOverlay(glm::vec4(0.30f, 0.35f, 0.42f, 0.45f), cmd);
     }
 
     // Brightness overlay, applied before the minimap so it doesn't affect UI.
     if (overlaySystem_) {
-        float br = postProcessPipeline_ ? postProcessPipeline_->getBrightness() : 1.0f;
+        float br = postProcessPipeline_ ? frameInputs_.postProcess.brightness : 1.0f;
         if (br < 0.99f) {
             // Black overlay at alpha (1-br) darkens as scene*br (a true multiply).
             overlaySystem_->renderOverlay(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f - br), cmd);
@@ -3962,15 +4031,15 @@ void Renderer::renderPostSceneOverlays(VkCommandBuffer cmd) {
 
 /// The minimap disc, over whatever has been drawn so far.
 void Renderer::renderMinimapOverlay(VkCommandBuffer cmd) {
-    if (minimap && minimap->isEnabled() && camera && surface_) {
+    if (minimap && frameInputs_.minimapEnabled && frameCamera() && surface_) {
         const glm::vec3 minimapCenter =
-            viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+            frameInputs_.viewer.thirdPerson ? frameInputs_.characterPosition : frameCamera()->getPosition();
         // Render-space character yaw faces north at 180 degrees; the
         // minimap shader arrow faces north at 0. Match the mirrored
         // minimap texture by flipping the visual arrow vertically.
-        minimap->render(cmd, *camera, minimapCenter,
-                        surface_->getWidth(), surface_->getHeight(),
-                        glm::radians(characterYaw), true);
+        minimap->render(cmd, *frameCamera(), minimapCenter,
+                        frameInputs_.windowWidth, frameInputs_.windowHeight,
+                        glm::radians(frameInputs_.characterYaw), true);
     }
 }
 
@@ -4423,7 +4492,7 @@ void Renderer::logViewDistanceDiag() {
     diagTerrainFurthest_ = terrainFurthest;
     diagM2Furthest_ = m2Furthest;
 
-    LOG_WARNING("view distance ", static_cast<int>(viewDistance_),
+    LOG_WARNING("view distance ", static_cast<int>(frameInputs_.viewDistance),
                 ": terrain drew to ", static_cast<int>(terrainFurthest),
                 ", doodads to ", static_cast<int>(m2Furthest),
                 ", tiles loaded to ", getTerrainLoadRadius(),
@@ -4433,19 +4502,11 @@ void Renderer::logViewDistanceDiag() {
 
 void Renderer::setSharpStars(bool enabled) {
     sharpStars_ = enabled;
-    // Two halves of one switch: the sky model stops drawing its star layer and
-    // the client's own point stars take its place. Setting either alone gives a
-    // sky with no stars or a sky with two sets of them.
-    if (m2Renderer) m2Renderer->setSuppressBakedStars(sharpStars_);
-    if (skySystem) skySystem->setProceduralStarsEnabled(sharpStars_);
 }
 
 void Renderer::setViewDistance(float distance) {
     viewDistance_ = glm::clamp(distance, kMinViewDistance, kMaxViewDistance);
 
-    if (terrainRenderer) terrainRenderer->setViewDistance(viewDistance_);
-    if (wmoRenderer) wmoRenderer->setViewDistance(viewDistance_);
-    if (m2Renderer) m2Renderer->setViewDistance(viewDistance_);
     if (terrainManager) {
         terrainManager->setLoadRadius(getTerrainLoadRadius());
         terrainManager->setUnloadRadius(getTerrainUnloadRadius());
@@ -4468,17 +4529,17 @@ int Renderer::getTerrainLoadRadius() const {
 // in createPerFrameResources() as part of the Vulkan shadow infrastructure.
 
 glm::mat4 Renderer::computeLightSpaceMatrix() {
-    const float kShadowHalfExtent = shadowDistance_;
-    const float kShadowLightDistance = shadowDistance_ * 3.0f;
+    const float kShadowHalfExtent = frameInputs_.shadowDistance;
+    const float kShadowLightDistance = frameInputs_.shadowDistance * 3.0f;
     constexpr float kShadowNearPlane = 1.0f;
-    const float kShadowFarPlane = shadowDistance_ * 6.5f;
+    const float kShadowFarPlane = frameInputs_.shadowDistance * 6.5f;
 
     // Use active lighting direction so shadow projection matches main shading.
     // Fragment shaders derive lighting with `ldir = normalize(-lightDir.xyz)`,
     // therefore shadow rays must use -directionalDir to stay aligned.
     glm::vec3 sunDir = glm::normalize(glm::vec3(-0.3f, -0.7f, -0.6f));
-    if (lightingManager) {
-        const auto& lighting = lightingManager->getLightingParams();
+    if (frameInputs_.hasLighting) {
+        const auto& lighting = frameInputs_.lighting;
         float ldirLenSq = glm::dot(lighting.directionalDir, lighting.directionalDir);
         if (ldirLenSq > 1e-6f) {
             sunDir = -lighting.directionalDir * glm::inversesqrt(ldirLenSq);
@@ -4503,7 +4564,7 @@ glm::mat4 Renderer::computeLightSpaceMatrix() {
 
     // Shadow center follows the player directly; texel snapping below prevents
     // camera translation from shimmering the projection.
-    glm::vec3 desiredCenter = characterPosition;
+    glm::vec3 desiredCenter = frameInputs_.characterPosition;
     if (!shadowCenterInitialized) {
         if (glm::dot(desiredCenter, desiredCenter) < 1.0f) {
             return glm::mat4(0.0f);
@@ -4743,7 +4804,7 @@ bool Renderer::waterReflectionAblated() const {
 }
 
 void Renderer::renderReflectionPass() {
-    if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->inView()) return;
+    if (!waterRenderer || !frameCamera() || !waterRenderer->hasReflectionPass() || !waterRenderer->inView()) return;
     if (waterReflectionAblated()) return;
     // Select the current frame's pre-bound reflection descriptor set
     // (each frame's set was bound to its own UBO and shadow view at init).
@@ -4756,8 +4817,8 @@ void Renderer::renderReflectionPass() {
     bool canRenderScene = (vkCtx->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT);
 
     // Find dominant water height near camera
-    const glm::vec3 camPos = camera->getPosition();
-    auto waterH = liquidScene_.dominantWaterHeight(camPos);
+    const glm::vec3 camPos = frameCamera()->getPosition();
+    auto waterH = frameInputs_.reflectionWaterHeight;
     if (!waterH) return;
 
     float waterHeight = *waterH;
@@ -4766,8 +4827,8 @@ void Renderer::renderReflectionPass() {
     if (camPos.z < waterHeight + 0.5f) return;
 
     // Compute reflected view and oblique projection
-    glm::mat4 reflView = mirroredView(camera->getPosition(), camera->getForward(), waterHeight);
-    glm::mat4 reflProj = obliqueReflectionProjection(camera->getProjectionMatrix(), reflView, waterHeight);
+    glm::mat4 reflView = mirroredView(frameCamera()->getPosition(), frameCamera()->getForward(), waterHeight);
+    glm::mat4 reflProj = obliqueReflectionProjection(frameCamera()->getProjectionMatrix(), reflView, waterHeight);
 
     // Update water renderer's reflection UBO with the reflected viewProj
     waterRenderer->updateReflectionUBO(reflProj * reflView);
@@ -4796,11 +4857,11 @@ void Renderer::renderReflectionPass() {
         // water.frag). The sky drawn here was a procedural one with no sky
         // model and no weather, and where the reflection held it, it stood
         // in for the real one as a grey wash over the sea.
-        if (terrainRenderer && terrainEnabled) {
-            terrainRenderer->render(currentCmd, reflDescSet, *camera);
+        if (terrainRenderer && frameInputs_.terrainEnabled) {
+            terrainRenderer->render(currentCmd, reflDescSet, *frameCamera());
         }
         if (wmoRenderer) {
-            wmoRenderer->render(currentCmd, reflDescSet, *camera, nullptr, WMORenderer::Pass::Reflection);
+            wmoRenderer->render(currentCmd, reflDescSet, *frameCamera(), nullptr, WMORenderer::Pass::Reflection);
         }
     }
 
@@ -4832,7 +4893,7 @@ void Renderer::renderShadowMap(bool contact) {
     // into it. Returning here instead left the image untransitioned while it
     // stayed bound for sampling, which is the shape of fault that takes the
     // device down rather than drawing something wrong.
-    const bool drawCasters = shadowsEnabled && (!contact || currentFrameData.contactParams.x > 0.5f);
+    const bool drawCasters = frameInputs_.shadows && (!contact || currentFrameData.contactParams.x > 0.5f);
 
     // Shadows render every frame - throttling causes visible flicker on player/NPCs
 
@@ -4846,7 +4907,7 @@ void Renderer::renderShadowMap(bool contact) {
     const VkImageView passView = contact ? contactShadowImages_[frame].imageView : shadowDepthView[frame];
     const VkFramebuffer passFramebuffer = contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
     auto& passLayout = contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
-    const glm::vec3 passCenter = contact ? characterPosition : shadowCenter;
+    const glm::vec3 passCenter = contact ? frameInputs_.characterPosition : shadowCenter;
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
@@ -4932,7 +4993,7 @@ void Renderer::renderShadowMap(bool contact) {
     // corners, and a few yards past them for a caster standing outside whose
     // body leans in.
     const float shadowCullRadius = contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
-                                           : shadowDistance_ * 1.35f;
+                                           : frameInputs_.shadowDistance * 1.35f;
     // With shadows off the pass still begins and ends, so the map is cleared
     // and left where its readers expect it; only the casters are skipped.
     if (drawCasters) {
@@ -4951,7 +5012,7 @@ void Renderer::renderShadowMap(bool contact) {
     }
     if (m2Renderer) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, contact ? "units: m2" : "sun: m2");
-        m2Renderer->renderShadow(currentCmd, passMatrix, wind_.gpu(), passCenter, shadowCullRadius,
+        m2Renderer->renderShadow(currentCmd, passMatrix, frameInputs_.wind, passCenter, shadowCullRadius,
                                  !contact, /*reuseCull=*/!contact);
     }
     if (characterRenderer) {
@@ -4995,8 +5056,7 @@ VkImageView Renderer::getNeutralRtLightingView() const {
 }
 
 void Renderer::setRtLightingMode(int mode) {
-    if (!rtLighting_) return;
-    rtLighting_->setMode(static_cast<RtLighting::Mode>(std::clamp(mode, 0, 3)));
+    requestedRtMode_ = std::clamp(mode, 0, 3);
 }
 
 void Renderer::writeRtLightingBindings(uint32_t i) {
@@ -5031,12 +5091,12 @@ VkExtent2D Renderer::sceneRenderExtent() const {
 
 void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
                                 std::string_view stageGroup) {
-    if (!rtLighting_ || !rtLighting_->active() || !camera) return;
+    if (!rtLighting_ || !rtLighting_->active() || !frameCamera()) return;
     rtRecordedThisFrame_ = true;
     RtLighting::FrameInputs in{};
-    in.view = camera->getViewMatrix();
-    in.projection = camera->getProjectionMatrix();
-    in.cameraPos = camera->getPosition();
+    in.view = frameCamera()->getViewMatrix();
+    in.projection = frameCamera()->getProjectionMatrix();
+    in.cameraPos = frameCamera()->getPosition();
     in.sunDir = -glm::vec3(currentFrameData.lightDir);
     in.sunColor = glm::vec3(currentFrameData.lightColor);
     in.skyColor = glm::vec3(currentFrameData.ambientColor);
@@ -5057,8 +5117,7 @@ VkImageView Renderer::getNeutralFogVolumeView() const {
 }
 
 void Renderer::setVolumetricFogQuality(int quality) {
-    if (!volumetricFog_) return;
-    volumetricFog_->setQuality(static_cast<VolumetricFog::Quality>(std::clamp(quality, 0, 3)));
+    requestedFogQuality_ = std::clamp(quality, 0, 3);
 }
 
 void Renderer::writeFogVolumeBindings(uint32_t i) {
@@ -5121,7 +5180,7 @@ float Renderer::volumetricFogExtinction() const {
 
 void Renderer::renderSeaBedPass() {
     ZoneScopedN("Renderer::renderSeaBedPass");
-    if (!seaBed_ || !waterRenderer || !camera || currentCmd == VK_NULL_HANDLE) return;
+    if (!seaBed_ || !waterRenderer || !frameCamera() || currentCmd == VK_NULL_HANDLE) return;
     // What the last drawing cost, once its timestamps are back. The frame
     // profile's own report is of one frame every ten seconds, and the map is
     // drawn in one frame of a few hundred.
@@ -5145,13 +5204,13 @@ void Renderer::renderSeaBedPass() {
         return;
     }
     // Round the camera, which is where the waves are seen.
-    const glm::vec2 nearby(camera->getPosition());
+    const glm::vec2 nearby(frameCamera()->getPosition());
     const std::optional<float> water =
-        waterRenderer->highestOpenWaterNear(nearby, SeaBedMap::kHalfExtent);
+        frameInputs_.seaWaterHeight;
     if (!water) return;
     // The wind the fetch is found for: the way it blows, not its gusts.
-    const glm::vec2 windToward = wind_.state().direction;
-    if (!seaBed_->wantsDrawing(nearby, *water, globalTime)) {
+    const glm::vec2 windToward = frameInputs_.windDirection;
+    if (!seaBed_->wantsDrawing(nearby, *water, frameInputs_.time)) {
         // The same bed, a wind that has turned: the shore upwind is another.
         if (seaBed_->wantsFetch(windToward)) {
             seaBed_->refetch(currentCmd, windToward);
@@ -5184,7 +5243,7 @@ void Renderer::renderSeaBedPass() {
     drawView(SeaBedView::GroundFromAbove);
     drawView(SeaBedView::BuildingsFromAbove);
     drawView(SeaBedView::BuildingsFromBelow);
-    seaBed_->finish(currentCmd, globalTime, windToward);
+    seaBed_->finish(currentCmd, frameInputs_.time, windToward);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "sea bed");
 }
 
@@ -5303,14 +5362,11 @@ void Renderer::updateWeather(float deltaTime) {
 
 void Renderer::renderShelterPass() {
     ZoneScopedN("Renderer::renderShelterPass");
-    if (!shelter_ || !camera || currentCmd == VK_NULL_HANDLE) return;
-    const glm::vec3 eye = camera->getPosition();
+    if (!shelter_ || !frameCamera() || currentCmd == VK_NULL_HANDLE) return;
+    const glm::vec3 eye = frameCamera()->getPosition();
     // What is loaded, as a number that moves when any of it streams in or out.
-    uint64_t world = wmoRenderer ? wmoRenderer->contentRevision() : 0;
-    world = world * 1000003u + (wmoRenderer ? wmoRenderer->getInstanceCount() : 0);
-    world = world * 1000003u + (m2Renderer ? m2Renderer->getInstanceCount() : 0);
-    world = world * 1000003u + static_cast<uint64_t>(terrainRenderer ? terrainRenderer->getChunkCount() : 0);
-    if (shelter_->wantsDrawing(eye, globalTime, world)) {
+    const uint64_t world = frameInputs_.shelterRevision;
+    if (shelter_->wantsDrawing(eye, frameInputs_.time, world)) {
         shelter_->begin(currentCmd, eye, world);
         const glm::mat4 matrix = shelter_->matrix();
         const glm::vec3 centre(shelter_->drawing().centre, eye.z);
@@ -5325,10 +5381,10 @@ void Renderer::renderShelterPass() {
             wmoCasterSetsReset_ = true;
         }
         if (m2Renderer) {
-            m2Renderer->renderShadow(currentCmd, matrix, wind_.gpu(), centre, reach, !m2CasterSetsReset_);
+            m2Renderer->renderShadow(currentCmd, matrix, frameInputs_.wind, centre, reach, !m2CasterSetsReset_);
             m2CasterSetsReset_ = true;
         }
-        shelter_->end(currentCmd, globalTime);
+        shelter_->end(currentCmd, frameInputs_.time);
         if (vkCtx) vkCtx->gpuMark(currentCmd, "shelter");
     }
     shelter_->probe(currentCmd, vkCtx->getCurrentFrame(), eye);
@@ -5340,13 +5396,13 @@ void Renderer::recordLensWeather() {
     // The world's picture only: a loading screen is not seen through the lens.
     const bool onScreen = worldDrawnThisFrame_ && currentImageIndex < images.size();
     lensWeather_->record(currentCmd, vkCtx->getCurrentFrame(), onScreen ? images[currentImageIndex] : VK_NULL_HANDLE,
-                         vkCtx->getSwapchainExtent(), lensDrops_, lensWindOnScreen_,
-                         std::fmod(globalTime, 1000.0f));
+                         vkCtx->getSwapchainExtent(), frameInputs_.lensDrops, frameInputs_.lensWind,
+                         std::fmod(frameInputs_.time, 1000.0f));
 }
 
 void Renderer::renderVolumetricFog() {
     ZoneScopedN("Renderer::renderVolumetricFog");
-    if (!volumetricThisFrame_ || !volumetricFog_ || !camera || currentCmd == VK_NULL_HANDLE) return;
+    if (!volumetricThisFrame_ || !volumetricFog_ || !frameCamera() || currentCmd == VK_NULL_HANDLE) return;
     const uint32_t frame = vkCtx->getCurrentFrame();
     // The inject pass samples this slot's shadow map, so not before the shadow
     // pass has left it readable: at the login screen, before the player has a
@@ -5355,17 +5411,14 @@ void Renderer::renderVolumetricFog() {
     // this slot's volume as it was - clear air, until the first real frame -
     // and the shaders read that.
     if (shadowDepthLayout_[frame] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
-    const float dt = std::max(lastDeltaTime_, 0.0f);
+    const float dt = std::max(frameInputs_.deltaTime, 0.0f);
 
     // The ground the mist lies on: the terrain under the player, or the
     // player's own feet where those are lower - a cave, a city under a
     // mountain - so the layer is never a ceiling over them. Chased over a
     // second or two so a step off a ledge does not lift the whole bank of
     // mist with it; a teleport snaps it, and drops last frame's air too.
-    float ground = characterPosition.z;
-    if (auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y)) {
-        ground = std::min(ground, *h);
-    }
+    const float ground = frameInputs_.fogGround;
     if (!fogLayerBaseValid_ || std::abs(ground - fogLayerBase_) > 150.0f) {
         fogLayerBase_ = ground;
         fogLayerBaseValid_ = true;
@@ -5374,7 +5427,7 @@ void Renderer::renderVolumetricFog() {
         fogLayerBase_ += (ground - fogLayerBase_) * (1.0f - std::exp(-dt / 1.5f));
     }
 
-    const float target = volumetricFogExtinction();
+    const float target = frameInputs_.fogTargetExtinction;
     if (fogExtinction_ < 0.0f) fogExtinction_ = target;
     fogExtinction_ += (target - fogExtinction_) * (1.0f - std::exp(-dt / 1.0f));
 
@@ -5382,15 +5435,15 @@ void Renderer::renderVolumetricFog() {
     in.view = currentFrameData.view;
     in.projection = currentFrameData.projection;
     in.cameraPos = glm::vec3(currentFrameData.viewPos);
-    in.time = globalTime;
+    in.time = frameInputs_.time;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
-    if (lightingManager) {
+    if (frameInputs_.hasLighting) {
         // The air's forward glow in the light tables' sunlit-cloud colour.
-        in.sunHaloColor = lightingManager->getLightingParams().cloudSunlitColor;
+        in.sunHaloColor = frameInputs_.lighting.cloudSunlitColor;
         in.sunGlareDirection =
-            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
-        in.sunGlareAmount = sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
+            sky_celestial::sunDisc(frameInputs_.timeOfDay / 24.0f).direction;
+        in.sunGlareAmount = frameInputs_.sunGlareSky * sky_celestial::weatherFade(frameInputs_.weather.strength());
     }
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog");
@@ -5398,8 +5451,8 @@ void Renderer::renderVolumetricFog() {
     // What it was built from, every few seconds, for the report that says the
     // fog is too thick or missing: INFO, so it costs nothing unless asked for.
     static double lastFogLog = 0.0;
-    if (globalTime - lastFogLog > 5.0) {
-        lastFogLog = globalTime;
+    if (frameInputs_.time - lastFogLog > 5.0) {
+        lastFogLog = frameInputs_.time;
         LOG_INFO("volumetricFog: extinction=", fogExtinction_, "/yd (target ", target,
                  ") layerBase=", fogLayerBase_, " lights=", currentFrameData.localLightMeta.x);
     }
@@ -5409,16 +5462,16 @@ void Renderer::recordSunShafts() {
     if (!sunShafts_ || currentCmd == VK_NULL_HANDLE) return;
     SunShafts::FrameInputs in;
     const auto& images = vkCtx->getSwapchainImages();
-    if (sunShaftsEnabled_ && worldDrawnThisFrame_ && camera && lightingManager &&
+    if (frameInputs_.sunShafts && worldDrawnThisFrame_ && frameCamera() && frameInputs_.hasLighting &&
         currentImageIndex < images.size() &&
         !(passAblation_ && passAblation_->skip(AblationPass::SunShafts))) {
-        const auto& lp = lightingManager->getLightingParams();
+        const auto& lp = frameInputs_.lighting;
         // Around the disc, where the glare is - not the light's direction,
         // which never sets.
         const glm::vec3 sunDir =
-            sky_celestial::sunDisc(lightingManager->getTimeOfDayHours() / 24.0f).direction;
-        const SunOnScreen sun = sunScreenPosition(camera->getViewMatrix(),
-                                                  camera->getProjectionMatrix(), sunDir);
+            sky_celestial::sunDisc(frameInputs_.timeOfDay / 24.0f).direction;
+        const SunOnScreen sun = sunScreenPosition(frameCamera()->getViewMatrix(),
+                                                  frameCamera()->getProjectionMatrix(), sunDir);
         if (sun.inFront) {
             // Screen strength: 1 would be the sky's own colour over anything a
             // fully lit walk crosses. Less, because the sky around the sun is
@@ -5427,7 +5480,7 @@ void Renderer::recordSunShafts() {
             // As much as the sky round the sun shines: the glare's hours, the
             // cloud in front, a sky model over it and the weather. Not its line
             // of sight - the rays are what a tree in front lets through.
-            strength *= sunGlareSky_ * sky_celestial::weatherFade(weatherStrength());
+            strength *= frameInputs_.sunGlareSky * sky_celestial::weatherFade(frameInputs_.weather.strength());
             // In view, or streaming in from just past an edge, fading out as
             // it goes half a screen beyond one.
             const glm::vec2 past = glm::max(glm::abs(sun.uv - 0.5f) - 0.5f, glm::vec2(0.0f));
@@ -5464,9 +5517,9 @@ void Renderer::buildFrameGraph() {
     // Minimap composites (no dependencies - standalone off-screen render target)
     renderGraph_->addPass("minimap_composite", {}, {},
         [this](VkCommandBuffer cmd) {
-            if (minimap && minimap->isEnabled() && camera) {
+            if (minimap && frameInputs_.minimapEnabled && frameCamera()) {
                 const glm::vec3 minimapCenter =
-                    viewerMotion_.thirdPerson ? characterPosition : camera->getPosition();
+                    frameInputs_.viewer.thirdPerson ? frameInputs_.characterPosition : frameCamera()->getPosition();
                 minimap->compositePass(cmd, minimapCenter);
             }
         });
@@ -5534,7 +5587,7 @@ void Renderer::buildFrameGraph() {
         [this](VkCommandBuffer) {
             renderShelterPass();
         });
-    renderGraph_->setPassEnabled("shelter", shelter_ && weather_.mix().any());
+    renderGraph_->setPassEnabled("shelter", shelter_ && frameInputs_.weather.any());
 
     // The sea → outputs the surface every water surface is carried by and
     // lit from. Only while there is water in view; the sea's clock and its

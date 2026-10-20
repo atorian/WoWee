@@ -380,7 +380,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             // batches and draws nothing, and the effects a script hangs on it
             // still have somewhere to hang.
             // Launch async M2 load - file I/O and parsing happen off the main thread.
-            uint32_t modelId = assets_.nextCreatureModelId_++;
+            uint32_t modelId = nextCreatureModelId_++;
             auto* am = assetManager_;
 
             // The display's rows are copied for the worker, which works out
@@ -1005,7 +1005,7 @@ void EntitySpawner::processAsyncGameObjectResults() {
             // finishWmoSpawn once every texture and group is up.
             PendingWmoUpload pending;
             pending.result = std::move(result);
-            pending.modelId = assets_.nextGameObjectWmoModelId_++;
+            pending.modelId = nextGameObjectWmoModelId_++;
             spawns_->pendingWmoUploads_.push_back(std::move(pending));
             continue;
         }
@@ -1036,7 +1036,7 @@ void EntitySpawner::finishM2GameObjectLoad(PreparedGameObjectWMO& result) {
         return;
     }
 
-    const uint32_t modelId = assets_.nextGameObjectModelId_++;
+    const uint32_t modelId = nextGameObjectModelId_++;
     m2Renderer->setPredecodedBLPCache(&result.predecodedTextures);
     const bool loaded = m2Renderer->loadModel(*result.m2Model, modelId);
     m2Renderer->setPredecodedBLPCache(nullptr);
@@ -1903,7 +1903,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
             rendering::CharacterRenderer* renderer;
             ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }
         } guard{cr};
-        modelId = assets_.nextCreatureModelId_++;
+        modelId = nextCreatureModelId_++;
         if (!cr->loadModel(model, modelId)) {
             modelId = 0;
             return fail("the renderer refused its model");

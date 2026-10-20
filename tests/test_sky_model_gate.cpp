@@ -26,9 +26,7 @@
 
 #include <algorithm>
 #include <bit>
-#include <chrono>
 #include <string>
-#include <thread>
 #include <vector>
 
 using wowee::rendering::LightingManager;
@@ -125,17 +123,16 @@ struct Place {
     }
 
     /// One frame at the centre of the volume at (dbcX, dbcY).
-    void step(uint32_t mapId, float dbcX, float dbcY) {
-        lighting.update(wowee::rendering::lightPositionToWorld(dbcX, dbcY, 0.0f), mapId, 0,
+    void step(uint32_t mapId, float dbcX, float dbcY, float dt = 0.016f) {
+        lighting.update(dt, wowee::rendering::lightPositionToWorld(dbcX, dbcY, 0.0f), mapId, 0,
                         12.0f);
     }
 
     /// Standing there for a second and a half, long enough for the skies the
-    /// lights name to finish fading in. The fade runs on real time.
+    /// lights name to finish fading in.
     void stand(uint32_t mapId, float dbcX, float dbcY) {
         for (int i = 0; i < 6; ++i) {
-            step(mapId, dbcX, dbcY);
-            std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            step(mapId, dbcX, dbcY, 0.25f);
         }
         step(mapId, dbcX, dbcY);
     }

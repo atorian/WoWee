@@ -249,12 +249,6 @@ inline float lampFlicker(const glm::vec3& phaseSeed, float seconds,
                 + fastAmp * std::sin(seconds * 3.90f + phase * 1.7f);
 }
 
-/// Seconds since process start, shared by the flicker animations.
-inline float lampFlickerClockSeconds() {
-    static const auto start = std::chrono::steady_clock::now();
-    return std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
-}
-
 // WOWEE_SKY_MIP_BIAS pushes the sky's textures toward smaller mips.
 //
 // Every per-frame quantity behind the sky has now been measured and holds

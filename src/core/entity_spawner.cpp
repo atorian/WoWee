@@ -447,7 +447,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         } guard{charRenderer, uploadCtx};
         const std::string attachmentKey = m2Path + '|' + texturePath;
         auto [cachedId, inserted] = assets_.attachmentModelIds_.try_emplace(attachmentKey, 0);
-        if (inserted) cachedId->second = assets_.nextWeaponModelId_++;
+        if (inserted) cachedId->second = nextWeaponModelId_++;
         return scene().characters().attachWeapon(instanceId, attachmentId,
             weaponModel, cachedId->second, texturePath);
     };
@@ -1075,7 +1075,7 @@ EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidat
     const std::string key = resolvedPath + '|' + texturePath;
     auto idIt = assets_.attachmentModelIds_.find(key);
     if (idIt == assets_.attachmentModelIds_.end()) {
-        idIt = assets_.attachmentModelIds_.emplace(key, assets_.nextCreatureModelId_++).first;
+        idIt = assets_.attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
     }
     return CachedAttachmentModel{.modelId = idIt->second, .model = std::move(model)};
 }
@@ -2341,6 +2341,8 @@ void EntitySpawner::rebuildLookups() {
         LOG_ERROR("Cannot rebuild entity asset caches while a map is active");
         return;
     }
+    // Table-derived answers change; resident model IDs remain owned by this
+    // spawner for the renderer's lifetime, including models of a former map.
     assets_ = AssetCaches{};
     initialize();
 }

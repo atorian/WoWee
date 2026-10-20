@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <functional>
 #include <vector>
 #include <map>
@@ -226,6 +225,7 @@ public:
 
     /**
      * Update lighting for current time and player position
+     * @param deltaTime Elapsed game-frame seconds, including light/sky fades
      * @param playerPos Player world position
      * @param mapId Current map ID
      * @param gameTime Optional game time in seconds (use -1 for real time)
@@ -237,7 +237,7 @@ public:
      * Note: WoW uses server-sent game time, not local PC time.
      * Pass gameTime from SMSG_LOGIN_SETTIMESPEED or similar.
      */
-    void update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
+    void update(float deltaTime, const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                 float gameTime = -1.0f,
                 float weatherIntensity = 0.0f, bool isUnderwater = false);
 
@@ -387,8 +387,6 @@ private:
     glm::vec3 currentPlayerPos_{0.0f};
     float timeOfDay_ = 0.5f;  // Start at noon
     std::vector<SkyboxLayer> skyboxLayers_;
-    /// When update last ran, for smoothing by real time rather than by frame.
-    std::chrono::steady_clock::time_point lastUpdate_{};
     bool isIndoors_ = false;
     float fogStrength_ = 0.4f;
 

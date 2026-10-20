@@ -610,6 +610,8 @@ public:
     /// The frame's point lights, which every draw picks its nearest from.
     /// Owned by the Renderer, filled before anything draws.
     void setFrameLocalLights(const std::vector<LocalLight>* lights) { frameLights_ = lights; }
+    /// Time captured with the view, for effects made while preparing its draws.
+    void setFrameTime(float seconds) { frameTime_ = seconds; }
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
@@ -1356,6 +1358,7 @@ private:
         float size;
     };
     std::vector<GlowSprite> glowSprites_;  // Reused each frame
+    float frameTime_ = 0.0f;
 
     /// The view's half of render(): folds the GPU's cull verdicts into the
     /// instances, keeps what the camera sees, copies it into drawInstances_,

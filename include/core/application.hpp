@@ -46,6 +46,7 @@ namespace wowee {
 // Forward declarations
 namespace rendering {
 class Renderer;
+struct FrameInputs;
 class PerformanceHUD;
 class CameraController;
 class AnimationController;
@@ -380,6 +381,7 @@ private:
 
     std::unique_ptr<Window> window;
     std::unique_ptr<rendering::Renderer> renderer;
+    std::unique_ptr<rendering::FrameInputs> renderInputs_;
     std::unique_ptr<ui::UIManager> uiManager;
     std::unique_ptr<ui::MapWindow> mapWindow_;
     /// A failed open is not retried every frame; switching the setting off

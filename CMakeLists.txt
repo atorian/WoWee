@@ -2222,6 +2222,27 @@ if(WOWEE_BUILD_TESTS)
     # Shown again, it does.
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
+    if(Python3_FOUND)
+        foreach(mode 1 2 3)
+            add_test(NAME scene_frame_inputs_rt${mode}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                        $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rt${mode}
+                        --mode ${mode})
+            set_tests_properties(scene_frame_inputs_rt${mode} PROPERTIES SKIP_RETURN_CODE 77)
+        endforeach()
+        add_test(NAME scene_frame_inputs_fsr2
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-fsr2 --fsr2)
+        set_tests_properties(scene_frame_inputs_fsr2 PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME scene_frame_inputs_msaa_fxaa
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-msaa-fxaa --msaa 2 --fxaa)
+        set_tests_properties(scene_frame_inputs_msaa_fxaa PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME scene_frame_inputs_rain
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/frame-inputs-rain --weather rain)
+        set_tests_properties(scene_frame_inputs_rain PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 endif()
 
 # ---- Tool: rt_probe ----
