@@ -57,7 +57,7 @@ bool EditorViewport::initialize(rendering::VkContext* ctx, pipeline::AssetManage
 
 void EditorViewport::shutdown() {
     if (!vkCtx_) return;
-    vkDeviceWaitIdle(vkCtx_->getDevice());
+    vkCtx_->waitIdle();
 
     if (npcMarkerVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), npcMarkerVB_, npcMarkerVBAlloc_); npcMarkerVB_ = VK_NULL_HANDLE; }
     if (brushVB_) { rendering::gpuDestroyBuffer(vkCtx_->getAllocator(), brushVB_, brushVBAlloc_); brushVB_ = VK_NULL_HANDLE; }

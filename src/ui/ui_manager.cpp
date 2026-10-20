@@ -367,7 +367,7 @@ void UIManager::shutdown() {
     if (imguiInitialized) {
         auto* vkCtx = window ? window->getVkContext() : nullptr;
         if (vkCtx) {
-            vkDeviceWaitIdle(vkCtx->getDevice());
+            vkCtx->waitIdle();
         }
 
         ImGui_ImplVulkan_Shutdown();

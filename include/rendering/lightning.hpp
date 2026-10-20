@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/per_frame_buffer.hpp"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -96,10 +98,7 @@ private:
     // Bolt pipeline + dynamic buffer
     VkPipeline boltPipeline = VK_NULL_HANDLE;
     VkPipelineLayout boltPipelineLayout = VK_NULL_HANDLE;
-    ::VkBuffer boltDynamicVB = VK_NULL_HANDLE;
-    VmaAllocation boltDynamicVBAlloc = VK_NULL_HANDLE;
-    VmaAllocationInfo boltDynamicVBAllocInfo{};
-    VkDeviceSize boltDynamicVBSize = 0;
+    PerFrameBuffer boltDynamicVB;
 
     // Flash pipeline + static quad buffer
     VkPipeline flashPipeline = VK_NULL_HANDLE;

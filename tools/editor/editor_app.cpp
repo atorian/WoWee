@@ -15,6 +15,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <nlohmann/json.hpp>
 #include "rendering/vk_context.hpp"
+#include "rendering/imgui_texture.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -189,7 +190,7 @@ void EditorApp::run() {
             if (rebuildTimer <= 0.0f) {
                 rebuildTimer = 0.0f;
                 if (objectPlacer_.objectCount() > 0 || npcSpawner_.spawnCount() > 0) {
-                    vkDeviceWaitIdle(vkCtx->getDevice());
+                    vkCtx->waitIdle();
                     viewport_.rebuildObjects(objectPlacer_.getObjects(), npcSpawner_.getSpawns());
                 }
             }
@@ -260,7 +261,7 @@ void EditorApp::run() {
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         viewport_.render(cmd);
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+        rendering::recordImGuiDrawData(*vkCtx, cmd);
 
         vkCmdEndRenderPass(cmd);
         vkCtx->endFrame(cmd, imageIndex);
@@ -270,7 +271,7 @@ void EditorApp::run() {
 void EditorApp::shutdown() {
     if (!window_) return;
     auto* vkCtx = window_->getVkContext();
-    if (vkCtx) vkDeviceWaitIdle(vkCtx->getDevice());
+    if (vkCtx) vkCtx->waitIdle();
 
     viewport_.shutdown();
     shutdownImGui();
@@ -1857,7 +1858,7 @@ int EditorApp::auditSpawnsAgainstTerrain(float threshold) const {
 }
 
 void EditorApp::clearAllObjects() {
-    vkDeviceWaitIdle(window_->getVkContext()->getDevice());
+    window_->getVkContext()->waitIdle();
     objectPlacer_.clearAll();
     npcSpawner_.clearAll();
     viewport_.clearObjects();

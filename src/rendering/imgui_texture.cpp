@@ -59,5 +59,17 @@ ImGuiTexture loadImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
     return makeImGuiTexture(ctx, assets.loadTexture(path));
 }
 
+void recordImGuiDrawData(VkContext& ctx, VkCommandBuffer cmd) {
+    ImDrawData* data = ImGui::GetDrawData();
+    if (!data) return;
+    if (data->Textures) {
+        auto queues = ctx.lockQueues();
+        for (ImTextureData* tex : *data->Textures) {
+            if (tex->Status != ImTextureStatus_OK) ImGui_ImplVulkan_UpdateTexture(tex);
+        }
+    }
+    ImGui_ImplVulkan_RenderDrawData(data, cmd);
+}
+
 }  // namespace rendering
 }  // namespace wowee

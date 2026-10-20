@@ -160,31 +160,17 @@ bool ChargeEffect::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayo
 
     // ---- Create dynamic mapped vertex buffers ----
     // Ribbon: MAX_TRAIL_POINTS * 2 vertices * 6 floats each
-    ribbonDynamicVBSize_ = MAX_TRAIL_POINTS * 2 * 6 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx_->getAllocator(), ribbonDynamicVBSize_,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        ribbonDynamicVB_ = buf.buffer;
-        ribbonDynamicVBAlloc_ = buf.allocation;
-        ribbonDynamicVBAllocInfo_ = buf.info;
-        if (ribbonDynamicVB_ == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create charge ribbon dynamic vertex buffer");
-            return false;
-        }
+    if (!ribbonDynamicVB_.create(vkCtx_->getAllocator(), MAX_TRAIL_POINTS * 2 * 6 * sizeof(float),
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        LOG_ERROR("Failed to create charge ribbon dynamic vertex buffer");
+        return false;
     }
 
     // Dust: MAX_DUST * 5 floats each
-    dustDynamicVBSize_ = MAX_DUST * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx_->getAllocator(), dustDynamicVBSize_,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        dustDynamicVB_ = buf.buffer;
-        dustDynamicVBAlloc_ = buf.allocation;
-        dustDynamicVBAllocInfo_ = buf.info;
-        if (dustDynamicVB_ == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create charge dust dynamic vertex buffer");
-            return false;
-        }
+    if (!dustDynamicVB_.create(vkCtx_->getAllocator(), MAX_DUST * 5 * sizeof(float),
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        LOG_ERROR("Failed to create charge dust dynamic vertex buffer");
+        return false;
     }
 
     ribbonVerts_.reserve(MAX_TRAIL_POINTS * 2 * 6);
@@ -201,11 +187,11 @@ void ChargeEffect::shutdown() {
 
         destroy(device, ribbonPipeline_);
         destroy(device, ribbonPipelineLayout_);
-        destroy(allocator, ribbonDynamicVB_, ribbonDynamicVBAlloc_);
+        ribbonDynamicVB_.destroy(allocator);
 
         destroy(device, dustPipeline_);
         destroy(device, dustPipelineLayout_);
-        destroy(allocator, dustDynamicVB_, dustDynamicVBAlloc_);
+        dustDynamicVB_.destroy(allocator);
     }
 
     vkCtx_ = nullptr;
@@ -413,6 +399,9 @@ void ChargeEffect::update(float deltaTime, SceneCommands::Models& models) {
 
 void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     VkDeviceSize offset = 0;
+    // This frame's copies of the vertex buffers: the frame before may still
+    // be drawing from the others.
+    const uint32_t frame = vkCtx_->getCurrentFrame();
 
     // ---- Render ribbon trail as triangle strip ----
     if (trail_.size() >= 2 && ribbonPipeline_ != VK_NULL_HANDLE) {
@@ -455,14 +444,15 @@ void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 
         // Upload to mapped buffer
         VkDeviceSize uploadSize = ribbonVerts_.size() * sizeof(float);
-        if (uploadSize > 0 && ribbonDynamicVBAllocInfo_.pMappedData) {
-            std::memcpy(ribbonDynamicVBAllocInfo_.pMappedData, ribbonVerts_.data(), uploadSize);
+        if (uploadSize > 0 && ribbonDynamicVB_.valid()) {
+            std::memcpy(ribbonDynamicVB_.mapped(frame), ribbonVerts_.data(), uploadSize);
         }
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ribbonPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ribbonPipelineLayout_,
             0, 1, &perFrameSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonDynamicVB_, &offset);
+        VkBuffer ribbonVB = ribbonDynamicVB_.buffer(frame);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonVB, &offset);
         vkCmdDraw(cmd, static_cast<uint32_t>(n * 2), 1, 0, 0);
     }
 
@@ -479,14 +469,15 @@ void ChargeEffect::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 
         // Upload to mapped buffer
         VkDeviceSize uploadSize = dustVerts_.size() * sizeof(float);
-        if (uploadSize > 0 && dustDynamicVBAllocInfo_.pMappedData) {
-            std::memcpy(dustDynamicVBAllocInfo_.pMappedData, dustVerts_.data(), uploadSize);
+        if (uploadSize > 0 && dustDynamicVB_.valid()) {
+            std::memcpy(dustDynamicVB_.mapped(frame), dustVerts_.data(), uploadSize);
         }
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dustPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dustPipelineLayout_,
             0, 1, &perFrameSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &dustDynamicVB_, &offset);
+        VkBuffer dustVB = dustDynamicVB_.buffer(frame);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &dustVB, &offset);
         vkCmdDraw(cmd, static_cast<uint32_t>(dustPuffs_.size()), 1, 0, 0);
     }
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/per_frame_buffer.hpp"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -92,26 +94,17 @@ private:
     // Ripple pipeline + dynamic buffer
     VkPipeline ripplePipeline = VK_NULL_HANDLE;
     VkPipelineLayout ripplePipelineLayout = VK_NULL_HANDLE;
-    ::VkBuffer rippleDynamicVB = VK_NULL_HANDLE;
-    VmaAllocation rippleDynamicVBAlloc = VK_NULL_HANDLE;
-    VmaAllocationInfo rippleDynamicVBAllocInfo{};
-    VkDeviceSize rippleDynamicVBSize = 0;
+    PerFrameBuffer rippleDynamicVB;
 
     // Bubble pipeline + dynamic buffer
     VkPipeline bubblePipeline = VK_NULL_HANDLE;
     VkPipelineLayout bubblePipelineLayout = VK_NULL_HANDLE;
-    ::VkBuffer bubbleDynamicVB = VK_NULL_HANDLE;
-    VmaAllocation bubbleDynamicVBAlloc = VK_NULL_HANDLE;
-    VmaAllocationInfo bubbleDynamicVBAllocInfo{};
-    VkDeviceSize bubbleDynamicVBSize = 0;
+    PerFrameBuffer bubbleDynamicVB;
 
     // Insect pipeline + dynamic buffer
     VkPipeline insectPipeline = VK_NULL_HANDLE;
     VkPipelineLayout insectPipelineLayout = VK_NULL_HANDLE;
-    ::VkBuffer insectDynamicVB = VK_NULL_HANDLE;
-    VmaAllocation insectDynamicVBAlloc = VK_NULL_HANDLE;
-    VmaAllocationInfo insectDynamicVBAllocInfo{};
-    VkDeviceSize insectDynamicVBSize = 0;
+    PerFrameBuffer insectDynamicVB;
 
     std::vector<float> rippleVertexData;
     std::vector<float> bubbleVertexData;

@@ -211,7 +211,7 @@ void SkyBodies::shutdown() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator allocator = vkCtx_->getAllocator();
-    vkDeviceWaitIdle(device);
+    vkCtx_->waitIdle();
     for (Sprite& sprite : sprites_) {
         sprite.texture.destroy(device, allocator);
         sprite.set = sprite.allocated = VK_NULL_HANDLE;

@@ -958,7 +958,7 @@ void M2Renderer::recordM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &particleTexLayout_;
-            if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &texSet) == VK_SUCCESS) {
+            if (vkCtx_->allocateDescriptorSets(ai, &texSet) == VK_SUCCESS) {
                 VkTexture* tex = (group.texture && group.texture->isValid())
                     ? group.texture : whiteTexture_.get();
                 if (!tex || !tex->isValid()) continue;

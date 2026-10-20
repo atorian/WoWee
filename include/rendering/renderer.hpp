@@ -655,10 +655,12 @@ private:
                              bool drawSkyModels, bool useOriginalSkybox);
     float globalTime = 0.0f;
 
-    // Per-frame reflection UBO (mirrors camera for planar reflections)
-    VkBuffer reflPerFrameUBO = VK_NULL_HANDLE;
-    VmaAllocation reflPerFrameUBOAlloc = VK_NULL_HANDLE;
-    void* reflPerFrameUBOMapped = nullptr;
+    // Per-frame reflection UBO (mirrors camera for planar reflections), one
+    // per frame slot: a frame still on the GPU reads its own while the next
+    // is written.
+    VkBuffer reflPerFrameUBO[MAX_FRAMES] = {};
+    VmaAllocation reflPerFrameUBOAlloc[MAX_FRAMES] = {};
+    void* reflPerFrameUBOMapped[MAX_FRAMES] = {};
     VkDescriptorSet reflPerFrameDescSet[MAX_FRAMES] = {};
 
     // The frame's point lights at set 0 binding 9 (local_lights.glsli): a

@@ -61,5 +61,14 @@ ImGuiTexture makeImGuiTexture(VkContext& ctx, const pipeline::BLPImage& image);
 ImGuiTexture loadImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
                               const std::string& path);
 
+/// Records ImGui's current draw data into `cmd`.
+///
+/// The backend uploads the textures the frame changed - the font atlas as it
+/// grows - from inside RenderDrawData, with its own submit and a wait for the
+/// queue to go idle: a queue use in the middle of recording, past the queue
+/// lock. They are made here first, under the lock, so the recording that
+/// follows submits nothing.
+void recordImGuiDrawData(VkContext& ctx, VkCommandBuffer cmd);
+
 }  // namespace rendering
 }  // namespace wowee

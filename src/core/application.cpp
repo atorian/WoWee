@@ -1,5 +1,6 @@
 #include "core/application.hpp"
 #include <imgui_impl_vulkan.h>
+#include "rendering/imgui_texture.hpp"
 #include "core/screen_recording.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/spell_visual_system.hpp"
@@ -418,8 +419,8 @@ bool Application::initialize() {
         return false;
     }
     // The interface is ImGui's frame, drawn over the picture at its end.
-    renderer->setInterfaceRecorder([](VkCommandBuffer cmd) {
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+    renderer->setInterfaceRecorder([this](VkCommandBuffer cmd) {
+        rendering::recordImGuiDrawData(*renderer->getVkContext(), cmd);
     });
 
     // The saved anti-aliasing setting, applied here rather than from the game
@@ -2380,7 +2381,7 @@ void Application::shutdown() {
     if (renderer && renderer->getVkContext()) {
         auto* ctx = renderer->getVkContext();
         if (ctx->getDevice() != VK_NULL_HANDLE) {
-            const VkResult result = vkDeviceWaitIdle(ctx->getDevice()); // Application exit only.
+            const VkResult result = ctx->waitIdle(); // Application exit only.
             if (result != VK_SUCCESS) {
                 LOG_ERROR("GPU wait failed during application shutdown: ", static_cast<int>(result));
                 ctx->noteDeviceLost("application shutdown", result);

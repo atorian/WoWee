@@ -541,13 +541,15 @@ bool Renderer::createPerFrameResources() {
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-        VmaAllocationInfo mapInfo{};
-        if (gpuCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
-                &reflPerFrameUBO, &reflPerFrameUBOAlloc, &mapInfo) != VK_SUCCESS) {
-            LOG_ERROR("Failed to create reflection per-frame UBO");
-            return false;
+        for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+            VmaAllocationInfo mapInfo{};
+            if (gpuCreateBuffer(vkCtx->getAllocator(), &bufInfo, &allocInfo,
+                    &reflPerFrameUBO[i], &reflPerFrameUBOAlloc[i], &mapInfo) != VK_SUCCESS) {
+                LOG_ERROR("Failed to create reflection per-frame UBO for frame slot ", i);
+                return false;
+            }
+            reflPerFrameUBOMapped[i] = mapInfo.pMappedData;
         }
-        reflPerFrameUBOMapped = mapInfo.pMappedData;
 
         VkDescriptorSetLayout layouts[MAX_FRAMES];
         for (auto& layout : layouts) layout = perFrameSetLayout;
@@ -563,10 +565,10 @@ bool Renderer::createPerFrameResources() {
             return false;
         }
 
-        // Bind each reflection descriptor to the same UBO but its own frame's shadow view
+        // Bind each reflection descriptor to its own frame's UBO and shadow view
         for (uint32_t i = 0; i < MAX_FRAMES; i++) {
             VkDescriptorBufferInfo descBuf{};
-            descBuf.buffer = reflPerFrameUBO;
+            descBuf.buffer = reflPerFrameUBO[i];
             descBuf.offset = 0;
             descBuf.range = sizeof(GPUPerFrameData);
 
@@ -738,7 +740,7 @@ void Renderer::uploadLocalLights(uint32_t slot) {
 
 void Renderer::destroyPerFrameResources() {
     if (!vkCtx) return;
-    vkDeviceWaitIdle(vkCtx->getDevice());
+    vkCtx->waitIdle();
     VkDevice device = vkCtx->getDevice();
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
@@ -748,10 +750,11 @@ void Renderer::destroyPerFrameResources() {
     }
     destroy(vkCtx->getAllocator(), neutralLightBuffer_.buffer, neutralLightBuffer_.alloc);
     neutralLightBuffer_ = {};
-    if (reflPerFrameUBO) {
-        gpuDestroyBuffer(vkCtx->getAllocator(), reflPerFrameUBO, reflPerFrameUBOAlloc);
-        reflPerFrameUBO = VK_NULL_HANDLE;
-        reflPerFrameUBOMapped = nullptr;
+    for (uint32_t i = 0; i < MAX_FRAMES; i++) {
+        if (!reflPerFrameUBO[i]) continue;
+        gpuDestroyBuffer(vkCtx->getAllocator(), reflPerFrameUBO[i], reflPerFrameUBOAlloc[i]);
+        reflPerFrameUBO[i] = VK_NULL_HANDLE;
+        reflPerFrameUBOMapped[i] = nullptr;
     }
     // Before the layout: its compute pipeline layout was built from it.
     if (volumetricFog_) {
@@ -4674,7 +4677,7 @@ bool Renderer::createSecondaryCommandResources() {
 void Renderer::destroySecondaryCommandResources() {
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
-    vkDeviceWaitIdle(device);
+    vkCtx->waitIdle();
 
     // Secondary buffers are freed when their pool is destroyed
     for (auto& workerCmdPool : workerCmdPools_) {
@@ -4742,11 +4745,10 @@ bool Renderer::waterReflectionAblated() const {
 void Renderer::renderReflectionPass() {
     if (!waterRenderer || !camera || !waterRenderer->hasReflectionPass() || !waterRenderer->inView()) return;
     if (waterReflectionAblated()) return;
-    if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped) return;
-
     // Select the current frame's pre-bound reflection descriptor set
-    // (each frame's set was bound to its own shadow depth view at init).
+    // (each frame's set was bound to its own UBO and shadow view at init).
     uint32_t frame = vkCtx->getCurrentFrame();
+    if (currentCmd == VK_NULL_HANDLE || !reflPerFrameUBOMapped[frame]) return;
     VkDescriptorSet reflDescSet = reflPerFrameDescSet[frame];
 
     // Reflection pass uses 1x MSAA. Scene pipelines must be render-pass-compatible,
@@ -4782,7 +4784,7 @@ void Renderer::renderReflectionPass() {
     reflData.volumetricParams = glm::vec4(0.0f);
     reflData.rtParams = glm::vec4(0.0f);
     reflData.fogSkyMiddle.w = 0.0f; // the main camera sky image is not a reflected view
-    std::memcpy(reflPerFrameUBOMapped, &reflData, sizeof(GPUPerFrameData));
+    std::memcpy(reflPerFrameUBOMapped[frame], &reflData, sizeof(GPUPerFrameData));
 
     // Begin reflection render pass (clears to black; scene rendered if pipeline-compatible)
     if (!waterRenderer->beginReflectionPass(currentCmd)) return;

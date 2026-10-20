@@ -188,43 +188,20 @@ bool SwimEffects::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     }
 
     // ---- Create dynamic mapped vertex buffers ----
-    rippleDynamicVBSize = MAX_RIPPLE_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), rippleDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        rippleDynamicVB = buf.buffer;
-        rippleDynamicVBAlloc = buf.allocation;
-        rippleDynamicVBAllocInfo = buf.info;
-        if (rippleDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create ripple dynamic vertex buffer");
-            return false;
-        }
+    if (!rippleDynamicVB.create(vkCtx->getAllocator(), MAX_RIPPLE_PARTICLES * 5 * sizeof(float),
+                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        LOG_ERROR("Failed to create ripple dynamic vertex buffer");
+        return false;
     }
-
-    bubbleDynamicVBSize = MAX_BUBBLE_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), bubbleDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        bubbleDynamicVB = buf.buffer;
-        bubbleDynamicVBAlloc = buf.allocation;
-        bubbleDynamicVBAllocInfo = buf.info;
-        if (bubbleDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create bubble dynamic vertex buffer");
-            return false;
-        }
+    if (!bubbleDynamicVB.create(vkCtx->getAllocator(), MAX_BUBBLE_PARTICLES * 5 * sizeof(float),
+                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        LOG_ERROR("Failed to create bubble dynamic vertex buffer");
+        return false;
     }
-
-    insectDynamicVBSize = MAX_INSECT_PARTICLES * 5 * sizeof(float);
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), insectDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        insectDynamicVB = buf.buffer;
-        insectDynamicVBAlloc = buf.allocation;
-        insectDynamicVBAllocInfo = buf.info;
-        if (insectDynamicVB == VK_NULL_HANDLE) {
-            LOG_ERROR("Failed to create insect dynamic vertex buffer");
-            return false;
-        }
+    if (!insectDynamicVB.create(vkCtx->getAllocator(), MAX_INSECT_PARTICLES * 5 * sizeof(float),
+                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        LOG_ERROR("Failed to create insect dynamic vertex buffer");
+        return false;
     }
 
     ripples.reserve(MAX_RIPPLE_PARTICLES);
@@ -245,15 +222,15 @@ void SwimEffects::shutdown() {
 
         destroy(device, ripplePipeline);
         destroy(device, ripplePipelineLayout);
-        destroy(allocator, rippleDynamicVB, rippleDynamicVBAlloc);
+        rippleDynamicVB.destroy(allocator);
 
         destroy(device, bubblePipeline);
         destroy(device, bubblePipelineLayout);
-        destroy(allocator, bubbleDynamicVB, bubbleDynamicVBAlloc);
+        bubbleDynamicVB.destroy(allocator);
 
         destroy(device, insectPipeline);
         destroy(device, insectPipelineLayout);
-        destroy(allocator, insectDynamicVB, insectDynamicVBAlloc);
+        insectDynamicVB.destroy(allocator);
     }
 
     vkCtx = nullptr;
@@ -657,49 +634,26 @@ void SwimEffects::update(const Camera& camera, const ViewerMotion& viewer,
 void SwimEffects::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     if (rippleVertexData.empty() && bubbleVertexData.empty() && insectVertexData.empty()) return;
 
-    VkDeviceSize offset = 0;
+    // Each kind writes and binds this frame's copy of its buffer.
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    const auto draw = [&](const std::vector<float>& vertexData, const PerFrameBuffer& vb,
+                          VkPipeline pipeline, VkPipelineLayout layout) {
+        if (vertexData.empty() || pipeline == VK_NULL_HANDLE || !vb.valid()) return;
+        std::memcpy(vb.mapped(frame), vertexData.data(), vertexData.size() * sizeof(float));
 
-    // --- Render ripples (splash droplets above water surface) ---
-    if (!rippleVertexData.empty() && ripplePipeline != VK_NULL_HANDLE) {
-        VkDeviceSize uploadSize = rippleVertexData.size() * sizeof(float);
-        if (rippleDynamicVBAllocInfo.pMappedData) {
-            std::memcpy(rippleDynamicVBAllocInfo.pMappedData, rippleVertexData.data(), uploadSize);
-        }
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ripplePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ripplePipelineLayout,
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
             0, 1, &perFrameSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &rippleDynamicVB, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(rippleVertexData.size() / 5), 1, 0, 0);
-    }
+        VkBuffer buffer = vb.buffer(frame);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
+        vkCmdDraw(cmd, static_cast<uint32_t>(vertexData.size() / 5), 1, 0, 0);
+    };
 
-    // --- Render bubbles ---
-    if (!bubbleVertexData.empty() && bubblePipeline != VK_NULL_HANDLE) {
-        VkDeviceSize uploadSize = bubbleVertexData.size() * sizeof(float);
-        if (bubbleDynamicVBAllocInfo.pMappedData) {
-            std::memcpy(bubbleDynamicVBAllocInfo.pMappedData, bubbleVertexData.data(), uploadSize);
-        }
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bubblePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bubblePipelineLayout,
-            0, 1, &perFrameSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &bubbleDynamicVB, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(bubbleVertexData.size() / 5), 1, 0, 0);
-    }
-
-    // --- Render insects ---
-    if (!insectVertexData.empty() && insectPipeline != VK_NULL_HANDLE) {
-        VkDeviceSize uploadSize = insectVertexData.size() * sizeof(float);
-        if (insectDynamicVBAllocInfo.pMappedData) {
-            std::memcpy(insectDynamicVBAllocInfo.pMappedData, insectVertexData.data(), uploadSize);
-        }
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, insectPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, insectPipelineLayout,
-            0, 1, &perFrameSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &insectDynamicVB, &offset);
-        vkCmdDraw(cmd, static_cast<uint32_t>(insectVertexData.size() / 5), 1, 0, 0);
-    }
+    // Ripples (splash droplets above the water surface), bubbles, insects.
+    draw(rippleVertexData, rippleDynamicVB, ripplePipeline, ripplePipelineLayout);
+    draw(bubbleVertexData, bubbleDynamicVB, bubblePipeline, bubblePipelineLayout);
+    draw(insectVertexData, insectDynamicVB, insectPipeline, insectPipelineLayout);
 }
 
 } // namespace rendering

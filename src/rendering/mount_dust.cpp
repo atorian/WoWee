@@ -82,14 +82,8 @@ bool MountDust::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     }
 
     // Create dynamic mapped vertex buffer
-    dynamicVBSize = MAX_DUST_PARTICLES * 5 * sizeof(float);
-    AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), dynamicVBSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    dynamicVB = buf.buffer;
-    dynamicVBAlloc = buf.allocation;
-    dynamicVBAllocInfo = buf.info;
-
-    if (dynamicVB == VK_NULL_HANDLE) {
+    if (!dynamicVB.create(vkCtx->getAllocator(), MAX_DUST_PARTICLES * 5 * sizeof(float),
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
         LOG_ERROR("Failed to create mount dust dynamic vertex buffer");
         return false;
     }
@@ -103,9 +97,8 @@ bool MountDust::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
 
 void MountDust::shutdown() {
     if (vkCtx) {
-        destroyParticleResources(vkCtx->getDevice(), vkCtx->getAllocator(),
-                                 pipeline, pipelineLayout, dynamicVB,
-                                 dynamicVBAlloc);
+        destroyPipeline(vkCtx->getDevice(), pipeline, pipelineLayout);
+        dynamicVB.destroy(vkCtx->getAllocator());
     }
 
     vkCtx = nullptr;
@@ -211,10 +204,11 @@ void MountDust::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
         vertexData.push_back(p.alpha);
     }
 
-    // Upload to mapped buffer
+    // Upload to this frame's copy of the mapped buffer
+    const uint32_t frame = vkCtx->getCurrentFrame();
     VkDeviceSize uploadSize = vertexData.size() * sizeof(float);
-    if (uploadSize > 0 && dynamicVBAllocInfo.pMappedData) {
-        std::memcpy(dynamicVBAllocInfo.pMappedData, vertexData.data(), uploadSize);
+    if (uploadSize > 0 && dynamicVB.valid()) {
+        std::memcpy(dynamicVB.mapped(frame), vertexData.data(), uploadSize);
     }
 
     // Bind pipeline
@@ -226,7 +220,8 @@ void MountDust::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 
     // Bind vertex buffer
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &dynamicVB, &offset);
+    VkBuffer vb = dynamicVB.buffer(frame);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
 
     // Draw particles as points
     vkCmdDraw(cmd, static_cast<uint32_t>(particles.size()), 1, 0, 0);

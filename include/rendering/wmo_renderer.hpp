@@ -734,7 +734,7 @@ private:
 
     /**
      * Destroy GPU resources for a single group.
-     * When defer=true, destruction is scheduled via deferAfterFrameFence
+     * When defer=true, destruction is scheduled via deferAfterAllFrameFences
      * so in-flight command buffers are not invalidated.
      */
     void destroyGroupGPU(GroupResources& group, bool defer = false);

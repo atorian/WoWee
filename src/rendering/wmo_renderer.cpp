@@ -312,7 +312,7 @@ void WMORenderer::shutdown() {
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator allocator = vkCtx_->getAllocator();
 
-    vkDeviceWaitIdle(device);
+    vkCtx_->waitIdle();
 
     // Free all GPU resources for loaded models
     for (auto& [id, model] : loadedModels) {
@@ -1431,7 +1431,7 @@ void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceM
     if (resetDescriptors) {
         shadowDrawCalls_ = 0;
         if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-            vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+            vkCtx_->resetDescriptorPool(shadowTexPool_[frameIndex]);
         }
         shadowTexSetCache_.clear();
     }
@@ -1510,7 +1510,7 @@ VkDescriptorSet WMORenderer::shadowTexSet(VkTexture* tex, uint32_t frameIndex) {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &shadowParams_.layout;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
+    if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
         return shadowParams_.set;
     }
 
@@ -1556,7 +1556,6 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
 
 void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
     if (!vkCtx_) return;
-    VkDevice device = vkCtx_->getDevice();
     VmaAllocator allocator = vkCtx_->getAllocator();
 
     if (!defer) {
@@ -1565,7 +1564,7 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         destroy(allocator, group.indexBuffer, group.indexAlloc);
         for (auto& mb : group.mergedBatches) {
             if (mb.materialSet) {
-                vkFreeDescriptorSets(device, materialDescPool_, 1, &mb.materialSet);
+                vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
                 mb.materialSet = VK_NULL_HANDLE;
             }
             if (materialSlots_) materialSlots_->free(mb.materialSlot);
@@ -1592,14 +1591,14 @@ void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
         }
 
         VkDescriptorPool pool = materialDescPool_;
-        vkCtx_->deferAfterAllFrameFences([device, allocator, pool, vb, vbAlloc, ib, ibAlloc,
+        vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, allocator, pool, vb, vbAlloc, ib, ibAlloc,
                                       slots = materialSlots_, mats = std::move(mats)]() {
             if (vb) gpuDestroyBuffer(allocator, vb, vbAlloc);
             if (ib) gpuDestroyBuffer(allocator, ib, ibAlloc);
             for (auto& m : mats) {
                 if (m.set) {
                     VkDescriptorSet s = m.set;
-                    vkFreeDescriptorSets(device, pool, 1, &s);
+                    ctx->freeDescriptorSets(pool, 1, &s);
                 }
                 if (slots) slots->free(m.slot);
             }
@@ -1680,8 +1679,7 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
     VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
     if ((!texToUse || !nhMap) && mb.materialSet) {
-        vkFreeDescriptorSets(vkCtx_->getDevice(), materialDescPool_, 1,
-                             &mb.materialSet);
+        vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
         mb.materialSet = VK_NULL_HANDLE;
     }
     if (!mb.materialSet) return;
@@ -1766,12 +1764,11 @@ void WMORenderer::retryPendingTextures() {
             attachNormalHeightMap(model, texIndex, mb);
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
-            VkDevice device = vkCtx_->getDevice();
             VkDescriptorPool pool = materialDescPool_;
-            vkCtx_->deferAfterAllFrameFences([device, pool, oldSet, oldSlot, slots = materialSlots_]() {
+            vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, oldSet, oldSlot, slots = materialSlots_]() {
                 if (oldSet) {
                     VkDescriptorSet set = oldSet;
-                    vkFreeDescriptorSets(device, pool, 1, &set);
+                    ctx->freeDescriptorSets(pool, 1, &set);
                 }
                 if (slots) slots->free(oldSlot);
             });
@@ -1799,7 +1796,7 @@ VkDescriptorSet WMORenderer::allocateMaterialSet() {
     allocInfo.pSetLayouts = &materialSetLayout_;
 
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &allocInfo, &set) != VK_SUCCESS) {
+    if (vkCtx_->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
         core::Logger::getInstance().warning("WMORenderer: failed to allocate material descriptor set");
         return VK_NULL_HANDLE;
     }

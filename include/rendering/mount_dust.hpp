@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rendering/per_frame_buffer.hpp"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -49,11 +51,8 @@ private:
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
-    // Dynamic mapped buffer for particle vertex data (updated every frame)
-    ::VkBuffer dynamicVB = VK_NULL_HANDLE;
-    VmaAllocation dynamicVBAlloc = VK_NULL_HANDLE;
-    VmaAllocationInfo dynamicVBAllocInfo{};
-    VkDeviceSize dynamicVBSize = 0;
+    // Particle vertex data, rewritten every frame
+    PerFrameBuffer dynamicVB;
 
     std::vector<float> vertexData;
     float spawnAccum = 0.0f;

@@ -122,7 +122,7 @@ void QuestMarkerRenderer::shutdown() {
     VmaAllocator allocator = vkCtx_->getAllocator();
 
     // Wait for device idle before destroying resources
-    vkDeviceWaitIdle(device);
+    vkCtx_->waitIdle();
 
     // Destroy textures
     for (int i = 0; i < 3; ++i) {

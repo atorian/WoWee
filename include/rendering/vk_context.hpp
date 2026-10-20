@@ -6,6 +6,7 @@
 #include "rendering/frames_in_flight.hpp"
 #include "rendering/frame_targets.hpp"
 #include "rendering/gpu_memory.hpp"
+#include "rendering/retire_queue.hpp"
 #include "rendering/texture_cache.hpp"
 #include "rendering/vk_utils.hpp"
 #include <vulkan/vulkan.h>
@@ -21,6 +22,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <atomic>
+#include <thread>
 #include <set>
 #include <unordered_map>
 #include <mutex>
@@ -39,6 +42,10 @@ struct FrameData {
     /// -- the same reason the fences are created VK_FENCE_CREATE_SIGNALED_BIT.
     uint64_t timelineValue = 0;
     bool submitted = false; // A reset fence with no submit must never be waited on.
+    /// The number of the frame this slot last submitted (VkContext's frame
+    /// numbers); once its wait returns, that frame and every earlier one have
+    /// completed.
+    uint64_t frameNumber = 0;
 };
 
 class VkContext {
@@ -56,9 +63,6 @@ public:
     /// Waits for the device, signals every fence, and starts again at slot
     /// zero. Only safe between frames, which is where the rebuild happens.
     void resetFrameSyncState();
-    /// Says once when the shared immediate-submit fence is reached from more
-    /// than one thread, which is unsafe and matches what validation reports.
-    void noteImmediateSubmitThread(const char* who);
 
     /// Which incarnation of the UI textures is current. Anything holding a
     /// descriptor set from uploadImGuiTexture caches this alongside it and
@@ -124,7 +128,8 @@ public:
     /// leaves semaphores signalled, and that is true of every window's.
     [[nodiscard]] uint64_t syncResetGeneration() const { return syncResetGeneration_; }
 
-    // Single-time command buffer helpers
+    // Single-time command buffer helpers. The calling thread's own command
+    // buffer and fence (its SubmitLane), so two threads never share either.
     VkCommandBuffer beginSingleTimeCommands();
     void endSingleTimeCommands(VkCommandBuffer cmd);
 
@@ -133,34 +138,58 @@ public:
 
     // Batch upload mode: records multiple upload commands into a single
     // command buffer, then submits with ONE fence wait instead of one per upload.
+    // Per thread: a batch open on one thread is that thread's alone, and an
+    // immediateSubmit from another never records into it.
     void beginUploadBatch();
     /// Opens the batch command buffer on first record, so a batch that
     /// nothing writes to never allocates one.
     void ensureBatchCmd();
     void endUploadBatch();       // Async: submits but does NOT wait for fence
     void endUploadBatchSync();   // Sync: submits and waits (for load screens)
-    [[nodiscard]] bool isInUploadBatch() const { return inUploadBatch_; }
-    /// Hands a plainly-allocated staging buffer to the current batch, which
-    /// frees it once its copies have actually run.
+    /// Whether the calling thread has a batch open.
+    [[nodiscard]] bool isInUploadBatch() const;
+    /// Hands a plainly-allocated staging buffer to the calling thread's batch,
+    /// which frees it once its copies have actually run.
     void deferRawStagingCleanup(VkBuffer buffer, VkDeviceMemory memory);
-    void freeRawStaging();
     void deferStagingCleanup(AllocatedBuffer staging);
     void pollUploadBatches();    // Check completed async uploads, free staging buffers
-    [[nodiscard]] bool uploadsComplete() const { return inFlightBatches_.empty() && !inUploadBatch_; }
+    /// No batch in flight on any thread, and none open on this one.
+    [[nodiscard]] bool uploadsComplete() const;
     void waitAllUploads();       // Block until all in-flight uploads complete
 
-    // Defer resource destruction until it is safe with multiple frames in flight.
-    //
-    // This queues work to run after the fence for the *current frame slot* has
-    // signaled the next time we enter beginFrame() for that slot (i.e. after
-    // MAX_FRAMES_IN_FLIGHT submissions). Use this for resources that may still
-    // be referenced by command buffers submitted in the previous frame(s),
-    // such as descriptor sets and buffers freed during streaming/unload.
-    void deferAfterFrameFence(std::function<void()>&& fn);
-    // Like deferAfterFrameFence, but waits until ALL in-flight frame slots have
-    // been fenced - safe for shared resources bound by multiple frames' command
-    // buffers (material descriptor sets, vertex/index buffers, etc.).
+    /// Holds every queue of the device for the caller: vkQueueSubmit,
+    /// vkQueuePresentKHR, vkQueueWaitIdle and vkDeviceWaitIdle all need the
+    /// queue externally synchronized, and the graphics queue is shared by the
+    /// frame, every upload and ImGui's own texture uploads. Everything in this
+    /// class that touches a queue takes it; code elsewhere that does - a
+    /// third-party backend's upload, a wait for idle - takes it too.
+    [[nodiscard]] std::unique_lock<std::mutex> lockQueues() const {
+        return std::unique_lock<std::mutex>(queueMutex_);
+    }
+    /// vkDeviceWaitIdle, under the queue lock.
+    VkResult waitIdle();
+
+    /// Descriptor sets from a pool more than one thread uses.
+    ///
+    /// A pool is externally synchronized for allocation, freeing and reset.
+    /// The renderers' material and bone pools are allocated from by the
+    /// loaders, freed into by the releases that wait for frames to complete,
+    /// and - for particles - allocated from while recording; once the frame
+    /// records on its own thread those are different threads. These take a
+    /// lock that belongs to the pool, so every pool keeps its owner and only
+    /// its uses are serialized.
+    VkResult allocateDescriptorSets(const VkDescriptorSetAllocateInfo& info, VkDescriptorSet* sets);
+    void freeDescriptorSets(VkDescriptorPool pool, uint32_t count, const VkDescriptorSet* sets);
+    void resetDescriptorPool(VkDescriptorPool pool);
+
+    /// Destroy something once no frame that may use it is in flight: buffers,
+    /// images and descriptor sets freed during streaming, unloads and rebuilds,
+    /// and what the current frame's command buffer binds. Filed under the frame
+    /// being built now - the last that can use an object the caller has let go
+    /// of - and run once that frame has completed (RetireQueue). Any thread.
     void deferAfterAllFrameFences(std::function<void()>&& fn);
+    /// The number of the frame being built: the next one to be submitted.
+    [[nodiscard]] uint64_t frameNumber() const { return frameNumber_.load(std::memory_order_acquire); }
 
     // Accessors
     [[nodiscard]] VkInstance getInstance() const { return instance; }
@@ -516,7 +545,6 @@ private:
 
     // Dedicated transfer queue (second queue from same graphics family)
     VkQueue transferQueue_ = VK_NULL_HANDLE;
-    VkCommandPool transferCommandPool_ = VK_NULL_HANDLE;
     bool hasDedicatedTransfer_ = false;
     uint32_t graphicsQueueFamilyQueueCount_ = 1; // queried in selectPhysicalDevice
 
@@ -527,9 +555,11 @@ private:
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
     std::vector<VkFramebuffer> swapchainFramebuffers;
-    bool swapchainDirty = false;
-    bool surfaceLost_ = false;
-    bool deviceLost_ = false;
+    // Set by whichever thread meets the condition (a present, a resize, a
+    // submit), read by the one that begins the next frame.
+    std::atomic<bool> swapchainDirty{false};
+    std::atomic<bool> surfaceLost_{false};
+    std::atomic<bool> deviceLost_{false};
     bool vsync_ = true;
     /// The vsync state the present-mode line last reported, so a rebuild
     /// that changes nothing says nothing. -1 until the first swapchain.
@@ -613,25 +643,10 @@ private:
     VkSemaphore nextAcquireSemaphore_ = VK_NULL_HANDLE;  // free semaphore for next acquire
     VkSemaphore currentAcquireSemaphore_ = VK_NULL_HANDLE; // the one used for the current frame
 
-    // Immediate submit resources
-    VkCommandPool immCommandPool = VK_NULL_HANDLE;
-    VkFence immFence = VK_NULL_HANDLE;
-    // Cached, reusable cmd buffer for beginSingleTimeCommands. Pool was created
-    // with RESET_COMMAND_BUFFER_BIT so we can reset and reuse instead of
-    // round-tripping through vkAllocateCommandBuffers + vkFreeCommandBuffers
-    // every immediate submit (the M2 frustum-cull dispatch fires this per frame).
-    VkCommandBuffer immCmdBuf_ = VK_NULL_HANDLE;
-
-    // Batch upload state (nesting-safe via depth counter)
-    int uploadBatchDepth_ = 0;
-    bool inUploadBatch_ = false;
-    VkCommandBuffer batchCmd_ = VK_NULL_HANDLE;
-    std::vector<AllocatedBuffer> batchStagingBuffers_;
     /// Staging allocated with plain Vulkan calls rather than the allocator.
     /// A batch only records the copy, so anything it reads from has to outlive
     /// the recording and be freed once the submit has completed.
     struct RawStaging { VkBuffer buffer; VkDeviceMemory memory; };
-    std::vector<RawStaging> batchRawStaging_;
 
     // Async upload: in-flight batches awaiting GPU completion
     struct InFlightBatch {
@@ -645,15 +660,69 @@ private:
         /// nothing orders it against the frame but a wait.
         bool onTransferQueue = false;
     };
-    std::vector<InFlightBatch> inFlightBatches_;
 
-    void runDeferredCleanup(uint32_t frameIndex);
+    /// What one thread needs to put work on the GPU: its own command pool, the
+    /// command buffer and fence its immediate submits reuse, the upload batch
+    /// it has open, and its batches still in flight.
+    ///
+    /// These were one set for the whole context - one immediate fence, one
+    /// pool, one batch - and correct only while one thread used them. A command
+    /// pool is externally synchronized, and two threads resetting and waiting
+    /// on one fence is how a device was already lost once (validation reported
+    /// the shared fence reset while in use). The loaders stay on the game thread and the
+    /// frame moves to its own, so each gets its own lane, made on first use.
+    struct SubmitLane {
+        std::thread::id owner;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        /// Reused by each immediate submit: the pool allows a reset.
+        VkCommandBuffer immCmd = VK_NULL_HANDLE;
+        VkFence immFence = VK_NULL_HANDLE;
+        int uploadBatchDepth = 0;
+        bool inUploadBatch = false;
+        VkCommandBuffer batchCmd = VK_NULL_HANDLE;
+        std::vector<AllocatedBuffer> batchStaging;
+        std::vector<RawStaging> batchRawStaging;
+        /// Guards the two lists below: a batch may be retired by whichever
+        /// thread polls first, but its command buffer goes back to the pool
+        /// only on the owner, which is the one thread that uses the pool.
+        std::mutex mutex;
+        std::vector<InFlightBatch> inFlight;
+        std::vector<VkCommandBuffer> finishedCmds;
+    };
+    /// The calling thread's lane, made on its first use.
+    SubmitLane& lane() const;
+    /// Frees, on the owner, the command buffers of batches retired since.
+    void reclaimFinished(SubmitLane& lane);
+    /// Retires the lane's batches that have completed (or, with `wait`, all of
+    /// them once they have). Any thread.
+    void retireBatches(SubmitLane& lane, bool wait);
+    void freeRawStaging(SubmitLane& lane);
+    /// Every lane made so far; the lock guards the list, not the lanes.
+    mutable std::mutex lanesMutex_;
+    mutable std::vector<std::unique_ptr<SubmitLane>> lanes_;
+    /// Tells this context's lanes from those a thread made for an earlier one
+    /// (lane() caches the last per thread).
+    uint64_t laneGeneration_ = 0;
+    /// See lockQueues.
+    mutable std::mutex queueMutex_;
+    /// See allocateDescriptorSets: a lock per pool, chosen by its handle from
+    /// a fixed set, so two pools rarely share one and no pool is ever unguarded.
+    static constexpr size_t kDescriptorPoolLocks = 64;
+    std::mutex descriptorPoolLocks_[kDescriptorPoolLocks];
+    std::mutex& descriptorPoolLock(VkDescriptorPool pool);
+
 public:
     // Execute all deferred destruction immediately. For shutdown paths, where no
     // further frames will run to drain the queues naturally.
     void flushDeferredCleanup();
 private:
-    std::vector<std::function<void()>> deferredCleanup_[MAX_FRAMES_IN_FLIGHT];
+    /// See deferAfterAllFrameFences.
+    RetireQueue retire_;
+    /// The frame being built; moved on by each frame's submit. Starts at one,
+    /// so frame zero - "never submitted" - has always completed.
+    std::atomic<uint64_t> frameNumber_{1};
+    /// The newest frame known to have completed.
+    uint64_t completedFrame_ = 0;
 
     // Depth buffer (shared across all framebuffers)
     VkImage depthImage = VK_NULL_HANDLE;
@@ -712,8 +781,8 @@ private:
     uint32_t uiTextureGeneration_ = 0;
     /// How many asynchronous upload batches have been submitted and retired.
     /// Only used to name the first fence and to say how many are outstanding.
-    uint64_t batchesSubmitted_ = 0;
-    uint64_t batchesRetired_ = 0;
+    std::atomic<uint64_t> batchesSubmitted_{0};
+    std::atomic<uint64_t> batchesRetired_{0};
 
     /// A descriptor pool and layout this context owns, for UI textures.
     ///

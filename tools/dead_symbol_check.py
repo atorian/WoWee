@@ -170,8 +170,20 @@ def use_counts(names):
 
                 # The declaration itself is not a use. A statement that merely
                 # looks like one is.
-                if not statement and (DECL.match(line) or FREE_DECL.match(line)):
-                    continue
+                #
+                # In a header the whole line goes: its parameter names are not
+                # calls. In a source file the same shape is as often a local
+                # built from a call - `std::lock_guard<std::mutex>
+                # lock(poolLock(pool));` - and only the declared name goes;
+                # the call inside it is a use, and poolLock looked dead with
+                # three callers.
+                declared_here = None
+                if not statement:
+                    declaration = DECL.match(line) or FREE_DECL.match(line)
+                    if declaration:
+                        if path.suffix == ".hpp":
+                            continue
+                        declared_here = declaration.group(1)
 
                 # A definition head, not a qualified call: `return
                 # Class::name(x);` matches DEFN too, and treating that as the
@@ -206,7 +218,7 @@ def use_counts(names):
                         continue
                     # A function's own definition is not a use of it; anything
                     # else on the same line still is.
-                    if name == defined_here:
+                    if name == defined_here or name == declared_here:
                         continue
                     counts[name] += 1
     return counts

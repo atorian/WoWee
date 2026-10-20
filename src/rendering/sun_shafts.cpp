@@ -402,7 +402,7 @@ void SunShafts::composite(VkCommandBuffer cmd, uint32_t frame) {
 void SunShafts::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     destroyTargets();
     destroy(device, descPool_);
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {

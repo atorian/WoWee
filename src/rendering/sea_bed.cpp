@@ -431,7 +431,7 @@ void SeaBedMap::refetch(VkCommandBuffer cmd, glm::vec2 windToward) {
 void SeaBedMap::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     for (VkFramebuffer& fb : framebuffers_) {
         if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device, fb, nullptr);
         fb = VK_NULL_HANDLE;

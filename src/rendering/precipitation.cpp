@@ -168,7 +168,7 @@ void Precipitation::recreatePipelines() {
 void Precipitation::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     destroy(device, pipeline_);
     destroy(device, layout_);
     destroy(device, pool_);

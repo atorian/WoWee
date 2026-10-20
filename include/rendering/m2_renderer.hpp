@@ -1585,7 +1585,7 @@ private:
     // Helper to destroy model GPU resources
     void destroyModelGPU(M2ModelGPU& model);
     // Helper to destroy instance bone buffers.
-    // When defer=true, destruction is scheduled via deferAfterFrameFence so
+    // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
     // in-flight command buffers are not invalidated (use for streaming unload).
     /// Starts a new instance's animation and seeds its bones from a
     /// sibling of the same model, so it draws on the frame it spawns.

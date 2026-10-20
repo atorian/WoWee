@@ -11,13 +11,12 @@ void releaseBoneSlot(VkContext& ctx, VkDescriptorPool pool,
                      bool defer) {
     if (set == VK_NULL_HANDLE && buffer == VK_NULL_HANDLE) return;
 
-    VkDevice device = ctx.getDevice();
     VmaAllocator alloc = ctx.getAllocator();
 
     if (!defer) {
         // Immediate, which is only safe once the device is idle.
         if (set != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
-            vkFreeDescriptorSets(device, pool, 1, &set);
+            ctx.freeDescriptorSets(pool, 1, &set);
         }
         if (buffer != VK_NULL_HANDLE) {
             gpuDestroyBuffer(alloc, buffer, allocation);
@@ -28,13 +27,13 @@ void releaseBoneSlot(VkContext& ctx, VkDescriptorPool pool,
     const uint64_t generation =
         poolGeneration ? poolGeneration->load(std::memory_order_relaxed) : 0;
     ctx.deferAfterAllFrameFences(
-        [device, alloc, pool, poolGeneration, generation, set, buffer, allocation]() {
+        [ctxPtr = &ctx, alloc, pool, poolGeneration, generation, set, buffer, allocation]() {
             const bool poolStillValid =
                 poolGeneration &&
                 poolGeneration->load(std::memory_order_relaxed) == generation;
             if (set != VK_NULL_HANDLE && pool != VK_NULL_HANDLE && poolStillValid) {
                 VkDescriptorSet s = set;
-                vkFreeDescriptorSets(device, pool, 1, &s);
+                ctxPtr->freeDescriptorSets(pool, 1, &s);
             }
             if (buffer != VK_NULL_HANDLE) {
                 gpuDestroyBuffer(alloc, buffer, allocation);

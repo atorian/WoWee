@@ -491,7 +491,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
 void VolumetricFog::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
 
     destroyVolumes();
     destroyVolume(neutral_);

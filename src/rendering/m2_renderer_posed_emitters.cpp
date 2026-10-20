@@ -46,7 +46,7 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &particleTexLayout_;
-            if (vkAllocateDescriptorSets(device, &ai, &gpuModel.particleTexSets[ei]) == VK_SUCCESS) {
+            if (vkCtx_->allocateDescriptorSets(ai, &gpuModel.particleTexSets[ei]) == VK_SUCCESS) {
                 // Valid, not merely non-null: descriptorInfo() returns the
                 // texture's handles as they are, so one whose upload failed
                 // writes a null view and sampler into a live descriptor and
@@ -105,7 +105,7 @@ void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2M
                 ai.descriptorPool = materialDescPool_;
                 ai.descriptorSetCount = 1;
                 ai.pSetLayouts = &particleTexLayout_;
-                if (vkAllocateDescriptorSets(device, &ai, &gpuModel.ribbonTexSets[ri]) == VK_SUCCESS) {
+                if (vkCtx_->allocateDescriptorSets(ai, &gpuModel.ribbonTexSets[ri]) == VK_SUCCESS) {
                     VkTexture* tex = gpuModel.ribbonTextures[ri];
                     if (!tex || !tex->isValid()) tex = whiteTexture_.get();
                     if (!tex || !tex->isValid()) continue;
@@ -203,11 +203,11 @@ void M2Renderer::unloadPosedEmitterModel(uint32_t handle) {
     posedEmitterModels_.erase(it);
     if (sets.empty() || !vkCtx_ || !materialDescPool_) return;
     vkCtx_->deferAfterAllFrameFences(
-        [device = vkCtx_->getDevice(), pool = materialDescPool_,
+        [ctx = vkCtx_, pool = materialDescPool_,
          generation = materialPoolGeneration_, expected = *materialPoolGeneration_,
          sets = std::move(sets)]() {
             if (*generation != expected) return;
-            vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data());
+            ctx->freeDescriptorSets(pool, static_cast<uint32_t>(sets.size()), sets.data());
         });
 }
 
@@ -274,12 +274,11 @@ void M2Renderer::destroyPosedEmitterModels() {
     // Called with the device idle, before the material pool is reset or
     // destroyed: the sets go back to it now.
     if (vkCtx_ && materialDescPool_) {
-        VkDevice device = vkCtx_->getDevice();
         for (auto& [handle, model] : posedEmitterModels_) {
             for (VkDescriptorSet set : model.gpu.particleTexSets)
-                if (set) vkFreeDescriptorSets(device, materialDescPool_, 1, &set);
+                if (set) vkCtx_->freeDescriptorSets(materialDescPool_, 1, &set);
             for (VkDescriptorSet set : model.gpu.ribbonTexSets)
-                if (set) vkFreeDescriptorSets(device, materialDescPool_, 1, &set);
+                if (set) vkCtx_->freeDescriptorSets(materialDescPool_, 1, &set);
         }
     }
     scene_->posedEmitters_.clear();

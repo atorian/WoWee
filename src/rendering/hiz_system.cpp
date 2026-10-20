@@ -34,8 +34,7 @@ bool HiZSystem::initialize(VkContext* ctx, uint32_t width, uint32_t height) {
 
 void HiZSystem::shutdown() {
     if (!ctx_) return;
-    VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
 
     destroyDescriptors();
     destroyPyramidImage();

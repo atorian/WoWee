@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
             vkCmdCopyImageToBuffer(cmd, lighting.reflectionImageWrittenBy(ctx.getCurrentFrame()),
                                    VK_IMAGE_LAYOUT_GENERAL, reflection.buffer, 1, &region);
         });
-        vkDeviceWaitIdle(ctx.getDevice());
+        ctx.waitIdle();
 
         const auto* lightTexels = static_cast<const uint16_t*>(light.info.pMappedData);
         const auto* giTexels = static_cast<const uint16_t*>(gi.info.pMappedData);

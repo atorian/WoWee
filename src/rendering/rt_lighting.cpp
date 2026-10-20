@@ -146,7 +146,7 @@ void RtLighting::shutdown() {
     if (!ctx_) return;
     VkDevice dev = ctx_->getDevice();
     VmaAllocator alloc = ctx_->getAllocator();
-    vkDeviceWaitIdle(dev);
+    ctx_->waitIdle();
     destroyImages();
     for (auto& s : slots_) destroyBuffer(alloc, s.ubo);
     destroyImage(dev, alloc, neutral_);

@@ -306,7 +306,7 @@ void TerrainRenderer::shutdown() {
     VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();
 
-    vkDeviceWaitIdle(device);
+    vkCtx->waitIdle();
 
     clear();
     // clear() defers chunk destruction, and no further frames will run to drain
@@ -867,7 +867,7 @@ VkDescriptorSet TerrainRenderer::allocateMaterialSet() {
     allocInfo.pSetLayouts = &materialSetLayout;
 
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vkCtx->getDevice(), &allocInfo, &set) != VK_SUCCESS) {
+    if (vkCtx->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
         static uint64_t failCount = 0;
         ++failCount;
         if (failCount <= 8 || (failCount % 256) == 0) {
@@ -1525,7 +1525,6 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
         chunk.rtInstance = chunk.rtMesh = RtScene::kInvalid;
     }
 
-    VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();
 
     // These resources may still be referenced by in-flight command buffers from
@@ -1568,7 +1567,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     for (TextureRef& t : chunk.layerNormalMaps) t.reset();
     chunk.normalGrid.reset();
 
-    vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
+    vkCtx->deferAfterAllFrameFences([ctx = vkCtx, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsSlot, slots = paramsSlots_, pool, materialSet,
                                      page, baseVertex, vertexCount, firstIndex, indexCount]() {
         if (page) {
@@ -1586,7 +1585,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
         if (slots) slots->free(paramsSlot);
         if (materialSet && pool) {
             VkDescriptorSet set = materialSet;
-            vkFreeDescriptorSets(device, pool, 1, &set);
+            ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }

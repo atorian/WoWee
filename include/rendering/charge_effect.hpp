@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/per_frame_buffer.hpp"
 #include "rendering/scene_commands.hpp"
 
 #include <vulkan/vulkan.h>
@@ -74,10 +75,7 @@ private:
     // Ribbon pipeline + dynamic buffer
     VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
-    ::VkBuffer ribbonDynamicVB_ = VK_NULL_HANDLE;
-    VmaAllocation ribbonDynamicVBAlloc_ = VK_NULL_HANDLE;
-    VmaAllocationInfo ribbonDynamicVBAllocInfo_{};
-    VkDeviceSize ribbonDynamicVBSize_ = 0;
+    PerFrameBuffer ribbonDynamicVB_;
     std::vector<float> ribbonVerts_;  // pos(3) + alpha(1) + heat(1) + height(1) = 6 floats per vert
 
     // --- Dust puffs (small point sprites at feet) ---
@@ -96,10 +94,7 @@ private:
     // Dust pipeline + dynamic buffer
     VkPipeline dustPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout dustPipelineLayout_ = VK_NULL_HANDLE;
-    ::VkBuffer dustDynamicVB_ = VK_NULL_HANDLE;
-    VmaAllocation dustDynamicVBAlloc_ = VK_NULL_HANDLE;
-    VmaAllocationInfo dustDynamicVBAllocInfo_{};
-    VkDeviceSize dustDynamicVBSize_ = 0;
+    PerFrameBuffer dustDynamicVB_;
     std::vector<float> dustVerts_;
 
     bool emitting_ = false;

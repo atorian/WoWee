@@ -221,6 +221,13 @@ CHECKS = [
     ("record_scene_check.py",
      r"^(\d+) reads of the scene while recording", 0,
      "reads of the renderers' scene from their recording functions"),
+    # The queues are externally synchronized and shared by the frame, the
+    # uploads and ImGui; once the frame records on its own thread, a submit or
+    # a wait-idle past VkContext's queue lock is a race with it. Held at zero
+    # from stage 5a of the threading plan.
+    ("queue_use_check.py",
+     r"^(\d+) uses of the GPU queues past VkContext", 0,
+     "vkQueueSubmit/Present/WaitIdle and vkDeviceWaitIdle past VkContext's queue lock"),
     # The game says what happened and is handed what it asks; it does not
     # drive the client's presentation. Held where it stood when the check was
     # written, and lowered to zero (AGENTS.md, "Layers"): the CVar store moved

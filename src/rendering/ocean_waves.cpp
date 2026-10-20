@@ -404,7 +404,7 @@ void OceanWaves::recordMips(VkCommandBuffer cmd) {
 void OceanWaves::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     {
         DeferredResources retired(*ctx_);
         retired.release(surfaceSampledView_, vkDestroyImageView);

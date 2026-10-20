@@ -395,7 +395,7 @@ void WaterRenderer::shutdown() {
 
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
-    vkDeviceWaitIdle(device);
+    vkCtx->waitIdle();
 
     // destroyAllDrawn() defers surface destruction, and those lambdas free descriptor sets
     // from the pools destroyed just below. Drain them here, while the pools are
@@ -426,7 +426,7 @@ VkDescriptorSet WaterRenderer::allocateMaterialSet() {
     allocInfo.pSetLayouts = &materialSetLayout;
 
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vkCtx->getDevice(), &allocInfo, &set) != VK_SUCCESS) {
+    if (vkCtx->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
         return VK_NULL_HANDLE;
     }
     return set;
@@ -1129,7 +1129,6 @@ void WaterRenderer::createWaterMesh(DrawnSurface& drawn, const LiquidSurface& su
 
 void WaterRenderer::destroyWaterMesh(DrawnSurface& surface) {
     if (!vkCtx) return;
-    VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();
 
     ::VkBuffer vertexBuffer = surface.vertexBuffer;
@@ -1149,7 +1148,7 @@ void WaterRenderer::destroyWaterMesh(DrawnSurface& surface) {
     surface.materialAlloc = VK_NULL_HANDLE;
     surface.materialSet = VK_NULL_HANDLE;
 
-    vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
+    vkCtx->deferAfterAllFrameFences([ctx = vkCtx, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      materialUBO, materialAlloc, pool, materialSet]() {
         if (vertexBuffer) {
             AllocatedBuffer ab{}; ab.buffer = vertexBuffer; ab.allocation = vertexAlloc;
@@ -1165,7 +1164,7 @@ void WaterRenderer::destroyWaterMesh(DrawnSurface& surface) {
         }
         if (materialSet && pool) {
             VkDescriptorSet set = materialSet;
-            vkFreeDescriptorSets(device, pool, 1, &set);
+            ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }

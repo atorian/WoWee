@@ -133,7 +133,7 @@ bool LensWeather::initialize(VkContext* ctx) {
 void LensWeather::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     for (Slot& slot : slots_) {
         destroyImage(device, ctx_->getAllocator(), slot.copy);
         destroyBuffer(ctx_->getAllocator(), slot.drops);

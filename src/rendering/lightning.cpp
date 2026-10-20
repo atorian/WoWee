@@ -178,17 +178,11 @@ bool Lightning::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
 
     // ---- Create dynamic mapped vertex buffer for bolt segments ----
     // Each bolt can have up to MAX_SEGMENTS * 2 vec3 entries (segments + branches)
-    boltDynamicVBSize = MAX_SEGMENTS * 4 * sizeof(glm::vec3);  // generous capacity
-    {
-        AllocatedBuffer buf = createBuffer(vkCtx->getAllocator(), boltDynamicVBSize,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        boltDynamicVB = buf.buffer;
-        boltDynamicVBAlloc = buf.allocation;
-        boltDynamicVBAllocInfo = buf.info;
-        if (boltDynamicVB == VK_NULL_HANDLE) {
-            core::Logger::getInstance().error("Failed to create bolt dynamic vertex buffer");
-            return false;
-        }
+    if (!boltDynamicVB.create(vkCtx->getAllocator(),
+                              MAX_SEGMENTS * 4 * sizeof(glm::vec3),  // generous capacity
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+        core::Logger::getInstance().error("Failed to create bolt dynamic vertex buffer");
+        return false;
     }
 
     // ---- Create static flash quad vertex buffer ----
@@ -221,7 +215,7 @@ void Lightning::shutdown() {
 
         destroy(device, boltPipeline);
         destroy(device, boltPipelineLayout);
-        destroy(allocator, boltDynamicVB, boltDynamicVBAlloc);
+        boltDynamicVB.destroy(allocator);
 
         destroy(device, flashPipeline);
         destroy(device, flashPipelineLayout);
@@ -439,27 +433,29 @@ void Lightning::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 }
 
 void Lightning::renderBolts(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (boltPipeline == VK_NULL_HANDLE) return;
+    if (boltPipeline == VK_NULL_HANDLE || !boltDynamicVB.valid()) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boltPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boltPipelineLayout,
         0, 1, &perFrameSet, 0, nullptr);
 
+    // This frame's copy of the buffer: the frame before may still be drawing
+    // from the other one.
+    const uint32_t frame = vkCtx->getCurrentFrame();
+    VkBuffer vb = boltDynamicVB.buffer(frame);
+    auto* mapped = static_cast<glm::vec3*>(boltDynamicVB.mapped(frame));
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &boltDynamicVB, &offset);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
 
     // Each bolt in its own stretch of the buffer: the draws read it when they
     // execute, so one stretch rewritten per bolt drew the last bolt every time.
-    const uint32_t capacity = static_cast<uint32_t>(boltDynamicVBSize / sizeof(glm::vec3));
+    const uint32_t capacity = static_cast<uint32_t>(boltDynamicVB.size() / sizeof(glm::vec3));
     uint32_t used = 0;
     for (const auto& bolt : bolts) {
-        if (!bolt.active || bolt.segments.empty() || !boltDynamicVBAllocInfo.pMappedData) {
-            continue;
-        }
+        if (!bolt.active || bolt.segments.empty()) continue;
         const uint32_t count = std::min(static_cast<uint32_t>(bolt.segments.size()), capacity - used);
         if (count < 2) break;
-        std::memcpy(static_cast<glm::vec3*>(boltDynamicVBAllocInfo.pMappedData) + used, bolt.segments.data(),
-                    count * sizeof(glm::vec3));
+        std::memcpy(mapped + used, bolt.segments.data(), count * sizeof(glm::vec3));
 
         vkCmdPushConstants(cmd, boltPipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

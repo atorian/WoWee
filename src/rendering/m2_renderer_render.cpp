@@ -2418,7 +2418,7 @@ VkDescriptorSet M2Renderer::shadowTexSet(VkTexture* tex) {
         ai.descriptorPool = shadowTexPool_[vkCtx_->getCurrentFrame()];
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &shadowParams_.layout;
-        if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
+        if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
             return shadowParams_.set; // fallback to white texture
         }
         VkDescriptorImageInfo imgInfo{};
@@ -2687,7 +2687,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
     if (resetDescriptors && shadowTexPool_[frameIdx]) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIdx], 0);
+        vkCtx_->resetDescriptorPool(shadowTexPool_[frameIdx]);
     }
     // Reuse persistent map - pool reset already invalidated the sets.
     if (resetDescriptors) shadowTexSetCache_.clear();

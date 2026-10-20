@@ -248,7 +248,7 @@ void Minimap::shutdown() {
     VkDevice device = vkCtx->getDevice();
     VmaAllocator alloc = vkCtx->getAllocator();
 
-    vkDeviceWaitIdle(device);
+    vkCtx->waitIdle();
 
     destroy(device, tilePipeline);
     destroy(device, displayPipeline);

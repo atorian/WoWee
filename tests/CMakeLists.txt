@@ -1755,6 +1755,12 @@ wowee_add_test(test_instance_index_set SOURCES test_instance_index_set.cpp)
 # which is what made a tile's doodads cost 11-22 ms whenever the list doubled.
 wowee_add_test(test_chunked_vector SOURCES test_chunked_vector.cpp)
 
+# ── test_retire_queue ────────────────────────────────────────
+# GPU objects released once the last frame that may use them has completed,
+# by frame number, from any thread - what a render thread recording from a
+# snapshot needs of every unload.
+wowee_add_test(test_retire_queue SOURCES test_retire_queue.cpp)
+
 # ── test_instance_random ─────────────────────────────────────
 # Each M2 instance's own random numbers: independent of the others, so
 # instances can be updated in parallel and still behave the same.

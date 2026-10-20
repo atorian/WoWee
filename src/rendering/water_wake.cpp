@@ -275,7 +275,7 @@ bool WaterWake::createPasses() {
 void WaterWake::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     destroyImage(device, ctx_->getAllocator(), surface_);
     destroyImage(device, ctx_->getAllocator(), state_);
     destroyImage(device, ctx_->getAllocator(), spectrum_);

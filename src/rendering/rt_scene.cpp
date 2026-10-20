@@ -166,7 +166,7 @@ void RtScene::shutdown() {
     if (!ctx_) return;
     VkDevice dev = ctx_->getDevice();
     VmaAllocator alloc = ctx_->getAllocator();
-    vkDeviceWaitIdle(dev);
+    ctx_->waitIdle();
     alive_.reset();
 
     for (auto& m : meshes_) destroyMeshGpu(m);
@@ -400,7 +400,7 @@ void RtScene::stage(VkCommandBuffer cmd, VkBuffer dst, VkDeviceSize dstOffset, c
     VkBufferCopy region{0, dstOffset, size};
     vkCmdCopyBuffer(cmd, staging.buffer, dst, 1, &region);
     VmaAllocator alloc = ctx_->getAllocator();
-    ctx_->deferAfterFrameFence([alloc, staging]() mutable { destroyBuffer(alloc, staging); });
+    ctx_->deferAfterAllFrameFences([alloc, staging]() mutable { destroyBuffer(alloc, staging); });
 }
 
 void RtScene::ensurePoolCapacity(VkCommandBuffer cmd, GpuPool& pool, uint32_t needed) {
@@ -603,7 +603,7 @@ void RtScene::buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& i
         range.primitiveCount = m.triCount;
         const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
         pfnCmdBuildAs_(cmd, 1, &build, &ranges);
-        ctx_->deferAfterFrameFence([alloc, scratch]() mutable { destroyBuffer(alloc, scratch); });
+        ctx_->deferAfterAllFrameFences([alloc, scratch]() mutable { destroyBuffer(alloc, scratch); });
 
         VkAccelerationStructureDeviceAddressInfoKHR ai{};
         ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
@@ -633,7 +633,7 @@ void RtScene::ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t ne
         // This frame slot's previous use has been fenced, but the descriptor
         // set of this slot still names the buffer until it is rewritten below.
         AllocatedBuffer old = buf;
-        ctx_->deferAfterFrameFence([alloc, old]() mutable { destroyBuffer(alloc, old); });
+        ctx_->deferAfterAllFrameFences([alloc, old]() mutable { destroyBuffer(alloc, old); });
     }
     capacity = grownCapacity(capacity, std::max(needed, 1u));
     buf = createBuffer(alloc, VkDeviceSize(capacity) * elementSize, usage,
@@ -743,7 +743,7 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
             VkAccelerationStructureKHR oldAs = fr.tlas;
             AllocatedBuffer oldBuf = fr.tlasBuffer;
             auto destroyAs = pfnDestroyAs_;
-            ctx_->deferAfterFrameFence([dev, alloc, oldAs, oldBuf, destroyAs]() mutable {
+            ctx_->deferAfterAllFrameFences([dev, alloc, oldAs, oldBuf, destroyAs]() mutable {
                 destroyAs(dev, oldAs, nullptr);
                 destroyBuffer(alloc, oldBuf);
             });
@@ -768,7 +768,7 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
     if (!fr.scratch.buffer || fr.scratchSize < sizes.buildScratchSize) {
         if (fr.scratch.buffer) {
             AllocatedBuffer old = fr.scratch;
-            ctx_->deferAfterFrameFence([alloc, old]() mutable { destroyBuffer(alloc, old); });
+            ctx_->deferAfterAllFrameFences([alloc, old]() mutable { destroyBuffer(alloc, old); });
         }
         fr.scratchSize = sizes.buildScratchSize + sizes.buildScratchSize / 2;
         fr.scratch = createBuffer(alloc, fr.scratchSize + scratchAlignment_,

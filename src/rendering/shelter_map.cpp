@@ -189,7 +189,7 @@ bool ShelterMap::initialize(VkContext* ctx, VkRenderPass shadowRenderPass) {
 void ShelterMap::shutdown() {
     if (!ctx_) return;
     VkDevice device = ctx_->getDevice();
-    vkDeviceWaitIdle(device);
+    ctx_->waitIdle();
     if (framebuffer_ != VK_NULL_HANDLE) vkDestroyFramebuffer(device, framebuffer_, nullptr);
     framebuffer_ = VK_NULL_HANDLE;
     destroyImage(device, ctx_->getAllocator(), map_);

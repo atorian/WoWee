@@ -2567,7 +2567,7 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             ai.descriptorPool = boneDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &boneSetLayout_;
-            VkResult dsRes = vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &instance.boneSet[frameIndex]);
+            VkResult dsRes = vkCtx_->allocateDescriptorSets(ai, &instance.boneSet[frameIndex]);
             if (dsRes != VK_SUCCESS) {
                 LOG_ERROR("CharacterRenderer::prepareRender: bone descriptor alloc failed (instance=",
                           id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
@@ -2726,7 +2726,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
     if (lastMaterialPoolResetFrame_ != frameIndex) {
         materialRingOffset_[frameSlot] = 0;
         if (materialDescPools_[frameSlot]) {
-            vkResetDescriptorPool(vkCtx_->getDevice(), materialDescPools_[frameSlot], 0);
+            vkCtx_->resetDescriptorPool(materialDescPools_[frameSlot]);
         }
         materialDescriptorCache_[frameSlot].clear();
         lastMaterialPoolResetFrame_ = frameIndex;
@@ -2791,7 +2791,7 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
         ai.descriptorPool = materialDescPools_[frameSlot];
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &materialSetLayout_;
-        if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS)
+        if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS)
             return VK_NULL_HANDLE;
 
         VkDescriptorBufferInfo bufferInfo{};
@@ -3422,7 +3422,7 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
     // This frame slot's fence was waited on in beginFrame, so last time's sets
     // are finished with and the pool can be handed back whole.
     if (resetDescriptors && frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-        vkResetDescriptorPool(vkCtx_->getDevice(), shadowTexPool_[frameIndex], 0);
+        vkCtx_->resetDescriptorPool(shadowTexPool_[frameIndex]);
     }
     if (resetDescriptors) shadowTexSetCache_.clear();
 
@@ -3560,7 +3560,7 @@ VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t fra
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &shadowParams_.layout;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
+    if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
         // Out of sets for this frame: the white fallback casts a full shadow,
         // which is the old behaviour rather than a hole.
         return shadowParams_.set;

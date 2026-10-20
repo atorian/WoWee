@@ -1011,7 +1011,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &particleTexLayout_;
-            if (vkAllocateDescriptorSets(device, &ai, &glowTexDescSet_) == VK_SUCCESS) {
+            if (vkCtx_->allocateDescriptorSets(ai, &glowTexDescSet_) == VK_SUCCESS) {
                 VkDescriptorImageInfo imgInfo = glowTexture_->descriptorInfo();
                 VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 write.dstSet = glowTexDescSet_;
@@ -1043,7 +1043,7 @@ void M2Renderer::shutdown() {
     LOG_INFO("Shutting down M2 renderer...");
     if (!vkCtx_) return;
 
-    vkDeviceWaitIdle(vkCtx_->getDevice());
+    vkCtx_->waitIdle();
     VkDevice device = vkCtx_->getDevice();
     VmaAllocator alloc = vkCtx_->getAllocator();
 
@@ -1162,21 +1162,21 @@ void M2Renderer::destroyModelGPU(M2ModelGPU& model) {
     // every frame slot has fenced. Capture values, never this or model refs.
     auto retired = std::make_shared<M2ModelGPU>(std::move(model));
     model = {};
-    const VkDevice device = vkCtx_->getDevice();
+    VkContext* ctx = vkCtx_;
     const VmaAllocator alloc = vkCtx_->getAllocator();
     const VkDescriptorPool pool = materialDescPool_;
-    vkCtx_->deferAfterAllFrameFences([retired, device, alloc, pool, slots = materialSlots_]() {
+    vkCtx_->deferAfterAllFrameFences([retired, ctx, alloc, pool, slots = materialSlots_]() {
         destroy(alloc, retired->vertexBuffer, retired->vertexAlloc);
         destroy(alloc, retired->indexBuffer, retired->indexAlloc);
         for (auto& batch : retired->batches) {
-            if (batch.materialSet) vkFreeDescriptorSets(device, pool, 1, &batch.materialSet);
+            if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
             if (slots) slots->free(batch.materialSlot);
         }
         for (auto set : retired->particleTexSets) {
-            if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+            if (set) ctx->freeDescriptorSets(pool, 1, &set);
         }
         for (auto set : retired->ribbonTexSets) {
-            if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+            if (set) ctx->freeDescriptorSets(pool, 1, &set);
         }
     });
 }
@@ -1192,7 +1192,7 @@ VkDescriptorSet M2Renderer::allocateMaterialSet() {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &materialSetLayout_;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult result = vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set);
+    VkResult result = vkCtx_->allocateDescriptorSets(ai, &set);
     if (result != VK_SUCCESS) {
         LOG_ERROR("M2Renderer: material descriptor set allocation failed (", result, ")");
         return VK_NULL_HANDLE;
@@ -1206,7 +1206,7 @@ VkDescriptorSet M2Renderer::allocateBoneSet() {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &boneSetLayout_;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult result = vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set);
+    VkResult result = vkCtx_->allocateDescriptorSets(ai, &set);
     if (result != VK_SUCCESS) {
         LOG_ERROR("M2Renderer: bone descriptor set allocation failed (", result, ")");
         return VK_NULL_HANDLE;
