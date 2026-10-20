@@ -849,7 +849,7 @@ constexpr const char* kGraphicsApplyKeys[] = {
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogstrength", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
-    "raytracedlighting",
+    "raytracedlighting", "rtdistance",
     // Moved off the game's own Effects panel, so this list is now what
     // applies them at startup; the cvar store used to do it.
     "groundclutterdistance", "particledensity", "weatherdetail",
@@ -992,6 +992,7 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
     {.key = "lightshafts",    .asInt   = &SettingsPanel::pendingVolumetricFog},
     {.key = "raytracedlighting", .asInt = &SettingsPanel::pendingRtLighting},
+    {.key = "rtdistance", .asFloat = &SettingsPanel::pendingRtDistance},
     {.key = "mistdensity",    .asFloat = &SettingsPanel::pendingVolumetricDensity},
     {.key = "mousespeed",     .asFloat = &SettingsPanel::pendingMouseSensitivity},
     {.key = "minimapclock",   .asBool  = &SettingsPanel::pendingShowMinimapClock},
@@ -1376,6 +1377,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
         if (renderer) renderer->setVolumetricFogQuality(pendingVolumetricFog);
     } else if (key == "raytracedlighting") {
         if (renderer) renderer->setRtLightingMode(pendingRtLighting);
+    } else if (key == "rtdistance") {
+        if (renderer) renderer->setRtDistance(pendingRtDistance);
     } else if (key == "mistdensity") {
         if (renderer) renderer->setVolumetricFogDensity(pendingVolumetricDensity);
     } else if (key == "framegen") {

@@ -20,6 +20,17 @@ TEST_CASE("the sky models' star layers are recognised", "[m2][sky][stars]") {
     REQUIRE(isStarLayer("environment\\stars\\rubysanctumstars01.blp"));
 }
 
+TEST_CASE("the client's Environments directory identifies only star point layers", "[m2][sky][stars]") {
+    // Paths carried by the client models, including Dalaran's two star sheets.
+    CHECK(isStarLayer("environments\\stars\\stars.blp"));
+    CHECK(isStarLayer("environments\\stars\\stars2.blp"));
+    CHECK(isStarLayer("environments\\stars\\hellfirestars.blp"));
+    CHECK_FALSE(isStarLayer("environments\\stars\\nagrandnight_dome01.blp"));
+    CHECK_FALSE(isStarLayer("environments\\stars\\dalaran_night_clouds02.blp"));
+    CHECK_FALSE(isStarLayer("environments\\stars\\starsandclouds.blp"));
+    CHECK_FALSE(isStarLayer("environments\\stars\\starbrightenerlarge.blp"));
+}
+
 TEST_CASE("the other layers of the same dome are left alone", "[m2][sky][stars]") {
     // Suppressing these would delete the sky itself, not its stars.
     REQUIRE_FALSE(isStarLayer("environment\\stars\\auchindoun_clouds01.blp"));

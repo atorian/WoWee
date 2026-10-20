@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "rt_lookup_probe.hpp"
+#include "rt_residency_probe.hpp"
 
 using namespace wowee::rendering;
 
@@ -105,6 +106,15 @@ int main(int argc, char** argv) {
             SDL_Quit();
             std::printf("%s\n", failures == 0 ? "PASS" : "FAIL");
             return failures == 0 ? 0 : 1;
+        }
+        if (hasArgument("--residency")) {
+            const int failures = checkRtResidency(ctx);
+            ctx.flushDeferredCleanup();
+            ctx.shutdown();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            std::printf("%s\n", failures ? "FAIL" : "PASS");
+            return failures ? 1 : 0;
         }
         RtScene scene;
         RtLighting lighting;
@@ -368,6 +378,19 @@ int main(int argc, char** argv) {
                            glm::length(incoming - expected) < .01);
                 }
             }
+        }
+
+        if (hasArgument("--sweep")) {
+            in.distance = 10.0f;
+            const uint32_t slot = recordFrame();
+            if (slot >= MAX_FRAMES_IN_FLIGHT) return 2;
+            readOutputs(slot);
+            const uint32_t x = te.width / 2, y = te.height / 2;
+            expect("outside RT radius has neutral sunlight and ambient",
+                   texel(lightTexels, x, y, 0) > .99f && texel(lightTexels, x, y, 1) > .99f);
+            expect("outside RT radius has no indirect-light correction",
+                   std::abs(texel(giTexels, x, y, 0)) + std::abs(texel(giTexels, x, y, 1)) +
+                   std::abs(texel(giTexels, x, y, 2)) < .001f);
         }
 
         destroyBuffer(ctx.getAllocator(), light);

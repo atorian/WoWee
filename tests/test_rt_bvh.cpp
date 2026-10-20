@@ -1,3 +1,4 @@
+#include "rendering/rt_region.hpp"
 // The hierarchy the software ray tracer walks.
 //
 // Closest hits are checked against a brute-force scan of every triangle, which
@@ -178,4 +179,33 @@ TEST_CASE("RT range allocator reuses and coalesces freed ranges", "[rt_bvh]") {
     CHECK(a.allocate(110) == 90);  // old tail and new space are one range
     a.release(z, 90);
     CHECK(a.allocate(0) == RtRangeAllocator::kFailed);
+}
+
+TEST_CASE("RT region keeps offscreen sunward casters and intersecting bounds", "[rt_region]") {
+    RtRegion region;
+    region.distance = 100;
+    region.indirectLength = 0;
+    region.sunDirection = {1, 0, 0};
+    CHECK(region.keeps({{-5, -5, -5}, {5, 5, 5}}, false));
+    CHECK(region.keeps({{900, -2, -2}, {910, 2, 2}}, false));
+    CHECK_FALSE(region.keeps({{-910, -2, -2}, {-900, 2, 2}}, false));
+    CHECK_FALSE(region.keeps({{900, 500, -2}, {910, 510, 2}}, false));
+    // The centre is outside the receiver area; part of a large building is in it.
+    region.sunlight = false;
+    CHECK(region.keeps({{90, -20, -20}, {1000, 20, 20}}, false));
+    CHECK_FALSE(region.keeps({{200, -20, -20}, {1000, 20, 20}}, false));
+}
+
+TEST_CASE("RT residency has a margin and includes indirect shadow origins", "[rt_region]") {
+    RtRegion region;
+    region.distance = 100;
+    region.indirectLength = 0;
+    region.sunlight = false;
+    RtAabb edge{{108, -1, -1}, {110, 1, 1}};
+    CHECK_FALSE(region.keeps(edge, false));
+    CHECK(region.keeps(edge, true));
+    region.indirectLength = 120;
+    CHECK(region.keeps({{200, -1, -1}, {210, 1, 1}}, false));
+    region.centre = {1000, 0, 0};
+    CHECK_FALSE(region.keeps(edge, true));
 }

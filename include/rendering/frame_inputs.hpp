@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/rt_distance.hpp"
 
 #include "rendering/overlay_system.hpp"
 
@@ -61,6 +62,7 @@ struct FrameInputs {
     bool minimapEnabled = false;
     uint32_t windowWidth = 0, windowHeight = 0;
     int rtMode = 0;
+    float rtDistance = kDefaultRtDistance;
     int fogQuality = 0;
     uint32_t msaaSamples = 1;
     FramePostProcessSettings postProcess;

@@ -18,6 +18,7 @@ class Clouds;
 class LensFlare;
 class SkyBodies;
 class LightingManager;
+class M2Renderer;
 
 /**
  * Sky rendering parameters (extracted from LightingManager)
@@ -113,7 +114,8 @@ public:
     };
     Frame extract() const;
     void record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                const Camera& camera, const SkyParams& params, const Frame& frame);
+                const Camera& camera, const SkyParams& params, const Frame& frame,
+                M2Renderer* skyModels = nullptr);
 
     /**
      * Enable/disable procedural stars (DEBUG/FALLBACK)

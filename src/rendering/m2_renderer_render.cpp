@@ -1207,9 +1207,10 @@ void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
 
 }  // namespace
 
-void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&) {
+void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&,
+                        const StarReplacement& drawStars) {
     if (!opaquePipeline_) return;
-    recordView(cmd, perFrameSet);
+    recordView(cmd, perFrameSet, drawStars);
 }
 
 
@@ -1582,7 +1583,26 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
 }
 
 
-void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                       const M2ModelGPU& model, const StarReplacement& drawStars) {
+    drawStars();
+    // A different renderer just bound its pipeline, descriptors and vertices.
+    // Restore all M2 bindings; callers invalidate their pipeline/material cache.
+    const uint32_t frame = vkCtx_->getCurrentFrame();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    const VkDescriptorSet bones = megaBoneSet_[frame] ? megaBoneSet_[frame] : dummyBoneSet_;
+    if (bones) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                     pipelineLayout_, 2, 1, &bones, 0, nullptr);
+    if (instanceSet_[frame]) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipelineLayout_, 3, 1, &instanceSet_[frame], 0, nullptr);
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
+    vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+}
+
+void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                            const StarReplacement& drawStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& sortedVisible_ = recording_->sortedVisible_;
 
@@ -1774,6 +1794,13 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
                 for (size_t bi = 0; bi < model.batches.size(); bi++) {
                     const auto& batch = model.batches[bi];
                     const char* skipped = opaqueBatchSkip(model, bi, lod, diagThisModel, recording_->suppressStars);
+                    if (drawStars && recording_->suppressStars && batch.starLayer &&
+                        batch.blendMode <= 1 && !batch.blendedByOpacity &&
+                        !opaqueBatchSkip(model, bi, lod, diagThisModel, false)) {
+                        recordStarReplacement(cmd, perFrameSet, model, drawStars);
+                        currentPipeline = VK_NULL_HANDLE;
+                        currentMaterialSet = VK_NULL_HANDLE;
+                    }
                     if (diagThisModel) {
                         static std::set<std::pair<const void*, size_t>> saidDraw;
                         if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
@@ -1905,7 +1932,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     // With the water out of the scene pass, the blended half waits for it:
     // drawn now, the water would be laid over it.
     blendedPendingAfterWater_ = drawsBlendedAfterWater();
-    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet);
+    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars);
 
     // How many of the sky's layers were actually drawn this frame.
     //
@@ -1927,7 +1954,8 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     }
 }
 
-void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                                       const StarReplacement& drawStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& transparentVisible_ = recording_->transparentVisible_;
     const auto& glowSprites_ = recording_->glowSprites_;
@@ -2026,6 +2054,15 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                     instance.globalSequenceTime, model.globalSequenceDurations);
             }
             if (layerOpacity <= kM2BatchHiddenOpacity) continue;
+
+            if (recording_->suppressStars && batch.starLayer) {
+                if (drawStars) {
+                    recordStarReplacement(cmd, perFrameSet, model, drawStars);
+                    currentPipeline = VK_NULL_HANDLE;
+                    currentMaterialSet = VK_NULL_HANDLE;
+                }
+                continue;
+            }
 
             // WOWEE_SKY_M2_SKIP_BLEND=<n> drops the sky's layers of one blend
             // mode. Its thirty-four batches are six opaque, ten alpha-blended

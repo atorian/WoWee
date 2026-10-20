@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/rt_region.hpp"
 
 #include "rendering/view_distance.hpp"
 #include "rendering/frame_inputs.hpp"
@@ -377,6 +378,7 @@ private:
     Camera renderCamera_;
     [[nodiscard]] const Camera* frameCamera() const { return &renderCamera_; }
     int requestedRtMode_ = 0;
+    float requestedRtDistance_ = kDefaultRtDistance;
     int requestedFogQuality_ = 0;
     VkSampleCountFlagBits requestedMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
@@ -584,6 +586,7 @@ public:
     /// Ray traced lighting: 0 off, 1 sun shadows, 2 + ambient occlusion,
     /// 3 + one-bounce diffuse. See RtLighting.
     void setRtLightingMode(int mode);
+    void setRtDistance(float yards) { requestedRtDistance_ = clampRtDistance(yards); }
     /// A multiplier on how thick that air is; 1 is the default mist.
     void setVolumetricFogDensity(float density) { volumetricFogDensity_ = glm::clamp(density, 0.0f, 3.0f); }
     /// Rays streaming from the sun across the finished picture. See SunShafts.

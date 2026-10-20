@@ -43,12 +43,6 @@ public:
     float animationTime() const { return twinkleTime; }
 
     /**
-     * Enable/disable star rendering
-     */
-    void setEnabled(bool enabled) { renderingEnabled = enabled; }
-    [[nodiscard]] bool isEnabled() const { return renderingEnabled; }
-
-    /**
      * Get number of stars
      */
     [[nodiscard]] int getStarCount() const { return starCount; }
@@ -79,7 +73,6 @@ private:
     VmaAllocation vertexAlloc = VK_NULL_HANDLE;
 
     float twinkleTime = 0.0f;
-    bool renderingEnabled = true;
 };
 
 } // namespace rendering

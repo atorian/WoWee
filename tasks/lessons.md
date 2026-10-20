@@ -1,5 +1,15 @@
 # Lessons
 
+- 2026-10-20 — The sky HUD reported stars OFF from a retired StarField flag while frame snapshots enabled point stars. After moving render controls into snapshots, remove unused control fields and make diagnostics read the same owner as the setting. Label a rendering-mode setting separately from whether an effect is visible at the current hour.
+
+- 2026-10-20 — Correcting the Sharp stars HUD did not establish that the sky's baked star layer was replaced: suppression reached the world M2 renderer and only its opaque pass, while sky models used a separate renderer and blended pass. Follow an effect through every owning renderer and blend pass, and compare enabled/disabled frame captures before claiming its intended visual result.
+
+- 2026-10-20 — A hardware/compute test script set WOWEE_RT_FORCE_SOFTWARE=0 for its hardware run, but VkContext tests presence, so both runs used compute. Remove a presence-based flag to disable it, keep single native arguments in a typed PowerShell array, and assert the actual backend and scenario marker in every probe log.
+
+- 2026-10-20 — RT GPU fixtures must verify a nonempty tracing scene. The animated lamppost used in frame-input comparisons is deliberately excluded from RT registration, so its rendered image alone does not exercise intersections. Use static geometry or WMO and assert the expected resident placements before judging RT behaviour.
+
+- 2026-10-20 — After 5в, the live Dalaran log showed 27–32 ms in scene extraction and 66–80 ms total CPU frame time with about 206k resident M2 instances. Pixel equality and lifetime tests do not validate snapshot cost. Profile extraction per subsystem on a populated scene, reuse immutable spatial/resource blocks, and compare total frame time when moving work between phases; an aggregate extraction timer cannot assign its cost to a particular renderer.
+
 - 2026-10-20 — Ships at Orgrimmar's zeppelin towers and swapped pumpkin/sign geometry were model-ID aliasing after realm patches mounted between maps. `rebuildLookups()` reset allocators inside AssetCaches while renderer models stayed resident. Keep resource identity allocation outside replaceable lookup caches for every model category. Verify with real asynchronous spawns before and after cache invalidation in reversed load order; a static scene and correct requested filenames do not exercise this boundary.
 
 - 2026-10-20 — A foreground fly-through with Vulkan validation looked to the user like a severe FPS regression. Announce diagnostic runs as unsuitable for FPS comparison, keep them short when validation reports errors, and restore the ordinary client promptly. Check the running process and its current log before attributing low FPS to the refactor or promising later plan stages will recover it; compare the same scene and settings without validation.

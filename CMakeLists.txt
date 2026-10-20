@@ -2223,6 +2223,18 @@ if(WOWEE_BUILD_TESTS)
     wowee_add_scene_test(scene_transport_shown_again_casts transport_shown_again.json
                          "WMO shadow draw calls: [1-9][0-9]* in")
     if(Python3_FOUND)
+        add_test(NAME scene_sharp_stars
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_sharp_stars.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/sharp-stars/scene)
+        set_tests_properties(scene_sharp_stars PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME scene_sharp_stars_fxaa
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_sharp_stars.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/sharp-stars/fxaa --fxaa --msaa 2)
+        set_tests_properties(scene_sharp_stars_fxaa PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME scene_rt_radius
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_rt_radius.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/rt-radius/scene)
+        set_tests_properties(scene_rt_radius PROPERTIES SKIP_RETURN_CODE 77)
         foreach(object m2 wmo character terrain water)
             add_test(NAME scene_frame_scene_${object}
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_frame_inputs.py

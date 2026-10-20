@@ -1433,6 +1433,7 @@ FrameInputs Renderer::extractFrameInputs() {
         in.windowHeight = surface_->getHeight();
     }
     in.rtMode = requestedRtMode_;
+    in.rtDistance = requestedRtDistance_;
     in.fogQuality = requestedFogQuality_;
     in.msaaSamples = static_cast<uint32_t>(requestedMsaaSamples_);
     if (postProcessPipeline_) in.postProcess = postProcessPipeline_->requestedSettings();
@@ -1503,7 +1504,6 @@ FrameInputs Renderer::extractFrameInputs() {
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
     if (m2Renderer) {
         m2Renderer->setViewDistance(in.viewDistance);
-        m2Renderer->setSuppressBakedStars(in.sharpStars);
         const auto shelterFrame = overheadFrameFor(glm::vec2(in.camera.getPosition()),
             in.camera.getPosition().z + ShelterMap::kAbove, ShelterMap::kHalfExtent,
             ShelterMap::kRange, ShelterMap::kTexels);
@@ -1512,7 +1512,10 @@ FrameInputs Renderer::extractFrameInputs() {
             in.shadowDistance * 1.35f, in.weather.any() ? &shelterMatrix : nullptr,
             ShelterMap::kHalfExtent * 1.415f);
     }
-    if (skyboxModelRenderer_) scene->skyModels = skyboxModelRenderer_->extract(in.camera, in.localLights, in.time, glm::mat4(0.0f), 1.0f);
+    if (skyboxModelRenderer_) {
+        skyboxModelRenderer_->setSuppressBakedStars(in.sharpStars);
+        scene->skyModels = skyboxModelRenderer_->extract(in.camera, in.localLights, in.time, glm::mat4(0.0f), 1.0f);
+    }
     if (grassRenderer_) scene->grass = grassRenderer_->extract();
     if (questMarkerRenderer) scene->markers = questMarkerRenderer->extract(in.camera, in.time);
     if (footprintRenderer) scene->footprints = footprintRenderer->extract(in.camera);
@@ -1529,7 +1532,16 @@ FrameInputs Renderer::extractFrameInputs() {
         if (wmoRenderer) wmoRenderer->syncRtScene();
         if (m2Renderer) m2Renderer->syncRtScene();
     }
-    if (rtScene_) scene->rtChanges = rtScene_->extractChanges();
+    if (rtScene_) {
+        RtRegion region;
+        region.enabled = in.rtMode != 0;
+        region.centre = in.camera.getPosition();
+        region.distance = in.rtDistance;
+        region.indirectLength = in.rtMode >= 3 ? kRtGiLength : in.rtMode >= 2 ? kRtAoRadius : 0.0f;
+        region.sunDirection = in.hasLighting ? -in.lighting.directionalDir : glm::vec3(0, 0, 1);
+        region.sunlight = region.sunDirection.z > -0.05f;
+        scene->rtChanges = rtScene_->extractChanges(region);
+    }
     in.scene = std::move(scene);
 
     return in;
@@ -1681,7 +1693,10 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     }
 
     // Retire replaced images; each consumer set is rewritten after its fence.
-    if (rtLighting_) rtLighting_->prepare(sceneRenderExtent());
+    if (rtLighting_) {
+        rtLighting_->setDistance(inputs.rtDistance);
+        rtLighting_->prepare(sceneRenderExtent());
+    }
     targetsStage.reset();
 
     rtRecordedThisFrame_ = false;
@@ -3276,11 +3291,9 @@ void Renderer::renderSkyBackground(float timeOfDay,
         useOriginalSkybox);
     params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
     params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
-    skySystem->record(currentCmd, skyPerFrameDescSets[slot], *frameCamera(), params, frameInputs_.scene->sky);
-    if (drawSkyModels) {
-        skyboxModelRenderer_->prepareRender(slot, *frameCamera());
-        skyboxModelRenderer_->render(currentCmd, skyPerFrameDescSets[slot], *frameCamera());
-    }
+    if (drawSkyModels) skyboxModelRenderer_->prepareRender(slot, *frameCamera());
+    skySystem->record(currentCmd, skyPerFrameDescSets[slot], *frameCamera(), params,
+                      frameInputs_.scene->sky, drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
     skyBackground_->end(currentCmd, slot);
 }
 
@@ -3467,11 +3480,9 @@ void Renderer::renderWorld() {
                 // puts its glare out (0x7f37c3).
                 skyParams.sunGlareVisibility =
                     frameInputs_.sunGlare * sky_celestial::weatherFade(frameInputs_.weather.strength());
-                skySystem->record(cmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky);
+                skySystem->record(cmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
+                                  drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
                 logSunDiagnostic(skyParams);
-                if (drawSkyModels) {
-                    skyboxModelRenderer_->render(cmd, perFrameSet, *frameCamera());
-                }
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3700,12 +3711,10 @@ void Renderer::renderWorld() {
                 useOriginalSkybox);
             skyParams.sunGlareVisibility =
                 frameInputs_.sunGlare * sky_celestial::weatherFade(frameInputs_.weather.strength());
-            skySystem->record(currentCmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky);
+            if (drawSkyModels) skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
+            skySystem->record(currentCmd, perFrameSet, *frameCamera(), skyParams, frameInputs_.scene->sky,
+                              drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
             logSunDiagnostic(skyParams);
-            if (drawSkyModels) {
-                skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
-                skyboxModelRenderer_->render(currentCmd, perFrameSet, *frameCamera());
-            }
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
@@ -5151,6 +5160,7 @@ void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool
     in.sunColor = glm::vec3(currentFrameData.lightColor);
     in.skyColor = glm::vec3(currentFrameData.ambientColor);
     in.sunUp = in.sunDir.z > -0.05f;
+    in.distance = frameInputs_.rtDistance;
     GpuPass pass(*vkCtx, currentCmd, "rt_lighting");
     CpuStage stage(vkCtx->cpuStages(), stageGroup, "rt lighting");
     rtLighting_->record(currentCmd, sceneDepth, sceneExtent, depthIsMsaa, in);

@@ -1828,6 +1828,7 @@ void GameScreen::saveSettings() {
     out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
     out << "light_shafts=" << settingsPanel_.pendingVolumetricFog << "\n";
     out << "ray_traced_lighting=" << settingsPanel_.pendingRtLighting << "\n";
+    out << "rt_distance=" << settingsPanel_.pendingRtDistance << "\n";
     out << "mist_density=" << settingsPanel_.pendingVolumetricDensity << "\n";
     out << "sharp_stars=" << (settingsPanel_.pendingSharpStars ? 1 : 0) << "\n";
     out << "sun_shafts=" << (settingsPanel_.pendingSunShafts ? 1 : 0) << "\n";
@@ -2076,6 +2077,7 @@ void GameScreen::loadSettings() {
             else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "light_shafts") settingsPanel_.pendingVolumetricFog = std::clamp(std::stoi(val), 0, 3);
             else if (key == "ray_traced_lighting") settingsPanel_.pendingRtLighting = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "rt_distance") settingsPanel_.pendingRtDistance = rendering::clampRtDistance(std::stof(val));
             else if (key == "mist_density") settingsPanel_.pendingVolumetricDensity = std::clamp(std::stof(val), 0.0f, 3.0f);
             else if (key == "sharp_stars") settingsPanel_.pendingSharpStars = (val == "1");
             else if (key == "sun_shafts") settingsPanel_.pendingSunShafts = (val == "1");

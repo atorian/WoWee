@@ -443,6 +443,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             renderer->setShadowsEnabled(settingsPanel_.pendingShadows);
             renderer->setShadowDistance(settingsPanel_.pendingShadowDistance);
             renderer->setViewDistance(settingsPanel_.pendingViewDistance);
+            renderer->setRtDistance(settingsPanel_.pendingRtDistance);
             // The latch waits for the pipeline, not just the renderer.
             //
             // Settings are loaded in the constructor, before the renderer is

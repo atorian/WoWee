@@ -12,8 +12,9 @@ void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= samples.length()) return;
     Sample s = samples[i];
-    rtParams = vec4(s.settings.z, 0.0, 0.0, 0.0);
+    rtParams = vec4(s.settings.z, s.settings.w * 0.8, s.settings.w, 0.0);
     RtLight light = rtLightAtProjected(s.point.xy, s.point.z, s.settings.xy, s.normal.xyz);
+    light.weight *= rtRangeWeight(s.point.z);
     results[i].ambientWeight = vec4(rtAmbient(light, vec3(0.3, 0.35, 0.4)), light.weight);
     results[i].sunAo = vec4(light.sun, light.ao, 0.0, 0.0);
 }

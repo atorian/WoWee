@@ -35,6 +35,7 @@
 
 #include "rendering/rt_build_budget.hpp"
 #include "rendering/rt_bvh.hpp"
+#include "rendering/rt_region.hpp"
 #include "rendering/rt_range_allocator.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
@@ -81,7 +82,7 @@ public:
     };
     using Changes = std::vector<Change>;
     /// Producer-side handoff. Subsequent edits belong to the next frame.
-    Changes extractChanges();
+    Changes extractChanges(const RtRegion& region = {});
     /// Consumer-side: apply a frame's ordered changes, even with RT disabled.
     void applyChanges(std::span<const Change> changes);
 
@@ -125,6 +126,7 @@ private:
         bool live = false;
         MeshId mesh = kInvalid;
         glm::mat4 objectToWorld{1.0f};
+        RtAabb bounds;
     };
 
     void applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source);
@@ -137,7 +139,17 @@ private:
     Changes changes_;
     uint64_t nextChangeSerial_ = 1;
     std::atomic<uint64_t> appliedChangeSerial_{0};
-    std::vector<bool> sourceMeshes_;
+    struct SourceMesh {
+        std::shared_ptr<const MeshSource> source;
+        RtAabb bounds;
+    };
+    std::vector<SourceMesh> sourceMeshes_;
+    std::vector<std::shared_ptr<const MeshSource>> publishedMeshes_;
+    std::vector<Instance> publishedInstances_;
+    std::vector<uint8_t> wantedInstances_, wantedMeshes_;
+    RtRegion publishedRegion_;
+    bool regionDirty_ = true;
+    std::atomic<uint64_t> sourceBytes_{0};
     std::vector<Instance> sourceInstances_;
     struct Mesh {
         bool live = false;
@@ -174,6 +186,8 @@ private:
     };
 
     struct GpuPool {
+        uint64_t epoch = 0;
+        bool compactionFailed = false;
         AllocatedBuffer buffer{};
         RtRangeAllocator alloc;
         uint32_t elementSize = 0;
@@ -200,6 +214,7 @@ private:
 
     bool loadHardwareEntryPoints();
     bool createDescriptors();
+    void compactPools(VkCommandBuffer cmd);
     void ensurePoolCapacity(VkCommandBuffer cmd, GpuPool& pool, uint32_t needed);
     uint32_t poolAllocate(VkCommandBuffer cmd, GpuPool& pool, uint32_t count);
     void observeLastBuild();

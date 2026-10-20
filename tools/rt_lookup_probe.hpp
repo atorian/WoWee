@@ -32,6 +32,9 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
     };
     samples.push_back(Sample{{36.25f, 30, 10, 0}, {0, 0, 3, 0}, {0, 0, 1, 0}});
     samples.push_back(Sample{{36.75f, 30, 20.7125f, 0}, {.15f, 0, 3, 0}, {0, 0, 1, 0}});
+    samples.push_back(Sample{{30, 30, 10, 0}, {0, 0, 3, 20}, {0, 0, 1, 0}}); // inside fade
+    samples.push_back(Sample{{30, 30, 10, 0}, {0, 0, 3, 100.0f / 9.0f}, {0, 0, 1, 0}}); // fade midpoint
+    samples.push_back(Sample{{30, 30, 10, 0}, {0, 0, 3, 10}, {0, 0, 1, 0}}); // outside radius
     const size_t checkedSamples = samples.size();
     if (benchmark) {
         // A pixel-sized workload, mostly stable receivers, with silhouette
@@ -198,7 +201,8 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
                            "AO-only mode", "sun-only mode", "outside image",
                            "wrong plane rejected", "matching lamp lid", "opposite side rejected",
                            "fractional GI gradient", "fractional AO gradient",
-                           "foreground bilinear footprint", "background bilinear footprint"};
+                           "foreground bilinear footprint", "background bilinear footprint",
+                           "inside RT range", "halfway through RT transition", "outside RT range"};
     int failures = 0;
     for (size_t i = 0; i < checkedSamples; ++i) {
         const bool fallback = i == 4 || i == 5 || i == 8 || i == 9 || i == 11;
@@ -209,16 +213,19 @@ inline int checkRtLookup(wowee::rendering::VkContext& ctx, bool benchmark = fals
         if (i == 13) expectedAmbient = glm::vec3(.3f, .35f, .4f) * (.1f + .01f * samples[i].point.x);
         if (i == 14) expectedAmbient = glm::vec3(.02f, .03f, .04f);
         if (i == 15) expectedAmbient = glm::vec3(.08f, .1f, .12f);
+        const float expectedWeight = i == 17 ? .5f : i == 18 ? 0.0f : 1.0f;
+        if (i >= 16) expectedAmbient = glm::vec3(.02f, .03f, .04f);
         // GI is a signed indirect correction to AO-attenuated ambient,
         // not a replacement that silently drops the Full mode's AO.
         if (!fallback && samples[i].settings.z == 3) {
-            const float ao = i == 12 ? .1825f : (i == 0 || i == 10 || i == 14) ? .4f : .65f;
+            const float ao = i == 12 ? .1825f : (i == 0 || i == 10 || i == 14 || i >= 16) ? .4f : .65f;
             expectedAmbient += glm::vec3(.3f, .35f, .4f) * ao;
         }
-        const float expectedSun = i == 14 ? .25f : i == 15 ? .75f : i >= 12 ? .2f + .01f * samples[i].point.x
+        if (i >= 16) expectedAmbient = glm::mix(glm::vec3(.3f, .35f, .4f), expectedAmbient, expectedWeight);
+        const float expectedSun = i >= 16 ? .25f : i == 14 ? .25f : i == 15 ? .75f : i >= 12 ? .2f + .01f * samples[i].point.x
             : (i == 0 || i >= 6 ? .25f : .75f);
         const bool ok = glm::length(glm::vec3(results[i].ambientWeight) - expectedAmbient) < (i >= 12 ? 1e-5f : .002f) &&
-            std::abs(results[i].ambientWeight.w - (fallback ? 0.0f : 1.0f)) < .002f &&
+            std::abs(results[i].ambientWeight.w - (fallback ? 0.0f : expectedWeight)) < .002f &&
             (fallback || std::abs(results[i].sunAo.x - expectedSun) < (i >= 12 ? 1e-5f : .002f));
         std::printf("lookup %-30s weight=%.3f ambient=%.3f %.3f %.3f %s\n", names[i],
                     results[i].ambientWeight.w, results[i].ambientWeight.x, results[i].ambientWeight.y,

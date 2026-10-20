@@ -2,6 +2,7 @@
 
 #include "ui/graphics_defaults.hpp"
 #include "rendering/view_distance.hpp"
+#include "rendering/rt_distance.hpp"
 
 namespace wowee {
 namespace ui {
@@ -204,6 +205,13 @@ constexpr SettingDesc kSchema[] = {
      "has it and a slower compute path where it does not.\n"
      "Characters still cast shadows from the shadow map.",
      "Off|Sun shadows|Shadows and occlusion|Shadows, occlusion and bounce light", 0},
+
+    {"rtdistance", "RT distance", SettingKind::Float, rendering::kMinRtDistance, rendering::kMaxRtDistance, 25,
+     "Ray Tracing", "Range",
+     "Distance from the camera where ray traced lighting fades into ordinary\n"
+     "lighting, in yards. The transition occupies the last 20% of the radius.\n"
+     "A shorter distance uses less video memory and reduces ray tracing work.",
+     "", rendering::kDefaultRtDistance, "raytracedlighting!=0"},
 
     // --------------------------------------------------------------- Upscaling
     {"upscaling", "Upscaling", SettingKind::Enum, 0, 2, 1, "Upscaling", "Mode",

@@ -354,11 +354,15 @@ void PerformanceHUD::render(const Renderer* renderer, const Camera* camera) {
                 line("Moon", SkyBodies::Body::Moon);
             }
 
-            // Star field info
+            // The setting selects point stars or the sky model's texture;
+            // it does not switch off the night sky's stars.
             auto* starField = renderer->getStarField();
             if (starField) {
-                ImGui::Text("Stars: %d (%s)", starField->getStarCount(),
-                           starField->isEnabled() ? "ON" : "OFF");
+                if (renderer->areSharpStars()) {
+                    ImGui::Text("Sharp stars: ON (%d points)", starField->getStarCount());
+                } else {
+                    ImGui::TextUnformatted("Sharp stars: OFF (sky texture)");
+                }
             }
 
             // Cloud info

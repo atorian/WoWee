@@ -549,7 +549,8 @@ M2BatchTexClassification classifyBatchTexture(const std::string& lowerTexKey)
     // must stay, and STARBRIGHTENER, which is a brightening card rather than
     // the field itself. The directory is checked as well as the name: a floor
     // doodad called UL_SKY_FLOOR_STARS is not a sky.
-    if (lowerTexKey.find("environment\\stars\\") != std::string::npos) {
+    if (lowerTexKey.find("environments\\stars\\") != std::string::npos ||
+        lowerTexKey.find("environment\\stars\\") != std::string::npos) {
         // The directory is called stars too, so the name has to be read on its
         // own: matching the whole path made every cloud and planet in the
         // folder a star layer, which would have deleted the sky.

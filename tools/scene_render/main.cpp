@@ -61,6 +61,7 @@
 //     "shadowQuality": 2,                 // 0-4, as the settings slider
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "fxaa": false,                      // FXAA, drawn through its own target
+//     "sharpStars": true,                 // point stars in place of baked star layers
 //     "viewDistance": 1900.0,             // world geometry range, in yards
 //     "fogStrength": 0.4,                 // the settings panel's atmosphere:
 //     "rayTracedLighting": 3,             // RT mode: 0 off, 1 shadows, 2 +AO, 3 +GI
@@ -100,6 +101,7 @@
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/render_surface.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/rt_scene.hpp"
 #include "rendering/scene_commands.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "pipeline/terrain_mesh.hpp"
@@ -696,6 +698,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     if (scene.contains("rayTracedLighting")) {
         renderer.setRtLightingMode(scene["rayTracedLighting"].get<int>());
     }
+    renderer.setRtDistance(scene.value("rtDistance", rendering::kDefaultRtDistance));
+    renderer.setSharpStars(scene.value("sharpStars", true));
     if (scene.contains("volumetricFog")) renderer.setVolumetricFogQuality(scene["volumetricFog"].get<int>());
     if (scene.contains("volumetricDensity")) {
         renderer.setVolumetricFogDensity(scene["volumetricDensity"].get<float>());
@@ -859,6 +863,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 renderer.getM2Renderer()->getDrawCallCount());
     std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
                 renderer.getWMORenderer()->getShadowDrawCallCount());
+    if (const auto* rt = renderer.getRtScene()) {
+        const auto stats = rt->stats();
+        std::printf("scene_render: RT scene %u meshes %u instances %llu bytes\n",
+                    stats.meshes, stats.instances, static_cast<unsigned long long>(stats.gpuBytes));
+    }
     if (!capture.write(outPath)) {
         std::fprintf(stderr, "scene_render: could not write %s\n", outPath.c_str());
         return 1;

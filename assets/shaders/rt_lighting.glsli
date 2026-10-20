@@ -181,7 +181,11 @@ RtLight rtLightAt(vec3 worldPos, vec3 receiverNormal) {
         return RtLight(0.0, 1.0, 1.0, vec3(0.0));
     }
     if (dot(receiverNormal, -relativePos) < 0.0) receiverNormal = -receiverNormal;
-    return rtLightAtProjected(f, expected, gradient, receiverNormal);
+    float rangeWeight = rtRangeWeight(expected);
+    if (rangeWeight <= 0.0) return RtLight(0.0, 1.0, 1.0, vec3(0.0));
+    RtLight result = rtLightAtProjected(f, expected, gradient, receiverNormal);
+    result.weight *= rangeWeight;
+    return result;
 }
 
 vec4 rtReflectionAt(vec3 worldPos, vec3 normal) {
@@ -193,6 +197,9 @@ vec4 rtReflectionAt(vec3 worldPos, vec3 normal) {
         return vec4(0.0);
     if (dot(normal, -relativePos) < 0.0) normal = -normal;
     vec2 f = uv * vec2(textureSize(uRtReflection, 0)) - 0.5;
-    return rtReflectionAtProjected(f, length(relativePos), normal);
+    float expected = length(relativePos);
+    vec4 result = rtReflectionAtProjected(f, expected, normal);
+    result.a *= rtRangeWeight(expected);
+    return result;
 }
 #endif

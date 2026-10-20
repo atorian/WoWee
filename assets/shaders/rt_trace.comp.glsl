@@ -31,7 +31,7 @@ void main() {
     vec4 g = texelFetch(uGbufCur, px, 0);
     float dist = rtGbufDist(g);
     uint mode = uint(pass.params.x + 0.5);
-    if (dist <= 0.0) {
+    if (dist <= 0.0 || (pass.misc.w > 0.0 && dist >= pass.misc.w)) {
         imageStore(uRaw, px, vec4(1.0, 1.0, 0.0, 0.0));
         if (mode >= RT_MODE_GI) imageStore(uRawGi, px, vec4(0.0));
         imageStore(uReflection, px, vec4(0.0));

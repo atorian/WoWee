@@ -1,5 +1,6 @@
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"
+#include "rendering/rt_region.hpp"
 #include "rendering/vk_shader.hpp"
 #include "core/logger.hpp"
 
@@ -49,12 +50,6 @@ enum Binding : uint32_t {
 };
 
 constexpr VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-constexpr float kAoRadius = 3.0f;         // yards
-constexpr float kGiRayLength = 120.0f;
-constexpr float kShadowRayLength = 1500.0f;
-// The sun's angular radius is about a quarter of a degree. Twice that gives a
-// penumbra that reads at game distances without looking like an area light.
-constexpr float kSunTanRadius = 0.0087f;
 
 void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess,
                    VkPipelineStageFlags2 dst, VkAccessFlags2 dstAccess) {
@@ -483,6 +478,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     ctx_->gpuMark(cmd, RtScene::kGpuMarkLabel);
 
     // Last frame's slot holds history only if last frame traced into it.
+    setDistance(in.distance);
     const bool havePrev = havePrev_ && resultMode_ == mode_ && resultFrame_ != 0 && resultFrame_ + 1 == frameCounter_;
 
     RtPassData d{};
@@ -494,15 +490,15 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     d.prevViewProj = havePrev ? prevViewProj_ : relativeViewProj;
     d.cameraPos = glm::vec4(in.cameraPos, static_cast<float>(frameCounter_ & 0xFFFFFF));
     d.prevCameraPos = glm::vec4(havePrev ? prevCameraPos_ : in.cameraPos, 0.0f);
-    d.sunDir = glm::vec4(glm::normalize(in.sunDir), kSunTanRadius);
+    d.sunDir = glm::vec4(glm::normalize(in.sunDir), kRtSunTanRadius);
     d.sunColor = glm::vec4(in.sunColor, in.sunUp ? 1.0f : 0.0f);
     d.skyColor = glm::vec4(in.skyColor, 0.0f);
-    d.params = glm::vec4(static_cast<float>(mode_), kAoRadius, kGiRayLength, kShadowRayLength);
+    d.params = glm::vec4(static_cast<float>(mode_), kRtAoRadius, kRtGiLength, kRtShadowLength);
     d.extent = glm::vec4(traceExtent_.width, traceExtent_.height, 1.0f / traceExtent_.width,
                          1.0f / traceExtent_.height);
     d.sceneExtent = glm::vec4(sceneExtent.width, sceneExtent.height, 1.0f / sceneExtent.width,
                               1.0f / sceneExtent.height);
-    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, in.traceReflections ? 1.0f : 0.0f, 0.0f);
+    d.misc = glm::vec4(scene_->hasContent() ? 1.0f : 0.0f, havePrev ? 1.0f : 0.0f, in.traceReflections ? 1.0f : 0.0f, in.distance);
     std::memcpy(s.ubo.info.pMappedData, &d, sizeof(d));
 
     // The outputs of this slot were last read by the surfaces of the frame
@@ -559,6 +555,7 @@ void RtLighting::record(VkCommandBuffer cmd, VkImage sceneDepth, VkExtent2D scen
     resultViewProj_ = relativeViewProj;
     resultCameraPos_ = in.cameraPos;
     resultMode_ = mode_;
+    resultDistance_ = in.distance;
 }
 
 RtLighting::ConsumerData RtLighting::consumerData() const {
@@ -566,7 +563,7 @@ RtLighting::ConsumerData RtLighting::consumerData() const {
     if (!active() || resultFrame_ == 0 || resultFrame_ + 1 != frameCounter_) return c;
     c.viewProj = resultViewProj_;
     c.cameraPos = glm::vec4(resultCameraPos_, 1.0f);
-    c.params = glm::vec4(static_cast<float>(resultMode_), 1.0f, 0.0f, 0.0f);
+    c.params = glm::vec4(static_cast<float>(resultMode_), resultDistance_ * 0.8f, resultDistance_, 0.0f);
     return c;
 }
 

@@ -26,6 +26,7 @@ layout(location = 3) in float aColorTemp;
 
 layout(location = 0) out float vBrightness;
 layout(location = 1) out vec3 vColor;
+layout(location = 2) flat out float vFootprint;
 
 // Cool red-orange, through white, to hot blue-white: the spread a real field
 // shows. Every star used to be the same (0.9, 0.95, 1.0).
@@ -52,14 +53,14 @@ void main() {
     // gl_PointSize is in pixels, so a fixed one is a different angular size at
     // every resolution - the same star is twice as wide at 1080p as at 4K.
     // projection[1][1] is 1/tan(fovY/2), so this holds the angle instead, and
-    // the floor keeps the faint end from falling below a pixel and aliasing
-    // into a flicker. Size still tracks brightness, because a brighter point
-    // does spread further, but over a much narrower range than 2px to 4px.
+    // the floor reserves enough fragments to integrate a point over pixels.
+    // This is the filter's support, not a filled luminous disc.
     const float kAngularRadius = 0.0019;
     float sizeScale = mix(0.85, 1.30, aBrightness);
     gl_PointSize = clamp(
         kAngularRadius * push.viewportHeight * projection[1][1] * sizeScale,
-        1.5, 5.0);
+        3.0, 5.0);
+    vFootprint = gl_PointSize;
 
     vec4 clip = projection * rotView * vec4(aPos, 1.0);
     // On the far plane, so the world drawn before the sky occludes it.

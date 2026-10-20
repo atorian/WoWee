@@ -586,7 +586,11 @@ public:
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
     /// The opaque pass, and the blended one too unless it is drawn after the
     /// water (see renderAfterWater).
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
+    /// A replacement is recorded where a suppressed star sheet would draw,
+    /// so the sky's background and foreground retain their authored order.
+    using StarReplacement = std::function<void()>;
+    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
+                const StarReplacement& drawStars = {});
 
     /// Draw blended things - transparent batches, glow sprites, particles,
     /// and ribbons - in the water's pass, after the water, instead of in
@@ -957,7 +961,8 @@ private:
     void destroyBlendedPipelines(BlendedPipelines& pipes);
     /// Pass 2: the transparent batches and the glow sprites, after the opaque
     /// pass has culled, sorted and gathered them.
-    void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                               const StarReplacement& drawStars = {});
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -1355,7 +1360,10 @@ private:
     void extractCull(const Camera& camera, Frame& frame);
     void collectCullOutput(uint32_t frame);
     /// The opaque pass, from the lists cullView made; reads no instance.
-    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
+    void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                    const StarReplacement& drawStars);
+    void recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
+                               const M2ModelGPU& model, const StarReplacement& drawStars);
     /// The glow sprites the opaque pass would draw of one instance at this
     /// level of detail and distance fade.
     void appendGlowSprites(const M2Instance& instance, const M2ModelGPU& model, uint16_t lod,

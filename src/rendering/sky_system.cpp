@@ -2,6 +2,7 @@
 #include "rendering/sun_direction.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/starfield.hpp"
+#include "rendering/m2_renderer.hpp"
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/sky_bodies.hpp"
@@ -46,7 +47,6 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
         LOG_ERROR("Failed to initialize star field");
         return false;
     }
-    starField_->setEnabled(false); // Off by default; skybox is authoritative
 
     // Clouds (Vulkan)
     clouds_ = std::make_unique<Clouds>();
@@ -113,7 +113,8 @@ SkySystem::Frame SkySystem::extract() const {
 }
 
 void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                        const Camera& camera, const SkyParams& params, const Frame& frame) {
+                        const Camera& camera, const SkyParams& params, const Frame& frame,
+                        M2Renderer* skyModels) {
     if (!initialized_) {
         return;
     }
@@ -122,9 +123,6 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     if (skybox_ && frame.sky) {
         skybox_->render(cmd, perFrameSet, params);
     }
-
-    // Original client sky M2s supply their own celestial bodies, clouds, and
-    // nebula layers. The caller draws that model over the gradient underlay.
 
     // --- Procedural stars ---
     // Not only a fallback any more: with sharp stars on, the sky model keeps
@@ -142,16 +140,20 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     celestialSkipped_ = params.useOriginalSkybox && !renderProceduralStars;
     if (celestialSkipped_) {
+        if (skyModels) skyModels->render(cmd, perFrameSet, camera);
         return;
     }
 
-    if (starField_) {
-        if (renderProceduralStars) {
-            const float cloudDensity = params.cloudDensity;
-            const float fogDensity   = params.fogDensity;
-            starField_->render(cmd, perFrameSet, params.timeOfDay, cloudDensity, fogDensity, frame.twinkleTime);
-        }
-    }
+    bool starsRecorded = false;
+    const auto drawStars = [&] {
+        if (starsRecorded || !renderProceduralStars || !starField_) return;
+        starsRecorded = true;
+        starField_->render(cmd, perFrameSet, params.timeOfDay,
+                           params.cloudDensity, params.fogDensity, frame.twinkleTime);
+    };
+    // An authored dome can cover this underlay completely. Replace its star
+    // sheet at its actual layer instead, below the clouds that follow it.
+    if (!skyModels) drawStars();
 
     // --- The sun's disc, then the moon's, each on its own path (0x7f0b43) ---
     // Both in the sun's colour and put out by weather alike; each is gone when
@@ -177,6 +179,7 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         lensFlare_->render(cmd, camera, params.sunDisc.direction * 800.0f, params.sunColor,
                            params.sunGlareVisibility, frame.flareIntensity);
     }
+    if (skyModels) skyModels->render(cmd, perFrameSet, camera, drawStars);
 }
 
 void SkySystem::loadTextures(pipeline::AssetManager* assets) {

@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/rt_distance.hpp"
 
 #include "ui/buff_bar_layout.hpp"
 #include "ui/graphics_defaults.hpp"
@@ -63,6 +64,7 @@ public:
     int pendingVolumetricFog = 2;
     /// Ray traced lighting: 0 off, 1 sun, 2 + occlusion, 3 + bounce. See RtLighting.
     int pendingRtLighting = 0;
+    float pendingRtDistance = rendering::kDefaultRtDistance;
     /// A multiplier on how thick that mist is. See Renderer::setVolumetricFogDensity.
     float pendingVolumetricDensity = 1.0f;
     bool pendingWaterRefraction = true;

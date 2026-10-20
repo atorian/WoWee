@@ -174,6 +174,12 @@ void RtScene::shutdown() {
     changes_.clear();
     sourceMeshes_.clear();
     sourceInstances_.clear();
+    publishedMeshes_.clear();
+    publishedInstances_.clear();
+    wantedInstances_.clear();
+    wantedMeshes_.clear();
+    sourceBytes_.store(0);
+    regionDirty_ = true;
     freeMeshes_.clear();
     freeInstances_.clear();
     nextChangeSerial_ = 1;
@@ -213,9 +219,56 @@ void RtScene::post(Change change) {
     changes_.push_back(std::move(change));
 }
 
-RtScene::Changes RtScene::extractChanges() {
+RtScene::Changes RtScene::extractChanges(const RtRegion& region) {
     const uint64_t applied = appliedChangeSerial_.load(std::memory_order_acquire);
     std::erase_if(changes_, [applied](const Change& change) { return change.serial <= applied; });
+    if (!regionDirty_ && region == publishedRegion_) return changes_;
+    regionDirty_ = false;
+    publishedRegion_ = region;
+    publishedMeshes_.resize(sourceMeshes_.size());
+    publishedInstances_.resize(sourceInstances_.size());
+    wantedInstances_.assign(sourceInstances_.size(), 0);
+    wantedMeshes_.assign(sourceMeshes_.size(), 0);
+    for (InstanceId id = 0; id < sourceInstances_.size(); ++id) {
+        const auto& source = sourceInstances_[id];
+        if (!source.live || !sourceMeshes_[source.mesh].source) continue;
+        const bool retained = publishedInstances_[id].live;
+        if (!region.keeps(source.bounds, retained)) continue;
+        wantedInstances_[id] = 1;
+        wantedMeshes_[source.mesh] = 1;
+    }
+    // Remove placements before retiring/replacing their mesh identity. All
+    // deltas remain queued until acknowledged, even if this frame is dropped.
+    for (InstanceId id = 0; id < publishedInstances_.size(); ++id) {
+        auto& old = publishedInstances_[id];
+        if (old.live && (!wantedInstances_[id] || old.mesh != sourceInstances_[id].mesh ||
+                publishedMeshes_[old.mesh] != sourceMeshes_[old.mesh].source)) {
+            post({.kind = Change::Kind::RemoveInstance, .id = id});
+            old = {};
+        }
+    }
+    for (MeshId id = 0; id < sourceMeshes_.size(); ++id) {
+        auto& old = publishedMeshes_[id];
+        const auto& source = sourceMeshes_[id].source;
+        if (old && (!wantedMeshes_[id] || old != source)) {
+            post({.kind = Change::Kind::RemoveMesh, .id = id});
+            old.reset();
+        }
+        if (wantedMeshes_[id] && !old) {
+            post({.kind = Change::Kind::AddMesh, .id = id, .source = source});
+            old = source;
+        }
+    }
+    for (InstanceId id = 0; id < sourceInstances_.size(); ++id) {
+        if (!wantedInstances_[id]) continue;
+        const auto& source = sourceInstances_[id];
+        auto& old = publishedInstances_[id];
+        if (!old.live) post({.kind = Change::Kind::AddInstance, .id = id,
+                            .mesh = source.mesh, .transform = source.objectToWorld});
+        else if (old.objectToWorld != source.objectToWorld)
+            post({.kind = Change::Kind::MoveInstance, .id = id, .transform = source.objectToWorld});
+        old = source;
+    }
     return changes_;
 }
 
@@ -239,44 +292,55 @@ RtScene::MeshId RtScene::addMesh(MeshSource source) {
     if (source.indices.size() < 3 || source.surfaces.empty()) return kInvalid;
     const size_t triangles = source.indices.size() / 3;
     if (source.surfaces.size() != 1 && source.surfaces.size() != triangles) return kInvalid;
-    for (uint32_t index : source.indices) if (index >= source.positions.size()) return kInvalid;
+    RtAabb bounds;
+    for (uint32_t index : source.indices) {
+        if (index >= source.positions.size()) return kInvalid;
+        bounds.grow(source.positions[index]);
+    }
     MeshId id;
-    if (freeMeshes_.empty()) { id = static_cast<MeshId>(sourceMeshes_.size()); sourceMeshes_.push_back(true); }
-    else { id = freeMeshes_.back(); freeMeshes_.pop_back(); sourceMeshes_[id] = true; }
-    post({.kind = Change::Kind::AddMesh, .id = id,
-                       .source = std::make_shared<const MeshSource>(std::move(source))});
+    if (freeMeshes_.empty()) { id = static_cast<MeshId>(sourceMeshes_.size()); sourceMeshes_.emplace_back(); }
+    else { id = freeMeshes_.back(); freeMeshes_.pop_back(); }
+    sourceBytes_.fetch_add(pipeline::vectorBytes(source.positions) + pipeline::vectorBytes(source.indices) +
+                          pipeline::vectorBytes(source.surfaces), std::memory_order_relaxed);
+    sourceMeshes_[id] = {std::make_shared<const MeshSource>(std::move(source)), bounds};
+    regionDirty_ = true;
     return id;
 }
 
 void RtScene::removeMesh(MeshId id) {
-    if (id >= sourceMeshes_.size() || !sourceMeshes_[id]) return;
-    sourceMeshes_[id] = false;
-    post({.kind = Change::Kind::RemoveMesh, .id = id});
+    if (id >= sourceMeshes_.size() || !sourceMeshes_[id].source) return;
+    const auto& source = *sourceMeshes_[id].source;
+    sourceBytes_.fetch_sub(pipeline::vectorBytes(source.positions) + pipeline::vectorBytes(source.indices) +
+                          pipeline::vectorBytes(source.surfaces), std::memory_order_relaxed);
+    sourceMeshes_[id] = {};
     freeMeshes_.push_back(id);
+    regionDirty_ = true;
 }
 
 RtScene::InstanceId RtScene::addInstance(MeshId mesh, const glm::mat4& transform) {
-    if (mesh >= sourceMeshes_.size() || !sourceMeshes_[mesh]) return kInvalid;
+    if (mesh >= sourceMeshes_.size() || !sourceMeshes_[mesh].source) return kInvalid;
     InstanceId id;
     if (freeInstances_.empty()) { id = static_cast<InstanceId>(sourceInstances_.size()); sourceInstances_.emplace_back(); }
     else { id = freeInstances_.back(); freeInstances_.pop_back(); }
-    sourceInstances_[id] = Instance{true, mesh, transform};
-    post({.kind = Change::Kind::AddInstance, .id = id, .mesh = mesh, .transform = transform});
+    sourceInstances_[id] = {true, mesh, transform, transformBounds(sourceMeshes_[mesh].bounds, transform)};
+    regionDirty_ = true;
     return id;
 }
 
 void RtScene::setInstanceTransform(InstanceId id, const glm::mat4& transform) {
     if (id >= sourceInstances_.size() || !sourceInstances_[id].live ||
         sourceInstances_[id].objectToWorld == transform) return;
-    sourceInstances_[id].objectToWorld = transform;
-    post({.kind = Change::Kind::MoveInstance, .id = id, .transform = transform});
+    auto& source = sourceInstances_[id];
+    source.objectToWorld = transform;
+    source.bounds = transformBounds(sourceMeshes_[source.mesh].bounds, transform);
+    regionDirty_ = true;
 }
 
 void RtScene::removeInstance(InstanceId id) {
     if (id >= sourceInstances_.size() || !sourceInstances_[id].live) return;
-    sourceInstances_[id] = Instance{};
-    post({.kind = Change::Kind::RemoveInstance, .id = id});
+    sourceInstances_[id] = {};
     freeInstances_.push_back(id);
+    regionDirty_ = true;
 }
 
 void RtScene::applyAddMesh(MeshId id, std::shared_ptr<const MeshSource> source) {
@@ -390,24 +454,25 @@ void RtScene::applyRemoveMesh(MeshId id) {
     // the pool ranges and the slot only matter to a scene that is.
     std::weak_ptr<bool> alive = alive_;
     const uint64_t epoch = gpuEpoch_;
+    const uint64_t triEpoch = triPool_.epoch, nodeEpoch = nodePool_.epoch;
     VkDevice dev = ctx_->getDevice();
     VmaAllocator alloc = ctx_->getAllocator();
     auto destroyAs = pfnDestroyAs_;
-    ctx_->deferAfterAllFrameFences([this, alive, epoch, dev, alloc, destroyAs, id, triOffset,
+    ctx_->deferAfterAllFrameFences([this, alive, epoch, triEpoch, nodeEpoch, dev, alloc, destroyAs, triOffset,
                                     triCount, nodeOffset, nodeCount, blas,
                                     blasBuffer]() mutable {
         if (blas) destroyAs(dev, blas, nullptr);
         destroyBuffer(alloc, blasBuffer);
         if (alive.expired()) return;
-        if (epoch == gpuEpoch_ && triOffset != RtRangeAllocator::kFailed) triPool_.alloc.release(triOffset, triCount);
-        if (epoch == gpuEpoch_ && nodeOffset != RtRangeAllocator::kFailed)
+        if (epoch == gpuEpoch_ && triEpoch == triPool_.epoch && triOffset != RtRangeAllocator::kFailed) triPool_.alloc.release(triOffset, triCount);
+        if (epoch == gpuEpoch_ && nodeEpoch == nodePool_.epoch && nodeOffset != RtRangeAllocator::kFailed)
             nodePool_.alloc.release(nodeOffset, nodeCount);
     });
 }
 
 void RtScene::applyAddInstance(InstanceId id, MeshId mesh, const glm::mat4& transform) {
     if (instances_.size() <= id) instances_.resize(static_cast<size_t>(id) + 1);
-    instances_[id] = Instance{true, mesh, transform};
+    instances_[id] = Instance{true, mesh, transform, transformBounds(meshes_[mesh].bounds, transform)};
     ++liveInstances_;
     ++sceneVersion_;
 }
@@ -415,6 +480,7 @@ void RtScene::applyAddInstance(InstanceId id, MeshId mesh, const glm::mat4& tran
 void RtScene::applyMoveInstance(InstanceId id, const glm::mat4& transform) {
     if (id >= instances_.size() || !instances_[id].live) return;
     instances_[id].objectToWorld = transform;
+    instances_[id].bounds = transformBounds(meshes_[instances_[id].mesh].bounds, transform);
     ++sceneVersion_;
 }
 
@@ -449,6 +515,66 @@ void RtScene::stage(VkCommandBuffer cmd, VkBuffer dst, VkDeviceSize dstOffset, c
     ctx_->deferAfterAllFrameFences([alloc, staging]() mutable { destroyBuffer(alloc, staging); });
 }
 
+void RtScene::compactPools(VkCommandBuffer cmd) {
+    for (bool nodes : {false, true}) {
+        GpuPool& pool = nodes ? nodePool_ : triPool_;
+        if (!pool.buffer.buffer || pool.compactionFailed) continue;
+        uint32_t live = 0;
+        for (const auto& m : meshes_) if (m.live && m.uploaded) live += nodes ? m.nodeCount : m.triCount;
+        const uint32_t floor = nodes ? kInitialNodes : kInitialTriangles;
+        const uint32_t capacity = live ? std::max(floor, grownCapacity(0, live + live / 2)) : 0;
+        if (capacity && uint64_t(capacity) * 2 >= pool.alloc.capacity()) continue;
+        AllocatedBuffer replacement{};
+        if (capacity) {
+            replacement = createBuffer(ctx_->getAllocator(), VkDeviceSize(capacity) * pool.elementSize,
+                                        pool.usage, VMA_MEMORY_USAGE_GPU_ONLY);
+            if (!replacement.buffer) {
+                pool.compactionFailed = true;
+                LOG_ERROR("RT ", nodes ? "node" : "triangle", " pool compaction failed; keeping its previous buffer");
+                continue;
+            }
+        }
+        RtRangeAllocator compacted(capacity);
+        std::vector<VkBufferCopy> copies;
+        for (auto& m : meshes_) {
+            if (!m.live || !m.uploaded) continue;
+            const uint32_t count = nodes ? m.nodeCount : m.triCount;
+            if (!count) continue;
+            uint32_t& offset = nodes ? m.nodeOffset : m.triOffset;
+            const uint32_t next = compacted.allocate(count);
+            copies.push_back({VkDeviceSize(offset) * pool.elementSize,
+                              VkDeviceSize(next) * pool.elementSize, VkDeviceSize(count) * pool.elementSize});
+            offset = next;
+        }
+        if (!copies.empty()) {
+            VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.memoryBarrierCount = 1;
+            dep.pMemoryBarriers = &barrier;
+            cmdPipelineBarrier2(cmd, dep);
+            vkCmdCopyBuffer(cmd, pool.buffer.buffer, replacement.buffer,
+                            static_cast<uint32_t>(copies.size()), copies.data());
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+            cmdPipelineBarrier2(cmd, dep);
+        }
+        auto old = pool.buffer;
+        pool.buffer = replacement;
+        pool.alloc = std::move(compacted);
+        ++pool.epoch;
+        ctx_->deferAfterAllFrameFences([alloc = ctx_->getAllocator(), old]() mutable { destroyBuffer(alloc, old); });
+        meshTableDirty_ = true;
+        ++descriptorGeneration_;
+        ++sceneVersion_;
+    }
+}
+
 void RtScene::ensurePoolCapacity(VkCommandBuffer cmd, GpuPool& pool, uint32_t needed) {
     if (pool.buffer.buffer && pool.alloc.capacity() >= needed) return;
     const uint32_t newCap = grownCapacity(pool.alloc.capacity(), needed);
@@ -465,6 +591,7 @@ void RtScene::ensurePoolCapacity(VkCommandBuffer cmd, GpuPool& pool, uint32_t ne
     }
     pool.buffer = grown;
     pool.alloc.grow(newCap);
+    pool.compactionFailed = false;
     ++descriptorGeneration_;
 }
 
@@ -673,7 +800,7 @@ void RtScene::buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& i
 
 void RtScene::ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t needed,
                            uint32_t elementSize, VkBufferUsageFlags usage) {
-    if (buf.buffer && capacity >= needed) return;
+    if (buf.buffer && capacity >= needed && (capacity <= 4096 || needed >= capacity / 3)) return;
     VmaAllocator alloc = ctx_->getAllocator();
     if (buf.buffer) {
         // This frame slot's previous use has been fenced, but the descriptor
@@ -681,7 +808,7 @@ void RtScene::ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t ne
         AllocatedBuffer old = buf;
         ctx_->deferAfterAllFrameFences([alloc, old]() mutable { destroyBuffer(alloc, old); });
     }
-    capacity = grownCapacity(capacity, std::max(needed, 1u));
+    capacity = grownCapacity(capacity > needed ? 0 : capacity, std::max(needed, 1u));
     buf = createBuffer(alloc, VkDeviceSize(capacity) * elementSize, usage,
                        VMA_MEMORY_USAGE_CPU_TO_GPU);
     ++descriptorGeneration_;
@@ -707,7 +834,7 @@ void RtScene::uploadFrame(VkCommandBuffer cmd, FrameResources& fr) {
             g.worldToObject[2] = invT[2];
             g.mesh = inst.mesh;
             instanceData_.push_back(g);
-            bounds.push_back(transformBounds(m.bounds, inst.objectToWorld));
+            bounds.push_back(inst.bounds);
 
             if (backend_ == Backend::Hardware) {
                 VkAccelerationStructureInstanceKHR ai{};
@@ -784,7 +911,8 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     pfnGetAsBuildSizes_(dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &count, &sizes);
 
-    if (!fr.tlas || fr.tlasSize < sizes.accelerationStructureSize) {
+    if (!fr.tlas || fr.tlasSize < sizes.accelerationStructureSize ||
+        fr.tlasSize > std::max<VkDeviceSize>(65536, sizes.accelerationStructureSize * 3)) {
         if (fr.tlas) {
             VkAccelerationStructureKHR oldAs = fr.tlas;
             AllocatedBuffer oldBuf = fr.tlasBuffer;
@@ -811,7 +939,8 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
         }
         ++descriptorGeneration_;
     }
-    if (!fr.scratch.buffer || fr.scratchSize < sizes.buildScratchSize) {
+    if (!fr.scratch.buffer || fr.scratchSize < sizes.buildScratchSize ||
+        fr.scratchSize > std::max<VkDeviceSize>(65536, sizes.buildScratchSize * 3)) {
         if (fr.scratch.buffer) {
             AllocatedBuffer old = fr.scratch;
             ctx_->deferAfterAllFrameFences([alloc, old]() mutable { destroyBuffer(alloc, old); });
@@ -919,6 +1048,7 @@ void RtScene::observeLastBuild() {
 void RtScene::update(VkCommandBuffer cmd) {
     if (!ctx_ || !active_) return;
     observeLastBuild();
+    compactPools(cmd);
     uploadPending(cmd);
 
     if (meshTableDirty_) {
@@ -927,7 +1057,7 @@ void RtScene::update(VkCommandBuffer cmd) {
         for (size_t i = 0; i < meshes_.size(); ++i) {
             table[i] = {meshes_[i].nodeOffset, meshes_[i].triOffset, 0, 0};
         }
-        if (!meshTable_.buffer || meshTableCapacity_ < table.size()) {
+        { // Immutable table version: older frames may still trace its mesh rows.
             if (meshTable_.buffer) {
                 VmaAllocator alloc = ctx_->getAllocator();
                 AllocatedBuffer old = meshTable_;
@@ -941,9 +1071,8 @@ void RtScene::update(VkCommandBuffer cmd) {
                                       VMA_MEMORY_USAGE_GPU_ONLY);
             ++descriptorGeneration_;
         }
-        // Rows of live meshes never change after upload and freed rows are
-        // unreferenced, so rewriting the table while an earlier frame reads
-        // it only changes rows no one is looking at.
+        // Pool compaction and identity reuse can change existing rows. Older
+        // frame descriptors retain the previous table and pool until fenced.
         stage(cmd, meshTable_.buffer, 0, table.data(), table.size() * sizeof(MeshGPU));
         VkMemoryBarrier2 mb{};
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -969,6 +1098,7 @@ VkDescriptorSet RtScene::descriptorSet() const {
 
 RtScene::Stats RtScene::stats() const {
     Stats s;
+    s.sourceBytes = sourceBytes_.load(std::memory_order_relaxed);
     s.meshes = liveMeshes_;
     s.instances = liveInstances_;
     s.triangles = liveTriangles_;
@@ -977,10 +1107,7 @@ RtScene::Stats RtScene::stats() const {
     for (const auto& m : meshes_) {
         s.gpuBytes += sz(m.blasBuffer);
         if (!m.source) continue;
-        s.sourceBytes += pipeline::vectorBytes(m.source->positions) +
-                         pipeline::vectorBytes(m.source->indices) +
-                         pipeline::vectorBytes(m.source->surfaces) +
-                         pipeline::vectorBytes(m.tris) + pipeline::vectorBytes(m.nodes);
+        s.sourceBytes += pipeline::vectorBytes(m.tris) + pipeline::vectorBytes(m.nodes);
     }
     s.sourceBytes += pipeline::vectorBytes(meshes_);
     return s;

@@ -1,3 +1,8 @@
+// The last fifth of the receiver radius returns smoothly to raster lighting.
+float rtRangeWeight(float distance) {
+    return rtParams.z > 0.0 ? 1.0 - smoothstep(rtParams.y, rtParams.z, distance) : 1.0;
+}
+
 // RT lighting composition shared by GPU consumers and behavioral tests.
 struct RtLight {
     float weight;

@@ -59,6 +59,12 @@ public:
         havePrev_ = false;
         resultFrame_ = 0;
     }
+    void setDistance(float distance) {
+        if (distance_ == distance) return;
+        distance_ = distance;
+        havePrev_ = false;
+        resultFrame_ = 0;
+    }
     [[nodiscard]] Mode mode() const { return mode_; }
     [[nodiscard]] bool active() const { return mode_ != Mode::Off && pipelinesOk_; }
 
@@ -90,6 +96,7 @@ public:
         glm::vec3 sunColor;
         glm::vec3 skyColor;    // what the flat ambient term stands for
         bool sunUp = true;
+        float distance = 0; // standalone probes can trace without a camera limit
         /// Opt in only when a material consumer will read mirror radiance.
         /// The client currently has none; the reflection GPU probe does.
         bool traceReflections = false;
@@ -163,6 +170,7 @@ private:
     glm::mat4 resultViewProj_{1.0f};
     glm::vec3 resultCameraPos_{0.0f};
     Mode resultMode_ = Mode::Off;
+    float distance_ = 0, resultDistance_ = 0;
     glm::mat4 prevViewProj_{1.0f};
     glm::vec3 prevCameraPos_{0.0f};
     bool havePrev_ = false;
