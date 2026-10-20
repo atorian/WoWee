@@ -371,16 +371,6 @@ public:
     void setViewDistance(float distance) { viewDistance_ = std::clamp(distance, kMinViewDistance, kMaxViewDistance); }
 
     /**
-     * Get number of groups culled by portals last frame
-     */
-    uint32_t getPortalCulledGroups() const { return recording_->view.portalCulled; }
-
-    /**
-     * Get number of groups culled by distance last frame
-     */
-    uint32_t getDistanceCulledGroups() const { return recording_->view.distanceCulled; }
-
-    /**
      * Enable/disable GPU occlusion query culling (stubbed in Vulkan)
      */
     void setOcclusionCulling(bool /*enabled*/) { /* stubbed */ }

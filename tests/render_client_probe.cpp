@@ -2,7 +2,9 @@
 // Built only with WOWEE_BUILD_RENDER_CLIENT_PROBE=ON.
 #include "core/application.hpp"
 #include "core/window.hpp"
+#include "core/frame_observer.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/performance_hud.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/minimap.hpp"
@@ -27,6 +29,27 @@
 
 using namespace wowee;
 namespace {
+class HudLoop final : public core::FrameObserver {
+public:
+    explicit HudLoop(core::Application& app) : app_(app) {}
+    void frameBegan() override {
+        ++frames_;
+        if (frames_ == 3) {
+            SDL_Event key{};
+            key.type = SDL_EVENT_KEY_DOWN;
+            key.key.key = SDLK_GRAVE;
+            key.key.scancode = SDL_SCANCODE_GRAVE;
+            key.key.mod = SDL_KMOD_CTRL;
+            key.key.down = true;
+            key.key.windowID = SDL_GetWindowID(app_.getWindow()->getSDLWindow());
+            SDL_PushEvent(&key);
+        }
+        if (frames_ >= 90) app_.getWindow()->setShouldClose(true);
+    }
+private:
+    core::Application& app_;
+    int frames_ = 0;
+};
 void require(bool okay, const char* message) {
     if (!okay) throw std::runtime_error(message);
 }
@@ -323,17 +346,56 @@ void resizeWorkerTest(core::Application& app) {
     std::puts("PASS: resize during queued recording, minimized submission skipped, window restored");
 }
 
+void hudTest(core::Application& app) {
+    auto& renderer = *app.getRenderer();
+    rendering::PerformanceHUD hud;
+    hud.setEnabled(true);
+    hud.setShowRenderer(true);
+    hud.setShowTerrain(true);
+    for (const bool threaded : {false, true}) {
+        core::FrameWorker worker(threaded);
+        // The real recording releases its consumed scene before HUD construction.
+        auto initial = std::make_shared<rendering::FrameInputs>(renderer.extractFrameInputs());
+        worker.submit(worker.reserve(), [&, initial] { record(renderer, *initial); });
+        worker.drain();
+        (void)renderer.takeFrameResults();
+        for (int i = 0; i < 4; ++i) {
+            auto permit = worker.reserve();
+            hud.update(1.0f / 60.0f);
+            auto frame = std::make_shared<rendering::FrameInputs>(extract(renderer, [&] {
+                hud.render(&renderer, renderer.getCamera());
+            }));
+            if (i > 0) require(frame->interface && !frame->interface->vertices.empty(), "Enabled HUD produced no owned draw data after layout settled");
+            worker.submit(std::move(permit), [&, frame] { record(renderer, *frame); });
+            (void)renderer.takeFrameResults();
+        }
+        worker.drain();
+    }
+    std::puts("PASS: full performance HUD after snapshot release and during recording in both modes");
+}
+
 }
 int main() {
     try {
         core::Application app;
         require(app.initialize(), "Client probe initialization failed");
         SDL_HideWindow(app.getWindow()->getSDLWindow());
+        if (std::getenv("WOWEE_HUD_APP_RUN")) {
+            app.observeFrames(std::make_unique<HudLoop>(app));
+            app.run();
+            std::puts("PASS: application world loop, performance HUD shortcut and clean shutdown");
+            return 0;
+        }
         auto& renderer = *app.getRenderer();
         renderer.setWorldInView(false);
         renderer.setRtLightingMode(0);
         renderer.setVolumetricFogQuality(0);
         record(renderer, renderer.extractFrameInputs());
+        if (std::getenv("WOWEE_HUD_REGRESSION_ONLY")) {
+            require(renderer.initializeRenderers(app.getAssetManager(), "Northrend"), "HUD renderer setup failed");
+            hudTest(app);
+            return 0;
+        }
         previewTest(app);
         mapTest(app);
         minimapTest(app);
@@ -342,6 +404,7 @@ int main() {
         screenshotTest(app);
         workerTest(app);
         resizeWorkerTest(app);
+        hudTest(app);
         renderer.getVkContext()->waitForSubmittedFrames("finish native interface probe");
         std::puts("PASS: native interface snapshot lifecycle");
         return 0;

@@ -115,3 +115,16 @@ before accepting the test.
   in both modes through run.ps1. No unexpected Vulkan validation errors or
   surviving VMA allocations. These short runs do not replace stage 5ж's long
   sessions/crowd/flight A/B measurement; no FPS gain is claimed here.
+
+5е follow-up — performance HUD crash (2026-10-20):
+
+The first live session crashed when the HUD opened: the symbolized crash stack
+points to performance_hud.cpp:443. Two WMO diagnostic getters dereferenced the
+recording snapshot after endFrame released it. Publish distance/portal culling
+counts with FrameResults, read only producer-owned statistics in the HUD, and
+remove those unsafe getters. The new full-HUD regression crashed before this
+fix, then passed after it in inline/threaded modes and concurrent recording.
+The full native probe, frame_results, frame_worker and sweep_guard passed with
+no unexpected Vulkan validation errors and zero surviving VMA allocations.
+An additional Application::run fixture opens the HUD using the actual Ctrl+`
+shortcut and runs 90 frames with a real model and RT in each mode; both passed.

@@ -82,6 +82,11 @@ void Renderer::publishFrameResults() {
         result.statistics.wmoDraws = wmoRenderer->getDrawCallCount();
         result.statistics.wmoShadows = wmoRenderer->getShadowDrawCallCount();
     }
+    if (frameInputs_.scene && frameInputs_.scene->buildings) {
+        const auto& view = frameInputs_.scene->buildings->view;
+        result.statistics.wmoDistanceCulled = view.distanceCulled;
+        result.statistics.wmoPortalCulled = view.portalCulled;
+    }
     if (rtScene_) {
         const auto stats = rtScene_->stats();
         result.statistics.rtMeshes = stats.meshes;

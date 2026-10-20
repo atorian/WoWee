@@ -41,6 +41,7 @@ struct RenderStatistics {
     uint32_t rtMeshes = 0, rtInstances = 0;
     uint64_t rtTriangles = 0, rtGpuBytes = 0, rtSourceBytes = 0;
     uint32_t width = 0, height = 0;
+    uint32_t wmoDistanceCulled = 0, wmoPortalCulled = 0;
     uint32_t waterDrawn = 0;
     std::string sunDisc = "pending", moonDisc = "pending";
     bool framegenActive = false, framegenReady = false;
