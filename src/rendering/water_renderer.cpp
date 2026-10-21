@@ -1182,6 +1182,12 @@ float WaterRenderer::getLiquidAlpha(uint8_t basicType) const {
 
 void WaterRenderer::createReflectionResources() {
     if (!vkCtx) return;
+    // The mirrored projection spans the camera's whole view. A fixed square
+    // target magnifies its texels across the water, especially on wide displays.
+    // Keep the output pixel density and aspect ratio, also after a resize.
+    const VkExtent2D output = vkCtx->getSwapchainExtent();
+    reflectionExtent = {.width = std::max(1u, output.width),
+                        .height = std::max(1u, output.height)};
     VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();
 
@@ -1190,7 +1196,7 @@ void WaterRenderer::createReflectionResources() {
     colorImgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     colorImgCI.imageType = VK_IMAGE_TYPE_2D;
     colorImgCI.format = vkCtx->getSwapchainFormat();
-    colorImgCI.extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT, .depth = 1};
+    colorImgCI.extent = {.width = reflectionExtent.width, .height = reflectionExtent.height, .depth = 1};
     colorImgCI.mipLevels = 1;
     colorImgCI.arrayLayers = 1;
     colorImgCI.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1223,7 +1229,7 @@ void WaterRenderer::createReflectionResources() {
     depthImgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     depthImgCI.imageType = VK_IMAGE_TYPE_2D;
     depthImgCI.format = vkCtx->getDepthFormat();
-    depthImgCI.extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT, .depth = 1};
+    depthImgCI.extent = {.width = reflectionExtent.width, .height = reflectionExtent.height, .depth = 1};
     depthImgCI.mipLevels = 1;
     depthImgCI.arrayLayers = 1;
     depthImgCI.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1316,8 +1322,8 @@ void WaterRenderer::createReflectionResources() {
     fbCI.renderPass = reflectionRenderPass;
     fbCI.attachmentCount = static_cast<uint32_t>(fbAttach.size());
     fbCI.pAttachments = fbAttach.data();
-    fbCI.width = REFLECTION_WIDTH;
-    fbCI.height = REFLECTION_HEIGHT;
+    fbCI.width = reflectionExtent.width;
+    fbCI.height = reflectionExtent.height;
     fbCI.layers = 1;
 
     if (vkCreateFramebuffer(device, &fbCI, nullptr, &reflectionFramebuffer) != VK_SUCCESS) {
@@ -1373,7 +1379,7 @@ void WaterRenderer::createReflectionResources() {
     });
     reflectionColorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    LOG_INFO("Water reflection resources created (", REFLECTION_WIDTH, "x", REFLECTION_HEIGHT, ")");
+    LOG_INFO("Water reflection resources created (", reflectionExtent.width, "x", reflectionExtent.height, ")");
 }
 
 void WaterRenderer::destroyReflectionResources() {
@@ -1395,6 +1401,7 @@ void WaterRenderer::destroyReflectionResources() {
         reflectionUBOMapped = nullptr;
     }
     reflectionColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    reflectionExtent = {.width = 0, .height = 0};
 }
 
 // ==============================================================
@@ -1408,7 +1415,7 @@ bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpInfo.renderPass = reflectionRenderPass;
     rpInfo.framebuffer = reflectionFramebuffer;
-    rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}};
+    rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = reflectionExtent};
 
     VkClearValue clears[2]{};
     clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -1418,9 +1425,9 @@ bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(REFLECTION_WIDTH), .height = static_cast<float>(REFLECTION_HEIGHT), .minDepth = 0.0f, .maxDepth = 1.0f};
+    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(reflectionExtent.width), .height = static_cast<float>(reflectionExtent.height), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}};
+    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = reflectionExtent};
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     return true;

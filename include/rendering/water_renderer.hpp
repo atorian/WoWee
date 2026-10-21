@@ -128,7 +128,7 @@ public:
                     float intensity, bool wading);
 
     VkRenderPass getReflectionRenderPass() const { return reflectionRenderPass; }
-    VkExtent2D getReflectionExtent() const { return {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}; }
+    VkExtent2D getReflectionExtent() const { return reflectionExtent; }
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
     bool hasSurfaces() const { return !drawn_.empty(); }
 
@@ -281,8 +281,7 @@ private:
     bool sceneHistoryReady = false;
 
     // Planar reflection resources
-    static constexpr uint32_t REFLECTION_WIDTH = 512;
-    static constexpr uint32_t REFLECTION_HEIGHT = 512;
+    VkExtent2D reflectionExtent{.width = 0, .height = 0};
     VkRenderPass reflectionRenderPass = VK_NULL_HANDLE;
     VkFramebuffer reflectionFramebuffer = VK_NULL_HANDLE;
     VkImage reflectionColorImage = VK_NULL_HANDLE;
