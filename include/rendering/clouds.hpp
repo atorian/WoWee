@@ -14,12 +14,12 @@ struct SkyParams;
 /**
  * Procedural cloud renderer (Vulkan)
  *
- * Renders animated procedural clouds on a sky hemisphere using FBM noise.
- * Sun-lit edges, self-shadowing, and DBC-driven cloud colors for realistic appearance.
+ * Renders classic-style evolving value-noise clouds on a sky hemisphere.
+ * Broad-slope lighting and DBC-driven cloud colors retain the zone palette.
  *
  * Pipeline layout:
  *   set 0 = perFrameLayout  (camera UBO - view, projection, etc.)
- *   push  = CloudPush       (3 x vec4 = 48 bytes)
+ *   push  = CloudPush       (5 x vec4 = 80 bytes)
  */
 class Clouds {
 public:

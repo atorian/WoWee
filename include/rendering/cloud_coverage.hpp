@@ -5,6 +5,7 @@
 /// cloud actually drawn in front of the sun (WoW.exe 0x7ef920, 0x7efa30).
 
 #include <glm/glm.hpp>
+#include <cstdint>
 
 namespace wowee::rendering::cloud_coverage {
 using glm::clamp;
@@ -13,6 +14,14 @@ using glm::floor;
 using glm::fract;
 using glm::mix;
 using glm::sin;
+using glm::cos;
+using glm::max;
+using glm::min;
+using glm::normalize;
+using glm::transpose;
+using glm::pow;
+using uint = std::uint32_t;
+using ivec3 = glm::ivec3;
 using glm::smoothstep;
 using mat2 = glm::mat2;
 using vec2 = glm::vec2;

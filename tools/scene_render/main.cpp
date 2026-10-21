@@ -68,6 +68,7 @@
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "bloom": 0.8,                       // bright light glow, 0 disables
 //     "fxaa": false,                      // FXAA, drawn through its own target
+//     "clouds": true,                   // procedural layer; authored sky models keep their gate
 //     "sharpStars": true,                 // point stars in place of baked star layers
 //     "viewDistance": 1900.0,             // world geometry range, in yards
 //     "fogStrength": 0.4,                 // the settings panel's atmosphere:
@@ -97,6 +98,7 @@
 #include "rendering/minimap.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/frame_sink.hpp"
+#include "rendering/frame_scene.hpp"
 #include "stb_image_write.h"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -105,6 +107,8 @@
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
+#include "rendering/sky_system.hpp"
+#include "rendering/clouds.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/frame_sink.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -717,6 +721,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     renderer.setRtDistance(scene.value("rtDistance", rendering::kDefaultRtDistance));
     renderer.setSharpStars(scene.value("sharpStars", true));
+    if (auto* sky = renderer.getSkySystem(); sky && sky->getClouds())
+        sky->getClouds()->setEnabled(scene.value("clouds", true));
     if (scene.contains("volumetricFog")) renderer.setVolumetricFogQuality(scene["volumetricFog"].get<int>());
     if (scene.contains("volumetricDensity")) {
         renderer.setVolumetricFogDensity(scene["volumetricDensity"].get<float>());
@@ -812,6 +818,27 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         timer.call("rendererUpdate", [&] { renderer.update(kStep); });
         if (scene.value("discardFirstExtraction", false) && frame == 0) (void)renderer.extractFrameInputs();
         auto inputs = renderer.extractFrameInputs();
+        // Isolated cloud fixtures use the same captured inputs and GPU passes
+        // as the client. White-cloud captures and a matching cloud-free
+        // underlay expose coverage independently of the zone palette.
+        if (scene.contains("cloudProbe")) {
+            const auto& probe = scene["cloudProbe"];
+            auto captured = std::make_shared<rendering::FrameScene>(*inputs.scene);
+            captured->sky.cloudOffset = probe.value("phase", 0.0f);
+            captured->sky.flare = false;
+            inputs.scene = std::move(captured);
+            if (probe.contains("density"))
+                inputs.weatherLight.cloudDensity = probe["density"].get<float>();
+            if (probe.value("mask", false)) {
+                auto& light = inputs.weatherLight;
+                light.skyTopColor = light.skyMiddleColor = light.skyBand1Color =
+                    light.skyBand2Color = light.skySmogColor = light.fogColor = glm::vec3(0);
+                light.sunColor = light.cloudSunlitColor = light.cloudFillColor = glm::vec3(0);
+                light.cloudBaseColor = glm::vec3(1);
+                light.horizonGlow = light.fogDensity = 0.0f;
+            }
+        }
+
         if (interfaceFixture) {
             interfaceFixture->build();
             inputs.interface = interfaceFixture->extract();

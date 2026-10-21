@@ -50,6 +50,7 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
 
     // Clouds (Vulkan)
     clouds_ = std::make_unique<Clouds>();
+    // Classic-style DBC clouds; authored sky replacements still gate this layer.
     if (!clouds_->initialize(ctx, perFrameLayout)) {
         LOG_ERROR("Failed to initialize clouds");
         return false;
@@ -149,7 +150,8 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (starsRecorded || !renderProceduralStars || !starField_) return;
         starsRecorded = true;
         starField_->render(cmd, perFrameSet, params.timeOfDay,
-                           params.cloudDensity, params.fogDensity, frame.twinkleTime);
+                           frame.clouds && !params.useOriginalSkybox ? params.cloudDensity : 0.0f,
+                           params.fogDensity, frame.twinkleTime);
     };
     // An authored dome can cover this underlay completely. Replace its star
     // sheet at its actual layer instead, below the clouds that follow it.
@@ -167,7 +169,7 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---
-    if (clouds_ && frame.clouds) {
+    if (clouds_ && frame.clouds && !params.useOriginalSkybox) {
         // The cover LightParams gives, already blended toward the storm row by
         // the weather as the client blends it. A fixed 0.4 per unit of weather
         // was added on top, a second storm over the first.

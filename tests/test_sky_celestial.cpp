@@ -7,6 +7,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/sky_celestial.hpp"
+#include "rendering/cloud_coverage.hpp"
 
 #include <cmath>
 
@@ -153,4 +154,65 @@ TEST_CASE("Looking straight at the sun dims the scene's light by a third", "[sky
     CHECK(sc::lookingAtSunDimming(1.0f, 0.0f) == 0.0f);
     // Looking away it is all but nothing.
     CHECK(sc::lookingAtSunDimming(0.0f, 1.0f) < 0.011f);
+}
+
+TEST_CASE("Cloud cover leaves clear gaps and becomes overcast with the weather", "[clouds]") {
+    namespace cc = wowee::rendering::cloud_coverage;
+    int gaps = 0, patches = 0;
+    float clearSum = 0.0f, stormSum = 0.0f;
+    for (int y = -16; y <= 16; ++y) {
+        for (int x = -16; x <= 16; ++x) {
+            const glm::vec3 ray = glm::normalize(glm::vec3(x / 8.0f, y / 8.0f, 1.0f));
+            const float clear = cc::coverageToward(ray, 0.5f, 0.0f);
+            const float storm = cc::coverageToward(ray, 0.95f, 0.0f);
+            REQUIRE(cc::coverageToward(ray, 0.0f, 0.0f) == 0.0f);
+            REQUIRE(storm >= clear);
+            REQUIRE(storm <= 1.0f);
+            clearSum += clear;
+            stormSum += storm;
+            gaps += clear < 0.01f;
+            patches += clear > 0.25f;
+        }
+    }
+    // These are visible behaviours, not a particular noise seed or pixel image.
+    CHECK(gaps > 100);
+    CHECK(patches > 100);
+    CHECK(stormSum / 1089.0f > 0.85f);
+    CHECK(stormSum > clearSum * 2.0f);
+}
+
+TEST_CASE("Cloud animation is continuous and disappears at the horizon", "[clouds]") {
+    namespace cc = wowee::rendering::cloud_coverage;
+    float motion = 0.0f;
+    for (int x = -15; x <= 15; ++x) {
+        const glm::vec3 ray = glm::normalize(glm::vec3(x * 0.17f, 0.4f, 1.0f));
+        const float a = cc::coverageToward(ray, 0.5f, 0.0f);
+        CHECK(std::abs(cc::coverageToward(ray, 0.5f, 0.0001f) - a) < 0.01f);
+        motion += std::abs(cc::coverageToward(ray, 0.5f, 1.0f) - a);
+    }
+    CHECK(motion > 0.1f);
+    CHECK(cc::coverageToward(glm::vec3(1, 0, 0), 1.0f, 0.0f) == 0.0f);
+    CHECK(cc::coverageToward(glm::normalize(glm::vec3(1, 0, -0.1f)), 1.0f, 0.0f) == 0.0f);
+}
+
+TEST_CASE("Clear daylight cloud edges retain their illumination", "[clouds]") {
+    namespace cc = wowee::rendering::cloud_coverage;
+    int edges = 0;
+    float darkest = 1.0f, sum = 0.0f;
+    for (int y = -12; y <= 12; ++y) {
+        for (int x = -12; x <= 12; ++x) {
+            const glm::vec3 ray = glm::normalize(glm::vec3(x / 16.0f, y / 16.0f, 1.0f));
+            const auto shape = cc::cloudShapeAt(ray, 0.5f, 0.0f);
+            if (shape.cloud < 0.05f || shape.cloud > 0.5f) continue;
+            // Isolate sunlight: no ambient fill can hide an erroneously dark rim.
+            const auto lit = cc::cloudLighting(shape, ray, glm::vec3(0, 0, 1), 0.0f,
+                                               glm::vec3(1), glm::vec3(0), glm::vec3(0));
+            darkest = std::min(darkest, lit.r);
+            sum += lit.r;
+            ++edges;
+        }
+    }
+    REQUIRE(edges > 20);
+    CHECK(darkest > 0.75f);
+    CHECK(sum / edges > 0.9f);
 }

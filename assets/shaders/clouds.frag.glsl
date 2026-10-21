@@ -57,11 +57,7 @@ vec4 fogVolumeSky(vec2 uv) {
     return textureLod(uFogVolume, vec3(uv, 1.0), 0.0);
 }
 
-// The layer's shape: domain-warped fbm cumulus over stretched cirrus, faded
-// at the horizon. Shared with the sun's glare, which is dimmed by the cloud
-// in front of the sun. Octave counts: the shape and its sun-ward re-sample
-// keep all five, because the self-shadow is their difference; the warp,
-// erosion and cirrus are modulators and stop at three or four.
+// Shared classic-style field and final alpha, including celestial glare.
 #include "cloud_coverage.glsli"
 
 void main() {
@@ -76,28 +72,12 @@ void main() {
 
     CloudShape s = cloudShapeAt(dir, density, windOffset);
     float cloud = s.cloud;
-    float shape = s.shape;
-    vec2 p = s.p;
-    vec2 q = s.q;
     if (cloud < 0.01) discard;
 
-    // --- Lighting, as WoW.exe lights its cloud texture (0x7efae0) ---
-    // The base colour everywhere, the fill by how thin the cloud is - a
-    // quarter of it at the densest, three quarters at the thinnest - and the
-    // sunlit colour where the cloud faces the light, less of it in a storm.
-    //
-    // Where the client takes N.L off its texture's slope toward the light,
-    // this layer has no texture: the slope is the shape re-sampled a step
-    // toward the light, lower upstream lit and higher upstream in shadow.
-    float towardLight = cloudFbm(p + q * 1.4 + lightDir.xy * 0.35, 5);
-    float facing = clamp(1.0 - (towardLight - shape) * 2.2, 0.0, 1.0);
-    float thinness = (64.0 + 127.5 * (1.0 - cloud)) / 255.0;
-    vec3 cloudRgb = push.baseColor.rgb + thinness * push.fillColor.rgb +
-                    push.sunlitColor.rgb * facing * (1.0 - 0.75 * storm);
-    cloudRgb = min(cloudRgb, vec3(1.0));
+    vec3 cloudRgb = cloudLighting(s, dir, lightDir, storm,
+                                  push.sunlitColor.rgb, push.fillColor.rgb, push.baseColor.rgb);
 
-    // --- Edge softness for alpha ---
-    float alpha = cloud * smoothstep(0.0, 0.25, cloud);
+    float alpha = cloud;
 
     if (alpha < 0.01) discard;
 

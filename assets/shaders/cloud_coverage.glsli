@@ -1,66 +1,105 @@
-// How much cloud covers the sky in a direction: the cloud layer's shape, as
-// clouds.frag draws it, and as the sun's glare asks of the cloud in front of
-// the sun - WoW.exe dims its glare by the cloud at the sun (0x7ef920,
-// 0x7efa30). Compiled into clouds.frag and, as C++, into the renderer, so the
-// glare and the clouds drawn over the sun agree.
-//
-// `dir` is unit and above the horizon; `density` the layer's coverage, 0-1;
-// `windOffset` how far it has drifted.
+// Classic-style evolving value noise, shared by the cloud shader and CPU
+// celestial glare. Original: four cosine-interpolated octaves, noise*64+128,
+// threshold (1-cloudDensity)*255. The HD silhouette below replaces the old
+// broad exponential opacity ramp with a finite feather and dense interiors.
+// We evaluate it directly on the GPU instead of updating DNClouds textures.
+// Two low-amplitude octaves add edge detail; the first three light the cloud.
+// The hash and dome projection are modern replacements, not a bit-exact port.
 
-vec2 cloudHash2(vec2 p) {
-    p = vec2(dot(p, vec2(127.1f, 311.7f)),
-             dot(p, vec2(269.5f, 183.3f)));
-    return fract(sin(p) * 43758.5453f);
+float cloudRandom(ivec3 p) {
+    uint h = uint(p.x) * 1597334677u ^ uint(p.y) * 3812015801u ^ uint(p.z) * 2798796415u;
+    h = (h ^ (h >> 16u)) * 2246822519u;
+    h = (h ^ (h >> 13u)) * 3266489917u;
+    h ^= h >> 16u;
+    return float(h & 65535u) * (2.0f / 65535.0f) - 1.0f;
 }
 
-float cloudGradientNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
-    float a = dot(cloudHash2(i + vec2(0.0f, 0.0f)) * 2.0f - 1.0f, f - vec2(0.0f, 0.0f));
-    float b = dot(cloudHash2(i + vec2(1.0f, 0.0f)) * 2.0f - 1.0f, f - vec2(1.0f, 0.0f));
-    float c = dot(cloudHash2(i + vec2(0.0f, 1.0f)) * 2.0f - 1.0f, f - vec2(0.0f, 1.0f));
-    float d = dot(cloudHash2(i + vec2(1.0f, 1.0f)) * 2.0f - 1.0f, f - vec2(1.0f, 1.0f));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5f + 0.5f;
+// Value and analytical derivatives in the two spatial axes. The third axis
+// changes slowly with time, so clouds evolve continuously as well as drift.
+vec3 cloudNoise(vec3 p) {
+    ivec3 cell = ivec3(floor(p));
+    vec3 f = fract(p);
+    vec3 u = 0.5f - 0.5f * cos(f * 3.141592654f);
+    vec2 du = 1.570796327f * sin(vec2(f.x, f.y) * 3.141592654f);
+    float a = cloudRandom(cell + ivec3(0, 0, 0));
+    float b = cloudRandom(cell + ivec3(1, 0, 0));
+    float c = cloudRandom(cell + ivec3(0, 1, 0));
+    float d = cloudRandom(cell + ivec3(1, 1, 0));
+    float e = cloudRandom(cell + ivec3(0, 0, 1));
+    float g = cloudRandom(cell + ivec3(1, 0, 1));
+    float h = cloudRandom(cell + ivec3(0, 1, 1));
+    float j = cloudRandom(cell + ivec3(1, 1, 1));
+    float ab = mix(a, b, u.x), cd = mix(c, d, u.x);
+    float eg = mix(e, g, u.x), hj = mix(h, j, u.x);
+    return vec3(mix(mix(ab, cd, u.y), mix(eg, hj, u.y), u.z),
+                mix(mix(b-a, d-c, u.y), mix(g-e, j-h, u.y), u.z) * du.x,
+                mix(cd-ab, hj-eg, u.z) * du.y);
 }
 
-float cloudFbm(vec2 p, int octaves) {
-    float val = 0.0f;
-    float amp = 0.5f;
-    const mat2 rot = mat2(0.8f, 0.6f, -0.6f, 0.8f);
-    for (int i = 0; i < octaves; i++) {
-        val += amp * cloudGradientNoise(p);
-        p = rot * p * 2.02f;
-        amp *= 0.5f;
-    }
-    return val;
-}
-
-// What the clouds' shading needs besides the coverage.
 struct CloudShape {
-    float cloud;    // coverage, 0-1
-    float cumulus;  // the heaped part of it
-    float shape;    // the base field
-    vec2 p;         // where the field was sampled
-    vec2 q;         // its warp
+    float cloud;   // Final opacity, also used by celestial glare.
+    vec2 slope;   // Large-scale slope for DBC sun/fill lighting.
 };
 
 CloudShape cloudShapeAt(vec3 dir, float density, float windOffset) {
     CloudShape s;
-    float altitude = dir.z;
-    vec2 uv = vec2(dir.x, dir.y) / (altitude + 0.08f);
-    vec2 wind = vec2(windOffset, windOffset * 0.6f);
-    s.p = uv * 0.8f + wind;
-    s.q = vec2(cloudFbm(s.p, 4), cloudFbm(s.p + vec2(5.2f, 1.3f), 4));
-    s.shape = cloudFbm(s.p + s.q * 1.4f, 5);
-    float coverage = smoothstep(0.42f - density * 0.22f, 0.74f - density * 0.10f, s.shape);
-    float erosion = cloudFbm(uv * 3.1f + wind * 1.6f + s.q, 3);
-    s.cumulus = coverage * smoothstep(0.22f, 0.55f, erosion + coverage * 0.4f);
-    vec2 cuv = vec2(uv.x * 0.32f, uv.y * 1.5f) + wind * 1.8f + vec2(3.7f, 9.1f);
-    float cirrus = cloudFbm(cuv, 3) * cloudFbm(cuv * 2.3f + 4.0f, 3);
-    cirrus = smoothstep(0.16f, 0.5f, cirrus) * 0.30f * (0.35f + 0.65f * density);
-    s.cloud = clamp(s.cumulus + cirrus * (1.0f - s.cumulus), 0.0f, 1.0f);
-    s.cloud *= clamp(density * 1.6f, 0.0f, 1.0f);
-    s.cloud *= smoothstep(0.0f, 0.15f, altitude);
+    s.cloud = 0.0f;
+    s.slope = vec2(0.0f);
+    density = clamp(density, 0.0f, 1.0f);
+    if (dir.z <= 0.0f || density <= 0.0f) return s;
+
+    // Finite dome projection: unlike intersection with a horizontal plane,
+    // it does not squeeze many repetitions into a streak at the horizon.
+    vec2 uv = vec2(dir.x, dir.y) * (4.0f / (1.0f + dir.z));
+    vec2 drift = vec2(windOffset * 0.22f, windOffset * 0.13f);
+    // More groups across the dome instead of a few screen-filling smudges.
+    // Rotated octave grids prevent the underlying square lattice from
+    // showing up as long aligned streaks when looking toward the zenith.
+    vec2 samplePoint = uv * 2.25f + drift;
+    mat2 basis = mat2(1.0f);
+    const mat2 rotation = mat2(0.8f, 0.6f, -0.6f, 0.8f);
+    float field = 0.0f;
+    float frequency = 1.0f;
+    float amplitude = 1.0f;
+    for (int octave = 0; octave < 6; ++octave) {
+        vec3 n = cloudNoise(vec3(basis * samplePoint * frequency,
+                                windOffset * 0.08f + float(octave) * 7.0f));
+        field += amplitude * n.x;
+        if (octave < 3) s.slope += transpose(basis) * vec2(n.y, n.z) * (amplitude * frequency);
+        basis = rotation * basis;
+        frequency *= 2.0f;
+        amplitude *= 0.5f;
+    }
+    float value = (128.0f + field * 64.0f) / 255.0f;
+    float excess = max(value - (1.0f - density), 0.0f);
+    // A bounded edge feather retains small silhouette details while the
+    // interior becomes opaque. The original-style exponential ramp left
+    // almost every visible pixel translucent, reading as unfocused smoke.
+    // Density still moves the threshold (coverage); it is not a second alpha.
+    // Keep the same final opacity for cloud rendering and celestial glare.
+    s.cloud = smoothstep(0.0f, 0.13f, excess) * smoothstep(0.0f, 0.12f, dir.z);
     return s;
+}
+
+// Cloud illumination is shared with the behavioural tests as well as GLSL.
+vec3 cloudLighting(CloudShape shape, vec3 dir, vec3 lightDir, float storm,
+                   vec3 sunlitColor, vec3 fillColor, vec3 baseColor) {
+    // Original 0xaf4dc4: first octave advances 16/256 noise cells per
+    // texel at 128px. 0x7f017a scales differences by textureSize/128.
+    // Therefore derivatives in noise-cell units must be divided by 16,
+    // independent of texture LOD. Using 0.45 here exaggerated relief 7.2x.
+    const float texelsPerNoiseCell = 16.0f;
+    vec3 normal = normalize(vec3(-shape.slope / texelsPerNoiseCell, 1.0f));
+    // 0x7efbf0 and 0x7f0215: light and receiver are in cloud texture space,
+    // with a light height of 64 + 192*storm, NOT the world-space sun vector.
+    // Keep our dome mapping, but use it for both positions consistently.
+    vec2 point = vec2(dir.x, dir.y) * (4.0f / (1.0f + dir.z));
+    vec2 lightPoint = vec2(lightDir.x, lightDir.y) *
+                      (4.0f / (1.0f + max(lightDir.z, 0.0f)));
+    vec3 towardLight = normalize(vec3((lightPoint - point) * texelsPerNoiseCell,
+                                     64.0f + 192.0f * storm));
+    float facing = max(dot(normal, towardLight), 0.0f);
+    float thinness = (64.0f + 127.5f * (1.0f - shape.cloud)) / 255.0f;
+    return min(baseColor + thinness * fillColor +
+               sunlitColor * facing * (1.0f - 0.75f * storm), vec3(1.0f));
 }
