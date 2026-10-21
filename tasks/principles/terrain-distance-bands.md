@@ -13,10 +13,17 @@ radius to avoid churn at boundaries.
 Objects retain their own geometry and available LODs; large landmarks must
 survive past the terrain boundary. Small props and clutter need shorter ranges.
 Use the same atmospheric perspective for every representation and the sky.
-The user confirmed restoring zone-based linear distance fog on 2026-10-21:
-Fog thickness scales its authored start/end, independently of View Distance
-and WDL coverage. Preserve the corrected air colour and nearby volumetric fog;
-do not add exponential distance extinction or height clearing on top.
+The latest explicit choice on 2026-10-21 supersedes the earlier fixed zone-end
+policy: complete outdoor haze extinction must coincide with View Distance.
+The purpose of increasing visibility is to see farther, with atmosphere leaving
+distant elements faint rather than hiding them at the original zone fog end.
+Keep zone colours, time/weather blending and the near gradient; Fog thickness
+controls the near haze relative to those profiles. Use a smooth distant tail and
+converge to the actual directional sky at the horizontal visibility boundary.
+Do not stretch the entire gradient to View Distance and erase nearby depth.
+Keep volumetric mist and underwater extinction independent; apply the same
+outdoor contrast curve to detailed terrain, WDL, water and models. No continent
+or landmark exemptions.
 
 Check: verify near detail, the overlap, far terrain and a real landmark; inspect
 memory and draw counts. A new distance limit alone is not a completed LOD fix.

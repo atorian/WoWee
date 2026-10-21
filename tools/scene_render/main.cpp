@@ -31,6 +31,8 @@
 //     "server": [5815.0, 629.0, 647.0],   // where it stands, as the realm and
 //                                         //   .gps give positions,
 //     "origin": [5815.0, 629.0, 647.0],   //   or in render coordinates
+//     "playerPosition": [5815,629,647],  // lighting/weather sample position,
+//                                         // render axes; default: model centre
 //     "terrain": false,                   // stream the map's terrain around it,
 //     "terrainRadius": 1,                 //   this many tiles out (3x3)
 //     "models": [
@@ -658,8 +660,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     camera->setPosition(eye);
     camera->setRotation(yaw, pitch);
-    // Light, shadows and fog centre on the character; here that is the scene.
-    renderer.getCharacterPosition() = centre;
+    // A distant model's centre can lie in a different lighting volume from
+    // the observer. Fixtures may fix the player's sampling position while
+    // preserving model-centred lighting for existing isolated model scenes.
+    renderer.getCharacterPosition() = scene.contains("playerPosition")
+        ? vec3(scene["playerPosition"]) : centre;
 
     rendering::WorldEnvironment environment;
     environment.mapId = scene.value("mapId", 571u);

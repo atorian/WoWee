@@ -104,3 +104,55 @@ TEST_CASE("fog leaves nearby surfaces clear and has finite degenerate ranges", "
     const auto translated = glm::normalize((p + d) - p);
     CHECK(ray == translated);
 }
+
+TEST_CASE("outdoor haze keeps zone contrast nearby and reaches opacity at view distance",
+          "[light][fog][haze]") {
+    using namespace fog_math;
+    // Durotar, the Icecrown surroundings and Dalaran at 14:21. These are
+    // different local profiles; one global thickness must work for all.
+    for (auto range : {glm::vec2(641.48f, 888.89f), glm::vec2(40.62f, 888.89f),
+                       glm::vec2(585.75f, 1527.78f)}) {
+        range /= .65f;
+        const float start = range.x, end = range.y;
+        const float middle = (start + end) * .5f;
+        INFO("zone range " << start << " to " << end);
+        for (float d : {0.0f, start, (start + middle) * .5f, middle}) {
+            const float visibility = distanceHazeVisibility(d, d, start, end, 10000);
+            CHECK(visibility == Catch::Approx(distanceFogVisibility(d, start, end)).margin(1e-6f));
+            // Increasing the far clip cannot clear the nearby atmosphere.
+            CHECK(visibility == Catch::Approx(distanceHazeVisibility(d, d, start, end, 5000)));
+        }
+        CHECK(distanceHazeVisibility(4500, 4500, start, end, 10000) > .01f);
+        float previous = 1;
+        for (int d = 0; d <= 10100; d += 10) {
+            const float visibility = distanceHazeVisibility(d, d, start, end, 10000);
+            CHECK(visibility >= 0);
+            CHECK(visibility <= previous + 1e-6f);
+            previous = visibility;
+        }
+        for (float viewDistance : {500.0f, 2400.0f, 4000.0f, 10000.0f}) {
+            CHECK(distanceHazeVisibility(viewDistance, viewDistance, start, end, viewDistance) == 0);
+            CHECK(distanceHazeVisibility(viewDistance-1, viewDistance-1, start, end, viewDistance) > 0);
+        }
+        // The renderer's visibility radius is horizontal: a high peak must
+        // not disappear simply because its slanted eye distance is longer.
+        CHECK(distanceHazeVisibility(11000, 8000, start, end, 10000) > 0);
+        const float step = (end - start) * .001f;
+        const float at = distanceHazeVisibility(middle, middle, start, end, 10000);
+        const float left = at - distanceHazeVisibility(middle-step, middle-step, start, end, 10000);
+        const float right = distanceHazeVisibility(middle+step, middle+step, start, end, 10000) - at;
+        CHECK(left == Catch::Approx(right).margin(1e-5f));
+    }
+}
+
+TEST_CASE("thinning outdoor haze never adds fog at a fixed distance", "[light][fog][haze]") {
+    using namespace fog_math;
+    for (float d : {500.0f, 1500.0f, 4500.0f, 9500.0f}) {
+        float previous = 1;
+        for (float thickness : {.05f, .2f, .65f, 1.0f, 2.0f}) {
+            const float visibility = distanceHazeVisibility(d, d, 640/thickness, 889/thickness, 10000);
+            CHECK(visibility <= previous);
+            previous = visibility;
+        }
+    }
+}

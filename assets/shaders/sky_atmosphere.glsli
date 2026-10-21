@@ -41,3 +41,19 @@ vec3 atmosphereSkyColor(vec3 worldDir, vec3 zenith, vec3 middle,
 float distanceFogVisibility(float dist, float start, float end) {
     return clamp((end - dist) / max(end - start, 0.001f), 0.0f, 1.0f);
 }
+
+float distanceHazeVisibility(float dist, float horizontalDist,
+                             float start, float end, float viewDistance) {
+    // Keep the zone's first half of the linear gradient. Continue beyond
+    // that with a reciprocal tail matching both its value and slope at 50%:
+    // 1-p and 0.25/p are both 0.5, with derivative -1, at p=0.5.
+    // The authored end is a density reference, not a wall hiding distant
+    // terrain. This is a contrast curve, not another volumetric fog layer.
+    float progress = max((dist - start) / max(end - start, 0.001f), 0.0f);
+    float visibility = progress <= 0.5f ? 1.0f - progress : 0.25f / progress;
+    // Geometry is culled by horizontal radius. Blend the remaining contrast
+    // to the actual sky over the final tenth of that radius, regardless of
+    // the zone's range, so increasing View Distance does not clear near fog.
+    float limit = max(viewDistance, 0.001f);
+    return visibility * (1.0f - smoothstep(limit * 0.9f, limit, horizontalDist));
+}

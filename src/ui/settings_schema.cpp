@@ -81,9 +81,9 @@ constexpr SettingDesc kSchema[] = {
     // shader keeps its own guard for a frame whose scene copy is not there yet,
     // which is a different thing from a player turning the feature off.
     {"fogstrength", "Fog thickness", SettingKind::Float, 0, 2, 0.05f, "Graphics", "Atmosphere",
-     "How heavy the distance fog is, against the zone's own design.\n"
-     "1 is as designed. Below 1 thins it and 0 removes it; above 1\n"
-     "brings it closer.", "", 0.4f},
+     "How heavy the distance haze is, relative to the zone's profile.\n"
+     "Higher values bring the haze closer; 0 removes it. Distant\n"
+     "surfaces blend fully into the sky at View Distance.", "", 0.4f},
     // The light shafts' own thickness. Their switch and its quality are on
     // the Detail page; see there.
     {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",

@@ -4,7 +4,9 @@
 
 namespace wowee::rendering {
 class VkContext;
-// A small, current-frame picture of the real sky, including authored sky M2s.
+// A small, current-frame picture of the real sky, including authored sky M2s,
+// before the near volumetric fog. Surface fog and sky reflections add that air
+// once after sampling; the capture must bind the neutral fog volume.
 // Each frame slot owns its attachments; the caller has waited on its fence.
 class SkyBackground {
 public:

@@ -885,8 +885,8 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),0);
         const float thickness=frameInputs_.fogStrength;
         if(frameInputs_.worldInView && thickness>0.001f) {
-            // Enable the shared sky/surface colour correction only. Opacity
-            // uses fogParams' zone start/end, scaled by LightingManager.
+            // Outdoor haze retains the zone's near gradient and extends to
+            // View Distance, using the same directional colour as the sky.
             currentFrameData.aerialParams=glm::vec4(0,0,0,1);
         }
 
@@ -1889,16 +1889,19 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     std::optional<CpuStage> skySetStage(std::in_place, stages, "beginFrame", "sky set");
     if (skyBackground_ && skyBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent())) {
         const uint32_t slot = skySlot;
-        // The sky uses the same light, shadows and fog volume, but a separate set
-        // whose sky sampler stays neutral: never sample the attachment being drawn.
-        VkCopyDescriptorSet copies[5]{};
-        for (uint32_t binding = 0; binding < 5; ++binding) {
-            copies[binding].sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
-            copies[binding].srcSet = perFrameDescSets[slot];
-            copies[binding].srcBinding = binding;
-            copies[binding].dstSet = skyPerFrameDescSets[slot];
-            copies[binding].dstBinding = binding;
-            copies[binding].descriptorCount = 1;
+        // Capture sky radiance before the near fog volume: surfaces apply
+        // that volume once after distance fog. Binding 5 stays neutral to
+        // avoid sampling the attachment while drawing it.
+        VkCopyDescriptorSet copies[4]{};
+        uint32_t copyCount=0;
+        for (uint32_t binding : {0u,1u,3u,4u}) {
+            auto& copy=copies[copyCount++];
+            copy.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
+            copy.srcSet = perFrameDescSets[slot];
+            copy.srcBinding = binding;
+            copy.dstSet = skyPerFrameDescSets[slot];
+            copy.dstBinding = binding;
+            copy.descriptorCount = 1;
         }
         VkDescriptorImageInfo image{};
         image.imageView = skyBackground_->view(slot);
@@ -1909,7 +1912,14 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.descriptorCount = 1;
         write.pImageInfo = &image;
-        vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 5, copies);
+        VkDescriptorImageInfo neutralFog{};
+        neutralFog.imageView=volumetricFog_->getNeutralView();
+        neutralFog.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet writes[2]{write,write};
+        writes[1].dstSet=skyPerFrameDescSets[slot];
+        writes[1].dstBinding=2;
+        writes[1].pImageInfo=&neutralFog;
+        vkUpdateDescriptorSets(vkCtx->getDevice(),2,writes,copyCount,copies);
     }
     skySetStage.reset();
 
@@ -3294,7 +3304,8 @@ void Renderer::renderSkyBackground(float timeOfDay,
     currentFrameData.fogSkyMiddle.w = 1.0f;
     std::memcpy(perFrameUBOMapped[slot], &currentFrameData, sizeof(currentFrameData));
 
-    // Render only the background, including authored sky layers and the air.
+    // Render authored sky layers without near volumetric air. Both the main
+    // sky and surfaces add that air exactly once in their own colour pass.
     skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
         timeOfDay, frameInputs_.environment.gameTime, frameInputs_.weather.strength(),

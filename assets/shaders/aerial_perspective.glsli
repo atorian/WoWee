@@ -1,4 +1,4 @@
-// Colour of the distant air; opacity follows the zone's linear distance fog.
+// Colour of distant air; the zone controls near contrast, View Distance its end.
 vec3 aerialScatteringColor(vec3 direction, vec3 authoredFog, vec3 neutralLight,
                            vec3 sunlight, vec4 sun) {
     float forward=pow(max(dot(normalize(direction),vec3(sun)),0.0f),8.0f);

@@ -140,6 +140,7 @@ float sunVisibility(vec3 p) {
 
 #include "sunlit_air.glsli"
 #include "sky_atmosphere.glsli"
+#define AERIAL_ANALYTIC_ONLY
 #include "aerial_frame.glsli"
 
 void main() {

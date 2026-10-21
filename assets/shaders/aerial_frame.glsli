@@ -1,16 +1,45 @@
 #include "aerial_perspective.glsli"
 float aerialVisibilityAt(vec3 worldPos,float distance) {
-    // Zone distances already include Fog thickness. Geometry visibility and
-    // the ADT/WDL handoff must not stretch this curve or clear high mountains.
+    if(aerialParams.w>0.5 && fogSkyBand1.w>0.0) {
+        return distanceHazeVisibility(distance,length(worldPos.xy-viewPos.xy),
+                                      fogParams.x,fogParams.y,fogSkyBand1.w);
+    }
+    // Underwater and fog-disabled views retain their own linear distances.
     return distanceFogVisibility(distance,fogParams.x,fogParams.y);
-}
-vec3 aerialColorAt(vec3 direction) {
-    if(aerialParams.w<0.5)return fogColor.rgb;
-    float len=length(direction);
-    return aerialScatteringColor(len>0.001 ? direction/len : vec3(0,0,1),fogColor.rgb,aerialLight.rgb,lightColor.rgb,aerialSun);
 }
 vec3 aerialSky(vec3 sky,vec3 direction) {
     if(aerialParams.w<0.5)return sky;
-    float horizon=1.0-smoothstep(0.02,0.18,max(normalize(direction).z,0.0));
-    return mix(sky,aerialColorAt(direction),horizon);
+    float len=length(direction);
+    vec3 ray=len>0.001 ? direction/len : vec3(0,0,1);
+    float horizon=1.0-smoothstep(0.02,0.18,max(ray.z,0.0));
+    vec3 haze=aerialScatteringColor(ray,fogColor.rgb,aerialLight.rgb,lightColor.rgb,aerialSun);
+    return mix(sky,haze,horizon);
+}
+
+#ifndef AERIAL_ANALYTIC_ONLY
+layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
+#endif
+
+vec3 aerialColorAt(vec3 direction) {
+    if(aerialParams.w<0.5)return fogColor.rgb;
+    float len=length(direction);
+    vec3 ray=len>0.001 ? direction/len : vec3(0,0,1);
+#ifndef AERIAL_ANALYTIC_ONLY
+    // The current camera's real sky, captured without the near fog volume.
+    // Sampling a direction (w=0) removes camera translation and avoids loss
+    // of precision at continent coordinates. Reflection views use the bands.
+    if(fogSkyMiddle.w>0.5) {
+        vec4 clip=projection*view*vec4(ray,0.0);
+        if(clip.w>0.0) {
+            vec2 uv=clip.xy/clip.w*0.5+0.5;
+            if(all(greaterThanEqual(uv,vec2(0))) && all(lessThanEqual(uv,vec2(1))))
+                return textureLod(uSceneSky,uv,0.0).rgb;
+        }
+    }
+#endif
+    // Before the capture (including fog injection), or outside its camera,
+    // use the same directional sky bands and horizon correction as the dome.
+    vec3 sky=atmosphereSkyColor(ray,fogSkyTop.rgb,fogSkyMiddle.rgb,
+        fogSkyBand1.rgb,fogSkyBand2.rgb,skySmogColor.rgb,fogColor.rgb);
+    return aerialSky(sky,ray);
 }

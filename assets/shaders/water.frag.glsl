@@ -41,7 +41,6 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
-layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
 
 #include "sky_atmosphere.glsli"
 #include "aerial_frame.glsli"
@@ -344,7 +343,12 @@ vec3 skyAlong(vec3 dir) {
     float onScreen = smoothstep(0.0, 0.05, uv.x) * smoothstep(1.0, 0.95, uv.x)
                    * smoothstep(0.0, 0.05, uv.y) * smoothstep(1.0, 0.95, uv.y);
     if (onScreen <= 0.0) return aerialSky(gradient,dir);
-    return mix(aerialSky(gradient, dir), textureLod(uSceneSky, clamp(uv, vec2(0.0), vec2(1.0)), 0.0).rgb, onScreen);
+    vec3 captured=textureLod(uSceneSky,clamp(uv,vec2(0.0),vec2(1.0)),0.0).rgb;
+    if(volumetricParams.x>0.5) {
+        vec4 air=textureLod(uFogVolume,vec3(uv,1.0),0.0);
+        captured=captured*air.a+air.rgb;
+    }
+    return mix(aerialSky(gradient,dir),captured,onScreen);
 }
 
 void main() {
