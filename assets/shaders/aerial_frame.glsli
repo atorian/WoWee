@@ -22,7 +22,7 @@ layout(set = 0, binding = 5) uniform sampler2D uSceneSky; // reflections, includ
 layout(set = 0, binding = 11) uniform sampler2D uAtmosphereSky; // scattering only
 #endif
 
-vec3 aerialColorAt(vec3 direction) {
+vec3 aerialBackgroundAt(vec3 direction) {
     if(aerialParams.w<0.5)return fogColor.rgb;
     float len=length(direction);
     vec3 ray=len>0.001 ? direction/len : vec3(0,0,1);
@@ -45,3 +45,5 @@ vec3 aerialColorAt(vec3 direction) {
         fogSkyBand1.rgb,fogSkyBand2.rgb,skySmogColor.rgb,fogColor.rgb);
     return aerialSky(sky,ray);
 }
+
+#include "aerial_march.glsli"

@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/texture_upload.hpp"

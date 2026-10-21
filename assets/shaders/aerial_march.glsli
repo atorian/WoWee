@@ -1,0 +1,89 @@
+// Reference-quality preview: integrate the illumination of the existing
+// authored optical-depth profile. This deliberately preserves visibility and
+// the Fog Thickness contract, isolating in-scattering in paired captures.
+// It is not a physical reconstruction of WoW's non-radiometric DBC colours.
+// A production implementation should cache this integral in a froxel/LUT pass.
+#ifndef AERIAL_MARCH_STEPS
+#define AERIAL_MARCH_STEPS 24
+#endif
+#ifndef AERIAL_MARCH_ENABLED
+#define AERIAL_MARCH_ENABLED 1
+#endif
+const float AERIAL_AEROSOL_G = 0.65;
+const float AERIAL_MOLECULAR_FRACTION = 0.15;
+const float AERIAL_MOLECULAR_HEIGHT = 8000.0; // yards, reference clear-air layer
+const float AERIAL_SOLAR_SCATTER = 0.25; // air / Lambert surface light convention
+
+float aerialProfileTransmission(float distance, float height) {
+    // Exclude the artificial geometry boundary from air transport. Its fade
+    // is composed once, after integration, against the captured real sky.
+    return distanceHeightHazeVisibility(distance, 0.0,
+        fogParams.x, fogParams.y, fogSkyBand1.w, viewPos.z, height,
+        aerialParams.x, aerialParams.y, aerialParams.z);
+}
+
+vec3 aerialMarchSource(float height, float cosine, vec3 background) {
+    float above = max(height - aerialParams.x, 0.0);
+    float aerosol = exp(-above * aerialParams.y);
+    float molecular = AERIAL_MOLECULAR_FRACTION * exp(-above / AERIAL_MOLECULAR_HEIGHT);
+    float aerosolFraction = aerosol / max(aerosol + molecular, 0.00001);
+    float g = AERIAL_AEROSOL_G;
+    // Unit spherical-mean phase functions. The common 1/(4*pi) and the
+    // client's Lambert-light convention are represented by SOLAR_SCATTER.
+    float rayleigh = 0.75 * (1.0 + cosine * cosine);
+    float mie = (1.0 - g*g) / pow(max(1.0 + g*g - 2.0*g*cosine, 0.001), 1.5);
+    float phase = mix(rayleigh, mie, aerosolFraction);
+
+    // Approximate vertical aerosol optical depth from the authored near
+    // profile's half-transmission distance. No terrain or cloud shadowing in
+    // this far-air preview; the existing near volume keeps its shadow maps.
+    float referenceHalf = max(0.5 * (fogParams.x + fogParams.y) *
+                              (aerialParams.z / 0.8), 1.0);
+    float scaleHeight = 1.0 / max(aerialParams.y, 1.0 / AERIAL_MOLECULAR_HEIGHT);
+    float beta = log(2.0) / referenceHalf * (aerialParams.z / 0.8);
+    float sunTransmission = exp(-beta * aerosol * scaleHeight /
+                                max(aerialSun.z, 0.08));
+    vec3 solar = lightColor.rgb * aerialSun.w * AERIAL_SOLAR_SCATTER;
+    // Keep the authored directional sky palette as the illumination budget,
+    // replacing its isotropic solar share by the local phase-weighted share.
+    // This is an artistic calibration, not calibrated physical irradiance.
+    vec3 diffuse = max(background - solar, vec3(0.0));
+    return diffuse + solar * (phase * sunTransmission);
+}
+
+vec3 aerialColorAt(vec3 direction) {
+    vec3 background = aerialBackgroundAt(direction);
+#if !AERIAL_MARCH_ENABLED
+    return background;
+#else
+    float distance = length(direction);
+    if (aerialParams.w < 0.5 || aerialParams.z <= 0.001 || distance < 0.001)
+        return background;
+    vec3 ray = direction / distance;
+    float cosine = clamp(dot(ray, normalize(aerialSun.xyz)), -1.0, 1.0);
+    vec3 scattered = vec3(0.0);
+    float transmission = 1.0;
+    float front = 0.0;
+    for (int i = 0; i < AERIAL_MARCH_STEPS; ++i) {
+        // Quadratic spacing gives the dense air near the viewer finer steps.
+        float u = float(i + 1) / float(AERIAL_MARCH_STEPS);
+        float back = distance * u * u;
+        float nextTransmission = aerialProfileTransmission(back, viewPos.z + ray.z * back);
+        vec3 source = aerialMarchSource(viewPos.z + ray.z * (front + back) * 0.5,
+                                        cosine, background);
+        // Exact homogeneous-cell integration using the authored segment's
+        // integrated extinction: exp(-tau_front) - exp(-tau_back).
+        scattered += max(transmission - nextTransmission, 0.0) * source;
+        transmission = nextTransmission;
+        front = back;
+    }
+    float limit = max(fogSkyBand1.w, 0.001);
+    float boundary = pow(1.0 - smoothstep(0.9 * limit, limit, length(direction.xy)),
+                         clamp(aerialParams.z, 0.0, 2.0) / 0.8);
+    scattered = scattered * boundary + background * (1.0 - boundary);
+    // Existing material callers compose colour*T + fogColour*(1-T).
+    // Supply the mean in-scattering colour, leaving additive attenuation and
+    // all material-specific blend rules untouched.
+    return scattered / max(1.0 - transmission * boundary, 0.00001);
+#endif
+}
