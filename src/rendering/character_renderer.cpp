@@ -2522,7 +2522,8 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     auto& slots = poseSlots_[frameIndex];
     if (slots.size() < recording_->poses.size()) slots.resize(recording_->poses.size());
     for (size_t index = 0; index < recording_->poses.size(); ++index) {
-        const auto& pose = recording_->poses[index];
+        const auto range = recording_->poses[index];
+        const auto pose = std::span<const glm::mat4>(recording_->bones).subspan(range.first, range.count);
         auto& slot = slots[index];
         const uint32_t id = static_cast<uint32_t>(index);
         if (slot.failed) continue;
@@ -2602,22 +2603,38 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     recordCharacters(cmd, perFrameSet, part, recording_->drawLists[static_cast<size_t>(part)]);
 }
 
+void CharacterRenderer::Frame::clear() noexcept {
+    for (auto& list : drawLists) list.clear();
+    depth.clear(); poses.clear(); bones.clear(); poseById.clear();
+}
+
+uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
+    const auto at = std::lower_bound(poseById.begin(), poseById.end(), id,
+        [](const auto& entry, uint32_t wanted) { return entry.first < wanted; });
+    if (at == poseById.end() || at->first != id)
+        throw std::out_of_range("Visible character has no extracted pose");
+    return at->second;
+}
+
 std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera,
         const std::vector<LocalLight>& lights) {
-    auto frame = std::make_shared<Frame>();
+    auto frame = framePool_.acquire();
     frame->normalMapping = normalMappingEnabled_;
     frame->normalStrength = normalMapStrength_;
     frameLights_ = &lights;
     for (const auto& [id, inst] : scene_->instances) {
         if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->vertexBuffer) continue;
         const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
-        frame->poseById.emplace(id, pose);
+        frame->poseById.emplace_back(id, pose);
         const size_t count = std::min(inst.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
-        frame->poses.emplace_back(inst.boneMatrices.begin(), inst.boneMatrices.begin() + count);
-        if (count == 0) frame->poses.back().emplace_back(1.0f);
+        const auto first = static_cast<uint32_t>(frame->bones.size());
+        frame->bones.insert(frame->bones.end(), inst.boneMatrices.begin(), inst.boneMatrices.begin() + count);
+        if (count == 0) frame->bones.emplace_back(1.0f);
+        frame->poses.push_back({first, static_cast<uint32_t>(std::max(count, size_t(1)))});
         frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst),
             .model = models.at(inst.modelId), .dress = inst.dress, .pose = pose, .id = inst.id, .modelId = inst.modelId});
     }
+    std::sort(frame->poseById.begin(), frame->poseById.end());
     cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
     for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
     frameLights_ = nullptr;
@@ -2691,7 +2708,7 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
             .modelMatrix = modelMatrix,
             .model = models.at(instance.modelId),
             .dress = instance.dress,
-            .pose = frame.poseById.at(instance.id),
+            .pose = frame.poseIndex(instance.id),
             .interiorLight = instance.interiorLight,
             // The lights nearest the unit's origin, as the client picks them
             // for any model.

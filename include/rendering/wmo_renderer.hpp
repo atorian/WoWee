@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/frame_pool.hpp"
 
 #include "collision/wmo_shape.hpp"
 #include "rendering/view_distance.hpp"
@@ -922,6 +923,7 @@ private:
 
 public:
     struct Frame {
+        void clear() noexcept;
         DrawList view, reflection, depth;
         bool wireframe = false;
         uint64_t materialVersion = 0;
@@ -929,6 +931,7 @@ public:
         float normalStrength = 1;
     };
 private:
+    FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
 
 };

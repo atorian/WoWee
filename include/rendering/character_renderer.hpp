@@ -1,4 +1,6 @@
 #pragma once
+#include "rendering/frame_pool.hpp"
+#include <span>
 
 #include "rendering/normal_map_builder.hpp"
 #include "rendering/texture_cache.hpp"
@@ -780,14 +782,19 @@ private:
 
 public:
     struct Frame {
+        void clear() noexcept;
+        uint32_t poseIndex(uint32_t id) const;
         bool normalMapping = false;
         float normalStrength = 1;
         std::vector<DrawCharacter> drawLists[3];
         std::vector<DrawCharacter> depth;
-        std::vector<std::vector<glm::mat4>> poses;
-        std::unordered_map<uint32_t, uint32_t> poseById;
+        struct Pose { uint32_t first, count; };
+        std::vector<Pose> poses;
+        std::vector<glm::mat4> bones;
+        std::vector<std::pair<uint32_t, uint32_t>> poseById;
     };
 private:
+    FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     struct PoseSlot {
         bool failed = false;

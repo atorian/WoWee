@@ -1071,9 +1071,19 @@ WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
     return out;
 }
 
+void WMORenderer::Frame::clear() noexcept {
+    for (auto* list : {&view, &reflection, &depth}) {
+        // Keep each entry's group capacity, but no resource from the completed
+        // frame. Entries past `used` can belong to an earlier, larger scene.
+        for (auto& entry : list->entries) entry.groups.clear();
+        list->portalGroups.clear();
+        list->clear();
+    }
+}
+
 std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
         const glm::vec3& viewer, const std::vector<LocalLight>& lights, bool reflection) {
-    auto frame = std::make_shared<Frame>();
+    auto frame = framePool_.acquire();
     frameLights_ = &lights;
     cullView(camera, viewer, frame->view);
     if (reflection) cullView(camera, camera.getPosition(), frame->reflection);

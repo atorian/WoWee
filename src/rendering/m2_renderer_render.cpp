@@ -39,6 +39,8 @@
 #include <random>
 #include <limits>
 #include <future>
+#include <iterator>
+#include <span>
 #include <thread>
 
 #include <set>
@@ -1372,13 +1374,6 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         gatherViewCandidates(camPos, frustum, maxPossibleDistSq, candidates);
     }
     const uint32_t totalInstances = static_cast<uint32_t>(candidates.size());
-    struct VisibleChunk {
-        std::vector<VisibleEntry> opaque;
-        std::vector<VisibleEntry> transparent;
-        /// Indexed by the entries' draw, from zero in each chunk.
-        std::vector<DrawInstance> draws;
-        std::vector<GlowSprite> glows;
-    };
     const bool haveLights = frameLights_ && !frameLights_->empty();
 
     // Visibility classification is independent per instance and was the
@@ -1388,12 +1383,17 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
     const uint32_t chunkCount = totalInstances >= 2048
         ? std::min<uint32_t>(4, (totalInstances + 1023) / 1024)
         : 1;
-    std::vector<VisibleChunk> chunks(chunkCount);
-    auto classifyInto = [&](std::vector<VisibleChunk>& into, const std::vector<uint32_t>& list,
+    auto& chunks = visibilityChunks_;
+    for (auto& chunk : chunks) chunk.clear();
+    const auto reserveGrowing = [](auto& values, size_t count) {
+        if (count > values.capacity())
+            values.reserve(std::max(count, values.capacity() + values.capacity() / 2));
+    };
+    auto classifyInto = [&](std::span<VisibleChunk> into, const std::vector<uint32_t>& list,
                             uint32_t chunk, uint32_t begin, uint32_t end) {
         auto& out = into[chunk];
-        out.opaque.reserve((end - begin) / 3);
-        out.transparent.reserve((end - begin) / 12);
+        reserveGrowing(out.opaque, (end - begin) / 3);
+        reserveGrowing(out.transparent, (end - begin) / 12);
         for (uint32_t k = begin; k < end; ++k) {
             const uint32_t i = list[k];
             const auto& instance = scene_->instances[i];
@@ -1492,31 +1492,42 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         classifyInto(chunks, candidates, chunk, begin, end);
     };
 
-    std::vector<std::future<void>> visibilityFutures;
-    visibilityFutures.reserve(chunkCount > 0 ? chunkCount - 1 : 0);
+    std::array<std::future<void>, 3> visibilityFutures;
     const uint32_t chunkSize = (totalInstances + chunkCount - 1) / chunkCount;
     for (uint32_t chunk = 0; chunk + 1 < chunkCount; ++chunk) {
         const uint32_t begin = chunk * chunkSize;
         const uint32_t end = std::min(totalInstances, begin + chunkSize);
-        visibilityFutures.push_back(core::ThreadPool::frameWorkers().submit(
+        visibilityFutures[chunk] = core::ThreadPool::frameWorkers().submit(
             "M2 visibility: chunk",
-            [&, chunk, begin, end]() { classifyRange(chunk, begin, end); }));
+            [&, chunk, begin, end]() { classifyRange(chunk, begin, end); });
     }
     const uint32_t lastChunk = chunkCount - 1;
     classifyRange(lastChunk, lastChunk * chunkSize, totalInstances);
-    for (auto& future : visibilityFutures) future.get();
+    for (uint32_t chunk = 0; chunk + 1 < chunkCount; ++chunk) visibilityFutures[chunk].get();
+
+    size_t drawCount = 0, opaqueCount = 0, transparentCount = 0, glowCount = 0;
+    for (const auto& chunk : chunks) {
+        drawCount += chunk.draws.size(); opaqueCount += chunk.opaque.size();
+        transparentCount += chunk.transparent.size(); glowCount += chunk.glows.size();
+    }
+    reserveGrowing(drawInstances_, drawCount);
+    reserveGrowing(sortedVisible_, opaqueCount);
+    reserveGrowing(transparentVisible_, transparentCount);
+    reserveGrowing(glowSprites_, glowCount);
 
     for (auto& chunk : chunks) {
         // Each chunk numbered its draws from zero; they follow the ones
         // before it here.
         const uint32_t base = static_cast<uint32_t>(drawInstances_.size());
-        drawInstances_.insert(drawInstances_.end(), chunk.draws.begin(), chunk.draws.end());
+        drawInstances_.insert(drawInstances_.end(), std::make_move_iterator(chunk.draws.begin()),
+                              std::make_move_iterator(chunk.draws.end()));
         for (VisibleEntry& e : chunk.opaque) e.draw += base;
         for (VisibleEntry& e : chunk.transparent) e.draw += base;
         sortedVisible_.insert(sortedVisible_.end(), chunk.opaque.begin(), chunk.opaque.end());
         transparentVisible_.insert(transparentVisible_.end(), chunk.transparent.begin(),
                                    chunk.transparent.end());
         glowSprites_.insert(glowSprites_.end(), chunk.glows.begin(), chunk.glows.end());
+        chunk.clear();
     }
 
     // WOWEE_M2_CULL_CHECK=1: classify the whole world as well, the way this
@@ -1642,10 +1653,19 @@ void M2Renderer::acceptCullAnswers(const std::vector<CullAnswer>& answers) {
     }
 }
 
+void M2Renderer::Frame::clear() noexcept {
+    drawInstances_.clear(); sortedVisible_.clear(); transparentVisible_.clear();
+    glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
+    ribbonVertices.clear(); particleVertices.clear(); bones.clear();
+    cullInput.clear(); cullIds.clear(); depth.clear(); solarDepth.clear(); strikeDepth.clear();
+    instanceEntries = 0;
+    solarMatrix = overheadMatrix = strikeMatrix = glm::mat4(0.0f);
+}
+
 std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camera, const std::vector<LocalLight>& lights, float time, const glm::mat4& shadowMatrix, float shadowRadius,
         const glm::mat4* overheadMatrix, float overheadRadius,
         const glm::mat4* strikeMatrix, float strikeRadius) {
-    auto frame = std::make_shared<Frame>();
+    auto frame = framePool_.acquire();
     frame->time = time;
     frame->cameraPosition = camera.getPosition();
     frame->skyHour = skyTimeOfDayHours_;

@@ -3454,6 +3454,7 @@ while(_wowee_test_libraries)
 endwhile()
 
 wowee_add_test(test_frame_worker SOURCES test_frame_worker.cpp)
+wowee_add_test(test_frame_pool SOURCES test_frame_pool.cpp)
 
 wowee_add_test(test_distant_terrain
     SOURCES test_distant_terrain.cpp ${CMAKE_SOURCE_DIR}/src/pipeline/distant_terrain.cpp

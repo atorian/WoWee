@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/frame_pool.hpp"
 #include "rendering/frame_results.hpp"
 
 #include "collision/m2_shape.hpp"
@@ -1354,6 +1355,18 @@ private:
         float size;
     };
 
+    struct VisibleChunk {
+        std::vector<VisibleEntry> opaque, transparent;
+        std::vector<DrawInstance> draws;
+        std::vector<GlowSprite> glows;
+        void clear() noexcept {
+            opaque.clear(); transparent.clear(); draws.clear(); glows.clear();
+        }
+    };
+    // Producer-only scratch; workers write disjoint chunks and finish before
+    // their draws are moved into the immutable frame.
+    std::array<VisibleChunk, 4> visibilityChunks_;
+
     /// The view's half of render(): folds the GPU's cull verdicts into the
     /// instances, keeps what the camera sees, copies it into drawInstances_,
     /// sorts the two lists and makes the glow sprites. Reads the scene and
@@ -1623,6 +1636,7 @@ private:
 
 public:
     struct Frame {
+        void clear() noexcept;
         uint64_t instanceEntries = 0;
         std::vector<DrawInstance> drawInstances_;
         std::vector<VisibleEntry> sortedVisible_, transparentVisible_;
@@ -1643,6 +1657,7 @@ public:
         bool suppressStars = false, skipDetail = false;
     };
 private:
+    FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
     std::mutex cullResultMutex_;
     std::vector<CullAnswer> collectedCull_;
