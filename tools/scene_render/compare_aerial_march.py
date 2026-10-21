@@ -42,3 +42,44 @@ for scene in ("hyjal_day", "citadel_evening", "dalaran_gundrak"):
     comparison.save(out / f"{scene}-comparison.png")
 (out / "comparison-metrics.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
+
+# The requested three-way lineup: original mode, global density, far-only density.
+scene = "dalaran_gundrak"
+variants = ("before", "thick", "far")
+if all((out / f"{scene}-{v}.png").exists() for v in variants):
+    images = [Image.open(out / f"{scene}-{v}.png").convert("RGB") for v in variants]
+    width, height = images[0].size
+    comparison = Image.new("RGB", (width * 3, height + 48), "#151a22")
+    draw = ImageDraw.Draw(comparison)
+    labels = ("OLD / Thickness 0.8", "RAY MARCH / Thickness 1.25",
+              "RAY MARCH / far layer boosted, base 0.8")
+    results = {}
+    baseline = np.asarray(images[0]).astype(np.int16)
+    for i, (variant, im, label) in enumerate(zip(variants, images, labels)):
+        draw.text((i * width + 20, 8), label, font=font, fill="white")
+        comparison.paste(im, (i * width, 48))
+        raw = (out / f"{scene}-{variant}.log").read_bytes()
+        log = raw.decode("utf-16" if raw.startswith(b"\xff\xfe") else "utf-8-sig")
+        delta = np.abs(np.asarray(im).astype(np.int16) - baseline)
+        results[variant] = {
+            "label": label,
+            "mean_absolute_rgb_8bit_vs_old": float(delta.mean()),
+            "gpu": [line for line in log.splitlines() if "GPU," in line],
+            "errors": [line for line in log.splitlines() if "[ERROR]" in line],
+            "streaming_incomplete": [line for line in log.splitlines() if "still streaming after" in line],
+        }
+    # Compare fixed near geometry against the retained 0.8 ray-marched image.
+    # These rectangles avoid foliage/particles and are retained in the report.
+    original_march = np.asarray(Image.open(out / f"{scene}-after.png").convert("RGB")).astype(np.int16)
+    far_march = np.asarray(images[2]).astype(np.int16)
+    regions = {"column": (70, 150, 230, 500), "parapet": (400, 660, 800, 700)}
+    results["far"]["near_geometry_vs_march_0_8"] = {}
+    for name, (x0, y0, x1, y1) in regions.items():
+        delta = np.abs(far_march[y0:y1, x0:x1] - original_march[y0:y1, x0:x1])
+        results["far"]["near_geometry_vs_march_0_8"][name] = {
+            "rectangle_xyxy": [x0, y0, x1, y1],
+            "mean_absolute_rgb_8bit": float(delta.mean()),
+            "max_rgb_8bit": int(delta.max()),
+        }
+    comparison.save(out / f"{scene}-three-way.png")
+    (out / "three-way-metrics.json").write_text(json.dumps(results, indent=2))

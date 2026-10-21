@@ -1,0 +1,51 @@
+{
+  "before": {
+    "label": "OLD / Thickness 0.8",
+    "mean_absolute_rgb_8bit_vs_old": 0.0,
+    "gpu": [
+      "timing:   GPU, 50 frames read back: 12.18ms/frame avg, p95 13.88, worst 13.91ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": []
+  },
+  "thick": {
+    "label": "RAY MARCH / Thickness 1.25",
+    "mean_absolute_rgb_8bit_vs_old": 2.2905870225694445,
+    "gpu": [
+      "timing:   GPU, 50 frames read back: 19.05ms/frame avg, p95 20.32, worst 22.98ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": []
+  },
+  "far": {
+    "label": "RAY MARCH / far layer boosted, base 0.8",
+    "mean_absolute_rgb_8bit_vs_old": 1.504603587962963,
+    "gpu": [
+      "timing:   GPU, 50 frames read back: 21.04ms/frame avg, p95 22.20, worst 22.90ms across 23 passes"
+    ],
+    "errors": [],
+    "streaming_incomplete": [],
+    "near_geometry_vs_march_0_8": {
+      "column": {
+        "rectangle_xyxy": [
+          70,
+          150,
+          230,
+          500
+        ],
+        "mean_absolute_rgb_8bit": 0.0010773809523809523,
+        "max_rgb_8bit": 1
+      },
+      "parapet": {
+        "rectangle_xyxy": [
+          400,
+          660,
+          800,
+          700
+        ],
+        "mean_absolute_rgb_8bit": 0.0015208333333333332,
+        "max_rgb_8bit": 1
+      }
+    }
+  }
+}

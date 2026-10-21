@@ -1,6 +1,7 @@
 // Reference-quality preview: integrate the illumination of the existing
-// authored optical-depth profile. This deliberately preserves visibility and
-// the Fog Thickness contract, isolating in-scattering in paired captures.
+// authored optical-depth profile. The default comparison preserves visibility
+// and the Fog Thickness contract, isolating in-scattering. The optional far
+// density preview changes the shared profile for both marching and surfaces.
 // It is not a physical reconstruction of WoW's non-radiometric DBC colours.
 // A production implementation should cache this integral in a froxel/LUT pass.
 #ifndef AERIAL_MARCH_STEPS

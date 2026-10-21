@@ -104,3 +104,36 @@ completed without ERROR entries or incomplete-terrain messages. Logged average
 GPU times were 12.18 ms before and 18.42 ms with 24 steps; these remain
 single-run measurements. The column stays along the left edge, with the
 central landscape open and the parapet along the bottom.
+
+
+## Three-way density preview
+
+The requested lineup, left to right, keeps the same Dalaran camera and world:
+
+1. `before`: original non-marched haze, Fog Thickness 0.8.
+2. `thick`: 24-step ray marching, Fog Thickness 1.25 throughout the profile.
+3. `far`: 24-step ray marching, Fog Thickness 0.8 with additional far-air density.
+
+The far-only switch is disabled by default. It preserves extinction through
+the authored profile's near half, then smoothly adds optical depth. The
+additional depth reaches a multiplier of 1.25 / 0.8 after another halving of
+transmission in the far portion. Surface extinction and ray-march integration
+use the same modified profile; the geometry boundary fade remains separate.
+This is an artistic density experiment, not a calibrated physical medium.
+
+```powershell
+./tools/scene_render/aerial_march_preview.ps1 -Scene dalaran_gundrak -Variant thick
+./tools/scene_render/aerial_march_preview.ps1 -Scene dalaran_gundrak -Variant far
+python tools/scene_render/compare_aerial_march.py
+```
+
+The script generates the 1.25 scene in the scratch directory without changing
+the original scene. The comparison script retains all rendered pixels and
+adds labels above a single row in `dalaran_gundrak-three-way.png`.
+
+Both new captures completed without ERROR or incomplete-terrain log entries;
+all seven variant fragment shaders passed glslc and spirv-val. Against the
+retained ray-marched 0.8 capture, fixed column/parapet rectangles differ by
+at most 1/255 per channel in the far-only variant. The retained three-way
+metrics record the rectangles and the single-run GPU times (19.05 ms for
+1.25 and 21.04 ms for far-only). These are still expensive reference previews.
