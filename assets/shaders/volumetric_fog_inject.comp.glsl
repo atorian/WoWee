@@ -56,13 +56,14 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayOrigin;      // xyz = camera position
     vec4 rayCorner[4];   // rays one yard deep through uv (0,0), (1,0), (0,1), (1,1)
     mat4 prevViewProj;
-    vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
-    vec4 lighting;       // x = light scatter (sun and models' lights)
+    vec4 medium;         // x = mist, y = layer base, z = 1 / mist height
+    vec4 lighting;       // x = light scatter, y = clear air, z = dust, w = 1 / dust height
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;
     vec4 sunHalo;        // rgb = the zone's glow around the sun (LightIntBand 10)
     vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
+    vec4 dustAlbedo;     // rgb = sand's scattering albedo
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -104,20 +105,22 @@ float valueNoise3D(vec3 x) {
                mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
 }
 
-// Extinction per yard. Densest at the layer's base - the ground the camera
-// stands over - thinning with height to a floor that never quite clears, and
-// broken into drifting banks forty yards or so across. Thinned to nothing
-// over the back two thirds of the volume's depth: this is the near air, where
-// shafts can be seen, and the zone's distance fog is the haze past it.
-float airDensity(vec3 p, float depth) {
+#include "volumetric_medium.glsli"
+
+// Scattering and extinction per yard for the three captured constituents.
+// Only mist and dust form banks; enabling shafts must not manufacture fog.
+vec4 airMedium(vec3 p, float depth) {
     float above = max(p.z - vol.medium.y, 0.0);
-    float layer = mix(vol.medium.w, 1.0, exp(-above * vol.medium.z));
-    vec3 q = (p + vol.drift.xyz) / 40.0;
-    float n = valueNoise3D(q) * 0.65 + valueNoise3D(q * 2.6 + 11.7) * 0.35;
-    float banks = mix(1.0, 2.0 * n, vol.drift.w);
+    float banks = 1.0;
+    if (vol.medium.x > 0.0 || vol.lighting.z > 0.0) {
+        vec3 q = (p + vol.drift.xyz) / 40.0;
+        float n = valueNoise3D(q) * 0.65 + valueNoise3D(q * 2.6 + 11.7) * 0.35;
+        banks = mix(1.0, 2.0 * n, vol.drift.w);
+    }
     float far = sliceDepth(volumetricParams.w);
     float near = 1.0 - smoothstep(0.35 * far, far, depth);
-    return vol.medium.x * layer * banks * near;
+    return volumeMediumAt(above, banks, vec3(vol.lighting.y, vol.medium.x, vol.lighting.z),
+                          vol.medium.z, vol.lighting.w, vol.dustAlbedo.rgb) * near;
 }
 
 // Whether the sun reaches this point, off the same shadow map the surfaces
@@ -139,9 +142,6 @@ float sunVisibility(vec3 p) {
 }
 
 #include "sunlit_air.glsli"
-#include "sky_atmosphere.glsli"
-#define AERIAL_ANALYTIC_ONLY
-#include "aerial_frame.glsli"
 
 void main() {
     ivec3 cell = ivec3(gl_GlobalInvocationID);
@@ -152,14 +152,12 @@ void main() {
     float depth = sliceDepth(at.z);
     vec3 p = vol.rayOrigin.xyz + rayAt(uv) * depth;
 
-    float density = airDensity(p, depth);
+    vec4 medium = airMedium(p, depth);
+    float density = medium.a;
 
-    // The light reaching this air. Where only the sky lights it, it takes the
-    // zone's fog colour, whole: that is the colour the zone's distance fog
-    // fades everything to, so deep air comes out as the same haze, and what
-    // stands far off in the mist turns to it - lighter than a dark forest, as
-    // mist is. At half, the air took out more light than it gave and the mist
-    // only darkened what was behind it, the more of it the darker.
+    // Ambient illumination is the zone's authored fill light. The distance
+    // haze's neutral horizon colour is not the light illuminating nearby air;
+    // using it here painted dense white banks even under a warm sky.
     //
     // Sunlight comes on top, and mostly forward, as it does off mist and
     // dust, the forward part in the colour of the zone's halo
@@ -173,7 +171,7 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    vec3 light = aerialColorAt(p - vol.rayOrigin.xyz);
+    vec3 light = ambientColor.rgb;
     if (sunUp > 0.0) {
         light += sunlitAirLight(lightColor.rgb, vol.sunHalo.rgb * vol.sunGlare.w, dot(-vol.sunGlare.xyz, toCamera)) *
                  (sunVisibility(p) * sunUp * vol.lighting.x);
@@ -194,7 +192,7 @@ void main() {
     }
     light += min(local, vec3(1.0)) * vol.lighting.x;
 
-    vec4 result = vec4(light * density, density);
+    vec4 result = vec4(light * medium.rgb, density);
 
     // The same air last frame, found by projecting this point into last
     // frame's view. Anything that falls outside it is new to the view and
@@ -213,6 +211,6 @@ void main() {
 
     // The renderer resets history during the pulse and on its first clear
     // frame, so the light appears and ends with the bolt.
-    result.rgb += lightningAt(p) * (density * vol.lighting.x);
+    result.rgb += lightningAt(p) * (medium.rgb * vol.lighting.x);
     imageStore(uCellsOut, cell, result);
 }

@@ -1428,6 +1428,12 @@ wowee_add_test(test_frustum
     SOURCES test_frustum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
 
+wowee_add_test(test_rt_instance_changes SOURCES test_rt_instance_changes.cpp)
+
+wowee_add_test(test_terrain_depth
+    SOURCES test_terrain_depth.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
+
 # ── test_rt_bvh ──────────────────────────────────────────────
 # The hierarchy the software ray tracer walks, against a brute-force scan.
 wowee_add_test(test_rt_bvh

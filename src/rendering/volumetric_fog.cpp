@@ -22,13 +22,14 @@ struct VolumeParamsGPU {
     glm::vec4 rayOrigin;      // xyz = camera position
     glm::vec4 rayCorner[4];   // world rays at one yard of view depth: uv (0,0), (1,0), (0,1), (1,1)
     glm::mat4 prevViewProj;   // last frame's, for reprojecting the history
-    glm::vec4 medium;         // x = density, y = layer base z, z = 1 / layer height, w = floor
-    glm::vec4 lighting;       // x = light scatter (sun and models' lights), yzw = unused
+    glm::vec4 medium;         // x = mist, y = layer base z, z = 1 / mist height, w = unused
+    glm::vec4 lighting;       // x = light scatter, y = clear air, z = dust, w = 1 / dust height
     glm::vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
     glm::vec4 sunHalo;        // rgb = the zone's glow around the sun, w = unused
     glm::vec4 sunGlare;       // xyz = toward the sun's disc, w = how much the sky round it shines
+    glm::vec4 dustAlbedo;     // rgb = sand's scattering albedo
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -423,9 +424,11 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
                    glm::length(in.cameraPos - prevCameraPos_) < 30.0f;
     p.prevViewProj = prevViewProj_;
 
-    p.medium = glm::vec4(in.density, in.layerBase, 1.0f / std::max(in.layerHeight, 1.0f),
-                         glm::clamp(in.layerFloor, 0.0f, 1.0f));
-    p.lighting = glm::vec4(in.lightScatter, 0.0f, 0.0f, 0.0f);
+    p.medium = glm::vec4(in.medium.mist, in.layerBase,
+                        1.0f / std::max(in.layerHeight, 1.0f), 0.0f);
+    p.lighting = glm::vec4(in.lightScatter, in.medium.air, in.medium.dust,
+                          1.0f / std::max(in.dustHeight, 1.0f));
+    p.dustAlbedo = glm::vec4(kSandAlbedo, 0.0f);
     // A slow breeze, a yard a second, so the mist drifts rather than sits.
     const float t = in.time;
     p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));

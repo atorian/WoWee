@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rendering/view_distance.hpp"
+#include "rendering/terrain_depth.hpp"
 
 #include <cmath>
 
@@ -240,11 +241,8 @@ public:
         TerrainSurfacePush surface;
         LocalLightSet lights = kNoLocalLights;
     };
-    struct DepthDraw {
-        GeometryDraw geometry;
-        glm::vec3 centre{0.0f};
-        float radius = 0.0f;
-    };
+    using DepthDraw = TerrainDepthChunk<GeometryDraw>;
+    using DepthTile = TerrainDepthTile<GeometryDraw>;
     struct BakeDraw {
         GeometryDraw geometry;
         VkDescriptorSet material = VK_NULL_HANDLE;
@@ -254,7 +252,7 @@ public:
     };
     struct DrawList {
         std::vector<ChunkDraw> view;
-        std::vector<DepthDraw> depth;
+        std::vector<std::shared_ptr<const DepthTile>> depth;
         std::vector<BakeDraw> bake;
         std::vector<std::shared_ptr<TerrainBake::Atlas>> atlases;
         bool wireframe = false;
@@ -443,15 +441,12 @@ private:
     /// chunk inside it. Kept up with chunkAt_.
     struct ShadowTile {
         int tileX = 0, tileY = 0;
-        glm::vec3 centre{0.0f};
-        float radius = 0.0f;
         std::vector<uint32_t> chunks;
+        TerrainDepthCache<GeometryDraw> depth;
     };
     std::vector<ShadowTile> shadowTiles_;
     /// Which of shadowTiles_ each tile is, by tile.
     std::unordered_map<uint64_t, uint32_t> tileAt_;
-    /// The sphere round all of a tile's chunks.
-    void boundTile(ShadowTile& tile) const;
     /// This frame's level for each chunk in `chunks`, -1 where it is not drawn.
 
     /// The visible chunks of this frame, in `chunks` order, with their levels.

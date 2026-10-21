@@ -1826,6 +1826,7 @@ void GameScreen::saveSettings() {
     out << "shadow_distance=" << settingsPanel_.pendingShadowDistance << "\n";
     out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
     out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
+    out << "fog_height_influence=" << settingsPanel_.pendingFogHeightInfluence << "\n";
     out << "light_shafts=" << settingsPanel_.pendingVolumetricFog << "\n";
     out << "ray_traced_lighting=" << settingsPanel_.pendingRtLighting << "\n";
     out << "rt_distance=" << settingsPanel_.pendingRtDistance << "\n";
@@ -2076,6 +2077,7 @@ void GameScreen::loadSettings() {
                 }
             }
             else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
+            else if (key == "fog_height_influence") settingsPanel_.pendingFogHeightInfluence = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "light_shafts") settingsPanel_.pendingVolumetricFog = std::clamp(std::stoi(val), 0, 3);
             else if (key == "ray_traced_lighting") settingsPanel_.pendingRtLighting = std::clamp(std::stoi(val), 0, 3);
             else if (key == "rt_distance") settingsPanel_.pendingRtDistance = rendering::clampRtDistance(std::stof(val));

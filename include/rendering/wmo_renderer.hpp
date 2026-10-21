@@ -1,4 +1,6 @@
 #pragma once
+
+#include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 
 #include "collision/wmo_shape.hpp"
@@ -99,10 +101,8 @@ public:
 
     /// Where loaded models register their geometry for the ray traced lighting.
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
-    /// Bring the scene's instances in line with this renderer's: added,
-    /// moved, hidden and removed. Once a frame, and only while the lighting
-    /// is on; one pass over the instances is cheaper than hooking every one
-    /// of the half-dozen ways they change.
+    /// Flush added, moved and hidden placements after producer mutations.
+    /// Unchanged instances are not visited; removals retire immediately.
     void syncRtScene();
 
     /**
@@ -761,14 +761,6 @@ private:
 
     RtScene* rtScene_ = nullptr;
     std::unordered_map<uint32_t, uint32_t> rtModelMeshes_;  // modelId -> RtScene mesh
-    struct RtInstanceRecord {
-        uint32_t rtId;
-        uint32_t modelId;
-        glm::mat4 matrix;
-        uint64_t seen;
-    };
-    std::unordered_map<uint32_t, RtInstanceRecord> rtInstances_;  // WMO instance id ->
-    uint64_t rtSyncGeneration_ = 0;
     /// Adds the mesh the preparation built to the ray-traced scene, its
     /// triangles coloured by the textures the model now has.
     void registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep);
@@ -916,6 +908,7 @@ private:
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
         std::vector<WMOInstance> instances;
+        RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, size_t> instanceIndexById;
     };
     InstanceState defaultInstances_;

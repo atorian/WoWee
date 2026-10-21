@@ -294,6 +294,7 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
 }
 
 void WMORenderer::shutdown() {
+    scene_->rtChanges.clear(rtScene_);
     core::Logger::getInstance().info("Shutting down WMO renderer...");
 
     // Without a context there is nothing to free on the GPU and nothing to drain
@@ -741,6 +742,7 @@ uint32_t WMORenderer::createInstance(uint32_t modelId, const glm::vec3& position
     scene_->instances.push_back(instance);
     size_t idx = scene_->instances.size() - 1;
     scene_->instanceIndexById[instance.id] = idx;
+    scene_->rtChanges.add(instance.id, modelId);
     if (collision_) collision_->placeWmo(instance.id, model.shape, instance.modelMatrix);
     markContentChanged();
     core::Logger::getInstance().debug("Created WMO instance ", instance.id, " (model ", modelId, ")");
@@ -795,6 +797,7 @@ void WMORenderer::setInstanceHidden(uint32_t instanceId, bool hidden) {
     auto& inst = scene_->instances[idxIt->second];
     if (inst.hidden == hidden) return;
     inst.hidden = hidden;
+    scene_->rtChanges.changed(instanceId);
     if (collision_) collision_->setWmoHidden(instanceId, hidden);
     // Its doodads leave and come back with it. Hiding the hull alone left a
     // ship's sails, barrels and anchor hanging over the harbour while the
@@ -833,6 +836,7 @@ void WMORenderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tra
     inst.invModelMatrix = glm::inverse(transform);
 
     refreshInstanceBounds(inst);
+    scene_->rtChanges.changed(instanceId);
 
     // Propagate transform to child M2 doodads (chairs, furniture on transports)
     if (m2Renderer_ && !inst.doodads.empty()) {
@@ -915,6 +919,7 @@ void WMORenderer::removeInstance(uint32_t instanceId) {
             for (const auto& doodad : it->doodads) doodadIds.push_back(doodad.m2InstanceId);
             m2Renderer_->removeInstances(doodadIds);
         }
+        scene_->rtChanges.remove(instanceId, rtScene_);
         scene_->instances.erase(it);
         rebuildIndexById();
         if (collision_) collision_->removeWmo(instanceId);
@@ -945,6 +950,7 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
         m2Renderer_->removeInstances(doodadIds);
     }
 
+    for (uint32_t id : toRemove) scene_->rtChanges.remove(id, rtScene_);
     const size_t oldSize = scene_->instances.size();
     scene_->instances.erase(std::remove_if(scene_->instances.begin(), scene_->instances.end(),
                    [&toRemove](const WMOInstance& inst) {
@@ -964,6 +970,7 @@ void WMORenderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
 }
 
 void WMORenderer::clearInstances() {
+    scene_->rtChanges.clear(rtScene_);
     if (m2Renderer_) {
         std::vector<uint32_t> doodadIds;
         for (const auto& inst : scene_->instances) {
@@ -2363,19 +2370,15 @@ void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model, WmoM
         src.surfaces[t] = m < materialSurface.size() ? materialSurface[m] : unknownSurface;
     }
     const RtScene::MeshId mesh = rtScene_->addMesh(std::move(src));
-    if (mesh != RtScene::kInvalid) rtModelMeshes_[modelId] = mesh;
+    if (mesh != RtScene::kInvalid) {
+        rtModelMeshes_[modelId] = mesh;
+        scene_->rtChanges.modelReady(modelId);
+    }
 }
 
 void WMORenderer::releaseRtModel(uint32_t modelId) {
     if (!rtScene_) return;
-    for (auto it = rtInstances_.begin(); it != rtInstances_.end();) {
-        if (it->second.modelId == modelId) {
-            rtScene_->removeInstance(it->second.rtId);
-            it = rtInstances_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    scene_->rtChanges.modelRemoved(modelId, rtScene_);
     auto mesh = rtModelMeshes_.find(modelId);
     if (mesh == rtModelMeshes_.end()) return;
     rtScene_->removeMesh(mesh->second);
@@ -2384,33 +2387,16 @@ void WMORenderer::releaseRtModel(uint32_t modelId) {
 
 void WMORenderer::syncRtScene() {
     if (!rtScene_) return;
-    const uint64_t gen = ++rtSyncGeneration_;
-    for (const auto& inst : scene_->instances) {
-        if (inst.hidden) continue;
-        auto mesh = rtModelMeshes_.find(inst.modelId);
-        if (mesh == rtModelMeshes_.end()) continue;
-        auto rec = rtInstances_.find(inst.id);
-        if (rec == rtInstances_.end()) {
-            const uint32_t rtId = rtScene_->addInstance(mesh->second, inst.modelMatrix);
-            if (rtId != RtScene::kInvalid) {
-                rtInstances_.emplace(inst.id, RtInstanceRecord{rtId, inst.modelId, inst.modelMatrix, gen});
-            }
-            continue;
-        }
-        if (rec->second.matrix != inst.modelMatrix) {
-            rtScene_->setInstanceTransform(rec->second.rtId, inst.modelMatrix);
-            rec->second.matrix = inst.modelMatrix;
-        }
-        rec->second.seen = gen;
-    }
-    for (auto it = rtInstances_.begin(); it != rtInstances_.end();) {
-        if (it->second.seen != gen) {
-            rtScene_->removeInstance(it->second.rtId);
-            it = rtInstances_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    scene_->rtChanges.flush(*rtScene_, [&](uint32_t id) {
+        const auto& inst = scene_->instances[scene_->instanceIndexById.at(id)];
+        const auto mesh = rtModelMeshes_.find(inst.modelId);
+        return RtInstanceChanges::State{
+            !inst.hidden && mesh != rtModelMeshes_.end() ? mesh->second : RtScene::kInvalid,
+            inst.modelMatrix};
+    }, [](uint32_t id, uint32_t mesh) {
+        LOG_WARNING("WMO instance ", id, " could not register RT mesh ", mesh,
+                    "; drawn without ray-traced occlusion until its source changes");
+    });
 }
 
 } // namespace rendering

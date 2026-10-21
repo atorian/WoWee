@@ -9,11 +9,71 @@
 // that slide against the trees casting them. Nothing else would say so.
 #include <catch_amalgamated.hpp>
 #include "rendering/volumetric_fog_math.hpp"
+#include "rendering/volumetric_medium.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 using wowee::rendering::froxelCornerRays;
+
+namespace medium_math {
+using vec3 = glm::vec3;
+using vec4 = glm::vec4;
+using glm::exp;
+using glm::max;
+#include "../assets/shaders/volumetric_medium.glsli"
+}
+
+TEST_CASE("clear weather supplies thin air without drifting ground fog", "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const auto medium = volumetricMediumFor({}, 1, false);
+    const auto sample = [&](float height, float banks) {
+        return medium_math::volumeMediumAt(height, banks,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+    };
+    const auto ground = sample(0, 1);
+    CHECK(std::exp(-ground.a * 100) > .95f);
+    CHECK(ground.a > 0); // Sun and torch shafts still have scattering air.
+    CHECK(sample(0, .2f) == sample(0, 1.8f));
+    CHECK(sample(0, 1) == sample(80, 1));
+}
+
+TEST_CASE("fog weather adds a neutral low layer and sand adds coloured dust", "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const auto sample = [](const WeatherMix& weather, float height) {
+        const auto medium = volumetricMediumFor(weather, 1, false);
+        return medium_math::volumeMediumAt(height, 1,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+    };
+    const auto wet = sample({.mist = 1}, 0);
+    CHECK(std::exp(-wet.a * 100) < .5f);
+    CHECK(wet.r == Catch::Approx(wet.b));
+    CHECK(sample({.mist = 1}, 40).a < wet.a * .1f);
+    const auto sand = sample({.sand = 1}, 0);
+    CHECK(sand.r > sand.b * 1.5f);
+    CHECK(sand.g > sand.b);
+    CHECK(sample({.sand = 1}, 40).a > sand.a * .4f);
+    CHECK(sample({.rain = 1}, 0).a > sample({}, 0).a);
+    CHECK(sample({.rain = 1}, 0).a < wet.a);
+}
+
+TEST_CASE("mixed weather conserves scattering energy and density zero clears every layer",
+          "[volumetric][medium]") {
+    using namespace wowee::rendering;
+    const WeatherMix weather{.rain = .5f, .sand = .5f, .mist = .5f};
+    for (float density : {0.0f, .65f, 1.0f, 3.0f}) {
+        const auto medium = volumetricMediumFor(weather, density, false);
+        const auto at = medium_math::volumeMediumAt(8, 1.3f,
+            {medium.air, medium.mist, medium.dust}, 1.0f/8, 1.0f/80, kSandAlbedo);
+        if (density == 0) CHECK(at == glm::vec4(0));
+        else {
+            CHECK(at.a > 0);
+            CHECK(at.r <= at.a);
+            CHECK(at.g <= at.a);
+            CHECK(at.b <= at.a);
+        }
+    }
+}
 
 namespace {
 

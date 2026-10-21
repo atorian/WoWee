@@ -1,8 +1,9 @@
 #include "aerial_perspective.glsli"
 float aerialVisibilityAt(vec3 worldPos,float distance) {
     if(aerialParams.w>0.5 && fogSkyBand1.w>0.0) {
-        return distanceHazeVisibility(distance,length(worldPos.xy-viewPos.xy),
-                                      fogParams.x,fogParams.y,fogSkyBand1.w);
+        return distanceHeightHazeVisibility(distance,length(worldPos.xy-viewPos.xy),
+            fogParams.x,fogParams.y,fogSkyBand1.w,viewPos.z,worldPos.z,
+            aerialParams.x,aerialParams.y,aerialParams.z);
     }
     // Underwater and fog-disabled views retain their own linear distances.
     return distanceFogVisibility(distance,fogParams.x,fogParams.y);
@@ -17,7 +18,8 @@ vec3 aerialSky(vec3 sky,vec3 direction) {
 }
 
 #ifndef AERIAL_ANALYTIC_ONLY
-layout(set = 0, binding = 5) uniform sampler2D uSceneSky;
+layout(set = 0, binding = 5) uniform sampler2D uSceneSky; // reflections, including stars
+layout(set = 0, binding = 11) uniform sampler2D uAtmosphereSky; // scattering only
 #endif
 
 vec3 aerialColorAt(vec3 direction) {
@@ -33,7 +35,7 @@ vec3 aerialColorAt(vec3 direction) {
         if(clip.w>0.0) {
             vec2 uv=clip.xy/clip.w*0.5+0.5;
             if(all(greaterThanEqual(uv,vec2(0))) && all(lessThanEqual(uv,vec2(1))))
-                return textureLod(uSceneSky,uv,0.0).rgb;
+                return textureLod(uAtmosphereSky,uv,0.0).rgb;
         }
     }
 #endif

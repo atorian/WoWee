@@ -681,6 +681,7 @@ private:
     void* perFrameUBOMapped[MAX_FRAMES] = {};
     GPUPerFrameData currentFrameData{};
     std::unique_ptr<SkyBackground> skyBackground_;
+    std::unique_ptr<SkyBackground> atmosphereBackground_;
     VkDescriptorSet skyPerFrameDescSets[MAX_FRAMES]{};
     void renderSkyBackground(float timeOfDay,
                              bool drawSkyModels, bool useOriginalSkybox);
@@ -805,9 +806,9 @@ private:
     /// The ground the mist lies on, chased toward the ground under the player.
     float fogLayerBase_ = 0.0f;
     bool fogLayerBaseValid_ = false;
-    /// The extinction the volume is built with, chased toward what the zone,
-    /// the weather and the hour ask for so walking indoors does not switch it.
-    float fogExtinction_ = -1.0f;
+    /// Independently smoothed clear air, ground mist and dust coefficients.
+    VolumetricMedium fogMedium_;
+    bool fogMediumValid_ = false;
     void renderVolumetricFog();
     void writeFogVolumeBindings(uint32_t slot);
 
@@ -825,7 +826,6 @@ private:
     bool characterCasterSetsReset_ = false;
     bool wmoCasterSetsReset_ = false;
     bool m2CasterSetsReset_ = false;
-    float volumetricFogExtinction() const;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.
     std::shared_ptr<ScreenCapture> screenCapture_;

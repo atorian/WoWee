@@ -60,6 +60,7 @@ struct SkyParams {
     // own pixel, and with the discs in the capture a moon rising behind a
     // misty inn showed through the inn's walls.
     bool drawBodies = true;
+    bool drawStars = true; // celestial imagery is excluded from atmospheric scattering
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours

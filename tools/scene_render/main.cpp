@@ -713,6 +713,7 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     // keeps the renderer's own default, not the panel's.
     if (auto* lighting = renderer.getLightingManager()) {
         if (scene.contains("fogStrength")) lighting->setFogStrength(scene["fogStrength"].get<float>());
+        if (scene.contains("fogHeightInfluence")) lighting->setFogHeightInfluence(scene["fogHeightInfluence"].get<float>());
         if (scene.contains("fogSkyBlend"))
             LOG_WARNING("scene_render: fogSkyBlend is obsolete; the zone's authored fog colour is used");
     }
@@ -839,6 +840,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
             }
         }
 
+        if (scene.contains("fogHeightInfluenceAfterExtract") &&
+            frame == scene.value("mutateAtFrame", frames - 1)) {
+            renderer.getLightingManager()->setFogHeightInfluence(
+                scene["fogHeightInfluenceAfterExtract"].get<float>());
+        }
         if (interfaceFixture) {
             interfaceFixture->build();
             inputs.interface = interfaceFixture->extract();

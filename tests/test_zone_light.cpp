@@ -210,3 +210,32 @@ TEST_CASE("the sky receives the authored smog and fog in clear and storm light",
         CHECK(glm::length(sky.skySmogColor - expected(6)) < 2e-3f);
     }
 }
+
+TEST_CASE("Fog thickness does not enter temporal zone-profile smoothing", "[light][fog-response]") {
+    wowee::pipeline::AssetManager assets;
+    LightingManager lighting;
+    const auto root = wowee::test::makeDataRoot("wowee_fog_slider_profile", {
+        {"dbfilesclient\\light.dbc", lightDbc()},
+        {"dbfilesclient\\lightparams.dbc", lightParamsDbc()},
+        {"dbfilesclient\\lightintband.dbc", lightIntBandDbc()},
+    });
+    REQUIRE(assets.initialize(root.string()));
+    REQUIRE(lighting.initialize(&assets));
+    const glm::vec3 pos = wowee::rendering::lightPositionToWorld(DBC_X, DBC_Y, 0.0f);
+    for (int i = 0; i < 120; ++i)
+        lighting.update(0.25f, pos, 0, 12, 12.0f, 0.0f);
+    const auto reference = lighting.getLightingParams();
+
+    // Density is applied to a frame's copy after the zone has been smoothed.
+    // An off/on slider change must never feed the million-yard off sentinel
+    // into that history, otherwise fog remains clear long after re-enabling.
+    for (float strength : {0.0f, 2.0f, 0.4f, 0.8f, 1.6f}) {
+        lighting.setFogStrength(strength);
+        for (int frame = 0; frame < 4; ++frame) {
+            lighting.update(1.0f / 60.0f, pos, 0, 12, 12.0f, 0.0f);
+            INFO("thickness=" << strength << " frame=" << frame);
+            CHECK(lighting.getLightingParams().fogStart == Catch::Approx(reference.fogStart));
+            CHECK(lighting.getLightingParams().fogEnd == Catch::Approx(reference.fogEnd));
+        }
+    }
+}

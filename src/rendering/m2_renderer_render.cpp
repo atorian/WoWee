@@ -200,6 +200,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // Track special instances for fast-path iteration
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
+    scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
     placeInCollision(placed);
 
@@ -297,6 +298,7 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     const M2Instance& placed = scene_->instances[idx];
     fileInIndexSets(idx);
     scene_->instanceIndexById[placed.id] = idx;
+    scene_->rtChanges.add(placed.id, placed.modelId);
     fileInCullGrid(scene_->instances[idx]);
     placeInCollision(placed);
 
@@ -878,13 +880,10 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
     smoothedRenderDist_ = glm::mix(smoothedRenderDist_, targetRenderDist, blendRate);
     const float maxRenderDistance = smoothedRenderDist_;
     const float maxRenderDistanceSq = maxRenderDistance * maxRenderDistance;
-    // The shader rejects on this bound before it ever reads the per-instance
-    // distance, so it has to clear the game-object floor as well - otherwise
-    // that floor is silently capped at 2x the ambient doodad distance.
-    const float maxPossibleDistSq = std::max(
-        maxRenderDistanceSq * 4.0f,  // 2x safety margin
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // Every per-instance range is capped by View Distance. The broad phase
+    // must cover that ceiling: twice the adaptive clutter range can be much
+    // shorter than a large landmark's own range once a dense scene settles.
+    const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
     // --- Upload frustum planes + camera (UBO, binding 0) ---
     const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -1257,9 +1256,9 @@ void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
 }  // namespace
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&,
-                        const StarReplacement& drawStars) {
+                        const StarReplacement& drawStars, bool drawBakedStars) {
     if (!opaquePipeline_) return;
-    recordView(cmd, perFrameSet, drawStars);
+    recordView(cmd, perFrameSet, drawStars, drawBakedStars);
 }
 
 
@@ -1325,12 +1324,9 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
         const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
         frustum.extractFromMatrix(vp);
     }
-    // Matches the bound uploaded to the cull shader, including the headroom the
-    // game-object floor needs (see dispatchCullCompute).
-    const float maxPossibleDistSq = std::max(
-        maxRenderDistanceSq * 4.0f,
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+    // Same conservative ceiling as extractCull, before each instance's own
+    // size/detail range is tested. Scene density must not shrink this bound.
+    const float maxPossibleDistSq = cappedViewDistance() * cappedViewDistance();
 
     // The existing batch probe also explains models rejected before drawing.
     // Emit only when the reason changes; this is opt-in, never per-frame noise.
@@ -1736,7 +1732,7 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
 }
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                            const StarReplacement& drawStars) {
+                            const StarReplacement& drawStars, bool drawBakedStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& sortedVisible_ = recording_->sortedVisible_;
 
@@ -2024,6 +2020,10 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         }
                     }
 
+                    // Keep SSBO addresses identical across the atmosphere,
+                    // reflection and main sky passes; filter only the draw.
+                    if (!drawBakedStars && batch.starLayer) continue;
+
                     // Pipeline selection (per-model/batch, not per-instance).
                     // What the batch is drawn as was decided when the model
                     // loaded - see m2BatchDrawState.
@@ -2067,7 +2067,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // With the water out of the scene pass, the blended half waits for it:
     // drawn now, the water would be laid over it.
     blendedPendingAfterWater_ = drawsBlendedAfterWater();
-    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars);
+    if (!blendedPendingAfterWater_) recordTransparentPass(cmd, perFrameSet, drawStars, drawBakedStars);
 
     // How many of the sky's layers were actually drawn this frame.
     //
@@ -2090,7 +2090,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 }
 
 void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                                       const StarReplacement& drawStars) {
+                                       const StarReplacement& drawStars, bool drawBakedStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
     const auto& transparentVisible_ = recording_->transparentVisible_;
     const auto& glowSprites_ = recording_->glowSprites_;
@@ -2278,6 +2278,10 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             e.flags = instance.afloat ? 1 : 0;
             e.interiorLight = instance.interiorLight;
             instanceDataCount_++;
+
+            // Earlier captures still reference these SSBO addresses. Reserve
+            // the same entries even when this pass omits celestial imagery.
+            if (!drawBakedStars && batch.starLayer) continue;
 
             // Pipeline selection
             const uint8_t drawBlendMode = batch.drawState.drawBlendMode;

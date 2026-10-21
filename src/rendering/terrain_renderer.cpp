@@ -1003,11 +1003,16 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     const TerrainBakeBand band = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
     std::vector<int8_t> levels(chunks.size(), -1);
     std::vector<uint32_t> visible;
-    list.depth.reserve(chunks.size());
+    list.depth.reserve(shadowTiles_.size());
+    for (auto& tile : shadowTiles_) {
+        list.depth.push_back(tile.depth.extract(tile.chunks, [&](uint32_t index) {
+            const auto& ch = chunks[index];
+            return DepthDraw{geometryOf(ch), ch.boundingSphereCenter, ch.boundingSphereRadius};
+        }));
+    }
     for (uint32_t i = 0; i < chunks.size(); ++i) {
         const auto& ch = chunks[i];
         if (!ch.isValid()) continue;
-        list.depth.push_back({geometryOf(ch), ch.boundingSphereCenter, ch.boundingSphereRadius});
         if (!ch.materialSet) continue;
         const glm::vec2 step = glm::vec2(ch.boundingSphereCenter - camPos);
         const float distanceSq = glm::dot(step, step);
@@ -1121,22 +1126,6 @@ void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     crossfadeDrawnChunks_ = list.crossfade;
 }
 
-void TerrainRenderer::boundTile(ShadowTile& tile) const {
-    // The sphere holds every one of its chunks' spheres.
-    glm::vec3 lo(std::numeric_limits<float>::max());
-    glm::vec3 hi(std::numeric_limits<float>::lowest());
-    for (const uint32_t i : tile.chunks) {
-        lo = glm::min(lo, chunks[i].boundingSphereCenter);
-        hi = glm::max(hi, chunks[i].boundingSphereCenter);
-    }
-    tile.centre = (lo + hi) * 0.5f;
-    tile.radius = 0.0f;
-    for (const uint32_t i : tile.chunks) {
-        tile.radius = std::max(tile.radius, glm::length(chunks[i].boundingSphereCenter - tile.centre) +
-                                                chunks[i].boundingSphereRadius);
-    }
-}
-
 void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
     const auto index = static_cast<uint32_t>(chunks.size());
     chunks.push_back(std::move(chunk));
@@ -1151,7 +1140,7 @@ void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
     }
     ShadowTile& tile = shadowTiles_[slot->second];
     tile.chunks.push_back(index);
-    boundTile(tile);
+    tile.depth.invalidate();
     queueBake(added);
 }
 
@@ -1255,33 +1244,15 @@ void TerrainRenderer::recordDepth(VkCommandBuffer cmd, const glm::mat4& lightSpa
     ShadowPush push{.lightSpaceModel = lightSpaceMatrix};
     vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
-    const glm::vec4 centreLs = lightSpaceMatrix * glm::vec4(shadowCenter, 1.0f);
-    const float scaleZ = glm::length(glm::vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2],
-                                             lightSpaceMatrix[2][2]));
-    const bool perspective = glm::length(glm::vec3(lightSpaceMatrix[0][3], lightSpaceMatrix[1][3], lightSpaceMatrix[2][3])) > 1e-6f;
-    Frustum shadowFrustum;
-    shadowFrustum.extractFromMatrix(lightSpaceMatrix);
-
-    // The same test for a sphere, a chunk's or a whole tile's: a tile's holds
-    // its chunks', so a tile that fails it has no chunk that passes.
-    const auto mayCast = [&](const glm::vec3& centre, float radius) {
-        if (!shadowFrustum.intersectsSphere(centre, radius)) return false;
-        if (perspective) return true;
-        const glm::vec4 ls = lightSpaceMatrix * glm::vec4(centre, 1.0f);
-        // Depth grows away from the light in either depth convention.
-        return ls.z <= centreLs.z + (shadowRadius + radius) * scaleZ;
-    };
-
     ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
-    for (const auto& draw : list.depth) {
-        if (!mayCast(draw.centre, draw.radius)) continue;
-        if (boundVertices != draw.geometry.vertices || boundIndices != draw.geometry.indices) {
-            bindDraw(cmd, draw.geometry);
-            boundVertices = draw.geometry.vertices;
-            boundIndices = draw.geometry.indices;
+    visitTerrainDepth(list.depth, lightSpaceMatrix, shadowCenter, shadowRadius, [&](const GeometryDraw& geometry) {
+        if (boundVertices != geometry.vertices || boundIndices != geometry.indices) {
+            bindDraw(cmd, geometry);
+            boundVertices = geometry.vertices;
+            boundIndices = geometry.indices;
         }
-        vkCmdDrawIndexed(cmd, draw.geometry.count, 1, draw.geometry.firstIndex, draw.geometry.baseVertex, 0);
-    }
+        vkCmdDrawIndexed(cmd, geometry.count, 1, geometry.firstIndex, geometry.baseVertex, 0);
+    });
 }
 
 void TerrainRenderer::removeTile(int tileX, int tileY) {
@@ -1305,6 +1276,8 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
             if (index != last) {
                 chunk = std::move(chunks[last]);
                 chunkAt_[chunkMapKey(chunk.tileX * 16 + chunk.chunkX, chunk.tileY * 16 + chunk.chunkY)] = index;
+                // The moved chunk keeps its geometry; the other tile's immutable
+                // depth snapshot contains values, not these live array indices.
                 auto& moversTile = shadowTiles_[tileAt_.at(chunkMapKey(chunk.tileX, chunk.tileY))].chunks;
                 *std::find(moversTile.begin(), moversTile.end(), last) = index;
             }

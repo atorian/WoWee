@@ -340,7 +340,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[11]{};
+    VkDescriptorSetLayoutBinding bindings[12]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -415,7 +415,9 @@ bool Renderer::createPerFrameResources() {
     bindings[10] = bindings[8];
     bindings[10].binding = 10;
     bindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-    layoutInfo.bindingCount = 11;
+    bindings[11] = bindings[5];
+    bindings[11].binding = 11; // atmosphere without celestial imagery
+    layoutInfo.bindingCount = 12;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -428,7 +430,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 3; // world, capture and reflection sets
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 9;  // shadow, fog, lighting, sky, reflection and geometry
+    poolSizes[1].descriptorCount = MAX_FRAMES * 3 * 10;  // shadow, fog, lighting, sky, reflection and geometry
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = MAX_FRAMES * 3;  // the point lights
 
@@ -501,7 +503,7 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[3].imageView = rtLighting_->geometryViewForSlot(i);
         for (auto& info : rtImgInfo) info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[10]{};
+        VkWriteDescriptorSet writes[11]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -548,18 +550,21 @@ bool Renderer::createPerFrameResources() {
         writes[9] = writes[1];
         writes[9].dstBinding = 10;
         writes[9].pImageInfo = &lightningInfo;
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
-        // Sky capture gets a separate set whose binding 5 stays neutral:
+        writes[10] = writes[5];
+        writes[10].dstBinding = 11;
+        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
+        // Sky capture gets a separate set whose bindings 5 and 11 stay neutral:
         // the M2 shader also declares the surface sampler, and must never
         // bind the image being written by this pass as a sampled image.
         setAlloc.pSetLayouts = &perFrameSetLayout;
         if (vkAllocateDescriptorSets(device, &setAlloc, &skyPerFrameDescSets[i]) != VK_SUCCESS)
             return false;
         for (auto& write : writes) write.dstSet = skyPerFrameDescSets[i];
-        vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
     }
 
     skyBackground_ = std::make_unique<SkyBackground>();
+    atmosphereBackground_ = std::make_unique<SkyBackground>();
 
     // --- Create reflection per-frame UBO and descriptor set ---
     {
@@ -621,7 +626,7 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[10]{};
+            VkWriteDescriptorSet writes[11]{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -667,7 +672,9 @@ bool Renderer::createPerFrameResources() {
             writes[9] = writes[1];
             writes[9].dstBinding = 10;
             writes[9].pImageInfo = &lightningInfo;
-            vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+            writes[10] = writes[5];
+            writes[10].dstBinding = 11;
+            vkUpdateDescriptorSets(device, 11, writes, 0, nullptr);
         }
     }
 
@@ -799,6 +806,7 @@ void Renderer::destroyPerFrameResources() {
         volumetricFog_.reset();
     }
     if (skyBackground_) { skyBackground_->shutdown(); skyBackground_.reset(); }
+    if (atmosphereBackground_) { atmosphereBackground_->shutdown(); atmosphereBackground_.reset(); }
     destroy(device, sceneDescriptorPool);
     destroy(device, perFrameSetLayout);
     // After every renderer has let go of its geometry, which is why this is
@@ -879,15 +887,22 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.skySmogColor = glm::vec4(lp.skySmogColor, 0.0f);
         const auto disc=sky_celestial::sunDisc(frameInputs_.timeOfDay/24.f);
         const float day=glm::smoothstep(-0.04f,0.15f,disc.direction.z);
-        const glm::vec3 illumination=glm::min(lp.ambientColor+lp.diffuseColor,glm::vec3(1));
-        const float grey=glm::dot(lp.skySmogColor,glm::vec3(.2126f,.7152f,.0722f));
+        // Distant air takes its broad colour from skylight, not the orange
+        // direct-light colour used to shade surfaces. Retain the authored
+        // palette; desaturate it slightly toward its own luminance.
+        const glm::vec3 illumination=glm::mix(lp.skyMiddleColor,lp.skyBand1Color,.5f);
+        const float grey=glm::dot(illumination,glm::vec3(.2126f,.7152f,.0722f));
         currentFrameData.aerialSun=glm::vec4(disc.direction,day);
         currentFrameData.aerialLight=glm::vec4(glm::mix(glm::vec3(grey),illumination,.65f),0);
         const float thickness=frameInputs_.fogStrength;
         if(frameInputs_.worldInView && thickness>0.001f) {
             // Outdoor haze retains the zone's near gradient and extends to
             // View Distance, using the same directional colour as the sky.
-            currentFrameData.aerialParams=glm::vec4(0,0,0,1);
+            // At influence 1, density falls by e every 300 yards above local
+            // ground. Lower influence keeps more haze aloft; 0 is uniform.
+            // The much shorter near weather volume remains independent.
+            currentFrameData.aerialParams=glm::vec4(frameInputs_.fogGround,
+                frameInputs_.fogHeightInfluence/300.f,thickness,1);
         }
 
         // Shift fog to blue when camera is significantly underwater (terrain water only).
@@ -1531,9 +1546,22 @@ FrameInputs Renderer::extractFrameInputs() {
     in.msaaSamples = static_cast<uint32_t>(requestedMsaaSamples_);
     if (postProcessPipeline_) in.postProcess = postProcessPipeline_->requestedSettings();
     in.fogDensity = volumetricFogDensity_;
-    in.fogTargetExtinction = volumetricFogExtinction();
+    in.fogMedium = volumetricMediumFor(in.weather, volumetricFogDensity_,
+                                      viewerMotion_.insideInterior);
     in.fogGround = characterPosition.z;
     in.fogStrength = lightingManager ? lightingManager->getFogStrength() : 1.f;
+    in.fogHeightInfluence = lightingManager ? lightingManager->getFogHeightInfluence() : 1.f;
+    // Apply user density after zone/time smoothing and weather blending.
+    // Keep the range and its density coherent in this immutable frame: the
+    // aerial shader recovers the reference profile before scaling optical depth.
+    const float strength = glm::clamp(in.fogStrength, 0.0f, 2.0f);
+    if (strength <= 0.001f) {
+        in.weatherLight.fogStart = 1.0e6f;
+        in.weatherLight.fogEnd = 1.0e6f + 1.0f;
+    } else {
+        in.weatherLight.fogStart /= strength;
+        in.weatherLight.fogEnd /= strength;
+    }
     if (const auto h = collision_->terrainHeight(characterPosition.x, characterPosition.y))
         in.fogGround = std::min(in.fogGround, *h);
     in.cameraWaterDepth = cameraWaterDepth();
@@ -1887,7 +1915,9 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // uses the world set too). Updating an already recorded set invalidates it.
     const uint32_t skySlot = vkCtx->getCurrentFrame();
     std::optional<CpuStage> skySetStage(std::in_place, stages, "beginFrame", "sky set");
-    if (skyBackground_ && skyBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent())) {
+    if (skyBackground_ && atmosphereBackground_ &&
+        skyBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent()) &&
+        atmosphereBackground_->prepare(*vkCtx, skySlot, sceneRenderExtent())) {
         const uint32_t slot = skySlot;
         // Capture sky radiance before the near fog volume: surfaces apply
         // that volume once after distance fog. Binding 5 stays neutral to
@@ -1915,11 +1945,15 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         VkDescriptorImageInfo neutralFog{};
         neutralFog.imageView=volumetricFog_->getNeutralView();
         neutralFog.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
-        VkWriteDescriptorSet writes[2]{write,write};
+        VkDescriptorImageInfo atmosphereImage{image};
+        atmosphereImage.imageView=atmosphereBackground_->view(slot);
+        VkWriteDescriptorSet writes[3]{write,write,write};
+        writes[2].dstBinding=11;
+        writes[2].pImageInfo=&atmosphereImage;
         writes[1].dstSet=skyPerFrameDescSets[slot];
         writes[1].dstBinding=2;
         writes[1].pImageInfo=&neutralFog;
-        vkUpdateDescriptorSets(vkCtx->getDevice(),2,writes,copyCount,copies);
+        vkUpdateDescriptorSets(vkCtx->getDevice(),3,writes,copyCount,copies);
     }
     skySetStage.reset();
 
@@ -2411,7 +2445,7 @@ void Renderer::logSunDiagnostic(const SkyParams& params) {
              " moonElev=", glm::degrees(std::asin(glm::clamp(params.moonDisc.direction.z, -1.0f, 1.0f))),
              " moonGlare=", frameInputs_.moonGlare, " clouds=", params.cloudDensity,
              " weather=", params.weatherIntensity,
-             " fog=", volumetricThisFrame_ ? fogExtinction_ : 0.0f,
+             " fog=", volumetricThisFrame_ ? fogMedium_.atGround() : 0.0f,
              " msaa=", int(vkCtx ? vkCtx->getMsaaSamples() : 1));
 }
 
@@ -3299,14 +3333,14 @@ void Renderer::updateGrassPopulation() {
 void Renderer::renderSkyBackground(float timeOfDay,
                                    bool drawSkyModels, bool useOriginalSkybox) {
     const uint32_t slot = vkCtx->getCurrentFrame();
-    if (!skyBackground_ || !skyBackground_->view(slot)) return;
+    if (!skyBackground_ || !skyBackground_->view(slot) ||
+        !atmosphereBackground_ || !atmosphereBackground_->view(slot)) return;
 
     currentFrameData.fogSkyMiddle.w = 1.0f;
     std::memcpy(perFrameUBOMapped[slot], &currentFrameData, sizeof(currentFrameData));
 
     // Render authored sky layers without near volumetric air. Both the main
     // sky and surfaces add that air exactly once in their own colour pass.
-    skyBackground_->begin(currentCmd, slot);
     auto params = skyParamsFromLighting(
         timeOfDay, frameInputs_.environment.gameTime, frameInputs_.weather.strength(),
         frameInputs_.hasLighting ? (&frameInputs_.weatherLight) : nullptr,
@@ -3314,9 +3348,15 @@ void Renderer::renderSkyBackground(float timeOfDay,
     params.sunGlareVisibility = 0.0f; // Lens flare is an optical overlay, not background haze.
     params.drawBodies = false;        // Nor are the discs: the haze is the sky behind them.
     if (drawSkyModels) skyboxModelRenderer_->prepareRender(slot, *frameCamera());
-    skySystem->record(currentCmd, skyPerFrameDescSets[slot], *frameCamera(), params,
-                      frameInputs_.scene->sky, drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
-    skyBackground_->end(currentCmd, slot);
+    // Reflection keeps its celestial image. Fog uses only diffuse sky/cloud
+    // radiance, so a star behind a solid mountain cannot shine through it.
+    for (SkyBackground* target : {skyBackground_.get(), atmosphereBackground_.get()}) {
+        params.drawStars = target == skyBackground_.get();
+        target->begin(currentCmd, slot);
+        skySystem->record(currentCmd, skyPerFrameDescSets[slot], *frameCamera(), params,
+                          frameInputs_.scene->sky, drawSkyModels ? skyboxModelRenderer_.get() : nullptr);
+        target->end(currentCmd, slot);
+    }
 }
 
 void Renderer::renderWorld() {
@@ -5220,46 +5260,6 @@ void Renderer::writeFogVolumeBindings(uint32_t i) {
     }
 }
 
-float Renderer::volumetricFogExtinction() const {
-    // Per yard, at and below the layer, near the camera. At this a quarter of
-    // the light is gone over the first thirty yards along the ground and two
-    // thirds over a hundred, before the zone and the slider scale it: the
-    // houses across a street stand in the mist, the trees past them are
-    // shapes in it. A fifth of this, with the layer thirty yards deep, took a
-    // sixth over a hundred and read as the picture dimmed, not as mist.
-    constexpr float kBaseExtinction = 0.01f;
-    float extinction = kBaseExtinction * volumetricFogDensity_;
-
-    if (lightingManager) {
-        const auto& lp = lightingManager->getLightingParams();
-        // The zone's own opinion, read off how close its authored fog comes
-        // in: Duskwood's ends at 525 yards and gets most of the mist, an
-        // open plain's ends far out and gets less. The player's fog slider
-        // divides those distances, so it is multiplied back out to reach the
-        // zone's number rather than the slider's.
-        //
-        // The weather comes in here too, and only here: the light blends
-        // toward the zone's storm row as it rains or snows, and that row's
-        // fog is the zone's word on how close the weather brings it. A rain
-        // and snow factor of our own on top - up to three times in a storm -
-        // closed a jungle in to a wall in the first shower.
-        const float strength = lightingManager->getFogStrength();
-        if (strength > 0.001f && lp.fogEnd > 1.0f) {
-            const float authoredEnd = lp.fogEnd * strength;
-            extinction *= glm::clamp(900.0f / authoredEnd, 0.6f, 2.0f);
-        }
-        // Morning mist: thickest around half past six, gone by nine.
-        const float hours = lightingManager->getTimeOfDayHours();
-        const float dawn = 1.0f - glm::smoothstep(0.0f, 2.5f, std::abs(hours - 6.5f));
-        extinction *= 1.0f + 0.8f * dawn;
-    }
-
-    // Indoors the outdoor air mostly stays outside. Not all of it: a hall
-    // with torches in it should still show their glow.
-    if (viewerMotion_.insideInterior) extinction *= 0.35f;
-    return extinction;
-}
-
 void Renderer::renderSeaBedPass() {
     ZoneScopedN("Renderer::renderSeaBedPass");
     if (!seaBed_ || !waterRenderer || !frameCamera() || currentCmd == VK_NULL_HANDLE) return;
@@ -5345,7 +5345,7 @@ void Renderer::hazeLightForWeather() {
     const WeatherMix& w = weather_.mix();
     if (w.sand > 0.0f || w.mist > 0.0f) {
         const glm::vec3 lit = p.ambientColor + p.diffuseColor * 0.5f;
-        const glm::vec3 sandHaze = glm::vec3(0.80f, 0.64f, 0.42f) * lit;
+        const glm::vec3 sandHaze = kSandAlbedo * lit;
         const glm::vec3 mistHaze = glm::mix(p.fogColor, glm::vec3(glm::dot(lit, glm::vec3(1.0f / 3.0f))), 0.5f);
         const auto haze = [&](const glm::vec3& c, float sandShare, float mistShare) {
             return glm::mix(glm::mix(c, sandHaze, w.sand * sandShare), mistHaze, w.mist * mistShare);
@@ -5519,6 +5519,7 @@ void Renderer::renderVolumetricFog() {
     if (!fogLayerBaseValid_ || std::abs(ground - fogLayerBase_) > 150.0f) {
         fogLayerBase_ = ground;
         fogLayerBaseValid_ = true;
+        fogMediumValid_ = false;
         volumetricFog_->resetHistory();
     } else {
         fogLayerBase_ += (ground - fogLayerBase_) * (1.0f - std::exp(-dt / 1.5f));
@@ -5527,16 +5528,19 @@ void Renderer::renderVolumetricFog() {
     const bool strikeLight = currentFrameData.lightningColor.b > 0.0f;
     if (strikeLight || lightningFogLastFrame_) volumetricFog_->resetHistory();
     lightningFogLastFrame_ = strikeLight;
-    const float target = frameInputs_.fogTargetExtinction;
-    if (fogExtinction_ < 0.0f) fogExtinction_ = target;
-    fogExtinction_ += (target - fogExtinction_) * (1.0f - std::exp(-dt / 1.0f));
+    const auto& target = frameInputs_.fogMedium;
+    if (!fogMediumValid_) {
+        fogMedium_ = target;
+        fogMediumValid_ = true;
+    }
+    fogMedium_ = blendVolumetricMedium(fogMedium_, target, 1.0f - std::exp(-dt / 1.0f));
 
     VolumetricFog::FrameInputs in;
     in.view = currentFrameData.view;
     in.projection = currentFrameData.projection;
     in.cameraPos = glm::vec3(currentFrameData.viewPos);
     in.time = frameInputs_.time;
-    in.density = fogExtinction_;
+    in.medium = fogMedium_;
     in.layerBase = fogLayerBase_;
     if (frameInputs_.hasLighting) {
         // The air's forward glow in the light tables' sunlit-cloud colour.
@@ -5553,8 +5557,9 @@ void Renderer::renderVolumetricFog() {
     static double lastFogLog = 0.0;
     if (frameInputs_.time - lastFogLog > 5.0) {
         lastFogLog = frameInputs_.time;
-        LOG_INFO("volumetricFog: extinction=", fogExtinction_, "/yd (target ", target,
-                 ") layerBase=", fogLayerBase_, " lights=", currentFrameData.localLightMeta.x);
+        LOG_INFO("volumetricFog: air=", fogMedium_.air, "/yd mist=", fogMedium_.mist,
+                 "/yd dust=", fogMedium_.dust, "/yd layerBase=", fogLayerBase_,
+                 " lights=", currentFrameData.localLightMeta.x);
     }
 }
 

@@ -252,12 +252,14 @@ public:
     /// takes its own light instead - see interior_light.glsli.
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
     [[nodiscard]] bool isIndoors() const { return isIndoors_; }
-    /// How much distance fog, as a multiplier on the zone's own fog distances.
-    /// 1 is the DBC unchanged, above 1 is thicker, 0 is none; the default
-    /// 0.4 thins the authored fog, which reads too heavy here. See
-    /// LightingManager::update.
+    /// Distance-fog density, 0 (off) through 2. The renderer applies it after
+    /// zone/time smoothing; getLightingParams() retains the authored profile.
+    /// Outdoor haze uses 0.8 as its calibrated reference appearance.
     void setFogStrength(float strength) { fogStrength_ = strength; }
     [[nodiscard]] float getFogStrength() const { return fogStrength_; }
+    /// How strongly outdoor haze thins with height: 0 uniform, 1 calibrated.
+    void setFogHeightInfluence(float value) { fogHeightInfluence_ = glm::clamp(value, 0.0f, 2.0f); }
+    [[nodiscard]] float getFogHeightInfluence() const { return fogHeightInfluence_; }
 
     /**
      * Get current time of day (0.0-1.0)
@@ -389,6 +391,7 @@ private:
     std::vector<SkyboxLayer> skyboxLayers_;
     bool isIndoors_ = false;
     float fogStrength_ = 0.4f;
+    float fogHeightInfluence_ = 1.0f;
 
     // Last values the sky diagnostic reported, so it prints on a change
     // rather than every frame. See LightingManager::update.

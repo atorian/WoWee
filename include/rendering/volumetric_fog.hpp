@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/volumetric_medium.hpp"
 
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -12,7 +13,7 @@ class VkContext;
 
 /**
  * Fog that light moves through: lit by the sun past the shadow map, so trees
- * and buildings cast shafts through it, by the zone's own fog colour where
+ * and buildings cast shafts through it, by the zone's ambient light where
  * the sun does not reach, and by the torches, braziers and lava the renderer
  * already gathers for the surfaces around them.
  *
@@ -63,8 +64,7 @@ public:
         glm::mat4 projection{1.0f};
         glm::vec3 cameraPos{0.0f};
         float time = 0.0f;           ///< seconds, for the drift of the mist
-        /// Extinction per yard at and below the layer's base.
-        float density = 0.0f;
+        VolumetricMedium medium;
         /// World height the densest air sits on.
         float layerBase = 0.0f;
         /// Yards over which the density falls by a factor of e above that.
@@ -73,10 +73,9 @@ public:
         /// air at the feet. Thirty spread it evenly through everything a
         /// player looks at, a haze with no ground to it.
         float layerHeight = 8.0f;
-        /// Share of the density still left high above the layer, so a shaft
-        /// seen from a flying mount does not vanish for want of air. Kept low:
-        /// the zenith looks through the whole depth of it.
-        float layerFloor = 0.1f;
+        /// Dust occupies a deeper layer than ground mist. Clear air is
+        /// independent of both layers, including when viewed from above.
+        float dustHeight = 80.0f;
         /// 0 is even mist; 1 lets it thin to nothing and pile to double.
         float noiseAmount = 0.6f;
         /// Brightness of lit air against a white surface in the same light, for

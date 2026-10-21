@@ -1,4 +1,6 @@
 #pragma once
+
+#include "rendering/rt_instance_changes.hpp"
 #include "rendering/frame_pool.hpp"
 #include "rendering/frame_results.hpp"
 
@@ -293,9 +295,6 @@ struct M2Instance {
     float scale;
     glm::mat4 modelMatrix;
     glm::mat4 invModelMatrix;
-    // Its RtScene instance and the matrix last given to it; see syncRtScene.
-    uint32_t rtInstance = ~0u;
-    glm::mat4 rtMatrix{0.0f};
     glm::vec3 worldBoundsMin;
     glm::vec3 worldBoundsMax;
 
@@ -593,7 +592,7 @@ public:
     /// so the sky's background and foreground retain their authored order.
     using StarReplacement = std::function<void()>;
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const StarReplacement& drawStars = {});
+                const StarReplacement& drawStars = {}, bool drawBakedStars = true);
 
     /// Draw blended things - transparent batches, glow sprites, particles,
     /// and ribbons - in the water's pass, after the water, instead of in
@@ -627,8 +626,8 @@ public:
     void setRtScene(RtScene* scene) { rtScene_ = scene; }
     /// Water surface height near a point, for telling a moored boat from a beached one.
     void setWaterHeightQuery(std::function<std::optional<float>(float, float, float)> q) { waterHeightAt_ = std::move(q); }
-    /// Bring the scene's instances in line with this renderer's, once a frame
-    /// while the lighting is on.
+    /// Flush only changed placements to RT after producer mutations.
+    /// Changes accumulate while lighting is off; removals retire immediately.
     void syncRtScene();
     void setForceNoCull(bool v) { forceNoCull_ = v; }
 
@@ -967,7 +966,7 @@ private:
     /// Pass 2: the transparent batches and the glow sprites, after the opaque
     /// pass has culled, sorted and gathered them.
     void recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                               const StarReplacement& drawStars = {});
+                               const StarReplacement& drawStars = {}, bool drawBakedStars = true);
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Shadow rendering (Phase 7)
@@ -1141,14 +1140,8 @@ private:
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
-    // RtScene instances this renderer owns, and per RtScene instance id the
-    // sync generation that last saw it and the mesh it places.
-    std::vector<uint32_t> rtOwned_;
-    std::vector<uint64_t> rtSeen_;
-    std::vector<uint32_t> rtMeshOf_;
-    uint64_t rtSyncGeneration_ = 0;
     void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
-    void releaseRtModel(M2ModelGPU& gpuModel);
+    void releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel);
 
     // Previous frame's view-projection for temporal reprojection in HiZ culling.
     // Stored each frame so the cull shader can project into the same screen space
@@ -1377,7 +1370,7 @@ private:
     void collectCullOutput(uint32_t frame);
     /// The opaque pass, from the lists cullView made; reads no instance.
     void recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                    const StarReplacement& drawStars);
+                    const StarReplacement& drawStars, bool drawBakedStars);
     void recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                const M2ModelGPU& model, const StarReplacement& drawStars);
     /// The glow sprites the opaque pass would draw of one instance at this
@@ -1597,7 +1590,7 @@ private:
     VkDescriptorSet allocateBoneSet();
 
     // Helper to destroy model GPU resources
-    void destroyModelGPU(std::shared_ptr<M2ModelGPU> model);
+    void destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> model);
     // Helper to destroy instance bone buffers.
     // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
     // in-flight command buffers are not invalidated (use for streaming unload).
@@ -1614,6 +1607,7 @@ private:
         uint64_t identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
         /// Chunked so that growing it moves no instance (chunked_vector.hpp).
         ChunkedVector<M2Instance> instances;
+        RtInstanceChanges rtChanges;
         std::unordered_map<uint32_t, PosedEmitters> posedEmitters_;
         std::unordered_map<DedupKey, uint32_t, DedupHash> instanceDedupMap_;
         std::unordered_map<uint32_t, size_t> instanceIndexById;

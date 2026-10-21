@@ -10,6 +10,7 @@
 #include "rendering/local_lights.hpp"
 #include "rendering/viewer_motion.hpp"
 #include "rendering/weather_mix.hpp"
+#include "rendering/volumetric_medium.hpp"
 #include "rendering/world_environment.hpp"
 
 #include <optional>
@@ -85,9 +86,10 @@ struct FrameInputs {
     uint32_t msaaSamples = 1;
     FramePostProcessSettings postProcess;
     float fogDensity = 1.0f;
-    float fogTargetExtinction = 0.0f;
+    VolumetricMedium fogMedium;
     float fogGround = 0.0f;
     float fogStrength = 1.0f;
+    float fogHeightInfluence = 1.0f;
     std::optional<float> cameraWaterDepth;
     std::optional<float> waterHeight;
     std::optional<float> reflectionWaterHeight;

@@ -63,7 +63,7 @@ struct GPUPerFrameData {
     glm::vec4 aerialSun{0.0f};   // toward visible sun; w daylight weight
     glm::vec4 aerialLight{0.0f}; // neutral illuminated aerosol; w reserved
     glm::vec4 terrainLodParams{0.0f}; // WDL overlap start/end, ready, reserved
-    glm::vec4 aerialParams{0.0f}; // xyz reserved, w aerial colour correction enabled
+    glm::vec4 aerialParams{0.0f}; // x regional ground, y inverse aerosol height, z fog thickness, w outdoor haze enabled
     // The current lightning source and its independent shadow view. Zero colour disables it.
     glm::mat4 lightningMatrix{0.0f};
     glm::vec4 lightningPosition{0.0f}; // xyz source, w range in yards

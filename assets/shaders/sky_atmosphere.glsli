@@ -57,3 +57,44 @@ float distanceHazeVisibility(float dist, float horizontalDist,
     float limit = max(viewDistance, 0.001f);
     return visibility * (1.0f - smoothstep(limit * 0.9f, limit, horizontalDist));
 }
+
+// Mean aerosol density along a straight segment through an exponential layer.
+// Below the regional ground datum the density is bounded; the horizontal-ray
+// limit uses a series so neither flat views nor small height changes divide by 0.
+float hazeColumnDensity(float fromZ, float toZ, float groundZ, float inverseHeight) {
+    float lo = (min(fromZ, toZ) - groundZ) * inverseHeight;
+    float hi = (max(fromZ, toZ) - groundZ) * inverseHeight;
+    if (hi <= 0.0f) return 1.0f;
+    float below = clamp(-lo / max(hi - lo, 0.000001f), 0.0f, 1.0f);
+    lo = max(lo, 0.0f);
+    float span = hi - lo;
+    float mean = exp(-lo) * (span < 0.001f
+        ? 1.0f - span * 0.5f + span * span / 6.0f
+        : (1.0f - exp(-span)) / span);
+    return mix(mean, 1.0f, below);
+}
+
+float distanceHeightHazeVisibility(float dist, float horizontalDist,
+    float start, float end, float viewDistance, float eyeZ, float surfaceZ,
+    float groundZ, float inverseHeight, float thickness) {
+    float density = clamp(thickness, 0.0f, 2.0f);
+    if (density <= 0.001f) return 1.0f;
+    // Frame extraction scales the authored ranges by 1/thickness for linear
+    // fog consumers. Recover one fixed reference profile before applying
+    // density, otherwise the slider both moves and thickens the same medium.
+    // 0.8 is the calibrated long-view appearance. Preserve its near gradient
+    // and height-dependent tail; change optical depth at other settings:
+    // doubling density squares transmission instead of merely moving the tail.
+    float relativeDensity = density / 0.8f;
+    start *= relativeDensity;
+    end *= relativeDensity;
+    float nearDistance = min(dist, max(start + 0.5f * (end - start), 0.0f));
+    float opticalDistance = dist;
+    if (dist > nearDistance) {
+        float nearZ = mix(eyeZ, surfaceZ, nearDistance / max(dist, 0.001f));
+        float column = mix(0.02f, 1.0f, hazeColumnDensity(nearZ, surfaceZ, groundZ, inverseHeight));
+        opticalDistance = nearDistance + (dist - nearDistance) * column;
+    }
+    float reference = distanceHazeVisibility(opticalDistance, horizontalDist, start, end, viewDistance);
+    return pow(reference, relativeDensity);
+}

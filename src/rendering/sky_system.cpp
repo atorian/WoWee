@@ -141,13 +141,13 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     celestialSkipped_ = params.useOriginalSkybox && !renderProceduralStars;
     if (celestialSkipped_) {
-        if (skyModels) skyModels->render(cmd, perFrameSet, camera);
+        if (skyModels) skyModels->render(cmd, perFrameSet, camera, {}, params.drawStars);
         return;
     }
 
     bool starsRecorded = false;
     const auto drawStars = [&] {
-        if (starsRecorded || !renderProceduralStars || !starField_) return;
+        if (starsRecorded || !params.drawStars || !renderProceduralStars || !starField_) return;
         starsRecorded = true;
         starField_->render(cmd, perFrameSet, params.timeOfDay,
                            frame.clouds && !params.useOriginalSkybox ? params.cloudDensity : 0.0f,
@@ -181,7 +181,7 @@ void SkySystem::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         lensFlare_->render(cmd, camera, params.sunDisc.direction * 800.0f, params.sunColor,
                            params.sunGlareVisibility, frame.flareIntensity);
     }
-    if (skyModels) skyModels->render(cmd, perFrameSet, camera, drawStars);
+    if (skyModels) skyModels->render(cmd, perFrameSet, camera, drawStars, params.drawStars);
 }
 
 void SkySystem::loadTextures(pipeline::AssetManager* assets) {
